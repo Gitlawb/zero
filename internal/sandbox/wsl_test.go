@@ -1,9 +1,6 @@
 package sandbox
 
-import (
-	"errors"
-	"testing"
-)
+import "testing"
 
 func TestParseWSL(t *testing.T) {
 	cases := []struct {
@@ -48,13 +45,16 @@ func wslBackendForTest() Backend {
 	return Backend{Name: BackendWSL, Platform: "linux", Fallback: true}
 }
 
-func TestWSLPlanFailsClosedWithoutUnavailable(t *testing.T) {
+func TestWSLPlanDegradesWithoutNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: wslBackendForTest()})
 
-	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
-	if !errors.Is(err, errNativeSandboxUnavailable) {
-		t.Fatalf("WSL command plan err = %v, want native sandbox unavailable", err)
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
+	if err != nil {
+		t.Fatalf("WSL command plan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded || !plan.RequiresPlatformSandbox {
+		t.Fatalf("WSL command plan = %#v, want degraded direct plan", plan)
 	}
 }

@@ -155,9 +155,6 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
-	if request.ValidateExecution && requiresPlatformSandbox && backend.SupportLevel() != BackendSupportNative {
-		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
-	}
 	// Windows: the OS sandbox needs a one-time elevated `zero sandbox setup` (it
 	// applies WFP network filters + workspace ACLs and writes a marker). Without
 	// it the command runner hard-fails — so on the default preference, DEGRADE to

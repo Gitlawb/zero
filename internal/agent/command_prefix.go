@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/tools"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -53,6 +55,40 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 		return grant, true, true
 	}
 	return sandbox.CommandPrefixGrant{}, false, false
+}
+
+func shellExecutionArgsForApproval(toolName string, args map[string]any, action PermissionDecisionAction, options Options) map[string]any {
+	if !isShellCommandTool(toolName) || !shellPrefixApprovalBypassesSandbox(action) {
+		return args
+	}
+	if options.Sandbox == nil || !options.Sandbox.UnsandboxedExecutionAllowed() {
+		return args
+	}
+	if shellCommandAdditionalPermissionsRequested(args) || shellCommandRequiresEscalated(args) {
+		return args
+	}
+	planned := cloneArgs(args)
+	if planned == nil {
+		planned = map[string]any{}
+	}
+	planned["sandbox_permissions"] = string(tools.SandboxPermissionsRequireEscalated)
+	return planned
+}
+
+func shellPrefixApprovalBypassesSandbox(action PermissionDecisionAction) bool {
+	return action == PermissionDecisionAllowPrefix || action == PermissionDecisionAlwaysAllowPrefix
+}
+
+func shellCommandRequiresEscalated(args map[string]any) bool {
+	raw, ok := args["sandbox_permissions"]
+	if !ok || raw == nil {
+		return false
+	}
+	value, ok := raw.(string)
+	if !ok {
+		value = fmt.Sprint(raw)
+	}
+	return strings.TrimSpace(value) == string(tools.SandboxPermissionsRequireEscalated)
 }
 
 func isShellCommandTool(toolName string) bool {

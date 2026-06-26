@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,7 +100,7 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 	}
 }
 
-func TestBuildCommandPlanRejectsUnavailableFallback(t *testing.T) {
+func TestBuildCommandPlanDegradesUnavailableFallback(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
@@ -109,13 +108,16 @@ func TestBuildCommandPlanRejectsUnavailableFallback(t *testing.T) {
 		Backend:       Backend{Name: BackendUnavailable, Message: "native sandbox unavailable"},
 	})
 
-	_, err := engine.BuildCommandPlan(CommandSpec{
+	plan, err := engine.BuildCommandPlan(CommandSpec{
 		Name: "/bin/sh",
 		Args: []string{"-c", "pwd"},
 		Dir:  root,
 	})
-	if !errors.Is(err, errNativeSandboxUnavailable) {
-		t.Fatalf("error = %v, want native sandbox unavailable", err)
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason != "native sandbox unavailable" {
+		t.Fatalf("plan = %#v, want degraded direct plan", plan)
 	}
 }
 

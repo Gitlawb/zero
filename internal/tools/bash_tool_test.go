@@ -325,7 +325,7 @@ func TestBashToolTimeoutKillsBackgroundChildren(t *testing.T) {
 	}
 }
 
-func TestRegistryReportsUnavailableNativeSandbox(t *testing.T) {
+func TestRegistryRunsWithDegradedUnavailableNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
 	registry.Register(NewBashTool(root))
@@ -344,15 +344,15 @@ func TestRegistryReportsUnavailableNativeSandbox(t *testing.T) {
 		Autonomy:          "medium",
 	})
 
-	if result.Status != StatusError {
-		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
+	if result.Status != StatusOK || !strings.Contains(result.Output, "hello from bash") {
+		t.Fatalf("expected degraded command to run, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "native sandbox backend is unavailable") {
-		t.Fatalf("expected unavailable native sandbox error, got %q", result.Output)
+	if result.Meta["sandbox_wrapped"] != "false" || result.Meta["sandbox_enforcement_level"] != string(sandbox.EnforcementDegraded) {
+		t.Fatalf("sandbox metadata = %#v, want degraded direct plan", result.Meta)
 	}
 }
 
-func TestBashToolReportsUnavailableNativeSandbox(t *testing.T) {
+func TestBashToolRunsWithDegradedUnavailableNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := sandbox.DefaultPolicy()
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
@@ -367,14 +367,11 @@ func TestBashToolReportsUnavailableNativeSandbox(t *testing.T) {
 		"command": helperCommand("success"),
 	}, engine)
 
-	if result.Status != StatusError {
-		t.Fatalf("expected error status, got %s", result.Status)
+	if result.Status != StatusOK || !strings.Contains(result.Output, "hello from bash") {
+		t.Fatalf("expected degraded command to run, got %s: %q", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "native sandbox backend is unavailable") {
-		t.Fatalf("expected unavailable native sandbox error, got %q", result.Output)
-	}
-	if result.Meta["exit_code"] != "-1" {
-		t.Fatalf("exit_code metadata = %q, want -1", result.Meta["exit_code"])
+	if result.Meta["sandbox_wrapped"] != "false" || result.Meta["sandbox_enforcement_level"] != string(sandbox.EnforcementDegraded) {
+		t.Fatalf("sandbox metadata = %#v, want degraded direct plan", result.Meta)
 	}
 }
 

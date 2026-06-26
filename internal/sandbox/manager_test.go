@@ -216,11 +216,11 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	}
 }
 
-func TestSandboxManagerRejectsUnavailableCommandPlan(t *testing.T) {
+func TestSandboxManagerDegradesUnavailableCommandPlan(t *testing.T) {
 	policy := DefaultPolicy()
 	backend := Backend{Name: BackendUnavailable, Platform: "windows", Fallback: true, Message: "native sandbox unavailable"}
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
-	_, err := manager.BuildCommandPlan(SandboxManagerRequest{
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     `C:\workspace`,
 		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/c", "dir"}, Dir: `C:\workspace`},
 		Policy:            policy,
@@ -228,8 +228,11 @@ func TestSandboxManagerRejectsUnavailableCommandPlan(t *testing.T) {
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if !errors.Is(err, errNativeSandboxUnavailable) {
-		t.Fatalf("BuildCommandPlan error = %v, want native sandbox unavailable", err)
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason != "native sandbox unavailable" {
+		t.Fatalf("plan = %#v, want degraded direct plan", plan)
 	}
 }
 
@@ -318,7 +321,7 @@ func TestSandboxManagerFailsClosedWhenNativeRequiredAndUnavailable(t *testing.T)
 		Command:           CommandSpec{Name: "cmd.exe", Dir: "/workspace"},
 		Policy:            policy,
 		Profile:           profile,
-		Preference:        SandboxPreferenceAuto,
+		Preference:        SandboxPreferenceRequire,
 		ValidateExecution: true,
 	})
 	if !errors.Is(err, errNativeSandboxUnavailable) {

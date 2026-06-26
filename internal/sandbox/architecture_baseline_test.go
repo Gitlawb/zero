@@ -103,12 +103,16 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 		Policy:        DefaultPolicy(),
 		Backend:       Backend{Name: BackendUnavailable, Platform: "linux", Fallback: true, Message: "native sandbox unavailable"},
 	})
-	if _, err := unavailable.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root}); !errors.Is(err, errNativeSandboxUnavailable) {
-		t.Fatalf("BuildCommandPlan unavailable error = %v, want native sandbox unavailable", err)
+	degraded, err := unavailable.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan unavailable auto plan: %v", err)
+	}
+	if degraded.Wrapped || degraded.EnforcementLevel != EnforcementDegraded || degraded.DowngradeReason != "native sandbox unavailable" {
+		t.Fatalf("unavailable command metadata = %#v, want degraded direct plan", degraded)
 	}
 }
 
-func TestUnavailableFailClosedForTargetPlatforms(t *testing.T) {
+func TestUnavailableBackendsDegradeForTargetPlatforms(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()
 	tests := []struct {
@@ -136,9 +140,12 @@ func TestUnavailableFailClosedForTargetPlatforms(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: test.backend})
-			_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
-			if !errors.Is(err, errNativeSandboxUnavailable) {
-				t.Fatalf("BuildCommandPlan error = %v, want native sandbox unavailable", err)
+			plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
+			if err != nil {
+				t.Fatalf("BuildCommandPlan degraded auto plan: %v", err)
+			}
+			if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded || !plan.RequiresPlatformSandbox {
+				t.Fatalf("BuildCommandPlan = %#v, want degraded direct plan requiring platform sandbox metadata", plan)
 			}
 		})
 	}

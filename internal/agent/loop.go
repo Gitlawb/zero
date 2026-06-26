@@ -815,6 +815,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			return blockedByHookResult(call, outcome), nil
 		}
 	}
+	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
 	// Task tool: wire progress callback so the TUI sees live tool-call events
 	// from the specialist child process.

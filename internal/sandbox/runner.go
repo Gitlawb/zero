@@ -160,7 +160,7 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 	spec := execRequest.Command
 	backend := execRequest.Backend
 	workspaceRoot := execRequest.WorkspaceRoot
-	if execRequest.EnforcementLevel == EnforcementDisabled || execRequest.TargetBackend == BackendNone || !execRequest.RequiresPlatformSandbox {
+	if execRequest.EnforcementLevel == EnforcementDisabled || execRequest.EnforcementLevel == EnforcementDegraded || execRequest.TargetBackend == BackendNone || !execRequest.RequiresPlatformSandbox {
 		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
 	switch backend.Name {
