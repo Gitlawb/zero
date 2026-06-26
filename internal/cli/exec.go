@@ -638,7 +638,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// continue budget while work remained) is reported as INCOMPLETE, not success,
 	// so callers/benchmarks don't mistake an abandoned run for a finished one.
 	if result.Incomplete {
-		sessionRecorder.append(sessions.EventError, map[string]any{"message": "incomplete"})
+		reason := result.IncompleteReason
+		if reason == "" {
+			reason = "run stopped with work unfinished"
+		}
+		sessionRecorder.append(sessions.EventError, map[string]any{"message": "incomplete: " + reason})
+		writer.warning("Run incomplete (not reported as success): " + reason)
 		writer.runEnd("incomplete", exitIncomplete)
 		if writer.err != nil {
 			return exitCrash
