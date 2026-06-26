@@ -33,7 +33,7 @@ func NewToolSearchTool(registry *Registry) Tool {
 	return toolSearchTool{
 		baseTool: baseTool{
 			name:        ToolSearchToolName,
-			description: "Search for and load deferred tools by exact name or keyword. Use query \"select:Name1,Name2\" to load specific tools, or keywords to find matching tools. Loading a tool returns its full schema so you can call it on the next turn.",
+			description: BuildToolSearchDescription(nil),
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -199,7 +199,7 @@ func alreadyAvailableMessage(names []string) string {
 	}
 	return subject + " " + verb + " already in your tool list — call " +
 		map[bool]string{true: "them", false: "it"}[len(names) > 1] +
-		" directly. tool_search only loads DEFERRED tools (those in the deferred-tools notice), not tools you already have."
+		" directly. tool_search only loads deferred tools, not tools you already have."
 }
 
 // toolAllowedByFilters mirrors agent.ToolAllowedByFilters (kept here to avoid an

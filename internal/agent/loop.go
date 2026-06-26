@@ -138,7 +138,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
 		// the messages, so computing it before compaction is safe.
-		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
+		exposed, _ := partitionTools(registry, permissionMode, options, loaded)
 
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
@@ -148,15 +148,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Messages:        copyMessages(messages),
 			Tools:           exposed,
 			ReasoningEffort: options.ReasoningEffort,
-		}
-		if reminder != "" {
-			// Append to the per-turn request copy only — NEVER to persistent
-			// messages — so the reminder refreshes each turn and never accumulates
-			// in the saved transcript.
-			request.Messages = append(request.Messages, zeroruntime.Message{
-				Role:    zeroruntime.MessageRoleUser,
-				Content: reminder,
-			})
 		}
 
 		// Report the per-category context budget for this turn so a surface can
@@ -184,23 +175,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					return result, retryErr
 				}
 				// Rebuild from the compacted messages but reuse the SAME active-mode
-				// partition (exposed) and reminder computed for this turn: they depend
+				// partition computed for this turn: it depends
 				// on registry+loaded, not on the messages, so they stay valid after
 				// compaction. Using the bare toolDefinitions here would route through an
-				// empty-loaded partition, re-hiding every already-loaded deferred tool
-				// and dropping the reminder when deferral is active.
+				// empty-loaded partition, re-hiding every already-loaded deferred tool.
 				request = zeroruntime.CompletionRequest{
 					Messages:        copyMessages(messages),
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
-				}
-				if reminder != "" {
-					// Append to the per-turn retry copy only — NEVER to persistent
-					// messages — matching the main path's reminder-not-persisted invariant.
-					request.Messages = append(request.Messages, zeroruntime.Message{
-						Role:    zeroruntime.MessageRoleUser,
-						Content: reminder,
-					})
 				}
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
@@ -235,23 +217,15 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					result.Messages = copyMessages(messages)
 					return result, retryErr
 				}
-				// Reuse the SAME active-mode partition (exposed) and reminder from this
-				// turn rather than the bare toolDefinitions: exposed/reminder depend on
+				// Reuse the SAME active-mode partition (exposed) from this
+				// turn rather than the bare toolDefinitions: exposed depends on
 				// registry+loaded (not the messages), so they stay valid after compaction.
 				// Routing through an empty-loaded partition here would re-hide every
-				// already-loaded deferred tool and drop the reminder when deferral is active.
+				// already-loaded deferred tool.
 				retryRequest := zeroruntime.CompletionRequest{
 					Messages:        copyMessages(messages),
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
-				}
-				if reminder != "" {
-					// Append to the per-turn retry copy only — NEVER to persistent
-					// messages — matching the main path's reminder-not-persisted invariant.
-					retryRequest.Messages = append(retryRequest.Messages, zeroruntime.Message{
-						Role:    zeroruntime.MessageRoleUser,
-						Content: reminder,
-					})
 				}
 				// Pre-content reconnect of a mid-stream disconnect: route the connect
 				// through the reconnect helper too (AUDIT-L1).
@@ -595,7 +569,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 	// tool_search is the gateway to the allowlisted deferred tools, so a non-empty
 	// EnabledTools allowlist that omits it must NOT reject the call — otherwise the
-	// reminder points the model at a tool the dispatch gate rejects (an inescapable
+	// discovery tool exposed to the model rejects at dispatch time (an inescapable
 	// dead-end). The allowlist is exempted; an explicit DisabledTools entry for
 	// tool_search is still honored (only the allowlist is exempted, not the denylist).
 	toolSearchAllowed := call.Name == tools.ToolSearchToolName && !containsToolName(options.DisabledTools, tools.ToolSearchToolName)
@@ -2221,15 +2195,15 @@ func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
 	}
 }
 
-// partitionTools builds the per-turn advertised tool list and an optional
-// deferred-tools reminder. INACTIVE (DeferThreshold <= 0 or the eligible count is
+// partitionTools builds the per-turn advertised tool list and optional
+// tool_search discovery text. INACTIVE (DeferThreshold <= 0 or the eligible count is
 // below it): every visible tool is exposed with its full schema EXCEPT tool_search
-// (dropped so it is never advertised when it cannot help), and the reminder is
+// (dropped so it is never advertised when it cannot help), and the discovery text is
 // empty — byte-identical to the pre-deferral output. ACTIVE: a deferred-eligible
-// tool is exposed only when loaded[name]; otherwise it is hidden and its compact
-// line goes into the reminder. Non-deferred tools (including tool_search) are
-// always exposed. The exposed slice is alpha-sorted by name, matching the legacy
-// order so the inactive path is stable.
+// tool is exposed only when loaded[name]; otherwise it is hidden and searchable
+// through tool_search. Non-deferred tools (including tool_search) are always
+// exposed. The exposed slice is alpha-sorted by name, matching the legacy order
+// so the inactive path is stable.
 func partitionTools(registry *tools.Registry, permissionMode PermissionMode, options Options, loaded map[string]bool) ([]zeroruntime.ToolDefinition, string) {
 	registeredTools := registry.All()
 
@@ -2267,7 +2241,7 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 
 	definitions := make([]zeroruntime.ToolDefinition, 0, len(visible))
 	exposedNames := make(map[string]bool, len(visible))
-	var hiddenLines []string
+	var hiddenTools []tools.Tool
 	for _, tool := range visible {
 		name := tool.Name()
 		deferred := tools.IsDeferred(tool)
@@ -2288,7 +2262,7 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 
 		// Active path.
 		if deferred && !loaded[name] {
-			hiddenLines = append(hiddenLines, tools.DeferredLine(tool))
+			hiddenTools = append(hiddenTools, tool)
 			continue
 		}
 		definitions = append(definitions, zeroruntime.ToolDefinition{
@@ -2305,23 +2279,34 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 	// tools, not the loader). Expose its full definition whenever it is not
 	// already in the exposed set. This never runs on the inactive path, so the
 	// byte-identical below-threshold output is preserved.
+	discovery := ""
+	if active && len(hiddenTools) > 0 {
+		discovery = tools.BuildToolSearchDescription(hiddenTools)
+	}
 	if active && !exposedNames[tools.ToolSearchToolName] {
+		description := loader.Description()
+		if discovery != "" {
+			description = discovery
+		}
 		definitions = append(definitions, zeroruntime.ToolDefinition{
 			Name:        loader.Name(),
-			Description: loader.Description(),
+			Description: description,
 			Parameters:  schemaToRuntimeMap(loader.Parameters()),
 		})
+	} else if active && discovery != "" {
+		for i := range definitions {
+			if definitions[i].Name == tools.ToolSearchToolName {
+				definitions[i].Description = discovery
+				break
+			}
+		}
 	}
 
 	sort.Slice(definitions, func(left int, right int) bool {
 		return definitions[left].Name < definitions[right].Name
 	})
 
-	reminder := ""
-	if active {
-		reminder = tools.BuildDeferredReminder(hiddenLines)
-	}
-	return definitions, reminder
+	return definitions, discovery
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {

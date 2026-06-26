@@ -129,6 +129,24 @@ func (fakeToolSearchTool) Run(_ context.Context, _ map[string]any) tools.Result 
 	return tools.Result{Status: tools.StatusOK, Output: "ok"}
 }
 
+func toolDefinitionByName(definitions []zeroruntime.ToolDefinition, name string) *zeroruntime.ToolDefinition {
+	for i := range definitions {
+		if definitions[i].Name == name {
+			return &definitions[i]
+		}
+	}
+	return nil
+}
+
+func assertNoDeferredDiscoveryMessage(t *testing.T, request zeroruntime.CompletionRequest) {
+	t.Helper()
+	for _, message := range request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser && strings.Contains(message.Content, "Deferred tools:") {
+			t.Fatalf("deferred discovery must not be appended as a user message: %q", message.Content)
+		}
+	}
+}
+
 func TestPartitionToolsInactiveIsByteIdenticalAndDropsToolSearch(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
@@ -219,8 +237,8 @@ func TestPartitionToolsBelowThresholdInactive(t *testing.T) {
 // FIX 6(a): a deferred tool removed by DisabledTools must NOT count toward the
 // eligible total. With N deferred registered and threshold == N, disabling one
 // drops the surviving eligible count to N-1 < threshold, so the partition takes
-// the INACTIVE path (empty reminder, all VISIBLE tools exposed with full schemas,
-// the disabled one filtered out entirely).
+// the INACTIVE path (empty discovery text, all VISIBLE tools exposed with full
+// schemas, the disabled one filtered out entirely).
 func TestPartitionToolsDisabledDeferredDropsBelowThresholdInactive(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
@@ -246,9 +264,9 @@ func TestPartitionToolsDisabledDeferredDropsBelowThresholdInactive(t *testing.T)
 }
 
 // FIX 6(b): with deferral ACTIVE, a DisabledTools-hidden deferred tool must never
-// appear in the reminder NOR be exposed — it is filtered out before the partition
+// influence discovery NOR be exposed — it is filtered out before the partition
 // even considers it.
-func TestPartitionToolsActiveExcludesDisabledDeferredFromReminderAndExposed(t *testing.T) {
+func TestPartitionToolsActiveExcludesDisabledDeferredFromDiscoveryAndExposed(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
@@ -256,25 +274,31 @@ func TestPartitionToolsActiveExcludesDisabledDeferredFromReminderAndExposed(t *t
 	registry.Register(fakeToolSearchTool{}) // usable loader => deferral can activate
 
 	// 3 deferred, disable beta => 2 surviving eligible, threshold 2 => active.
-	exposed, reminder := partitionTools(registry, PermissionModeAuto, Options{
+	exposed, discovery := partitionTools(registry, PermissionModeAuto, Options{
 		DeferThreshold: 2,
 		DisabledTools:  []string{"mcp__srv__beta"},
 	}, map[string]bool{})
 
-	if reminder == "" {
-		t.Fatalf("expected active path with a non-empty reminder for the unloaded tools")
+	if discovery == "" {
+		t.Fatalf("expected active path with discovery text for the unloaded tools")
 	}
-	if strings.Contains(reminder, "mcp__srv__beta") {
-		t.Fatalf("disabled deferred tool must not appear in the reminder, got %q", reminder)
+	if strings.Contains(discovery, "mcp__srv__beta") {
+		t.Fatalf("disabled deferred tool must not appear in discovery text, got %q", discovery)
 	}
 	for _, def := range exposed {
 		if def.Name == "mcp__srv__beta" {
 			t.Fatalf("disabled deferred tool must not be exposed, got %#v", exposed)
 		}
 	}
-	// The two surviving deferred tools are hidden (unloaded) and named in the reminder.
-	if !strings.Contains(reminder, "mcp__srv__alpha") || !strings.Contains(reminder, "mcp__srv__gamma") {
-		t.Fatalf("reminder must list the surviving unloaded deferred tools, got %q", reminder)
+	search := toolDefinitionByName(exposed, tools.ToolSearchToolName)
+	if search == nil {
+		t.Fatalf("tool_search must be exposed on active path, got %#v", exposed)
+	}
+	if search.Description != discovery {
+		t.Fatalf("tool_search description must carry discovery text\n got: %q\nwant: %q", search.Description, discovery)
+	}
+	if !strings.Contains(discovery, "mcp") {
+		t.Fatalf("discovery text must list the surviving deferred source, got %q", discovery)
 	}
 }
 
@@ -289,7 +313,7 @@ func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	loaded := map[string]bool{"mcp__srv__alpha": true}
 
 	// 2 eligible deferred tools, threshold 2 => active.
-	exposed, reminder := partitionTools(registry, PermissionModeAuto, Options{DeferThreshold: 2}, loaded)
+	exposed, discovery := partitionTools(registry, PermissionModeAuto, Options{DeferThreshold: 2}, loaded)
 
 	exposedNames := map[string]bool{}
 	for _, def := range exposed {
@@ -307,14 +331,18 @@ func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	if exposedNames["mcp__srv__beta"] {
 		t.Fatalf("unloaded deferred tool must be hidden from exposed, got %#v", exposed)
 	}
-	if reminder == "" {
-		t.Fatalf("expected a non-empty reminder for the hidden tool")
+	if discovery == "" {
+		t.Fatalf("expected non-empty discovery text for the hidden tool")
 	}
-	if !strings.Contains(reminder, "mcp__srv__beta") {
-		t.Fatalf("expected reminder to list the hidden tool, got %q", reminder)
+	search := toolDefinitionByName(exposed, tools.ToolSearchToolName)
+	if search == nil {
+		t.Fatalf("expected tool_search exposed on active path, got %#v", exposed)
 	}
-	if strings.Contains(reminder, "mcp__srv__alpha") {
-		t.Fatalf("loaded tool must not appear in the reminder, got %q", reminder)
+	if search.Description != discovery || !strings.Contains(search.Description, "mcp") {
+		t.Fatalf("tool_search description must carry discovery source, got %q", search.Description)
+	}
+	if strings.Contains(search.Description, "mcp__srv__alpha") || strings.Contains(search.Description, "mcp__srv__beta") {
+		t.Fatalf("tool_search description must not list exact hidden/loaded tool names, got %q", search.Description)
 	}
 }
 
@@ -337,9 +365,9 @@ func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
 	if !exposedNames["tool_search"] {
 		t.Fatalf("expected tool_search exposed on active path, got %#v", exposed)
 	}
-	// BuildDeferredReminder returns "" for no hidden lines.
+	// No hidden tools means no dynamic discovery text is needed.
 	if reminder != "" {
-		t.Fatalf("expected empty reminder when nothing is hidden, got %q", reminder)
+		t.Fatalf("expected empty discovery text when nothing is hidden, got %q", reminder)
 	}
 }
 
@@ -376,7 +404,8 @@ func TestRunLoadsDeferredToolThenAdvertisesNextTurn(t *testing.T) {
 		t.Fatalf("expected two turns, got %d", len(provider.requests))
 	}
 
-	// Turn 1: alpha is hidden (not advertised) and the reminder is a trailing user msg.
+	// Turn 1: alpha is hidden (not advertised), and discovery lives on the
+	// tool_search definition rather than a trailing user message.
 	turn1Tools := map[string]bool{}
 	for _, def := range provider.requests[0].Tools {
 		turn1Tools[def.Name] = true
@@ -384,9 +413,13 @@ func TestRunLoadsDeferredToolThenAdvertisesNextTurn(t *testing.T) {
 	if turn1Tools["mcp__srv__alpha"] {
 		t.Fatalf("turn 1 must not advertise the not-yet-loaded deferred tool")
 	}
-	last1 := provider.requests[0].Messages[len(provider.requests[0].Messages)-1]
-	if last1.Role != zeroruntime.MessageRoleUser || !strings.Contains(last1.Content, "tool_search") {
-		t.Fatalf("turn 1 request must end with the deferred-tools reminder, got role=%s content=%q", last1.Role, last1.Content)
+	assertNoDeferredDiscoveryMessage(t, provider.requests[0])
+	search1 := toolDefinitionByName(provider.requests[0].Tools, tools.ToolSearchToolName)
+	if search1 == nil {
+		t.Fatalf("turn 1 must expose tool_search, got %#v", provider.requests[0].Tools)
+	}
+	if !strings.Contains(search1.Description, "Tool discovery") || !strings.Contains(search1.Description, "mcp") {
+		t.Fatalf("tool_search description must carry deferred discovery, got %q", search1.Description)
 	}
 
 	// Turn 2: alpha is now loaded and advertised with a full schema.
@@ -401,20 +434,20 @@ func TestRunLoadsDeferredToolThenAdvertisesNextTurn(t *testing.T) {
 		t.Fatalf("beta was never loaded; it must stay hidden in turn 2")
 	}
 
-	// The reminder must NOT persist into the returned message history.
+	// The discovery text must NOT persist into the returned message history.
 	for _, m := range result.Messages {
-		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Call tool_search") {
-			t.Fatalf("the deferred-tools reminder must not be persisted in result.Messages")
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Tool discovery") {
+			t.Fatalf("deferred discovery must not be persisted in result.Messages")
 		}
 	}
 }
 
-// TestRunReactiveRetryKeepsLoadedDeferredToolAndReminder drives a mid-run
+// TestRunReactiveRetryKeepsLoadedDeferredToolAndDiscovery drives a mid-run
 // context-limit error that triggers reactive compaction+retry while deferral is
 // ACTIVE and a deferred tool is already loaded. The retried turn must NOT be
-// degraded to the empty-loaded/no-reminder state: it must still advertise the
-// loaded tool's FULL schema and carry the <system-reminder> for the hidden tool.
-func TestRunReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testing.T) {
+// degraded to the empty-loaded/no-discovery state: it must still advertise the
+// loaded tool's FULL schema and keep tool_search discovery for hidden tools.
+func TestRunReactiveRetryKeepsLoadedDeferredToolAndDiscovery(t *testing.T) {
 	registry := tools.NewRegistry()
 	// load_signal asks the loop to load mcp__srv__alpha next turn.
 	registry.Register(loadSignalTool{value: "mcp__srv__alpha"})
@@ -492,24 +525,20 @@ func TestRunReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testing.T) {
 		t.Fatalf("retry must advertise the loaded tool's FULL schema, got %#v", alpha.Parameters)
 	}
 
-	// The retry must carry the deferred-tools reminder as its trailing user
-	// message (the hidden tool is mcp__srv__beta) — not the no-reminder state.
-	last := retry.Messages[len(retry.Messages)-1]
-	if last.Role != zeroruntime.MessageRoleUser || !strings.Contains(last.Content, "tool_search") {
-		t.Fatalf("retry request must end with the deferred-tools reminder, got role=%s content=%q", last.Role, last.Content)
+	assertNoDeferredDiscoveryMessage(t, retry)
+	search := toolDefinitionByName(retry.Tools, tools.ToolSearchToolName)
+	if search == nil {
+		t.Fatalf("retry must expose tool_search for still-hidden tools, got %#v", retry.Tools)
 	}
-	if !strings.Contains(last.Content, "mcp__srv__beta") {
-		t.Fatalf("retry reminder must list the still-hidden tool mcp__srv__beta, got %q", last.Content)
-	}
-	if strings.Contains(last.Content, "mcp__srv__alpha") {
-		t.Fatalf("loaded tool must not appear in the retry reminder, got %q", last.Content)
+	if !strings.Contains(search.Description, "Tool discovery") || !strings.Contains(search.Description, "mcp") {
+		t.Fatalf("retry tool_search description must carry deferred discovery, got %q", search.Description)
 	}
 
-	// The reminder must NOT persist into the returned message history, even on
+	// The discovery text must NOT persist into the returned message history, even on
 	// the reactive-retry path.
 	for _, m := range result.Messages {
-		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Call tool_search") {
-			t.Fatalf("the deferred-tools reminder must not be persisted in result.Messages")
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Tool discovery") {
+			t.Fatalf("deferred discovery must not be persisted in result.Messages")
 		}
 	}
 }
@@ -544,15 +573,15 @@ func (provider *connectErrorProvider) StreamCompletion(_ context.Context, reques
 	return ch, nil
 }
 
-// TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndReminder mirrors
-// TestRunReactiveRetryKeepsLoadedDeferredToolAndReminder but drives the
+// TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndDiscovery mirrors
+// TestRunReactiveRetryKeepsLoadedDeferredToolAndDiscovery but drives the
 // CONNECT-TIME error path: StreamCompletion itself returns a non-nil
 // context-limit error (rather than a mid-stream StreamEventError). With deferral
 // ACTIVE and a deferred tool already loaded, the rebuilt retry request must still
-// advertise the loaded tool's FULL schema AND carry the deferred-tools reminder —
-// i.e. the first reactive block reuses exposed/reminder, not the empty-loaded
+// advertise the loaded tool's FULL schema AND carry tool_search discovery —
+// i.e. the first reactive block reuses exposed, not the empty-loaded
 // partition.
-func TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testing.T) {
+func TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndDiscovery(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(loadSignalTool{value: "mcp__srv__alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
@@ -625,22 +654,19 @@ func TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testin
 		t.Fatalf("retry must advertise the loaded tool's FULL schema, got %#v", alpha.Parameters)
 	}
 
-	// The retry must carry the deferred-tools reminder as its trailing user message.
-	last := retry.Messages[len(retry.Messages)-1]
-	if last.Role != zeroruntime.MessageRoleUser || !strings.Contains(last.Content, "tool_search") {
-		t.Fatalf("retry request must end with the deferred-tools reminder, got role=%s content=%q", last.Role, last.Content)
+	assertNoDeferredDiscoveryMessage(t, retry)
+	search := toolDefinitionByName(retry.Tools, tools.ToolSearchToolName)
+	if search == nil {
+		t.Fatalf("retry must expose tool_search for still-hidden tools, got %#v", retry.Tools)
 	}
-	if !strings.Contains(last.Content, "mcp__srv__beta") {
-		t.Fatalf("retry reminder must list the still-hidden tool mcp__srv__beta, got %q", last.Content)
-	}
-	if strings.Contains(last.Content, "mcp__srv__alpha") {
-		t.Fatalf("loaded tool must not appear in the retry reminder, got %q", last.Content)
+	if !strings.Contains(search.Description, "Tool discovery") || !strings.Contains(search.Description, "mcp") {
+		t.Fatalf("retry tool_search description must carry deferred discovery, got %q", search.Description)
 	}
 
-	// The reminder must NOT persist into the returned message history.
+	// The discovery text must NOT persist into the returned message history.
 	for _, m := range result.Messages {
-		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Call tool_search") {
-			t.Fatalf("the deferred-tools reminder must not be persisted in result.Messages")
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Tool discovery") {
+			t.Fatalf("deferred discovery must not be persisted in result.Messages")
 		}
 	}
 }
@@ -649,8 +675,7 @@ func TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testin
 // regression: N deferred tools are registered alongside tool_search, the operator
 // allowlists ONLY the N deferred names (NOT tool_search), and DeferThreshold == N.
 // Deferral must ACTIVATE, the partition must STILL expose tool_search (the gateway
-// to the allowlisted tools), and a tool_search call must be DISPATCH-ALLOWED — so
-// the reminder never points the model at an unreachable tool.
+// to the allowlisted tools), and a tool_search call must be DISPATCH-ALLOWED.
 func TestAllowlistedDeferredToolsKeepToolSearchReachable(t *testing.T) {
 	registry := tools.NewRegistry()
 	deferredNames := []string{"mcp__srv__alpha", "mcp__srv__beta"}
@@ -667,14 +692,14 @@ func TestAllowlistedDeferredToolsKeepToolSearchReachable(t *testing.T) {
 		EnabledTools: append([]string{}, deferredNames...),
 	}
 
-	exposed, reminder := partitionTools(registry, PermissionModeAuto, options, map[string]bool{})
+	exposed, discovery := partitionTools(registry, PermissionModeAuto, options, map[string]bool{})
 
-	// Deferral active => non-empty reminder advertising the hidden deferred tools.
-	if reminder == "" {
-		t.Fatalf("expected deferral active (non-empty reminder) at threshold N, got empty")
+	// Deferral active => non-empty tool_search discovery for hidden deferred tools.
+	if discovery == "" {
+		t.Fatalf("expected deferral active (non-empty discovery) at threshold N, got empty")
 	}
-	if !strings.Contains(reminder, "tool_search") {
-		t.Fatalf("reminder must instruct the model to call tool_search, got %q", reminder)
+	if !strings.Contains(discovery, "tool_search") {
+		t.Fatalf("discovery must instruct the model to call tool_search, got %q", discovery)
 	}
 
 	// FIX 2(a): tool_search is exposed even though the allowlist omits it.
@@ -684,6 +709,10 @@ func TestAllowlistedDeferredToolsKeepToolSearchReachable(t *testing.T) {
 	}
 	if !exposedNames["tool_search"] {
 		t.Fatalf("tool_search must be exposed on the active path despite the allowlist omitting it, got %#v", exposed)
+	}
+	search := toolDefinitionByName(exposed, tools.ToolSearchToolName)
+	if search == nil || search.Description != discovery {
+		t.Fatalf("tool_search description must carry discovery text, got %#v discovery=%q", search, discovery)
 	}
 	// The allowlisted-but-unloaded deferred tools are hidden (not exposed).
 	for _, name := range deferredNames {

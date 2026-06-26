@@ -212,43 +212,35 @@ func TestFormatDeferredToolLine(t *testing.T) {
 	})
 }
 
-func TestBuildDeferredReminder(t *testing.T) {
-	t.Run("no lines returns empty", func(t *testing.T) {
-		if got := BuildDeferredReminder(nil); got != "" {
-			t.Fatalf("BuildDeferredReminder(nil) = %q, want empty", got)
-		}
-		if got := BuildDeferredReminder([]string{}); got != "" {
-			t.Fatalf("BuildDeferredReminder([]) = %q, want empty", got)
+func TestBuildToolSearchDescription(t *testing.T) {
+	t.Run("no sources still describes discovery", func(t *testing.T) {
+		got := BuildToolSearchDescription(nil)
+		for _, want := range []string{"# Tool discovery", "None currently enabled.", "tool_search"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("BuildToolSearchDescription(nil) = %q, missing %q", got, want)
+			}
 		}
 	})
 
-	t.Run("wraps lines in system-reminder", func(t *testing.T) {
-		lines := []string{
-			"mcp_github_fetch: Fetches a URL. | server: github | inputs (* required): url (string)*",
-			"mcp_weather_now: Current weather. | server: weather | (none)",
+	t.Run("lists sources without exact tool names", func(t *testing.T) {
+		tools := []Tool{
+			serverNamedTool{
+				baseTool: baseTool{name: "mcp_git_hub_create_issue", description: "Create an issue.", parameters: Schema{Type: "object"}},
+				server:   "git hub",
+			},
+			fakeDeferredTool{baseTool: baseTool{name: "swarm_spawn", description: "Spawn a worker.", parameters: Schema{Type: "object"}}, deferred: true},
 		}
-		got := BuildDeferredReminder(lines)
+		got := BuildToolSearchDescription(tools)
 
-		if !strings.HasPrefix(got, "<system-reminder>") {
-			t.Fatalf("missing opening tag: %q", got)
-		}
-		if !strings.HasSuffix(got, "</system-reminder>") {
-			t.Fatalf("missing closing tag: %q", got)
-		}
-		if !strings.Contains(got, "tool_search") {
-			t.Fatalf("reminder must name the tool_search tool: %q", got)
-		}
-		if !strings.Contains(got, `select:`) {
-			t.Fatalf("reminder must explain select: query form: %q", got)
-		}
-		for _, line := range lines {
-			if !strings.Contains(got, line) {
-				t.Fatalf("reminder missing line %q in %q", line, got)
+		for _, want := range []string{"# Tool discovery", "- git hub", "- swarm", "select:Name1,Name2"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("BuildToolSearchDescription = %q, missing %q", got, want)
 			}
 		}
-		// Lines are newline-joined, not concatenated.
-		if !strings.Contains(got, lines[0]+"\n"+lines[1]) {
-			t.Fatalf("lines not newline-joined in %q", got)
+		for _, avoid := range []string{"mcp_git_hub_create_issue", "swarm_spawn", "Create an issue", "Spawn a worker"} {
+			if strings.Contains(got, avoid) {
+				t.Fatalf("BuildToolSearchDescription should not list exact tool metadata %q in %q", avoid, got)
+			}
 		}
 	})
 }
