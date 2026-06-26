@@ -17,6 +17,7 @@
 ![providers](https://img.shields.io/badge/providers-25%2B-34E2EA)
 ![tests](https://img.shields.io/badge/test%20files-200%2B-43D17A)
 ![status](https://img.shields.io/badge/status-active%20development-E8B84B)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -354,7 +355,7 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Run `go te
 
 ## License
 
-License is being finalized; a `LICENSE` file will be added before the public release.
+Zero is released under the [MIT License](LICENSE) — © 2026 Gitlawb.
 
 ---
 
