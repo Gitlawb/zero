@@ -49,6 +49,7 @@ func (tool *sandboxDeniedRetryTool) Parameters() tools.Schema {
 		Properties: map[string]tools.PropertySchema{
 			"command":             {Type: "string"},
 			"sandbox_permissions": {Type: "string"},
+			"justification":       {Type: "string"},
 		},
 		Required:             []string{"command"},
 		AdditionalProperties: false,
@@ -73,6 +74,12 @@ func (tool *sandboxDeniedRetryTool) Run(_ context.Context, args map[string]any) 
 		},
 	}
 }
+
+type sandboxDeniedExecCommandRetryTool struct {
+	sandboxDeniedRetryTool
+}
+
+func (tool *sandboxDeniedExecCommandRetryTool) Name() string { return "exec_command" }
 
 type sandboxNetworkDeniedRetryTool struct {
 	calls []map[string]any
@@ -136,6 +143,197 @@ func agentNativeBackendStub() sandbox.Backend {
 		Executable:      "/nonexistent/zero-linux-sandbox-stub",
 		CommandWrapping: true,
 		NativeIsolation: true,
+	}
+}
+
+type sandboxNamespaceLimitedRetryTool struct {
+	calls []map[string]any
+}
+
+func (tool *sandboxNamespaceLimitedRetryTool) Name() string        { return "bash" }
+func (tool *sandboxNamespaceLimitedRetryTool) Description() string { return "test shell tool" }
+func (tool *sandboxNamespaceLimitedRetryTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"command":             {Type: "string"},
+			"sandbox_permissions": {Type: "string"},
+		},
+		Required:             []string{"command"},
+		AdditionalProperties: false,
+	}
+}
+func (tool *sandboxNamespaceLimitedRetryTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
+}
+func (tool *sandboxNamespaceLimitedRetryTool) Run(_ context.Context, args map[string]any) tools.Result {
+	tool.calls = append(tool.calls, cloneArgs(args))
+	if args["sandbox_permissions"] == string(tools.SandboxPermissionsRequireEscalated) {
+		return tools.Result{Status: tools.StatusOK, Output: "stdout:\nUSER PID COMMAND\nanaxy 42 firefox\nanaxy 43 Discord"}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "stdout:\nUSER PID COMMAND\nanaxy 1 bwrap --new-session --die-with-parent --unshare-user --unshare-pid --unshare-net --proc /proc -- /bin/sh -c ps aux\nanaxy 2 ps aux",
+		Meta: map[string]string{
+			"sandbox_backend":        string(sandbox.BackendLinuxBwrap),
+			"sandbox_target_backend": string(sandbox.BackendLinuxBwrap),
+			"sandbox_wrapped":        "true",
+		},
+	}
+}
+
+func TestRunRetriesShellUnsandboxedAfterSandboxNamespaceLimitedOutput(t *testing.T) {
+	root := t.TempDir()
+	retryTool := &sandboxNamespaceLimitedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"ps aux"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var events []PermissionEvent
+
+	result, err := Run(context.Background(), "check running applications", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllowPrefix, Reason: "inspect host processes"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(retryTool.calls) != 2 {
+		t.Fatalf("tool calls = %#v, want sandboxed attempt plus unsandboxed retry", retryTool.calls)
+	}
+	if retryTool.calls[1]["sandbox_permissions"] != string(tools.SandboxPermissionsRequireEscalated) {
+		t.Fatalf("retry args = %#v, want require_escalated", retryTool.calls[1])
+	}
+	if len(requests) != 1 {
+		t.Fatalf("permission requests = %#v, want one unsandboxed retry approval", requests)
+	}
+	if !strings.Contains(requests[0].Reason, "sandbox PID namespace") {
+		t.Fatalf("permission reason = %q, want sandbox namespace reason", requests[0].Reason)
+	}
+	if !equalStringSlices(requests[0].CommandPrefix, []string{"ps", "aux"}) {
+		t.Fatalf("request command prefix = %#v, want ps aux", requests[0].CommandPrefix)
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionAllow || events[0].DecisionAction != PermissionDecisionAllowPrefix {
+		t.Fatalf("permission events = %#v, want approved unsandboxed retry", events)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("provider requests = %d, want retry result sent back to model", len(provider.requests))
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(last.Content, "firefox") || strings.Contains(last.Content, "bwrap --new-session") {
+		t.Fatalf("tool result sent to model = %q, want unsandboxed retry output only", last.Content)
+	}
+}
+
+func TestRunUsesEscalatedJustificationForPermissionPrompt(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(&sandboxDeniedRetryTool{})
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"ps aux","sandbox_permissions":"require_escalated","justification":"Need host process visibility."}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requestReasons []string
+
+	_, err := Run(context.Background(), "check host processes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requestReasons = append(requestReasons, request.Reason)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "not needed"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requestReasons) != 1 {
+		t.Fatalf("permission reasons = %#v, want one request", requestReasons)
+	}
+	if requestReasons[0] != "Need host process visibility." {
+		t.Fatalf("permission reason = %q, want model justification", requestReasons[0])
+	}
+}
+
+func TestRunUsesUserFacingEscalatedFallbackForPermissionPrompt(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(&sandboxDeniedExecCommandRetryTool{})
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "exec_command"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"ps aux","sandbox_permissions":"require_escalated"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requestReasons []string
+
+	_, err := Run(context.Background(), "check host processes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requestReasons = append(requestReasons, request.Reason)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "not needed"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requestReasons) != 1 {
+		t.Fatalf("permission reasons = %#v, want one request", requestReasons)
+	}
+	if requestReasons[0] != "This command needs to run outside the sandbox." {
+		t.Fatalf("permission reason = %q, want user-facing fallback", requestReasons[0])
+	}
+	if strings.Contains(requestReasons[0], sandbox.ReasonEscalatedSandboxRequired) {
+		t.Fatalf("permission reason leaked internal sandbox copy: %q", requestReasons[0])
 	}
 }
 

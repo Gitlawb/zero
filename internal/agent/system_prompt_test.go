@@ -31,6 +31,19 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 	}
 }
 
+func TestSystemPromptExplainsSandboxEscalationForHiddenHostState(t *testing.T) {
+	prompt := strings.ToLower(buildSystemPrompt(Options{}))
+	for _, want := range []string{
+		"sandboxed shell command returns only sandbox-local state",
+		"sandbox_permissions: \"require_escalated\"",
+		"prefix_rule",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected sandbox escalation guidance %q, got:\n%s", want, buildSystemPrompt(Options{}))
+		}
+	}
+}
+
 func TestBuildSystemPromptIncludesWorkspaceSeedFromCwd(t *testing.T) {
 	cwd := t.TempDir()
 	writeSystemPromptTestFile(t, cwd, "go.mod", "module example.test/zero\n")

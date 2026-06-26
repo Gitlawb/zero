@@ -102,7 +102,10 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 		descriptionParts = append(descriptionParts, property.Description)
 	}
 	description := strings.ToLower(strings.Join(descriptionParts, " "))
-	if !strings.Contains(description, "sandbox_permissions") || !strings.Contains(description, "require_escalated") {
+	if !strings.Contains(description, "sandbox_permissions") ||
+		!strings.Contains(description, "require_escalated") ||
+		!strings.Contains(description, "host/global process") ||
+		!strings.Contains(description, "sandbox namespaces") {
 		t.Fatalf("expected sandbox escalation guidance in bash description, got %q", description)
 	}
 

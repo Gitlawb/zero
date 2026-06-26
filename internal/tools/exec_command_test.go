@@ -48,6 +48,26 @@ func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
 	}
 }
 
+func TestExecCommandToolDescribesHostStateEscalation(t *testing.T) {
+	tool := NewScopedExecCommandTool(t.TempDir(), nil, nil)
+	schema := tool.Parameters()
+	descriptionParts := []string{tool.Description()}
+	for _, property := range schema.Properties {
+		descriptionParts = append(descriptionParts, property.Description)
+	}
+	description := strings.ToLower(strings.Join(descriptionParts, " "))
+	for _, want := range []string{
+		"sandbox_permissions",
+		"require_escalated",
+		"host/global process",
+		"sandbox namespaces",
+	} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("expected exec_command escalation guidance %q, got %q", want, description)
+		}
+	}
+}
+
 func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	root := t.TempDir()
 	manager := newExecSessionManager()

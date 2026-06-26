@@ -850,7 +850,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// The sandbox decision (if any) is returned synchronously on the Result and
 		// used here for permission event building.
 	})
-	if retryResult, directResult, retried, action, reason, prefix, abortErr := maybeRetryUnsandboxedAfterSandboxDenial(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
+	if retryResult, directResult, retried, action, reason, prefix, abortErr := maybeRetryUnsandboxedAfterSandboxRestriction(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
 		if directResult != nil {
 			return *directResult, abortErr
 		}
@@ -907,14 +907,16 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}, nil
 }
 
-func maybeRetryUnsandboxedAfterSandboxDenial(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) (tools.Result, *ToolResult, bool, PermissionDecisionAction, string, []string, error) {
+const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
+
+func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) (tools.Result, *ToolResult, bool, PermissionDecisionAction, string, []string, error) {
 	if retryResult, directResult, retried, action, reason, abortErr := maybeRetryWithNetworkAfterSandboxDenial(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
 		return retryResult, directResult, retried, action, reason, nil, abortErr
 	}
-	if !sandboxDeniedShellRetryCandidate(call, args, result, options) {
+	if !sandboxRestrictedShellRetryCandidate(call, args, result, options) {
 		return result, nil, false, "", "", nil, nil
 	}
-	requestEvent := sandboxDeniedRetryEvent(call, tool, args, permissionMode, options, result)
+	requestEvent := sandboxRestrictionRetryEvent(call, tool, args, permissionMode, options, result)
 	request := permissionRequestFromEvent(requestEvent, args, options)
 	if permissionMode == PermissionModeUnsafe {
 		retryArgs := unsandboxedRetryArgs(args)
@@ -1056,27 +1058,41 @@ func sandboxDeniedNetworkRetryEvent(call ToolCall, tool tools.Tool, args map[str
 	}
 }
 
-func sandboxDeniedShellRetryCandidate(call ToolCall, args map[string]any, result tools.Result, options Options) bool {
-	if options.Sandbox == nil || !isShellCommandTool(call.Name) || result.Status != tools.StatusError {
+func sandboxRestrictedShellRetryCandidate(call ToolCall, args map[string]any, result tools.Result, options Options) bool {
+	if options.Sandbox == nil || !isShellCommandTool(call.Name) {
 		return false
 	}
 	if !options.Sandbox.UnsandboxedExecutionAllowed() {
 		return false
 	}
-	if result.Meta[tools.SandboxLikelyDeniedMeta] != "true" {
-		return false
-	}
 	if value, _ := args["sandbox_permissions"].(string); strings.TrimSpace(value) == string(tools.SandboxPermissionsRequireEscalated) {
 		return false
 	}
-	return true
+	return sandboxDeniedShellResult(result) || sandboxNamespaceLimitedShellResult(result)
 }
 
-func sandboxDeniedRetryEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionMode PermissionMode, options Options, result tools.Result) PermissionEvent {
-	reason := strings.TrimSpace(result.Meta[tools.SandboxDenialReasonMeta])
-	if reason == "" {
-		reason = "sandbox blocked command execution"
+func sandboxDeniedShellResult(result tools.Result) bool {
+	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
+}
+
+func sandboxNamespaceLimitedShellResult(result tools.Result) bool {
+	if result.Status != tools.StatusOK {
+		return false
 	}
+	if result.Meta["sandbox_wrapped"] != "true" {
+		return false
+	}
+	if result.Meta["sandbox_backend"] != string(sandbox.BackendLinuxBwrap) && result.Meta["sandbox_target_backend"] != string(sandbox.BackendLinuxBwrap) {
+		return false
+	}
+	output := strings.ToLower(result.Output)
+	return strings.Contains(output, "bwrap ") &&
+		strings.Contains(output, "--unshare-pid") &&
+		strings.Contains(output, "-- /bin/sh -c")
+}
+
+func sandboxRestrictionRetryEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionMode PermissionMode, options Options, result tools.Result) PermissionEvent {
+	reason := sandboxRestrictionRetryReason(result)
 	if keyword := strings.TrimSpace(result.Meta[tools.SandboxDenialKeywordMeta]); keyword != "" {
 		reason += " (" + keyword + ")"
 	}
@@ -1102,6 +1118,19 @@ func sandboxDeniedRetryEvent(call ToolCall, tool tools.Tool, args map[string]any
 		Risk:           risk,
 		CommandPrefix:  proposedCommandPrefix(call.Name, args),
 	}
+}
+
+func sandboxRestrictionRetryReason(result tools.Result) string {
+	if sandboxDeniedShellResult(result) {
+		if reason := strings.TrimSpace(result.Meta[tools.SandboxDenialReasonMeta]); reason != "" {
+			return reason
+		}
+		return "sandbox blocked command execution"
+	}
+	if sandboxNamespaceLimitedShellResult(result) {
+		return sandboxNamespaceLimitedReason
+	}
+	return "sandbox blocked command execution"
 }
 
 func runToolForNetworkRetry(ctx context.Context, registry *tools.Registry, name string, toolCallID string, args map[string]any, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) tools.Result {
@@ -1945,6 +1974,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 	if profile, ok, err := inlineAdditionalPermissionsProfile(args, options.Cwd); ok && err == nil {
 		scopeText = requestPermissionsScope(profile)
 	}
+	reason = userFacingPermissionReason(call.Name, args, reason)
 
 	return PermissionEvent{
 		ToolCallID:        call.ID,
@@ -1964,6 +1994,20 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Grant:             grant,
 		CommandPrefix:     proposedCommandPrefix(call.Name, args),
 	}, true
+}
+
+func userFacingPermissionReason(toolName string, args map[string]any, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if !isShellCommandTool(toolName) || !shellCommandRequiresEscalated(args) {
+		return reason
+	}
+	if justification, ok := firstStringArg(args, "justification"); ok {
+		return justification
+	}
+	if reason == "" || reason == sandbox.ReasonEscalatedSandboxRequired {
+		return "This command needs to run outside the sandbox."
+	}
+	return reason
 }
 
 func grantDecisionAction(grant *sandbox.Grant) PermissionDecisionAction {

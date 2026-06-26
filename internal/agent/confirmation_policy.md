@@ -86,5 +86,6 @@ Otherwise, confirm before executing.
 
 - Prefer sandboxed additional permissions over full escalation: use `sandbox_permissions: "with_additional_permissions"` with the required file-system or network permission when that can satisfy the command.
 - Use `sandbox_permissions: "require_escalated"` only when the command must run outside the sandbox, such as inspecting or controlling host/global state that the sandbox intentionally hides.
+- If a sandboxed shell command returns only sandbox-local state when the user asked for host/global state, do not answer from that misleading output. Rerun the needed command with `sandbox_permissions: "require_escalated"`, a short user-facing `justification`, and a narrow `prefix_rule` when appropriate.
 - For `require_escalated`, include a short user-facing `justification`. When a reusable approval is appropriate, include a narrow `prefix_rule`; do not suggest broad shell, interpreter, or launcher prefixes.
 - Shell commands are evaluated as independent command segments across `|`, `&&`, `||`, and `;`. A reusable prefix must apply safely to the command segment it is meant to authorize.

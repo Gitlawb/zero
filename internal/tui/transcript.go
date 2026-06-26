@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -463,6 +464,10 @@ func permissionDisplayReason(reason string) string {
 	switch reason {
 	case "network access requires approval":
 		return "Network access requires approval."
+	case sandbox.ReasonEscalatedSandboxRequired:
+		return "This command needs to run outside the sandbox."
+	case "sandbox output is limited to the sandbox PID namespace; host/global state requires approval":
+		return "Host/global state is hidden by the sandbox, so this command needs to run outside it."
 	case "workspace write is allowed":
 		return "Workspace write is allowed."
 	default:

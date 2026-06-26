@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -100,6 +101,26 @@ func TestPermissionOptionsExposeCommandPrefixApproval(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
 		}
+	}
+}
+
+func TestPermissionPromptMapsEscalatedSandboxReason(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName:   "exec_command",
+		SideEffect: "shell",
+		Reason:     sandbox.ReasonEscalatedSandboxRequired,
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionDeny,
+		},
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 0, 96)
+	got := plainRender(t, card)
+	if !strings.Contains(got, "This command needs to run outside the sandbox.") {
+		t.Fatalf("permission card = %q, missing user-facing sandbox reason", got)
+	}
+	if strings.Contains(got, sandbox.ReasonEscalatedSandboxRequired) {
+		t.Fatalf("permission card leaked internal sandbox reason: %q", got)
 	}
 }
 
