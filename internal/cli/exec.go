@@ -32,6 +32,12 @@ const (
 	exitCrash    = 1
 	exitUsage    = 2
 	exitProvider = 3
+	// exitIncomplete marks a headless run that stopped with work clearly
+	// unfinished — the completion gate exhausted its continue budget on a
+	// no-tool-call turn while plan items were pending or the model ended mid-step.
+	// Distinct from success so callers/benchmarks don't treat an abandoned run as
+	// finished.
+	exitIncomplete = 4
 	// exitInterrupted is the conventional shell exit code for a process stopped by
 	// SIGINT (128 + signal number 2).
 	exitInterrupted = 130
@@ -513,12 +519,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
 		SelfCorrect:      selfCorrector,
-		Sandbox:          sandboxEngine,
-		FileTracker:      tools.NewFileTracker(),
-		Hooks:            newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
-		EnabledTools:     options.enabledTools,
-		DisabledTools:    options.disabledTools,
-		OnText:           writer.text,
+		// Headless exec: don't accept a no-tool-call turn as "done" while work
+		// clearly remains (pending plan items / a mid-step continuation cue) —
+		// nudge to continue, and finalize as INCOMPLETE rather than false success
+		// if the model keeps stalling. The interactive TUI leaves this off.
+		RequireCompletionSignal: true,
+		Sandbox:                 sandboxEngine,
+		FileTracker:             tools.NewFileTracker(),
+		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+		EnabledTools:            options.enabledTools,
+		DisabledTools:           options.disabledTools,
+		OnText:                  writer.text,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{
@@ -623,6 +634,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		writer.warning(notice)
 	}
 	writer.final(result.FinalAnswer)
+	// A headless run that stalled mid-task (the completion gate exhausted its
+	// continue budget while work remained) is reported as INCOMPLETE, not success,
+	// so callers/benchmarks don't mistake an abandoned run for a finished one.
+	if result.Incomplete {
+		sessionRecorder.append(sessions.EventError, map[string]any{"message": "incomplete"})
+		writer.runEnd("incomplete", exitIncomplete)
+		if writer.err != nil {
+			return exitCrash
+		}
+		return exitIncomplete
+	}
 	writer.runEnd("success", exitSuccess)
 	if writer.err != nil {
 		return exitCrash
