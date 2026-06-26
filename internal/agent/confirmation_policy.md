@@ -81,3 +81,10 @@ Otherwise, confirm before executing.
 6. Avoid redundant confirmations if you already confirmed and there is no material new risk.
 7. Write/shell operations inside the workspace do not need the same scrutiny as operations outside it.
 8. Interactive programs (editors, pagers, REPLs, `ssh`/`psql`/`mysql` without a command, `top`/`htop`, `git rebase -i`) will be blocked because they hang the agent; always use the non-interactive alternative.
+
+## Sandbox Permission Requests
+
+- Prefer sandboxed additional permissions over full escalation: use `sandbox_permissions: "with_additional_permissions"` with the required file-system or network permission when that can satisfy the command.
+- Use `sandbox_permissions: "require_escalated"` only when the command must run outside the sandbox, such as inspecting or controlling host/global state that the sandbox intentionally hides.
+- For `require_escalated`, include a short user-facing `justification`. When a reusable approval is appropriate, include a narrow `prefix_rule`; do not suggest broad shell, interpreter, or launcher prefixes.
+- Shell commands are evaluated as independent command segments across `|`, `&&`, `||`, and `;`. A reusable prefix must apply safely to the command segment it is meant to authorize.

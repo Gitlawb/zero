@@ -59,6 +59,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "gh release download", script: "gh release download v1.0.0", network: true},
 		{name: "no network", script: "ls -la && echo done", network: false},
 		{name: "process pattern is not network", script: `pkill -f "python3 -m http.server 8000"`, network: false},
+		{name: "process listing is not special-cased", script: "ps aux", network: false},
 
 		{name: "unparseable", script: `'unterminated quote`, tooComplex: true},
 	}

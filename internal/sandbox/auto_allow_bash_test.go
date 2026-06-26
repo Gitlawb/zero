@@ -51,6 +51,23 @@ func TestSandboxedBashRequireEscalatedStillPromptsWhenSandboxActive(t *testing.T
 	}
 }
 
+func TestSandboxedBashProcessListingAutoAllowedWhenSandboxActive(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
+	request := bashRequest()
+	request.Args["command"] = "ps aux"
+
+	decision := engine.Evaluate(context.Background(), request)
+	if decision.Action != ActionAllow {
+		t.Fatalf("decision = %#v, want allow (sandbox active)", decision)
+	}
+	if len(decision.Risk.Categories) != 1 || !HasRiskCategory(decision.Risk, "shell") {
+		t.Fatalf("risk = %#v, want only shell category", decision.Risk)
+	}
+	if !decision.AutoAllowed {
+		t.Fatalf("sandboxed shell command should be auto-allowed: %#v", decision)
+	}
+}
+
 func TestSandboxedBashStillPromptsWithoutSandbox(t *testing.T) {
 	engine := sandboxedShellEngine(t, Backend{Name: BackendUnavailable})
 	decision := engine.Evaluate(context.Background(), bashRequest())
