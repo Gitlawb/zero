@@ -1237,9 +1237,12 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
 	questions := prompt.request.Questions
 	if len(questions) == 0 {
-		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.line, zeroTheme.panel)
+		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
-	fill := zeroTheme.onPanel
+	// The questionnaire replaces the composer, so it paints on the terminal canvas
+	// (black) like the composer box — not a gray card. fill is an identity wrapper
+	// so existing fill(style) call sites render bare foregrounds on that canvas.
+	fill := func(style lipgloss.Style) lipgloss.Style { return style }
 	confirm := len(questions)
 	active := prompt.active
 	if active < 0 {
@@ -1292,7 +1295,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		}
 		lines = append(lines, "")
 		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc dismiss"))
-		return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
+		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
 
 	question := questions[active]
@@ -1332,14 +1335,14 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 			footer = "⇆ tab · ↑↓ select · enter confirm · esc dismiss"
 		}
 		lines = append(lines, fill(zeroTheme.faint).Render(footer))
-		return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
+		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
 
 	// Free-text mode: the typed answer is echoed here (this region IS the input now).
 	if question.MultiSelect && len(question.Options) > 0 {
 		lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
 	}
-	lines = append(lines, zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ")+fill(zeroTheme.ink).Render(input)+fill(zeroTheme.accent).Render("▌"))
+	lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(input)+fill(zeroTheme.accent).Render("▌"))
 	footer := "enter submit · esc dismiss"
 	switch {
 	case !question.MultiSelect && len(question.Options) > 0:
@@ -1348,7 +1351,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		footer = "⇆ tab · enter submit · esc dismiss"
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
-	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
+	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 }
 
 // --- Tool cards -------------------------------------------------------------
