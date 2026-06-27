@@ -7,6 +7,56 @@ import (
 	"testing"
 )
 
+func TestParseAskUserRecommended(t *testing.T) {
+	// recommended is kept only when it resolves to one of the options (canonical
+	// option text), case-insensitively; otherwise it is dropped so Recommended stays
+	// either empty or a member of Options.
+	cases := []struct {
+		name        string
+		options     []any
+		recommended any
+		wantOptions []string
+		wantRec     string
+	}{
+		{"exact match", []any{"Postgres", "SQLite"}, "SQLite", []string{"Postgres", "SQLite"}, "SQLite"},
+		{"case-insensitive maps to canonical", []any{"Postgres", "SQLite"}, "sqlite", []string{"Postgres", "SQLite"}, "SQLite"},
+		{"non-member dropped", []any{"Postgres", "SQLite"}, "Mongo", []string{"Postgres", "SQLite"}, ""},
+		{"no options drops recommended", nil, "SQLite", nil, ""},
+		{"non-string recommended ignored", []any{"A", "B"}, 3, []string{"A", "B"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			question := map[string]any{"question": "Which one?"}
+			if c.options != nil {
+				question["options"] = c.options
+			}
+			if c.recommended != nil {
+				question["recommended"] = c.recommended
+			}
+			parsed, err := ParseAskUserQuestions(map[string]any{"questions": []any{question}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(parsed) != 1 {
+				t.Fatalf("expected one question, got %d", len(parsed))
+			}
+			if strings.Join(parsed[0].Options, ",") != strings.Join(c.wantOptions, ",") {
+				t.Fatalf("options = %#v, want %#v", parsed[0].Options, c.wantOptions)
+			}
+			if parsed[0].Recommended != c.wantRec {
+				t.Fatalf("recommended = %q, want %q", parsed[0].Recommended, c.wantRec)
+			}
+		})
+	}
+}
+
+func TestAskUserToolAdvertisesRecommended(t *testing.T) {
+	schema := NewAskUserTool().Parameters()
+	if _, ok := schema.Properties["questions"].Items.Properties["recommended"]; !ok {
+		t.Fatal("expected question item to document a recommended field")
+	}
+}
+
 func TestAskUserToolSafetyIsReadOnly(t *testing.T) {
 	safety := NewAskUserTool().Safety()
 	if safety.Permission != PermissionAllow {

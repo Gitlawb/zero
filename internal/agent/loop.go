@@ -1445,6 +1445,7 @@ func toAgentAskUserQuestions(questions []tools.AskUserQuestion) []AskUserQuestio
 		converted[index] = AskUserQuestion{
 			Question:    question.Question,
 			Options:     append([]string{}, question.Options...),
+			Recommended: question.Recommended,
 			MultiSelect: question.MultiSelect,
 		}
 	}

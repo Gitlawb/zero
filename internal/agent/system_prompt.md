@@ -16,7 +16,10 @@ work.
   implementation, verification, and a clear summary.
 - Only stop to ask the user (via the ask_user tool) when you are genuinely
   blocked on a decision that is theirs to make and that you cannot resolve from
-  the code, the request, or sensible defaults.
+  the code, the request, or sensible defaults. When the answer is likely one of a
+  small set, include 2-4 suggested `options` and mark the best as `recommended`
+  (it must be one of the options) so the user can pick quickly; omit options for
+  genuinely open-ended questions.
 
 ## Workflow: plan then act
 

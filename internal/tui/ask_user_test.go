@@ -60,8 +60,8 @@ func TestAskUserPromptCollectsAnswersInOrder(t *testing.T) {
 	})
 	next := updated.(model)
 
-	// Answer the first question.
-	next.input.SetValue("React")
+	// Q1 has options -> selector mode; Enter selects the default (first) option "React"
+	// without any composer input.
 	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
@@ -89,6 +89,133 @@ func TestAskUserPromptCollectsAnswersInOrder(t *testing.T) {
 	}
 	if len(answers[0]) != 2 || answers[0][0] != "React" || answers[0][1] != "yes" {
 		t.Fatalf("expected answers [React yes], got %#v", answers[0])
+	}
+}
+
+func askUserRecommendedRequest() agent.AskUserRequest {
+	return agent.AskUserRequest{
+		ToolCallID: "call_db",
+		Questions: []agent.AskUserQuestion{
+			{Question: "Which database?", Options: []string{"Postgres", "SQLite", "MySQL"}, Recommended: "SQLite"},
+		},
+	}
+}
+
+// A question with options + a recommended choice renders the selector, rests the
+// cursor on the recommended option, and Enter selects it without typing.
+func TestAskUserSelectorDefaultsToRecommended(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: askUserRecommendedRequest(),
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+
+	if next.pendingAskUser == nil || next.pendingAskUser.typing {
+		t.Fatalf("expected selector mode for a question with options, got %#v", next.pendingAskUser)
+	}
+	if next.pendingAskUser.cursor != 1 {
+		t.Fatalf("expected cursor to rest on the recommended option (index 1), got %d", next.pendingAskUser.cursor)
+	}
+	for _, want := range []string{"Postgres", "SQLite", "MySQL", "(recommended)", askUserTypeMyOwnLabel} {
+		assertContains(t, next.View(), want)
+	}
+
+	// Enter selects the recommended default — no composer text involved.
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatalf("expected single-question prompt to clear after selecting, got %#v", next.pendingAskUser)
+	}
+	if len(answers) != 1 || len(answers[0]) != 1 || answers[0][0] != "SQLite" {
+		t.Fatalf("expected selecting the recommended default to return [SQLite], got %#v", answers)
+	}
+}
+
+// Arrowing to the trailing "type my own" entry switches the question into free-text
+// mode; the typed answer is what gets returned.
+func TestAskUserSelectorTypeMyOwnReturnsTypedText(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: askUserRecommendedRequest(),
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+
+	// Cursor starts at index 1 (SQLite); move down twice to the "type my own" entry
+	// (options=3 -> type-my-own index 3).
+	for i := 0; i < 2; i++ {
+		updated, _ = next.Update(testKey(tea.KeyDown))
+		next = updated.(model)
+	}
+	if next.pendingAskUser.cursor != 3 {
+		t.Fatalf("expected cursor on the 'type my own' entry (index 3), got %d", next.pendingAskUser.cursor)
+	}
+
+	// Enter on "type my own" switches to free-text and delivers nothing yet.
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
+		t.Fatalf("expected 'type my own' to switch into free-text typing mode, got %#v", next.pendingAskUser)
+	}
+	if len(answers) != 0 {
+		t.Fatalf("expected no answer delivered when switching to free-text, got %#v", answers)
+	}
+	assertContains(t, next.View(), "type an answer")
+
+	// Type a custom answer and submit.
+	next.input.SetValue("CockroachDB")
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "CockroachDB" {
+		t.Fatalf("expected typed free-text answer [CockroachDB], got %#v", answers)
+	}
+}
+
+// A question with NO options keeps the plain free-text prompt exactly as before (no
+// selector, no regression).
+func TestAskUserNoOptionsIsPlainFreeText(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID: 7,
+		request: agent.AskUserRequest{
+			ToolCallID: "call_open",
+			Questions:  []agent.AskUserQuestion{{Question: "Describe the desired behavior"}},
+		},
+		answer: func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+
+	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
+		t.Fatalf("expected free-text (typing) mode for a question with no options, got %#v", next.pendingAskUser)
+	}
+	view := next.View()
+	assertContains(t, view, "type an answer")
+	if transcriptContains(next.transcript, askUserTypeMyOwnLabel) {
+		t.Fatalf("a no-options question must not show the selector's type-my-own entry")
+	}
+
+	next.input.SetValue("my free-form answer")
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "my free-form answer" {
+		t.Fatalf("expected free-text answer, got %#v", answers)
 	}
 }
 

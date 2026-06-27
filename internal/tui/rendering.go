@@ -1254,16 +1254,41 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 		question := questions[index]
 		lines = append(lines, fill(zeroTheme.faint).Render(fmt.Sprintf("question %d of %d", index+1, total)))
 		lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
-		if len(question.Options) > 0 {
-			lines = append(lines, fill(zeroTheme.muted).Render("options: "+strings.Join(question.Options, ", ")))
+
+		if len(question.Options) > 0 && !prompt.typing {
+			// Selector mode: render each suggested option plus a trailing "type my
+			// own" entry. The highlighted row gets a lime ▸ marker and a reverse
+			// badge label (mirrors the permission popup); the recommended option is
+			// tagged inline.
+			selectable := askUserSelectableCount(question)
+			cursor := clampAskUserCursor(prompt.cursor, selectable)
+			for optionIndex, option := range question.Options {
+				label := option
+				if option == question.Recommended {
+					label += "  (recommended)"
+				}
+				if optionIndex == cursor {
+					lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+label+" "))
+				} else {
+					lines = append(lines, "  "+fill(zeroTheme.ink).Render(label))
+				}
+			}
+			if cursor >= len(question.Options) {
+				lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+askUserTypeMyOwnLabel+" "))
+			} else {
+				lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTypeMyOwnLabel))
+			}
+			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip"))
+		} else {
+			// Free-text mode (no options, or "type my own" chosen): echo the
+			// in-progress answer inside the card, cursor included — unchanged from the
+			// original plain prompt so open-ended questions behave exactly as before.
+			answer := zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ") +
+				fill(zeroTheme.ink).Render(input) + fill(zeroTheme.accent).Render("▌")
+			lines = append(lines, answer)
+			lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))
 		}
 	}
-	// Echo the in-progress answer inside the card so the user sees what they
-	// are typing where they are answering, cursor included.
-	answer := zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ") +
-		fill(zeroTheme.ink).Render(input) + fill(zeroTheme.accent).Render("▌")
-	lines = append(lines, answer)
-	lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))
 
 	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
 }

@@ -511,11 +511,18 @@ type askUserRequestMsg struct {
 // pendingAskUserPrompt tracks an in-progress questionnaire. Answers are collected
 // one question at a time; once every question has an answer (or the user cancels)
 // the answer callback is invoked exactly once.
+//
+// When the current question carries Options, the prompt is in SELECTOR mode: cursor
+// indexes the options plus a trailing "type my own" entry, and starts on the
+// recommended option. Choosing "type my own" (or a question with no options) flips
+// typing=true, falling back to the existing free-text composer input.
 type pendingAskUserPrompt struct {
 	request agent.AskUserRequest
 	answer  func([]string)
 	index   int
 	answers []string
+	cursor  int  // selector index over [options..., "type my own"] for the current question
+	typing  bool // true = free-text input mode for the current question
 }
 
 type pendingSpecReviewPrompt struct {
@@ -1014,7 +1021,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.confirmPermissionCursor()
 			}
 			if m.pendingAskUser != nil {
-				return m.submitAskUserAnswer()
+				return m.confirmAskUser()
 			}
 			if m.pendingSpecReview != nil {
 				return m, nil
@@ -1163,6 +1170,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
 			}
+			if m.pendingAskUser != nil && !m.pendingAskUser.typing {
+				return m.moveAskUserCursor(1), nil
+			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
@@ -1200,6 +1210,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
+			}
+			if m.pendingAskUser != nil && !m.pendingAskUser.typing {
+				return m.moveAskUserCursor(-1), nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
@@ -1457,6 +1470,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answer:  msg.answer,
 			answers: make([]string, 0, len(msg.request.Questions)),
 		}
+		m.pendingAskUser.syncQuestionState() // selector vs free-text for question 1
 		m.clearComposer()
 		m.clearSuggestions()
 		return m, nil
@@ -3087,17 +3101,11 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 // submitAskUserAnswer records the answer to the current question and advances to
 // the next one; once every question is answered it delivers the full answer set.
 func (m model) submitAskUserAnswer() (tea.Model, tea.Cmd) {
-	pending := m.pendingAskUser
-	if pending == nil {
+	if m.pendingAskUser == nil {
 		return m, nil
 	}
-	pending.answers = append(pending.answers, strings.TrimSpace(m.input.Value()))
-	pending.index++
-	m.input.SetValue("")
-	if pending.index >= len(pending.request.Questions) {
-		return m.resolveAskUser(false)
-	}
-	return m, nil
+	// Free-text path: the answer is whatever is in the composer.
+	return m.advanceAskUser(strings.TrimSpace(m.input.Value()))
 }
 
 // resolveAskUser delivers the collected answers (padding to one-per-question when

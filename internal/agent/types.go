@@ -138,10 +138,13 @@ type PermissionEvent struct {
 	CommandPrefix     []string                 `json:"commandPrefix,omitempty"`
 }
 
-// AskUserQuestion is one clarifying question the agent wants answered.
+// AskUserQuestion is one clarifying question the agent wants answered. Options are
+// optional suggested answers an interactive front-end can render as a picker;
+// Recommended (when set) is the suggested default — it should match one of Options.
 type AskUserQuestion struct {
 	Question    string   `json:"question"`
 	Options     []string `json:"options,omitempty"`
+	Recommended string   `json:"recommended,omitempty"`
 	MultiSelect bool     `json:"multiSelect,omitempty"`
 }
 

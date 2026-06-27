@@ -12,6 +12,7 @@ import (
 type AskUserQuestion struct {
 	Question    string
 	Options     []string
+	Recommended string
 	MultiSelect bool
 }
 
@@ -35,6 +36,9 @@ func NewAskUserTool() *askUserTool {
 			name: "ask_user",
 			description: "Ask the user one or more clarifying questions and wait for their answers. " +
 				"Use ONLY for genuinely blocking ambiguity that you cannot resolve from the workspace or reasonable assumptions. " +
+				"When the answer is likely one of a small set, you MAY include 2-4 suggested `options` and mark one as `recommended` " +
+				"(it must match one of the options) — an interactive front-end shows these as a quick picker with a \"type my own\" fallback. " +
+				"Options are optional: omit them for open-ended questions. " +
 				"If no interactive user is available, this returns guidance to proceed with your best assumption instead of blocking.",
 			parameters: Schema{
 				Type: "object",
@@ -53,8 +57,12 @@ func NewAskUserTool() *askUserTool {
 								"question": {Type: "string", Description: "The non-empty question to ask the user.", MinLength: intPtr(1)},
 								"options": {
 									Type:        "array",
-									Description: "Optional list of suggested answer choices.",
+									Description: "Optional list of 2-4 suggested answer choices for a quick picker.",
 									Items:       &PropertySchema{Type: "string"},
+								},
+								"recommended": {
+									Type:        "string",
+									Description: "Optional recommended choice; must match one of options. Preselected as the default in the picker.",
 								},
 								"multiSelect": {
 									Type:        "boolean",
@@ -128,9 +136,11 @@ func ParseAskUserQuestions(args map[string]any) ([]AskUserQuestion, error) {
 		// multiSelect is a UI hint; treat an uncoercible value as the default rather
 		// than failing the whole call (mirrors the best-effort options path).
 		multiSelect, _ := boolArg(object, "multiSelect", false)
+		options := coerceOptionStrings(object["options"]) // best-effort; never errors
 		questions = append(questions, AskUserQuestion{
 			Question:    text,
-			Options:     coerceOptionStrings(object["options"]), // best-effort; never errors
+			Options:     options,
+			Recommended: recommendedOption(object["recommended"], options), // only kept if it matches an option
 			MultiSelect: multiSelect,
 		})
 	}
@@ -151,6 +161,33 @@ func questionTextArg(object map[string]any) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("question is required")
+}
+
+// recommendedOption returns the model's recommended choice ONLY when it resolves to
+// one of the supplied options (exact, then case-insensitive trim match). It returns
+// the canonical option text (not the model's raw spelling) so the front-end can
+// match it by equality, and "" when there is no usable recommendation — keeping the
+// invariant that Recommended is always either empty or a member of Options.
+func recommendedOption(value any, options []string) string {
+	raw, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(options) == 0 {
+		return ""
+	}
+	for _, option := range options {
+		if option == raw {
+			return option
+		}
+	}
+	for _, option := range options {
+		if strings.EqualFold(strings.TrimSpace(option), raw) {
+			return option
+		}
+	}
+	return ""
 }
 
 // coerceOptionStrings turns whatever a model put in "options" into a string slice
