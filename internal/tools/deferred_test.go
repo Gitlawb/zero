@@ -215,14 +215,14 @@ func TestFormatDeferredToolLine(t *testing.T) {
 func TestBuildToolSearchDescription(t *testing.T) {
 	t.Run("no sources still describes discovery", func(t *testing.T) {
 		got := BuildToolSearchDescription(nil)
-		for _, want := range []string{"# Tool discovery", "None currently enabled.", "tool_search"} {
+		for _, want := range []string{"# Tool discovery", "No deferred tools are currently hidden.", "tool_search"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("BuildToolSearchDescription(nil) = %q, missing %q", got, want)
 			}
 		}
 	})
 
-	t.Run("lists sources without exact tool names", func(t *testing.T) {
+	t.Run("lists compact tool names and sources", func(t *testing.T) {
 		tools := []Tool{
 			serverNamedTool{
 				baseTool: baseTool{name: "mcp_git_hub_create_issue", description: "Create an issue.", parameters: Schema{Type: "object"}},
@@ -232,12 +232,17 @@ func TestBuildToolSearchDescription(t *testing.T) {
 		}
 		got := BuildToolSearchDescription(tools)
 
-		for _, want := range []string{"# Tool discovery", "- git hub", "- swarm", "select:Name1,Name2"} {
+		for _, want := range []string{
+			"# Tool discovery",
+			"- mcp_git_hub_create_issue — git hub",
+			"- swarm_spawn — swarm",
+			"select:Name1,Name2",
+		} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("BuildToolSearchDescription = %q, missing %q", got, want)
 			}
 		}
-		for _, avoid := range []string{"mcp_git_hub_create_issue", "swarm_spawn", "Create an issue", "Spawn a worker"} {
+		for _, avoid := range []string{"Create an issue", "Spawn a worker"} {
 			if strings.Contains(got, avoid) {
 				t.Fatalf("BuildToolSearchDescription should not list exact tool metadata %q in %q", avoid, got)
 			}

@@ -206,38 +206,54 @@ func DeferredSource(t Tool) string {
 	return name
 }
 
+// DeferredToolDiscoveryLine renders the compact name/source entry used in
+// tool_search's dynamic description. It intentionally omits descriptions and
+// schemas; those are revealed only after tool_search loads a matching tool.
+func DeferredToolDiscoveryLine(t Tool) string {
+	if t == nil {
+		return ""
+	}
+	name := strings.TrimSpace(t.Name())
+	if name == "" {
+		return ""
+	}
+	source := strings.TrimSpace(DeferredSource(t))
+	if source == "" || source == name {
+		return name
+	}
+	return name + " — " + source
+}
+
 // BuildToolSearchDescription renders the model-facing discovery instructions for
 // deferred tools. This belongs on the tool_search tool definition, not as an
 // extra user message, so the model can discover tools without treating discovery
 // metadata as something to answer or acknowledge.
 func BuildToolSearchDescription(deferred []Tool) string {
-	sources := make(map[string]bool)
+	seen := make(map[string]bool)
+	lines := make([]string, 0, len(deferred))
 	for _, tool := range deferred {
-		if source := DeferredSource(tool); source != "" {
-			sources[source] = true
+		line := DeferredToolDiscoveryLine(tool)
+		if line != "" && !seen[line] {
+			seen[line] = true
+			lines = append(lines, line)
 		}
 	}
+	sort.Strings(lines)
 
-	sourceLines := make([]string, 0, len(sources))
-	for source := range sources {
-		sourceLines = append(sourceLines, source)
-	}
-	sort.Strings(sourceLines)
-
-	sourceText := "None currently enabled."
-	if len(sourceLines) > 0 {
-		for i, source := range sourceLines {
-			sourceLines[i] = "- " + source
+	toolText := "No deferred tools are currently hidden."
+	if len(lines) > 0 {
+		for i, line := range lines {
+			lines[i] = "- " + line
 		}
-		sourceText = strings.Join(sourceLines, "\n")
+		toolText = strings.Join(lines, "\n")
 	}
 
 	var b strings.Builder
 	b.WriteString("# Tool discovery\n\n")
 	b.WriteString("Searches over deferred tool metadata and exposes matching tools for the next model call.\n\n")
-	b.WriteString("You have access to tools from the following sources:\n")
-	b.WriteString(sourceText)
+	b.WriteString("Deferred tools available through `tool_search`:\n")
+	b.WriteString(toolText)
 	b.WriteString("\n")
-	b.WriteString("Some of the tools may not have been provided to you upfront, and you should use `tool_search` to search for required tools. Use query `select:Name1,Name2` when you know exact tool names, or keywords to find matching tools. Do not call `tool_search` for tools already present in the current tool list.")
+	b.WriteString("Use query `select:Name1,Name2` for exact names from this list, or use keywords to search tool names and descriptions. Do not call `tool_search` for tools already present in the current tool list.")
 	return b.String()
 }

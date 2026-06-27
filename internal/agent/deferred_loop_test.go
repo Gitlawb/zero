@@ -341,8 +341,11 @@ func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	if search.Description != discovery || !strings.Contains(search.Description, "mcp") {
 		t.Fatalf("tool_search description must carry discovery source, got %q", search.Description)
 	}
-	if strings.Contains(search.Description, "mcp__srv__alpha") || strings.Contains(search.Description, "mcp__srv__beta") {
-		t.Fatalf("tool_search description must not list exact hidden/loaded tool names, got %q", search.Description)
+	if strings.Contains(search.Description, "mcp__srv__alpha") {
+		t.Fatalf("tool_search description must not list already-loaded tool names, got %q", search.Description)
+	}
+	if !strings.Contains(search.Description, "mcp__srv__beta") {
+		t.Fatalf("tool_search description must list exact hidden tool names, got %q", search.Description)
 	}
 }
 
