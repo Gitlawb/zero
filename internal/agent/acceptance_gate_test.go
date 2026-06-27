@@ -58,11 +58,20 @@ func TestSelfReportedIncompletionMatching(t *testing.T) {
 		{"I could not recover the original values, so this is my best guess.", true},
 		{"I was unable to complete the optimization.", true},
 		{"The result may not be correct.", true},
+		// multi-occurrence: an early guarded use ("could not find any") must NOT mask a
+		// later genuine admission with the same stem (review #5):
+		{"I could not find any examples in the codebase, so I could not implement the feature.", true},
 		// genuine successes that must NOT be flagged:
 		{"I implemented the function and all tests pass.", false},
 		{"I verified the fix; I could not find any remaining issues.", false},
 		{"I cannot reproduce the bug, so the fix holds.", false},
 		{"Done — the output matches the required format and values.", false},
+		// behavior descriptions that must NOT be flagged — these phrases describe
+		// implemented behavior, not an admission (review #1, removed from the list):
+		{"The parser will fall back to UTF-8 when no encoding is set.", false},
+		{"I replaced the placeholder value with the computed key.", false},
+		{"The retry uses exponential backoff as a fallback.", false},
+		{"Without proper error handling the function would crash, so I added it.", false},
 	}
 	for _, c := range cases {
 		got := selfReportedIncompletion(c.text) != ""
@@ -95,12 +104,16 @@ func TestAcceptanceCannotPhrasingIsIncomplete(t *testing.T) {
 	}
 }
 
-// BUG #2(a)/Bug #1: an update_plan item left in_progress at termination means work
-// remains — the run must end INCOMPLETE, not success.
-func TestAcceptanceInProgressPlanItemIsIncomplete(t *testing.T) {
+// A pending/in_progress update_plan item is an AMBIGUOUS signal (the model may have
+// finished without re-marking the step), so it must NOT by itself force INCOMPLETE.
+// The gate nudges, but if the model keeps claiming completion with no continuation
+// cue and no admission, the run finalizes as SUCCESS — trusting the completion claim
+// over stale plan bookkeeping. (Only a continuation cue or self-report admission
+// forces INCOMPLETE; see TestCompletionGate* and TestAcceptance*Admission*.)
+func TestPendingPlanAloneDoesNotForceIncomplete(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewUpdatePlanTool())
-	done := "All set." // confident, no cue, no admission — only the plan says otherwise
+	done := "All set." // confident; no cue, no admission — only the plan is stale
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
 		planTurn("completed", "in_progress"),
 		textTurn(done), textTurn(done), textTurn(done), textTurn(done), textTurn(done),
@@ -115,11 +128,14 @@ func TestAcceptanceInProgressPlanItemIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Incomplete {
-		t.Fatalf("an in_progress plan item must end Incomplete, got success; final=%q", result.FinalAnswer)
+	if result.Incomplete {
+		t.Fatalf("pending-plan alone must NOT force Incomplete (stale bookkeeping != unfinished); reason=%q", result.IncompleteReason)
 	}
-	if !strings.Contains(result.IncompleteReason, "pending plan items") {
-		t.Fatalf("IncompleteReason = %q, want it to cite pending plan items", result.IncompleteReason)
+	if result.FinalAnswer != done {
+		t.Fatalf("final answer = %q, want the completion claim %q", result.FinalAnswer, done)
+	}
+	if !someRequestContains(provider.requests, continueNudgeMarker) {
+		t.Fatalf("expected at least one continue-nudge before accepting completion")
 	}
 }
 

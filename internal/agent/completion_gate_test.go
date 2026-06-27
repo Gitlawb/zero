@@ -153,3 +153,53 @@ func TestCompletionGateOffPreservesLegacyBehavior(t *testing.T) {
 		t.Fatalf("legacy path must not re-prompt; got %d turns", len(provider.requests))
 	}
 }
+
+// review #6: the continuation-cue detector must catch a mid-line action announcement
+// that stops on a colon (the git-multibranch case), without flagging genuine closers
+// — a recommendation, a plain summary colon, or a sign-off.
+func TestContinuationCueMatching(t *testing.T) {
+	cases := []struct {
+		text string
+		cue  bool
+	}{
+		{"Now I need to configure the SSH server. Let me check the current SSH configuration:", true},
+		{"Let me read the file:", true},
+		{"Now I'll run the tests:", true},
+		{"Next, I suggest reviewing the changes.", false}, // recommendation, no colon
+		{"Here is the summary:", false},                   // summary colon, no action lead-in
+		{"Let me know if you need anything:", false},      // sign-off
+		{"The function is implemented and all tests pass.", false},
+	}
+	for _, c := range cases {
+		if got := endsWithContinuationCue(c.text); got != c.cue {
+			t.Errorf("endsWithContinuationCue(%q) = %v, want %v", c.text, got, c.cue)
+		}
+	}
+}
+
+// review #4: a run that loops to the MaxTurns ceiling (always calling a tool, so it
+// never reaches the no-tool-call gate) was reported as success. Under the headless
+// gate, a max-turns cutoff is INCOMPLETE — the agent was stopped mid-run, not done.
+func TestMaxTurnsCutoffIsIncompleteUnderGate(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	toolEvery := toolTurn("c", "update_plan", `{"plan":[{"content":"step","status":"in_progress"}]}`)
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		toolEvery, toolEvery, toolEvery, toolEvery,
+	}}
+
+	result, err := Run(context.Background(), "keep working", provider, Options{
+		Registry:                registry,
+		MaxTurns:                2,
+		RequireCompletionSignal: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Incomplete {
+		t.Fatalf("a max-turns cutoff under the gate must be Incomplete; final=%q", result.FinalAnswer)
+	}
+	if !strings.Contains(result.IncompleteReason, "max-turns") {
+		t.Fatalf("IncompleteReason = %q, want it to cite max-turns", result.IncompleteReason)
+	}
+}

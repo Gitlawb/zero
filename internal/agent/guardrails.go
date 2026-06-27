@@ -68,18 +68,17 @@ func continueNudge(reason string) string {
 }
 
 // endsWithContinuationCue reports whether an assistant message ends mid-thought —
-// announcing a next action it then failed to take — rather than concluding. A
-// trailing colon is the strongest signal ("…Let me check the SSH configuration:");
-// otherwise the last non-empty line is matched against explicit lead-in phrases.
-// Deliberately conservative: a false positive costs at most one bounded re-prompt,
-// while a genuine final answer rarely ends on these cues.
+// the model announcing its OWN next action and then stopping on a colon
+// ("…Let me check the SSH configuration:") rather than concluding. It requires
+// BOTH a trailing colon AND an action lead-in on the last line, so genuine closers
+// are NOT flagged: a forward-looking recommendation ("Next, I suggest reviewing
+// the changes."), a sign-off ("Let me know if you need anything"), or a summary
+// that merely ends in a colon ("Here is the summary:"). A bare trailing colon alone
+// is too common in legitimate final answers to use as a signal.
 func endsWithContinuationCue(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return false
-	}
-	if strings.HasSuffix(trimmed, ":") {
-		return true
 	}
 	lines := strings.Split(trimmed, "\n")
 	last := ""
@@ -89,11 +88,24 @@ func endsWithContinuationCue(text string) bool {
 			break
 		}
 	}
+	if !strings.HasSuffix(last, ":") {
+		return false
+	}
+	// Inspect the final clause (after the last sentence break) so a mid-line action
+	// announcement is caught ("…configure the server. Let me check the config:")
+	// while a plain summary colon ("Here is the summary:") or a recommendation is not.
+	clause := last
+	if idx := strings.LastIndex(last, ". "); idx >= 0 {
+		clause = strings.TrimSpace(last[idx+2:])
+	}
+	if strings.HasPrefix(clause, "let me know") { // sign-off, not a mid-step action
+		return false
+	}
 	for _, cue := range []string{
-		"let me ", "let's ", "now i'll ", "now i will ", "now let me ",
-		"i'll now ", "i will now ", "next i'll ", "next, i", "let me now ",
+		"let me ", "let's ", "now i'll ", "now i will ", "now let me ", "let me now ",
+		"i'll now ", "i will now ", "next i'll ", "next, i'll ", "first, i'll ", "first let me ",
 	} {
-		if strings.HasPrefix(last, cue) {
+		if strings.HasPrefix(clause, cue) {
 			return true
 		}
 	}
@@ -118,19 +130,23 @@ func planStatusRemaining(status string) bool {
 // in acceptanceVerificationNudge.
 const acceptanceNudgeMarker = "verify your work against the task's stated success criterion"
 
-// selfReportPhrases are high-signal admissions of guessing, fallback, or
-// uncertainty about correctness. Admissions of INABILITY are matched separately by
-// inabilityStems below, which generalize over the verb/tense so the detector is
-// not defeated by re-phrasing.
+// selfReportPhrases are high-signal admissions of guessing/fabrication or stated
+// uncertainty about the produced result. They are matched by plain substring with
+// NO context guard, so every entry must be FIRST-PERSON or unambiguously about the
+// model's own output — NOT a phrase that also describes implemented behavior.
+// (Earlier versions included "fall back to" / "placeholder value" / "as a
+// fallback" / bare "best guess" / "without proper", which match legitimate final
+// answers like "the parser will fall back to UTF-8" or "I replaced the placeholder
+// value", wrongly downgrading completed runs — so those are removed. Admissions of
+// INABILITY are handled separately by inabilityStems, which carry a guard.)
 var selfReportPhrases = []string{
-	// admitted guessing / fallback / placeholder
-	"i guessed", "my best guess", "best guess", "this is a guess", "just a guess",
-	"as a fallback", "fell back to", "fall back to", "placeholder value", "as a placeholder",
-	"i assumed a", "i had to assume",
-	// admitted lack of capability / external dependency
-	"without proper", "would need a tool", "do not have the ability", "don't have the ability",
-	"lack the ability", "no way for me to", "not possible for me to",
-	// admitted uncertainty about correctness of the result
+	// first-person admissions of guessing / fabrication / assumption
+	"i guessed", "my best guess", "i'm guessing", "this is a guess", "just a guess",
+	"i made it up", "i fabricated", "i assumed a", "i had to assume",
+	// first-person lack of capability (inability stems also cover cannot/could-not)
+	"i do not have the ability", "i don't have the ability", "i lack the ability",
+	"no way for me to", "not possible for me to",
+	// stated uncertainty about the correctness of the produced result
 	"may not be correct", "might not be correct", "may be incorrect", "might be incorrect",
 	"this may not work", "this might not work", "not fully functional", "not fully working",
 }
@@ -167,15 +183,21 @@ func selfReportedIncompletion(text string) string {
 		}
 	}
 	for _, stem := range inabilityStems {
-		idx := strings.Index(lower, stem)
-		if idx < 0 {
-			continue
+		// Scan EVERY occurrence of the stem, not just the first: an earlier
+		// success-negation use ("I could not find any examples, so I could not
+		// implement it") must not mask a later genuine admission with the same stem.
+		for start := 0; ; {
+			rel := strings.Index(lower[start:], stem)
+			if rel < 0 {
+				break
+			}
+			abs := start + rel
+			tail := strings.TrimSpace(lower[abs+len(stem):])
+			if !hasAnyPrefix(tail, successNegationTails) {
+				return selfReportReason(strings.TrimSpace(stem) + " …")
+			}
+			start = abs + len(stem)
 		}
-		tail := strings.TrimSpace(lower[idx+len(stem):])
-		if hasAnyPrefix(tail, successNegationTails) {
-			continue // "could not find any …" etc. — a success statement, not an admission
-		}
-		return selfReportReason(strings.TrimSpace(stem) + " …")
 	}
 	return ""
 }

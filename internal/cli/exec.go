@@ -633,23 +633,44 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if notice := result.TruncationNotice(); notice != "" {
 		writer.warning(notice)
 	}
-	writer.final(result.FinalAnswer)
-	// A headless run that stalled mid-task (the completion gate exhausted its
-	// continue budget while work remained) is reported as INCOMPLETE, not success,
-	// so callers/benchmarks don't mistake an abandoned run for a finished one.
+	// A headless run the completion gate marked INCOMPLETE (no-tool-call stall,
+	// self-reported non-completion, or max-turns cutoff) must NOT be reported as a
+	// success: exit 4 AND a machine-readable terminal event saying so. Handled per
+	// output format BEFORE writer.final(), because for -o json final() emits a
+	// {"type":"done","exit_code":0} that would otherwise mask the incomplete exit.
+	// An `error` event (not just a warning) is emitted so log/cron consumers that
+	// scan for type=="error" can recover the reason.
 	if result.Incomplete {
 		reason := result.IncompleteReason
 		if reason == "" {
 			reason = "run stopped with work unfinished"
 		}
 		sessionRecorder.append(sessions.EventError, map[string]any{"message": "incomplete: " + reason})
-		writer.warning("Run incomplete (not reported as success): " + reason)
-		writer.runEnd("incomplete", exitIncomplete)
-		if writer.err != nil {
-			return exitCrash
+		switch options.outputFormat {
+		case execOutputStreamJSON:
+			writer.final(result.FinalAnswer)
+			writer.errorEvent("incomplete", reason, false)
+			writer.runEnd("incomplete", exitIncomplete)
+			if writer.err != nil {
+				return exitCrash
+			}
+		case execOutputJSON:
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "final", "text": result.FinalAnswer}); writeErr != nil {
+				return exitCrash
+			}
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "error", "code": "incomplete", "message": reason}); writeErr != nil {
+				return exitCrash
+			}
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "done", "exit_code": exitIncomplete}); writeErr != nil {
+				return exitCrash
+			}
+		default:
+			writer.final(result.FinalAnswer)
+			fmt.Fprintln(stderr, "Run incomplete (not reported as success): "+reason)
 		}
 		return exitIncomplete
 	}
+	writer.final(result.FinalAnswer)
 	writer.runEnd("success", exitSuccess)
 	if writer.err != nil {
 		return exitCrash
