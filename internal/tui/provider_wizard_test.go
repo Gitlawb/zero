@@ -641,6 +641,8 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 
 func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	const secret = "ollama-secret-123"
+	// Encrypted-file backend in the temp config dir keeps the test off the real keychain.
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{
@@ -681,11 +683,19 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	if profile.Name != "ollama-cloud" || profile.CatalogID != "ollama-cloud" {
 		t.Fatalf("persisted provider identity = %#v, want ollama-cloud", profile)
 	}
-	if profile.APIKey != secret {
-		t.Fatalf("persisted APIKey = %q, want pasted secret", profile.APIKey)
+	// Capture flip: the secret lives in the credential store, not config.json.
+	if profile.APIKey != "" || profile.APIKeyEnv != "" {
+		t.Fatalf("config must not persist the key: APIKey %q APIKeyEnv %q", profile.APIKey, profile.APIKeyEnv)
 	}
-	if profile.APIKeyEnv != "" {
-		t.Fatalf("persisted APIKeyEnv = %q, want empty for pasted key", profile.APIKeyEnv)
+	if !profile.APIKeyStored {
+		t.Fatal("expected APIKeyStored marker in persisted config")
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, _ := store.Get("ollama-cloud"); !ok || key != secret {
+		t.Fatalf("stored key = %q,%v; want the pasted secret in the credential store", key, ok)
 	}
 }
 
@@ -1084,6 +1094,66 @@ func providerWizardModelIDs(models []providerWizardModel) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func TestWizardProviderStoredKey(t *testing.T) {
+	m := model{savedProviders: []config.ProviderProfile{
+		{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true},
+		{Name: "nokey"},
+	}}
+	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "acme"}); !ok || name != "acme" {
+		t.Fatalf("match by name = %q,%v", name, ok)
+	}
+	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); !ok || name != "acme" {
+		t.Fatalf("match by catalog id = %q,%v", name, ok)
+	}
+	if _, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "nokey"}); ok {
+		t.Fatal("provider without a stored key must not match")
+	}
+}
+
+func TestProviderWizardManageKeyRemove(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("acme", "sk-secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(context.Background(), Options{UserConfigPath: configPath})
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "acme", manageKeyCursor: 2}
+	next, _ := m.applyManageKeyChoice()
+	if next.providerWizard != nil {
+		t.Fatal("remove should close the wizard")
+	}
+	if _, ok, _ := store.Get("acme"); ok {
+		t.Fatal("remove should delete the key from the credential store")
+	}
+}
+
+func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
+	m := newModel(context.Background(), Options{UserConfigPath: filepath.Join(t.TempDir(), "config.json")})
+
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "acme", manageKeyCursor: 1}
+	next, _ := m.applyManageKeyChoice()
+	if next.providerWizard == nil || next.providerWizard.step != providerWizardStepCredential {
+		t.Fatal("replace should route to the credential step")
+	}
+
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "acme", manageKeyCursor: 0}
+	next, _ = m.applyManageKeyChoice()
+	if next.providerWizard != nil {
+		t.Fatal("keep should close the wizard without changes")
+	}
 }
 
 func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfig {

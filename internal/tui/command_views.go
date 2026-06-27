@@ -467,7 +467,7 @@ func providerNextActionLines(profile config.ProviderProfile, snapshot zerocomman
 }
 
 func providerProfileHasCredential(profile config.ProviderProfile) bool {
-	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
+	return strings.TrimSpace(profile.APIKey) != "" || profile.APIKeyStored || strings.TrimSpace(profile.AuthHeaderValue) != ""
 }
 
 func providerCredentialRequired(profile config.ProviderProfile, providerKind string) bool {
@@ -656,7 +656,7 @@ func (m model) configText() string {
 				Lines: []string{
 					"provider: " + displayValue(m.providerName, "none"),
 					"model: " + displayValue(m.modelName, "none"),
-					"api key: " + apiKeyState(strings.TrimSpace(m.providerProfile.APIKey) != ""),
+					"api key: " + apiKeyState(strings.TrimSpace(m.providerProfile.APIKey) != "" || m.providerProfile.APIKeyStored),
 				},
 			},
 		},

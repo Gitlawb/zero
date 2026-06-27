@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -336,6 +337,19 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	// Also drop any stored API key and its marker so `auth logout` clears the whole
+	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
+	// failures rather than reporting success while a credential remains.
+	keyRemoved, keyErr := config.ForgetProviderKey(provider)
+	if keyErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
+	}
+	if configPath, perr := deps.userConfigPath(); perr == nil {
+		if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
+		}
+	}
+	removed = removed || keyRemoved
 	if parsed.json {
 		payload := struct {
 			Provider string `json:"provider"`
@@ -346,7 +360,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		}
 		return exitSuccess
 	}
-	msg := fmt.Sprintf("No OAuth login stored for %s.\n", provider)
+	msg := fmt.Sprintf("No stored credential for %s.\n", provider)
 	if removed {
 		msg = fmt.Sprintf("Logged out of %s.\n", provider)
 	}

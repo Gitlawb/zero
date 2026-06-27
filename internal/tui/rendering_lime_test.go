@@ -1549,26 +1549,16 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	}
 }
 
-func TestModelPickerRowShowsProviderTag(t *testing.T) {
+func TestModelPickerRowOmitsProviderTag(t *testing.T) {
+	// The provider is shown as a section header above each group, so a row renders
+	// just the model label — no repeated right-aligned provider tag.
 	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", Remote: true}
 	got := plainRender(t, renderModelPickerRow(60, false, item))
 	if !strings.Contains(got, "Claude Sonnet 4.6") {
 		t.Fatalf("row = %q, missing model label", got)
 	}
-	if !strings.Contains(got, "anthropic") {
-		t.Fatalf("row = %q, missing right-aligned provider tag", got)
-	}
-	// The provider tag must trail the model name, not lead it.
-	if strings.Index(got, "anthropic") < strings.Index(got, "Claude") {
-		t.Fatalf("row = %q, provider tag should be right-aligned after the model name", got)
-	}
-}
-
-func TestModelPickerRowDropsProviderTagWhenNarrow(t *testing.T) {
-	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic"}
-	got := plainRender(t, renderModelPickerRow(12, false, item))
 	if strings.Contains(got, "anthropic") {
-		t.Fatalf("narrow row = %q, should drop the provider tag rather than crowd the model name", got)
+		t.Fatalf("row = %q, should not repeat the provider tag (now a section header)", got)
 	}
 }
 

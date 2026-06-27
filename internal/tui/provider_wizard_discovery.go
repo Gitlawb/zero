@@ -40,6 +40,17 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		attemptID := m.providerWizard.beginOAuthAttempt(false)
 		return m, providerWizardOAuthCmdFor(provider, attemptID)
 	}
+	// A non-OAuth provider that already has a key in the credential store: offer
+	// keep/replace/remove before re-entering credentials.
+	if m.providerWizard.step == providerWizardStepProvider && !m.providerWizard.oauthMode {
+		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
+			m.providerWizard.manageProviderName = name
+			m.providerWizard.manageKeyCursor = 0
+			m.providerWizard.err = ""
+			m.providerWizard.step = providerWizardStepManageKey
+			return m, nil
+		}
+	}
 	previous := m.providerWizard.step
 	m.providerWizard.advance()
 	if m.providerWizard.step == providerWizardStepModel && previous != providerWizardStepModel {

@@ -51,6 +51,7 @@ type model struct {
 	providerName           string
 	modelName              string
 	providerProfile        config.ProviderProfile
+	savedProviders         []config.ProviderProfile
 	provider               zeroruntime.Provider
 	newProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
 	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
@@ -297,8 +298,10 @@ type model struct {
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
-	modelPickerLiveProviderID    string
-	modelPickerLiveModels        []providermodeldiscovery.Model
+	// modelPickerLiveByProvider holds live-discovered models per provider (keyed by
+	// catalog descriptor ID), so /model shows each provider's real current models —
+	// the same list the provider-setup wizard discovers — not the static catalog.
+	modelPickerLiveByProvider map[string][]providermodeldiscovery.Model
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -613,6 +616,7 @@ func newModel(ctx context.Context, options Options) model {
 		userConfigPath:         options.UserConfigPath,
 		doctorUserConfigPath:   doctorUserConfigPath,
 		projectConfigPath:      options.ProjectConfigPath,
+		savedProviders:         options.SavedProviders,
 		gitBranch:              gitBranch(cwd),
 		providerName:           options.ProviderName,
 		modelName:              options.ModelName,
@@ -3167,7 +3171,12 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	switch picker.kind {
 	case pickerModel:
 		text := ""
-		m, text = m.handleModelCommand(item.Value)
+		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
+			// A model from another saved provider: switch provider + model together.
+			m, text = m.switchProviderModel(owner, item.Value)
+		} else {
+			m, text = m.handleModelCommand(item.Value)
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
 		text := ""

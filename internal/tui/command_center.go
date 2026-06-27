@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/redaction"
 	zsearch "github.com/Gitlawb/zero/internal/search"
 )
 
@@ -414,6 +416,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 		nextProfile = m.normalizeProfileForProvider(provider)
 	}
 	nextProfile.Model = target.modelID
+	// Reload the credential: a stored-key provider's profile carries an empty APIKey
+	// (the resolver is pure), so without this the rebuilt provider would send no key.
+	nextProfile = m.profileWithCredential(nextProfile)
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {
 		return m, "Model\n" + err.Error()
@@ -473,6 +478,82 @@ func (m model) handleModelCommand(args string) (model, string) {
 	return m, strings.Join(lines, "\n")
 }
 
+// switchProviderModel switches the active provider to providerName (one of the
+// saved providers) and sets modelID, rebuilding the provider client. The /model
+// picker calls this when a model from a non-active provider is chosen, so the
+// picker can list every saved provider and switch across them (like a unified
+// provider+model selector). The key is loaded from the encrypted store / env.
+func (m model) switchProviderModel(providerName, modelID string) (model, string) {
+	if m.pending {
+		return m, "Model\nCannot switch providers while a run is active."
+	}
+	if m.newProvider == nil {
+		return m, "Model\nProvider rebuild is not available for this TUI session."
+	}
+	target, ok := m.savedProviderByName(providerName)
+	if !ok {
+		return m, "Model\nunknown provider " + strconv.Quote(providerName)
+	}
+	target = m.profileWithCredential(target)
+	target.Model = strings.TrimSpace(modelID)
+	descriptor, hasDescriptor := m.descriptorForProfile(target)
+	// Gate on the resolved credential, not the APIKeyStored marker: if the stored key
+	// was deleted/unreadable the marker can still be set, and building a keyless
+	// provider would only fail later with a 401. Local/no-auth providers need no key.
+	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" && !(hasDescriptor && descriptor.Local) {
+		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`."
+	}
+	next, err := m.newProvider(target)
+	if err != nil {
+		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}})
+	}
+	m.provider = next
+	m.providerProfile = target
+	m.providerName = target.Name
+	m.modelName = target.Model
+	if strings.TrimSpace(m.userConfigPath) != "" {
+		_, _ = config.SetActiveProvider(m.userConfigPath, target.Name)
+		_, _ = config.SetProviderModel(m.userConfigPath, target.Name, target.Model)
+	}
+	return m, fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model)
+}
+
+// profileWithCredential fills a profile's APIKey for provider construction the same
+// way the runtime resolves it: a stored key (encrypted credstore), then an env var,
+// then a stored OAuth bearer for token-login providers. The config resolver is pure
+// (no secret I/O), so a stored-key profile carries an empty APIKey until this runs —
+// every place that rebuilds the provider (model switch, provider switch) must call
+// this or the request goes out with no key.
+func (m model) profileWithCredential(profile config.ProviderProfile) config.ProviderProfile {
+	if strings.TrimSpace(profile.APIKey) == "" {
+		if store, err := config.ProviderKeyStore(); err == nil {
+			profile = config.ApplyStoredAPIKey(profile, store)
+		}
+	}
+	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
+		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
+	}
+	if descriptor, ok := m.descriptorForProfile(profile); ok && strings.TrimSpace(profile.APIKey) == "" && descriptor.OAuth && !descriptor.OAuthMintsKey {
+		if token := oauthStoredToken(m.ctx, descriptor.ID); token != "" {
+			profile.APIKey = token
+		}
+	}
+	return profile
+}
+
+func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {
+	name = strings.TrimSpace(name)
+	for _, profile := range m.savedProviders {
+		if strings.EqualFold(strings.TrimSpace(profile.Name), name) {
+			return profile, true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(m.providerProfile.Name), name) {
+		return m.providerProfile, true
+	}
+	return config.ProviderProfile{}, false
+}
+
 func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error) {
 	path := strings.TrimSpace(m.userConfigPath)
 	if path == "" {
@@ -510,11 +591,9 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}, true
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
-		if m.modelPickerLiveProviderID == provider.ID {
-			for _, model := range m.modelPickerLiveModels {
-				if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
-					return modelSwitchTarget{modelID: model.ID}, true
-				}
+		for _, model := range m.modelPickerLiveByProvider[provider.ID] {
+			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
+				return modelSwitchTarget{modelID: model.ID}, true
 			}
 		}
 		for _, model := range providermodelcatalog.Models(provider) {

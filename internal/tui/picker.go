@@ -35,10 +35,14 @@ type pickerItem struct {
 	Label    string
 	Value    string
 	Meta     string
-	Provider string
-	Remote   bool
-	Local    bool
-	Favorite bool
+	Provider string // display tag (catalog id / locality)
+	// OwnerProvider is the saved provider profile name a model belongs to, so the
+	// /model picker can switch providers when a model from a non-active provider is
+	// chosen. Empty for non-model items.
+	OwnerProvider string
+	Remote        bool
+	Local         bool
+	Favorite      bool
 }
 
 // commandPicker is a generic single-select overlay reused by /model, /effort,
@@ -122,10 +126,24 @@ func (m model) newModelPicker() *commandPicker {
 		recent = append(recent, m.modelPickerRecentItem(registry, activeModel))
 	}
 
+	activeProvider := strings.TrimSpace(m.providerName)
 	catalog := []pickerItem{}
-	if provider, ok := m.activeProviderDescriptor(); ok {
-		catalog = append(catalog, m.providerCatalogModelPickerItems(provider, activeModel)...)
-	} else {
+	// List every saved provider's models, grouped per provider (one contiguous
+	// section each), so /model shows all configured providers and you can switch
+	// across them. Dedup by group so two profiles resolving to the same provider
+	// don't produce a repeated section.
+	seenGroup := map[string]bool{}
+	for _, profile := range m.modelPickerProviders() {
+		descriptor, hasDescriptor := m.descriptorForProfile(profile)
+		group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
+		if seenGroup[group] {
+			continue
+		}
+		seenGroup[group] = true
+		catalog = append(catalog, m.savedProviderModelPickerItems(profile, activeProvider, activeModel)...)
+	}
+	if len(catalog) == 0 {
+		// No saved providers resolved any models: fall back to the full registry.
 		for _, entry := range registry.List(modelregistry.ListOptions{}) {
 			if entry.ID == activeModel {
 				continue
@@ -140,6 +158,99 @@ func (m model) newModelPicker() *commandPicker {
 	return &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
 }
 
+// modelPickerProviders returns the providers to list in /model: all saved
+// providers, falling back to the active profile when none were threaded in.
+func (m model) modelPickerProviders() []config.ProviderProfile {
+	if len(m.savedProviders) > 0 {
+		return m.savedProviders
+	}
+	if config.HasProviderProfile(m.providerProfile) {
+		return []config.ProviderProfile{m.providerProfile}
+	}
+	return nil
+}
+
+// savedProviderModelPickerItems lists one saved provider's models as a group,
+// tagging each with the owning provider so selection can switch providers. The
+// active provider prefers its live-discovered models when available.
+func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, activeProvider, activeModel string) []pickerItem {
+	providerName := strings.TrimSpace(profile.Name)
+	isActive := providerName != "" && strings.EqualFold(providerName, activeProvider)
+	descriptor, hasDescriptor := m.descriptorForProfile(profile)
+	group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
+
+	var raw []pickerItem
+	switch {
+	case hasDescriptor && len(m.modelPickerLiveByProvider[descriptor.ID]) > 0:
+		for _, model := range m.modelPickerLiveByProvider[descriptor.ID] {
+			if strings.TrimSpace(model.ID) == "" {
+				continue
+			}
+			raw = append(raw, discoveredModelPickerItem(descriptor, model, group))
+		}
+	case hasDescriptor && descriptor.Local:
+		// Local providers (e.g. Ollama) only have the models you've actually pulled.
+		// Never fall back to the static catalog — that would list models you don't
+		// have. Until live discovery returns them, this provider shows no rows.
+	case hasDescriptor:
+		for _, model := range providermodelcatalog.Models(descriptor) {
+			if strings.TrimSpace(model.ID) == "" {
+				continue
+			}
+			raw = append(raw, providerModelPickerItem(descriptor, model, group))
+		}
+	default:
+		// Custom provider without a catalog: surface its single configured model.
+		if mdl := strings.TrimSpace(profile.Model); mdl != "" {
+			raw = append(raw, pickerItem{Label: modelPickerDisplayName(mdl, ""), Value: mdl})
+		}
+	}
+
+	out := make([]pickerItem, 0, len(raw))
+	for _, item := range raw {
+		// The active model is already shown under "Recent" for the active provider.
+		if isActive && item.Value == activeModel {
+			continue
+		}
+		item.Group = group
+		item.OwnerProvider = providerName
+		out = append(out, item)
+	}
+	return out
+}
+
+// descriptorForProfile resolves a profile's catalog descriptor the same way the
+// active provider is resolved — by CatalogID, then base URL, then a synthesized
+// custom descriptor, then name/kind candidates — so every saved provider (not just
+// the active one) lists its models.
+func (m model) descriptorForProfile(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
+	if descriptor, ok := providercatalog.Get(profile.CatalogID); ok && !genericProviderCatalogID(descriptor.ID) {
+		return descriptor, true
+	}
+	if descriptor, ok := providerDescriptorByBaseURL(profile.BaseURL); ok {
+		return descriptor, true
+	}
+	if descriptor, ok := customProviderDescriptorForProfile(profile); ok {
+		return descriptor, true
+	}
+	for _, candidate := range []string{profile.Name, profile.Provider, string(profile.ProviderKind)} {
+		if descriptor, ok := providercatalog.Get(candidate); ok {
+			return descriptor, true
+		}
+	}
+	return providercatalog.Descriptor{}, false
+}
+
+func modelPickerProviderGroup(profile config.ProviderProfile, descriptor providercatalog.Descriptor, hasDescriptor bool) string {
+	if hasDescriptor && strings.TrimSpace(descriptor.Name) != "" {
+		return descriptor.Name
+	}
+	if name := strings.TrimSpace(profile.Name); name != "" {
+		return name
+	}
+	return "Provider"
+}
+
 func (m model) openModelPicker() (model, tea.Cmd) {
 	picker := m.newModelPicker()
 	if picker == nil {
@@ -147,17 +258,66 @@ func (m model) openModelPicker() (model, tea.Cmd) {
 	}
 	m.picker = picker
 	m.clearModelPickerLoadState()
-	provider, ok := m.activeProviderDescriptor()
-	if !ok || (m.modelPickerLiveProviderID == provider.ID && len(m.modelPickerLiveModels) > 0) {
-		return m, nil
+	// Live-discover every usable provider's real models in the background. The list
+	// shows immediately from the static catalog and each provider's section refreshes
+	// as its discovery returns — no blocking overlay.
+	return m, m.modelPickerDiscoveryCmds()
+}
+
+// modelPickerDiscoveryCmds dispatches a live model-discovery command for each
+// usable provider (deduped by catalog descriptor), so /model shows the same real
+// models the provider-setup wizard discovers.
+func (m model) modelPickerDiscoveryCmds() tea.Cmd {
+	cmds := []tea.Cmd{}
+	seen := map[string]bool{}
+	for _, profile := range m.modelPickerProviders() {
+		descriptor, ok := m.descriptorForProfile(profile)
+		if !ok || seen[descriptor.ID] {
+			continue
+		}
+		seen[descriptor.ID] = true
+		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, profile); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
-	cmd := m.modelPickerDiscoveryCmd()
-	if cmd == nil {
-		return m, nil
+	if len(cmds) == 0 {
+		return nil
 	}
-	m.modelPickerLoading = true
-	m.modelPickerLoadingProviderID = provider.ID
-	return m, cmd
+	return tea.Batch(cmds...)
+}
+
+// modelPickerProviderDiscoveryCmd discovers one provider's live models, resolving
+// its credential the same way the wizard does: a stored/inline/env key, or a stored
+// OAuth bearer for token-login providers (e.g. xAI).
+func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
+	authed := profile
+	if store, err := config.ProviderKeyStore(); err == nil {
+		authed = config.ApplyStoredAPIKey(authed, store)
+	}
+	key := strings.TrimSpace(authed.APIKey)
+	if key == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
+		key = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
+	}
+	needOAuth := key == "" && descriptor.OAuth && !descriptor.OAuthMintsKey
+	discover := m.discoverProviderModels
+	if discover == nil {
+		discover = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return providermodeldiscovery.DiscoverCatalog(ctx, descriptor, p, providermodeldiscovery.Options{})
+		}
+	}
+	providerID := descriptor.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		defer cancel()
+		k := key
+		if needOAuth {
+			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
+				k = resolved
+			}
+		}
+		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
+		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+	}
 }
 
 func (m model) modelPickerIsLoading() bool {
@@ -220,34 +380,6 @@ func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID st
 		return providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
 	}
 	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID}
-}
-
-func (m model) providerCatalogModelPickerItems(provider providercatalog.Descriptor, activeModel string) []pickerItem {
-	if m.modelPickerLiveProviderID == provider.ID && len(m.modelPickerLiveModels) > 0 {
-		return m.liveProviderModelPickerItems(provider, activeModel)
-	}
-	models := providermodelcatalog.Models(provider)
-	items := make([]pickerItem, 0, len(models))
-	group := provider.Name + " catalog"
-	for _, model := range models {
-		if strings.TrimSpace(model.ID) == "" || model.ID == activeModel {
-			continue
-		}
-		items = append(items, providerModelPickerItem(provider, model, group))
-	}
-	return items
-}
-
-func (m model) liveProviderModelPickerItems(provider providercatalog.Descriptor, activeModel string) []pickerItem {
-	items := make([]pickerItem, 0, len(m.modelPickerLiveModels))
-	group := provider.Name + " catalog"
-	for _, model := range m.modelPickerLiveModels {
-		if strings.TrimSpace(model.ID) == "" || model.ID == activeModel {
-			continue
-		}
-		items = append(items, discoveredModelPickerItem(provider, model, group))
-	}
-	return items
 }
 
 func registryModelPickerItem(entry modelregistry.ModelEntry, group string) pickerItem {
@@ -356,26 +488,7 @@ func modelPickerTitleWord(word string) string {
 }
 
 func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
-	if descriptor, ok := providercatalog.Get(m.providerProfile.CatalogID); ok && !genericProviderCatalogID(descriptor.ID) {
-		return descriptor, true
-	}
-	if descriptor, ok := providerDescriptorByBaseURL(m.providerProfile.BaseURL); ok {
-		return descriptor, true
-	}
-	if descriptor, ok := customProviderDescriptorForProfile(m.providerProfile); ok {
-		return descriptor, true
-	}
-	for _, candidate := range []string{
-		m.providerProfile.Name,
-		m.providerName,
-		m.providerProfile.Provider,
-		string(m.providerProfile.ProviderKind),
-	} {
-		if descriptor, ok := providercatalog.Get(candidate); ok {
-			return descriptor, true
-		}
-	}
-	return providercatalog.Descriptor{}, false
+	return m.descriptorForProfile(m.providerProfile)
 }
 
 func customProviderDescriptorForProfile(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
@@ -452,34 +565,6 @@ type modelPickerModelsDiscoveredMsg struct {
 	err        error
 }
 
-func (m model) modelPickerDiscoveryCmd() tea.Cmd {
-	provider, ok := m.activeProviderDescriptor()
-	if !ok {
-		return nil
-	}
-	profile := m.modelPickerDiscoveryProfile(provider)
-	discover := m.discoverProviderModels
-	if discover == nil {
-		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
-		}
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
-		defer cancel()
-		models, err := discover(ctx, profile)
-		return modelPickerModelsDiscoveredMsg{providerID: provider.ID, models: models, err: err}
-	}
-}
-
-func (m model) modelPickerDiscoveryProfile(provider providercatalog.Descriptor) config.ProviderProfile {
-	profile := m.normalizeProfileForProvider(provider)
-	if strings.TrimSpace(profile.Model) == "" {
-		profile.Model = provider.DefaultModel
-	}
-	return profile
-}
-
 func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) config.ProviderProfile {
 	profile := m.providerProfile
 	normalizeIdentity := profileMatchesProviderBaseURL(profile, provider) ||
@@ -515,25 +600,18 @@ func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider prov
 }
 
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
-	provider, ok := m.activeProviderDescriptor()
-	if !ok || provider.ID != msg.providerID {
-		return m
-	}
-	wasLoading := m.modelPickerLoadingProviderID == msg.providerID
-	if wasLoading {
-		m.modelPickerLoading = false
-		m.modelPickerLoadingProviderID = ""
-	}
+	m.modelPickerLoading = false
+	m.modelPickerLoadingProviderID = ""
 	if msg.err != nil || len(msg.models) == 0 {
-		if m.picker != nil && m.picker.kind == pickerModel && wasLoading {
-			m.modelPickerLoadError = "Using built-in model list"
-		}
 		return m
 	}
-	m.modelPickerLoadError = ""
-	m.modelPickerLiveProviderID = msg.providerID
-	m.modelPickerLiveModels = append([]providermodeldiscovery.Model{}, msg.models...)
-	if m.picker != nil && m.picker.kind == pickerModel && wasLoading {
+	if m.modelPickerLiveByProvider == nil {
+		m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{}
+	}
+	m.modelPickerLiveByProvider[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	// Rebuild the open picker so this provider's section shows its live models,
+	// preserving the current query + selection.
+	if m.picker != nil && m.picker.kind == pickerModel {
 		selectedValue := ""
 		query := m.picker.query
 		if item, ok := m.picker.current(); ok {

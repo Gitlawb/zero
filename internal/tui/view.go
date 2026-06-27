@@ -774,7 +774,12 @@ func (m model) modelPickerOverlay(width int) string {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(status), innerWidth, transparentSurface))
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	lastGroup := ""
 	for index, item := range visible {
+		if item.Group != "" && item.Group != lastGroup {
+			lines = append(lines, fillPaletteLine(zeroTheme.accent.Bold(true).Render(item.Group), innerWidth, transparentSurface))
+			lastGroup = item.Group
+		}
 		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
 	}
 	if len(visible) == 0 {
@@ -881,19 +886,9 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		prefix = "* "
 	}
 	left := marker + surface(zeroTheme.ink).Render(prefix+label)
-	right := ""
-	if tag := strings.TrimSpace(item.Provider); tag != "" {
-		right = surface(zeroTheme.faintest).Render(tag)
-	}
-	// Right-align the provider slug so each row reads "<model> … <provider>".
-	// Drop it when the row is too narrow to keep a clear gap from the model
-	// name (mirrors the generic picker's gap math at pickerOverlay).
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if right == "" || gap < 2 {
-		return fillPaletteLine(left, width, surface)
-	}
-	line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", gap)) + right
-	return fitStyledLine(line, width)
+	// The provider is shown as a section header above each group, so rows no longer
+	// repeat it as a right-aligned tag (matches a grouped provider+model list).
+	return fillPaletteLine(left, width, surface)
 }
 
 func modelPickerItemDetail(item pickerItem) string {

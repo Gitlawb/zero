@@ -27,6 +27,7 @@ type Options struct {
 	ProviderName           string
 	ModelName              string
 	ProviderProfile        config.ProviderProfile
+	SavedProviders         []config.ProviderProfile // all configured providers, for the /model multi-provider list
 	FavoriteModels         []string
 	RecapsEnabled          bool
 	Provider               zeroruntime.Provider

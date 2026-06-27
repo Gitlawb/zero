@@ -51,7 +51,9 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	cfg, err := config.UpsertProvider(configPath, profile, options.setActive)
+	// Persist with the key moved into the encrypted credential store (capture flip);
+	// the local profile keeps the key for the verification build below.
+	cfg, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), options.setActive)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -486,7 +488,7 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 }
 
 func providerProfileHasCredential(profile config.ProviderProfile) bool {
-	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
+	return strings.TrimSpace(profile.APIKey) != "" || profile.APIKeyStored || strings.TrimSpace(profile.AuthHeaderValue) != ""
 }
 
 func providerKindForDescriptor(descriptor providercatalog.Descriptor) config.ProviderKind {

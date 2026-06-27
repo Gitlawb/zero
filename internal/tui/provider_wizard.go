@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -237,6 +238,7 @@ type providerWizardStep int
 const (
 	providerWizardStepMethod providerWizardStep = iota
 	providerWizardStepProvider
+	providerWizardStepManageKey
 	providerWizardStepEndpoint
 	providerWizardStepName
 	providerWizardStepCredential
@@ -300,10 +302,13 @@ type providerWizardState struct {
 	modelLoadError   string
 	discoveryToken   int
 	selectedMethod   int
-	oauthMode        bool
-	oauthPending     bool
-	oauthAttemptID   int
-	oauthErr         string
+	// Manage-key step: shown when the selected provider already has a stored key.
+	manageKeyCursor    int
+	manageProviderName string
+	oauthMode          bool
+	oauthPending       bool
+	oauthAttemptID     int
+	oauthErr           string
 	// Device-code login (RFC 8628) state while an OAuth login is in flight.
 	oauthDevice           bool
 	deviceUserCode        string
@@ -593,6 +598,24 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Manage-key step: keep/replace/remove a provider's stored key.
+	if m.providerWizard.step == providerWizardStepManageKey {
+		switch {
+		case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
+			m.providerWizard.step = providerWizardStepProvider
+			m.providerWizard.err = ""
+			return m, nil
+		case keyIs(msg, tea.KeyUp):
+			m.providerWizard.manageKeyCursor = (m.providerWizard.manageKeyCursor + 2) % 3
+			return m, nil
+		case keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
+			m.providerWizard.manageKeyCursor = (m.providerWizard.manageKeyCursor + 1) % 3
+			return m, nil
+		case keyIs(msg, tea.KeyEnter):
+			return m.applyManageKeyChoice()
+		}
+		return m, nil
+	}
 	// On the OAuth provider list, "d" forces device-code login for a device-capable
 	// provider (xAI) — useful on a desktop when the browser flow won't work.
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode &&
@@ -869,8 +892,13 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		m.provider = nextProvider
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
+		// Capture flip: move the freshly entered key into the encrypted credential
+		// store before persisting, so config.json never holds the cleartext. The
+		// provider was already built above from runtimeProfile, which has the key.
+		secret := profile.APIKey
+		profile = config.SecureProviderProfile(profile, m.userConfigPath)
 		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
-			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey}})
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil
 		}
 	}
@@ -879,6 +907,57 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	m.modelName = profile.Model
 	m.providerWizard = nil
 	return m, nil
+}
+
+// wizardProviderStoredKey reports the saved provider name that has a key in the
+// credential store matching the wizard-selected descriptor, so the wizard can offer
+// keep/replace/remove instead of forcing a new key entry.
+func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (string, bool) {
+	for _, profile := range m.savedProviders {
+		if !profile.APIKeyStored {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.Name)) ||
+			strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID)) ||
+			strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.ID)) {
+			return profile.Name, true
+		}
+	}
+	return "", false
+}
+
+// applyManageKeyChoice acts on the keep/replace/remove selection. Keep closes the
+// wizard (nothing changes); Replace routes to credential entry (overwrites on save);
+// Remove deletes the stored key and its marker.
+func (m model) applyManageKeyChoice() (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil {
+		return m, nil
+	}
+	name := strings.TrimSpace(wizard.manageProviderName)
+	switch wizard.manageKeyCursor {
+	case 1: // Replace
+		wizard.apiKey = ""
+		wizard.err = ""
+		wizard.step = providerWizardStepCredential
+		return m, nil
+	case 2: // Remove
+		if strings.TrimSpace(m.userConfigPath) != "" {
+			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
+				_, _ = store.Delete(name)
+			}
+			_, _ = config.ClearProviderKeyStored(m.userConfigPath, name)
+		} else {
+			_, _ = config.ForgetProviderKey(name)
+		}
+		m.providerWizard = nil
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})
+		return m, nil
+	default: // Keep
+		m.providerWizard = nil
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nKept the saved key for " + name + "."})
+		return m, nil
+	}
 }
 
 func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {
@@ -927,6 +1006,8 @@ func (wizard *providerWizardState) render(width int) string {
 		lines = append(lines, wizard.renderMethodStep(innerWidth)...)
 	case providerWizardStepProvider:
 		lines = append(lines, wizard.renderProviderStep(innerWidth)...)
+	case providerWizardStepManageKey:
+		lines = append(lines, wizard.renderManageKeyStep(innerWidth)...)
 	case providerWizardStepEndpoint:
 		lines = append(lines, wizard.renderEndpointStep(innerWidth)...)
 	case providerWizardStepName:
@@ -963,6 +1044,8 @@ func (wizard *providerWizardState) footer() string {
 			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
 		}
 		return "↑/↓ move   Enter continue   ← back   Esc close"
+	case providerWizardStepManageKey:
+		return "↑/↓ move   Enter select   Esc back"
 	case providerWizardStepEndpoint:
 		if canRight {
 			return "Enter/→ continue   ← back   Esc close"
@@ -1058,6 +1141,33 @@ func (wizard *providerWizardState) renderMethodStep(width int) []string {
 		surface := transparentSurface
 		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == wizard.selectedMethod {
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
+		}
+		lines = append(lines, fitStyledLine(marker+surface(zeroTheme.ink).Render(option.label), width))
+		lines = append(lines, fitStyledLine("    "+zeroTheme.faint.Render(option.subtitle), width))
+	}
+	return lines
+}
+
+// renderManageKeyStep shows keep/replace/remove for a provider that already has a
+// key in the encrypted credential store.
+func (wizard *providerWizardState) renderManageKeyStep(width int) []string {
+	name := strings.TrimSpace(wizard.manageProviderName)
+	if name == "" {
+		name = wizard.currentProvider().Name
+	}
+	options := []struct{ label, subtitle string }{
+		{"Keep current key", "A key is already saved (encrypted) for " + name + "."},
+		{"Replace key", "Enter a new key; it overwrites the stored one."},
+		{"Remove key", "Delete the stored key for " + name + "."},
+	}
+	wizard.manageKeyCursor = clampInt(wizard.manageKeyCursor, 0, len(options)-1)
+	lines := []string{zeroTheme.accent.Render(name + " already has a saved key")}
+	for index, option := range options {
+		surface := transparentSurface
+		marker := surface(zeroTheme.faintest).Render("  ")
+		if index == wizard.manageKeyCursor {
 			surface = zeroTheme.onSel
 			marker = surface(zeroTheme.accent).Render("❯ ")
 		}

@@ -112,14 +112,16 @@ func (m model) modelSupportsVisionTUI() bool {
 	// Check the discovered model list (from models.dev) for InputModalities
 	// containing "image". This covers custom/ollama/cloud models not in the
 	// curated catalog — models.dev knows their capabilities.
-	for _, dm := range m.modelPickerLiveModels {
-		if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
-			for _, modality := range dm.InputModalities {
-				if strings.EqualFold(strings.TrimSpace(modality), "image") {
-					return true
+	for _, models := range m.modelPickerLiveByProvider {
+		for _, dm := range models {
+			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+				for _, modality := range dm.InputModalities {
+					if strings.EqualFold(strings.TrimSpace(modality), "image") {
+						return true
+					}
 				}
+				return false // found the model in discovered list, no image modality
 			}
-			return false // found the model in discovered list, no image modality
 		}
 	}
 	// Fall back to the name heuristic for models not in the catalog or

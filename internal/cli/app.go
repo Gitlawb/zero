@@ -514,6 +514,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), 1)
 	}
+	// Fail-soft, one-time: move any inline plaintext API keys in config.json into
+	// the encrypted credential store (interactive runs only; headless exec keeps
+	// its existing behavior). Non-fatal — a missing keyring or write error leaves
+	// the inline key in place and this run still uses the already-resolved key.
+	if store, storeErr := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath)); storeErr == nil {
+		_, _ = config.MigratePlaintextProviderKeys(userConfigPath, store)
+	}
 	doctorUserConfigPath := ""
 	projectConfigPath := ""
 	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {
@@ -640,6 +647,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ProviderName:         resolved.Provider.Name,
 		ModelName:            resolved.Provider.Model,
 		ProviderProfile:      resolved.Provider,
+		SavedProviders:       usableSavedProviders(resolved.Providers),
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
 		Provider:             provider,
@@ -715,7 +723,16 @@ func buildProvider(resolved config.ResolvedConfig, deps appDeps) (zeroruntime.Pr
 	if !config.HasProviderProfile(resolved.Provider) {
 		return nil, nil
 	}
-	return deps.newProvider(resolved.Provider)
+	// Load the API key from the encrypted credential store when it isn't already
+	// resolved from inline config or an env var. This keeps the resolver pure (no
+	// I/O) and is a no-op for env/inline-key providers and when nothing is stored.
+	profile := resolved.Provider
+	if path, perr := deps.userConfigPath(); perr == nil {
+		if store, err := config.ProviderKeyStoreAt(filepath.Dir(path)); err == nil {
+			profile = config.ApplyStoredAPIKey(profile, store)
+		}
+	}
+	return deps.newProvider(profile)
 }
 
 func newCoreRegistry(workspaceRoot string) *tools.Registry {
@@ -1051,7 +1068,7 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 // setup result is not env-resolved, so checking APIKey alone would wrongly flag every
 // env-var-based provider as keyless.
 func profileHasCredential(profile config.ProviderProfile) bool {
-	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
+	if strings.TrimSpace(profile.APIKey) != "" || profile.APIKeyStored || strings.TrimSpace(profile.AuthHeaderValue) != "" {
 		return true
 	}
 	if env := strings.TrimSpace(profile.APIKeyEnv); env != "" {

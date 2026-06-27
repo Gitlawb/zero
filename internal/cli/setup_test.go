@@ -103,6 +103,9 @@ func TestSetupProviderOptionsUseRuntimeSupportedCatalog(t *testing.T) {
 }
 
 func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
+	// Use the encrypted-file backend in the temp config dir so the test never
+	// touches the real OS keychain.
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 
 	result, err := saveSetupProvider(appDeps{
@@ -132,8 +135,20 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	if len(cfg.Providers) != 1 {
 		t.Fatalf("Providers = %#v, want one provider", cfg.Providers)
 	}
-	if cfg.Providers[0].APIKey != "sk-pasted-secret" || cfg.Providers[0].APIKeyEnv != "" {
-		t.Fatalf("stored provider credentials = APIKey %q APIKeyEnv %q, want pasted key only", cfg.Providers[0].APIKey, cfg.Providers[0].APIKeyEnv)
+	// The capture flip: config.json must NOT hold the cleartext key — it carries the
+	// APIKeyStored marker, and the secret lives in the co-located credential store.
+	if cfg.Providers[0].APIKey != "" || cfg.Providers[0].APIKeyEnv != "" {
+		t.Fatalf("config must not persist the key: APIKey %q APIKeyEnv %q", cfg.Providers[0].APIKey, cfg.Providers[0].APIKeyEnv)
+	}
+	if !cfg.Providers[0].APIKeyStored {
+		t.Fatal("expected APIKeyStored marker in config")
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, _ := store.Get("ollama-cloud"); !ok || key != "sk-pasted-secret" {
+		t.Fatalf("stored key = %q,%v; want sk-pasted-secret in the credential store", key, ok)
 	}
 }
 

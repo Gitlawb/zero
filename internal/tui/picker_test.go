@@ -37,8 +37,8 @@ func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
 		t.Fatal("expected model picker")
 	}
 	groups := pickerGroups(picker.items)
-	if !contains(groups, "Ollama Cloud catalog") {
-		t.Fatalf("picker groups = %#v, want Ollama Cloud catalog", groups)
+	if !contains(groups, "Ollama Cloud") {
+		t.Fatalf("picker groups = %#v, want Ollama Cloud", groups)
 	}
 	got := pickerValues(picker.items)
 	if !contains(got, "qwen3-coder:480b") {
@@ -128,8 +128,8 @@ func TestModelPickerTreatsCustomOpenAIEndpointAsCustomProvider(t *testing.T) {
 		t.Fatalf("discovery profile = %#v, want custom OpenAI-compatible identity", captured)
 	}
 	groups := pickerGroups(next.picker.items)
-	if !contains(groups, "Custom OpenAI-compatible catalog") {
-		t.Fatalf("picker groups = %#v, want custom catalog group", groups)
+	if !contains(groups, "Custom OpenAI-compatible") {
+		t.Fatalf("picker groups = %#v, want custom provider group", groups)
 	}
 	got := pickerValues(next.picker.items)
 	if !contains(got, "custom-coder-plus") {
@@ -163,23 +163,24 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
-		t.Fatal("expected opening the model picker to start discovery")
+		t.Fatal("expected opening the model picker to start background discovery")
 	}
-	loading := plainRender(t, m.pickerOverlay(100))
-	assertContains(t, loading, "Checking available models...")
-	assertNotContains(t, loading, "Live Cloud A")
-
-	updated, _ = m.Update(testKey(tea.KeyEnter))
-	m = updated.(model)
+	// The list shows immediately (no blocking overlay) before discovery returns.
+	immediate := plainRender(t, m.pickerOverlay(100))
+	assertNotContains(t, immediate, "Checking available models...")
+	assertNotContains(t, immediate, "Live Cloud A")
 	if m.picker == nil {
-		t.Fatal("Enter while loading should not choose the fallback list")
+		t.Fatal("picker should be open immediately")
 	}
 
-	updated, _ = m.Update(cmd())
+	// When the provider's discovery returns, its section shows the live models.
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "ollama-cloud",
+		models:     []providermodeldiscovery.Model{{ID: "live-cloud-a", Description: "Live Cloud A"}},
+	})
 	m = updated.(model)
 	loaded := plainRender(t, m.pickerOverlay(100))
 	assertContains(t, loaded, "Live Cloud A")
-	assertNotContains(t, loaded, "Checking available models...")
 }
 
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
@@ -195,13 +196,14 @@ func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
 			Model:        "minimax-m3",
 		},
 	})
-	m.modelPickerLiveProviderID = "ollama-cloud"
-	m.modelPickerLiveModels = []providermodeldiscovery.Model{
-		{
-			ID:            "cogito-2.1:671b",
-			ContextWindow: 163840,
-			ToolCall:      true,
-			Reasoning:     true,
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"ollama-cloud": {
+			{
+				ID:            "cogito-2.1:671b",
+				ContextWindow: 163840,
+				ToolCall:      true,
+				Reasoning:     true,
+			},
 		},
 	}
 	m.picker = m.newModelPicker()
@@ -246,11 +248,14 @@ func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected opening the model picker to start discovery")
 	}
-	updated, _ = m.Update(cmd())
+	// A failed discovery leaves the static catalog list in place — no crash, no block.
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama-cloud", models: nil, err: errors.New("offline")})
 	m = updated.(model)
 	view := plainRender(t, m.pickerOverlay(100))
-	assertContains(t, view, "Using built-in model list")
 	assertNotContains(t, view, "Checking available models...")
+	if m.picker == nil || len(m.picker.items) == 0 {
+		t.Fatal("static catalog list should remain after a failed discovery")
+	}
 }
 
 func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
@@ -272,8 +277,7 @@ func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
 			return &fakeProvider{}, nil
 		},
 	})
-	m.modelPickerLiveProviderID = "ollama-cloud"
-	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{"ollama-cloud": {{ID: "glm-5.1", Description: "GLM 5.1"}}}
 	m.picker = m.newModelPicker()
 	m.picker.selected = pickerIndex(m.picker.items, "glm-5.1")
 
@@ -306,8 +310,7 @@ func TestModelSwitchNormalizesDetectedOllamaCloudProfile(t *testing.T) {
 			return &fakeProvider{}, nil
 		},
 	})
-	m.modelPickerLiveProviderID = "ollama-cloud"
-	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{"ollama-cloud": {{ID: "glm-5.1", Description: "GLM 5.1"}}}
 	m.input.SetValue("/model glm-5.1")
 
 	updated, _ := m.Update(testKey(tea.KeyEnter))
@@ -446,8 +449,8 @@ func TestModelPickerShowsRecentThenActiveProviderCatalog(t *testing.T) {
 	if picker.items[0].Value != "google/gemini-2.5-pro" {
 		t.Fatalf("first picker value = %q, want active recent model", picker.items[0].Value)
 	}
-	if picker.items[1].Group != "OpenRouter catalog" {
-		t.Fatalf("second picker group = %q, want OpenRouter catalog", picker.items[1].Group)
+	if picker.items[1].Group != "OpenRouter" {
+		t.Fatalf("second picker group = %q, want OpenRouter", picker.items[1].Group)
 	}
 	got := pickerValues(picker.items)
 	if !contains(got, "anthropic/claude-sonnet-4.5") || !contains(got, "minimax/minimax-m2.1") {
@@ -725,6 +728,39 @@ func pickerValues(items []pickerItem) []string {
 		values = append(values, item.Value)
 	}
 	return values
+}
+
+func TestModelPickerListsAllSavedProviders(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "xai", CatalogID: "xai", Model: "grok-4"},
+		},
+	})
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected model picker")
+	}
+	// More than one provider section is listed (not just the active provider).
+	if groups := pickerGroups(picker.items); len(groups) < 2 {
+		t.Fatalf("expected multiple provider groups, got %#v", groups)
+	}
+	// Models from both saved providers are present and tagged with their owner so
+	// selection can switch providers.
+	owners := map[string]bool{}
+	for _, item := range picker.items {
+		if item.OwnerProvider != "" {
+			owners[strings.ToLower(item.OwnerProvider)] = true
+		}
+	}
+	for _, want := range []string{"openai", "xai"} {
+		if !owners[want] {
+			t.Fatalf("expected models owned by %q; owners=%v", want, owners)
+		}
+	}
 }
 
 func pickerGroups(items []pickerItem) []string {

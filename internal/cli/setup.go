@@ -263,7 +263,9 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	if _, err := config.UpsertProvider(configPath, profile, true); err != nil {
+	// Persist with the key moved into the encrypted credential store (capture flip);
+	// the returned profile keeps the key for this run's immediate use.
+	if _, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), true); err != nil {
 		return tui.SetupResult{}, err
 	}
 	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
@@ -379,6 +381,50 @@ func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderPro
 		return localFallback, true
 	}
 	return config.ProviderProfile{}, false
+}
+
+// usableSavedProviders filters configured providers to those the user can actually
+// use: an inline/stored/env key, an auth header, a stored OAuth login, or a no-auth
+// local provider. This keeps /model from listing providers that are merely present
+// in config.json but never authenticated (e.g. a default openai entry with no key).
+func usableSavedProviders(providers []config.ProviderProfile) []config.ProviderProfile {
+	logins := oauthLoggedInProviders()
+	store, storeErr := config.ProviderKeyStore()
+	usable := make([]config.ProviderProfile, 0, len(providers))
+	for _, profile := range providers {
+		if !config.HasProviderProfile(profile) {
+			continue
+		}
+		// A provider whose only credential is the APIKeyStored marker counts as usable
+		// only when the key is actually retrievable — the keyring/file entry may have
+		// been deleted, leaving a stale marker that would otherwise list it in /model.
+		if profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
+			if storeErr == nil {
+				if key, ok, err := store.Get(profile.Name); err == nil && ok && strings.TrimSpace(key) != "" {
+					usable = append(usable, profile)
+					continue
+				}
+			}
+			// Marker present but key missing/unreadable: fall through and judge the
+			// profile on its other signals (env var, OAuth, local) with the marker off.
+			withoutMarker := profile
+			withoutMarker.APIKeyStored = false
+			if _, missing := setupMissingCredentialEnv(withoutMarker); !missing {
+				usable = append(usable, profile)
+			} else if providerHasOAuthLogin(profile, logins) {
+				usable = append(usable, profile)
+			}
+			continue
+		}
+		if _, missing := setupMissingCredentialEnv(profile); !missing {
+			usable = append(usable, profile)
+			continue
+		}
+		if providerHasOAuthLogin(profile, logins) {
+			usable = append(usable, profile)
+		}
+	}
+	return usable
 }
 
 // providerProfileIsLocal reports whether a provider points at a local endpoint

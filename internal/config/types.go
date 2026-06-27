@@ -21,13 +21,18 @@ const (
 )
 
 type ProviderProfile struct {
-	Name            string            `json:"name"`
-	Provider        string            `json:"provider,omitempty"`
-	ProviderKind    ProviderKind      `json:"provider_kind,omitempty"`
-	CatalogID       string            `json:"catalogID,omitempty"`
-	BaseURL         string            `json:"baseURL,omitempty"`
-	APIKey          string            `json:"apiKey,omitempty"`
-	APIKeyEnv       string            `json:"apiKeyEnv,omitempty"`
+	Name         string       `json:"name"`
+	Provider     string       `json:"provider,omitempty"`
+	ProviderKind ProviderKind `json:"provider_kind,omitempty"`
+	CatalogID    string       `json:"catalogID,omitempty"`
+	BaseURL      string       `json:"baseURL,omitempty"`
+	APIKey       string       `json:"apiKey,omitempty"`
+	APIKeyEnv    string       `json:"apiKeyEnv,omitempty"`
+	// APIKeyStored marks that this provider's API key lives in the encrypted
+	// credential store (internal/credstore), not inline in APIKey. The effective
+	// key is loaded from the store at provider-build time; config.json holds only
+	// this marker, never the secret.
+	APIKeyStored    bool              `json:"apiKeyStored,omitempty"`
 	APIFormat       string            `json:"apiFormat,omitempty"`
 	AuthHeader      string            `json:"authHeader,omitempty"`
 	AuthScheme      string            `json:"authScheme,omitempty"`
@@ -485,6 +490,8 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 		APIKeySnake          string            `json:"api_key"`
 		APIKeyEnv            string            `json:"apiKeyEnv"`
 		APIKeyEnvSnake       string            `json:"api_key_env"`
+		APIKeyStored         bool              `json:"apiKeyStored"`
+		APIKeyStoredSnake    bool              `json:"api_key_stored"`
 		APIFormat            string            `json:"apiFormat"`
 		APIFormatSnake       string            `json:"api_format"`
 		AuthHeader           string            `json:"authHeader"`
@@ -514,6 +521,7 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 	profile.BaseURL = strings.TrimSpace(firstNonEmpty(raw.BaseURL, raw.BaseURLSnake))
 	profile.APIKey = firstNonEmpty(raw.APIKey, raw.APIKeySnake)
 	profile.APIKeyEnv = strings.TrimSpace(firstNonEmpty(raw.APIKeyEnv, raw.APIKeyEnvSnake))
+	profile.APIKeyStored = raw.APIKeyStored || raw.APIKeyStoredSnake
 	profile.APIFormat = strings.TrimSpace(firstNonEmpty(raw.APIFormat, raw.APIFormatSnake))
 	profile.AuthHeader = strings.TrimSpace(firstNonEmpty(raw.AuthHeader, raw.AuthHeaderSnake))
 	profile.AuthScheme = strings.TrimSpace(firstNonEmpty(raw.AuthScheme, raw.AuthSchemeSnake))

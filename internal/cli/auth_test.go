@@ -72,7 +72,7 @@ func TestRunAuthLogoutNothing(t *testing.T) {
 	if code := runWithDeps([]string{"auth", "logout", "demo"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No OAuth login stored for demo") {
+	if !strings.Contains(stdout.String(), "No stored credential for demo") {
 		t.Fatalf("logout output = %q", stdout.String())
 	}
 }
