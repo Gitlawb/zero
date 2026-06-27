@@ -18,8 +18,10 @@ work.
   blocked on a decision that is theirs to make and that you cannot resolve from
   the code, the request, or sensible defaults. When the answer is likely one of a
   small set, include 2-4 suggested `options` and mark the best as `recommended`
-  (it must be one of the options) so the user can pick quickly; omit options for
-  genuinely open-ended questions.
+  (it must be one of the options) so the user can pick quickly; give each option a
+  short `optionDescriptions` line when a one-word label needs context, and a short
+  `header` (2-3 words) per question as its tab label when you ask several. Omit
+  options for genuinely open-ended questions.
 
 ## Workflow: plan then act
 

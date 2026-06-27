@@ -10,10 +10,12 @@ import (
 // Options/MultiSelect are presentation hints for an interactive front-end; the
 // tool itself never blocks on input.
 type AskUserQuestion struct {
-	Question    string
-	Options     []string
-	Recommended string
-	MultiSelect bool
+	Question           string
+	Header             string
+	Options            []string
+	OptionDescriptions []string
+	Recommended        string
+	MultiSelect        bool
 }
 
 // askUserNonInteractiveMessage is returned both by the tool's own Run() fallback
@@ -55,9 +57,18 @@ func NewAskUserTool() *askUserTool {
 							Type: "object",
 							Properties: map[string]PropertySchema{
 								"question": {Type: "string", Description: "The non-empty question to ask the user.", MinLength: intPtr(1)},
+								"header": {
+									Type:        "string",
+									Description: "Optional short title (2-3 words) used as this question's tab label in a multi-question prompt.",
+								},
 								"options": {
 									Type:        "array",
-									Description: "Optional list of 2-4 suggested answer choices for a quick picker.",
+									Description: "Optional list of 2-4 suggested answer choices (string labels) for a quick picker.",
+									Items:       &PropertySchema{Type: "string"},
+								},
+								"optionDescriptions": {
+									Type:        "array",
+									Description: "Optional one-line descriptions aligned by index to options.",
 									Items:       &PropertySchema{Type: "string"},
 								},
 								"recommended": {
@@ -136,12 +147,14 @@ func ParseAskUserQuestions(args map[string]any) ([]AskUserQuestion, error) {
 		// multiSelect is a UI hint; treat an uncoercible value as the default rather
 		// than failing the whole call (mirrors the best-effort options path).
 		multiSelect, _ := boolArg(object, "multiSelect", false)
-		options := coerceOptionStrings(object["options"]) // best-effort; never errors
+		options, optionDescriptions := coerceAskUserOptions(object["options"], object["optionDescriptions"]) // best-effort; never errors
 		questions = append(questions, AskUserQuestion{
-			Question:    text,
-			Options:     options,
-			Recommended: recommendedOption(object["recommended"], options), // only kept if it matches an option
-			MultiSelect: multiSelect,
+			Question:           text,
+			Header:             firstStringKey(object, "header"),
+			Options:            options,
+			OptionDescriptions: optionDescriptions,
+			Recommended:        recommendedOption(object["recommended"], options), // only kept if it matches an option
+			MultiSelect:        multiSelect,
 		})
 	}
 	return questions, nil
@@ -190,12 +203,70 @@ func recommendedOption(value any, options []string) string {
 	return ""
 }
 
-// coerceOptionStrings turns whatever a model put in "options" into a string slice
-// without ever failing — options are presentation hints, so a malformed shape must
-// not break the whole ask_user call. It delegates to the shared coerceStringSlice
-// so there is a single coercion path across the package.
-func coerceOptionStrings(value any) []string {
-	return coerceStringSlice(value)
+// firstStringKey returns the first non-empty string value among the given keys.
+func firstStringKey(object map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := object[key]; ok {
+			if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+// coerceAskUserOptions extracts option labels and their aligned descriptions from
+// the raw "options" value without ever failing (options are presentation hints, so
+// a malformed shape must not break the call). Each option may be a bare string (no
+// description) or an object {label/value/text, description/desc/detail}. The
+// question-level "optionDescriptions" array (descsValue) fills any description left
+// empty, aligned by index. The returned descriptions slice is nil when every entry
+// is empty, so a plain options list stays single-line.
+func coerceAskUserOptions(optionsValue, descsValue any) (labels []string, descriptions []string) {
+	if items, ok := optionsValue.([]any); ok {
+		for _, item := range items {
+			switch value := item.(type) {
+			case string:
+				if s := strings.TrimSpace(value); s != "" {
+					labels = append(labels, s)
+					descriptions = append(descriptions, "")
+				}
+			case map[string]any:
+				label := firstStringKey(value, "label", "value", "text", "name", "title", "option")
+				if label == "" {
+					continue
+				}
+				labels = append(labels, label)
+				descriptions = append(descriptions, firstStringKey(value, "description", "desc", "detail", "hint", "subtitle"))
+			}
+		}
+	} else {
+		// Non-array shape (e.g. newline-delimited string): reuse the shared coercion.
+		labels = coerceStringSlice(optionsValue)
+		descriptions = make([]string, len(labels))
+	}
+	// Fill any still-empty descriptions from the parallel optionDescriptions array.
+	parallel := coerceStringSlice(descsValue)
+	for index := range labels {
+		if index < len(descriptions) && strings.TrimSpace(descriptions[index]) != "" {
+			continue
+		}
+		if index < len(parallel) {
+			for len(descriptions) <= index {
+				descriptions = append(descriptions, "")
+			}
+			descriptions[index] = parallel[index]
+		}
+	}
+	for len(descriptions) < len(labels) {
+		descriptions = append(descriptions, "")
+	}
+	for _, description := range descriptions {
+		if strings.TrimSpace(description) != "" {
+			return labels, descriptions
+		}
+	}
+	return labels, nil
 }
 
 // FormatAskUserAnswers renders question/answer pairs into a clear, model-readable

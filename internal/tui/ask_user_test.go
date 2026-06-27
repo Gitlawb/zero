@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,6 +9,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 )
 
+// testAskUserRequest is a two-question request used by model_test.go too.
 func testAskUserRequest() agent.AskUserRequest {
 	return agent.AskUserRequest{
 		ToolCallID: "call_1",
@@ -21,395 +21,332 @@ func testAskUserRequest() agent.AskUserRequest {
 	}
 }
 
-func TestAskUserRequestShowsFocusedPrompt(t *testing.T) {
+func newAskUserModel(t *testing.T, request agent.AskUserRequest, answers *[][]string) model {
+	t.Helper()
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
 	m.width = 96
-
-	updated, cmd := m.Update(askUserRequestMsg{
+	updated, _ := m.Update(askUserRequestMsg{
 		runID:   7,
-		request: testAskUserRequest(),
+		request: request,
+		answer:  func(values []string) { *answers = append(*answers, values) },
 	})
-	next := updated.(model)
+	return updated.(model)
+}
 
-	_ = cmd // the settle pass may emit a benign scrollback flush command
-	if next.pendingAskUser == nil {
-		t.Fatalf("expected ask_user prompt to be pending, got %#v", next)
+func askUserSingle(options []string, recommended string) agent.AskUserRequest {
+	return agent.AskUserRequest{
+		ToolCallID: "call_single",
+		Questions:  []agent.AskUserQuestion{{Question: "Pick one", Options: options, Recommended: recommended}},
 	}
-	if countTranscriptRows(next.transcript, rowAskUser) != 1 {
-		t.Fatalf("expected one ask_user transcript row, got %#v", next.transcript)
+}
+
+func askUserTwoQuestions() agent.AskUserRequest {
+	return agent.AskUserRequest{
+		ToolCallID: "call_2q",
+		Questions: []agent.AskUserQuestion{
+			{Question: "Framework?", Header: "FW", Options: []string{"React", "Vue"}},
+			{Question: "TypeScript?", Header: "TS", Options: []string{"Yes", "No"}},
+		},
+	}
+}
+
+// --- single question (no Confirm step) -------------------------------------
+
+func TestAskUserSinglePickerDefaultsToRecommendedAndSubmits(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
+
+	if next.pendingAskUser == nil || next.pendingAskUser.states[0].typing {
+		t.Fatalf("expected picker mode for a question with options, got %#v", next.pendingAskUser)
+	}
+	if next.pendingAskUser.states[0].cursor != 1 {
+		t.Fatalf("expected cursor on the recommended option (index 1), got %d", next.pendingAskUser.states[0].cursor)
 	}
 	view := next.View()
-	for _, want := range []string{"Which framework?", "React", "Vue", "question 1 of 2"} {
+	for _, want := range []string{"Postgres", "SQLite", "MySQL", "(recommended)", askUserTypeMyOwnLabel} {
 		assertContains(t, view, want)
 	}
-}
+	// A single question has no tab row / Confirm step.
+	assertNotContains(t, view, "Confirm")
 
-func TestAskUserPromptCollectsAnswersInOrder(t *testing.T) {
-	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: testAskUserRequest(),
-		answer: func(values []string) {
-			answers = append(answers, values)
-		},
-	})
-	next := updated.(model)
-
-	// Q1 has options -> selector mode; Enter selects the default (first) option "React"
-	// without any composer input.
-	updated, cmd := next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("expected first answer to advance synchronously")
-	}
-	if next.pendingAskUser == nil {
-		t.Fatal("expected prompt to remain pending after first answer")
-	}
-	if len(answers) != 0 {
-		t.Fatalf("expected no answers delivered until all questions answered, got %#v", answers)
-	}
-
-	// Answer the second (final) question.
-	next.input.SetValue("yes")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("expected final answer to resolve synchronously")
-	}
-	if next.pendingAskUser != nil {
-		t.Fatalf("expected prompt to clear after final answer, got %#v", next.pendingAskUser)
-	}
-	if len(answers) != 1 {
-		t.Fatalf("expected one delivery of answers, got %#v", answers)
-	}
-	if len(answers[0]) != 2 || answers[0][0] != "React" || answers[0][1] != "yes" {
-		t.Fatalf("expected answers [React yes], got %#v", answers[0])
-	}
-}
-
-func askUserRecommendedRequest() agent.AskUserRequest {
-	return agent.AskUserRequest{
-		ToolCallID: "call_db",
-		Questions: []agent.AskUserQuestion{
-			{Question: "Which database?", Options: []string{"Postgres", "SQLite", "MySQL"}, Recommended: "SQLite"},
-		},
-	}
-}
-
-// A question with options + a recommended choice renders the selector, rests the
-// cursor on the recommended option, and Enter selects it without typing.
-func TestAskUserSelectorDefaultsToRecommended(t *testing.T) {
-	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
-
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: askUserRecommendedRequest(),
-		answer:  func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-
-	if next.pendingAskUser == nil || next.pendingAskUser.typing {
-		t.Fatalf("expected selector mode for a question with options, got %#v", next.pendingAskUser)
-	}
-	if next.pendingAskUser.cursor != 1 {
-		t.Fatalf("expected cursor to rest on the recommended option (index 1), got %d", next.pendingAskUser.cursor)
-	}
-	for _, want := range []string{"Postgres", "SQLite", "MySQL", "(recommended)", askUserTypeMyOwnLabel} {
-		assertContains(t, next.View(), want)
-	}
-
-	// Enter selects the recommended default — no composer text involved.
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.pendingAskUser != nil {
-		t.Fatalf("expected single-question prompt to clear after selecting, got %#v", next.pendingAskUser)
+		t.Fatalf("single question should submit on selection, still pending: %#v", next.pendingAskUser)
 	}
 	if len(answers) != 1 || len(answers[0]) != 1 || answers[0][0] != "SQLite" {
-		t.Fatalf("expected selecting the recommended default to return [SQLite], got %#v", answers)
+		t.Fatalf("expected [SQLite], got %#v", answers)
 	}
 }
 
-// Arrowing to the trailing "type my own" entry switches the question into free-text
-// mode; the typed answer is what gets returned.
-func TestAskUserSelectorTypeMyOwnReturnsTypedText(t *testing.T) {
+func TestAskUserSingleTypeMyOwnSubmitsTypedText(t *testing.T) {
 	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
+	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
 
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: askUserRecommendedRequest(),
-		answer:  func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-
-	// Cursor starts at index 1 (SQLite); move down twice to the "type my own" entry
-	// (options=3 -> type-my-own index 3).
+	// Move from SQLite (1) to the "type your own" entry (index 3).
 	for i := 0; i < 2; i++ {
-		updated, _ = next.Update(testKey(tea.KeyDown))
+		updated, _ := next.Update(testKey(tea.KeyDown))
 		next = updated.(model)
 	}
-	if next.pendingAskUser.cursor != 3 {
-		t.Fatalf("expected cursor on the 'type my own' entry (index 3), got %d", next.pendingAskUser.cursor)
+	if next.pendingAskUser.states[0].cursor != 3 {
+		t.Fatalf("expected cursor on type-your-own (index 3), got %d", next.pendingAskUser.states[0].cursor)
 	}
-
-	// Enter on "type my own" switches to free-text and delivers nothing yet.
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
-		t.Fatalf("expected 'type my own' to switch into free-text typing mode, got %#v", next.pendingAskUser)
+	if !next.pendingAskUser.states[0].typing {
+		t.Fatal("expected 'type your own' to switch into free-text")
 	}
-	if len(answers) != 0 {
-		t.Fatalf("expected no answer delivered when switching to free-text, got %#v", answers)
-	}
-	assertContains(t, next.View(), "type your own answer")
-
-	// The typed answer must appear ONLY in the composer, never echoed inside the ask
-	// card (the double-display bug): the focused card carries no input.
 	next.input.SetValue("CockroachDB")
-	if card := renderFocusedAskUserPrompt(*next.pendingAskUser, next.width); strings.Contains(card, "CockroachDB") {
-		t.Fatalf("ask card must not echo the typed answer; card=\n%s", card)
-	}
-
-	// Submit the typed answer.
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if len(answers) != 1 || answers[0][0] != "CockroachDB" {
-		t.Fatalf("expected typed free-text answer [CockroachDB], got %#v", answers)
+		t.Fatalf("expected typed answer [CockroachDB], got %#v", answers)
 	}
 }
 
-// Esc from the "type my own" free-text steps back to the selector for that question
-// — it must NOT cancel the questionnaire or deliver answers; the user can then pick
-// a suggested option instead.
-func TestAskUserTypeMyOwnEscReturnsToSelector(t *testing.T) {
+func TestAskUserTypingInPickerSwitchesToFreeText(t *testing.T) {
 	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
+	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
 
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: askUserRecommendedRequest(),
-		answer:  func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-
-	// Into "type my own" (index 3) and free-text.
-	for i := 0; i < 2; i++ {
-		updated, _ = next.Update(testKey(tea.KeyDown))
-		next = updated.(model)
+	updated, _ := next.Update(testKeyText("M"))
+	next = updated.(model)
+	if !next.pendingAskUser.states[0].typing {
+		t.Fatal("a printable keystroke should switch the picker into free-text")
 	}
+	if next.input.Value() != "M" {
+		t.Fatalf("the keystroke should be captured, got %q", next.input.Value())
+	}
+	next.input.SetValue("MariaDB")
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
-		t.Fatal("expected free-text mode after choosing type-my-own")
+	if len(answers) != 1 || answers[0][0] != "MariaDB" {
+		t.Fatalf("expected typed answer [MariaDB], got %#v", answers)
 	}
+}
+
+func TestAskUserSingleNoOptionsIsFreeText(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Describe the behavior"}},
+	}, &answers)
+
+	if next.pendingAskUser == nil || !next.pendingAskUser.states[0].typing {
+		t.Fatalf("expected free-text for a no-options question, got %#v", next.pendingAskUser)
+	}
+	next.input.SetValue("free-form answer")
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "free-form answer" {
+		t.Fatalf("expected [free-form answer], got %#v", answers)
+	}
+}
+
+func TestAskUserMultiSelectIsFreeTextWithSuggestions(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Which checks?", Options: []string{"lint", "test", "typecheck"}, MultiSelect: true}},
+	}, &answers)
+
+	if !next.pendingAskUser.states[0].typing {
+		t.Fatalf("multi-select must use free-text, got %#v", next.pendingAskUser)
+	}
+	assertContains(t, next.View(), "suggested:")
+	assertContains(t, next.View(), "lint")
+	next.input.SetValue("lint, typecheck")
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "lint, typecheck" {
+		t.Fatalf("expected verbatim multi-answer, got %#v", answers)
+	}
+}
+
+func TestAskUserTypeMyOwnEscReturnsToPicker(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
+
+	for i := 0; i < 2; i++ { // to type-your-own
+		updated, _ := next.Update(testKey(tea.KeyDown))
+		next = updated.(model)
+	}
+	updated, _ := next.Update(testKey(tea.KeyEnter)) // into free-text
+	next = updated.(model)
 	next.input.SetValue("scratch")
 
-	// Esc returns to the selector, does not cancel, does not deliver.
-	updated, _ = next.Update(testKey(tea.KeyEsc))
+	updated, _ = next.Update(testKey(tea.KeyEsc)) // back to picker
 	next = updated.(model)
 	if next.pendingAskUser == nil {
-		t.Fatal("Esc from type-my-own must NOT cancel the questionnaire")
+		t.Fatal("Esc from type-your-own must not dismiss the prompt")
 	}
-	if next.pendingAskUser.typing {
-		t.Fatal("Esc from type-my-own must return to the selector (typing=false)")
+	if next.pendingAskUser.states[0].typing {
+		t.Fatal("Esc from type-your-own must return to the picker")
 	}
 	if len(answers) != 0 {
-		t.Fatalf("Esc back to the selector must not deliver answers, got %#v", answers)
+		t.Fatalf("Esc back to the picker must not deliver answers, got %#v", answers)
 	}
-	if !next.pending {
-		t.Fatal("the run must keep running after Esc steps back")
-	}
-
-	// From the selector, move up to a real option and select it.
+	// Pick a real option from the picker.
 	updated, _ = next.Update(testKey(tea.KeyUp)) // 3 -> 2 (MySQL)
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if len(answers) != 1 || answers[0][0] != "MySQL" {
-		t.Fatalf("expected selecting MySQL after returning to the selector, got %#v", answers)
+		t.Fatalf("expected [MySQL] after returning to picker, got %#v", answers)
 	}
 }
 
-// A question with NO options keeps the plain free-text prompt exactly as before (no
-// selector, no regression).
-func TestAskUserNoOptionsIsPlainFreeText(t *testing.T) {
+// A single-question prompt has no tab strip / Confirm tab, so Tab / Shift+Tab must
+// be no-ops (not advance into the hidden Confirm state).
+func TestAskUserSingleQuestionTabIsNoOp(t *testing.T) {
 	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
-
-	updated, _ := m.Update(askUserRequestMsg{
-		runID: 7,
-		request: agent.AskUserRequest{
-			ToolCallID: "call_open",
-			Questions:  []agent.AskUserQuestion{{Question: "Describe the desired behavior"}},
-		},
-		answer: func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-
-	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
-		t.Fatalf("expected free-text (typing) mode for a question with no options, got %#v", next.pendingAskUser)
+	next := newAskUserModel(t, askUserSingle([]string{"A", "B"}, "A"), &answers)
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("expected to start on the single question, active=%d", next.pendingAskUser.active)
 	}
-	view := next.View()
-	assertContains(t, view, "type an answer")
-	if transcriptContains(next.transcript, askUserTypeMyOwnLabel) {
-		t.Fatalf("a no-options question must not show the selector's type-my-own entry")
+	updated, _ := next.Update(testKey(tea.KeyTab))
+	next = updated.(model)
+	if next.pendingAskUser == nil || next.pendingAskUser.active != 0 {
+		t.Fatalf("Tab on a single-question prompt must be a no-op, active=%d", next.pendingAskUser.active)
 	}
+	updated, _ = next.Update(testKeyShift(tea.KeyTab))
+	next = updated.(model)
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("Shift+Tab on a single-question prompt must be a no-op, active=%d", next.pendingAskUser.active)
+	}
+}
 
-	next.input.SetValue("my free-form answer")
+// --- multi-question (tabs + Confirm) ---------------------------------------
+
+func TestAskUserMultiQuestionTabbedSubmit(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
+
+	// Q1: select React (cursor 0), advances to Q2.
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.pendingAskUser == nil || next.pendingAskUser.active != 1 {
+		t.Fatalf("expected to advance to Q2 (active=1), got %#v", next.pendingAskUser)
+	}
+	if len(answers) != 0 {
+		t.Fatalf("must not deliver before Confirm, got %#v", answers)
+	}
+	// Q2: select Yes (cursor 0), advances to Confirm tab.
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	if len(answers) != 1 || answers[0][0] != "my free-form answer" {
-		t.Fatalf("expected free-text answer, got %#v", answers)
+	if !next.pendingAskUser.onConfirmTab() {
+		t.Fatalf("expected to land on the Confirm tab, active=%d", next.pendingAskUser.active)
 	}
-}
-
-// A multi-select question can't be a single-pick selector, so it renders as
-// free-text (surfacing the options as suggestions) — the typed answer is returned
-// verbatim and nothing is silently narrowed to one option.
-func TestAskUserMultiSelectFallsBackToFreeText(t *testing.T) {
-	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
-
-	updated, _ := m.Update(askUserRequestMsg{
-		runID: 7,
-		request: agent.AskUserRequest{
-			ToolCallID: "call_multi",
-			Questions: []agent.AskUserQuestion{
-				{Question: "Which checks?", Options: []string{"lint", "test", "typecheck"}, MultiSelect: true},
-			},
-		},
-		answer: func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-
-	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
-		t.Fatalf("expected multi-select to use free-text, got %#v", next.pendingAskUser)
-	}
-	// Options are surfaced as suggestions, not a single-pick list.
-	assertContains(t, next.View(), "suggested:")
-	assertContains(t, next.View(), "lint")
-
-	next.input.SetValue("lint, typecheck")
+	assertContains(t, next.View(), "Review and submit")
+	// Confirm: submit all.
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	if len(answers) != 1 || answers[0][0] != "lint, typecheck" {
-		t.Fatalf("expected the typed multi-answer returned verbatim, got %#v", answers)
+	if next.pendingAskUser != nil {
+		t.Fatalf("Confirm should submit, still pending: %#v", next.pendingAskUser)
+	}
+	if len(answers) != 1 || len(answers[0]) != 2 || answers[0][0] != "React" || answers[0][1] != "Yes" {
+		t.Fatalf("expected [React Yes], got %#v", answers)
 	}
 }
 
-// Typing a printable key while the single-select selector is showing flips straight
-// into free-text (seeding the keystroke) rather than being swallowed and discarded.
-func TestAskUserTypingInSelectorSwitchesToFreeText(t *testing.T) {
+func TestAskUserTabSwitchesQuestions(t *testing.T) {
 	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	m.width = 96
+	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
 
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: askUserRecommendedRequest(), // single-select, 3 options
-		answer:  func(values []string) { answers = append(answers, values) },
-	})
-	next := updated.(model)
-	if next.pendingAskUser.typing {
-		t.Fatal("expected selector mode initially")
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("expected to start on Q1, got active=%d", next.pendingAskUser.active)
 	}
-
-	// Type a character: it must switch to free-text AND be captured (not swallowed).
-	updated, _ = next.Update(testKeyText("M"))
+	updated, _ := next.Update(testKey(tea.KeyTab))
 	next = updated.(model)
-	if !next.pendingAskUser.typing {
-		t.Fatal("expected a printable keystroke to switch the selector into free-text")
+	if next.pendingAskUser.active != 1 {
+		t.Fatalf("Tab should move to Q2, got active=%d", next.pendingAskUser.active)
 	}
-	if next.input.Value() != "M" {
-		t.Fatalf("expected the keystroke to be captured in the composer, got %q", next.input.Value())
-	}
-
-	// Finish typing and submit; the typed answer wins (not a discarded option).
-	next.input.SetValue("MariaDB")
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyTab))
 	next = updated.(model)
-	if len(answers) != 1 || answers[0][0] != "MariaDB" {
-		t.Fatalf("expected the typed answer MariaDB, got %#v", answers)
+	if !next.pendingAskUser.onConfirmTab() {
+		t.Fatalf("Tab should move to the Confirm tab, got active=%d", next.pendingAskUser.active)
+	}
+	updated, _ = next.Update(testKey(tea.KeyTab))
+	next = updated.(model)
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("Tab should wrap to Q1, got active=%d", next.pendingAskUser.active)
+	}
+	updated, _ = next.Update(testKeyShift(tea.KeyTab))
+	next = updated.(model)
+	if !next.pendingAskUser.onConfirmTab() {
+		t.Fatalf("Shift+Tab should wrap back to the Confirm tab, got active=%d", next.pendingAskUser.active)
 	}
 }
 
-func TestAskUserPromptEscDeliversCollectedAnswers(t *testing.T) {
+func TestAskUserEscDismissDeliversPartialAnswers(t *testing.T) {
 	var answers [][]string
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
+	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
 
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: testAskUserRequest(),
-		answer: func(values []string) {
-			answers = append(answers, values)
-		},
-	})
-	next := updated.(model)
-
-	// Esc while an ask_user prompt is active cancels the questionnaire and must
-	// still deliver a (partial/empty) answer set so the run never deadlocks.
+	// Answer Q1, advance to Q2, then Esc (Q2 is a picker, so Esc dismisses).
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
-
 	if next.pendingAskUser != nil {
-		t.Fatalf("expected ask_user prompt to clear after Esc, got %#v", next.pendingAskUser)
+		t.Fatalf("Esc on a picker should dismiss, still pending: %#v", next.pendingAskUser)
 	}
-	if len(answers) != 1 {
-		t.Fatalf("expected the answer callback to fire on Esc, got %#v", answers)
+	if len(answers) != 1 || len(answers[0]) != 2 || answers[0][0] != "React" || answers[0][1] != "" {
+		t.Fatalf("expected partial [React, \"\"], got %#v", answers)
 	}
-	// Esc on an ask_user prompt cancels only the questionnaire, not the run, so the
-	// run stays pending and continues with the degraded (empty) answers.
 	if !next.pending {
-		t.Fatal("expected the run to keep running after Esc cancels only the ask_user prompt")
+		t.Fatal("dismiss cancels only the questionnaire; the run keeps running")
 	}
 }
 
+// --- rendering -------------------------------------------------------------
+
+func TestAskUserMultiQuestionShowsTabsAndOptions(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, agent.AskUserRequest{
+		ToolCallID: "call_v",
+		Questions: []agent.AskUserQuestion{
+			{Question: "Which framework?", Header: "Framework", Options: []string{"React", "Vue"}},
+			{Question: "TypeScript?", Header: "TypeScript"},
+		},
+	}, &answers)
+	view := next.View()
+	for _, want := range []string{"Framework", "TypeScript", "Confirm", "Which framework?", "React", "Vue"} {
+		assertContains(t, view, want)
+	}
+}
+
+func TestAskUserOptionDescriptionsRender(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, agent.AskUserRequest{
+		ToolCallID: "call_d",
+		Questions: []agent.AskUserQuestion{{
+			Question:           "Which decade?",
+			Options:            []string{"1980s", "1990s"},
+			OptionDescriptions: []string{"Synth-pop, hair metal", "Grunge, Britpop"},
+			Recommended:        "1980s",
+		}},
+	}, &answers)
+	view := next.View()
+	for _, want := range []string{"1980s", "Synth-pop, hair metal", "1990s", "Grunge, Britpop"} {
+		assertContains(t, view, want)
+	}
+}
+
+// --- regressions preserved -------------------------------------------------
+
 func TestAskUserPromptBlocksNormalSubmit(t *testing.T) {
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-	m.activeRunID = 7
-	updated, _ := m.Update(askUserRequestMsg{
-		runID:   7,
-		request: testAskUserRequest(),
-		answer:  func([]string) {},
-	})
-	next := updated.(model)
+	var answers [][]string
+	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
 	next.input.SetValue("/help")
 
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-
 	if transcriptContains(next.transcript, "Available commands") {
-		t.Fatalf("ask_user prompt should capture Enter, not run commands: %#v", next.transcript)
+		t.Fatalf("ask_user must capture Enter, not run commands: %#v", next.transcript)
 	}
 	if next.pendingAskUser == nil {
-		t.Fatal("expected ask_user prompt to remain pending after answering one question")
+		t.Fatal("expected the prompt to remain pending after answering Q1 of 2")
 	}
 }
 
@@ -420,23 +357,16 @@ func TestAskUserRequestClearsComposerDraft(t *testing.T) {
 	m.activeRunID = 7
 	m = typeRunes(t, m, "hidden followup")
 	if !m.composerActive || m.composerValue() == "" {
-		t.Fatalf("test setup expected active composer draft, got active=%v value=%q", m.composerActive, m.composerValue())
+		t.Fatalf("setup expected an active composer draft, got active=%v value=%q", m.composerActive, m.composerValue())
 	}
-
 	updated, _ := m.Update(askUserRequestMsg{
-		runID: 7,
-		request: agent.AskUserRequest{
-			ToolCallID: "call_1",
-			Questions:  []agent.AskUserQuestion{{Question: "Proceed?"}},
-		},
-		answer: func(values []string) {
-			answers = append(answers, values)
-		},
+		runID:   7,
+		request: agent.AskUserRequest{ToolCallID: "c", Questions: []agent.AskUserQuestion{{Question: "Proceed?"}}},
+		answer:  func(values []string) { answers = append(answers, values) },
 	})
 	next := updated.(model)
-
 	if next.composerActive || next.composerValue() != "" {
-		t.Fatalf("ask_user should clear composer draft, active=%v value=%q", next.composerActive, next.composerValue())
+		t.Fatalf("ask_user should clear the composer draft, active=%v value=%q", next.composerActive, next.composerValue())
 	}
 	next.input.SetValue("yes")
 	updated, _ = next.Update(testKey(tea.KeyEnter))
@@ -450,6 +380,7 @@ func TestAskUserRequestClearsComposerDraft(t *testing.T) {
 }
 
 func TestAskUserRequestClearsStaleSuggestions(t *testing.T) {
+	var answers [][]string
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
@@ -458,21 +389,31 @@ func TestAskUserRequestClearsStaleSuggestions(t *testing.T) {
 	m.suggestionsAreFiles = true
 
 	updated, _ := m.Update(askUserRequestMsg{
-		runID: 7,
-		request: agent.AskUserRequest{
-			ToolCallID: "call_1",
-			Questions:  []agent.AskUserQuestion{{Question: "Proceed?"}},
-		},
-		answer: func([]string) {},
+		runID:   7,
+		request: agent.AskUserRequest{ToolCallID: "c", Questions: []agent.AskUserQuestion{{Question: "Proceed?"}}},
+		answer:  func(values []string) { answers = append(answers, values) },
 	})
 	next := updated.(model)
-
 	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
-		t.Fatalf("ask_user should clear stale suggestions, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)
+		t.Fatalf("ask_user should clear stale suggestions, got %#v files=%v", next.suggestions, next.suggestionsAreFiles)
 	}
-	updated, _ = next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
-	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
-		t.Fatalf("ask_user resolve should keep suggestions clear, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)
+}
+
+func TestAskUserEmptyRequestResolvesImmediately(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: agent.AskUserRequest{ToolCallID: "c"},
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatalf("an empty request must not open a prompt, got %#v", next.pendingAskUser)
+	}
+	if len(answers) != 1 {
+		t.Fatalf("an empty request should resolve immediately, got %#v", answers)
 	}
 }

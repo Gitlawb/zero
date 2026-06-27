@@ -277,9 +277,11 @@ func TestEnterWithNoSuggestionStillSubmits(t *testing.T) {
 
 func TestSuggestionsSuppressedDuringModals(t *testing.T) {
 	m := newModel(context.Background(), Options{})
+	request := agent.AskUserRequest{Questions: []agent.AskUserQuestion{{Question: "name?"}}}
 	m.pendingAskUser = &pendingAskUserPrompt{
-		request: agent.AskUserRequest{Questions: []agent.AskUserQuestion{{Question: "name?"}}},
+		request: request,
 		answer:  func([]string) {},
+		states:  newAskUserStates(request.Questions),
 	}
 	// Typing while a questionnaire is active feeds the answer field; no overlay.
 	m = typeRunes(t, m, "/mo")

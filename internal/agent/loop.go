@@ -1503,10 +1503,12 @@ func toAgentAskUserQuestions(questions []tools.AskUserQuestion) []AskUserQuestio
 	converted := make([]AskUserQuestion, len(questions))
 	for index, question := range questions {
 		converted[index] = AskUserQuestion{
-			Question:    question.Question,
-			Options:     append([]string{}, question.Options...),
-			Recommended: question.Recommended,
-			MultiSelect: question.MultiSelect,
+			Question:           question.Question,
+			Header:             question.Header,
+			Options:            append([]string{}, question.Options...),
+			OptionDescriptions: append([]string{}, question.OptionDescriptions...),
+			Recommended:        question.Recommended,
+			MultiSelect:        question.MultiSelect,
 		}
 	}
 	return converted

@@ -141,11 +141,16 @@ type PermissionEvent struct {
 // AskUserQuestion is one clarifying question the agent wants answered. Options are
 // optional suggested answers an interactive front-end can render as a picker;
 // Recommended (when set) is the suggested default — it should match one of Options.
+// Header is an optional short tab title for a multi-question prompt (falls back to
+// the question text). OptionDescriptions, when present, holds a one-line description
+// per option aligned by index to Options (empty string = no description).
 type AskUserQuestion struct {
-	Question    string   `json:"question"`
-	Options     []string `json:"options,omitempty"`
-	Recommended string   `json:"recommended,omitempty"`
-	MultiSelect bool     `json:"multiSelect,omitempty"`
+	Question           string   `json:"question"`
+	Header             string   `json:"header,omitempty"`
+	Options            []string `json:"options,omitempty"`
+	OptionDescriptions []string `json:"optionDescriptions,omitempty"`
+	Recommended        string   `json:"recommended,omitempty"`
+	MultiSelect        bool     `json:"multiSelect,omitempty"`
 }
 
 // AskUserRequest is handed to OnAskUser when the model invokes the ask_user tool.
