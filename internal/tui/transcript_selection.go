@@ -696,15 +696,11 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 		}
 		selectable = append(selectable, meta)
 	}
-	if !m.transcriptSelection.active {
-		return m.renderRow(row, width, rowContext{}), selectable
-	}
-	lines := make([]string, 0, len(wrapped)+1)
-	lines = append(lines, "")
-	for _, meta := range selectable {
-		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.ink.Bold(true)), contentWidth))
-	}
-	return strings.Join(lines, "\n"), selectable
+	// The selection highlight is painted once, at the body-item level, AFTER the
+	// reading-column gutter shift (finalizeTranscriptBodyRow) — in the same shifted
+	// coordinate the mouse maps to. Self-painting here (unshifted) double-painted the
+	// highlight gutter cells off from the finalize pass (the "two highlights" bug).
+	return m.renderRow(row, width, rowContext{}), selectable
 }
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -732,29 +728,11 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		}
 		selectable = append(selectable, meta)
 	}
-	if !m.transcriptSelection.active {
-		return m.renderRow(row, width, rowContext{}), selectable
-	}
-	lines := make([]string, 0, len(wrapped)+1)
-	// Interim narration and the final answer both render bright (ink); only
-	// reasoning bodies stay muted. Mirrors renderAssistantRow.
-	textStyle := zeroTheme.ink
-	for index, line := range wrapped {
-		meta := selectable[index]
-		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
-		if !row.final {
-			prefix := "  "
-			if index == 0 {
-				prefix = zeroTheme.accent.Render("●") + " "
-			}
-			rendered = fitStyledLine(prefix+rendered, width)
-		}
-		lines = append(lines, rendered)
-	}
-	if row.final && row.turnElapsed >= longTurnBookend {
-		lines = append(lines, doneLine(row))
-	}
-	return strings.Join(lines, "\n"), selectable
+	// The selection highlight is painted once, at the body-item level, AFTER the
+	// reading-column gutter shift (finalizeTranscriptBodyRow) — in the same shifted
+	// coordinate the mouse maps to. Self-painting here (unshifted) double-painted the
+	// highlight gutter cells off from the finalize pass (the "two highlights" bug).
+	return m.renderRow(row, width, rowContext{}), selectable
 }
 
 func (m model) renderSelectableReasoningRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -784,10 +762,9 @@ func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expande
 		text:      headerPlain,
 		toggle:    true,
 	}
+	// Selection highlight is painted once at the body-item level (finalizeTranscriptBodyRow),
+	// in the gutter-shifted coordinate the mouse maps to — never self-painted here.
 	headerRendered := header
-	if _, _, ok := m.selectedColumnsForTranscriptLine(headerMeta); ok {
-		headerRendered = m.renderTranscriptSelectableText(headerMeta, zeroTheme.faint)
-	}
 	lines := []string{headerRendered}
 	selectable := []transcriptSelectableLine{headerMeta}
 	if expanded {
@@ -825,30 +802,10 @@ func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expande
 			}
 			selectable = append(selectable, meta)
 			rendered := styleAssistantMarkdownLine(line, zeroTheme.sayText)
-			if _, _, ok := m.selectedColumnsForTranscriptLine(meta); ok {
-				rendered = m.renderTranscriptSelectableText(meta, zeroTheme.sayText)
-			}
 			lines = append(lines, fitStyledLine("  "+rendered, width))
 		}
 	}
 	return lines, selectable
-}
-
-func (m model) renderTranscriptSelectableMarkdownText(line transcriptSelectableLine, styledText string, base lipgloss.Style) string {
-	if _, _, ok := m.selectedColumnsForTranscriptLine(line); ok {
-		return m.renderTranscriptSelectableText(line, base)
-	}
-	return styleAssistantMarkdownLine(styledText, base)
-}
-
-func (m model) renderTranscriptSelectableText(line transcriptSelectableLine, base lipgloss.Style) string {
-	start, end, ok := m.selectedColumnsForTranscriptLine(line)
-	if !ok {
-		return base.Render(line.text)
-	}
-	before, rest := splitPlainAtDisplayWidth(line.text, start)
-	middle, after := splitPlainAtDisplayWidth(rest, end-start)
-	return base.Render(before) + zeroTheme.selection.Render(middle) + base.Render(after)
 }
 
 func (m model) selectedColumnsForTranscriptLine(line transcriptSelectableLine) (int, int, bool) {

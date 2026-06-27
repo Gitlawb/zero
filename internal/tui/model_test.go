@@ -1925,6 +1925,71 @@ func TestSelectionHighlightUsesGutterShiftedCoordinate(t *testing.T) {
 	}
 }
 
+// TestTranscriptSelectionPaintsHighlightOnceNotTwice guards the "two highlights"
+// bug: assistant/user/reasoning rows used to self-paint the selection in the
+// UNSHIFTED coordinate AND finalizeTranscriptBodyRow re-painted it in the
+// gutter-shifted coordinate, so a single selection lit up in two places (the
+// real one plus a copy shifted right by the reading gutter). The highlight must
+// land exactly once.
+func TestTranscriptSelectionPaintsHighlightOnceNotTwice(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 160, 30
+	m.altScreen = true
+	m.transcript = append(m.transcript, transcriptRow{
+		kind: rowAssistant, text: "alpha beta gamma delta epsilon zeta", final: true,
+	})
+	width := m.chatColumnWidth()
+	if transcriptGutter(width) <= 0 {
+		t.Fatalf("need a positive reading gutter at width %d", width)
+	}
+
+	findRow := func(mm model) (transcriptBodyItem, bool) {
+		for _, it := range mm.transcriptBodyItems(width, "") {
+			if it.kind == transcriptBodyItemRow && it.rowIndex >= 0 {
+				return it, true
+			}
+		}
+		return transcriptBodyItem{}, false
+	}
+
+	row, ok := findRow(m)
+	if !ok {
+		t.Fatal("no assistant row item")
+	}
+	var line transcriptSelectableLine
+	for _, sl := range row.render(0).selectable {
+		if sl.text != "" {
+			line = sl
+			break
+		}
+	}
+	if line.text == "" || lipgloss.Width(line.text) < 5 {
+		t.Fatalf("expected a selectable text line of width >= 5, got %+v", line)
+	}
+
+	// Select the first 5 columns of that line (in the gutter-shifted coordinate the
+	// mouse hands to anchor/cursor).
+	m.transcriptSelection = transcriptSelectionState{
+		active: true,
+		anchor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart},
+		cursor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart + 5},
+	}
+	row2, ok := findRow(m)
+	if !ok {
+		t.Fatal("no assistant row item with selection active")
+	}
+	out := strings.Join(row2.render(0).lines, "\n")
+
+	sentinel := zeroTheme.selection.Render("\x00")
+	open := sentinel[:strings.IndexByte(sentinel, 0)]
+	if open == "" {
+		t.Fatal("selection style emitted no opening sequence to count")
+	}
+	if got := strings.Count(out, open); got != 1 {
+		t.Fatalf("selection highlight painted %d times, want exactly 1 (the two-highlights bug):\n%q", got, out)
+	}
+}
+
 func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.width, m.height = 120, 40
