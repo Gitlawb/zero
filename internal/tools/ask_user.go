@@ -63,12 +63,12 @@ func NewAskUserTool() *askUserTool {
 								},
 								"options": {
 									Type:        "array",
-									Description: "Optional list of 2-4 suggested answer choices for a quick picker. Each item is a string label, or an object {label, description}.",
+									Description: "Optional list of 2-4 suggested answer choices (string labels) for a quick picker.",
 									Items:       &PropertySchema{Type: "string"},
 								},
 								"optionDescriptions": {
 									Type:        "array",
-									Description: "Optional one-line descriptions aligned by index to options (alternative to the object form).",
+									Description: "Optional one-line descriptions aligned by index to options.",
 									Items:       &PropertySchema{Type: "string"},
 								},
 								"recommended": {

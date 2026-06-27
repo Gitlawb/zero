@@ -197,6 +197,26 @@ func TestAskUserTypeMyOwnEscReturnsToPicker(t *testing.T) {
 	}
 }
 
+// A single-question prompt has no tab strip / Confirm tab, so Tab / Shift+Tab must
+// be no-ops (not advance into the hidden Confirm state).
+func TestAskUserSingleQuestionTabIsNoOp(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, askUserSingle([]string{"A", "B"}, "A"), &answers)
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("expected to start on the single question, active=%d", next.pendingAskUser.active)
+	}
+	updated, _ := next.Update(testKey(tea.KeyTab))
+	next = updated.(model)
+	if next.pendingAskUser == nil || next.pendingAskUser.active != 0 {
+		t.Fatalf("Tab on a single-question prompt must be a no-op, active=%d", next.pendingAskUser.active)
+	}
+	updated, _ = next.Update(testKeyShift(tea.KeyTab))
+	next = updated.(model)
+	if next.pendingAskUser.active != 0 {
+		t.Fatalf("Shift+Tab on a single-question prompt must be a no-op, active=%d", next.pendingAskUser.active)
+	}
+}
+
 // --- multi-question (tabs + Confirm) ---------------------------------------
 
 func TestAskUserMultiQuestionTabbedSubmit(t *testing.T) {

@@ -121,9 +121,11 @@ func (m model) askUserSwitchTab(target int) model {
 	return m
 }
 
-// moveAskUserTab cycles the active tab by delta (Tab / Shift+Tab).
+// moveAskUserTab cycles the active tab by delta (Tab / Shift+Tab). A no-op for a
+// single-question prompt, which has no tab strip / Confirm tab — so Tab can't move
+// it into the hidden Confirm state.
 func (m model) moveAskUserTab(delta int) model {
-	if m.pendingAskUser == nil {
+	if m.pendingAskUser == nil || len(m.pendingAskUser.request.Questions) <= 1 {
 		return m
 	}
 	return m.askUserSwitchTab(m.pendingAskUser.active + delta)
