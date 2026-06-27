@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -40,7 +41,7 @@ func TestParseAskUserRecommended(t *testing.T) {
 			if len(parsed) != 1 {
 				t.Fatalf("expected one question, got %d", len(parsed))
 			}
-			if strings.Join(parsed[0].Options, ",") != strings.Join(c.wantOptions, ",") {
+			if !slices.Equal(parsed[0].Options, c.wantOptions) {
 				t.Fatalf("options = %#v, want %#v", parsed[0].Options, c.wantOptions)
 			}
 			if parsed[0].Recommended != c.wantRec {

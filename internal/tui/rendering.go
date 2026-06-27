@@ -1278,7 +1278,7 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, width int) string {
 			} else {
 				lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTypeMyOwnLabel))
 			}
-			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip"))
+			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip the rest"))
 		} else {
 			// Free-text mode. The composer text box below is the single input — do NOT
 			// echo the typed answer inside the card too (that showed it in two places).
@@ -1287,12 +1287,12 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, width int) string {
 				// Multi-select can't be a single-pick list; surface the suggestions and
 				// let the user type one or more in their own words.
 				lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
-				lines = append(lines, fill(zeroTheme.faint).Render("type your answer(s) below · Enter to submit · Esc to skip"))
+				lines = append(lines, fill(zeroTheme.faint).Render("type your answer(s) below · Enter to submit · Esc to skip the rest"))
 			case len(question.Options) > 0:
 				// Single-select "type my own": Esc steps back to the selector.
 				lines = append(lines, fill(zeroTheme.faint).Render("type your own answer below · Enter to submit · Esc to go back"))
 			default:
-				lines = append(lines, fill(zeroTheme.faint).Render("type an answer below · Enter to submit · Esc to skip"))
+				lines = append(lines, fill(zeroTheme.faint).Render("type an answer below · Enter to submit · Esc to skip the rest"))
 			}
 		}
 	}
