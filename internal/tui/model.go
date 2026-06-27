@@ -508,21 +508,17 @@ type askUserRequestMsg struct {
 	answer  func([]string)
 }
 
-// pendingAskUserPrompt tracks an in-progress questionnaire. Answers are collected
-// one question at a time; once every question has an answer (or the user cancels)
-// the answer callback is invoked exactly once.
-//
-// When the current question carries Options, the prompt is in SELECTOR mode: cursor
-// indexes the options plus a trailing "type my own" entry, and starts on the
-// recommended option. Choosing "type my own" (or a question with no options) flips
-// typing=true, falling back to the existing free-text composer input.
+// pendingAskUserPrompt tracks an in-progress questionnaire rendered in the composer
+// region as a row of tabs — one per question plus a trailing Confirm tab. Questions
+// are answered in any order (Tab switches); the answer callback is invoked exactly
+// once when the user submits on the Confirm tab or dismisses (Esc). active is the
+// current tab (0..N-1 = questions, N = Confirm); states holds the per-question
+// picker/free-text state and committed answer. See ask_user_prompt.go.
 type pendingAskUserPrompt struct {
 	request agent.AskUserRequest
 	answer  func([]string)
-	index   int
-	answers []string
-	cursor  int  // selector index over [options..., "type my own"] for the current question
-	typing  bool // true = free-text input mode for the current question
+	active  int
+	states  []askUserAnswerState
 }
 
 type pendingSpecReviewPrompt struct {
@@ -1059,6 +1055,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
 			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserTab(-1), nil
+			}
 			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
 			// is intentionally not reachable by a casual keypress — see
 			// nextPermissionMode), but only when nothing modal is up: a permission
@@ -1141,6 +1140,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
 			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserTab(1), nil
+			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
@@ -1171,7 +1173,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
 			}
-			if m.pendingAskUser != nil && !m.pendingAskUser.typing {
+			if m.pendingAskUser != nil {
 				return m.moveAskUserCursor(1), nil
 			}
 			if m.providerWizard != nil {
@@ -1212,7 +1214,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
 			}
-			if m.pendingAskUser != nil && !m.pendingAskUser.typing {
+			if m.pendingAskUser != nil {
 				return m.moveAskUserCursor(-1), nil
 			}
 			if m.providerWizard != nil {
@@ -1246,18 +1248,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pendingAskUser != nil {
-			// While a questionnaire is active, keys feed the answer text input. In
-			// selector mode a printable keystroke means the user wants to type their
-			// own answer, so flip into free-text first (same as choosing "type my
-			// own") instead of letting the text accumulate invisibly and then be
-			// discarded when Enter selects the highlighted option.
-			if !m.pendingAskUser.typing && keyPrintable(msg) {
-				m.pendingAskUser.typing = true
+			_, state, ok := m.pendingAskUser.activeQuestion()
+			if !ok {
+				return m, nil // Confirm tab: ignore stray keys
+			}
+			// In picker mode a printable keystroke means the user wants to type their
+			// own answer, so flip into free-text first instead of letting the text
+			// accumulate invisibly and then be discarded when Enter picks an option.
+			if !state.typing && keyPrintable(msg) {
+				state.typing = true
 				m.input.SetValue("")
 			}
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
+			if state.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
+			return m, nil // picker mode: non-navigation keys do nothing
 		}
 		if m.pendingSpecReview != nil {
 			return m.handleSpecReviewKey(msg)
@@ -1476,9 +1483,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingAskUser = &pendingAskUserPrompt{
 			request: msg.request,
 			answer:  msg.answer,
-			answers: make([]string, 0, len(msg.request.Questions)),
+			states:  newAskUserStates(msg.request.Questions),
 		}
-		m.pendingAskUser.syncQuestionState() // selector vs free-text for question 1
 		m.clearComposer()
 		m.clearSuggestions()
 		return m, nil
@@ -1997,6 +2003,15 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	// While an ask-user questionnaire is active it REPLACES the composer box (the
+	// text box becomes the questionnaire): render the tabbed prompt + status line and
+	// skip the plan panel / idle hints / composer for a focused modal.
+	if m.pendingAskUser != nil {
+		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
+		footer.WriteString("\n")
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
 	// Pinned plan panel: sits directly above the composer so it stays visible
 	// while the transcript scrolls underneath (a streaming turn no longer pushes
 	// the plan off-screen). Budgeted to at most a third of the screen height; a
@@ -3103,30 +3118,6 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 		})
 	}
 	m.pendingPermission = nil
-	return m, nil
-}
-
-// resolveAskUser delivers the collected answers (padding to one-per-question when
-// cancelled early) and clears the prompt. cancelled answers stay empty so the
-// loop can degrade to its best-assumption path without deadlocking.
-func (m model) resolveAskUser(cancelled bool) (tea.Model, tea.Cmd) {
-	pending := m.pendingAskUser
-	if pending == nil {
-		return m, nil
-	}
-	answers := pending.answers
-	if cancelled {
-		// Record the question currently on screen as unanswered too.
-		m.input.SetValue("")
-	}
-	for len(answers) < len(pending.request.Questions) {
-		answers = append(answers, "")
-	}
-	if pending.answer != nil {
-		pending.answer(answers)
-	}
-	m.pendingAskUser = nil
-	m.clearSuggestions()
 	return m, nil
 }
 

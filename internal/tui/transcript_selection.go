@@ -290,7 +290,8 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				},
 			})
 		case m.pendingAskUser != nil:
-			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedAskUserPrompt(*m.pendingAskUser, width)))
+			// The ask-user questionnaire renders in the composer/footer region
+			// (footerView), not as a scrolling transcript card — nothing to emit here.
 		default:
 			items = append(items, transcriptBodyItem{
 				kind:     transcriptBodyItemPendingInterim,

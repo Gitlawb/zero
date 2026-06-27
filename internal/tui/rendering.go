@@ -1230,73 +1230,124 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 	return "scope"
 }
 
-// renderFocusedAskUserPrompt draws the ask-user questionnaire in the same
-// card language as the permission card, with line borders.
-func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, width int) string {
+// renderAskUserQuestionnaire draws the ask-user prompt that replaces the composer
+// box: a tab row (one per question + a trailing Confirm tab for multi-question
+// prompts), the active question's picker or free-text field, and a key-hint footer.
+// `input` is the live composer value, echoed in free-text mode.
+func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
 	questions := prompt.request.Questions
-	total := len(questions)
-	index := prompt.index
-	if index >= total {
-		index = total - 1
-	}
-	if index < 0 {
-		index = 0
+	if len(questions) == 0 {
+		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.line, zeroTheme.panel)
 	}
 	fill := zeroTheme.onPanel
-
-	heading := zeroTheme.badge.Render(" ASK ")
-	if header := strings.TrimSpace(prompt.request.Header); header != "" {
-		heading += fill(zeroTheme.ink).Render(" " + header)
+	confirm := len(questions)
+	active := prompt.active
+	if active < 0 {
+		active = 0
 	}
-	lines := []string{heading}
+	if active > confirm {
+		active = confirm
+	}
+	multi := len(questions) > 1
 
-	if total > 0 {
-		question := questions[index]
-		lines = append(lines, fill(zeroTheme.faint).Render(fmt.Sprintf("question %d of %d", index+1, total)))
-		lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
+	var lines []string
+	if header := strings.TrimSpace(prompt.request.Header); header != "" {
+		lines = append(lines, fill(zeroTheme.ink).Render(header))
+	}
 
-		if len(question.Options) > 0 && !prompt.typing {
-			// Selector mode: render each suggested option plus a trailing "type my
-			// own" entry. The highlighted row gets a lime ▸ marker and a reverse
-			// badge label (mirrors the permission popup); the recommended option is
-			// tagged inline.
-			selectable := askUserSelectableCount(question)
-			cursor := clampAskUserCursor(prompt.cursor, selectable)
-			for optionIndex, option := range question.Options {
-				label := option
-				if option == question.Recommended {
-					label += "  (recommended)"
-				}
-				if optionIndex == cursor {
-					lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+label+" "))
-				} else {
-					lines = append(lines, "  "+fill(zeroTheme.ink).Render(label))
-				}
-			}
-			if cursor >= len(question.Options) {
-				lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+askUserTypeMyOwnLabel+" "))
-			} else {
-				lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTypeMyOwnLabel))
-			}
-			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip the rest"))
-		} else {
-			// Free-text mode. The composer text box below is the single input — do NOT
-			// echo the typed answer inside the card too (that showed it in two places).
+	// Tab row (only for multi-question prompts): each question's short title + a
+	// trailing Confirm tab; the active tab is a lime badge, answered ones get a ✓.
+	if multi {
+		tabs := make([]string, 0, len(questions)+1)
+		for index, question := range questions {
+			title := askUserTabTitle(question, index)
 			switch {
-			case question.MultiSelect && len(question.Options) > 0:
-				// Multi-select can't be a single-pick list; surface the suggestions and
-				// let the user type one or more in their own words.
-				lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
-				lines = append(lines, fill(zeroTheme.faint).Render("type your answer(s) below · Enter to submit · Esc to skip the rest"))
-			case len(question.Options) > 0:
-				// Single-select "type my own": Esc steps back to the selector.
-				lines = append(lines, fill(zeroTheme.faint).Render("type your own answer below · Enter to submit · Esc to go back"))
+			case index == active:
+				tabs = append(tabs, zeroTheme.badge.Render(" "+title+" "))
+			case prompt.states[index].answered:
+				tabs = append(tabs, fill(zeroTheme.muted).Render(" ✓ "+title+" "))
 			default:
-				lines = append(lines, fill(zeroTheme.faint).Render("type an answer below · Enter to submit · Esc to skip the rest"))
+				tabs = append(tabs, fill(zeroTheme.faint).Render(" "+title+" "))
 			}
 		}
+		if active == confirm {
+			tabs = append(tabs, zeroTheme.badge.Render(" Confirm "))
+		} else {
+			tabs = append(tabs, fill(zeroTheme.faint).Render(" Confirm "))
+		}
+		lines = append(lines, strings.Join(tabs, " "))
 	}
 
+	// Confirm tab: a review of the collected answers.
+	if active == confirm {
+		lines = append(lines, "")
+		lines = append(lines, fill(zeroTheme.ink).Render("Review and submit:"))
+		for index, question := range questions {
+			answer := strings.TrimSpace(prompt.states[index].answer)
+			rendered := fill(zeroTheme.ink).Render(answer)
+			if answer == "" {
+				rendered = fill(zeroTheme.faint).Render("(no answer)")
+			}
+			lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTabTitle(question, index)+": ")+rendered)
+		}
+		lines = append(lines, "")
+		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc dismiss"))
+		return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
+	}
+
+	question := questions[active]
+	state := prompt.states[active]
+	lines = append(lines, "")
+	lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
+
+	if len(question.Options) > 0 && !state.typing {
+		// Picker: numbered options (with optional descriptions) + a trailing "type
+		// your own" entry; the highlighted row gets a lime ▸ marker and a badge label,
+		// the recommended option is tagged inline.
+		selectable := askUserSelectableCount(question)
+		cursor := clampAskUserCursor(state.cursor, selectable)
+		for index, option := range question.Options {
+			label := fmt.Sprintf("%d. %s", index+1, option)
+			if option == question.Recommended {
+				label += "  (recommended)"
+			}
+			if index == cursor {
+				lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+label+" "))
+			} else {
+				lines = append(lines, "  "+fill(zeroTheme.ink).Render(label))
+			}
+			if index < len(question.OptionDescriptions) && strings.TrimSpace(question.OptionDescriptions[index]) != "" {
+				lines = append(lines, "     "+fill(zeroTheme.faint).Render(question.OptionDescriptions[index]))
+			}
+		}
+		typeOwn := fmt.Sprintf("%d. %s", len(question.Options)+1, askUserTypeMyOwnLabel)
+		if cursor >= len(question.Options) {
+			lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+typeOwn+" "))
+		} else {
+			lines = append(lines, "  "+fill(zeroTheme.muted).Render(typeOwn))
+		}
+		lines = append(lines, "")
+		footer := "↑↓ select · enter confirm · esc dismiss"
+		if multi {
+			footer = "⇆ tab · ↑↓ select · enter confirm · esc dismiss"
+		}
+		lines = append(lines, fill(zeroTheme.faint).Render(footer))
+		return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
+	}
+
+	// Free-text mode: the typed answer is echoed here (this region IS the input now).
+	if question.MultiSelect && len(question.Options) > 0 {
+		lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
+	}
+	lines = append(lines, zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ")+fill(zeroTheme.ink).Render(input)+fill(zeroTheme.accent).Render("▌"))
+	footer := "enter submit · esc dismiss"
+	switch {
+	case !question.MultiSelect && len(question.Options) > 0:
+		footer = "enter submit · esc back to options"
+	case multi:
+		footer = "⇆ tab · enter submit · esc dismiss"
+	}
+	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
 }
 
