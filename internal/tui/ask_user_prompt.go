@@ -68,11 +68,13 @@ func (p *pendingAskUserPrompt) askUserCurrentQuestion() (agent.AskUserQuestion, 
 
 // syncQuestionState initialises the selector/free-text state for the question the
 // prompt is now on. Called when the prompt is created and after each answer
-// advances the index. A question with options enters selector mode resting on the
-// recommended choice; one without options is plain free-text.
+// advances the index. Only a SINGLE-select question with options enters the picker
+// (resting on the recommended choice). A multi-select question — which a single-pick
+// selector cannot represent — and an open-ended question both use free-text, so a
+// multi-select answer is never silently narrowed to one option.
 func (p *pendingAskUserPrompt) syncQuestionState() {
 	question, ok := p.askUserCurrentQuestion()
-	if !ok || len(question.Options) == 0 {
+	if !ok || len(question.Options) == 0 || question.MultiSelect {
 		p.typing = true
 		p.cursor = 0
 		return
@@ -141,7 +143,7 @@ func (m model) escapeAskUser() (tea.Model, tea.Cmd) {
 	if pending == nil {
 		return m, nil
 	}
-	if question, ok := pending.askUserCurrentQuestion(); ok && pending.typing && len(question.Options) > 0 {
+	if question, ok := pending.askUserCurrentQuestion(); ok && pending.typing && !question.MultiSelect && len(question.Options) > 0 {
 		pending.typing = false
 		pending.cursor = clampAskUserCursor(pending.cursor, askUserSelectableCount(question))
 		m.input.SetValue("")

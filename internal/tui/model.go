@@ -1246,8 +1246,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pendingAskUser != nil {
-			// While a questionnaire is active, all other keys feed the text input
-			// (the answer field); nothing else should react.
+			// While a questionnaire is active, keys feed the answer text input. In
+			// selector mode a printable keystroke means the user wants to type their
+			// own answer, so flip into free-text first (same as choosing "type my
+			// own") instead of letting the text accumulate invisibly and then be
+			// discarded when Enter selects the highlighted option.
+			if !m.pendingAskUser.typing && keyPrintable(msg) {
+				m.pendingAskUser.typing = true
+				m.input.SetValue("")
+			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
@@ -3097,16 +3104,6 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 	}
 	m.pendingPermission = nil
 	return m, nil
-}
-
-// submitAskUserAnswer records the answer to the current question and advances to
-// the next one; once every question is answered it delivers the full answer set.
-func (m model) submitAskUserAnswer() (tea.Model, tea.Cmd) {
-	if m.pendingAskUser == nil {
-		return m, nil
-	}
-	// Free-text path: the answer is whatever is in the composer.
-	return m.advanceAskUser(strings.TrimSpace(m.input.Value()))
 }
 
 // resolveAskUser delivers the collected answers (padding to one-per-question when

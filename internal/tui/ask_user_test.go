@@ -282,6 +282,81 @@ func TestAskUserNoOptionsIsPlainFreeText(t *testing.T) {
 	}
 }
 
+// A multi-select question can't be a single-pick selector, so it renders as
+// free-text (surfacing the options as suggestions) — the typed answer is returned
+// verbatim and nothing is silently narrowed to one option.
+func TestAskUserMultiSelectFallsBackToFreeText(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID: 7,
+		request: agent.AskUserRequest{
+			ToolCallID: "call_multi",
+			Questions: []agent.AskUserQuestion{
+				{Question: "Which checks?", Options: []string{"lint", "test", "typecheck"}, MultiSelect: true},
+			},
+		},
+		answer: func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+
+	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
+		t.Fatalf("expected multi-select to use free-text, got %#v", next.pendingAskUser)
+	}
+	// Options are surfaced as suggestions, not a single-pick list.
+	assertContains(t, next.View(), "suggested:")
+	assertContains(t, next.View(), "lint")
+
+	next.input.SetValue("lint, typecheck")
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "lint, typecheck" {
+		t.Fatalf("expected the typed multi-answer returned verbatim, got %#v", answers)
+	}
+}
+
+// Typing a printable key while the single-select selector is showing flips straight
+// into free-text (seeding the keystroke) rather than being swallowed and discarded.
+func TestAskUserTypingInSelectorSwitchesToFreeText(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: askUserRecommendedRequest(), // single-select, 3 options
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+	if next.pendingAskUser.typing {
+		t.Fatal("expected selector mode initially")
+	}
+
+	// Type a character: it must switch to free-text AND be captured (not swallowed).
+	updated, _ = next.Update(testKeyText("M"))
+	next = updated.(model)
+	if !next.pendingAskUser.typing {
+		t.Fatal("expected a printable keystroke to switch the selector into free-text")
+	}
+	if next.input.Value() != "M" {
+		t.Fatalf("expected the keystroke to be captured in the composer, got %q", next.input.Value())
+	}
+
+	// Finish typing and submit; the typed answer wins (not a discarded option).
+	next.input.SetValue("MariaDB")
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "MariaDB" {
+		t.Fatalf("expected the typed answer MariaDB, got %#v", answers)
+	}
+}
+
 func TestAskUserPromptEscDeliversCollectedAnswers(t *testing.T) {
 	var answers [][]string
 	m := newModel(context.Background(), Options{})

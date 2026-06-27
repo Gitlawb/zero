@@ -1280,15 +1280,20 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, width int) string {
 			}
 			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip"))
 		} else {
-			// Free-text mode (no options, or "type my own" chosen). The composer text
-			// box below is the single input — do NOT echo the typed answer inside the
-			// card too (that showed the text in two places). "Type my own" can step
-			// back to the selector with Esc; an open-ended question's Esc skips it.
-			hint := "type an answer below · Enter to submit · Esc to skip"
-			if len(question.Options) > 0 {
-				hint = "type your own answer below · Enter to submit · Esc to go back"
+			// Free-text mode. The composer text box below is the single input — do NOT
+			// echo the typed answer inside the card too (that showed it in two places).
+			switch {
+			case question.MultiSelect && len(question.Options) > 0:
+				// Multi-select can't be a single-pick list; surface the suggestions and
+				// let the user type one or more in their own words.
+				lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
+				lines = append(lines, fill(zeroTheme.faint).Render("type your answer(s) below · Enter to submit · Esc to skip"))
+			case len(question.Options) > 0:
+				// Single-select "type my own": Esc steps back to the selector.
+				lines = append(lines, fill(zeroTheme.faint).Render("type your own answer below · Enter to submit · Esc to go back"))
+			default:
+				lines = append(lines, fill(zeroTheme.faint).Render("type an answer below · Enter to submit · Esc to skip"))
 			}
-			lines = append(lines, fill(zeroTheme.faint).Render(hint))
 		}
 	}
 
