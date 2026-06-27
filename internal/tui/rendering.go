@@ -1232,7 +1232,7 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 
 // renderFocusedAskUserPrompt draws the ask-user questionnaire in the same
 // card language as the permission card, with line borders.
-func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width int) string {
+func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, width int) string {
 	questions := prompt.request.Questions
 	total := len(questions)
 	index := prompt.index
@@ -1280,13 +1280,15 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 			}
 			lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter to select · esc to skip"))
 		} else {
-			// Free-text mode (no options, or "type my own" chosen): echo the
-			// in-progress answer inside the card, cursor included — unchanged from the
-			// original plain prompt so open-ended questions behave exactly as before.
-			answer := zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ") +
-				fill(zeroTheme.ink).Render(input) + fill(zeroTheme.accent).Render("▌")
-			lines = append(lines, answer)
-			lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))
+			// Free-text mode (no options, or "type my own" chosen). The composer text
+			// box below is the single input — do NOT echo the typed answer inside the
+			// card too (that showed the text in two places). "Type my own" can step
+			// back to the selector with Esc; an open-ended question's Esc skips it.
+			hint := "type an answer below · Enter to submit · Esc to skip"
+			if len(question.Options) > 0 {
+				hint = "type your own answer below · Enter to submit · Esc to go back"
+			}
+			lines = append(lines, fill(zeroTheme.faint).Render(hint))
 		}
 	}
 

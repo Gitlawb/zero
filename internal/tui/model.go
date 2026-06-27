@@ -962,11 +962,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcriptDetailed = false
 				return m, nil
 			}
-			// An active questionnaire is cancelled (not the whole run): deliver
-			// whatever answers were collected so the agent loop unblocks and
-			// degrades to its best-assumption path.
+			// Esc on an ask-user prompt: from the "type my own" free-text it steps
+			// back to the selector for that question; otherwise it cancels the
+			// questionnaire (not the run), delivering whatever answers were collected
+			// so the agent loop unblocks and degrades to its best-assumption path.
 			if m.pendingAskUser != nil {
-				return m.resolveAskUser(true)
+				return m.escapeAskUser()
 			}
 			if m.pendingSpecReview != nil {
 				return m.cancelSpecReview()

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -145,6 +146,7 @@ func TestAskUserSelectorTypeMyOwnReturnsTypedText(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
+	m.width = 96
 
 	updated, _ := m.Update(askUserRequestMsg{
 		runID:   7,
@@ -172,14 +174,75 @@ func TestAskUserSelectorTypeMyOwnReturnsTypedText(t *testing.T) {
 	if len(answers) != 0 {
 		t.Fatalf("expected no answer delivered when switching to free-text, got %#v", answers)
 	}
-	assertContains(t, next.View(), "type an answer")
+	assertContains(t, next.View(), "type your own answer")
 
-	// Type a custom answer and submit.
+	// The typed answer must appear ONLY in the composer, never echoed inside the ask
+	// card (the double-display bug): the focused card carries no input.
 	next.input.SetValue("CockroachDB")
+	if card := renderFocusedAskUserPrompt(*next.pendingAskUser, next.width); strings.Contains(card, "CockroachDB") {
+		t.Fatalf("ask card must not echo the typed answer; card=\n%s", card)
+	}
+
+	// Submit the typed answer.
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if len(answers) != 1 || answers[0][0] != "CockroachDB" {
 		t.Fatalf("expected typed free-text answer [CockroachDB], got %#v", answers)
+	}
+}
+
+// Esc from the "type my own" free-text steps back to the selector for that question
+// — it must NOT cancel the questionnaire or deliver answers; the user can then pick
+// a suggested option instead.
+func TestAskUserTypeMyOwnEscReturnsToSelector(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: askUserRecommendedRequest(),
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+
+	// Into "type my own" (index 3) and free-text.
+	for i := 0; i < 2; i++ {
+		updated, _ = next.Update(testKey(tea.KeyDown))
+		next = updated.(model)
+	}
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.pendingAskUser == nil || !next.pendingAskUser.typing {
+		t.Fatal("expected free-text mode after choosing type-my-own")
+	}
+	next.input.SetValue("scratch")
+
+	// Esc returns to the selector, does not cancel, does not deliver.
+	updated, _ = next.Update(testKey(tea.KeyEsc))
+	next = updated.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("Esc from type-my-own must NOT cancel the questionnaire")
+	}
+	if next.pendingAskUser.typing {
+		t.Fatal("Esc from type-my-own must return to the selector (typing=false)")
+	}
+	if len(answers) != 0 {
+		t.Fatalf("Esc back to the selector must not deliver answers, got %#v", answers)
+	}
+	if !next.pending {
+		t.Fatal("the run must keep running after Esc steps back")
+	}
+
+	// From the selector, move up to a real option and select it.
+	updated, _ = next.Update(testKey(tea.KeyUp)) // 3 -> 2 (MySQL)
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "MySQL" {
+		t.Fatalf("expected selecting MySQL after returning to the selector, got %#v", answers)
 	}
 }
 

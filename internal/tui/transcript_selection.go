@@ -290,7 +290,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				},
 			})
 		case m.pendingAskUser != nil:
-			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width)))
+			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedAskUserPrompt(*m.pendingAskUser, width)))
 		default:
 			items = append(items, transcriptBodyItem{
 				kind:     transcriptBodyItemPendingInterim,

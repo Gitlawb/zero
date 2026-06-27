@@ -131,6 +131,25 @@ func (m model) confirmAskUser() (tea.Model, tea.Cmd) {
 	return m.advanceAskUser(question.Options[cursor])
 }
 
+// escapeAskUser handles Esc for an ask-user prompt. From the "type my own"
+// free-text state of a question that HAS options, it steps back to the selector
+// (keeping the cursor on the "type my own" entry) rather than cancelling — so Esc is
+// an undo of the free-text drop-in. In every other case (selector mode, or an
+// open-ended question with no options) it cancels the questionnaire as before.
+func (m model) escapeAskUser() (tea.Model, tea.Cmd) {
+	pending := m.pendingAskUser
+	if pending == nil {
+		return m, nil
+	}
+	if question, ok := pending.askUserCurrentQuestion(); ok && pending.typing && len(question.Options) > 0 {
+		pending.typing = false
+		pending.cursor = clampAskUserCursor(pending.cursor, askUserSelectableCount(question))
+		m.input.SetValue("")
+		return m, nil
+	}
+	return m.resolveAskUser(true)
+}
+
 // advanceAskUser records answer for the current question and moves to the next,
 // resolving the whole questionnaire once the last question is answered. It is the
 // single advance path shared by the free-text submit and the option select, so both
