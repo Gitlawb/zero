@@ -2142,11 +2142,12 @@ func exploreCardLine(name string, hint string, arg string, detail string, width 
 	line := zeroTheme.faint.Render("  "+marker+" ") + zeroTheme.green.Render(action)
 	if target != "" {
 		shown := target
-		if looksLikePath(target) {
+		isPath := exploreTargetLooksLikePath(name, target)
+		if isPath {
 			shown = displayPath(opts.cwd, target)
 		}
 		styled := zeroTheme.toolTarget.Render(middleTruncate(shown, maxInt(8, width-lipgloss.Width(action)-6)))
-		if looksLikePath(target) {
+		if isPath {
 			styled = hyperlink(fileURL(opts.cwd, target), styled)
 		}
 		line += " " + styled
@@ -2166,6 +2167,15 @@ func exploreChildAction(name string) string {
 		return "Find"
 	default:
 		return toolDisplayName(name)
+	}
+}
+
+func exploreTargetLooksLikePath(name string, target string) bool {
+	switch name {
+	case "read_file", "read_minified_file", "list_directory":
+		return looksLikePath(target)
+	default:
+		return false
 	}
 }
 

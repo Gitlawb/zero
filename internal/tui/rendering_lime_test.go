@@ -1589,6 +1589,9 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 	if strings.Contains(got, "internal/cli/root.go:41") {
 		t.Fatalf("grep card = %q, must not dump search matches", got)
 	}
+	if exploreTargetLooksLikePath("grep", `flag\.|RegisterFlag`) {
+		t.Fatal("grep regex arguments must not be treated as paths")
+	}
 }
 
 // --- Stage 3: interactive surfaces ------------------------------------------
