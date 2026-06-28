@@ -459,22 +459,27 @@ func (m model) handleModelCommand(args string) (model, string) {
 			effortLine = "effort: " + string(effective)
 		}
 	}
+	// Compact one-line summary — "<model> · <provider>[ · effort …][ · saved]" —
+	// instead of a multi-line model/provider/api/effort/saved block.
+	summary := target.modelID + " · " + displayValue(nextProfile.Name, string(metadata.ProviderKind))
+	effort := strings.TrimSpace(strings.TrimPrefix(effortLine, "effort: "))
+	if resetEffort {
+		summary += " · effort auto (reset)"
+	} else if effort != "" && effort != "auto" {
+		summary += " · effort " + effort
+	}
+	if persisted {
+		summary += " · saved"
+	} else if persistErr != nil {
+		// Keep the failure reason (e.g. an unwritable config path) so persistence
+		// problems stay debuggable from the status line.
+		summary += " · not saved (" + persistErr.Error() + ")"
+	}
 	lines := []string{"Model"}
 	if target.notice != "" {
 		lines = append(lines, target.notice)
 	}
-	lines = append(lines,
-		"Switched model.",
-		"model: "+target.modelID,
-		"provider: "+displayValue(nextProfile.Name, string(metadata.ProviderKind)),
-		"api model: "+metadata.APIModel,
-		effortLine,
-	)
-	if persisted {
-		lines = append(lines, "saved: user config")
-	} else if persistErr != nil {
-		lines = append(lines, "saved: no ("+persistErr.Error()+")")
-	}
+	lines = append(lines, summary)
 	return m, strings.Join(lines, "\n")
 }
 

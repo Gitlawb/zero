@@ -870,7 +870,7 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unsupported effort preference to reset, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "effort: auto (unsupported preference reset)") {
+	if !transcriptContains(next.transcript, "effort auto (reset)") {
 		t.Fatalf("expected model switch transcript to mention effort reset, got %#v", next.transcript)
 	}
 }
@@ -903,7 +903,7 @@ func TestModelSwitchRedirectsDeprecatedModelWithNotice(t *testing.T) {
 	if !transcriptContains(next.transcript, "deprecated") {
 		t.Fatalf("expected deprecation notice in transcript, got %#v", next.transcript)
 	}
-	if !transcriptContains(next.transcript, "model: gpt-4.1") {
+	if !transcriptContains(next.transcript, "gpt-4.1 · openai") {
 		t.Fatalf("expected switch to canonical fallback id, got %#v", next.transcript)
 	}
 }

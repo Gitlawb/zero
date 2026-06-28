@@ -494,7 +494,7 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	if next.modelName != "openai/gpt-4.1" {
 		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
 	}
-	if !transcriptContains(next.transcript, "model: openai/gpt-4.1") {
+	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
 		t.Fatalf("expected model switch status, got %#v", next.transcript)
 	}
 }
