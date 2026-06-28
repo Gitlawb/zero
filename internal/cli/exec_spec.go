@@ -98,7 +98,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	defer stopSignals()
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:        run.resolved.MaxTurns,
-		ContextWindow:   modelregistry.AgentContextWindow(modelContextWindow(run.modelRegistry, run.resolved.Provider.Model)),
+		ContextWindow:   resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
 		SessionID:       draftSession.SessionID,
 		SessionTitle:    run.sessionTitle,
 		ProviderName:    run.resolved.Provider.Name,

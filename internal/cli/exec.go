@@ -16,6 +16,8 @@ import (
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -500,7 +502,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	defer lspShutdown()
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
-		ContextWindow:    modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, resolved.Provider.Model)),
+		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
 		DeferThreshold:   effectiveDeferThreshold,
 		Specialists:      specialistRuntime.specialistInfos(),
 		SessionID:        preparedSession.Session.SessionID,
@@ -1009,6 +1011,56 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 	}
 	if entry, ok := registry.Resolve(trimmed); ok {
 		return entry.ContextLimits.ContextWindow
+	}
+	return 0
+}
+
+// resolveAgentContextWindow returns the context window used to enable/size agent
+// compaction: the exact registry value when catalogued, else a window learned from
+// live provider discovery (so an uncatalogued proxy/custom model gets its real
+// window instead of the generic fallback), else the positive FallbackContextWindow.
+// Discovery runs only on a registry miss (catalogued models pay no latency), is
+// bounded by a short timeout, and degrades to the fallback on any error — so a
+// headless run is never blocked or failed by it.
+func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile) int {
+	if window := modelContextWindow(registry, profile.Model); window > 0 {
+		return window
+	}
+	if window := discoveredModelContextWindow(ctx, profile); window > 0 {
+		return window
+	}
+	return modelregistry.AgentContextWindow(0)
+}
+
+// discoveredModelContextWindow queries the provider's live model list for the
+// active model's context window. Returns 0 when the provider isn't catalogued, the
+// credential can't be resolved, discovery fails, or the model reports no window.
+func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) int {
+	descriptor, ok := providercatalog.Get(strings.TrimSpace(profile.CatalogID))
+	if !ok {
+		return 0
+	}
+	// Authenticate discovery with the resolved key (inline, then stored, then env).
+	authed := profile
+	if strings.TrimSpace(authed.APIKey) == "" {
+		if store, err := config.ProviderKeyStore(); err == nil {
+			authed = config.ApplyStoredAPIKey(authed, store)
+		}
+	}
+	if strings.TrimSpace(authed.APIKey) == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
+		authed.APIKey = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
+	}
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	models, err := providermodeldiscovery.DiscoverCatalog(dctx, descriptor, authed, providermodeldiscovery.Options{})
+	if err != nil {
+		return 0
+	}
+	target := strings.TrimSpace(profile.Model)
+	for _, model := range models {
+		if strings.EqualFold(strings.TrimSpace(model.ID), target) && model.ContextWindow > 0 {
+			return model.ContextWindow
+		}
 	}
 	return 0
 }
