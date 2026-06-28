@@ -20,7 +20,6 @@ const (
 	commandSandboxSetup
 	commandProvider
 	commandModel
-	commandMode
 	commandContext
 	commandConfig
 	commandDebug
@@ -83,13 +82,6 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupModel,
 		description: "Show or switch the active model.",
 		kind:        commandModel,
-	},
-	{
-		name:        "/mode",
-		usage:       "/mode [name]",
-		group:       commandGroupModel,
-		description: "List agent modes or switch model, effort, and turns at once.",
-		kind:        commandMode,
 	},
 	{
 		name:        "/plan",

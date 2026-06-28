@@ -48,8 +48,8 @@ func TestSuggestionsSurfaceMatchingCommands(t *testing.T) {
 		t.Fatal("expected suggestions active after typing /mo")
 	}
 	names := suggestionNames(m)
-	if !contains(names, "/model") || !contains(names, "/mode") {
-		t.Fatalf("expected /model and /mode in suggestions, got %v", names)
+	if !contains(names, "/model") {
+		t.Fatalf("expected /model in suggestions, got %v", names)
 	}
 }
 
@@ -80,7 +80,7 @@ func TestSuggestionsInactiveWithoutSlashOrToken(t *testing.T) {
 
 func TestTabCyclesSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m = typeRunes(t, m, "/mo")
+	m = typeRunes(t, m, "/s") // ambiguous prefix with several matches
 	start := m.suggestionIdx
 
 	updated, _ := m.Update(testKey(tea.KeyTab))
@@ -101,7 +101,7 @@ func TestTabCyclesSuggestions(t *testing.T) {
 
 func TestUpDownMoveSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m = typeRunes(t, m, "/mo")
+	m = typeRunes(t, m, "/s") // ambiguous prefix with several matches
 
 	updated, _ := m.Update(testKey(tea.KeyDown))
 	m = updated.(model)
@@ -223,13 +223,13 @@ func TestCommandSuggestionFooterReflectsInsertAction(t *testing.T) {
 
 func TestTabCompletesAfterSelection(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m = typeRunes(t, m, "/mo")
+	m = typeRunes(t, m, "/s") // ambiguous prefix (stop, search, spec, …)
 
-	// Move to /mode, then Tab again -> per spec Tab cycles, so we use Down then
-	// Enter to lock the selection; verify Tab keeps cycling not completing.
+	// With multiple matches, Tab cycles the highlighted suggestion rather than
+	// completing the input, so the typed prefix stays put.
 	updated, _ := m.Update(testKey(tea.KeyTab))
 	m = updated.(model)
-	if m.input.Value() != "/mo" {
+	if m.input.Value() != "/s" {
 		t.Fatalf("Tab should cycle, not yet complete; input=%q", m.input.Value())
 	}
 }
@@ -315,7 +315,7 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	if !strings.Contains(plain, "model") || !strings.Contains(plain, "mode") {
 		t.Fatal("view should render the suggestion overlay")
 	}
-	if strings.Contains(plain, "/model") || strings.Contains(plain, "/mode") {
+	if strings.Contains(plain, "/model") {
 		t.Fatalf("suggestion overlay should display command names without slash prefixes, got %q", plain)
 	}
 	for _, want := range []string{"╭── Commands", "╰", "search > mo", "↑/↓ move", "Enter run", "Esc close"} {

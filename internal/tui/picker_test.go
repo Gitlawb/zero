@@ -659,7 +659,6 @@ func TestPickersRefuseToOpenWhileRunPending(t *testing.T) {
 		command string
 	}{
 		{name: "model", command: "/model"},
-		{name: "mode", command: "/mode"},
 		{name: "effort", command: "/effort"},
 	}
 	for _, tc := range cases {

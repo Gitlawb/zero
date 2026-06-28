@@ -286,7 +286,7 @@ type model struct {
 	exitConfirmSeq      int
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
-	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
+	// /effort with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
 	picker                       *commandPicker
 	providerWizard               *providerWizardState
@@ -3177,8 +3177,7 @@ func permissionDecisionReason(decision permissionDecision) string {
 
 // choosePicker applies the highlighted picker item through the same handler the
 // typed command would have used, appends the resulting status text, and closes
-// the picker. Behavior is identical to running "/model <id>", "/effort <v>",
-// or "/mode <name>".
+// the picker. Behavior is identical to running "/model <id>" or "/effort <v>".
 func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	if m.modelPickerIsLoading() {
 		return m, nil
@@ -3208,10 +3207,6 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerEffort:
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-	case pickerMode:
-		text := ""
-		m, text = m.handleModeCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerSession:
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
@@ -3352,21 +3347,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleModelCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
-	case commandMode:
-		if strings.TrimSpace(command.text) == "" {
-			if m.pending {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
-				return m, nil
-			}
-			if picker := m.newModePicker(); picker != nil {
-				m.picker = picker
-				return m, nil
-			}
-		}
-		text := ""
-		m, text = m.handleModeCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandContext:

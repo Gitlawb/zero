@@ -24,7 +24,7 @@ func displayValue(value string, fallback string) string {
 	return value
 }
 
-// pickerBusyText explains that a settings picker (/model, /mode, /effort)
+// pickerBusyText explains that a settings picker (/model, /effort)
 // can't be opened while a run is in flight. Opening it then would silently refuse
 // the selection once the run lands, so the no-arg command no-ops into this notice.
 func pickerBusyText(name string) string {

@@ -22,7 +22,6 @@ type pickerKind int
 const (
 	pickerModel pickerKind = iota
 	pickerEffort
-	pickerMode
 	pickerSession
 )
 
@@ -45,8 +44,8 @@ type pickerItem struct {
 	Favorite      bool
 }
 
-// commandPicker is a generic single-select overlay reused by /model, /effort,
-// and /mode (invoked with no argument). It owns only list state; the chosen
+// commandPicker is a generic single-select overlay reused by /model and /effort
+// (invoked with no argument). It owns only list state; the chosen
 // value is applied through the existing command handlers.
 type commandPicker struct {
 	kind     pickerKind
@@ -726,22 +725,4 @@ func (m model) newEffortPicker() *commandPicker {
 		}
 	}
 	return &commandPicker{kind: pickerEffort, title: "select reasoning effort", items: items, selected: selected}
-}
-
-// newModePicker lists the agent modes, preselecting none (modes don't carry a
-// single "active" identity).
-func (m model) newModePicker() *commandPicker {
-	modes := modelregistry.Modes()
-	if len(modes) == 0 {
-		return nil
-	}
-	items := make([]pickerItem, 0, len(modes))
-	for _, mode := range modes {
-		label := mode.Name
-		if mode.Description != "" {
-			label += " — " + mode.Description
-		}
-		items = append(items, pickerItem{Label: label, Value: mode.Name})
-	}
-	return &commandPicker{kind: pickerMode, title: "select mode", items: items, selected: 0}
 }
