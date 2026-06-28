@@ -65,6 +65,25 @@ func TestPlainProseDoesNotTriggerBareCodeHighlight(t *testing.T) {
 	}
 }
 
+func TestBareCodeHighlightRequiresBlockSignal(t *testing.T) {
+	out := strings.Join(renderAssistantMarkdownText("for these reasons:\nreturn later with a decision", 90, 90, true), "\n")
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("ordinary prose should not be highlighted as bare code, got:\n%s", out)
+	}
+}
+
+func TestStreamingMarkdownStablePrefixUsesRenderCache(t *testing.T) {
+	defaultRenderCache.clear()
+	text := "Here is the script:\n```go\nfunc main() {}\n```\nDone."
+	_ = renderStreamingAssistantMarkdownText(text, 90, 90)
+	before := defaultRenderCache.stats()
+	_ = renderStreamingAssistantMarkdownText(text, 90, 90)
+	after := defaultRenderCache.stats()
+	if after.Hits <= before.Hits {
+		t.Fatalf("streaming stable markdown should reuse highlighted cache, before=%+v after=%+v", before, after)
+	}
+}
+
 func TestStreamingBuffersOpenFencedCodeBlock(t *testing.T) {
 	open := model{
 		streamingText: "Here is the script:\n```python\nfrom datetime import datetime\nprint(datetime.now())",

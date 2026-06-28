@@ -128,8 +128,8 @@ func isHiddenPlumbingTool(name string) bool {
 
 // skip reports whether a row renders nothing itself: a tool call whose result
 // arrived collapses into the result's card; a permission prompt that has been
-// decided collapses away; allow rows are audit events and the tool card speaks
-// for the approved action.
+// decided collapses away; silent auto-approvals collapse, while manual approval
+// decisions remain as audit rows.
 func (rc rowContext) skip(row transcriptRow) bool {
 	switch row.kind {
 	case rowToolCall:
@@ -154,7 +154,7 @@ func (rc rowContext) skip(row transcriptRow) bool {
 		case agent.PermissionActionPrompt:
 			return rc.decided[key]
 		case agent.PermissionActionAllow:
-			return true
+			return rc.auto[key]
 		}
 	}
 	return false
@@ -164,8 +164,9 @@ func (rc rowContext) skip(row transcriptRow) bool {
 // (small for the live region, generous for the permanent scrollback flush) and
 // the workspace root used to absolutize paths for OSC 8 file hyperlinks.
 type cardRenderOptions struct {
-	bodyCap int
-	cwd     string
+	bodyCap  int
+	cwd      string
+	expanded bool
 }
 
 // flushCardBodyMaxLines is the body cap for cards flushed to scrollback. The
@@ -1423,7 +1424,9 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
 	}
-	body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, opts, failed)
+	bodyOpts := opts
+	bodyOpts.expanded = row.expanded
+	body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
 	head := toolCardHead(name, headTarget, headArg, body.headTag, row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 	footer := body.footer
 	if collapsedFooter != "" && row.expanded && footer == "" {
@@ -1988,7 +1991,7 @@ func highlightedAddedDiffLines(rawLines []string, meta diffMetadata, textBudget 
 	}
 	content := make([]string, 0, meta.adds)
 	for _, line := range rawLines {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++ ") {
 			content = append(content, strings.TrimPrefix(line, "+"))
 		}
 	}
@@ -2040,10 +2043,10 @@ func diffBodyStyledLine(number int, sign string, styledText string, added bool, 
 }
 
 func isDiffAddContent(s string) bool {
-	return strings.HasPrefix(s, "+") && !strings.HasPrefix(s, "+++")
+	return strings.HasPrefix(s, "+") && !strings.HasPrefix(s, "+++ ")
 }
 func isDiffDelContent(s string) bool {
-	return strings.HasPrefix(s, "-") && !strings.HasPrefix(s, "---")
+	return strings.HasPrefix(s, "-") && !strings.HasPrefix(s, "--- ")
 }
 
 // isIsolatedReplacement reports whether rawLines[i] (already a deleted content
@@ -2130,7 +2133,30 @@ func exploreCardBody(name string, hint string, arg string, detail string, width 
 	if failed {
 		return genericCardBody(detail, opts)
 	}
-	return cardBody{lines: []string{exploreCardLine(name, hint, arg, detail, width, opts, "└")}}
+	summary := exploreCardLine(name, hint, arg, detail, width, opts, "└")
+	if !opts.expanded && opts.bodyCap > 0 {
+		footer := ""
+		if strings.TrimSpace(detail) != "" {
+			footer = zeroTheme.faint.Render("▸ details")
+		}
+		return cardBody{lines: []string{summary}, footer: footer}
+	}
+	body := exploreDetailCardBody(name, detail, width, opts)
+	lines := append([]string{summary}, body.lines...)
+	footer := body.footer
+	if opts.expanded && opts.bodyCap > 0 && footer == "" {
+		footer = zeroTheme.faint.Render("▾ collapse")
+	}
+	return cardBody{lines: lines, footer: footer}
+}
+
+func exploreDetailCardBody(name string, detail string, width int, opts cardRenderOptions) cardBody {
+	switch name {
+	case "grep":
+		return grepCardBody(detail, width, opts)
+	default:
+		return genericCardBody(detail, opts)
+	}
 }
 
 func exploreCardLine(name string, hint string, arg string, detail string, width int, opts cardRenderOptions, marker string) string {
@@ -2235,7 +2261,7 @@ func localControlCardBody(name string, hint string, detail string, width int, op
 func localControlChildLine(text string, width int) string {
 	prefix := "  └ "
 	budget := maxInt(8, width-lipgloss.Width(prefix))
-	return zeroTheme.faint.Render(prefix) + zeroTheme.muted.Render(truncateRunes(text, budget))
+	return zeroTheme.faint.Render(prefix) + zeroTheme.muted.Render(truncateDisplayWidth(text, budget))
 }
 
 func browserOpenSummary(detail string, target string) string {
@@ -2360,7 +2386,7 @@ func renderCommandOutputLines(output []commandOutputLine, width int, opts cardRe
 	if len(output) == 1 {
 		prefix := "  └ "
 		budget := maxInt(8, width-lipgloss.Width(prefix))
-		text := truncateRunes(output[0].text, budget)
+		text := truncateDisplayWidth(output[0].text, budget)
 		return capCardLines([]string{zeroTheme.faint.Render(prefix) + output[0].style.Render(text)}, opts.bodyCap)
 	}
 
@@ -2368,7 +2394,7 @@ func renderCommandOutputLines(output []commandOutputLine, width int, opts cardRe
 	prefix := "  │ "
 	budget := maxInt(8, width-lipgloss.Width(prefix))
 	for _, item := range output {
-		text := truncateRunes(item.text, budget)
+		text := truncateDisplayWidth(item.text, budget)
 		lines = append(lines, zeroTheme.faint.Render(prefix)+item.style.Render(text))
 	}
 	return capCardLines(lines, opts.bodyCap)
@@ -2379,6 +2405,20 @@ func trimTrailingEmptyCommandOutput(output []commandOutputLine) []commandOutputL
 		output = output[:len(output)-1]
 	}
 	return output
+}
+
+func truncateDisplayWidth(text string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= budget {
+		return text
+	}
+	if budget <= 1 {
+		return "…"
+	}
+	head, _ := splitAtWidth(text, budget-1)
+	return head + "…"
 }
 
 // renderSessionsCards draws the /resume list as stacked cards: id (accent) +
@@ -2427,7 +2467,7 @@ func grepCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 				location = hyperlink(fileURL(opts.cwd, path), location)
 			}
 			budget := maxInt(8, innerWidth-lipgloss.Width(match[1])-2)
-			lines = append(lines, location+"  "+zeroTheme.muted.Render(truncateRunes(match[2], budget)))
+			lines = append(lines, location+"  "+zeroTheme.muted.Render(truncateDisplayWidth(match[2], budget)))
 			continue
 		}
 		lines = append(lines, zeroTheme.muted.Render(line))

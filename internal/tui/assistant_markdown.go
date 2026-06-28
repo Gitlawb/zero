@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -137,18 +139,22 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 
 		if allowHighlight && looksLikeBareCodeLine(line) {
 			code := []string{}
-			for index < len(raw) {
-				next := raw[index]
+			probe := index
+			for probe < len(raw) {
+				next := raw[probe]
 				nextTrimmed := strings.TrimSpace(next)
-				if nextTrimmed == "" || markdownStartsBlock(raw, index) || !looksLikeBareCodeLine(next) {
+				if nextTrimmed == "" || markdownStartsBlock(raw, probe) || !looksLikeBareCodeLine(next) {
 					break
 				}
 				code = append(code, strings.ReplaceAll(next, "\t", "    "))
-				index++
+				probe++
 			}
-			if highlighted, ok := highlightCodeAuto(code, "", tableMeasure); ok {
-				lines = append(lines, highlighted...)
-				continue
+			if looksLikeBareCodeBlock(code) {
+				if highlighted, ok := highlightCodeAuto(code, "", tableMeasure); ok {
+					lines = append(lines, highlighted...)
+					index = probe
+					continue
+				}
 			}
 		}
 
@@ -171,7 +177,20 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 }
 
 func renderStreamingAssistantMarkdownText(text string, proseMeasure int, tableMeasure int) []string {
-	return renderAssistantMarkdownText(streamingMarkdownStablePrefix(text), proseMeasure, tableMeasure, true)
+	stablePrefix := streamingMarkdownStablePrefix(text)
+	if defaultRenderCache == nil {
+		return renderAssistantMarkdownText(stablePrefix, proseMeasure, tableMeasure, true)
+	}
+	key := streamingMarkdownRenderCacheKey(stablePrefix, proseMeasure, tableMeasure)
+	rendered := defaultRenderCache.render(key, true, func() string {
+		return strings.Join(renderAssistantMarkdownText(stablePrefix, proseMeasure, tableMeasure, true), "\n")
+	})
+	return viewLines(rendered)
+}
+
+func streamingMarkdownRenderCacheKey(text string, proseMeasure int, tableMeasure int) string {
+	sum := sha256.Sum256([]byte(text))
+	return fmt.Sprintf("stream-md-v1:%d:%d:%x", proseMeasure, tableMeasure, sum)
 }
 
 func streamingMarkdownStablePrefix(text string) string {
@@ -419,16 +438,54 @@ func looksLikeBareCodeLine(line string) bool {
 func looksLikeBareCodeBlock(lines []string) bool {
 	nonBlank := 0
 	codeLike := 0
+	strongSignals := 0
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		nonBlank++
-		if looksLikeBareCodeLine(line) || isIndentedCodeContinuation(line) {
+		if isIndentedCodeContinuation(line) {
 			codeLike++
+			strongSignals++
+			continue
+		}
+		if looksLikeBareCodeLine(line) {
+			codeLike++
+			if looksLikeStrongBareCodeLine(line) {
+				strongSignals++
+			}
 		}
 	}
-	return nonBlank >= 2 && codeLike == nonBlank
+	return nonBlank >= 2 && codeLike == nonBlank && strongSignals > 0
+}
+
+func looksLikeStrongBareCodeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "from ") && strings.Contains(trimmed, " import "):
+		return true
+	case strings.HasPrefix(trimmed, "import ") && !strings.Contains(trimmed, " from "):
+		return true
+	case strings.HasPrefix(trimmed, "def ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "class ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "print("):
+		return true
+	case isSimpleFunctionCall(trimmed):
+		return true
+	case strings.HasPrefix(trimmed, "package "):
+		return true
+	case strings.HasPrefix(trimmed, "func ") && strings.Contains(trimmed, "{"):
+		return true
+	case strings.HasPrefix(trimmed, "const "), strings.HasPrefix(trimmed, "let "), strings.HasPrefix(trimmed, "var "):
+		return true
+	case strings.HasPrefix(trimmed, "function ") && strings.Contains(trimmed, "{"):
+		return true
+	case strings.HasPrefix(trimmed, "<!DOCTYPE "), strings.HasPrefix(trimmed, "<html"), strings.HasPrefix(trimmed, "<div"), strings.HasPrefix(trimmed, "<span"):
+		return true
+	}
+	return false
 }
 
 func isIndentedCodeContinuation(line string) bool {

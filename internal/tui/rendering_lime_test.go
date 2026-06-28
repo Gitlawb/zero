@@ -874,7 +874,7 @@ func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 		"@@ -0,0 +1,3 @@",
 		"+package cli",
 		"+",
-		"+var Version = \"dev\"",
+		"+++var Version = \"dev\"",
 	}, "\n")
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "write_file", status: tools.StatusOK, detail: diff}
 	styled := m.renderRow(row, 80, buildRowContext(nil))
@@ -884,7 +884,7 @@ func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 		}
 	}
 	got := plainRender(t, styled)
-	for _, want := range []string{"Added", "internal/cli/root.go", "(+3 -0)", "package cli", "   1"} {
+	for _, want := range []string{"Added", "internal/cli/root.go", "(+3 -0)", "package cli", "++var Version = \"dev\"", "   1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("diff card = %q, missing %q", got, want)
 		}
@@ -943,11 +943,22 @@ func TestReadCardBodyShowsExploredSummary(t *testing.T) {
 			t.Fatalf("read card = %q, missing %q", got, want)
 		}
 	}
+	if !strings.Contains(got, "▸ details") {
+		t.Fatalf("read card = %q, missing expand affordance", got)
+	}
 	if strings.Contains(got, "L12") || strings.Contains(got, "func Run()") || strings.Contains(got, "  12 ") {
 		t.Fatalf("read card = %q, must not dump read_file body into the transcript", got)
 	}
 	if strings.Contains(got, "read_file") {
 		t.Fatalf("read card = %q, must not expose raw tool name", got)
+	}
+
+	row.expanded = true
+	expanded := plainRender(t, m.renderRow(row, 80, rc))
+	for _, want := range []string{"Explored", "└ Read", "internal/agent/loop.go", "func Run()", "13 |"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded read card = %q, missing %q", expanded, want)
+		}
 	}
 }
 
@@ -1632,8 +1643,11 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 	if !rc.skip(prompt) {
 		t.Fatal("a decided prompt row must collapse away")
 	}
-	if !rc.skip(allowed) {
-		t.Fatal("manual allow rows should collapse; the tool card shows the approved action")
+	if rc.skip(allowed) {
+		t.Fatal("manual allow rows should remain as audit lines")
+	}
+	if got := plainRender(t, m.renderRow(allowed, 80, rc)); !strings.Contains(got, "allowed once · bash") {
+		t.Fatalf("manual allow = %q, want allowed once · bash", got)
 	}
 
 	session := transcriptRow{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{
@@ -1643,8 +1657,11 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 		{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{ToolCallID: "call_session", ToolName: "bash", Action: agent.PermissionActionPrompt}},
 		session,
 	})
-	if !rcSession.skip(session) {
-		t.Fatal("session allow rows should collapse; the durable decision is still recorded")
+	if rcSession.skip(session) {
+		t.Fatal("session allow rows should remain as audit lines")
+	}
+	if got := plainRender(t, m.renderRow(session, 80, rcSession)); !strings.Contains(got, "allowed for session · bash") {
+		t.Fatalf("session allow = %q, want allowed for session · bash", got)
 	}
 
 	grant := &agent.PermissionEvent{ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionAllow}
@@ -1654,8 +1671,11 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 		ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionPrompt,
 	}}
 	rcTwo := buildRowContext([]transcriptRow{promptTwo, always})
-	if !rcTwo.skip(always) {
-		t.Fatal("always allow rows should collapse; the saved grant is still recorded")
+	if rcTwo.skip(always) {
+		t.Fatal("always allow rows should remain as audit lines")
+	}
+	if got := plainRender(t, m.renderRow(always, 80, rcTwo)); !strings.Contains(got, "always · bash") {
+		t.Fatalf("always allow = %q, want always · bash", got)
 	}
 
 	denied := transcriptRow{kind: rowPermission, id: "call_3", permission: &agent.PermissionEvent{
@@ -1789,7 +1809,8 @@ func TestPermissionCollapseIsRunScoped(t *testing.T) {
 		t.Fatal("run 2's unprompted allow should fold into its tool card's [auto] tag")
 	}
 
-	// Same-run prompt+decision still collapses as before.
+	// Same-run prompt+decision collapses the prompt but keeps the manual decision
+	// as an audit line.
 	sameRunPrompt := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 3, permission: &agent.PermissionEvent{
 		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
 	}}
@@ -1800,8 +1821,8 @@ func TestPermissionCollapseIsRunScoped(t *testing.T) {
 	if !rcSame.skip(sameRunPrompt) {
 		t.Fatal("a same-run decided prompt must collapse")
 	}
-	if !rcSame.skip(sameRunAllow) {
-		t.Fatal("the same-run manual decision line must collapse")
+	if rcSame.skip(sameRunAllow) {
+		t.Fatal("the same-run manual decision line must render")
 	}
 }
 

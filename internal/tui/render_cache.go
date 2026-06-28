@@ -150,6 +150,7 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, strconv.Itoa(width))
 	appendRenderCacheField(&b, strconv.FormatBool(flush))
 	appendRenderCacheField(&b, strconv.Itoa(opts.bodyCap))
+	appendRenderCacheField(&b, strconv.FormatBool(opts.expanded))
 	appendRenderCacheField(&b, opts.cwd)
 	appendRenderCacheField(&b, strconv.Itoa(int(row.kind)))
 	appendRenderCacheField(&b, row.id)
