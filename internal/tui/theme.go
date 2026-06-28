@@ -6,8 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// tuiTheme is the resolved terminal palette Zero renders with — the Lime design
-// (the terminal translation of docs/design/zero_tui_lime.html). It is produced by
+// tuiTheme is the resolved terminal palette Zero renders with. It is produced by
 // buildTheme from a palette, so the same renderers serve both the dark default
 // and the light variant; the active theme lives in the package var zeroTheme and
 // may be swapped at startup (background detection / ZERO_THEME / --theme) or live

@@ -1,32 +1,36 @@
-# Zero Install Scripts
+# Installing Zero
 
-> **Status: pre-release.** No GitHub release has been published yet, so the install scripts below
-> (which download release assets from `Gitlawb/zero`'s Releases) will fail with a 404 until the first
-> release exists. Until then, build from source: `go run ./cmd/zero` or `go build -o zero ./cmd/zero`
-> (requires Go 1.25+). The instructions below describe how the scripts work once releases are published.
+Zero is distributed as:
 
-Zero release archives are published as:
+- an npm package, `@gitlawb/zero`
+- release archives on GitHub Releases
+- source builds with Go 1.25+
 
-- `zero-v<version>-linux-<arch>.tar.gz`
-- `zero-v<version>-macos-<arch>.tar.gz`
-- `zero-v<version>-windows-<arch>.zip`
+The npm package and install scripts download a platform-specific release archive.
+They require a published GitHub Release for the requested version.
 
-Each archive must have a matching `.sha256` file. The install scripts download both files and verify the checksum before copying the binary.
-
-Maintainers can verify the release directory before upload:
+## npm
 
 ```bash
-go run ./cmd/zero-release package
-go run ./cmd/zero-release verify
+npm install -g @gitlawb/zero
+zero
 ```
 
-`verify:release` requires every archive in `dist/release` to have a same-directory `.sha256` file whose contents are:
+The package supports Linux, macOS, and Windows on x64 and arm64. It installs the
+`zero` command and downloads the matching release binary during `postinstall`.
 
-```text
-<sha256>  <archive-name>
+Requirements:
+
+- Node.js 18+
+- network access to npm and GitHub Releases
+
+## Linux And macOS Script
+
+Install the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
 ```
-
-## Linux And macOS
 
 From a checkout:
 
@@ -38,18 +42,14 @@ Install a specific version:
 
 ```bash
 ZERO_VERSION=0.1.0 scripts/install.sh
+scripts/install.sh --version 0.1.0
 ```
 
-Install to a custom directory:
+Install somewhere else:
 
 ```bash
 ZERO_INSTALL_DIR="$HOME/bin" scripts/install.sh
-```
-
-Install from a fork or internal repository:
-
-```bash
-scripts/install.sh --repo owner/repo
+scripts/install.sh --install-dir "$HOME/bin"
 ```
 
 Defaults:
@@ -58,9 +58,15 @@ Defaults:
 - Version: latest GitHub release
 - Install path: `~/.local/bin/zero`
 
-Requirements: `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.
+Requirements: Bash, `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.
 
-## Windows
+## Windows PowerShell Script
+
+Install the latest release:
+
+```powershell
+irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+```
 
 From a checkout:
 
@@ -74,16 +80,10 @@ Install a specific version:
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Version 0.1.0
 ```
 
-Install to a custom directory:
+Install somewhere else:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallDir "$env:USERPROFILE\bin"
-```
-
-Install from a fork or internal repository:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Repository owner/repo
 ```
 
 Defaults:
@@ -92,12 +92,49 @@ Defaults:
 - Version: latest GitHub release
 - Install path: `%LOCALAPPDATA%\zero\bin\zero.exe`
 
+## From Source
+
+```bash
+git clone https://github.com/Gitlawb/zero.git
+cd zero
+go run ./cmd/zero
+```
+
+Build a local binary:
+
+```bash
+go build -o zero ./cmd/zero
+```
+
+Source builds require Go 1.25+.
+
+## Release Archive Format
+
+Release archives are named:
+
+- `zero-v<version>-linux-<arch>.tar.gz`
+- `zero-v<version>-macos-<arch>.tar.gz`
+- `zero-v<version>-windows-<arch>.zip`
+
+Supported targets:
+
+- `linux-x64`
+- `linux-arm64`
+- `macos-x64`
+- `macos-arm64`
+- `windows-x64`
+- `windows-arm64`
+
+Each archive must have a matching `.sha256` file. The install scripts download
+both files, verify the checksum, and then copy the binary into the install
+directory.
+
 ## Updating
 
-Check whether a newer release exists:
+Check for a newer release:
 
 ```bash
 zero update --check
 ```
 
-For M2, updates are check-only. Re-run the installer to replace the local binary after reviewing the release.
+Then reinstall with npm or rerun the install script for the version you want.

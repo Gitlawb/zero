@@ -17,11 +17,12 @@ func TestBuildOrdersAndClassifiesWorkspaceSeed(t *testing.T) {
 		GitSummary: "3 modified, 1 untracked",
 		Paths: []string{
 			"internal/agent/loop.go",
-			"docs/WORK_SPLIT_PRD.md",
+			"docs/STREAM_JSON_PROTOCOL.md",
 			"package.json",
 			"cmd/zero/main.go",
 			"AGENTS.md",
-			"docs/PRD.md",
+			"docs/INSTALL.md",
+			"README.md",
 			"ZERO.md",
 			"go.mod",
 		},
@@ -36,10 +37,10 @@ func TestBuildOrdersAndClassifiesWorkspaceSeed(t *testing.T) {
 	if got.GitSummary != "dirty: 3 modified, 1 untracked" {
 		t.Fatalf("GitSummary=%q", got.GitSummary)
 	}
-	if want := []string{"AGENTS.md", "ZERO.md", "cmd/", "docs/", "go.mod", "internal/", "package.json"}; !reflect.DeepEqual(got.Layout, want) {
+	if want := []string{"AGENTS.md", "README.md", "ZERO.md", "cmd/", "docs/", "go.mod", "internal/", "package.json"}; !reflect.DeepEqual(got.Layout, want) {
 		t.Fatalf("Layout=%v want %v", got.Layout, want)
 	}
-	if want := []string{"go.mod", "package.json", "AGENTS.md", "docs/PRD.md", "docs/WORK_SPLIT_PRD.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
+	if want := []string{"README.md", "go.mod", "package.json", "AGENTS.md", "docs/INSTALL.md", "docs/STREAM_JSON_PROTOCOL.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
 		t.Fatalf("ProjectFiles=%v want %v", got.ProjectFiles, want)
 	}
 	if want := []string{"AGENTS.md", "ZERO.md"}; !reflect.DeepEqual(got.MemoryFiles, want) {
@@ -56,7 +57,7 @@ func TestBuildKeepsPathsRelativeToCWD(t *testing.T) {
 		GitDirty:  &dirty,
 		Paths: []string{
 			filepath.Join(root, "go.mod"),
-			filepath.Join(root, "docs", "PRD.md"),
+			filepath.Join(root, "docs", "INSTALL.md"),
 			filepath.Join(filepath.Dir(root), "outside", "AGENTS.md"),
 		},
 	})
@@ -92,7 +93,7 @@ func TestBuildRejectsAbsolutePathsWithoutCWD(t *testing.T) {
 func TestBuildNormalizesBackslashPathsBeforeTraversalChecks(t *testing.T) {
 	got := Build(Input{
 		Paths: []string{
-			`docs\PRD.md`,
+			`docs\INSTALL.md`,
 			`..\..\etc\passwd`,
 			`\\server\share\secret.txt`,
 		},
@@ -101,7 +102,7 @@ func TestBuildNormalizesBackslashPathsBeforeTraversalChecks(t *testing.T) {
 	if want := []string{"docs/"}; !reflect.DeepEqual(got.Layout, want) {
 		t.Fatalf("Layout=%v want %v", got.Layout, want)
 	}
-	if want := []string{"docs/PRD.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
+	if want := []string{"docs/INSTALL.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
 		t.Fatalf("ProjectFiles=%v want %v", got.ProjectFiles, want)
 	}
 }
@@ -113,8 +114,8 @@ func TestRenderHonorsLineAndWidthBudgets(t *testing.T) {
 		Paths: []string{
 			"averyveryveryverylongdirectoryname/averyveryveryverylongfilename.go",
 			"cmd/zero/main.go",
-			"docs/PRD.md",
-			"docs/WORK_SPLIT_PRD.md",
+			"docs/INSTALL.md",
+			"docs/STREAM_JSON_PROTOCOL.md",
 			"go.mod",
 			"package.json",
 			"AGENTS.md",
@@ -152,7 +153,7 @@ func TestBuildFromWorkspaceUsesWorkspaceIndexWithoutGit(t *testing.T) {
 	root := t.TempDir()
 	writeSeedFile(t, root, "go.mod", "module example.test/zero\n")
 	writeSeedFile(t, root, "cmd/zero/main.go", "package main\n")
-	writeSeedFile(t, root, "docs/PRD.md", "# PRD\n")
+	writeSeedFile(t, root, "docs/INSTALL.md", "# Install\n")
 	writeSeedFile(t, root, "node_modules/pkg/index.js", "ignored")
 
 	got, err := BuildFromWorkspace(root, GitInfo{Branch: "main", Summary: "clean"})
@@ -163,7 +164,7 @@ func TestBuildFromWorkspaceUsesWorkspaceIndexWithoutGit(t *testing.T) {
 	if got.GitSummary != "clean" {
 		t.Fatalf("GitSummary=%q want clean", got.GitSummary)
 	}
-	if want := []string{"go.mod", "docs/PRD.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
+	if want := []string{"go.mod", "docs/INSTALL.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
 		t.Fatalf("ProjectFiles=%v want %v", got.ProjectFiles, want)
 	}
 	if contains(got.Layout, "node_modules/") {

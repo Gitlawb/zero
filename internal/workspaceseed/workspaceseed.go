@@ -19,11 +19,12 @@ const (
 )
 
 var detectedProjectFileOrder = []string{
+	"README.md",
 	"go.mod",
 	"package.json",
 	"AGENTS.md",
-	"docs/PRD.md",
-	"docs/WORK_SPLIT_PRD.md",
+	"docs/INSTALL.md",
+	"docs/STREAM_JSON_PROTOCOL.md",
 }
 
 // Input is the pure builder input. Callers provide paths and git metadata; the

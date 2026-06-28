@@ -1,6 +1,6 @@
 # Zero Performance Benchmarks
 
-The M2 performance harness tracks three release-facing signals:
+The performance harness tracks three release-facing signals:
 
 - Cold start: process startup time for `zero --version`.
 - Binary first output: time from spawning the built `zero --version` command to

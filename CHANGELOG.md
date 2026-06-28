@@ -33,5 +33,4 @@ tagged. Until then, source builds report the version `dev`.
 - The inert `/input-style` slash command (it had no backend).
 
 ### Fixed
-- README/`go.mod` Go-version mismatch and other stale docs claims surfaced by the product/UX audit
-  (`docs/audit/2026-06-21-product-ux-audit.md`).
+- README/`go.mod` Go-version mismatch and other stale public-release docs claims.

@@ -1,364 +1,289 @@
-<div align="center">
+<p align="center">
+  <img src="docs/assets/zero-logo.png" alt="Zero" width="385">
+</p>
 
-```
-███████╗ ███████╗ ██████╗   ██████╗
-╚══███╔╝ ██╔════╝ ██╔══██╗ ██╔═══██╗
-  ███╔╝  █████╗   ██████╔╝ ██║   ██║
- ███╔╝   ██╔══╝   ██╔══██╗ ██║   ██║
-███████╗ ███████╗ ██║  ██║ ╚██████╔╝
-╚══════╝ ╚══════╝ ╚═╝  ╚═╝  ╚═════╝
-```
+<p align="center"><strong>A terminal coding agent you own.</strong></p>
 
-### The terminal coding agent you fully own.
+<p align="center">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
+  <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+</p>
 
-**Any model. Any provider. Your rules.**
-
-![go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
-![providers](https://img.shields.io/badge/providers-25%2B-34E2EA)
-![tests](https://img.shields.io/badge/test%20files-200%2B-43D17A)
-![status](https://img.shields.io/badge/status-active%20development-E8B84B)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-</div>
-
----
-
-Zero is an AI coding agent that lives in your terminal. It runs a full agentic loop — reading, searching, editing, and executing in your repo — against **whatever model you choose**: frontier APIs, fast cloud inference, or a local model on your own machine. One interface, no vendor lock-in, no telemetry phoning home.
+Zero is an AI coding agent for your local terminal. It can inspect a repository,
+edit files, run commands, use browser/terminal helpers, and keep durable local
+sessions while you choose the model and the permission level.
 
 ```bash
-zero                                          # interactive TUI
-zero exec "fix the failing test in ./pkg"     # headless one-shot
-zero exec -o stream-json < turns.jsonl        # programmatic, for scripts & CI
+zero
+zero exec "fix the failing test in ./pkg"
+zero exec --output-format stream-json < turns.jsonl
 ```
-
-> Zero treats the **model as a swappable, per-task choice** and **never mutates your system without a permission decision**.
 
 ## Why Zero
 
-- 🔌 **25+ providers, one interface** — OpenAI, Anthropic, Gemini, Ollama (local & cloud), LM Studio, OpenRouter, Groq, DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, and any OpenAI- or Anthropic-compatible endpoint. Switch mid-session with `/model`.
-- 🖥️ **A TUI that feels premium** — truecolor Bubble Tea interface with a first-run setup wizard, searchable live model picker, scrollback, themes, image input, and slash commands for everything.
-- 🤖 **Headless & scriptable** — `zero exec` with `text` / `json` / `stream-json` I/O, session resume & fork, isolated `--worktree` runs, and meaningful exit codes. Built for CI.
-- 🧠 **Subagents** — delegate to built-in `worker`, `explorer`, and `code-review` specialists (or generate your own) that run as real background tasks, even out-of-process.
-- 📋 **Spec mode** — have the agent draft a spec first, review and approve it, *then* let it build. No more runaway sessions.
-- 📈 **Mid-run model escalation** — start cheap, and let the agent request a stronger model only when it hits a wall (`--allow-escalation`).
-- 🗺️ **Repo intelligence** — deterministic repo maps, workspace indexing, and context-budget reports keep the agent grounded in *your* codebase, not hallucinations.
-- ⏰ **Scheduled agents** — `zero cron` runs file-backed, dependency-free agent jobs on a schedule.
-- 🛡️ **Safe by default** — permission-gated mutations, autonomy ceilings, sandbox policy (writes stay inside the workspace unless you grant extra directories with `--add-dir` / `/add-dir`), and secret redaction everywhere. Unsafe mode is an explicit, loudly-labeled opt-in.
-- 💾 **Durable sessions** — append-only local event store with full-text search, resume, fork, and rewind. Your history never leaves your disk.
-- 🧩 **Extensible** — skills, plugins, hooks, and MCP (Zero is both an MCP client *and* an MCP server).
+- **Use the model you want.** Bring OpenAI, Anthropic, Gemini, Groq, OpenRouter,
+  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, or any
+  OpenAI-/Anthropic-compatible endpoint.
+- **Stay in control.** File writes, shell commands, network access, and
+  out-of-workspace writes go through Zero's permission and sandbox policy.
+- **Works in the terminal.** The TUI has model/provider pickers, image input,
+  slash commands, live plan/tool rendering, scrollback, themes, and resume/fork
+  support.
+- **Works without the TUI.** `zero exec` is scriptable, supports text/JSON/
+  stream-JSON I/O, isolated worktrees, spec-first runs, and meaningful exit
+  codes for CI.
+- **Keeps context local.** Sessions are stored on disk, searchable, resumable,
+  and never uploaded as telemetry by Zero.
+- **Extensible when you need it.** Use MCP servers, skills, plugins, hooks, and
+  specialist subagents from the same CLI.
 
-## Quick start
+## Install
 
-```bash
-# run from source (requires Go 1.25+)
-go run ./cmd/zero
-```
-
-Or, once the first release is published, install the prebuilt binary via npm — the wrapper
-downloads the right binary for your platform:
+### npm
 
 ```bash
 npm install -g @gitlawb/zero
 zero
 ```
 
-> **Pre-built binaries are coming soon.** The npm package and the `scripts/install.sh`
-> (Linux/macOS) / `scripts/install.ps1` (Windows) installers all download GitHub Release
-> assets, which require the first release to be published. Until then, build from source with
-> `go run ./cmd/zero` (or `go build -o zero ./cmd/zero`).
+The npm package installs a small wrapper plus the matching Zero binary for your
+platform from GitHub Releases. It supports Linux, macOS, and Windows on x64 and
+arm64.
 
-First launch opens a **guided setup wizard** — pick a provider, paste a key, choose a model, done. Or do it non-interactively:
+### Install scripts
+
+Linux/macOS:
 
 ```bash
-export OPENAI_API_KEY=sk-...      # or ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...
-zero setup                        # guided first-run provider setup
-zero doctor                       # verify config, keys, and connectivity
+curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
 ```
 
-Local models need no key at all:
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+```
+
+### From source
+
+Source builds require Go 1.25+.
 
 ```bash
-# Ollama or LM Studio running locally? Zero finds them.
+git clone https://github.com/Gitlawb/zero.git
+cd zero
+go run ./cmd/zero
+```
+
+Release installers and the npm wrapper require published GitHub Release assets.
+If you are testing before the first public release, build from source:
+
+```bash
+go build -o zero ./cmd/zero
+```
+
+More install details: [docs/INSTALL.md](docs/INSTALL.md).
+
+## First Run
+
+Start the TUI:
+
+```bash
+zero
+```
+
+The setup wizard helps you pick a provider and model. You can also configure
+providers from the command line:
+
+```bash
+zero setup
 zero providers list
+zero models list
+zero doctor
 ```
 
-## The TUI
-
-Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cycles permission modes, **Ctrl+C** exits.
-
-| | |
-|---|---|
-| `/model` `/provider` | switch model or provider mid-session (searchable picker) |
-| `/spec` `/plan` | spec-mode drafting and live plan view |
-| `/image` | attach images for vision models |
-| `/resume` `/rewind` | time-travel across sessions |
-| `/compact` `/context` | manage the context window |
-| `/permissions` `/tools` | inspect what the agent can touch |
-| `/add-dir` | grant an extra write directory for the session, or list current write roots |
-| `/theme` `/style` | make it yours |
-| `/doctor` `/config` | health and config without leaving the chat |
-
-Turn-completion notifications (terminal bell / OSC-9) ping you when the agent finishes or needs input — go make coffee.
-
-## Accessibility & appearance
-
-Zero ships sensible defaults and a few environment/command controls. Meaning never depends on color
-alone — diffs carry `+`/`−` signs, permission outcomes use `✓`/`✗` glyphs plus a text `PERMISSION`
-badge, and permission modes show text labels — so the UI stays readable when color is stripped.
-
-| Control | What it does |
-|---|---|
-| `NO_COLOR` (any non-empty value) | Disables color, per [no-color.org](https://no-color.org). Zero honors **any** non-empty value (`NO_COLOR=1`, `yes`, `true`, …); bold/underline still render. |
-| `ZERO_THEME=auto\|dark\|light` | Selects the palette at startup. `auto` (default) detects the terminal background. |
-| `--theme auto\|dark\|light` | Same as `ZERO_THEME`, as a launch flag (takes precedence over the env var). |
-| `/theme [auto\|dark\|light]` | Switches the palette live inside the TUI. |
-| `ZERO_NO_FADE=1` | Reduce-motion opt-out: disables the streaming-text fade animation. Fade also auto-disables over SSH/tmux and on low-color/no-TTY terminals. |
-
-## Headless `exec`
+For API providers, set the matching environment variable before setup or enter
+the key in the wizard:
 
 ```bash
-# one-shot
-zero exec "explain internal/agent/loop.go and suggest one improvement"
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=...
+export GEMINI_API_KEY=...
+```
 
-# pick a model and mode preset per task
-zero exec --model claude-sonnet-4.5 --mode deep "refactor the session store"
+For local models, run Ollama or LM Studio and then use `zero setup` or
+`zero providers detect`.
 
-# spec-first: draft → review → approve → build
+## Daily Use
+
+### Interactive TUI
+
+```bash
+zero
+```
+
+Useful controls:
+
+| Control | Action |
+|---|---|
+| `Enter` | send the prompt |
+| `/` | open slash-command suggestions |
+| `Shift+Tab` | cycle permission mode |
+| `Ctrl+B` | show/hide the sidebar |
+| `Ctrl+C` | cancel or exit |
+
+Common slash commands:
+
+| Command | Purpose |
+|---|---|
+| `/model`, `/provider` | switch the active model/provider |
+| `/spec`, `/plan` | draft and review a plan before building |
+| `/image` | attach an image for vision-capable models |
+| `/resume`, `/rewind` | continue or roll back local sessions |
+| `/compact`, `/context` | manage context usage |
+| `/permissions`, `/tools` | inspect available tools and policy |
+| `/add-dir` | allow an extra write directory for this session |
+| `/theme`, `/doctor`, `/config` | adjust appearance and inspect setup |
+
+### Headless `exec`
+
+```bash
+zero exec "explain internal/agent/loop.go"
+zero exec --model claude-sonnet-4.5 "refactor the config loader"
 zero exec --use-spec "add rate limiting to the API client"
+zero exec --worktree "try the migration in an isolated worktree"
+zero exec --resume
+zero exec --fork <session-id> "try the other approach"
+```
 
-# run in an isolated git worktree, escalate model only if needed
-zero exec -w --allow-escalation "migrate the config loader to v2"
+Programmatic use:
 
-# multi-turn programmatic I/O over stdio
+```bash
 zero exec --input-format stream-json --output-format stream-json < turns.jsonl
-
-# resume or fork any previous session
-zero exec --resume            # latest
-zero exec --fork <session-id> "now try the other approach"
 ```
 
-Key flags: `-m/--model` · `--mode <smart|deep|fast|large|precise>` · `--image` · `--use-spec` · `--auto <low|medium|high>` · `--enabled-tools/--disabled-tools` · `-w/--worktree` · `--add-dir <path>` (repeatable) · `--resume/--fork` · `--allow-escalation` · `--notify` · `-o <text|json|stream-json>`.
+The stream-JSON contract is documented in
+[docs/STREAM_JSON_PROTOCOL.md](docs/STREAM_JSON_PROTOCOL.md).
 
-stdout carries **only** program output; logs go to stderr. Full contract in [`docs/STREAM_JSON_PROTOCOL.md`](docs/STREAM_JSON_PROTOCOL.md).
+## Safety Model
 
-## Commands
+Zero is designed to make side effects visible.
 
+- Workspace reads are allowed by default.
+- File writes are limited to the workspace unless you grant another directory.
+- Shell commands, network access, destructive commands, and elevated actions are
+  permission-gated.
+- `--add-dir <path>` and `/add-dir <path>` grant additional write roots without
+  giving the agent the whole filesystem.
+- Unsafe/autonomous modes are explicit opt-ins.
+- Secrets are redacted from tool output and logs where Zero controls the surface.
+
+Example:
+
+```bash
+zero --add-dir ../docs-site
+zero exec --add-dir ../shared "update both repos"
 ```
+
+Sandbox behavior can be inspected with:
+
+```bash
+zero sandbox policy
+zero sandbox grants list
+```
+
+## Web And Local Control
+
+Zero includes local file/search/edit/shell tools, `web_fetch` for public URLs,
+and MCP support for additional tools.
+
+For local dev servers, use shell commands such as `curl` through `exec_command`
+so the normal sandbox and permission policy applies. Long-running commands stay
+attached to a background terminal session and can be listed or stopped from the
+TUI.
+
+The npm package also includes browser and terminal helper packages used by local
+browser/terminal tools. Source builds can use the same helpers when they are on
+`PATH` or configured in Zero's local-control settings.
+
+## Common Commands
+
+```text
 zero                  interactive TUI
-zero exec             one-shot / scripted agent runs
-zero setup            guided first-run provider setup
-zero models           model registry (capabilities, context, cost)
-zero providers        provider profiles + 25-provider catalog
-zero doctor           config, key, and connectivity health checks
-zero context          workspace context-budget report
-zero repo-map         deterministic repository map for agent context
-zero repo-info        local (network-free) repository characterizer
-zero search | find    full-text search over local session history
-zero sessions         session lineage inspection
-zero spec             review & approve saved spec-mode drafts
-zero specialist       manage subagent profiles
-zero skills           markdown instruction skills
-zero plugins          plugin manifests
-zero hooks            lifecycle hook configuration
-zero mcp              MCP client settings
-zero serve --mcp      expose Zero's tools over MCP stdio
-zero sandbox          sandbox policy & persistent grants
-zero worktrees        isolated git worktrees for agent runs
-zero verify           detect & run local verification checks
-zero changes          inspect & commit local git changes
+zero exec             one-shot or scripted agent run
+zero setup            first-run provider setup
+zero auth             OAuth/login helpers for supported providers
+zero models           model registry and capabilities
+zero providers        provider profiles and detection
+zero doctor           setup, key, and connectivity checks
+zero context          context-budget report
+zero repo-map         deterministic repository map
+zero repo-info        local repository summary
+zero search | find    search local session history
+zero sessions         inspect, resume, fork, and rewind sessions
+zero spec             manage spec-mode drafts
+zero specialist       manage specialist subagents
+zero skills           manage markdown instruction skills
+zero plugins          manage plugins
+zero hooks            manage lifecycle hooks
+zero mcp              manage MCP servers and tools
+zero serve --mcp      expose Zero tools over MCP stdio
+zero sandbox          inspect sandbox policy and grants
+zero worktrees        prepare isolated git worktrees
+zero verify           detect and run local verification checks
+zero changes          inspect and commit local git changes
 zero usage            token usage and estimated cost
-zero cron             scheduled agent jobs (file-backed, dep-free)
+zero cron             scheduled agent jobs
 zero update           check for newer releases
 ```
 
-## Providers
+## Appearance And Accessibility
 
-Bring your own key — or no key at all for local runtimes.
-
-| Tier | Providers |
+| Control | Effect |
 |---|---|
-| **Frontier APIs** | OpenAI · Anthropic · Google Gemini |
-| **Fast cloud inference** | Groq · OpenRouter · Together AI · DeepSeek · Mistral · xAI · NVIDIA NIM |
-| **Local — no key, no cloud** | Ollama · LM Studio |
-| **More clouds** | Ollama Cloud · DashScope (Qwen) · Moonshot (Kimi) · MiniMax · Z.ai · Venice · GitHub Models · and more |
-| **Enterprise (catalog)** | Amazon Bedrock · Vertex AI *(adapters in progress)* |
-| **Anything else** | any OpenAI-compatible or Anthropic-compatible endpoint |
+| `NO_COLOR=<anything>` | disables color output |
+| `ZERO_THEME=auto|dark|light` | selects the startup theme |
+| `--theme auto|dark|light` | selects the TUI theme from the CLI |
+| `/theme auto|dark|light` | switches theme inside the TUI |
+| `ZERO_NO_FADE=1` | disables streaming fade animation |
 
-The model registry tracks each model's capabilities, context window, and cost — and the live model picker discovers what your provider actually serves.
-
-**Slow or stalling streams.** Every provider aborts a stream that goes completely silent (no data and no keep-alive) for `ZERO_STREAM_IDLE_TIMEOUT` (default **5 minutes**) so a hung connection can't block the agent forever. SSE keep-alives reset the timer, so a heartbeating-but-slow backend is never killed. If a slow cloud or reasoning model still trips it, raise the limit — `ZERO_STREAM_IDLE_TIMEOUT=10m` (accepts a Go duration or bare seconds; `0`/`off` disables the watchdog).
-
-## Tools
-
-| Tool | Purpose | Side effect |
-|---|---|---|
-| `read_file` · `list_directory` · `grep` · `glob` | explore & search | read |
-| `web_fetch` | fetch docs & references | network |
-| `update_plan` · `ask_user` | plan & clarify | none |
-| `write_file` · `edit_file` · `apply_patch` | create & modify | write (gated) |
-| `exec_command` · `write_stdin` | run shell commands, keep long-running processes alive, poll/send input | shell (gated on start/input) |
-| `bash` | run one-shot legacy shell commands | shell (gated) |
-| `Task` · `TaskOutput` · `TaskStop` | delegate to specialist subagents | per-tool gating |
-| `GenerateSpecialist` | create new subagent manifests | write (gated) |
-| `skill` | load markdown instruction skills | read |
-| `tool_search` | lazily load deferred tools (large MCP sets stay cheap) | none |
-| `escalate_model` | request a stronger model mid-run | gated by `--allow-escalation` |
-
-Every mutating tool routes through the permission policy **before** any side effect.
-
-### Web search & scraping (free, no API key)
-
-`web_fetch` is built in and always available: it pulls a single public remote URL
-into clean markdown locally, with no third party. For localhost/private dev-server
-URLs, use shell commands such as `curl` through `exec_command` so sandbox network
-permission applies. For local dev servers, start the server in the foreground with
-`exec_command` and keep the returned `session_id`; use `write_stdin` to poll or
-interrupt it. Use `/ps` to list running background terminals and `/stop` or
-`/stop <session_id>` to close them. Interactive terminal-style commands can set
-`tty: true` on `exec_command` so stdin works like a terminal session.
-
-For **search**, JS-rendered scraping,
-whole-site crawls, PDF→markdown, and structured extraction, Zero ships the
-[Firecrawl](https://firecrawl.dev) **keyless** MCP server **enabled by default**, so
-web search and scraping work out of the box with **no setup and no API key** (1,000
-free credits/month). It is a normal MCP server, so you stay in control:
-
-```bash
-zero mcp tools list           # see the firecrawl_* tools it exposes
-zero mcp disable firecrawl    # turn it off — web_fetch stays as the local floor
-```
-
-- **Privacy / disclosure:** keyless requests route through `firecrawl.dev`. If you
-  prefer nothing leaves your machine, `zero mcp disable firecrawl` and rely on
-  `web_fetch`, or self-host below.
-- **Self-host (unlimited, private):** Firecrawl is open source (AGPL-3.0). Run your
-  own instance and override the default URL — Zero only *calls* it over the network,
-  so the AGPL never reaches into Zero's own code:
-  ```jsonc
-  // config.json
-  { "mcp": { "servers": { "firecrawl": { "type": "http", "url": "http://localhost:3002/v2/mcp" } } } }
-  ```
-- **Bring your own key (higher limits):** add an auth header over the default:
-  ```bash
-  zero mcp add firecrawl --type http --url https://mcp.firecrawl.dev/v2/mcp \
-    --header "Authorization: Bearer fc-your-key"
-  ```
-
-An MCP server that can't be reached at startup (e.g. Firecrawl on an offline
-machine) is **skipped with a warning, not fatal** — Zero still launches and the
-rest of its tools, including `web_fetch`, keep working.
-
-### Extra write directories (`--add-dir`)
-
-Zero confines writes to the workspace by default. To let the agent write somewhere
-else, pass the repeatable `--add-dir` flag — it works for both the interactive TUI
-and `zero exec`:
-
-```bash
-zero --add-dir ~/Desktop/scratch                       # launch the TUI with an extra write root
-zero exec --add-dir ../sibling-repo "update both repos"
-```
-
-In the TUI, `/add-dir <path>` grants a directory mid-session (session-only), and a
-bare `/add-dir` lists the current write roots. To persist extra roots across
-sessions, set `sandbox.additionalWriteRoots` in the **global** user config
-(`~/.config/zero/config.json`); the key is deliberately ignored in project config
-so a checked-out repo can't widen its own sandbox. Flag and config sources merge
-as a union.
-
-Granted roots must already exist (the filesystem root is rejected), symlinks are
-resolved when the grant is made, and the same per-root symlink-traversal checks
-that protect the workspace apply to each extra root. Relative paths in tool calls
-still resolve against the workspace only, and network and destructive-shell policy
-are unchanged. A write denied outside all roots returns an error that suggests
-`/add-dir`.
-
-Two extra hardening/diagnostic flags are available in the `sandbox` config block,
-both **off by default** and safe to leave unset:
-
-- `sandbox.blockUnixSockets` (Linux) — asks the Linux sandbox helper to install a
-  best-effort seccomp filter that denies `AF_UNIX` socket creation in the
-  sandboxed command. Linux packages also continue to ship `zero-seccomp` as a
-  compatibility wrapper for existing direct uses; new sandbox plans do not depend
-  on that external wrapper.
-- `sandbox.monitorDenials` (macOS) — tails the unified log for this run's seatbelt
-  denials and appends them to a command's stderr as a `<sandbox_blocks>` block
-  so blocked operations are visible. A no-op on OS versions that do not deliver
-  seatbelt denials to the queryable log.
-
-## Architecture
-
-```
-   TUI (Bubble Tea)      headless exec       MCP server      cron runner
-        └──────────────────────┬──────────────────────┘
-                  surface-agnostic agent core
-            (loop · typed event stream · tool registry)
-   ┌──────────┬──────────┬───────────┬───────────┬────────────┬──────────┐
- providers   tools     sessions    specialist   repo intel   permissions
- + catalog   registry  + search    + background + workspace  + sandbox
- + registry            + rewind      tasks        index      + redaction
-```
-
-- **Surface-agnostic core** — the agent loop streams text + tool calls and emits one typed event stream consumed identically by the TUI, `exec`, the MCP server, and cron.
-- **Edges are interfaces** — `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
-- **Model is data** — capabilities, cost, and routing live in the registry, never hard-coded.
-- **Pure Go** — one static binary per platform; the npm wrapper just delegates to it.
-
-## Project layout
-
-```
-cmd/
-  zero/                 production CLI entrypoint
-  zero-release/         release builder + smoke tests
-  zero-perf-bench/      performance benchmarks
-  zero-pr-review/       deterministic PR review helper
-internal/
-  agent/ zeroruntime/   agent loop & runtime orchestration
-  cli/                  command surface (exec, doctor, cron, ...)
-  tui/                  Bubble Tea terminal interface
-  providers/ providercatalog/ providermodelcatalog/
-  modelregistry/        capabilities, context windows, cost
-  tools/                read/write/edit/bash/grep/glob/patch/...
-  specialist/ background/  subagents + out-of-process tasks
-  sessions/ search/     append-only store, full-text search
-  repomap/ repoinfo/ workspaceindex/ contextreport/
-  specmode/ cron/ skills/ plugins/ hooks/ mcp/
-  sandbox/ redaction/ secrets/   safety surfaces
-  doctor/ providerhealth/ verify/ selfverify/
-docs/                   PRD, protocols, install/update/perf
-scripts/                installers
-```
+Meaning does not rely on color alone; diffs, permissions, and statuses also use
+text or glyph markers.
 
 ## Development
 
 ```bash
-go test ./...                     # full test suite (200+ test files)
-go run ./cmd/zero-release build   # compile the release binary
-go run ./cmd/zero-release smoke   # smoke-test it
-go run ./cmd/zero-perf-bench      # perf benchmarks (docs/PERFORMANCE.md)
+go test ./...
+go run ./cmd/zero-release build
+go run ./cmd/zero-release smoke
+go run ./cmd/zero-perf-bench
+```
 
-# cross-compile
+Cross-compile examples:
+
+```bash
 go run ./cmd/zero-release build --goos linux --goarch amd64
 go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero.exe
 ```
 
 ## Documentation
 
-- [Product Requirements (PRD)](docs/PRD.md) — vision, full feature spec, roadmap
-- [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md) — headless I/O contract
-- [Specialists](docs/SPECIALISTS.md) — subagent manifests, Task tools, background state
-- [Install](docs/INSTALL.md) · [Update](docs/UPDATE.md) · [Performance](docs/PERFORMANCE.md)
+- [Install](docs/INSTALL.md)
+- [Update flow](docs/UPDATE.md)
+- [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md)
+- [Specialists](docs/SPECIALISTS.md)
+- [GitHub Action](docs/GITHUB_ACTION.md)
+- [Benchmarks](docs/BENCHMARK.md)
+- [Performance](docs/PERFORMANCE.md)
+- [Agent evals](docs/AGENT_EVALS.md)
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Run `go test ./...` and the relevant build or smoke command before opening a PR.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), run the
+relevant tests, and open a focused pull request.
+
+Security reports should follow [SECURITY.md](SECURITY.md).
 
 ## License
 
-Zero is released under the [MIT License](LICENSE) — © 2026 Gitlawb.
-
----
-
-<div align="center">
-<sub><b>Zero</b> — one terminal · every model</sub>
-</div>
+Zero is released under the [MIT License](LICENSE).

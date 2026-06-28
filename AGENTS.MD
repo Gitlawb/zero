@@ -315,6 +315,5 @@ That's it. Run `zero` from the repo root and the agent has the team's full instr
 
 - [README](README.md) — install, quickstart, command reference.
 - [docs/SPECIALISTS.md](docs/SPECIALISTS.md) — full specialist manifest spec.
-- [docs/PRD.md](docs/PRD.md) — product requirements, full feature surface.
 - [docs/STREAM_JSON_PROTOCOL.md](docs/STREAM_JSON_PROTOCOL.md) — `zero exec` I/O contract.
 - [docs/INSTALL.md](docs/INSTALL.md) — install from source or release.
