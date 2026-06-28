@@ -427,7 +427,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if guarded, text, requested := m.requestCompactionBeforeModelSwitch(modelSwitchCompactionRequest{
 		TargetModel:         target.modelID,
 		TargetProvider:      string(metadata.ProviderKind),
-		TargetContextWindow: m.modelContextWindow(target.modelID),
+		TargetContextWindow: modelregistry.AgentContextWindow(m.modelContextWindow(target.modelID)),
 	}, "Model"); requested {
 		return guarded, text
 	}
@@ -655,7 +655,7 @@ func (m model) handleModeCommand(args string) (model, string) {
 	if guarded, text, requested := m.requestCompactionBeforeModelSwitch(modelSwitchCompactionRequest{
 		TargetModel:         entry.ID,
 		TargetProvider:      string(metadata.ProviderKind),
-		TargetContextWindow: m.modelContextWindow(entry.ID),
+		TargetContextWindow: modelregistry.AgentContextWindow(m.modelContextWindow(entry.ID)),
 	}, "Mode"); requested {
 		return guarded, text
 	}

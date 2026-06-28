@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
 
 func (m model) modelListText() string {
@@ -70,16 +71,32 @@ func (m model) modelContextWindow(modelName string) int {
 			return entry.ContextLimits.ContextWindow
 		}
 	}
-	// Live-discovered window for any provider that has surfaced this model.
+	// Live-discovered window, preferring the ACTIVE provider's models so a model ID
+	// shared across providers resolves to the provider actually in use; only then
+	// fall back to other providers that surfaced the same ID.
+	if descriptor, ok := m.activeProviderDescriptor(); ok {
+		if window := discoveredContextWindow(m.modelPickerLiveByProvider[descriptor.ID], trimmed); window > 0 {
+			return window
+		}
+	}
 	for _, models := range m.modelPickerLiveByProvider {
-		for _, dm := range models {
-			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) && dm.ContextWindow > 0 {
-				return dm.ContextWindow
-			}
+		if window := discoveredContextWindow(models, trimmed); window > 0 {
+			return window
 		}
 	}
 	// Unknown: report 0 so display gauges show no denominator. Compaction enablement
 	// applies its own positive fallback via modelregistry.AgentContextWindow.
+	return 0
+}
+
+// discoveredContextWindow returns the context window of the model whose ID matches
+// name in a provider's live-discovered model list, or 0 when absent.
+func discoveredContextWindow(models []providermodeldiscovery.Model, name string) int {
+	for _, dm := range models {
+		if strings.EqualFold(strings.TrimSpace(dm.ID), name) && dm.ContextWindow > 0 {
+			return dm.ContextWindow
+		}
+	}
 	return 0
 }
 
