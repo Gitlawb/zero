@@ -727,6 +727,16 @@ func (m model) Init() tea.Cmd {
 	if m.themeMode == themeAuto {
 		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
+	// Warm model discovery for the active provider in the background so the
+	// context-usage gauge (used / total tokens + % fill) knows the active model's
+	// window from launch — including proxy/custom models not in the curated
+	// registry. Async: never blocks startup; if discovery is unavailable the gauge
+	// just shows the used-token count until the window is otherwise learned.
+	if descriptor, ok := m.activeProviderDescriptor(); ok {
+		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
 	if m.prService != nil && m.runtimeMessageSink != nil {
 		service := m.prService
 		sink := m.runtimeMessageSink
