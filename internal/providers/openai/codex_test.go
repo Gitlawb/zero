@@ -454,6 +454,67 @@ func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
 	}
 }
 
+func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
+	// A reasoning effort must reach the Responses backend nested under
+	// `reasoning.effort` (where the chat-completions `reasoning_effort` moved).
+	// Without this the user's chosen effort is silently dropped for Codex models.
+	var rec codexRequest
+	srv := newCodexTestServer(t, &rec)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream)
+
+	reasoning, ok := rec.body["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("body.reasoning = %#v, want an object carrying the effort", rec.body["reasoning"])
+	}
+	if reasoning["effort"] != "high" {
+		t.Fatalf("body.reasoning.effort = %#v, want high", reasoning["effort"])
+	}
+}
+
+func TestCodexProviderOmitsReasoningWhenUnset(t *testing.T) {
+	// No effort (and unsupported values) must omit the `reasoning` field entirely
+	// rather than send an empty object, which the backend would reject.
+	var rec codexRequest
+	srv := newCodexTestServer(t, &rec)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "", // auto
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream)
+
+	if _, ok := rec.body["reasoning"]; ok {
+		t.Fatalf("body.reasoning must be omitted when no effort is requested, got %#v", rec.body["reasoning"])
+	}
+}
+
 func TestCodexProviderRetriesHeadersAfter401(t *testing.T) {
 	var hits atomic.Int32
 	var rec1, rec2 codexRequest

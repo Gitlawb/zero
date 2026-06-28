@@ -71,13 +71,21 @@ const (
 
 // responsesRequest is the wire shape POSTed to {baseURL}/responses.
 type responsesRequest struct {
-	Model           string          `json:"model"`
-	Instructions    string          `json:"instructions"`
-	Input           []inputItem     `json:"input"`
-	Stream          bool            `json:"stream"`
-	Store           bool            `json:"store"`
-	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
-	Tools           []responsesTool `json:"tools,omitempty"`
+	Model           string              `json:"model"`
+	Instructions    string              `json:"instructions"`
+	Input           []inputItem         `json:"input"`
+	Stream          bool                `json:"stream"`
+	Store           bool                `json:"store"`
+	MaxOutputTokens int                 `json:"max_output_tokens,omitempty"`
+	Tools           []responsesTool     `json:"tools,omitempty"`
+	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
+}
+
+// responsesReasoning carries the reasoning controls for the Responses API. The
+// chat-completions `reasoning_effort` field is nested under `reasoning.effort`
+// here; omitted entirely when the caller requests no (or an unsupported) effort.
+type responsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // inputItem is one element of the Responses `input` array. The Type field
@@ -241,6 +249,14 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 			Description: tool.Description,
 			Parameters:  tool.Parameters,
 		})
+	}
+	// Codex / o-series reasoning models take the effort tier nested under
+	// `reasoning` on the Responses API (the chat-completions `reasoning_effort`
+	// moved here). Reuse the chat normalizer so only API-accepted values are sent
+	// and an empty or unsupported effort simply omits the field — without this the
+	// caller's chosen effort was silently dropped for every Codex model.
+	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
+		req.Reasoning = &responsesReasoning{Effort: effort}
 	}
 	return req, nil
 }
