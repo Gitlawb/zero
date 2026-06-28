@@ -1,6 +1,9 @@
 package modelregistry
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const DefaultModelID = "gpt-4.1"
 
@@ -169,11 +172,45 @@ func (registry Registry) SupportsCapability(pattern string, capability ModelCapa
 }
 
 func (registry Registry) ReasoningEfforts(pattern string) []ReasoningEffort {
-	model, ok := registry.Get(pattern)
-	if !ok {
+	if model, ok := registry.Get(pattern); ok && len(model.ReasoningEfforts) > 0 {
+		return append([]ReasoningEffort{}, model.ReasoningEfforts...)
+	}
+	// Fallback for reasoning-model families that aren't enumerated in the curated
+	// catalog — e.g. the GPT-5 / Codex / o-series variants served via the ChatGPT
+	// proxy or custom OpenAI-compatible endpoints. Without this, /effort shows no
+	// controls for those models even though they support reasoning_effort.
+	return reasoningEffortsForModelName(pattern)
+}
+
+// reasoningEffortsForModelName infers reasoning-effort controls from a model name
+// for known reasoning families not present in the catalog. It returns nil for
+// non-reasoning models (e.g. GPT-4.1 / GPT-4o), so /effort stays empty there.
+func reasoningEffortsForModelName(name string) []ReasoningEffort {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if i := strings.IndexByte(n, ':'); i >= 0 { // drop a "provider:" qualifier
+		n = n[i+1:]
+	}
+	switch {
+	case strings.HasPrefix(n, "gpt-5") || strings.HasPrefix(n, "gpt5"):
+		// GPT-5 / Codex (gpt-5.x) add a "minimal" tier below low.
+		return []ReasoningEffort{ReasoningEffortMinimal, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
+	case strings.Contains(n, "codex") || isOSeriesModelName(n):
+		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
+	default:
 		return nil
 	}
-	return append([]ReasoningEffort{}, model.ReasoningEfforts...)
+}
+
+// isOSeriesModelName reports whether name is an OpenAI o-series reasoning model
+// (o1/o3/o4, optionally with a -mini/-pro suffix), without matching unrelated
+// names that merely start with the same letters.
+func isOSeriesModelName(n string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if n == prefix || strings.HasPrefix(n, prefix+"-") || strings.HasPrefix(n, prefix+"mini") {
+			return true
+		}
+	}
+	return false
 }
 
 func (registry Registry) RequireProvider(pattern string, provider ProviderKind) (ModelEntry, error) {
