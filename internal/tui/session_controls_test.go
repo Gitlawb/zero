@@ -263,8 +263,8 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	if request.ModelName != "gpt-4.1" {
 		t.Fatalf("expected request model gpt-4.1, got %q", request.ModelName)
 	}
-	if request.ContextWindow != modelContextWindow("gpt-4.1") {
-		t.Fatalf("expected request context window %d, got %d", modelContextWindow("gpt-4.1"), request.ContextWindow)
+	if request.ContextWindow != next.modelContextWindow("gpt-4.1") {
+		t.Fatalf("expected request context window %d, got %d", next.modelContextWindow("gpt-4.1"), request.ContextWindow)
 	}
 	if request.EstimatedTokens <= 0 || request.VisibleTranscriptRows != len(m.transcript) {
 		t.Fatalf("expected request estimate and transcript count, got %#v", request)

@@ -3778,9 +3778,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if m.captureRunImages != nil {
 			m.captureRunImages(images)
 		}
-		// Enable agent-loop compaction sized to the active model's context
-		// window. An unknown/custom model resolves to 0, leaving compaction off.
-		options.ContextWindow = modelContextWindow(m.modelName)
+		// Enable agent-loop compaction sized to the active model's context window.
+		// AgentContextWindow applies a positive fallback for unknown/custom models so
+		// compaction (proactive + reactive) is enabled for every model, not just
+		// catalogued ones.
+		options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,

@@ -519,7 +519,7 @@ func (m model) compactRequest() CompactRequest {
 	return CompactRequest{
 		SessionID:             strings.TrimSpace(m.activeSession.SessionID),
 		ModelName:             strings.TrimSpace(m.modelName),
-		ContextWindow:         modelContextWindow(m.modelName),
+		ContextWindow:         m.modelContextWindow(m.modelName),
 		SessionEventCount:     len(m.sessionEvents),
 		EstimatedTokens:       estimateTranscriptTokens(m.transcript),
 		VisibleTranscriptRows: len(m.transcript),

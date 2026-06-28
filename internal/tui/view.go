@@ -67,7 +67,7 @@ func (m model) titleBar(width int) string {
 	}
 	model := m.titleModelSegment()
 	ctx := ""
-	if window := modelContextWindow(m.modelName); window > 0 {
+	if window := m.modelContextWindow(m.modelName); window > 0 {
 		ctx = zeroTheme.faint.Render(" · " + formatContextWindow(window))
 	}
 
@@ -348,7 +348,7 @@ func (m model) contextFillPercent() (pct, used, window int, style lipgloss.Style
 	}
 	summary := m.usageTracker.Summary()
 	used = m.latestUsageTokens(summary)
-	window = modelContextWindow(m.modelName)
+	window = m.modelContextWindow(m.modelName)
 	if used <= 0 || window <= 0 {
 		return 0, 0, 0, lipgloss.Style{}, false
 	}

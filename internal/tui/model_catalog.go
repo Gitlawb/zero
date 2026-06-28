@@ -54,20 +54,33 @@ func (m model) modelListText() string {
 // modelContextWindow resolves the active model's context window (max input
 // tokens) from the model registry to size agent-loop compaction. An unknown or
 // custom model resolves to 0, leaving compaction DISABLED as a safe default.
-func modelContextWindow(modelName string) int {
+// modelContextWindow resolves a model's exact context window (max input tokens) for
+// the context gauges: the curated registry value, else a value learned from live
+// provider discovery (so proxy/custom models like GPT-5 Codex, xAI, or Ollama-cloud
+// get an accurate window once /model has discovered them), else 0 (unknown). The
+// agent-run compaction path wraps this in modelregistry.AgentContextWindow to apply
+// a positive fallback so compaction is enabled even for unknown models.
+func (m model) modelContextWindow(modelName string) int {
 	trimmed := strings.TrimSpace(modelName)
 	if trimmed == "" {
 		return 0
 	}
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return 0
+	if registry, err := modelregistry.DefaultRegistry(); err == nil {
+		if entry, ok := registry.Resolve(trimmed); ok && entry.ContextLimits.ContextWindow > 0 {
+			return entry.ContextLimits.ContextWindow
+		}
 	}
-	entry, ok := registry.Resolve(trimmed)
-	if !ok {
-		return 0
+	// Live-discovered window for any provider that has surfaced this model.
+	for _, models := range m.modelPickerLiveByProvider {
+		for _, dm := range models {
+			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) && dm.ContextWindow > 0 {
+				return dm.ContextWindow
+			}
+		}
 	}
-	return entry.ContextLimits.ContextWindow
+	// Unknown: report 0 so display gauges show no denominator. Compaction enablement
+	// applies its own positive fallback via modelregistry.AgentContextWindow.
+	return 0
 }
 
 func activeModelID(registry modelregistry.Registry, modelName string) string {

@@ -837,7 +837,7 @@ func (m model) sidebarTokenText() string {
 	if used <= 0 {
 		return ""
 	}
-	if window := modelContextWindow(m.modelName); window > 0 {
+	if window := m.modelContextWindow(m.modelName); window > 0 {
 		return fmt.Sprintf("%s / %s tokens", humanCount(used), humanCount(window))
 	}
 	return humanCount(used) + " tokens"

@@ -500,7 +500,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	defer lspShutdown()
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
-		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
+		ContextWindow:    modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, resolved.Provider.Model)),
 		DeferThreshold:   effectiveDeferThreshold,
 		Specialists:      specialistRuntime.specialistInfos(),
 		SessionID:        preparedSession.Session.SessionID,
@@ -998,20 +998,19 @@ func resolveSelectedModel(registry modelregistry.Registry, input string) (string
 	return entry.ID, notice
 }
 
-// modelContextWindow returns the resolved model's context window (max input
-// tokens) from the model registry, used to enable agent-loop compaction. An
-// unknown model (e.g. a custom openai-compatible name) returns 0, which leaves
-// compaction DISABLED — a safe default that never compacts unexpectedly.
+// modelContextWindow returns the resolved model's exact context window (max input
+// tokens) from the registry, or 0 when the model isn't catalogued. Compaction call
+// sites wrap this in modelregistry.AgentContextWindow to apply a positive fallback;
+// display/report sites use the raw value so an unknown model shows no denominator.
 func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {
 		return 0
 	}
-	entry, ok := registry.Resolve(trimmed)
-	if !ok {
-		return 0
+	if entry, ok := registry.Resolve(trimmed); ok {
+		return entry.ContextLimits.ContextWindow
 	}
-	return entry.ContextLimits.ContextWindow
+	return 0
 }
 
 // reasoningEffortNotice resolves the requested --reasoning-effort against the

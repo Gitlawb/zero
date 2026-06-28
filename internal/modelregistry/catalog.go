@@ -4,6 +4,27 @@ import "fmt"
 
 const DefaultModelID = "gpt-4.1"
 
+// FallbackContextWindow is the assumed context window (max input tokens) for a
+// model that isn't in the curated registry and wasn't resolved from live provider
+// discovery — e.g. proxy/custom models like the GPT-5 Codex, xAI, or Ollama-cloud
+// variants. A positive value here is what enables agent-loop compaction (both the
+// proactive ~80% trigger and the reactive post-overflow recovery) for those models;
+// without it compaction stays disabled and long sessions overflow. It is only a
+// backstop: an exact window from the registry or live discovery always wins.
+const FallbackContextWindow = 200_000
+
+// AgentContextWindow turns a resolved context window into the value used to enable
+// agent-loop compaction: the resolved window when known, else FallbackContextWindow
+// so compaction is enabled even for uncatalogued models. Kept separate from the
+// raw resolver so display gauges still show nothing (not a guessed denominator)
+// when the real window is unknown.
+func AgentContextWindow(resolved int) int {
+	if resolved <= 0 {
+		return FallbackContextWindow
+	}
+	return resolved
+}
+
 const sourceLastVerified = "2026-06-04"
 
 const (
