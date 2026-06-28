@@ -47,15 +47,8 @@ func TestStyleAssistantMarkdownLinePassesAnsiVerbatim(t *testing.T) {
 	in := "\x1b[31mtoken\x1b[0m" // an already-colored code token
 	out := styleAssistantMarkdownLine(in, lipgloss.NewStyle().Bold(true))
 
-	// With the fix the input escape leads the output verbatim. Without it, the
-	// whole line is re-wrapped so the output would START with base's own "\x1b[1m"
-	// and the input escape would be nested inside it.
-	if !strings.HasPrefix(out, "\x1b[31m") {
-		t.Fatalf("already-styled input was re-wrapped instead of passed verbatim: %q", out)
-	}
-	// The input's reset must also survive, not be re-encoded as runes.
-	if !strings.Contains(out, "\x1b[0m") {
-		t.Fatalf("input reset escape not preserved: %q", out)
+	if out != in {
+		t.Fatalf("already-styled input must pass through verbatim:\nin:  %q\nout: %q", in, out)
 	}
 }
 
@@ -323,6 +316,40 @@ func TestMarkdownInlineKeepsCodingLiterals(t *testing.T) {
 		if got != want {
 			t.Fatalf("inline markdown for %q = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestMarkdownHorizontalRulesRenderAsDividers(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"Before",
+		"---",
+		"After",
+		"***",
+		"Done",
+	}, "\n"), 40, 40, true)
+	got := plainRender(t, strings.Join(lines, "\n"))
+	if strings.Contains(got, "\n---\n") || strings.Contains(got, "\n***\n") {
+		t.Fatalf("horizontal rules should not leak raw markdown markers:\n%s", got)
+	}
+	if strings.Count(got, strings.Repeat("─", 40)) != 2 {
+		t.Fatalf("horizontal rules should render as divider lines, got:\n%s", got)
+	}
+}
+
+func TestMarkdownHorizontalRulesDoNotEatListsOrDiffHeaders(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"- item",
+		"--- a/file.go",
+		"+++ b/file.go",
+	}, "\n"), 60, 60, false)
+	got := plainRender(t, strings.Join(lines, "\n"))
+	for _, want := range []string{"- item", "--- a/file.go", "+++ b/file.go"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown rule parser should leave %q alone, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, strings.Repeat("─", 16)) {
+		t.Fatalf("list/diff-looking text should not render as a divider:\n%s", got)
 	}
 }
 
@@ -734,44 +761,38 @@ func TestDoneLineOnlyOnLongTurns(t *testing.T) {
 	}
 }
 
-func TestInterimAssistantRowRendersAsBulletedProse(t *testing.T) {
+func TestInterimAssistantRowRendersAsPlainProse(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowAssistant, text: "No provider configured."}
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
-	if strings.Contains(got, "│") {
-		t.Fatalf("non-final assistant row = %q, must not carry a card rail", got)
-	}
-	// Narration carries a leading "●" bullet so each story beat stands out.
-	if !strings.Contains(got, "●") {
-		t.Fatalf("non-final assistant row should carry the narration bullet, got %q", got)
+	if strings.Contains(got, "│") || strings.Contains(got, "●") {
+		t.Fatalf("non-final assistant row = %q, must not carry activity chrome", got)
 	}
 	if !strings.Contains(got, "No provider configured.") {
 		t.Fatalf("non-final assistant row should carry the body text, got %q", got)
 	}
 }
 
-// TestNarrationBulletSelectionGeometry locks the bullet's column math: the
-// narration block wraps 2 cols narrower, every selectable meta starts at the
-// gutter (so copy/selection stays aligned and copied text is gutter-free), no
-// line overflows the width, and the final answer keeps no bullet / textStart 0.
-func TestNarrationBulletSelectionGeometry(t *testing.T) {
+// TestNarrationSelectionGeometry locks narration column math: interim prose and
+// final answers both start at textStart 0, no line overflows the width, and copy
+// metadata stays free of display-only chrome.
+func TestNarrationSelectionGeometry(t *testing.T) {
 	m := limeTestModel()
-	gutter := lipgloss.Width(narrationPrefix)
 	narr := transcriptRow{kind: rowAssistant, text: "Now the stylesheet. " + strings.Repeat("word ", 60)}
 	rendered, metas := m.renderSelectableAssistantRow(0, narr, 90, 0)
 
-	if !strings.Contains(plainRender(t, rendered), "●") {
-		t.Fatalf("narration display should carry the bullet:\n%s", rendered)
+	if strings.Contains(plainRender(t, rendered), "●") {
+		t.Fatalf("narration display should not carry the old bullet:\n%s", rendered)
 	}
 	if len(metas) < 2 {
 		t.Fatalf("expected the long narration to wrap to multiple lines, got %d", len(metas))
 	}
 	for i, meta := range metas {
-		if meta.textStart != gutter {
-			t.Errorf("meta %d textStart = %d, want %d (gutter)", i, meta.textStart, gutter)
+		if meta.textStart != 0 {
+			t.Errorf("meta %d textStart = %d, want 0", i, meta.textStart)
 		}
 		if strings.Contains(meta.text, "●") {
-			t.Errorf("meta %d copy text should be gutter-free, got %q", i, meta.text)
+			t.Errorf("meta %d copy text should be chrome-free, got %q", i, meta.text)
 		}
 	}
 	for _, line := range strings.Split(rendered, "\n") {
@@ -820,13 +841,11 @@ func TestRunningToolCardShowsHeadAndSpinnerSlot(t *testing.T) {
 	m.pending = true
 	row := transcriptRow{kind: rowToolCall, id: "call_1", tool: "grep", detail: "internal/cli"}
 	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
-	if !strings.Contains(got, "grep") || !strings.Contains(got, "internal/cli") {
-		t.Fatalf("running card = %q, want tool name and target in head", got)
+	if !strings.Contains(got, "Searching") || !strings.Contains(got, "internal/cli") {
+		t.Fatalf("running card = %q, want action label and target in head", got)
 	}
-	// Tool cards render as a left-rule card (status-tinted "│ " rail, no box),
-	// matching specialist cards and the reference TUIs.
-	if !strings.HasPrefix(got, "│ ") {
-		t.Fatalf("running card = %q, want a left-rule card", got)
+	if strings.HasPrefix(got, "│ ") || strings.Contains(got, "\n│ ") {
+		t.Fatalf("running card = %q, must not carry the old left rail", got)
 	}
 	if strings.ContainsAny(got, "╭╮╰╯") {
 		t.Fatalf("running card = %q, must not carry box-border corners", got)
@@ -850,19 +869,31 @@ func TestResolvedToolCallCollapsesIntoResultCard(t *testing.T) {
 func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 	m := limeTestModel()
 	diff := strings.Join([]string{
-		"--- /dev/null",
-		"+++ b/internal/cli/root.go",
+		"--- internal/cli/root.go",
+		"+++ internal/cli/root.go",
 		"@@ -0,0 +1,3 @@",
 		"+package cli",
 		"+",
 		"+var Version = \"dev\"",
 	}, "\n")
-	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "edit_file", status: tools.StatusOK, detail: diff}
-	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
-	for _, want := range []string{"internal/cli/root.go", "NEW FILE", "+3", "package cli", "   1"} {
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "write_file", status: tools.StatusOK, detail: diff}
+	styled := m.renderRow(row, 80, buildRowContext(nil))
+	for _, want := range []string{zeroTheme.diffAdd.Render("+3"), zeroTheme.diffDel.Render("-0")} {
+		if !strings.Contains(styled, want) {
+			t.Fatalf("diff card count tag should color additions/deletions, missing styled %q in:\n%s", want, styled)
+		}
+	}
+	got := plainRender(t, styled)
+	for _, want := range []string{"Added", "internal/cli/root.go", "(+3 -0)", "package cli", "   1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("diff card = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "write_file") || strings.Contains(got, "NEW FILE") {
+		t.Fatalf("diff card = %q, must not expose raw tool name or duplicate new-file tag", got)
+	}
+	if strings.Contains(got, "@@") {
+		t.Fatalf("diff card should hide raw hunk metadata, got %q", got)
 	}
 
 	// The 16-line cap keeps long diffs bounded.
@@ -877,17 +908,46 @@ func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 	}
 }
 
-func TestReadCardBodyShowsGutterAndRange(t *testing.T) {
+func TestEditedDiffCardHidesHunkHeader(t *testing.T) {
+	m := limeTestModel()
+	diff := strings.Join([]string{
+		"--- a/time_test.py",
+		"+++ b/time_test.py",
+		"@@ -1,3 +1,3 @@",
+		" from datetime import datetime",
+		"",
+		"-print(datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\"))",
+		"+print(f\"Current system time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\")",
+	}, "\n")
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "edit_file", status: tools.StatusOK, detail: diff}
+	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
+	for _, want := range []string{"Edited", "time_test.py", "(+1 -1)", "from datetime import datetime", "   3 −", "   3 +"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("edited diff card = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "@@") {
+		t.Fatalf("edited diff card should hide raw hunk metadata, got %q", got)
+	}
+}
+
+func TestReadCardBodyShowsExploredSummary(t *testing.T) {
 	m := limeTestModel()
 	// Mirrors the real read_file output shape: "<right-aligned N> | <text>".
 	detail := "File: internal/agent/loop.go\n\n  12 | func Run() {\n  13 | }\n"
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "read_file", status: tools.StatusOK, detail: detail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "read_file", detail: "internal/agent/loop.go"}})
 	got := plainRender(t, m.renderRow(row, 80, rc))
-	for _, want := range []string{"read_file", "internal/agent/loop.go", "L12–L13", "func Run() {"} {
+	for _, want := range []string{"Explored", "└ Read", "internal/agent/loop.go"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("read card = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "L12") || strings.Contains(got, "func Run()") || strings.Contains(got, "  12 ") {
+		t.Fatalf("read card = %q, must not dump read_file body into the transcript", got)
+	}
+	if strings.Contains(got, "read_file") {
+		t.Fatalf("read card = %q, must not expose raw tool name", got)
 	}
 }
 
@@ -897,13 +957,45 @@ func TestBashCardBodyShowsCommandOutputAndExit(t *testing.T) {
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "bash", status: tools.StatusError, detail: detail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "bash", detail: "go build ./..."}})
 	got := plainRender(t, m.renderRow(row, 80, rc))
-	for _, want := range []string{"❯ go build ./...", "ok build", "warning: slow", "exit 1"} {
+	for _, want := range []string{"Ran", "go build ./...", "ok build", "warning: slow", "exit 1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("bash card = %q, missing %q", got, want)
 		}
 	}
-	if strings.Contains(got, "stdout:") || strings.Contains(got, "exit_code:") {
+	if strings.Contains(got, "❯") || strings.Contains(got, "stdout:") || strings.Contains(got, "exit_code:") {
 		t.Fatalf("bash card = %q, must restyle section markers", got)
+	}
+	if strings.Contains(got, "├ ok build") || strings.Contains(got, "└ warning: slow") {
+		t.Fatalf("multi-line command output should render as a simple output block, got:\n%s", got)
+	}
+	if !strings.Contains(got, "│ ok build") || !strings.Contains(got, "│ warning: slow") {
+		t.Fatalf("multi-line command output should stay grouped under the command, got:\n%s", got)
+	}
+}
+
+func TestBashCardBodyKeepsSingleLineOutputCompact(t *testing.T) {
+	m := limeTestModel()
+	detail := "stdout:\nJS syntax: OK\nexit_code: 0"
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "bash", status: tools.StatusOK, detail: detail}
+	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "bash", detail: `node -e "console.log('ok')"`}})
+	got := plainRender(t, m.renderRow(row, 80, rc))
+	if !strings.Contains(got, "└ JS syntax: OK") {
+		t.Fatalf("single-line command output should keep compact child marker, got:\n%s", got)
+	}
+}
+
+func TestToolCardHeadCollapsesMultilineCommand(t *testing.T) {
+	m := limeTestModel()
+	command := "node -e \"\nconst fs = require('fs')\nconsole.log('ok')\n\""
+	detail := "stdout:\nJS syntax: OK\nexit_code: 0"
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "bash", status: tools.StatusOK, detail: detail}
+	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "bash", detail: command}})
+	got := plainRender(t, m.renderRow(row, 120, rc))
+	if strings.Contains(got, "\nconst fs") || strings.Contains(got, "\n\"") {
+		t.Fatalf("multi-line command should not break the card header, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Ran node -e") || !strings.Contains(got, "const fs = require") {
+		t.Fatalf("multi-line command summary should stay visible on one line, got:\n%s", got)
 	}
 }
 
@@ -913,18 +1005,24 @@ func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
 	running := transcriptRow{kind: rowToolResult, id: "call_1", tool: "exec_command", status: tools.StatusOK, detail: runningDetail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "exec_command", detail: "python3 -m http.server 8000"}})
 	got := plainRender(t, m.renderRow(running, 90, rc))
-	for _, want := range []string{"❯ python3 -m http.server 8000", "Serving HTTP", "session 1000"} {
+	for _, want := range []string{"Ran", "python3 -m http.server 8000", "Serving HTTP", "session 1000"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("exec_command card = %q, missing %q", got, want)
 		}
 	}
-	if strings.Contains(got, "Use write_stdin") || strings.Contains(got, "session_id:") {
+	if strings.Contains(got, "❯") || strings.Contains(got, "Use write_stdin") || strings.Contains(got, "session_id:") {
 		t.Fatalf("exec_command card = %q, must restyle session markers", got)
 	}
 
 	exited := transcriptRow{kind: rowToolResult, id: "call_2", tool: "write_stdin", status: tools.StatusOK, detail: "output:\ndone\nexit_code: 0"}
 	got = plainRender(t, m.renderRow(exited, 90, buildRowContext(nil)))
-	for _, want := range []string{"done", "exit 0"} {
+	if !strings.Contains(got, "done") {
+		t.Fatalf("write_stdin card = %q, missing output", got)
+	}
+	if strings.Contains(got, "exit 0") {
+		t.Fatalf("write_stdin card = %q, must not show successful exit", got)
+	}
+	for _, want := range []string{"done"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("write_stdin card = %q, missing %q", got, want)
 		}
@@ -937,6 +1035,61 @@ func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
 	}
 }
 
+func TestLocalControlCardsUseFriendlyCompactLabels(t *testing.T) {
+	m := limeTestModel()
+
+	open := transcriptRow{kind: rowToolResult, id: "call_1", tool: "browser_open", status: tools.StatusOK, detail: "✓ ZERO - terminal agent\nhttp://localhost:8080/"}
+	openRC := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "browser_open", detail: "http://localhost:8080"}})
+	got := plainRender(t, m.renderRow(open, 100, openRC))
+	for _, want := range []string{"Opened", "http://localhost:8080", "ZERO - terminal agent"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("browser_open card missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "browser_open") || strings.Contains(got, "http://localhost:8080/\n") {
+		t.Fatalf("browser_open card should not expose raw tool names or repeat the URL body:\n%s", got)
+	}
+
+	snapshotDetail := strings.Repeat("button \"Item\"\n", 31)
+	snapshot := transcriptRow{kind: rowToolResult, id: "call_2", tool: "browser_snapshot", status: tools.StatusOK, detail: snapshotDetail}
+	got = plainRender(t, m.renderRow(snapshot, 100, buildRowContext(nil)))
+	for _, want := range []string{"Captured", "snapshot"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("browser_snapshot card missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "browser_snapshot") || strings.Contains(got, "click to expand") || strings.Contains(got, "button \"Item\"") {
+		t.Fatalf("browser_snapshot card should stay compact and friendly:\n%s", got)
+	}
+
+	artifact := transcriptRow{kind: rowToolResult, id: "call_3", tool: "capture_artifact", status: tools.StatusOK, detail: "Artifact captured: /tmp/zero-artifacts/page.png\n\nhelper wrote screenshot"}
+	got = plainRender(t, m.renderRow(artifact, 100, buildRowContext(nil)))
+	for _, want := range []string{"Captured", "page.png"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("capture_artifact card missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "capture_artifact") || strings.Contains(got, "Artifact captured:") || strings.Contains(got, "helper wrote screenshot") {
+		t.Fatalf("capture_artifact card should summarize the artifact instead of dumping helper output:\n%s", got)
+	}
+}
+
+func TestPermissionRowsUseFriendlyLocalControlLabels(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{kind: rowPermission, id: "call_1", permission: &agent.PermissionEvent{
+		ToolCallID: "call_1",
+		ToolName:   "browser_open",
+		Action:     agent.PermissionActionPrompt,
+	}}
+	got := plainRender(t, m.renderRow(row, 100, buildRowContext(nil)))
+	if !strings.Contains(got, "Open browser") {
+		t.Fatalf("permission row should use local-control display name:\n%s", got)
+	}
+	if strings.Contains(got, "browser_open") {
+		t.Fatalf("permission row should not expose raw local-control tool name:\n%s", got)
+	}
+}
+
 func TestToolCallSummaryDescribesExecSessions(t *testing.T) {
 	cases := []struct {
 		event streamjson.Event
@@ -945,6 +1098,10 @@ func TestToolCallSummaryDescribesExecSessions(t *testing.T) {
 		{
 			event: streamjson.Event{Name: "exec_command", Args: map[string]any{"cmd": "python3 -m http.server 8000"}},
 			want:  "python3 -m http.server 8000",
+		},
+		{
+			event: streamjson.Event{Name: "exec_command", Args: map[string]any{"cmd": "node -e \"\nconsole.log('ok')\n\""}},
+			want:  `node -e " console.log('ok') "`,
 		},
 		{
 			event: streamjson.Event{Name: "write_stdin", Args: map[string]any{"session_id": 1000}},
@@ -966,15 +1123,19 @@ func TestToolCallSummaryDescribesExecSessions(t *testing.T) {
 	}
 }
 
-func TestGrepCardBodyShowsLocationsAndMatchCount(t *testing.T) {
+func TestGrepCardBodyShowsExploredSummary(t *testing.T) {
 	m := limeTestModel()
 	detail := "internal/cli/root.go:41: fs := flag.NewFlagSet\ninternal/cli/app.go:12: flag.Parse()"
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "grep", status: tools.StatusOK, detail: detail}
-	got := plainRender(t, m.renderRow(row, 90, buildRowContext(nil)))
-	for _, want := range []string{"internal/cli/root.go:41", "2 matches"} {
+	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "grep", detail: "internal/cli", arg: "flag"}})
+	got := plainRender(t, m.renderRow(row, 90, rc))
+	for _, want := range []string{"Explored", "└ Search", "flag"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("grep card = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "internal/cli/root.go:41") || strings.Contains(got, "2 matches") {
+		t.Fatalf("grep card = %q, must not expose raw search matches", got)
 	}
 }
 
@@ -1326,7 +1487,7 @@ func TestToolCardLinesAllSameWidth(t *testing.T) {
 	}
 }
 
-func TestToolResultCardRendersAsLeftRule(t *testing.T) {
+func TestToolResultCardRendersInlineWithoutRail(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
 		kind:   rowToolResult,
@@ -1337,19 +1498,18 @@ func TestToolResultCardRendersAsLeftRule(t *testing.T) {
 	}
 	card := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
 	lines := strings.Split(card, "\n")
-	// Every line carries the left rail; none carries a box corner or a right
-	// border — the unified left-rule card shape (matches specialist cards).
+	// No line carries the old left rail or box borders.
 	for i, line := range lines {
-		if !strings.HasPrefix(line, "│ ") {
-			t.Fatalf("line %d = %q, want left-rule prefix", i, line)
+		if strings.HasPrefix(line, "│ ") {
+			t.Fatalf("line %d = %q, must not carry left-rule prefix", i, line)
 		}
 		if strings.ContainsAny(line, "╭╮╰╯") || strings.HasSuffix(line, "│") {
 			t.Fatalf("line %d = %q, must not carry box borders", i, line)
 		}
 	}
-	// The status glyph sits on the head line (first line), right-aligned.
-	if !strings.Contains(lines[0], "✓") {
-		t.Fatalf("head line = %q, want the status glyph on the rule line", lines[0])
+	// The status glyph still sits on the head line.
+	if !strings.Contains(lines[0], "•") {
+		t.Fatalf("head line = %q, want the status glyph on the head line", lines[0])
 	}
 }
 
@@ -1421,8 +1581,13 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 	}
 	rc := buildRowContext(rows)
 	got := plainRender(t, m.renderRow(rows[1], 110, rc))
-	if !strings.Contains(got, "internal/cli") || !strings.Contains(got, `flag\.|RegisterFlag`) {
-		t.Fatalf("grep card head = %q, want separate target and pattern columns", got)
+	for _, want := range []string{"Explored", "└ Search", `flag\.|RegisterFlag`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("grep card = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "internal/cli/root.go:41") {
+		t.Fatalf("grep card = %q, must not dump search matches", got)
 	}
 }
 
@@ -1464,8 +1629,8 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 	if !rc.skip(prompt) {
 		t.Fatal("a decided prompt row must collapse away")
 	}
-	if got := plainRender(t, m.renderRow(allowed, 80, rc)); !strings.Contains(got, "allowed once · bash") {
-		t.Fatalf("manual allow = %q, want allowed once · bash", got)
+	if !rc.skip(allowed) {
+		t.Fatal("manual allow rows should collapse; the tool card shows the approved action")
 	}
 
 	session := transcriptRow{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{
@@ -1475,8 +1640,8 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 		{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{ToolCallID: "call_session", ToolName: "bash", Action: agent.PermissionActionPrompt}},
 		session,
 	})
-	if got := plainRender(t, m.renderRow(session, 80, rcSession)); !strings.Contains(got, "allowed for session · bash") {
-		t.Fatalf("session allow = %q, want allowed for session · bash", got)
+	if !rcSession.skip(session) {
+		t.Fatal("session allow rows should collapse; the durable decision is still recorded")
 	}
 
 	grant := &agent.PermissionEvent{ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionAllow}
@@ -1486,8 +1651,8 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 		ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionPrompt,
 	}}
 	rcTwo := buildRowContext([]transcriptRow{promptTwo, always})
-	if got := plainRender(t, m.renderRow(always, 80, rcTwo)); !strings.Contains(got, "always · bash") {
-		t.Fatalf("always allow = %q, want always · bash", got)
+	if !rcTwo.skip(always) {
+		t.Fatal("always allow rows should collapse; the saved grant is still recorded")
 	}
 
 	denied := transcriptRow{kind: rowPermission, id: "call_3", permission: &agent.PermissionEvent{
@@ -1504,7 +1669,7 @@ func TestUnpromptedAllowRowsCollapseIntoAutoTag(t *testing.T) {
 	}}
 	rc := buildRowContext([]transcriptRow{allow})
 	if !rc.skip(allow) {
-		t.Fatal("an unprompted (auto) allow row must collapse — the tool card carries [auto]")
+		t.Fatal("an unprompted (auto) allow row must collapse")
 	}
 }
 
@@ -1632,8 +1797,8 @@ func TestPermissionCollapseIsRunScoped(t *testing.T) {
 	if !rcSame.skip(sameRunPrompt) {
 		t.Fatal("a same-run decided prompt must collapse")
 	}
-	if rcSame.skip(sameRunAllow) {
-		t.Fatal("the same-run manual decision line must render")
+	if !rcSame.skip(sameRunAllow) {
+		t.Fatal("the same-run manual decision line must collapse")
 	}
 }
 

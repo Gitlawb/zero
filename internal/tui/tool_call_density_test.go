@@ -120,18 +120,29 @@ func TestRedundantConfirmationCollapsesSuccessBody(t *testing.T) {
 	}
 }
 
-func TestRealOutputKeepsBody(t *testing.T) {
+func TestExplorationOutputSummarizesBody(t *testing.T) {
 	m := limeTestModel()
-	row := transcriptRow{
+	rows := []transcriptRow{{
+		kind:   rowToolCall,
+		id:     "c2",
+		tool:   "grep",
+		detail: "internal/cli",
+		arg:    "flag.NewFlagSet",
+	}, {
 		kind:   rowToolResult,
 		id:     "c2",
 		tool:   "grep",
 		status: tools.StatusOK,
 		detail: "internal/cli/root.go:41: fs := flag.NewFlagSet",
+	}}
+	card := plainRender(t, m.renderRow(rows[1], 80, buildRowContext(rows)))
+	for _, want := range []string{"Explored", "Search", "flag.NewFlagSet"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("exploration card missing %q:\n%s", want, card)
+		}
 	}
-	card := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
-	if !strings.Contains(card, "flag.NewFlagSet") {
-		t.Fatalf("real grep output must NOT be suppressed, got:\n%s", card)
+	if strings.Contains(card, "internal/cli/root.go:41") {
+		t.Fatalf("exploration card must not dump raw grep output, got:\n%s", card)
 	}
 }
 
@@ -151,9 +162,7 @@ func TestErrorConfirmationKeepsBody(t *testing.T) {
 	}
 }
 
-// --- Fix 5: blank line between consecutive tool cards -------------------------
-
-func TestConsecutiveToolCardsAreBlankSeparated(t *testing.T) {
+func TestConsecutiveExplorationResultsGroup(t *testing.T) {
 	m := limeTestModel()
 	m.headerPrinted = true
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: "go"})
@@ -168,16 +177,11 @@ func TestConsecutiveToolCardsAreBlankSeparated(t *testing.T) {
 
 	body, _ := m.transcriptBody(96, "")
 	got := plainRender(t, body)
-	// Both cards must be present, and a blank line must sit between the end of the
-	// first card and the start of the second (the "wall" fix).
-	firstIdx := strings.Index(got, "internal/a.go")
-	secondIdx := strings.Index(got, "internal/b.go")
-	if firstIdx < 0 || secondIdx < 0 || secondIdx <= firstIdx {
-		t.Fatalf("both tool cards should render in order, got:\n%s", got)
+	if strings.Count(got, "Explored") != 1 {
+		t.Fatalf("adjacent exploration results should group into one card, got:\n%s", got)
 	}
-	between := got[firstIdx:secondIdx]
-	if !strings.Contains(between, "\n\n") {
-		t.Fatalf("expected a blank line between consecutive tool cards, got:\n%s", got)
+	if strings.Count(got, "Search") != 2 || !strings.Contains(got, "├ Search") || !strings.Contains(got, "└ Search") {
+		t.Fatalf("grouped exploration card should show both searches, got:\n%s", got)
 	}
 }
 

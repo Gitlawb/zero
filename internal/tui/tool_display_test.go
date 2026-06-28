@@ -12,7 +12,13 @@ func TestToolDisplayNameCleansMCPNames(t *testing.T) {
 		"mcp_exa_web_search_exa": "web search",
 		"mcp_exa_web_fetch_exa":  "web fetch",
 		"mcp_foo_bar":            "bar",
-		"edit_file":              "edit_file",  // built-in, unchanged
+		"write_file":             "Create",
+		"edit_file":              "Edit",
+		"read_file":              "Read",
+		"bash":                   "Run",
+		"browser_open":           "Open browser",
+		"browser_snapshot":       "Browser snapshot",
+		"capture_artifact":       "Capture",
 		"web_search":             "web_search", // built-in, unchanged
 	}
 	for in, want := range cases {

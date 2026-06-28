@@ -406,10 +406,10 @@ func toolCallSummary(event streamjson.Event) string {
 		}
 	case "bash", "exec_command":
 		if cmd, ok := args["command"].(string); ok {
-			return truncateRunes(cmd, 40)
+			return truncateRunes(singleLineToolHeadText(cmd), 40)
 		}
 		if cmd, ok := args["cmd"].(string); ok {
-			return truncateRunes(cmd, 40)
+			return truncateRunes(singleLineToolHeadText(cmd), 40)
 		}
 	case "write_stdin":
 		sessionID := toolCallIntArg(args, "session_id")

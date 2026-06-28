@@ -8,9 +8,11 @@ import (
 type toolBodyRequest struct {
 	name   string
 	hint   string
+	arg    string
 	detail string
 	width  int
 	opts   cardRenderOptions
+	failed bool
 }
 
 type toolBodyRenderer interface {
@@ -40,9 +42,13 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 	// write_file's card-only Display.Preview is a synthesized all-additions diff
 	// (the new file's head), so render it through the same diff path.
 	registry.register("write_file", diffOrFallback)
-	registry.register("read_file", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
-		return readCardBody(req.detail, req.width, req.opts)
-	})})
+	exploreRenderer := diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
+		return exploreCardBody(req.name, req.hint, req.arg, req.detail, req.width, req.opts, req.failed)
+	})}
+	registry.register("read_file", exploreRenderer)
+	registry.register("read_minified_file", exploreRenderer)
+	registry.register("list_directory", exploreRenderer)
+	registry.register("glob", exploreRenderer)
 	registry.register("bash", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
 		return bashCardBody(req.hint, req.detail, req.width, req.opts)
 	})})
@@ -52,9 +58,18 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 	registry.register("write_stdin", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
 		return execCommandCardBody("", req.detail, req.width, req.opts)
 	})})
-	registry.register("grep", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
-		return grepCardBody(req.detail, req.width, req.opts)
-	})})
+	registry.register("grep", exploreRenderer)
+	localControlRenderer := diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
+		return localControlCardBody(req.name, req.hint, req.detail, req.width, req.opts, req.failed)
+	})}
+	for _, name := range []string{
+		"browser_install", "browser_launch", "browser_connect", "browser_open", "browser_snapshot",
+		"browser_click", "browser_type", "browser_press", "browser_action",
+		"desktop_windows", "desktop_snapshot", "desktop_action",
+		"terminal_session", "capture_artifact",
+	} {
+		registry.register(name, localControlRenderer)
+	}
 	// update_plan's full plan is already shown live by the sticky plan panel
 	// (renderPlanPanel); collapse its transcript card to a one-line summary so the
 	// plan isn't re-dumped into the transcript on every call.

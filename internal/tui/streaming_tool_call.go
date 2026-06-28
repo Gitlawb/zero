@@ -3,8 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-
-	"github.com/charmbracelet/x/ansi"
 )
 
 // streamingTailLines is how many trailing lines of a file's in-progress content
@@ -96,7 +94,7 @@ func skipJSONSpace(s string, i int) int {
 // streamingFilePath pulls the file path out of a streaming tool-call args buffer,
 // trying the argument names the file tools use. Used to seed the decoder's path.
 func streamingFilePath(args string) string {
-	for _, key := range []string{"path", "file_path", "filename"} {
+	for _, key := range []string{"path", "file", "file_path", "filepath", "filename"} {
 		if v, ok := decodeStreamingJSONString(args, key); ok && v != "" {
 			return v
 		}
@@ -104,64 +102,29 @@ func streamingFilePath(args string) string {
 	return ""
 }
 
-// streamingToolCallView renders the in-progress file-writing tool call — its path,
-// a live line count, and a tail of the streaming content — so a long write/edit
-// shows the code flowing in instead of a frozen spinner. It reads the decoder's
-// incrementally-maintained state (O(1) per render); returns "" when no
-// file-writing call is mid-stream.
+// streamingToolCallView renders the in-progress file-writing tool call: its path
+// and live line count. The code body is intentionally buffered until the result
+// card lands, so partial code does not recolor or shift while generating.
 func (m model) streamingToolCallView(width int) string {
 	if m.streamCallID == "" || !isFileWritingTool(m.streamCallName) || m.streamCallDecoder == nil {
 		return ""
 	}
 	d := m.streamCallDecoder
 
-	head := zeroTheme.accent.Render("✎ ") + zeroTheme.toolName.Render(m.streamCallName)
-	if d.path != "" {
-		head += " " + zeroTheme.toolTarget.Render(d.path)
-	}
+	headTag := ""
 	switch {
 	case d.hasContent():
-		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  %d lines", d.lineTotal()))
+		if m.streamCallName == "write_file" {
+			headTag = diffCountTag(d.lineTotal(), 0)
+		} else {
+			headTag = fmt.Sprintf("%d lines", d.lineTotal())
+		}
 	case d.rawLen > 0:
 		// Args are streaming but the content field hasn't arrived yet — show a live
 		// byte count so it reads as progressing, never frozen.
-		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  receiving %.1f KB", float64(d.rawLen)/1024))
+		headTag = fmt.Sprintf("receiving %.1f KB", float64(d.rawLen)/1024)
 	}
-	lines := []string{head}
-	if d.hasContent() {
-		bodyWidth := maxInt(8, width-4)
-		// write_file/edit_file content is brand-new, so every line is an addition;
-		// apply_patch carries a real ± diff. styleStreamingCodeLine colors added
-		// lines green, removed red, and everything else bright (not the old dim gray).
-		newContent := m.streamCallName == "write_file" || m.streamCallName == "edit_file"
-		for _, line := range d.tailLines() {
-			line = strings.ReplaceAll(line, "\t", "    ")
-			// Truncate by display WIDTH (ansi.Truncate), not rune count, so wide/CJK
-			// glyphs can't overrun bodyWidth and break the tail layout.
-			lines = append(lines, "  "+styleStreamingCodeLine(ansi.Truncate(line, bodyWidth, ""), newContent))
-		}
-	}
+	head := toolCardHead(m.streamCallName, d.path, "", headTag, "", "", true, zeroTheme.ink, false, width, cardRenderOptions{cwd: m.cwd})
+	lines := []string{zeroTheme.accent.Render(m.spinnerGlyph()) + " " + head}
 	return strings.Join(lines, "\n")
-}
-
-// styleStreamingCodeLine colors one line of the live code preview: explicit diff
-// additions (+) render green and removals (-) red; for a brand-new write_file/edit
-// every line is an addition (green); anything else renders in bright ink. This
-// replaces the old dim faintest gray the streamed code was nearly invisible in.
-func styleStreamingCodeLine(line string, newContent bool) string {
-	// A brand-new write_file/edit_file is NOT a diff: every line is added content,
-	// so color it all green and never treat a leading "-" (e.g. CSS "-webkit-…") as
-	// a removal. Only apply_patch (newContent=false) carries real ± diff markers.
-	if newContent {
-		return zeroTheme.green.Render(line)
-	}
-	trimmed := strings.TrimLeft(line, " ")
-	switch {
-	case strings.HasPrefix(trimmed, "+") && !strings.HasPrefix(trimmed, "+++"):
-		return zeroTheme.green.Render(line)
-	case strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "---"):
-		return zeroTheme.red.Render(line)
-	default:
-		return zeroTheme.ink.Render(line)
-	}
 }

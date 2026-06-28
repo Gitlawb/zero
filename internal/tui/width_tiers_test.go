@@ -54,8 +54,8 @@ func TestWidthTierSegments(t *testing.T) {
 		}
 
 		rows := []transcriptRow{
-			{kind: rowToolCall, id: "c", tool: "grep", detail: "internal/cli", arg: "RegisterFlag"},
-			{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "internal/cli/root.go:41: x"},
+			{kind: rowToolCall, id: "c", tool: "custom_tool", detail: "internal/cli", arg: "RegisterFlag"},
+			{kind: rowToolResult, id: "c", tool: "custom_tool", status: tools.StatusOK, detail: "ok"},
 		}
 		rc := buildRowContext(rows)
 		card := plainRender(t, m.renderRow(rows[1], tc.width, rc))

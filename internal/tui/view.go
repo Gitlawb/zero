@@ -939,7 +939,7 @@ func firstArgValue(raw string, keys []string) string {
 	for _, key := range keys {
 		if value, ok := args[key]; ok {
 			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-				return strings.TrimSpace(text)
+				return singleLineToolHeadText(text)
 			}
 		}
 	}

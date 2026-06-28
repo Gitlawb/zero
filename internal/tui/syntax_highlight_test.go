@@ -5,15 +5,90 @@ import (
 	"testing"
 )
 
-// The live streaming render path (allowHighlight=false) must render code
-// verbatim/plain — never tokenised — so the per-frame loop can't re-lex a
-// growing block. Profile-independent: the plain path applies no styling, so the
-// code appears as a contiguous substring (a highlighted block would not).
-func TestStreamingCodeRendersPlain(t *testing.T) {
-	md := "```go\nfunc main() {}\n```"
-	out := strings.Join(renderAssistantMarkdownText(md, 80, 80, false), "\n")
-	if !strings.Contains(out, "func main() {}") {
-		t.Fatalf("interim render must keep code verbatim (no chroma), got:\n%s", out)
+func TestStreamingCodeRendersHighlighted(t *testing.T) {
+	m := model{
+		streamingText: "```go\nfunc main() {}\n```",
+		pending:       true,
+	}
+	out := m.interimBlock(80)
+	if !strings.Contains(out, "\x1b[") {
+		t.Fatalf("live code should be highlighted before commit, got:\n%s", out)
+	}
+	if !strings.Contains(plainRender(t, out), "func main() {}") {
+		t.Fatalf("live code should keep the plain content, got:\n%s", out)
+	}
+}
+
+func TestFinalBarePythonCodeRendersHighlighted(t *testing.T) {
+	row := transcriptRow{
+		kind:  rowAssistant,
+		final: true,
+		text: strings.Join([]string{
+			"from datetime import datetime",
+			"",
+			"def print_current_time():",
+			"    print(datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\"))",
+			"",
+			"if __name__ == \"__main__\":",
+			"    print_current_time()",
+		}, "\n"),
+	}
+	out := renderAssistantRow(row, 90)
+	if !strings.Contains(out, "\x1b[") {
+		t.Fatalf("final bare Python code should be syntax-highlighted, got:\n%s", out)
+	}
+	plain := plainRender(t, out)
+	if !strings.Contains(plain, "from datetime import datetime") ||
+		!strings.Contains(plain, "def print_current_time():") ||
+		!strings.Contains(plain, `if __name__ == "__main__":`) ||
+		!strings.Contains(plain, "print_current_time()") {
+		t.Fatalf("final bare Python code should keep content, got:\n%s", out)
+	}
+	for _, wantStyled := range []string{"from", "def", "if"} {
+		if !strings.Contains(out, zeroTheme.accent.Render(wantStyled)) {
+			t.Fatalf("final bare Python code should color keyword %q, got:\n%s", wantStyled, out)
+		}
+	}
+}
+
+func TestBareFencedCodeInfersLanguage(t *testing.T) {
+	out := strings.Join(renderAssistantMarkdownText("```\nfrom datetime import datetime\nprint(datetime.now())\n```", 90, 90, true), "\n")
+	if !strings.Contains(out, "\x1b[") {
+		t.Fatalf("bare fenced Python code should infer language and highlight, got:\n%s", out)
+	}
+}
+
+func TestPlainProseDoesNotTriggerBareCodeHighlight(t *testing.T) {
+	out := strings.Join(renderAssistantMarkdownText("from here we continue with the explanation", 90, 90, true), "\n")
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("plain prose should not be treated as bare code, got:\n%s", out)
+	}
+}
+
+func TestStreamingBuffersOpenFencedCodeBlock(t *testing.T) {
+	open := model{
+		streamingText: "Here is the script:\n```python\nfrom datetime import datetime\nprint(datetime.now())",
+		pending:       true,
+	}
+	openOut := plainRender(t, open.interimBlock(90))
+	if !strings.Contains(openOut, "Here is the script:") {
+		t.Fatalf("streaming prose before code should remain visible, got:\n%s", openOut)
+	}
+	if strings.Contains(openOut, "datetime") || strings.Contains(openOut, "print(") {
+		t.Fatalf("open fenced code should be buffered until the closing fence, got:\n%s", openOut)
+	}
+
+	closed := model{
+		streamingText: open.streamingText + "\n```",
+		pending:       true,
+	}
+	closedOut := closed.interimBlock(90)
+	closedPlain := plainRender(t, closedOut)
+	if !strings.Contains(closedPlain, "from datetime import datetime") || !strings.Contains(closedPlain, "print(datetime.now())") {
+		t.Fatalf("closed fenced code should appear as one block, got:\n%s", closedOut)
+	}
+	if !strings.Contains(closedOut, "\x1b[") {
+		t.Fatalf("closed streaming code should be highlighted, got:\n%s", closedOut)
 	}
 }
 

@@ -1297,7 +1297,10 @@ func TestAgentResponsePreservesToolResultMetadata(t *testing.T) {
 	if row.tool != "apply_patch" || row.status != tools.StatusError || row.detail != diff {
 		t.Fatalf("tool result metadata was not preserved: %#v", row)
 	}
-	assertContains(t, next.renderRow(row, 80, buildRowContext(next.transcript)), "@@ -1 +1 @@")
+	rendered := next.renderRow(row, 80, buildRowContext(next.transcript))
+	assertContains(t, rendered, "old")
+	assertContains(t, rendered, "new")
+	assertNotContains(t, rendered, "@@")
 }
 
 func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
@@ -1549,7 +1552,7 @@ func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
 				tool:   "read_file",
 				detail: "README.md",
 			},
-			wants: []string{"read_file", "README.md"},
+			wants: []string{"Read", "README.md"},
 		},
 		zeroruntime.AgentEventToolResult: {
 			row: transcriptRow{
@@ -1565,7 +1568,7 @@ func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
 					"+new",
 				}, "\n"),
 			},
-			wants: []string{"apply_patch", "@@ -1 +1 @@"},
+			wants: []string{"Patched", "file.txt", "old", "new"},
 		},
 		zeroruntime.AgentEventPlanUpdate: {
 			row:   transcriptRow{kind: rowSystem, text: "Plan updated\n- inspect: completed"},
@@ -1926,11 +1929,9 @@ func TestSelectionHighlightUsesGutterShiftedCoordinate(t *testing.T) {
 }
 
 // TestTranscriptSelectionPaintsHighlightOnceNotTwice guards the "two highlights"
-// bug: assistant/user/reasoning rows used to self-paint the selection in the
-// UNSHIFTED coordinate AND finalizeTranscriptBodyRow re-painted it in the
-// gutter-shifted coordinate, so a single selection lit up in two places (the
-// real one plus a copy shifted right by the reading gutter). The highlight must
-// land exactly once.
+// bug: assistant/user/reasoning rows used to self-paint the selection and
+// finalizeTranscriptBodyRow re-painted it, so a single selection lit up twice.
+// The highlight must land exactly once.
 func TestTranscriptSelectionPaintsHighlightOnceNotTwice(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.width, m.height = 160, 30
@@ -1939,9 +1940,6 @@ func TestTranscriptSelectionPaintsHighlightOnceNotTwice(t *testing.T) {
 		kind: rowAssistant, text: "alpha beta gamma delta epsilon zeta", final: true,
 	})
 	width := m.chatColumnWidth()
-	if transcriptGutter(width) <= 0 {
-		t.Fatalf("need a positive reading gutter at width %d", width)
-	}
 
 	findRow := func(mm model) (transcriptBodyItem, bool) {
 		for _, it := range mm.transcriptBodyItems(width, "") {
@@ -1967,8 +1965,8 @@ func TestTranscriptSelectionPaintsHighlightOnceNotTwice(t *testing.T) {
 		t.Fatalf("expected a selectable text line of width >= 5, got %+v", line)
 	}
 
-	// Select the first 5 columns of that line (in the gutter-shifted coordinate the
-	// mouse hands to anchor/cursor).
+	// Select the first 5 columns of that line in the same coordinate system mouse
+	// selection uses.
 	m.transcriptSelection = transcriptSelectionState{
 		active: true,
 		anchor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart},
@@ -2016,20 +2014,127 @@ func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 	}
 }
 
+func TestAssistantNarrationBeforeToolCardGetsBlankSeparator(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowUser, text: "run it"},
+		transcriptRow{kind: rowAssistant, text: "I'll inspect the existing file, then run it."},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n  1 | print('x')"},
+	)
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	toolIdx := -1
+	for i := range items {
+		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
+			m.transcript[items[i].rowIndex].kind == rowToolResult {
+			toolIdx = i
+		}
+	}
+	if toolIdx <= 0 {
+		t.Fatal("tool item not found in the body")
+	}
+	if items[toolIdx-1].kind != transcriptBodyItemSeparator {
+		t.Fatalf("expected a blank separator between assistant narration and first tool card, got kind %v", items[toolIdx-1].kind)
+	}
+}
+
+func TestUserPromptBeforeToolCardGetsBlankSeparator(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowUser, text: "create the landing page"},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "write_file", status: tools.StatusOK, detail: "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,1 @@\n+<!DOCTYPE html>"},
+	)
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	toolIdx := -1
+	for i := range items {
+		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
+			m.transcript[items[i].rowIndex].kind == rowToolResult {
+			toolIdx = i
+		}
+	}
+	if toolIdx <= 0 {
+		t.Fatal("tool item not found in the body")
+	}
+	if items[toolIdx-1].kind != transcriptBodyItemSeparator {
+		t.Fatalf("expected a blank separator between user prompt and first tool card, got kind %v", items[toolIdx-1].kind)
+	}
+}
+
+func TestAssistantAfterToolCardGetsRuleSeparator(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowUser, text: "run it"},
+		transcriptRow{kind: rowAssistant, text: "I'll run it first."},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "bash", status: tools.StatusOK, detail: "stdout:\nok\nexit_code: 0"},
+		transcriptRow{kind: rowAssistant, text: "Done.", final: true},
+	)
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	finalIdx := -1
+	for i := range items {
+		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
+			m.transcript[items[i].rowIndex].kind == rowAssistant &&
+			m.transcript[items[i].rowIndex].final {
+			finalIdx = i
+		}
+	}
+	if finalIdx <= 0 {
+		t.Fatal("final assistant item not found in the body")
+	}
+	if items[finalIdx-1].kind != transcriptBodyItemRule {
+		t.Fatalf("expected a rule separator before assistant prose after tool output, got kind %v", items[finalIdx-1].kind)
+	}
+
+	body, _ := m.transcriptBody(m.chatColumnWidth(), "")
+	got := plainRender(t, body)
+	if !strings.Contains(got, "──") || !strings.Contains(got, "Done.") {
+		t.Fatalf("expected visible rule before final answer, got:\n%s", got)
+	}
+}
+
+func TestStreamingAssistantAfterToolCardGetsRuleSeparator(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.pending = true
+	m.streamingText = "Done."
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowUser, text: "run it"},
+		transcriptRow{kind: rowAssistant, text: "I'll run it first."},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "bash", status: tools.StatusOK, detail: "stdout:\nok\nexit_code: 0"},
+	)
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	pendingIdx := -1
+	for i := range items {
+		if items[i].kind == transcriptBodyItemPendingInterim {
+			pendingIdx = i
+		}
+	}
+	if pendingIdx <= 0 {
+		t.Fatal("pending interim item not found in the body")
+	}
+	if items[pendingIdx-1].kind != transcriptBodyItemRule {
+		t.Fatalf("expected a live rule separator before streaming assistant text after tool output, got kind %v", items[pendingIdx-1].kind)
+	}
+}
+
 func TestTranscriptReadingColumnHelpers(t *testing.T) {
-	// Wide terminal: a scaled side margin on each side, and the content fills the
-	// rest (column minus both margins) instead of stopping at a fixed cap.
-	if g := transcriptGutter(160); g != 8 {
-		t.Fatalf("wide gutter = %d, want 8", g)
+	// Wide terminal: no body gutter, full content width.
+	if g := transcriptGutter(160); g != 0 {
+		t.Fatalf("wide gutter = %d, want 0", g)
 	}
-	if cw := transcriptContentWidth(160); cw != 160-2*8 {
-		t.Fatalf("wide contentWidth = %d, want %d (column minus both margins)", cw, 160-2*8)
+	if cw := transcriptContentWidth(160); cw != 160 {
+		t.Fatalf("wide contentWidth = %d, want full 160", cw)
 	}
-	// Very wide terminal: the margin is clamped so it never grows unbounded.
-	if g := transcriptGutter(400); g != 12 {
-		t.Fatalf("very wide gutter = %d, want clamp ceiling 12", g)
+	// Very wide terminal: still no gutter, so code/tool blocks use the width.
+	if g := transcriptGutter(400); g != 0 {
+		t.Fatalf("very wide gutter = %d, want 0", g)
 	}
-	// Tiny terminal: no margins, full width so prose never collapses.
+	// Tiny terminal: full width so prose never collapses.
 	if g := transcriptGutter(40); g != 0 {
 		t.Fatalf("tiny gutter = %d, want 0", g)
 	}
@@ -2038,7 +2143,7 @@ func TestTranscriptReadingColumnHelpers(t *testing.T) {
 	}
 }
 
-func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
+func TestTranscriptBodyRowsUseFullWidthAndAlignSelection(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.width, m.height = 160, 30
 	m.altScreen = true
@@ -2048,8 +2153,8 @@ func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
 
 	width := m.chatColumnWidth()
 	gutter := transcriptGutter(width)
-	if gutter <= 0 {
-		t.Fatalf("expected a gutter at width %d", width)
+	if gutter != 0 {
+		t.Fatalf("expected no body gutter at width %d, got %d", width, gutter)
 	}
 
 	items := m.transcriptBodyItems(width, "")
@@ -2064,24 +2169,21 @@ func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
 	}
 	rendered := row.render(0)
 
-	maxLine := transcriptContentWidth(width) + gutter // content plus the left indent
-	wroteIndented := false
+	maxLine := transcriptContentWidth(width) + gutter // content plus any left indent
+	sawContent := false
 	for _, line := range rendered.lines {
 		if w := lipgloss.Width(line); w > maxLine {
-			t.Fatalf("body line width %d exceeds reading column %d: %q", w, maxLine, line)
+			t.Fatalf("body line width %d exceeds chat column %d: %q", w, maxLine, line)
 		}
 		if strings.TrimSpace(line) != "" {
-			if !strings.HasPrefix(line, strings.Repeat(" ", gutter)) {
-				t.Fatalf("non-blank body line is not gutter-indented: %q", line)
-			}
-			wroteIndented = true
+			sawContent = true
 		}
 	}
-	if !wroteIndented {
-		t.Fatal("expected at least one indented content line")
+	if !sawContent {
+		t.Fatal("expected at least one content line")
 	}
-	// Selection alignment: text-carrying selectable lines start at/after the gutter
-	// so click-to-select and the highlight track the indented glyphs.
+	// Selection alignment: text-carrying selectable lines should never start before
+	// the rendered text coordinate.
 	for _, sl := range rendered.selectable {
 		if sl.text != "" && sl.textStart < gutter {
 			t.Fatalf("selectable textStart %d < gutter %d — selection would misalign", sl.textStart, gutter)

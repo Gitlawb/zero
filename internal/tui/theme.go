@@ -40,7 +40,7 @@ type tuiTheme struct {
 
 	// Tool cards.
 	toolName   lipgloss.Style // head-row tool name, ink bold
-	toolTarget lipgloss.Style // head-row target path, muted
+	toolTarget lipgloss.Style // head-row target path, ink
 	toolArg    lipgloss.Style // one-line arg hint, faintest
 	cardRun    lipgloss.Style // card border while the call runs (accent-mixed)
 	cardErr    lipgloss.Style // card border after an error (red-mixed)
@@ -144,9 +144,9 @@ var darkPalette = palette{
 	blue:      "#7db4ff",
 	gitAdd:    "#7db87a",
 	gitDel:    "#b87a7a",
-	addBg:     "#15201d",
+	addBg:     "#18352c",
 	delBg:     "#241819",
-	addBgWord: "#26503d", // changed span within an added line — brighter green (sep 1.83 vs addBg, addInk 7.1:1)
+	addBgWord: "#2e654d", // changed span within an added line — brighter green (sep 1.83 vs addBg, addInk 7.1:1)
 	delBgWord: "#502d30", // changed span within a deleted line — brighter red (sep 1.44 vs delBg, delInk 7.7:1)
 	permBg:    "#1c1915",
 	selBg:     "#32401b", // selected row bg — brightened from #1d2114 so the highlighted row separates from the panel (sep 1.18→1.73) while ink label contrast stays ~9.4:1
@@ -217,7 +217,7 @@ func buildTheme(p palette) tuiTheme {
 		userPrompt: fg(p.accent).Bold(true),
 		sayText:    fg(p.muted),
 		toolName:   fg(p.ink).Bold(true),
-		toolTarget: fg(p.muted),
+		toolTarget: fg(p.ink),
 		toolArg:    fg(p.faintest),
 		cardRun:    fg(p.cardRun),
 		cardErr:    fg(p.cardErr),

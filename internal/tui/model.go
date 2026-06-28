@@ -2453,17 +2453,13 @@ func (m model) interimBlock(width int) string {
 		}
 		return strings.Join(blocks, "\n")
 	}
-	// Live streaming block: render plain (no chroma) so the per-frame render loop
-	// never re-tokenises the growing code block. Highlighting happens once the row
-	// commits (renderAssistantRow, cached).
-	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width, false)
+	// Live streaming block: prose streams normally, but an open fenced code block
+	// is buffered until its closing fence arrives so the code appears as one
+	// highlighted block instead of recoloring token-by-token.
+	lines := renderStreamingAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
-		// styleStreamingLine applies the fade palette when fadeActive is
-		// true and lineAges is populated; otherwise it falls through to
-		// the same base-ink render styleAssistantMarkdownLine would have
-		// applied. This means test fixtures that pre-populate
-		// m.streamingText without going through the agentTextMsg
-		// branch keep rendering identically to before.
+		// styleStreamingLine fades plain prose but leaves already-highlighted
+		// markdown/code lines alone, so live colors match the committed row.
 		lines[index] = m.styleStreamingLine(line, index, len(lines))
 	}
 	lines = m.appendStreamingCursor(lines, width)
@@ -3090,6 +3086,17 @@ func startsTurn(kind rowKind) bool {
 // (summary line + injected spacing) and must not be double-spaced.
 func isToolCardKind(kind rowKind) bool {
 	return kind == rowToolCall || kind == rowToolResult
+}
+
+func needsSeparatorBeforeToolCard(previous rowKind, current rowKind) bool {
+	if !isToolCardKind(current) {
+		return false
+	}
+	return isToolCardKind(previous) || previous == rowAssistant || previous == rowUser
+}
+
+func shouldRuleBeforeTurn(previous rowKind, current rowKind) bool {
+	return current == rowAssistant && isToolCardKind(previous)
 }
 
 func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

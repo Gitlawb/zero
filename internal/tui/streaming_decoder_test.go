@@ -31,6 +31,27 @@ func TestStreamingDecoderPathTailAndCount(t *testing.T) {
 	}
 }
 
+func TestStreamingDecoderPathAliases(t *testing.T) {
+	for _, key := range []string{"file", "file_path", "filepath", "filename"} {
+		d := newStreamingDecoder()
+		d.feed(`{"` + key + `":"time_test.py","content":"print(1)"}`)
+		if d.path != "time_test.py" {
+			t.Errorf("%s path = %q, want time_test.py", key, d.path)
+		}
+	}
+}
+
+func TestStreamingDecoderFindsPathAfterContent(t *testing.T) {
+	d := newStreamingDecoder()
+	feedChunks(d, `{"content":"from datetime import datetime\n`, `print(datetime.now())",`, `"path":"time_test.py"}`)
+	if d.path != "time_test.py" {
+		t.Fatalf("late path = %q, want time_test.py", d.path)
+	}
+	if got := d.lineTotal(); got != 2 {
+		t.Fatalf("lineTotal = %d, want 2", got)
+	}
+}
+
 func TestStreamingDecoderSplitEscape(t *testing.T) {
 	d := newStreamingDecoder()
 	// The \n and \t escapes are split across feed boundaries (backslash, then n/t).

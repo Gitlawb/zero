@@ -12,6 +12,7 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 	tests := []struct {
 		name   string
 		hint   string
+		arg    string
 		detail string
 		want   []string
 	}{
@@ -24,7 +25,7 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 				"-old",
 				"+new",
 			}, "\n"),
-			want: []string{"app.go", "-1", "+1", "new"},
+			want: []string{"(+1 -1)", "-1", "+1", "new"},
 		},
 		{
 			name: "apply_patch",
@@ -35,23 +36,25 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 				"-old",
 				"+new",
 			}, "\n"),
-			want: []string{"app.go", "-1", "+1", "new"},
+			want: []string{"(+1 -1)", "-1", "+1", "new"},
 		},
 		{
 			name:   "read_file",
+			hint:   "README.md",
 			detail: "File: README.md\n\n  7 | # Zero",
-			want:   []string{"# Zero", "L7"},
+			want:   []string{"Read", "README.md"},
 		},
 		{
 			name:   "bash",
 			hint:   "go test ./internal/tui",
 			detail: "stdout:\nok\nexit_code: 0",
-			want:   []string{"go test ./internal/tui", "ok", "exit 0"},
+			want:   []string{"ok"},
 		},
 		{
 			name:   "grep",
+			arg:    "func render",
 			detail: "internal/tui/rendering.go:41: func render()",
-			want:   []string{"internal/tui/rendering.go:41", "1 matches"},
+			want:   []string{"Search", "func render"},
 		},
 		{
 			name:   "unknown_tool",
@@ -65,6 +68,7 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 			body := registry.render(toolBodyRequest{
 				name:   tt.name,
 				hint:   tt.hint,
+				arg:    tt.arg,
 				detail: normalizeToolCardDetail(tt.detail),
 				width:  96,
 				opts:   opts,
@@ -74,6 +78,12 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 				if !strings.Contains(got, want) {
 					t.Fatalf("%s body = %q, missing %q", tt.name, got, want)
 				}
+			}
+			if tt.name == "read_file" && strings.Contains(got, "# Zero") {
+				t.Fatalf("read_file body = %q, must not expose read contents", got)
+			}
+			if tt.name == "grep" && strings.Contains(got, "internal/tui/rendering.go:41") {
+				t.Fatalf("grep body = %q, must not expose raw search matches", got)
 			}
 		})
 	}
@@ -107,7 +117,7 @@ func TestToolBodyRegistryReplacementIsScopedToOneTool(t *testing.T) {
 	if strings.Contains(got, "replacement grep body") {
 		t.Fatalf("bash body = %q, must not use grep replacement", got)
 	}
-	if !strings.Contains(got, "go test ./internal/tui") || !strings.Contains(got, "exit 0") {
+	if !strings.Contains(got, "ok") || strings.Contains(got, "exit 0") {
 		t.Fatalf("bash body = %q, want original bash renderer", got)
 	}
 }

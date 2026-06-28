@@ -17,6 +17,7 @@ type streamingDecoder struct {
 
 	rawLen   int    // total raw arg bytes seen (for the "receiving N KB" indicator)
 	head     []byte // raw args before the content value; dropped once content starts
+	pathScan []byte // bounded post-content args used only to recover a late path
 	path     string
 	pathDone bool
 
@@ -32,7 +33,7 @@ type streamingDecoder struct {
 
 func newStreamingDecoder() *streamingDecoder {
 	return &streamingDecoder{
-		pathKeys:    []string{"path", "file_path", "filename"},
+		pathKeys:    []string{"path", "file", "file_path", "filepath", "filename"},
 		contentKeys: []string{"content", "new_string", "new_str", "new_text", "new", "replacement", "patch", "input"},
 		tailCap:     streamingTailLines,
 	}
@@ -42,27 +43,54 @@ func newStreamingDecoder() *streamingDecoder {
 func (d *streamingDecoder) feed(fragment string) {
 	d.rawLen += len(fragment)
 	if d.closed {
+		d.scanPathFragment(fragment)
 		return
 	}
 	if d.inContent {
-		d.consume(fragment)
+		if remainder := d.consume(fragment); remainder != "" {
+			d.scanPathFragment(remainder)
+		}
 		return
 	}
 	d.head = append(d.head, fragment...)
 	if !d.pathDone {
 		// Best effort: the path completes quickly (it precedes the content), and a
 		// partial value just updates until it's whole.
-		d.path = streamingFilePath(string(d.head))
+		d.setPathFrom(string(d.head))
 	}
 	start := d.contentValueStart()
 	if start < 0 {
 		return // content value hasn't begun yet
 	}
-	d.pathDone = true
 	d.inContent = true
 	rest := string(d.head[start:])
 	d.head = nil
-	d.consume(rest)
+	if remainder := d.consume(rest); remainder != "" {
+		d.scanPathFragment(remainder)
+	}
+}
+
+func (d *streamingDecoder) setPathFrom(args string) {
+	if d.pathDone {
+		return
+	}
+	if v := streamingFilePath(args); v != "" {
+		d.path = v
+		d.pathDone = true
+	}
+}
+
+const maxStreamingPathScanBytes = 8192
+
+func (d *streamingDecoder) scanPathFragment(fragment string) {
+	if d.pathDone || fragment == "" {
+		return
+	}
+	d.pathScan = append(d.pathScan, fragment...)
+	if len(d.pathScan) > maxStreamingPathScanBytes {
+		d.pathScan = d.pathScan[len(d.pathScan)-maxStreamingPathScanBytes:]
+	}
+	d.setPathFrom(string(d.pathScan))
 }
 
 // contentValueStart returns the index in head just past the opening quote of the
@@ -78,9 +106,9 @@ func (d *streamingDecoder) contentValueStart() int {
 	return best
 }
 
-// consume decodes content bytes, splitting on decoded newlines into tail lines and
-// stopping at the value's closing quote.
-func (d *streamingDecoder) consume(b string) {
+// consume decodes content bytes, splitting on decoded newlines into tail lines,
+// stopping at the value's closing quote, and returning any bytes after it.
+func (d *streamingDecoder) consume(b string) string {
 	for i := 0; i < len(b); i++ {
 		c := b[i]
 		if d.uSkip > 0 {
@@ -108,11 +136,12 @@ func (d *streamingDecoder) consume(b string) {
 			d.pendingEsc = true
 		case '"':
 			d.closed = true // closing quote of the content value
-			return
+			return b[i+1:]
 		default:
 			d.cur = append(d.cur, c)
 		}
 	}
+	return ""
 }
 
 func (d *streamingDecoder) newline() {

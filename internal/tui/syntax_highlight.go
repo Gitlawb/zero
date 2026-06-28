@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"image/color"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -37,6 +39,25 @@ func cachedLexer(lang string) chroma.Lexer {
 	return lexer
 }
 
+func cachedLexerForPath(path string) chroma.Lexer {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	key := "path:" + strings.ToLower(filepath.Base(path))
+	lexerCacheMu.RLock()
+	lexer, ok := lexerCache[key]
+	lexerCacheMu.RUnlock()
+	if ok {
+		return lexer
+	}
+	lexer = lexers.Match(path)
+	lexerCacheMu.Lock()
+	lexerCache[key] = lexer
+	lexerCacheMu.Unlock()
+	return lexer
+}
+
 // tokenStyle maps a chroma token type onto Zero's existing, contrast-audited
 // palette rather than a chroma color scheme — so highlighted code stays on-brand
 // and degrades through the same lipgloss profile path as the rest of the UI
@@ -66,10 +87,73 @@ func tokenStyle(tt chroma.TokenType) lipgloss.Style {
 // unknown or missing language is never worse than today. Wrapping is done at the
 // token level so colors never split an ANSI escape.
 func highlightCode(code []string, lang string, measure int) ([]string, bool) {
+	return highlightCodeWithLexer(cachedLexer(lang), code, measure, nil)
+}
+
+func highlightCodeAuto(code []string, lang string, measure int) ([]string, bool) {
+	if strings.TrimSpace(lang) == "" {
+		lang = inferCodeLanguage(code)
+	}
+	return highlightCode(code, lang, measure)
+}
+
+func highlightCodeForPath(code []string, path string, measure int, bg color.Color) ([]string, bool) {
+	return highlightCodeWithLexer(cachedLexerForPath(path), code, measure, bg)
+}
+
+func inferCodeLanguage(code []string) string {
+	for _, line := range code {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "from ") && strings.Contains(trimmed, " import "):
+			return "python"
+		case strings.HasPrefix(trimmed, "import ") && !strings.Contains(trimmed, " from "):
+			return "python"
+		case strings.HasPrefix(trimmed, "def ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "class ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "if ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "elif ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case trimmed == "else:" || trimmed == "try:" || trimmed == "finally:":
+			return "python"
+		case strings.HasPrefix(trimmed, "for ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "while ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "with ") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "except") && strings.HasSuffix(trimmed, ":"):
+			return "python"
+		case strings.HasPrefix(trimmed, "return "):
+			return "python"
+		case strings.HasPrefix(trimmed, "print("):
+			return "python"
+		case strings.HasPrefix(trimmed, "package "):
+			return "go"
+		case strings.HasPrefix(trimmed, "func ") && strings.Contains(trimmed, "{"):
+			return "go"
+		case strings.HasPrefix(trimmed, "const "), strings.HasPrefix(trimmed, "let "), strings.HasPrefix(trimmed, "var "):
+			return "javascript"
+		case strings.HasPrefix(trimmed, "function ") && strings.Contains(trimmed, "{"):
+			return "javascript"
+		case strings.HasPrefix(trimmed, "<!DOCTYPE "), strings.HasPrefix(trimmed, "<html"), strings.HasPrefix(trimmed, "<div"), strings.HasPrefix(trimmed, "<span"):
+			return "html"
+		}
+		break
+	}
+	return ""
+}
+
+func highlightCodeWithLexer(lexer chroma.Lexer, code []string, measure int, bg color.Color) ([]string, bool) {
 	if measure < 4 {
 		return nil, false
 	}
-	lexer := cachedLexer(lang)
 	if lexer == nil {
 		return nil, false
 	}
@@ -87,6 +171,9 @@ func highlightCode(code []string, lang string, measure int) ([]string, bool) {
 		curWidth = 0
 	}
 	emit := func(style lipgloss.Style, s string) {
+		if bg != nil {
+			style = style.Background(bg)
+		}
 		var chunk strings.Builder
 		flushChunk := func() {
 			if chunk.Len() > 0 {

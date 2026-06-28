@@ -59,8 +59,8 @@ func TestDiffBodyWordHighlightRenders(t *testing.T) {
 	d := "--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-timeout = 90\n+timeout = 300"
 	body := diffCardBody(d, 70, cardRenderOptions{bodyCap: 20})
 	joined := strings.Join(body.lines, "\n")
-	// addBgWord #26503d -> "38;80;61"; delBgWord #502d30 -> "80;45;48"
-	if !strings.Contains(joined, "38;80;61") || !strings.Contains(joined, "80;45;48") {
+	// addBgWord #2e654d -> "46;101;77"; delBgWord #502d30 -> "80;45;48"
+	if !strings.Contains(joined, "46;101;77") || !strings.Contains(joined, "80;45;48") {
 		t.Errorf("expected changed spans on the brighter word bg, got:\n%s", joined)
 	}
 }

@@ -62,11 +62,36 @@ func TestStreamingToolCallView(t *testing.T) {
 	if viewModel("bash", `{"command":"ls"}`).streamingToolCallView(80) != "" {
 		t.Error("non-file tool should render nothing")
 	}
-	// Active write_file → shows path, line count, and a content tail.
+	// Active write_file → shows path and live count, but buffers the code body
+	// until the final tool result lands.
 	out := viewModel("write_file", `{"path":"a/b.go","content":"package main\n\nfunc main() {}\n"}`).streamingToolCallView(80)
-	for _, want := range []string{"write_file", "a/b.go", "lines", "func main()"} {
+	for _, want := range []string{zeroTheme.diffAdd.Render("+3"), zeroTheme.diffDel.Render("-0")} {
 		if !strings.Contains(out, want) {
+			t.Errorf("live count tag should color additions/deletions, missing styled %q in:\n%s", want, out)
+		}
+	}
+	plain := plainRender(t, out)
+	for _, want := range []string{"Adding", "a/b.go", "(+3 -0)"} {
+		if !strings.Contains(plain, want) {
 			t.Errorf("view missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(plain, "package main") || strings.Contains(plain, "func main()") {
+		t.Errorf("live write preview should buffer code body until completion:\n%s", out)
+	}
+	if strings.Contains(out, "write_file") {
+		t.Errorf("live preview must not expose raw tool name:\n%s", out)
+	}
+}
+
+func TestStreamingToolCallViewShowsLatePath(t *testing.T) {
+	dec := newStreamingDecoder()
+	feedChunks(dec, `{"content":"from datetime import datetime\n`, `print(datetime.now())",`, `"path":"time_test.py"}`)
+	m := model{streamCallID: "1", streamCallName: "write_file", streamCallDecoder: dec}
+	out := plainRender(t, m.streamingToolCallView(80))
+	for _, want := range []string{"Adding", "time_test.py", "(+2 -0)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("live write header = %q, missing %q", out, want)
 		}
 	}
 }
@@ -80,21 +105,5 @@ func TestStreamingViewShowsProgressBeforeContent(t *testing.T) {
 	}
 	if !strings.Contains(out, "KB") {
 		t.Errorf("should show a receiving byte count before content: %q", out)
-	}
-}
-
-func TestStyleStreamingNewContentNeverRed(t *testing.T) {
-	// L8: a brand-new file line beginning with "-" (e.g. CSS "-webkit-…") must NOT
-	// be colored as a diff removal. With newContent=true it renders green; the
-	// red/green diff branches apply only to apply_patch (newContent=false).
-	green := zeroTheme.green.Render("-webkit-box-shadow: none;")
-	got := styleStreamingCodeLine("-webkit-box-shadow: none;", true)
-	if got != green {
-		t.Errorf("new-file '-' line should render green, got %q want %q", got, green)
-	}
-	// And for a real patch (newContent=false) a '-' line IS a red removal.
-	red := zeroTheme.red.Render("-old line")
-	if got := styleStreamingCodeLine("-old line", false); got != red {
-		t.Errorf("patch '-' line should render red, got %q", got)
 	}
 }

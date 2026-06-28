@@ -362,3 +362,13 @@ func TestStyleStreamingLineFallsBackWhenLineAgesNil(t *testing.T) {
 		t.Errorf("styleStreamingLine with nil lineAges = %q, want %q (base render)", out, want)
 	}
 }
+
+func TestStyleStreamingLinePreservesHighlightedLines(t *testing.T) {
+	m := model{}
+	m.fadeActive = true
+	m.lineAges = []time.Time{time.Now()}
+	line := zeroTheme.accent.Render("func") + " main()"
+	if out := m.styleStreamingLine(line, 0, 1); out != line {
+		t.Errorf("highlighted streaming line should be preserved, got %q want %q", out, line)
+	}
+}

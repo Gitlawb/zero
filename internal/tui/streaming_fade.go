@@ -262,12 +262,14 @@ func (m *model) resetStreamingFade() {
 	m.lastStreamActivity = time.Time{}
 }
 
-// styleStreamingLine applies the fade palette to one visual line of the
-// streaming block. When fadeActive is false (or lineAges is nil because a
-// test fixture pre-populated streamingText), the line is styled with the
-// base ink color — the same look the streaming block had before the fade
-// feature shipped.
+// styleStreamingLine applies the fade palette to one visual line of prose in the
+// streaming block. Already-styled lines (markdown/code/table highlighting) are
+// returned unchanged so live colors match committed colors instead of snapping at
+// turn end.
 func (m model) styleStreamingLine(line string, visualIndex, visualCount int) string {
+	if strings.Contains(line, "\x1b") {
+		return line
+	}
 	if !m.fadeActive || m.lineAges == nil {
 		return zeroTheme.ink.Render(line)
 	}

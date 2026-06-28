@@ -44,6 +44,11 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 	if len(raw) == 0 {
 		return []string{""}
 	}
+	if allowHighlight && looksLikeBareCodeBlock(raw) {
+		if highlighted, ok := highlightCodeAuto(raw, "", tableMeasure); ok {
+			return trimMarkdownDisplayBlankEdges(highlighted)
+		}
+	}
 
 	lines := []string{}
 	// blankBefore inserts one separator blank line before a block (heading or
@@ -82,11 +87,8 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 				code = append(code, strings.ReplaceAll(raw[index], "\t", "    "))
 				index++
 			}
-			// Highlighting tokenises the whole block, so it is confined to
-			// committed/cached rows (allowHighlight); the live streaming block
-			// renders plain so the per-frame render loop never re-lexes.
 			if allowHighlight {
-				if highlighted, ok := highlightCode(code, lang, tableMeasure); ok {
+				if highlighted, ok := highlightCodeAuto(code, lang, tableMeasure); ok {
 					lines = append(lines, highlighted...)
 					continue
 				}
@@ -104,6 +106,13 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 				index++
 			}
 			lines = append(lines, renderMarkdownTable(tableRows, alignments, tableMeasure)...)
+			continue
+		}
+
+		if isMarkdownHorizontalRule(trimmed) {
+			blankBefore()
+			lines = append(lines, renderMarkdownHorizontalRule(proseMeasure))
+			index++
 			continue
 		}
 
@@ -126,6 +135,23 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 			continue
 		}
 
+		if allowHighlight && looksLikeBareCodeLine(line) {
+			code := []string{}
+			for index < len(raw) {
+				next := raw[index]
+				nextTrimmed := strings.TrimSpace(next)
+				if nextTrimmed == "" || markdownStartsBlock(raw, index) || !looksLikeBareCodeLine(next) {
+					break
+				}
+				code = append(code, strings.ReplaceAll(next, "\t", "    "))
+				index++
+			}
+			if highlighted, ok := highlightCodeAuto(code, "", tableMeasure); ok {
+				lines = append(lines, highlighted...)
+				continue
+			}
+		}
+
 		blankBefore()
 		paragraph := []string{strings.TrimSpace(line)}
 		index++
@@ -144,6 +170,45 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 	return trimMarkdownDisplayBlankEdges(lines)
 }
 
+func renderStreamingAssistantMarkdownText(text string, proseMeasure int, tableMeasure int) []string {
+	return renderAssistantMarkdownText(streamingMarkdownStablePrefix(text), proseMeasure, tableMeasure, true)
+}
+
+func streamingMarkdownStablePrefix(text string) string {
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	offset := 0
+	openFenceStart := -1
+	openFence := ""
+	for offset <= len(text) {
+		lineStart := offset
+		next := strings.IndexByte(text[offset:], '\n')
+		line := ""
+		if next < 0 {
+			line = text[offset:]
+			offset = len(text) + 1
+		} else {
+			line = text[offset : offset+next]
+			offset += next + 1
+		}
+		if fence, ok := markdownFenceMarker(strings.TrimSpace(line)); ok {
+			if openFence == "" {
+				openFence = fence
+				openFenceStart = lineStart
+			} else if fence == openFence {
+				openFence = ""
+				openFenceStart = -1
+			}
+		}
+		if next < 0 {
+			break
+		}
+	}
+	if openFenceStart >= 0 {
+		return strings.TrimRight(text[:openFenceStart], "\n")
+	}
+	return text
+}
+
 func renderAssistantMarkdownPlainText(text string, proseMeasure int, tableMeasure int) []string {
 	lines := renderAssistantMarkdownText(text, proseMeasure, tableMeasure, false)
 	for index := range lines {
@@ -158,6 +223,10 @@ func stripMarkdownRenderControls(text string) string {
 }
 
 func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
+	if hasExternalANSIStyle(line) {
+		return line
+	}
+
 	var builder strings.Builder
 	style := markdownDisplayNormal
 	var run strings.Builder
@@ -222,6 +291,26 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 	return builder.String()
 }
 
+func hasExternalANSIStyle(line string) bool {
+	for index := 0; index < len(line); {
+		if line[index] != '\x1b' {
+			index++
+			continue
+		}
+		end := ansiSequenceEnd(line, index)
+		if end <= index {
+			index++
+			continue
+		}
+		seq := line[index:end]
+		if seq != markdownBoldStart && seq != markdownBoldEnd {
+			return true
+		}
+		index = end
+	}
+	return false
+}
+
 func markdownDisplayStyleForRune(r rune, current markdownDisplayStyle) markdownDisplayStyle {
 	switch r {
 	case '│', '─', '┼', '╭', '╮', '╰', '╯', '├', '┤', '┬', '┴':
@@ -245,10 +334,126 @@ func markdownStartsBlock(lines []string, index int) bool {
 	if _, ok := markdownFenceMarker(trimmed); ok {
 		return true
 	}
-	if markdownHeadingText(trimmed) != "" || isMarkdownListLine(trimmed) || strings.HasPrefix(trimmed, ">") {
+	if markdownHeadingText(trimmed) != "" || isMarkdownHorizontalRule(trimmed) || isMarkdownListLine(trimmed) || strings.HasPrefix(trimmed, ">") {
 		return true
 	}
 	return index+1 < len(lines) && isMarkdownTableHeader(lines[index], lines[index+1])
+}
+
+func isMarkdownHorizontalRule(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	marker := rune(0)
+	count := 0
+	for _, r := range trimmed {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		if r != '-' && r != '_' && r != '*' {
+			return false
+		}
+		if marker == 0 {
+			marker = r
+		} else if marker != r {
+			return false
+		}
+		count++
+	}
+	return count >= 3
+}
+
+func renderMarkdownHorizontalRule(measure int) string {
+	width := clampInt(measure, 16, 96)
+	return strings.Repeat("─", width)
+}
+
+func looksLikeBareCodeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(trimmed, "from ") && strings.Contains(trimmed, " import "):
+		return true
+	case strings.HasPrefix(trimmed, "import ") && !strings.Contains(trimmed, " from "):
+		return true
+	case strings.HasPrefix(trimmed, "def ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "class ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "if ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "elif ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case trimmed == "else:" || trimmed == "try:" || trimmed == "finally:":
+		return true
+	case strings.HasPrefix(trimmed, "for ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "while ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "with ") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "except") && strings.HasSuffix(trimmed, ":"):
+		return true
+	case strings.HasPrefix(trimmed, "return "):
+		return true
+	case strings.HasPrefix(trimmed, "print("):
+		return true
+	case isSimpleFunctionCall(trimmed):
+		return true
+	case strings.HasPrefix(trimmed, "package "):
+		return true
+	case strings.HasPrefix(trimmed, "func ") && strings.Contains(trimmed, "{"):
+		return true
+	case strings.HasPrefix(trimmed, "const "), strings.HasPrefix(trimmed, "let "), strings.HasPrefix(trimmed, "var "):
+		return true
+	case strings.HasPrefix(trimmed, "function ") && strings.Contains(trimmed, "{"):
+		return true
+	case strings.HasPrefix(trimmed, "<!DOCTYPE "), strings.HasPrefix(trimmed, "<html"), strings.HasPrefix(trimmed, "<div"), strings.HasPrefix(trimmed, "<span"):
+		return true
+	}
+	return false
+}
+
+func looksLikeBareCodeBlock(lines []string) bool {
+	nonBlank := 0
+	codeLike := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		nonBlank++
+		if looksLikeBareCodeLine(line) || isIndentedCodeContinuation(line) {
+			codeLike++
+		}
+	}
+	return nonBlank >= 2 && codeLike == nonBlank
+}
+
+func isIndentedCodeContinuation(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return trimmed != "" && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t"))
+}
+
+func isSimpleFunctionCall(trimmed string) bool {
+	open := strings.Index(trimmed, "(")
+	return open > 0 &&
+		strings.HasSuffix(trimmed, ")") &&
+		isIdentifierText(trimmed[:open])
+}
+
+func isIdentifierText(text string) bool {
+	if text == "" {
+		return false
+	}
+	for index, r := range text {
+		if r == '_' || unicode.IsLetter(r) || (index > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func markdownFenceMarker(trimmed string) (string, bool) {

@@ -11,6 +11,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 type transcriptSelectionPoint struct {
@@ -59,6 +61,7 @@ const (
 	transcriptBodyItemTitle transcriptBodyItemKind = iota
 	transcriptBodyItemEmpty
 	transcriptBodyItemSeparator
+	transcriptBodyItemRule
 	transcriptBodyItemRow
 	transcriptBodyItemPendingPrompt
 	transcriptBodyItemPendingInterim
@@ -118,10 +121,11 @@ func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []st
 	return append([]string(nil), l.lines[start:end]...)
 }
 
-// padTranscriptBodyLines left-indents transcript body rows by gutter cells (the
-// reading-column margin). Horizontal only — it never changes the line count, so
-// the width-keyed height cache stays valid. Two-column mode right-pads the chat
-// block to the column width in joinColumns; single-column leaves the right blank.
+// padTranscriptBodyLines left-indents transcript body rows when a non-zero
+// gutter is configured. It is horizontal only — it never changes the line count,
+// so the width-keyed height cache stays valid. Two-column mode right-pads the
+// chat block to the column width in joinColumns; single-column leaves any
+// remaining cells blank.
 func padTranscriptBodyLines(lines []string, gutter int) []string {
 	if gutter <= 0 {
 		return lines
@@ -161,9 +165,9 @@ func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcrip
 
 func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
 	items := []transcriptBodyItem{}
-	// Transcript ROWS render in a reading column: wrapped to contentWidth and
-	// indented by gutter, so wide terminals don't run text edge-to-edge. Block
-	// items (title bar, empty state, prompts) keep the full column width below.
+	// Transcript ROWS render at the full chat width; row/status glyphs provide
+	// structure without adding another body margin. Block items (title bar, empty
+	// state, prompts) keep the full column width below.
 	contentWidth := transcriptContentWidth(width)
 	gutter := transcriptGutter(width)
 
@@ -173,6 +177,8 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 		items = append(items, transcriptBlockBodyItem(transcriptBodyItemTitle, -1, m.titleBar(width)))
 	}
 
+	previousKind := rowWelcome
+	havePreviousKind := false
 	if m.transcriptEmpty() && !m.pending {
 		if emptyOverlay != "" {
 			items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, m.emptyStateWithOverlay(width, emptyOverlay)))
@@ -182,7 +188,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 	} else {
 		rc := buildRowContext(m.transcript)
 		shownAny := false
-		previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
+		previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
 		specialistSummaryEmitted := false
 		for index := m.flushed; index < len(m.transcript); index++ {
 			row := m.transcript[index]
@@ -191,10 +197,54 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			if row.kind == rowWelcome || rc.skip(row) {
 				continue
 			}
+			if isSuccessfulExploreResult(row) {
+				groupRows, groupIndices, nextIndex := collectExploreResultGroup(m.transcript, index, rc)
+				if len(groupRows) > 0 {
+					if (shownAny || m.flushedAny) && startsTurn(row.kind) {
+						items = append(items, transcriptBlankBodyItem())
+					}
+					if shownAny && havePreviousKind && needsSeparatorBeforeToolCard(previousKind, row.kind) {
+						items = append(items, transcriptBlankBodyItem())
+					}
+					firstRowIndex := groupIndices[0]
+					groupRowsCopy := append([]transcriptRow(nil), groupRows...)
+					groupIndicesCopy := append([]int(nil), groupIndices...)
+					block := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
+					items = append(items, transcriptBodyItem{
+						kind:              transcriptBodyItemRow,
+						rowIndex:          firstRowIndex,
+						heightCacheKey:    transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block),
+						heightCacheStable: true,
+						render: func(startBodyY int) transcriptBodyRenderedItem {
+							rendered := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
+							selectable := make([]transcriptSelectableLine, 0, len(groupIndicesCopy)+1)
+							for offset, line := range viewLines(rendered) {
+								rowIndex := firstRowIndex
+								if offset > 0 && offset-1 < len(groupIndicesCopy) {
+									rowIndex = groupIndicesCopy[offset-1]
+								}
+								if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY+offset, line, false); ok {
+									selectable = append(selectable, meta)
+								}
+							}
+							return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
+						},
+					})
+					shownAny = true
+					previousKind = row.kind
+					havePreviousKind = true
+					index = nextIndex - 1
+					continue
+				}
+			}
 			// Blank-line separation before turns, including between flushed
 			// history and the first live row.
 			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
-				items = append(items, transcriptBlankBodyItem())
+				if havePreviousKind && shouldRuleBeforeTurn(previousKind, row.kind) {
+					items = append(items, transcriptRuleBodyItem(contentWidth, gutter))
+				} else {
+					items = append(items, transcriptBlankBodyItem())
+				}
 			}
 			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
 				items = append(items, transcriptBlankBodyItem())
@@ -204,7 +254,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			// would otherwise stack with no gap (the dense "wall" look). One blank
 			// line between them matches the reference agents. Turn-starters are
 			// separated above, so this only fires tool-card -> tool-card.
-			if shownAny && havePreviousKind && isToolCardKind(previousKind) && isToolCardKind(row.kind) {
+			if shownAny && havePreviousKind && needsSeparatorBeforeToolCard(previousKind, row.kind) {
 				items = append(items, transcriptBlankBodyItem())
 			}
 			// A "Thought for X" reasoning header opens the next think→act group, so
@@ -263,7 +313,12 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 	}
 
 	if m.pending {
-		items = append(items, transcriptBlankBodyItem())
+		pendingShowsAssistantText := m.pendingPermission == nil && m.pendingAskUser == nil && strings.TrimSpace(m.streamingText) != ""
+		if pendingShowsAssistantText && havePreviousKind && shouldRuleBeforeTurn(previousKind, rowAssistant) {
+			items = append(items, transcriptRuleBodyItem(contentWidth, gutter))
+		} else {
+			items = append(items, transcriptBlankBodyItem())
+		}
 		switch {
 		case m.pendingPermission != nil:
 			perm := m.pendingPermission
@@ -336,6 +391,61 @@ func transcriptBlankBodyItem() transcriptBodyItem {
 	}
 }
 
+func transcriptRuleBodyItem(width int, gutter int) transcriptBodyItem {
+	if width < 1 {
+		width = 1
+	}
+	return transcriptBodyItem{
+		kind:              transcriptBodyItemRule,
+		rowIndex:          -1,
+		heightCacheKey:    "transcript-body-height:v1:rule:" + strconv.Itoa(width) + ":" + strconv.Itoa(gutter),
+		heightCacheStable: true,
+		render: func(int) transcriptBodyRenderedItem {
+			rule := zeroTheme.line.Render(strings.Repeat("─", width))
+			return transcriptBodyRenderedItem{lines: padTranscriptBodyLines([]string{rule, ""}, gutter)}
+		},
+	}
+}
+
+func isSuccessfulExploreResult(row transcriptRow) bool {
+	return row.kind == rowToolResult && row.status != tools.StatusError && isExploreTool(toolRowName(row))
+}
+
+func collectExploreResultGroup(rows []transcriptRow, start int, rc rowContext) ([]transcriptRow, []int, int) {
+	groupRows := []transcriptRow{}
+	groupIndices := []int{}
+	for index := start; index < len(rows); index++ {
+		row := rows[index]
+		if row.kind == rowWelcome || rc.skip(row) {
+			continue
+		}
+		if !isSuccessfulExploreResult(row) {
+			return groupRows, groupIndices, index
+		}
+		groupRows = append(groupRows, row)
+		groupIndices = append(groupIndices, index)
+	}
+	return groupRows, groupIndices, len(rows)
+}
+
+func (m model) renderExploreResultGroup(rows []transcriptRow, width int, rc rowContext) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	body := make([]string, 0, len(rows))
+	for index, row := range rows {
+		marker := "├"
+		if index == len(rows)-1 {
+			marker = "└"
+		}
+		key := rcKey(row.runID, row.id)
+		body = append(body, exploreCardLine(toolRowName(row), rc.hints[key], rc.args[key], row.detail, width, opts, marker))
+	}
+	head := zeroTheme.green.Bold(true).Render("Explored")
+	return toolCard(head, zeroTheme.green.Render("•"), body, "", zeroTheme.line, width)
+}
+
 // transcriptBodyItemsFromRows builds body items from an arbitrary set of
 // transcript rows (used by the subchat drill-in view to render a child
 // session's events). It mirrors the main loop's logic but operates on the
@@ -357,7 +467,11 @@ func (m model) transcriptBodyItemsFromRows(rows []transcriptRow, width int) []tr
 			continue
 		}
 		if shownAny && startsTurn(row.kind) {
-			items = append(items, transcriptBlankBodyItem())
+			if havePreviousKind && shouldRuleBeforeTurn(previousKind, row.kind) {
+				items = append(items, transcriptRuleBodyItem(contentWidth, gutter))
+			} else {
+				items = append(items, transcriptBlankBodyItem())
+			}
 		}
 		if shownAny && havePreviousKind && previousKind == rowUser && row.kind == rowReasoning {
 			items = append(items, transcriptBlankBodyItem())
@@ -570,6 +684,13 @@ func selectableLineFromRenderedLine(rowIndex int, bodyY int, rendered string, bo
 			text = strings.TrimSuffix(text, " │")
 		}
 	}
+	for _, prefix := range []string{"  ├ ", "  └ ", "  │ "} {
+		if strings.HasPrefix(text, prefix) {
+			textStart += lipgloss.Width(prefix)
+			text = strings.TrimPrefix(text, prefix)
+			break
+		}
+	}
 	text = strings.TrimRight(text, " ")
 	if strings.TrimSpace(text) == "" {
 		return transcriptSelectableLine{}, false
@@ -706,16 +827,8 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
-	// Interim narration carries a 2-col "● " gutter (see renderAssistantRow), so it
-	// wraps 2 cols narrower and its selectable columns start at textStart=gutter;
-	// the final answer keeps the full width and textStart=0.
-	gutter := lipgloss.Width(narrationPrefix)
 	measure := assistantMeasure(width)
 	textStart := 0
-	if !row.final {
-		measure = maxInt(16, assistantMeasure(width)-gutter)
-		textStart = gutter
-	}
 	// Committed/selectable row: highlight (the result is cached per row).
 	wrapped := renderAssistantMarkdownText(row.text, measure, tableMeasure, true)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))

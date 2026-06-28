@@ -5,16 +5,15 @@ import (
 	"testing"
 )
 
-// The status glyph must LEAD the tool-card head row (✓/✗/spinner in the first
-// cell after the rail), not be right-aligned to the far edge — so state reads at
-// a glance. Guards the "easier-to-scan results" change.
+// The status glyph must LEAD the tool-card head row (dot/spinner first), not be
+// right-aligned to the far edge — so state reads at a glance.
 func TestToolCardGlyphLeadsHeadRow(t *testing.T) {
 	head := zeroTheme.toolName.Render("bash")
-	glyph := zeroTheme.green.Render("✓")
+	glyph := zeroTheme.green.Render("•")
 	out := toolCard(head, glyph, nil, "", zeroTheme.line, 60)
 	first := strings.SplitN(out, "\n", 2)[0]
 
-	glyphIdx := strings.Index(first, "✓")
+	glyphIdx := strings.Index(first, "•")
 	nameIdx := strings.Index(first, "bash")
 	if glyphIdx < 0 {
 		t.Fatalf("head row missing status glyph: %q", first)
