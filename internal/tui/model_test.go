@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -2314,5 +2315,62 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 	m.notifier.Notify(notify.Completion, "x")
 	if buf.Len() != 0 {
 		t.Fatalf("refocused should be silent, got %q", buf.String())
+	}
+}
+
+func TestScrimViewportLine(t *testing.T) {
+	// Blank lines are left untouched (no scrim).
+	if got := scrimViewportLine("   ", 10); got != "   " {
+		t.Fatalf("blank line should be untouched, got %q", got)
+	}
+	// Non-blank lines keep their text (only the styling is dimmed), so the backdrop
+	// stays readable behind the overlay.
+	got := scrimViewportLine("transcript content", 40)
+	if ansi.Strip(got) != "transcript content" {
+		t.Fatalf("scrim must preserve text, got %q", ansi.Strip(got))
+	}
+	// A pre-styled line must have its OWN styling stripped (so the dim wins), while
+	// the text content survives. This fails if scrim stops re-styling the backdrop.
+	styled := "\x1b[31mred backdrop\x1b[0m text"
+	scrimmed := scrimViewportLine(styled, 40)
+	if ansi.Strip(scrimmed) != "red backdrop text" {
+		t.Fatalf("scrim must preserve styled line's text, got %q", ansi.Strip(scrimmed))
+	}
+	if strings.Contains(scrimmed, "\x1b[31m") {
+		t.Fatalf("scrim must strip the line's original styling, got %q", scrimmed)
+	}
+}
+
+func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
+	width := 40
+	lines := make([]string, 9)
+	for i := range lines {
+		lines[i] = "backdrop transcript row"
+	}
+	// Narrow, indented overlay so the composited rows keep backdrop in the margins.
+	overlay := "          ╭────╮\n          │ pn │\n          ╰────╯"
+	out := overlayViewportLines(append([]string{}, lines...), overlay, width)
+	joined := ansi.Strip(strings.Join(out, "\n"))
+	if !strings.Contains(joined, "pn") {
+		t.Fatalf("overlay panel should be composited, got:\n%s", joined)
+	}
+	// A non-overlaid row keeps its (dimmed) backdrop text.
+	if !strings.Contains(ansi.Strip(out[0]), "backdrop transcript row") {
+		t.Fatalf("non-overlaid backdrop should survive the scrim, got %q", ansi.Strip(out[0]))
+	}
+	// The compositing contract: the row carrying the panel must ALSO keep backdrop
+	// text outside the panel (left/right margins), not blank it out.
+	var panelRow string
+	for _, line := range out {
+		if strings.Contains(ansi.Strip(line), "pn") {
+			panelRow = ansi.Strip(line)
+			break
+		}
+	}
+	if panelRow == "" {
+		t.Fatal("expected a row containing the panel")
+	}
+	if !strings.Contains(panelRow, "backdrop") {
+		t.Fatalf("overlaid row should keep backdrop margin text alongside the panel, got %q", panelRow)
 	}
 }

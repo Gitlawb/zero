@@ -2261,6 +2261,12 @@ func overlayViewportLines(lines []string, overlay string, width int) []string {
 	if overlayWidth <= 0 {
 		return lines
 	}
+	// Scrim: dim the whole transcript backdrop so a floating overlay (slash-command
+	// palette, picker, wizard) clearly stands out instead of blending into the live
+	// chat behind it. Header and composer are rendered separately and stay bright.
+	for index := range lines {
+		lines[index] = scrimViewportLine(lines[index], width)
+	}
 	start := maxInt(0, (len(lines)-len(overlayLines))/2)
 	for offset, line := range overlayLines {
 		target := start + offset
@@ -2270,6 +2276,17 @@ func overlayViewportLines(lines []string, overlay string, width int) []string {
 		lines[target] = overlayViewportLine(lines[target], line, left, overlayWidth, width)
 	}
 	return lines
+}
+
+// scrimViewportLine dims one backdrop line: it strips the line's own colors and
+// re-renders the text faint, so the dimmed transcript recedes behind the overlay.
+// Blank lines are left untouched.
+func scrimViewportLine(line string, width int) string {
+	plain := ansi.Strip(line)
+	if strings.TrimSpace(plain) == "" {
+		return line
+	}
+	return zeroTheme.faint.Render(plain)
 }
 
 func normalizeOverlayBlock(lines []string, width int) (int, []string, int) {
