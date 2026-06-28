@@ -1014,14 +1014,6 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 	return entry.ContextLimits.ContextWindow
 }
 
-// reasoningEffortNotice resolves the requested --reasoning-effort against the
-// selected model's supported efforts via EffectiveReasoningEffort and returns a
-// short advisory when the requested value is unsupported (and was coerced to the
-// model default).
-//
-// NOTE: the effective effort is not yet forwarded to the provider request — the
-// zeroruntime.CompletionRequest / provider wire schemas carry no effort field.
-// Full provider-request propagation is deferred (see slice-3 report).
 // forwardedReasoningEffort returns the effort to send on the provider request.
 // It mirrors reasoningEffortNotice: a known model that does not support reasoning
 // yields "" (matching the "ignoring" advisory, so the request never carries an
@@ -1044,6 +1036,10 @@ func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, r
 	return string(effective)
 }
 
+// reasoningEffortNotice resolves the requested --reasoning-effort against the
+// selected model's supported efforts via EffectiveReasoningEffort and returns a
+// short advisory when the requested value is unsupported (and was coerced to the
+// model default).
 func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {

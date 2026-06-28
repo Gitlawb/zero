@@ -47,10 +47,13 @@ func (registry Registry) ResolveWithFallback(input string) (ModelEntry, string, 
 
 // EffectiveReasoningEffort returns the effort to use for a model: the requested
 // value if the model supports it, otherwise the model's default (or first
-// supported, or none).
+// supported, or none). It resolves the supported set through
+// effectiveReasoningEfforts so it sees the same name-based fallback the /effort
+// picker uses — the two must never disagree about which tiers a model supports.
 func EffectiveReasoningEffort(model ModelEntry, requested ReasoningEffort) ReasoningEffort {
+	efforts := effectiveReasoningEfforts(model)
 	if requested != "" {
-		for _, effort := range model.ReasoningEfforts {
+		for _, effort := range efforts {
 			if effort == requested {
 				return requested
 			}
@@ -59,8 +62,23 @@ func EffectiveReasoningEffort(model ModelEntry, requested ReasoningEffort) Reaso
 	if model.DefaultReasoningEffort != "" {
 		return model.DefaultReasoningEffort
 	}
-	if len(model.ReasoningEfforts) > 0 {
-		return model.ReasoningEfforts[0]
+	if len(efforts) > 0 {
+		return efforts[0]
 	}
 	return ReasoningEffortNone
+}
+
+// effectiveReasoningEfforts returns a model's supported reasoning efforts, falling
+// back to name-based inference (reasoningEffortsForModelName) when the catalog
+// entry enumerates none. Both the /effort picker (Registry.ReasoningEfforts) and
+// the run-time resolver (EffectiveReasoningEffort) read efforts through this
+// single helper, so the picker can never advertise a tier the resolver drops.
+func effectiveReasoningEfforts(model ModelEntry) []ReasoningEffort {
+	if len(model.ReasoningEfforts) > 0 {
+		return model.ReasoningEfforts
+	}
+	if efforts := reasoningEffortsForModelName(model.ID); len(efforts) > 0 {
+		return efforts
+	}
+	return reasoningEffortsForModelName(model.APIModel)
 }

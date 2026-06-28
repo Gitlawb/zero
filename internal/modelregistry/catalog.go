@@ -172,13 +172,12 @@ func (registry Registry) SupportsCapability(pattern string, capability ModelCapa
 }
 
 func (registry Registry) ReasoningEfforts(pattern string) []ReasoningEffort {
-	if model, ok := registry.Get(pattern); ok && len(model.ReasoningEfforts) > 0 {
-		return append([]ReasoningEffort{}, model.ReasoningEfforts...)
+	if model, ok := registry.Get(pattern); ok {
+		return append([]ReasoningEffort{}, effectiveReasoningEfforts(model)...)
 	}
-	// Fallback for reasoning-model families that aren't enumerated in the curated
-	// catalog — e.g. the GPT-5 / Codex / o-series variants served via the ChatGPT
-	// proxy or custom OpenAI-compatible endpoints. Without this, /effort shows no
-	// controls for those models even though they support reasoning_effort.
+	// Unknown model not in the curated catalog — e.g. a GPT-5 / Codex / o-series
+	// variant served via the ChatGPT proxy or a custom OpenAI-compatible endpoint.
+	// Infer from the name so /effort still shows controls for it.
 	return reasoningEffortsForModelName(pattern)
 }
 
