@@ -70,19 +70,21 @@ func (c Catalog) Lookup(provider, apiModel string) (Capability, bool) {
 			continue
 		}
 		if cap, ok := models[apiModel]; ok {
-			return cap, true
+			// Deep copy so callers cannot mutate the shared catalog through the
+			// returned Controls / Values slices or budget pointers.
+			return cap.clone(), true
 		}
 	}
 	return Capability{}, false
 }
 
-// providerSlugs maps a Zero provider kind to the models.dev provider slug(s) to
-// try, in order. Gemini/Google models live under "google" and, when served
-// through Vertex, "google-vertex".
+// providerSlugs maps a Zero provider kind to the models.dev provider slug to
+// look up. Gemini and Google both resolve to "google" (AI Studio), the
+// first-party source for Gemini models.
 func providerSlugs(provider string) []string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "google", "gemini":
-		return []string{"google", "google-vertex"}
+	case "gemini":
+		return []string{"google"}
 	default:
 		return []string{strings.ToLower(strings.TrimSpace(provider))}
 	}

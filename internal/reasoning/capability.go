@@ -29,12 +29,32 @@ const (
 
 // Control is one reasoning control a model accepts. For an effort control,
 // Values lists the accepted tiers ordered weakest to strongest. For a budget
-// control, Min/Max bound the thinking-token budget (0 means "unspecified").
+// control, Min/Max bound the thinking-token budget; each is nil when the
+// provider does not bound that side, kept distinct from an explicit 0 (Gemini
+// uses min: 0 to mean "thinking can be disabled", which a plain int would lose).
 type Control struct {
 	Kind   ControlKind `json:"type"`
 	Values []string    `json:"values,omitempty"`
-	Min    int         `json:"min,omitempty"`
-	Max    int         `json:"max,omitempty"`
+	Min    *int        `json:"min,omitempty"`
+	Max    *int        `json:"max,omitempty"`
+}
+
+// clone returns a deep copy of the control so the embedded catalog cannot be
+// mutated through a returned Control's slice or budget pointers.
+func (ctrl Control) clone() Control {
+	out := Control{Kind: ctrl.Kind}
+	if ctrl.Values != nil {
+		out.Values = append([]string(nil), ctrl.Values...)
+	}
+	if ctrl.Min != nil {
+		min := *ctrl.Min
+		out.Min = &min
+	}
+	if ctrl.Max != nil {
+		max := *ctrl.Max
+		out.Max = &max
+	}
+	return out
 }
 
 // Capability is the reasoning capability of a single model: whether it reasons
@@ -44,6 +64,19 @@ type Control struct {
 type Capability struct {
 	Reasoning bool      `json:"reasoning"`
 	Controls  []Control `json:"reasoning_options,omitempty"`
+}
+
+// clone returns a deep copy of the capability, cloning each control, so a caller
+// cannot mutate the shared catalog through the returned value's slices.
+func (c Capability) clone() Capability {
+	out := Capability{Reasoning: c.Reasoning}
+	if c.Controls != nil {
+		out.Controls = make([]Control, len(c.Controls))
+		for i, ctrl := range c.Controls {
+			out.Controls[i] = ctrl.clone()
+		}
+	}
+	return out
 }
 
 // Supported reports whether the model performs any reasoning.
@@ -81,15 +114,16 @@ func (c Capability) SupportsEffort(tier string) bool {
 	return false
 }
 
-// Budget returns the model's token-budget bounds and whether it has a budget
-// control.
-func (c Capability) Budget() (min, max int, ok bool) {
+// BudgetControl returns the model's token-budget control and whether it has one.
+// The returned Control's Min/Max are nil when that bound is unspecified (a real
+// 0, e.g. Gemini's min: 0, is reported as a non-nil pointer to 0).
+func (c Capability) BudgetControl() (Control, bool) {
 	for _, ctrl := range c.Controls {
 		if ctrl.Kind == ControlBudget {
-			return ctrl.Min, ctrl.Max, true
+			return ctrl, true
 		}
 	}
-	return 0, 0, false
+	return Control{}, false
 }
 
 // HasControl reports whether the model exposes a control of the given kind.
