@@ -201,3 +201,88 @@ func TestUpstreamUnreachable(t *testing.T) {
 		})
 	}
 }
+
+// A heartbeating-but-output-less upstream must not hang forever: SSE keep-alives
+// feed the idle watchdog (so it never fires), but the content watchdog
+// (idleTimeout × streamContentStallFactor) aborts with ErrStreamStalled when no
+// real data line arrives. This is the gpt-5.x / ollama "still generating forever"
+// hang.
+func TestScanSSEDataWithContextAbortsOnContentStall(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		// Heartbeat every 20ms (< the 60ms idle timeout, so idle never fires) but
+		// never send a data line.
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := io.WriteString(pw, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	cancelled := false
+	cancel := func() { cancelled = true }
+
+	done := make(chan error, 1)
+	go func() {
+		// idle 60ms → content stall at 120ms. Keep-alives reset idle but not content.
+		done <- ScanSSEDataWithContext(context.Background(), cancel, pr, 60*time.Millisecond, func(string) bool { return true })
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrStreamStalled) {
+			t.Fatalf("err = %v, want ErrStreamStalled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ScanSSEDataWithContext hung on a heartbeat-but-no-output stream")
+	}
+	if !cancelled {
+		t.Fatal("content stall did not cancel the request context")
+	}
+}
+
+// Real data lines reset the content watchdog, so a slow-but-producing stream that
+// runs longer than the content window is never aborted.
+func TestScanSSEDataWithContextContentResetsOnData(t *testing.T) {
+	pr, pw := io.Pipe()
+
+	go func() {
+		// One data line every 40ms for ~240ms (well past the 120ms content window),
+		// so the content watchdog keeps resetting, then close cleanly.
+		for i := 0; i < 6; i++ {
+			if _, err := io.WriteString(pw, "data: chunk\n\n"); err != nil {
+				return
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+		_ = pw.Close()
+	}()
+
+	n := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- ScanSSEDataWithContext(context.Background(), func() {}, pr, 60*time.Millisecond, func(string) bool { n++; return true })
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("err = %v, want nil (data kept the stream alive)", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ScanSSEDataWithContext hung on a producing stream")
+	}
+	if n != 6 {
+		t.Fatalf("handled %d data lines, want 6", n)
+	}
+}

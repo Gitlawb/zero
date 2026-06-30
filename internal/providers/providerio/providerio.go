@@ -23,6 +23,13 @@ const maxSSELineBytes = 16 * 1024 * 1024
 // closing the connection. Callers surface it as an idle-timeout error.
 var ErrStreamIdle = errors.New("idle timeout (upstream stopped sending data)")
 
+// ErrStreamStalled reports that a streaming upstream kept the connection alive
+// (SSE keep-alives reset the idle watchdog, so it never fired) but produced no
+// actual output for streamContentStallFactor × the idle timeout. Without this an
+// upstream that heartbeats-but-stalls — observed on chatgpt/gpt-5.x and ollama
+// reasoning models — would hang the agent indefinitely.
+var ErrStreamStalled = errors.New("stream stalled (upstream kept the connection alive but produced no output)")
+
 // DefaultStreamIdleTimeout is the single source of truth for how long every
 // provider waits on a silent stream before aborting it. The watchdog only fires
 // on genuine silence — SSE keep-alive comments reset it (see
@@ -32,6 +39,14 @@ var ErrStreamIdle = errors.New("idle timeout (upstream stopped sending data)")
 // healthy long generations; 5 minutes is the floor a real stall must cross.
 // Override globally with ZERO_STREAM_IDLE_TIMEOUT.
 const DefaultStreamIdleTimeout = 5 * time.Minute
+
+// streamContentStallFactor bounds a heartbeat-but-no-output stream. Keep-alives
+// reset the idle watchdog (a heartbeating upstream is not "dead"), but if NO real
+// data line arrives for streamContentStallFactor × the idle timeout, the stream is
+// treated as stalled and aborted (ErrStreamStalled). It is > 1 so a slow-but-
+// producing request — one that emits data between heartbeats — is never killed; the
+// content watchdog only catches a stream that heartbeats while producing nothing.
+const streamContentStallFactor = 2
 
 // streamIdleTimeoutEnv is the global override for the stream idle timeout. It
 // accepts a Go duration ("5m", "300s", "90s") or a bare number of seconds
@@ -202,21 +217,36 @@ func ScanSSEDataWithContext(
 	// The idle watchdog is optional. When idleTimeout <= 0 it is disabled, but we
 	// STILL run the goroutine + select loop so ctx cancellation is always honored
 	// (a nil idleC channel simply never fires in the select).
-	var idleC <-chan time.Time
+	var idleC, contentC <-chan time.Time
 	resetIdle := func() {}
+	resetContent := func() {}
 	if idleTimeout > 0 {
+		// reset drains the timer's channel if it already fired before re-arming, so
+		// a stale tick can't trip the watchdog after activity resumed.
+		reset := func(t *time.Timer, d time.Duration) func() {
+			return func() {
+				if !t.Stop() {
+					select {
+					case <-t.C:
+					default:
+					}
+				}
+				t.Reset(d)
+			}
+		}
 		idle := time.NewTimer(idleTimeout)
 		defer idle.Stop()
 		idleC = idle.C
-		resetIdle = func() {
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(idleTimeout)
-		}
+		resetIdle = reset(idle, idleTimeout)
+
+		// Content watchdog: only real data lines reset it (keep-alives do not), so a
+		// stream that heartbeats without producing output is bounded instead of
+		// hanging forever.
+		contentTimeout := idleTimeout * streamContentStallFactor
+		content := time.NewTimer(contentTimeout)
+		defer content.Stop()
+		contentC = content.C
+		resetContent = reset(content, contentTimeout)
 	}
 
 	for {
@@ -232,6 +262,12 @@ func ScanSSEDataWithContext(
 			// a timeout instead of blocking the agent forever.
 			cancel()
 			return ErrStreamIdle
+		case <-contentC:
+			// Upstream kept heartbeating (idle watchdog never fired) but produced
+			// no output for the content window. Treat as stalled and abort rather
+			// than hanging forever.
+			cancel()
+			return ErrStreamStalled
 		case item, ok := <-payloads:
 			if !ok {
 				// Reader finished: deliver its terminal status (EOF -> nil,
@@ -246,8 +282,11 @@ func ScanSSEDataWithContext(
 			}
 			resetIdle()
 			if item.keepAlive {
+				// A heartbeat keeps the connection "alive" (idle watchdog) but is
+				// NOT output, so it must not reset the content watchdog.
 				continue
 			}
+			resetContent()
 			if !handle(item.data) {
 				// The provider asked to stop (e.g. it already emitted an error
 				// for this payload). Abort the read and end like ScanSSEData:
