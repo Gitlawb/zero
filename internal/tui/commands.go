@@ -40,6 +40,7 @@ const (
 	commandImage
 	commandAddDir
 	commandSelfCorrect
+	commandTurns
 	commandUnknown
 )
 
@@ -240,6 +241,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or set post-edit self-correction depth (LSP-only default; on/tests/full add the project test plan; off/lsp disable tests, LSP-only).",
 		kind:        commandSelfCorrect,
+	},
+	{
+		name:        "/turns",
+		usage:       "/turns [n]",
+		group:       commandGroupSession,
+		description: "Show or set the per-run tool-turn budget for this session (raise it for long multi-step tasks).",
+		kind:        commandTurns,
 	},
 	{
 		name:        "/help",

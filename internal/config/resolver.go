@@ -13,7 +13,10 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
-const defaultMaxTurns = 30
+// defaultMaxTurns is the per-run tool-turn budget when none is configured. 30 was
+// too low for real multi-step agentic work (agents ran out mid-task before reaching
+// later steps); 50 matches the old "deep" preset. Raise per-session with /turns.
+const defaultMaxTurns = 50
 
 // defaultDeferThreshold is the number of deferred-eligible (MCP) tools at which
 // Zero collapses their full JSON schemas into compact `tool_search` reminder

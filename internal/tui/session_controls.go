@@ -256,6 +256,38 @@ func (m model) handleSelfCorrectCommand(args string) (model, string) {
 	return m, m.selfCorrectText()
 }
 
+// maxTurnsCeiling caps the per-session /turns budget so a typo (e.g. /turns 99999)
+// can't set an absurd ceiling; real multi-step tasks fit comfortably under it.
+const maxTurnsCeiling = 500
+
+func (m model) handleTurnsCommand(args string) (model, string) {
+	args = strings.TrimSpace(args)
+	if args == "" || strings.EqualFold(args, "status") {
+		return m, m.turnsText()
+	}
+	n, err := strconv.Atoi(args)
+	if err != nil || n < 1 {
+		return m, "Turns\nUsage: /turns <n> — set the per-run tool-turn budget for this session (a positive number, e.g. /turns 150)."
+	}
+	if n > maxTurnsCeiling {
+		n = maxTurnsCeiling
+	}
+	m.agentOptions.MaxTurns = n
+	return m, m.turnsText()
+}
+
+func (m model) turnsText() string {
+	return renderCommandOutput(commandOutput{
+		Title:  "Turns",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "State",
+			Lines: []string{fmt.Sprintf("max tool-turns per run: %d", m.agentOptions.MaxTurns)},
+		}},
+		Hints: []string{fmt.Sprintf("/turns <n> sets this session's tool-turn budget (max %d); raise it for long multi-step tasks like delegation/swarm runs", maxTurnsCeiling)},
+	})
+}
+
 func (m model) selfCorrectText() string {
 	depth := "LSP diagnostics only — fast, scoped to changed files"
 	if m.selfCorrectTests {

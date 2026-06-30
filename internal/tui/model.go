@@ -3465,6 +3465,11 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleSelfCorrectCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandTurns:
+		text := ""
+		m, text = m.handleTurnsCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
 	case commandTheme:
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
