@@ -103,6 +103,25 @@ func errResult(format string, a ...any) tools.Result {
 	return tools.Result{Status: tools.StatusError, Output: "Error: " + fmt.Sprintf(format, a...)}
 }
 
+// agentTypeProperty builds the schema for an agent-type parameter, constraining it
+// to the roster's currently registered types (the built-ins plus any user-registered
+// agents) via an enum so a model can't spawn or hand off to an unknown type — the
+// schema teaches the valid set up front instead of the model learning it from a
+// failed call. Falls back to a free-form string if the roster is unavailable or
+// empty (so the tool never advertises an empty, un-satisfiable enum).
+func agentTypeProperty(sw *Swarm, description string) tools.PropertySchema {
+	prop := tools.PropertySchema{Type: "string", Description: description}
+	if sw == nil {
+		return prop
+	}
+	if registry := sw.Registry(); registry != nil {
+		if types := registry.AgentTypes(); len(types) > 0 {
+			prop.Enum = types
+		}
+	}
+	return prop
+}
+
 // ---- swarm_spawn -----------------------------------------------------------
 
 type spawnTool struct {
@@ -118,7 +137,7 @@ func (t *spawnTool) Parameters() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: map[string]tools.PropertySchema{
-			"agent_type": {Type: "string", Description: "Roster agent type to spawn (e.g. teammate, subagent)."},
+			"agent_type": agentTypeProperty(t.sw, "Roster agent type to spawn."),
 			"task":       {Type: "string", Description: "The focused task/briefing for the member."},
 			"team":       {Type: "string", Description: "Team to spawn into. Defaults to \"default\"."},
 		},
@@ -353,7 +372,7 @@ func (t *handoffTool) Parameters() tools.Schema {
 		Type: "object",
 		Properties: map[string]tools.PropertySchema{
 			"task_id":       {Type: "string", Description: "Task id to hand off."},
-			"to_agent_type": {Type: "string", Description: "Roster agent type to take over."},
+			"to_agent_type": agentTypeProperty(t.sw, "Roster agent type to take over."),
 			"note":          {Type: "string", Description: "Optional handoff note delivered to the new member's inbox."},
 			"team":          {Type: "string", Description: "Team the task belongs to. Defaults to \"default\"."},
 		},

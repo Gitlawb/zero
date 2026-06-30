@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,42 @@ import (
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
+
+func TestSpawnAndHandoffAgentTypeEnumReflectsRoster(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	want := sw.Registry().AgentTypes() // sorted built-ins: subagent, teammate
+
+	spawnEnum := (&spawnTool{sw: sw}).Parameters().Properties["agent_type"].Enum
+	if !slices.Equal(spawnEnum, want) {
+		t.Fatalf("spawn agent_type enum = %v, want roster %v", spawnEnum, want)
+	}
+	if !slices.Contains(spawnEnum, "subagent") || !slices.Contains(spawnEnum, "teammate") {
+		t.Fatalf("enum missing built-in roster types: %v", spawnEnum)
+	}
+	handoffEnum := (&handoffTool{sw: sw}).Parameters().Properties["to_agent_type"].Enum
+	if !slices.Equal(handoffEnum, want) {
+		t.Fatalf("handoff to_agent_type enum = %v, want roster %v", handoffEnum, want)
+	}
+
+	// A user-registered custom type must extend the enum (not a hardcoded list).
+	if err := sw.Registry().Register(Definition{AgentType: "researcher"}); err != nil {
+		t.Fatalf("register custom agent: %v", err)
+	}
+	spawnEnum = (&spawnTool{sw: sw}).Parameters().Properties["agent_type"].Enum
+	if !slices.Contains(spawnEnum, "researcher") {
+		t.Fatalf("custom agent type not reflected in enum: %v", spawnEnum)
+	}
+}
+
+func TestAgentTypePropertyFallsBackWithoutRoster(t *testing.T) {
+	prop := agentTypeProperty(nil, "desc")
+	if prop.Type != "string" || prop.Description != "desc" {
+		t.Fatalf("unexpected property: %+v", prop)
+	}
+	if prop.Enum != nil {
+		t.Fatalf("nil swarm must not advertise an (empty) enum, got %v", prop.Enum)
+	}
+}
 
 func TestCollapseRuneSafeTruncation(t *testing.T) {
 	// 300 multi-byte runes: truncation must not split a rune (no invalid UTF-8).
