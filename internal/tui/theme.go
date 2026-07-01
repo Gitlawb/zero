@@ -129,23 +129,15 @@ type palette struct {
 // lime accent. bg (#070708) is the terminal's own canvas — deliberately never
 // painted — so no token references it.
 var darkPalette = palette{
-	panel:    "#0e0e10",
-	promptBg: "#262626",
-	line:     "#242429",
-	line2:    "#414147",
-	ink:      "#ececee",
-	muted:    "#9a9aa2", // secondary text — lifted so it clearly out-ranks faint
-	faint:    "#8a8a92", // hints/metadata — nudged up to separate from faintest
-	faintest: "#7c7c82", // line numbers/separators — pinned at the WCAG-AA floor on the dark panel
-	// Brand lime, softened from the original #caff3f (L 62%, S 100% — fully
-	// saturated, which read as glaring/neon everywhere it filled a block or
-	// bold-text surface: the composer prompt glyph, the permission popup's
-	// focused-option badge, the text-selection highlight). Two prior passes
-	// (#ade619 at L50/S80, #8db620 at L42/S70) were each confirmed too subtle
-	// in turn; settled at L 36%/S 62% — a darker, more olive lime. Contrast
-	// vs both black (onAccent) and the near-black panel stays comfortably
-	// above WCAG AA (~6.1:1 and ~5.6:1) with real margin to spare.
-	accent:    "#759523",
+	panel:     "#0e0e10",
+	promptBg:  "#262626",
+	line:      "#242429",
+	line2:     "#414147",
+	ink:       "#ececee",
+	muted:     "#9a9aa2", // secondary text — lifted so it clearly out-ranks faint
+	faint:     "#8a8a92", // hints/metadata — nudged up to separate from faintest
+	faintest:  "#7c7c82", // line numbers/separators — pinned at the WCAG-AA floor on the dark panel
+	accent:    "#caff3f",
 	green:     "#5dd1a4",
 	red:       "#ff7a7a",
 	amber:     "#ffc25c",
