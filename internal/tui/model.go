@@ -791,6 +791,18 @@ func composerBlinkCmd() tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
+	// Bubble Tea documents an initial WindowSizeMsg as delivered automatically
+	// on program start, so m.height/m.width are normally set before the first
+	// render. But that's the terminal proactively pushing a size — if it's
+	// ever missed (a slow/unusual terminal, a multiplexer, a startup race),
+	// nothing else ever asks again: m.height stays its zero value forever,
+	// `if m.altScreen && m.height > 0` (transcriptView) falls back to the
+	// unpadded, non-fullscreen render path for the rest of the session, and
+	// the alt-screen viewport never gets filled below the actual content.
+	// Explicitly requesting it here means Zero doesn't depend solely on the
+	// terminal's unprompted push — mirrors the RequestBackgroundColor request
+	// below for the same reason.
+	cmds = append(cmds, tea.RequestWindowSize)
 	// In auto mode, ask the terminal for its background color; the reply arrives
 	// as tea.BackgroundColorMsg and selects light vs dark (see updateModel).
 	if m.themeMode == themeAuto {
