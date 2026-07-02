@@ -62,6 +62,19 @@ function Find-ZeroExtractedFile {
   throw "Release archive did not contain exactly one $FileName"
 }
 
+function Test-ZeroPathContainsDir {
+  param(
+    [string]$PathValue,
+    [string]$Dir
+  )
+
+  if ([string]::IsNullOrEmpty($PathValue)) {
+    return $false
+  }
+
+  return @($PathValue -split [System.IO.Path]::PathSeparator) -contains $Dir
+}
+
 function Find-ZeroOptionalExtractedDirectory {
   param(
     [string]$Root,
@@ -150,18 +163,18 @@ try {
   Write-Host "Installed $targetPath"
 
   $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-  $userPathEntries = @()
-  if (-not [string]::IsNullOrEmpty($userPath)) {
-    $userPathEntries = $userPath -split [System.IO.Path]::PathSeparator
-  }
-  if ($userPathEntries -notcontains $InstallDir) {
-    $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
-    [Environment]::SetEnvironmentVariable("PATH", $newUserPath, "User")
-    Write-Host "Added $InstallDir to your user PATH. Restart your terminal to use 'zero'."
+  if (-not (Test-ZeroPathContainsDir -PathValue $userPath -Dir $InstallDir)) {
+    try {
+      $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
+      [Environment]::SetEnvironmentVariable("PATH", $newUserPath, "User")
+      Write-Host "Added $InstallDir to your user PATH. Restart your terminal to use 'zero'."
+    } catch {
+      Write-Warning "Could not update your user PATH automatically: $_"
+      Write-Warning "Add $InstallDir to PATH manually to run zero from any directory."
+    }
   }
 
-  $sessionPathEntries = $env:PATH -split [System.IO.Path]::PathSeparator
-  if ($sessionPathEntries -notcontains $InstallDir) {
+  if (-not (Test-ZeroPathContainsDir -PathValue $env:PATH -Dir $InstallDir)) {
     $env:PATH = "$env:PATH;$InstallDir"
   }
 } finally {
