@@ -1,0 +1,35 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write # push the release-PR branch, create the tag + GitHub Release
+  pull-requests: write # open/update the release PR
+  issues: write # create/apply release-tracking labels on the release PR
+  actions: write # dispatch release-artifacts.yml once a release is cut
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@a02a34c4d625f9be7cb89156071d8567266a2445 # v4.2.0
+
+      # Tags created with the default GITHUB_TOKEN never fire `on: push: tags`
+      # workflows (GitHub suppresses workflows triggered by workflow-created
+      # events), so release-artifacts.yml would not run for a release-please
+      # tag. workflow_dispatch invoked through the API is exempt from that
+      # suppression — dispatch the artifacts build at the new tag explicitly.
+      - name: Build and publish release artifacts
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release-artifacts.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "${{ steps.release.outputs.tag_name }}"
