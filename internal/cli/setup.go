@@ -269,6 +269,15 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if _, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), true); err != nil {
 		return tui.SetupResult{}, err
 	}
+
+	// Persist live-discovered models so per-model apiModel overrides survive.
+	if len(selection.Models) > 0 {
+		if _, err := config.SetProviderDiscoveredModels(configPath, profile.Name, selection.Models); err != nil {
+			// Non-fatal: the provider was already saved. Swallow the error so we
+			// don't block the user from starting work.
+		}
+	}
+
 	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
 }
 

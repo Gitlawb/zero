@@ -437,38 +437,59 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 	seen := map[string]bool{}
 	all := append(append([]pickerItem{}, recent...), catalog...)
 	for _, item := range all {
-		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
+		fk := modelFavoriteKey(item)
+		if item.Value == "" || !m.favoriteModels[fk] || seen[fk] {
 			continue
 		}
 		item.Group = "Favorites"
 		item.Favorite = true
+		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
+			item.Label = owner + "/" + item.Value
+		}
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[fk] = true
 	}
 	for _, item := range recent {
-		if item.Value == "" || seen[item.Value] {
+		if item.Value == "" || seen[modelFavoriteKey(item)] {
 			continue
 		}
 		item.Group = "Recent"
-		item.Favorite = m.favoriteModels[item.Value]
+		item.Favorite = m.favoriteModels[modelFavoriteKey(item)]
 		result = append(result, item)
 		seen[item.Value] = true
 	}
+	// Catalog: no global dedup — the same model ID from different providers must
+	// all appear, so the user can pick which provider to use it with. Intra-provider
+	// duplicates are already handled by savedProviderModelPickerItems.
 	for _, item := range catalog {
-		if item.Value == "" || seen[item.Value] {
+		if item.Value == "" {
 			continue
 		}
-		item.Favorite = m.favoriteModels[item.Value]
+		item.Favorite = m.favoriteModels[modelFavoriteKey(item)]
 		result = append(result, item)
-		seen[item.Value] = true
 	}
 	return result
+}
+
+// modelFavoriteKey returns the provider-qualified key used for favorite lookups.
+// Format: "provider/modelID". When the item has no owner the bare model ID is
+// used so legacy favorites (stored without a prefix) still match.
+func modelFavoriteKey(item pickerItem) string {
+	id := strings.TrimSpace(item.Value)
+	if id == "" {
+		return ""
+	}
+	if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
+		return owner + "/" + id
+	}
+	return id
 }
 
 func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID string) pickerItem {
 	if entry, ok := registry.Resolve(modelID); ok {
 		item := registryModelPickerItem(entry, "Recent")
 		item.Value = modelID
+		item.OwnerProvider = m.providerName
 		return item
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
@@ -476,10 +497,13 @@ func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID st
 			if model.ID == modelID {
 				item := providerModelPickerItem(provider, model, "Recent")
 				item.Value = modelID
+				item.OwnerProvider = m.providerName
 				return item
 			}
 		}
-		return providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
+		item := providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
+		item.OwnerProvider = m.providerName
+		return item
 	}
 	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID}
 }
@@ -500,7 +524,7 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 func providerModelPickerItem(provider providercatalog.Descriptor, model providermodelcatalog.Model, group string) pickerItem {
 	item := pickerItem{
 		Group: group,
-		Label: modelPickerDisplayName(model.ID, model.Description),
+		Label: model.ID,
 		Value: model.ID,
 	}
 	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)
@@ -511,7 +535,7 @@ func providerModelPickerItem(provider providercatalog.Descriptor, model provider
 func discoveredModelPickerItem(provider providercatalog.Descriptor, model providermodeldiscovery.Model, group string) pickerItem {
 	item := pickerItem{
 		Group: group,
-		Label: modelPickerDisplayName(model.ID, model.Description),
+		Label: model.ID,
 		Value: model.ID,
 	}
 	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)
@@ -791,13 +815,17 @@ func (m model) toggleModelFavorite() model {
 	if !ok || strings.TrimSpace(item.Value) == "" {
 		return m
 	}
+	key := modelFavoriteKey(item)
+	if key == "" {
+		return m
+	}
 	if m.favoriteModels == nil {
 		m.favoriteModels = map[string]bool{}
 	}
-	if m.favoriteModels[item.Value] {
-		delete(m.favoriteModels, item.Value)
+	if m.favoriteModels[key] {
+		delete(m.favoriteModels, key)
 	} else {
-		m.favoriteModels[item.Value] = true
+		m.favoriteModels[key] = true
 	}
 	if err := m.persistFavoriteModels(); err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "favorite save error: " + err.Error()})

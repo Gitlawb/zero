@@ -47,7 +47,7 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
 			if merged := mergeLiveModels(provider, liveModels, catalogModels); len(merged) > 0 {
-				return merged, nil
+				return filterModelsForProvider(provider.ID, merged), nil
 			}
 			// Live probe returned 200 but its model ids didn't match the catalog, so
 			// the merge is empty. Fall through to the curated catalog below instead of
@@ -58,12 +58,25 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 		}
 	}
 	if len(catalogModels) > 0 {
-		return catalogModels, nil
+		return filterModelsForProvider(provider.ID, catalogModels), nil
 	}
 	if catalogErr != nil {
 		return nil, catalogErr
 	}
 	return nil, fmt.Errorf("no provider models discovered")
+}
+
+// filterModelsForProvider prunes model entries that are not allowed for the
+// given provider under provider-specific allow/block rules (e.g. opencode-go-anthropic
+// must only show Qwen and MiniMax models regardless of what the endpoint returns).
+func filterModelsForProvider(providerID string, models []Model) []Model {
+	result := make([]Model, 0, len(models))
+	for _, m := range models {
+		if providermodelcatalog.ModelIDAllowedForProvider(providerID, m.ID) {
+			result = append(result, m)
+		}
+	}
+	return result
 }
 
 // discoveryHasCredential reports whether the profile carries a usable credential

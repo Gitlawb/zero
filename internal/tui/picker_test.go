@@ -182,7 +182,7 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	})
 	m = updated.(model)
 	loaded := plainRender(t, m.pickerOverlay(100))
-	assertContains(t, loaded, "Live Cloud A")
+	assertContains(t, loaded, "live-cloud-a")
 }
 
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
@@ -354,8 +354,8 @@ func TestModelPickerSearchFiltersModels(t *testing.T) {
 	}
 	view := plainRender(t, next.pickerOverlay(100))
 	assertContains(t, view, "search > qwen")
-	assertContains(t, view, "Qwen")
-	assertNotContains(t, view, "Minimax M3")
+	assertContains(t, view, "qwen3-coder:480b")
+	assertNotContains(t, view, "minimax-m3")
 }
 
 func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
@@ -385,21 +385,21 @@ func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 
 	updated, _ := m.Update(testKeyCtrl('f'))
 	next := updated.(model)
-	if !next.favoriteModels["qwen3-coder:480b"] {
-		t.Fatalf("favorite map = %#v, want qwen3-coder:480b favorited", next.favoriteModels)
+	if !next.favoriteModels["ollama-cloud/qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want ollama-cloud/qwen3-coder:480b favorited", next.favoriteModels)
 	}
 	if next.picker.items[0].Group != "Favorites" || next.picker.items[0].Value != "qwen3-coder:480b" {
 		t.Fatalf("first picker item = %#v, want favorite group row", next.picker.items[0])
 	}
 	persisted := readTUIConfigFixture(t, configPath)
-	if len(persisted.Preferences.FavoriteModels) != 1 || persisted.Preferences.FavoriteModels[0] != "qwen3-coder:480b" {
-		t.Fatalf("persisted FavoriteModels = %#v, want qwen3-coder:480b", persisted.Preferences.FavoriteModels)
+	if len(persisted.Preferences.FavoriteModels) != 1 || persisted.Preferences.FavoriteModels[0] != "ollama-cloud/qwen3-coder:480b" {
+		t.Fatalf("persisted FavoriteModels = %#v, want ollama-cloud/qwen3-coder:480b", persisted.Preferences.FavoriteModels)
 	}
 
 	updated, _ = next.Update(testKeyCtrl('f'))
 	next = updated.(model)
-	if next.favoriteModels["qwen3-coder:480b"] {
-		t.Fatalf("favorite map = %#v, want qwen3-coder:480b unfavorited", next.favoriteModels)
+	if next.favoriteModels["ollama-cloud/qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want ollama-cloud/qwen3-coder:480b unfavorited", next.favoriteModels)
 	}
 	if len(next.picker.items) > 0 && next.picker.items[0].Group == "Favorites" {
 		t.Fatalf("favorites group should be gone after unfavorite, got first item %#v", next.picker.items[0])
@@ -414,7 +414,7 @@ func TestModelPickerLoadsFavoriteModelsFromOptions(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName:    "ollama-cloud",
 		ModelName:       "minimax-m3",
-		FavoriteModels:  []string{"qwen3-coder:480b"},
+		FavoriteModels:  []string{"ollama-cloud/qwen3-coder:480b"},
 		ProviderProfile: config.ProviderProfile{Name: "ollama-cloud", CatalogID: "ollama-cloud", Model: "minimax-m3"},
 	})
 	picker := m.newModelPicker()

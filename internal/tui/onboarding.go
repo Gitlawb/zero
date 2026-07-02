@@ -743,12 +743,21 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 		name = option.ID
 		apiKey = ""
 	}
+	// Include the full discovered models list so it gets persisted alongside the
+	// provider, preserving per-model apiModel overrides across sessions.
+	discovered := make([]config.DiscoveredModel, 0, len(m.setup.models))
+	for _, wm := range m.setup.models {
+		if id := strings.TrimSpace(wm.ID); id != "" {
+			discovered = append(discovered, config.DiscoveredModel{ID: id})
+		}
+	}
 	result, err := m.setupSave(SetupSelection{
 		CatalogID: option.ID,
 		Name:      name,
 		BaseURL:   m.setupBaseURL(option),
 		Model:     m.setupCurrentModel().ID,
 		APIKey:    apiKey,
+		Models:    discovered,
 	})
 	if err != nil {
 		m.setup.err = err.Error()

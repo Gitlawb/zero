@@ -1107,10 +1107,36 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
 		}
+
+		// Persist the live-discovered models so they survive across sessions.
+		// Only persist when discovery ran and returned live results (not fallback).
+		if wizard.modelSource != "" && wizard.modelSource != "fallback" && len(wizard.models) > 0 {
+			discovered := make([]config.DiscoveredModel, 0, len(wizard.models))
+			for _, wm := range wizard.models {
+				if id := strings.TrimSpace(wm.ID); id != "" {
+					discovered = append(discovered, config.DiscoveredModel{ID: id})
+				}
+			}
+			if len(discovered) > 0 {
+				if _, err := config.SetProviderDiscoveredModels(m.userConfigPath, profile.Name, discovered); err != nil {
+					// Non-fatal: the provider was already saved. Log but don't block.
+					// (Redact the path in case it contains identifying info.)
+					wizard.err = strings.TrimSpace("saved provider but could not persist models")
+				}
+			}
+		}
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child
 	// env export together, so they can never disagree.
+
+	// Refresh savedProviders so /model shows the newly added / updated provider
+	// without requiring a restart. The profile was just persisted (above) and is
+	// guaranteed usable (key stored / env var set / local), so it qualifies.
+	if strings.TrimSpace(profile.Name) != "" {
+		m.savedProviders = mergeSavedProvider(m.savedProviders, profile)
+	}
+
 	if nextProvider != nil {
 		m.provider = nextProvider
 	}
@@ -1747,18 +1773,19 @@ func (wizard *providerWizardState) filteredModels() []providerWizardModel {
 }
 
 func (model providerWizardModel) displayLabel() string {
+	id := strings.TrimSpace(model.ID)
+	if id != "" {
+		return id
+	}
+	return strings.TrimSpace(model.Description)
+}
+
+func (model providerWizardModel) secondaryText() string {
 	description := strings.TrimSpace(model.Description)
 	if description != "" && !providerWizardGenericModelDescription(description) {
 		return description
 	}
-	return model.ID
-}
-
-func (model providerWizardModel) secondaryText() string {
-	if model.displayLabel() != model.ID {
-		return model.ID
-	}
-	return model.Description
+	return ""
 }
 
 func (model providerWizardModel) matches(query string) bool {
@@ -1938,4 +1965,21 @@ func providerWizardAPIFormat(provider providercatalog.Descriptor) string {
 		return ""
 	}
 	return string(provider.SupportedAPIFormats[0])
+}
+
+// mergeSavedProvider replaces or appends a profile in the saved list by name.
+// This lets the provider wizard refresh m.savedProviders so /model sees newly
+// added providers without requiring a restart.
+func mergeSavedProvider(profiles []config.ProviderProfile, profile config.ProviderProfile) []config.ProviderProfile {
+	name := strings.TrimSpace(profile.Name)
+	if name == "" {
+		return profiles
+	}
+	for i, p := range profiles {
+		if strings.EqualFold(strings.TrimSpace(p.Name), name) {
+			profiles[i] = profile
+			return profiles
+		}
+	}
+	return append(profiles, profile)
 }
