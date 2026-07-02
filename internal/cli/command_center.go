@@ -81,6 +81,9 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if command == "detect" {
 		return runProvidersDetect(args, stdout, stderr, deps)
 	}
+	if command == "models" {
+		return runProvidersModels(args, stdout, stderr, deps)
+	}
 	if command != "list" && command != "current" && command != "catalog" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}
@@ -465,9 +468,11 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers use <name> [flags]
   zero providers setup <catalog-id> [flags]
   zero providers detect [flags]
+  zero providers models [name] [flags]
 
 Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
 Detect probes for running local runtimes (Ollama, LM Studio) and prints adopt commands plus per-provider next steps.
+Models probes a provider's live model-listing endpoint (e.g. an OpenAI-compatible /v1/models) and lists the models it serves — including custom OpenAI-/Anthropic-compatible endpoints — so a self-hosted provider needs no per-model config.
 
 Flags:
       --json                    Print JSON summary

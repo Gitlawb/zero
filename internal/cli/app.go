@@ -22,6 +22,7 @@ import (
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -53,32 +54,33 @@ type appDeps struct {
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
 	// inject it). nil ⇒ no export.
-	exportActiveProvider  func(providerName string)
-	probeProviderHealth   func(context.Context, providerhealth.Options) providerhealth.Result
-	detectLocalRuntimes   func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
-	newSessionStore       func() *sessions.Store
-	loadPlugins           func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks             func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir             func() string
-	pluginsDir            func() string
-	toolsDir              func() string
-	newMCPStore           func() (*mcp.PermissionStore, error)
-	newMCPTokenStore      func() (*mcp.TokenStore, error)
-	newSandboxStore       func() (*sandbox.GrantStore, error)
-	selectSandboxBackend  func(sandbox.BackendOptions) sandbox.Backend
-	runSandboxSetupHelper func(path string, args []string, stdout io.Writer, stderr io.Writer) error
-	registerMCPTools      func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree       func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan      func(string) (verify.Plan, error)
-	runVerify             func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify         func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval          func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges        func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges         func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	runTUI                func(context.Context, tui.Options) int
-	runEditor             func(string) error
-	checkUpdate           func(context.Context, update.Options) (update.Result, error)
-	now                   func() time.Time
+	exportActiveProvider   func(providerName string)
+	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
+	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
+	newSessionStore        func() *sessions.Store
+	loadPlugins            func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks              func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir              func() string
+	pluginsDir             func() string
+	toolsDir               func() string
+	newMCPStore            func() (*mcp.PermissionStore, error)
+	newMCPTokenStore       func() (*mcp.TokenStore, error)
+	newSandboxStore        func() (*sandbox.GrantStore, error)
+	selectSandboxBackend   func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
+	detectVerifyPlan       func(string) (verify.Plan, error)
+	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval           func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges         func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	runTUI                 func(context.Context, tui.Options) int
+	runEditor              func(string) error
+	checkUpdate            func(context.Context, update.Options) (update.Result, error)
+	now                    func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -134,8 +136,9 @@ func defaultAppDeps() appDeps {
 				OAuthLoginKey: loginKey,
 			})
 		},
-		probeProviderHealth: providerhealth.Probe,
-		detectLocalRuntimes: provideronboarding.DetectLocalRuntimes,
+		probeProviderHealth:    providerhealth.Probe,
+		discoverProviderModels: defaultDiscoverProviderModels,
+		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -439,6 +442,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.probeProviderHealth == nil {
 		deps.probeProviderHealth = defaults.probeProviderHealth
+	}
+	if deps.discoverProviderModels == nil {
+		deps.discoverProviderModels = defaults.discoverProviderModels
 	}
 	if deps.detectLocalRuntimes == nil {
 		deps.detectLocalRuntimes = defaults.detectLocalRuntimes
