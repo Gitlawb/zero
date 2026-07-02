@@ -95,6 +95,47 @@ func TestNewThreadsCustomProviderHeaders(t *testing.T) {
 	}
 }
 
+func TestNewAIMLAPIProviderAddsAttributionHeaders(t *testing.T) {
+	transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
+	provider, err := New(config.ProviderProfile{
+		Name:          "aimlapi",
+		CatalogID:     "aimlapi",
+		ProviderKind:  config.ProviderKindOpenAICompatible,
+		APIKey:        "aimlapi-test-key",
+		Model:         "openai/gpt-5-chat",
+		CustomHeaders: map[string]string{"X-Trace": "test"},
+	}, Options{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+
+	if transport.request == nil {
+		t.Fatal("HTTP client was not used")
+	}
+	if got := transport.request.URL.String(); got != "https://api.aimlapi.com/v1/chat/completions" {
+		t.Fatalf("request URL = %q, want AI/ML API endpoint", got)
+	}
+	for header, want := range map[string]string{
+		"Authorization":                 "Bearer aimlapi-test-key",
+		"X-AIMLAPI-Partner-ID":          "Gitlawb",
+		"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+		"X-AIMLAPI-Integration-Version": "1.0.0",
+		"X-Trace":                       "test",
+	} {
+		if got := transport.request.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
+
 func TestNewSupportsOpenAIProviderKind(t *testing.T) {
 	provider, err := New(config.ProviderProfile{
 		Name:         "openai",

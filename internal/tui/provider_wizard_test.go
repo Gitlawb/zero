@@ -172,17 +172,13 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
-	// Index 0 is the recommended OpenGateway entry, so two downs land on anthropic
-	// (opengateway → openai → anthropic).
-	updated, _ := m.Update(testKey(tea.KeyDown))
-	next := updated.(model)
-	updated, _ = next.Update(testKey(tea.KeyDown))
-	next = updated.(model)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "anthropic")
+	next := m
 	if got := next.providerWizard.currentProvider().ID; got != "anthropic" {
 		t.Fatalf("after down, selected provider = %q, want anthropic", got)
 	}
 
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("wizard step = %v, want credential", next.providerWizard.step)
@@ -313,14 +309,12 @@ func TestProviderWizardRightAllowsExistingCredentialEnv(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
-	// Move off the recommended OpenGateway entry (index 0) onto openai so the
-	// OPENAI_API_KEY env credential is the one in play.
-	updated, _ := m.Update(testKey(tea.KeyDown))
-	next := updated.(model)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "openai")
+	next := m
 	if got := next.providerWizard.currentProvider().ID; got != "openai" {
 		t.Fatalf("after down, selected provider = %q, want openai", got)
 	}
-	updated, _ = next.Update(testKey(tea.KeyEnter))
+	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("enter from provider step = %v, want credential", next.providerWizard.step)

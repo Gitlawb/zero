@@ -121,6 +121,13 @@ the key in the wizard:
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
+export AIMLAPI_API_KEY=...
+```
+
+To configure AI/ML API directly, run:
+
+```bash
+zero providers setup aimlapi --set-active
 ```
 
 For local models, run Ollama or LM Studio and then use `zero setup` or
