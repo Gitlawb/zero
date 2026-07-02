@@ -181,7 +181,7 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	})
 	m = updated.(model)
 	loaded := plainRender(t, m.pickerOverlay(100))
-	assertContains(t, loaded, "Live Cloud A")
+	assertContains(t, loaded, "live-cloud-a")
 }
 
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
@@ -353,8 +353,8 @@ func TestModelPickerSearchFiltersModels(t *testing.T) {
 	}
 	view := plainRender(t, next.pickerOverlay(100))
 	assertContains(t, view, "search > qwen")
-	assertContains(t, view, "Qwen")
-	assertNotContains(t, view, "Minimax M3")
+	assertContains(t, view, "qwen3-coder:480b")
+	assertNotContains(t, view, "minimax-m3")
 }
 
 func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {

@@ -20,6 +20,14 @@ const (
 	ProviderKindOpenAICompatible ProviderKind = "openai-compatible"
 )
 
+// DiscoveredModel represents a model discovered from a provider's /models
+// endpoint. The APIModel field is reserved for per-model API name overrides
+// (filled in later — not yet wired into the factory).
+type DiscoveredModel struct {
+	ID       string `json:"id"`
+	APIModel string `json:"apiModel,omitempty"`
+}
+
 type ProviderProfile struct {
 	Name         string       `json:"name"`
 	Provider     string       `json:"provider,omitempty"`
@@ -41,6 +49,10 @@ type ProviderProfile struct {
 	Model           string            `json:"model,omitempty"`
 	ParseThinkTags  *bool             `json:"parseThinkTags,omitempty"`
 	Description     string            `json:"description,omitempty"`
+	// Models is the list of models discovered from the provider's /models
+	// endpoint, persisted in config so that per-model apiModel over survive
+	// across sessions. Populated by the setup wizard or onboarding flow.
+	Models []DiscoveredModel `json:"models,omitempty"`
 }
 
 func HasProviderProfile(profile ProviderProfile) bool {
@@ -511,6 +523,7 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 		ParseThinkTags       *bool             `json:"parseThinkTags"`
 		ParseThinkTagsSnake  *bool             `json:"parse_think_tags"`
 		Description          string            `json:"description"`
+		Models               []DiscoveredModel `json:"models"`
 	}
 
 	var raw rawProfile
@@ -534,6 +547,9 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 	profile.Model = strings.TrimSpace(firstNonEmpty(raw.Model, raw.ModelID))
 	profile.ParseThinkTags = firstNonNilBool(raw.ParseThinkTags, raw.ParseThinkTagsSnake)
 	profile.Description = strings.TrimSpace(raw.Description)
+	if len(raw.Models) > 0 {
+		profile.Models = append([]DiscoveredModel{}, raw.Models...)
+	}
 	return nil
 }
 

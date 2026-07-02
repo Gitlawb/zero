@@ -135,6 +135,8 @@ var descriptors = []Descriptor{
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
 	openAICompat("zai", "Z.ai", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY", "ZHIPU_API_KEY"}),
 	openAICompat("atomic-chat", "Atomic Chat", "https://api.atomic.chat/v1", "gpt-4.1", []string{"ATOMIC_CHAT_API_KEY"}),
+	openAICompat("opencode-go-openai", "OpenCode-Go-OpenAI SDK", "https://opencode.ai/zen/go/v1", "glm-5.2", []string{"OPENCODE_GO_OPENAI_API_KEY"}),
+	anthropicCompat("opencode-go-anthropic", "OpenCode-Go-Anthropic SDK", "https://opencode.ai/zen/go", "MiniMax-M3", []string{"OPENCODE_GO_ANTHROPIC_API_KEY"}),
 	// ChatGPT subscription via a local OAuth proxy. A ChatGPT (Plus/Pro) OAuth
 	// token only works against ChatGPT's own backend (which is Cloudflare-gated to
 	// the official client), so zero does not call it directly; instead point this

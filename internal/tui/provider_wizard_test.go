@@ -940,8 +940,8 @@ func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
 	assertNotContains(t, view, "SearchÃ")
 	assertNotContains(t, view, "Searchâ")
 	assertContains(t, view, "Grok 4.3")
-	assertContains(t, view, "x-ai/grok-4.3 · 1M ctx · tools · reasoning")
-	assertNotContains(t, view, "❯ x-ai/grok-4.3")
+	assertContains(t, view, "x-ai/grok-4.3")
+	assertContains(t, view, "1M ctx · tools · reasoning")
 	assertNotContains(t, view, "more models")
 	assertNotContains(t, view, "Model 17")
 }
@@ -979,7 +979,7 @@ func TestProviderWizardModelSearchFiltersAndAppliesRawModelID(t *testing.T) {
 	}
 	view := plainRender(t, next.View())
 	assertContains(t, view, "DeepSeek Chat")
-	assertContains(t, view, "DeepSeek V3.2")
+	assertContains(t, view, "deepseek/deepseek-v3.2")
 	assertNotContains(t, view, "GPT-4.1")
 }
 

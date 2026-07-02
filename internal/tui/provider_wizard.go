@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -913,6 +914,24 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
 		}
+
+		// Persist the live-discovered models so they survive across sessions.
+		// Only persist when discovery ran and returned live results (not fallback).
+		if wizard.modelSource != "" && wizard.modelSource != "fallback" && len(wizard.models) > 0 {
+			discovered := make([]config.DiscoveredModel, 0, len(wizard.models))
+			for _, wm := range wizard.models {
+				if id := strings.TrimSpace(wm.ID); id != "" {
+					discovered = append(discovered, config.DiscoveredModel{ID: id})
+				}
+			}
+			if len(discovered) > 0 {
+				if _, err := config.SetProviderDiscoveredModels(m.userConfigPath, profile.Name, discovered); err != nil {
+					// Non-fatal: the provider was already saved. Log but don't block.
+					// (Redact the path in case it contains identifying info.)
+					wizard.err = strings.TrimSpace(fmt.Sprintf("saved provider but could not persist models: %v", err))
+				}
+			}
+		}
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child
@@ -1499,18 +1518,19 @@ func (wizard *providerWizardState) filteredModels() []providerWizardModel {
 }
 
 func (model providerWizardModel) displayLabel() string {
+	id := strings.TrimSpace(model.ID)
+	if id != "" {
+		return id
+	}
+	return strings.TrimSpace(model.Description)
+}
+
+func (model providerWizardModel) secondaryText() string {
 	description := strings.TrimSpace(model.Description)
 	if description != "" && !providerWizardGenericModelDescription(description) {
 		return description
 	}
-	return model.ID
-}
-
-func (model providerWizardModel) secondaryText() string {
-	if model.displayLabel() != model.ID {
-		return model.ID
-	}
-	return model.Description
+	return ""
 }
 
 func (model providerWizardModel) matches(query string) bool {

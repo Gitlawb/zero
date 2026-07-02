@@ -359,6 +359,117 @@ func TestSetFavoriteModelsCreatesMissingConfig(t *testing.T) {
 	}
 }
 
+func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "opencode",
+		Providers: []ProviderProfile{
+			{
+				Name:         "opencode",
+				ProviderKind: ProviderKindOpenAICompatible,
+				BaseURL:      "https://api.opencode.ai/v1",
+				Model:        "glm-5.2",
+				Models: []DiscoveredModel{
+					{ID: "glm-5.1"},
+					{ID: "glm-5.2", APIModel: "glm-5.2-custom"},
+					{ID: "glm-5.3"},
+				},
+			},
+		},
+	}, 0o600)
+
+	// First call: add a set that drops glm-5.3, keeps glm-5.1/5.2, and adds a new one.
+	fresh := []DiscoveredModel{
+		{ID: "glm-5.1"},
+		{ID: "glm-5.2"}, // should preserve APIModel "glm-5.2-custom"
+		{ID: "glm-5.4"}, // new model, no APIModel override
+	}
+	cfg, err := SetProviderDiscoveredModels(path, "opencode", fresh)
+	if err != nil {
+		t.Fatalf("SetProviderDiscoveredModels() error = %v", err)
+	}
+
+	got := cfg.Providers[0].Models
+	if len(got) != 3 {
+		t.Fatalf("len(Models) = %d, want 3", len(got))
+	}
+
+	// glm-5.1 should have no APIModel (was empty, no override set).
+	if got[0].ID != "glm-5.1" || got[0].APIModel != "" {
+		t.Fatalf("Models[0] = %#v, want {ID: glm-5.1}", got[0])
+	}
+	// glm-5.2 should preserve its APIModel override.
+	if got[1].ID != "glm-5.2" || got[1].APIModel != "glm-5.2-custom" {
+		t.Fatalf("Models[1] = %#v, want {ID: glm-5.2, APIModel: glm-5.2-custom}", got[1])
+	}
+	// glm-5.4 should have no APIModel.
+	if got[2].ID != "glm-5.4" || got[2].APIModel != "" {
+		t.Fatalf("Models[2] = %#v, want {ID: glm-5.4}", got[2])
+	}
+
+	// Verify model glm-5.3 was dropped.
+	for _, m := range got {
+		if m.ID == "glm-5.3" {
+			t.Fatal("glm-5.3 should have been dropped from the models list")
+		}
+	}
+
+	// Verify persisted file matches.
+	persisted := readConfigFixture(t, path)
+	got = persisted.Providers[0].Models
+	if len(got) != 3 {
+		t.Fatalf("persisted len(Models) = %d, want 3", len(got))
+	}
+	if got[1].APIModel != "glm-5.2-custom" {
+		t.Fatalf("persisted Models[1].APIModel = %q, want glm-5.2-custom", got[1].APIModel)
+	}
+
+	// Preserve APIModel even when the fresh set explicitly omits it (no APIModel set).
+	secondFresh := []DiscoveredModel{
+		{ID: "glm-5.2"},
+	}
+	cfg, err = SetProviderDiscoveredModels(path, "opencode", secondFresh)
+	if err != nil {
+		t.Fatalf("SetProviderDiscoveredModels() error = %v", err)
+	}
+	if len(cfg.Providers[0].Models) != 1 {
+		t.Fatalf("after second call len(Models) = %d, want 1", len(cfg.Providers[0].Models))
+	}
+	if cfg.Providers[0].Models[0].APIModel != "glm-5.2-custom" {
+		t.Fatalf("after second call APIModel = %q, want glm-5.2-custom preserved", cfg.Providers[0].Models[0].APIModel)
+	}
+}
+
+func TestSetProviderDiscoveredModelsRejectsUnknownProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	_, err := SetProviderDiscoveredModels(path, "opencode", []DiscoveredModel{{ID: "glm-5.2"}})
+	if err == nil {
+		t.Fatal("SetProviderDiscoveredModels() error = nil, want error for unknown provider")
+	}
+	if !strings.Contains(err.Error(), `provider "opencode" not found`) {
+		t.Fatalf("error = %q, want provider not found", err.Error())
+	}
+}
+
+func TestSetProviderDiscoveredModelsRejectsEmptyPathAndName(t *testing.T) {
+	_, err := SetProviderDiscoveredModels("", "opencode", []DiscoveredModel{{ID: "glm-5.2"}})
+	if err == nil {
+		t.Fatal("SetProviderDiscoveredModels() error = nil for empty path")
+	}
+
+	_, err = SetProviderDiscoveredModels("/tmp/test.json", "", []DiscoveredModel{{ID: "glm-5.2"}})
+	if err == nil {
+		t.Fatal("SetProviderDiscoveredModels() error = nil for empty name")
+	}
+}
+
 func writeConfigFixture(t *testing.T, path string, cfg FileConfig, mode fs.FileMode) []byte {
 	t.Helper()
 
