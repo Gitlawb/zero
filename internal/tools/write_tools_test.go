@@ -273,7 +273,6 @@ func TestEditFileToolReplacesCRLF(t *testing.T) {
 	}
 }
 
-
 func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")

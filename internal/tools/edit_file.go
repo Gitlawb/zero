@@ -92,7 +92,9 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		if normalizedOccurrences > 0 {
 			occurrences = normalizedOccurrences
 			oldString = crlfOldString
-			newString = strings.ReplaceAll(newString, "\n", "\r\n")
+			if !strings.Contains(newString, "\r\n") {
+				newString = strings.ReplaceAll(newString, "\n", "\r\n")
+			}
 		}
 	}
 
