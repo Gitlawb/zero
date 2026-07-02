@@ -219,6 +219,14 @@ type model struct {
 	// active the chat column's body shows the file's diff/content instead of the
 	// transcript, mirroring the subchat drill-in.
 	fileView fileViewState
+	// Git-sweep state (files_git_sweep.go): the startup snapshot of already-dirty
+	// paths (nil until Init's sweep answers), the newly dirty files discovered by
+	// live sweeps (bash/subagent mutations that carry no changedFiles), the
+	// single-flight guard, and the "not a git repo / no git" latch.
+	gitFileBaseline     map[string]bool
+	gitTouched          []gitSweepFile
+	gitSweepInFlight    bool
+	gitSweepUnavailable bool
 	// swarmDoneAt records when each swarm member was first seen finished (done/
 	// failed) in a swarm_status report, so the sidebar can linger it briefly with a
 	// fading ✓ before dropping it (a smooth exit, not an abrupt pop). Stamped in the
@@ -811,6 +819,12 @@ func (m model) Init() tea.Cmd {
 	// terminal's unprompted push — mirrors the RequestBackgroundColor request
 	// below for the same reason.
 	cmds = append(cmds, tea.RequestWindowSize)
+	// Baseline git snapshot for the FILES sidebar sweep: whatever is already
+	// dirty when the TUI opens is pre-existing state, not this session's work
+	// (files_git_sweep.go). Async; a non-git workspace just disables the sweep.
+	if strings.TrimSpace(m.cwd) != "" {
+		cmds = append(cmds, gitSweepCmd(m.ctx, m.cwd, true))
+	}
 	// In auto mode, ask the terminal for its background color; the reply arrives
 	// as tea.BackgroundColorMsg and selects light vs dark (see updateModel).
 	if m.themeMode == themeAuto {
@@ -1839,8 +1853,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
 		}
+		// End-of-turn git sweep: catch file mutations the tool stream couldn't
+		// report (bash scaffolding, subagent edits) so the FILES sidebar is
+		// complete once the turn settles.
+		var sweepCmd tea.Cmd
+		m, sweepCmd = m.maybeGitSweep()
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, queuedCmd)
+		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
@@ -1991,6 +2010,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		m = m.captureStepWork(msg.row)
+		// A finished command tool may have mutated files git can see but no
+		// changedFiles reports (npm create, heredoc writes, subagent edits) —
+		// re-sweep so the FILES sidebar picks them up mid-turn.
+		if msg.row.kind == rowToolResult && isPlanCommandTool(msg.row.tool) {
+			var sweep tea.Cmd
+			m, sweep = m.maybeGitSweep()
+			return m, sweep
+		}
 		return m, nil
 	case swarmSessionsMsg:
 		// Merge completed swarm members' session ids so their AGENTS sidebar rows
@@ -2021,6 +2048,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case prStateMsg:
 		m.prState = msg.state
 		return m, nil
+	case gitSweepMsg:
+		return m.handleGitSweepMsg(msg), nil
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil

@@ -76,6 +76,15 @@ func (m model) touchedFiles() []touchedFile {
 	for left, right := 0, len(files)-1; left < right; left, right = left+1, right-1 {
 		files[left], files[right] = files[right], files[left]
 	}
+	// Merge the git sweep's discoveries (bash/subagent mutations that carry no
+	// changedFiles — files_git_sweep.go) below the transcript-derived entries,
+	// skipping paths a tool result already reported.
+	for _, f := range m.gitTouchedFiles() {
+		if _, seen := index[f.path]; seen {
+			continue
+		}
+		files = append(files, f)
+	}
 	return files
 }
 
