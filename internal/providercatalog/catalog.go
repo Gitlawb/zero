@@ -142,6 +142,9 @@ var descriptors = []Descriptor{
 	// endpoint. Local (no API key — the proxy authenticates); override the base URL
 	// for your proxy's port. See docs/oauth-subscriptions.md.
 	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
+	openAICompat("kilocode", "KiloCode", "https://api.kilo.ai/api/gateway", "anthropic/claude-sonnet-4.6", []string{"KILO_API_KEY"}, "kilo", "kilo gateway"),
+	openAICompat("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "gpt-5.5", []string{"OPENCODE_API_KEY"}, "opencode zen"),
+	openAICompat("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "deepseek-v4-pro", []string{"OPENCODE_API_KEY"}, "opencode go"),
 	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
 	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),
 }
