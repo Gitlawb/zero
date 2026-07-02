@@ -164,6 +164,9 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, strconv.FormatBool(row.final))
 	appendRenderCacheField(&b, strconv.Itoa(row.turnTools))
 	appendRenderCacheField(&b, strconv.FormatInt(int64(row.turnElapsed), 10))
+	// The FILES selection tints this row's card border, so selecting/deselecting
+	// a file must miss the cache entry rendered under the other state.
+	appendRenderCacheField(&b, strconv.FormatBool(m.rowTouchesSelectedFile(row)))
 
 	key := rcKey(row.runID, row.id)
 	appendRenderCacheField(&b, rc.hints[key])

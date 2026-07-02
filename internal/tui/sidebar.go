@@ -97,6 +97,9 @@ func (m model) sidebarHasContent() bool {
 	if len(m.sidebarSpecialists()) > 0 || len(m.swarmSpawnedAgents()) > 0 {
 		return true
 	}
+	if len(m.touchedFiles()) > 0 {
+		return true
+	}
 	return !m.plan.isEmpty()
 }
 
@@ -587,6 +590,19 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, planLines...)
 	}
 
+	// FILES section: the files this session has touched (files_panel.go).
+	// Rendered BELOW the plan steps so it never shifts sidebarPlanSelectables'
+	// click offsets; its own hits (sidebarFileSelectables) account for the
+	// sections above it.
+	add("")
+	add(m.sidebarFilesHeader(width))
+	fileLines, _ := m.sidebarFileLines(width)
+	if len(fileLines) == 0 {
+		add(sidebarPlaceholder("no files touched", width))
+	} else {
+		lines = append(lines, fileLines...)
+	}
+
 	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
 	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
 	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
@@ -648,6 +664,12 @@ func (m model) hoveredSidebarLineOffset(width int) (int, bool) {
 	case hoverPlanStep:
 		for _, hit := range m.sidebarPlanSelectables(width) {
 			if hit.stepIndex == m.hover.stepIndex {
+				return hit.lineOffset, true
+			}
+		}
+	case hoverFileRow:
+		for _, hit := range m.sidebarFileSelectables(width) {
+			if hit.path == m.hover.filePath {
 				return hit.lineOffset, true
 			}
 		}

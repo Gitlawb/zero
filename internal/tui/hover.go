@@ -15,6 +15,9 @@ const (
 	// hoverPlanStep: a plan step row in the sidebar's PLAN section, identified by
 	// step index.
 	hoverPlanStep
+	// hoverFileRow: a touched-file row in the sidebar's FILES section, identified
+	// by path.
+	hoverFileRow
 )
 
 // hoverTarget identifies the single clickable row (if any) currently under the
@@ -34,6 +37,7 @@ type hoverTarget struct {
 	bodyY     int    // hoverTranscript
 	sessionID string // hoverSidebarAgent
 	stepIndex int    // hoverPlanStep
+	filePath  string // hoverFileRow
 }
 
 // mouseHover reports whether msg is a plain cursor-movement event with NO button
@@ -58,6 +62,9 @@ func (m model) updateHoverTarget(msg tea.MouseMsg) model {
 	}
 	if stepIndex, ok := m.planStepAtMouse(msg); ok {
 		return m.withHover(hoverTarget{kind: hoverPlanStep, stepIndex: stepIndex})
+	}
+	if path, ok := m.fileRowAtMouse(msg); ok {
+		return m.withHover(hoverTarget{kind: hoverFileRow, filePath: path})
 	}
 	if line, ok := m.transcriptLineAtMouse(msg); ok {
 		// A permission option reuses its OWN existing keyboard-cursor highlight

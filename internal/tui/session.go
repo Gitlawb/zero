@@ -444,12 +444,13 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			output := payloadString(payload, "output")
 			rows = append(rows, transcriptRow{
-				kind:   rowToolResult,
-				id:     effectiveToolRowID(id, callSeq[id]),
-				text:   fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
-				tool:   name,
-				status: status,
-				detail: output,
+				kind:         rowToolResult,
+				id:           effectiveToolRowID(id, callSeq[id]),
+				text:         fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:         name,
+				status:       status,
+				detail:       output,
+				changedFiles: payloadStringSlice(payload, "changedFiles"),
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
@@ -616,6 +617,28 @@ func payloadString(payload map[string]any, key string) string {
 			return ""
 		}
 		return string(data)
+	}
+}
+
+// payloadStringSlice reads a []string persisted into a session payload (JSON
+// round-trips it as []any), skipping non-string entries. Nil when absent.
+func payloadStringSlice(payload map[string]any, key string) []string {
+	switch typed := payload[key].(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, v := range typed {
+			if s, ok := v.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
 	}
 }
 

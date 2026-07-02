@@ -1,0 +1,232 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+// filesPanelTestModel is sidebarTestModel plus a couple of touched files: one
+// created, one edited twice (the second touch most recent).
+func filesPanelTestModel() model {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "write_file", id: "f1", status: tools.StatusOK,
+			text:         "tool result: write_file ok Created web/app.js (10 lines).",
+			detail:       "+let a = 1\n+let b = 2",
+			changedFiles: []string{"web/app.js"}},
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "f2", status: tools.StatusOK,
+			text:         "tool result: edit_file ok Edited internal/tui/sidebar.go.",
+			detail:       "+added one\n-removed one",
+			changedFiles: []string{"internal/tui/sidebar.go"}},
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "f3", status: tools.StatusOK,
+			text:         "tool result: edit_file ok Edited internal/tui/sidebar.go.",
+			detail:       "+two\n+three\n-gone",
+			changedFiles: []string{"internal/tui/sidebar.go"}},
+	)
+	return m
+}
+
+// TestTouchedFilesAggregates: the roster is recovered from tool-result rows,
+// newest-touch first, with per-file diffstat totals, edit counts, and the
+// created badge from write_file's confirmation text.
+func TestTouchedFilesAggregates(t *testing.T) {
+	m := filesPanelTestModel()
+	files := m.touchedFiles()
+	if len(files) != 2 {
+		t.Fatalf("expected 2 touched files, got %d: %+v", len(files), files)
+	}
+	// sidebar.go was touched last, so it lists first.
+	if files[0].path != "internal/tui/sidebar.go" {
+		t.Fatalf("most recently touched file should list first, got %q", files[0].path)
+	}
+	if files[0].adds != 3 || files[0].dels != 2 || files[0].edits != 2 {
+		t.Errorf("sidebar.go diffstat = +%d −%d over %d edits, want +3 −2 over 2", files[0].adds, files[0].dels, files[0].edits)
+	}
+	if files[0].created {
+		t.Error("edited file must not read as created")
+	}
+	if !files[1].created {
+		t.Error("write_file 'Created …' result should mark the file created")
+	}
+	if files[0].lastRowIndex != len(m.transcript)-1 {
+		t.Errorf("lastRowIndex = %d, want the final transcript row", files[0].lastRowIndex)
+	}
+}
+
+// TestSidebarFileLinesRenderAndOverflow: rows carry the badge + left-truncated
+// path + diffstat; beyond maxSidebarFiles the tail collapses into "+N more";
+// hits index only real file rows.
+func TestSidebarFileLinesRenderAndOverflow(t *testing.T) {
+	m := filesPanelTestModel()
+	lines, hits := m.sidebarFileLines(34)
+	joined := plainRender(t, strings.Join(lines, "\n"))
+	if !strings.Contains(joined, "sidebar.go") || !strings.Contains(joined, "app.js") {
+		t.Fatalf("file rows missing paths:\n%s", joined)
+	}
+	if !strings.Contains(joined, "+3 −2") {
+		t.Errorf("expected aggregated diffstat +3 −2:\n%s", joined)
+	}
+	if !strings.Contains(joined, "A") || !strings.Contains(joined, "M") {
+		t.Errorf("expected A and M badges:\n%s", joined)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 clickable hits, got %d", len(hits))
+	}
+	if hits[0].path != "internal/tui/sidebar.go" {
+		t.Errorf("first hit should be the newest file, got %q", hits[0].path)
+	}
+
+	// Overflow: 8 distinct files -> maxSidebarFiles rows + a "+2 more" trailer.
+	over := sidebarTestModel()
+	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		over.transcript = append(over.transcript, transcriptRow{
+			kind: rowToolResult, tool: "edit_file", id: name, status: tools.StatusOK,
+			changedFiles: []string{name + ".go"},
+		})
+	}
+	overLines, overHits := over.sidebarFileLines(34)
+	if len(overHits) != maxSidebarFiles {
+		t.Fatalf("expected %d clickable rows, got %d", maxSidebarFiles, len(overHits))
+	}
+	if got := plainRender(t, overLines[len(overLines)-1]); !strings.Contains(got, "+2 more") {
+		t.Errorf("expected '+2 more' trailer, got %q", got)
+	}
+}
+
+// TestSidebarFilesLivePulseRow: while a mutating tool call streams its args,
+// the file it is writing shows as a pinned (unclickable) pulse row.
+func TestSidebarFilesLivePulseRow(t *testing.T) {
+	m := filesPanelTestModel()
+	m.streamCallName = "write_file"
+	m.streamCallDecoder = newStreamingDecoder()
+	m.streamCallDecoder.feed(`{"path":"web/new.css","content":"body{}`)
+
+	lines, hits := m.sidebarFileLines(34)
+	if got := plainRender(t, lines[0]); !strings.Contains(got, "web/new.css") {
+		t.Fatalf("live write should pin its path atop FILES, got %q", got)
+	}
+	for _, hit := range hits {
+		if hit.path == "web/new.css" {
+			t.Error("the live row must not be clickable (no result exists yet)")
+		}
+	}
+	// A non-mutating streaming call shows no pulse row.
+	m.streamCallName = "read_file"
+	if m.liveEditingPath() != "" {
+		t.Error("read_file must not read as a live edit")
+	}
+}
+
+// TestSidebarFileSelectablesMatchRenderedRows: the hit offsets computed by
+// sidebarFileSelectables must land exactly on the rendered FILES rows in
+// renderContextSidebar's output — the same invariant the mouse hit-test relies
+// on. Asserted against the real render, not a re-derivation of the math.
+func TestSidebarFileSelectablesMatchRenderedRows(t *testing.T) {
+	m := filesPanelTestModel()
+	width := sidebarWidth(m.width)
+	rendered := m.renderContextSidebar(width, m.height)
+	hits := m.sidebarFileSelectables(width)
+	if len(hits) == 0 {
+		t.Fatal("expected clickable FILES rows")
+	}
+	for _, hit := range hits {
+		if hit.lineOffset >= len(rendered) {
+			t.Fatalf("hit offset %d beyond rendered sidebar (%d lines)", hit.lineOffset, len(rendered))
+		}
+		line := plainRender(t, rendered[hit.lineOffset])
+		base := hit.path[strings.LastIndex(hit.path, "/")+1:]
+		if !strings.Contains(line, base) {
+			t.Errorf("hit for %q points at line %d which reads %q", hit.path, hit.lineOffset, line)
+		}
+	}
+}
+
+// TestFileRowClickSelectsThenOpens: the first sidebar click on a file selects
+// it (tint + scroll state, no view swap); the second click on the same file
+// opens the drill-in; clicking another file while the view is open switches it.
+func TestFileRowClickSelectsThenOpens(t *testing.T) {
+	m := filesPanelTestModel()
+	width := sidebarWidth(m.width)
+	hits := m.sidebarFileSelectables(width)
+	if len(hits) < 2 {
+		t.Fatal("expected two clickable FILES rows")
+	}
+	x := m.chatColumnWidth() + 3
+	click := func(hit fileHit) tea.MouseMsg { return testMouseClick(tea.MouseLeft, x, hit.lineOffset) }
+
+	m1, _, handled := m.handleTranscriptSelectionMouse(click(hits[0]))
+	if !handled {
+		t.Fatal("FILES row click should be handled")
+	}
+	if m1.selectedFile != hits[0].path || m1.fileView.active {
+		t.Fatalf("first click should select (not open): selected=%q active=%v", m1.selectedFile, m1.fileView.active)
+	}
+
+	m2, _, _ := m1.handleTranscriptSelectionMouse(click(hits[0]))
+	if !m2.fileView.active || m2.fileView.path != hits[0].path {
+		t.Fatalf("second click should open the file view: %+v", m2.fileView)
+	}
+
+	m3, _, _ := m2.handleTranscriptSelectionMouse(click(hits[1]))
+	if !m3.fileView.active || m3.fileView.path != hits[1].path {
+		t.Fatalf("clicking another file with the view open should switch it: %+v", m3.fileView)
+	}
+	if m3.selectedFile != hits[1].path {
+		t.Errorf("switching the view should move the selection too, got %q", m3.selectedFile)
+	}
+}
+
+// TestRowTouchesSelectedFileTint: only tool-result rows whose changedFiles
+// carry the selected path tint, and the render cache key differs across
+// selection states so the tint can't be served stale.
+func TestRowTouchesSelectedFileTint(t *testing.T) {
+	m := filesPanelTestModel()
+	row := m.transcript[len(m.transcript)-1]
+	if m.rowTouchesSelectedFile(row) {
+		t.Fatal("nothing selected: no row should tint")
+	}
+	m.selectedFile = "internal/tui/sidebar.go"
+	if !m.rowTouchesSelectedFile(row) {
+		t.Fatal("selected file's edit row should tint")
+	}
+	other := m.transcript[len(m.transcript)-3] // web/app.js
+	if m.rowTouchesSelectedFile(other) {
+		t.Fatal("an unrelated file's row must not tint")
+	}
+
+	rc := buildRowContext(m.transcript)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	selectedKey, _ := m.renderRowCacheKey(row, 80, rc, opts, false)
+	m.selectedFile = ""
+	plainKey, _ := m.renderRowCacheKey(row, 80, rc, opts, false)
+	if selectedKey == plainKey {
+		t.Error("render cache key must change with the selection state")
+	}
+}
+
+// TestEscClearsFileSelectionThenNothing: Esc drops an active file selection
+// (before any run-level action) and is consumed doing so.
+func TestEscClearsFileSelectionThenNothing(t *testing.T) {
+	m := filesPanelTestModel()
+	m.selectedFile = "web/app.js"
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if got := updated.(model).selectedFile; got != "" {
+		t.Fatalf("Esc should clear the file selection, still %q", got)
+	}
+}
+
+func TestTruncatePathLeft(t *testing.T) {
+	if got := truncatePathLeft("internal/tui/sidebar.go", 40); got != "internal/tui/sidebar.go" {
+		t.Errorf("short path should pass through, got %q", got)
+	}
+	if got := truncatePathLeft("internal/tui/sidebar.go", 18); got != "…/tui/sidebar.go" {
+		t.Errorf("want …/tui/sidebar.go, got %q", got)
+	}
+	if got := truncatePathLeft("internal/tui/sidebar.go", 14); got != "…/sidebar.go" {
+		t.Errorf("want …/sidebar.go, got %q", got)
+	}
+}

@@ -167,6 +167,10 @@ type cardRenderOptions struct {
 	bodyCap  int
 	cwd      string
 	expanded bool
+	// fileSelected marks a tool-result card whose mutation touched the file
+	// selected in the FILES sidebar; the card border tints accent so the
+	// selection reads in the transcript.
+	fileSelected bool
 }
 
 // flushCardBodyMaxLines is the body cap for cards flushed to scrollback. The
@@ -210,6 +214,10 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 }
 
 func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
+	// Resolved per-row (not at the opts construction sites) so every render
+	// path — live, flush, detailed — carries the FILES selection tint; the
+	// cache key includes the same predicate (renderRowCacheKey).
+	opts.fileSelected = m.rowTouchesSelectedFile(row)
 	switch row.kind {
 	case rowUser:
 		return renderUserRow(row, width)
@@ -1390,6 +1398,11 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	glyph := zeroTheme.green.Render("•")
 	nameStyle := zeroTheme.green
 	borderStyle := zeroTheme.line
+	if opts.fileSelected {
+		// The selected FILES row's edit card: accent border, same as the
+		// sidebar's ▸ marker, so click → highlight reads as one gesture.
+		borderStyle = zeroTheme.accent
+	}
 	if failed {
 		glyph = zeroTheme.red.Render("•")
 		nameStyle = zeroTheme.red
