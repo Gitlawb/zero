@@ -50,6 +50,11 @@ func (m model) openFileView(path string) model {
 	m.fileView.active = true
 	m.fileView.path = path
 	m.fileView.mode = fileViewDiff
+	// A file only the git sweep knows about (bash/subagent mutation) has no edit
+	// cards to stack — open straight on the full file instead of a placeholder.
+	if len(m.fileViewResultRows()) == 0 {
+		m.fileView.mode = fileViewFull
+	}
 	m.chatScrollOffset = 0
 	m = m.clearHover() // bodyY numbering differs between the file body and the chat
 	return m
