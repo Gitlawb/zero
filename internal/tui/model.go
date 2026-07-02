@@ -211,6 +211,14 @@ type model struct {
 	// sidebar; when set, the chat reflows to full width. Distinct from the
 	// availability conditions in sidebarAvailable (geometry / mode / overlays).
 	sidebarHidden bool
+	// selectedFile is the touched file selected by clicking its FILES sidebar
+	// row: its edit cards tint in the chat (rowTouchesSelectedFile) and a second
+	// click opens the drill-in file view. "" when nothing is selected; Esc clears.
+	selectedFile string
+	// fileView is the drill-in view for a touched file (file_view.go): while
+	// active the chat column's body shows the file's diff/content instead of the
+	// transcript, mirroring the subchat drill-in.
+	fileView fileViewState
 	// swarmDoneAt records when each swarm member was first seen finished (done/
 	// failed) in a swarm_status report, so the sidebar can linger it briefly with a
 	// fading ✓ before dropping it (a smooth exit, not an abrupt pop). Stamped in the
@@ -1058,6 +1066,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
+		case m.fileView.active && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
+			// Mode toggle for the file drill-in, only while the composer is empty
+			// so mid-sentence typing is never hijacked.
+			if keyText(msg) == "f" {
+				return m.setFileViewMode(fileViewFull), nil
+			}
+			return m.setFileViewMode(fileViewDiff), nil
 		case keyCtrl(msg, 'e'):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection).
@@ -1081,6 +1096,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatScrollOffset = m.subchat.exit()
 				m = m.clearHover() // bodyY numbering differs between subchat and the parent transcript
 				return m, nil
+			}
+			// File drill-in exits on Esc (returns to the chat at its saved scroll
+			// position); the file stays selected so a second Esc clears that.
+			if m.fileView.active {
+				return m.exitFileView(), nil
 			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
@@ -1137,6 +1157,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.suggestionsActive() {
 				return m.dismissSuggestions(), nil
+			}
+			// A selected FILES row clears before anything run-related: the
+			// selection is a passive highlight, so Esc dropping it is cheap and
+			// expected (mirrors how editors clear selection on Esc).
+			if m.selectedFile != "" {
+				m.selectedFile = ""
+				return m, nil
 			}
 			if m.hasQueuedMessage() {
 				return m.clearQueuedMessage(), nil
@@ -2197,6 +2224,12 @@ func (m model) titleBarInTranscriptBody() bool {
 func (m model) pinnedTitleBar(width int) string {
 	if !m.altScreen || m.height <= 0 {
 		return ""
+	}
+	// The file drill-in replaces the title bar with its nav line (path + key
+	// hints). Both are exactly one line, and every frame computation routes
+	// through here, so the swap never desyncs the viewport geometry.
+	if m.fileView.active {
+		return m.fileViewNavBar(width)
 	}
 	return m.titleBar(width)
 }
@@ -4298,13 +4331,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:   rowToolResult,
-				id:     effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:   toolResultRowText(result),
-				tool:   result.Name,
-				status: result.Status,
-				detail: toolResultDetail(result),
-				runID:  runID,
+				kind:         rowToolResult,
+				id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:         toolResultRowText(result),
+				tool:         result.Name,
+				status:       result.Status,
+				detail:       toolResultDetail(result),
+				runID:        runID,
+				changedFiles: result.ChangedFiles,
 			}
 			// A Task result is shown by the specialist card, and update_plan by the
 			// plan panel/sidebar, so skip both redundant transcript rows.

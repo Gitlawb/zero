@@ -41,6 +41,11 @@ type transcriptRow struct {
 	askUser    *agent.AskUserRequest
 	expanded   bool // collapsible transcript rows, e.g. provider thoughts
 
+	// changedFiles lists the workspace-relative paths a mutating tool result
+	// wrote (from tools.Result.ChangedFiles; restored from the session payload on
+	// resume). The sidebar FILES section derives its roster from these.
+	changedFiles []string
+
 	// specialistInfo holds the specialist card data for rowSpecialist rows.
 	// Nil for all other row kinds.
 	specialistInfo *specialistInfo

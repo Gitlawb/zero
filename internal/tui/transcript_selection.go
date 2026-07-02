@@ -211,6 +211,12 @@ func (m model) renderHoverHighlight(rendered string, selectable []transcriptSele
 }
 
 func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
+	// File drill-in: the chat column's body swaps to the viewed file's
+	// diff/content. Swapping HERE (the single source every consumer reads) keeps
+	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
+	if m.fileView.active {
+		return m.fileViewBodyItems(width)
+	}
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render at the full chat width; row/status glyphs provide
 	// structure without adding another body margin. Block items (title bar, empty
@@ -1242,6 +1248,9 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// session, reusing the specialist-card subchat path. Checked before the
 		// transcript hit-test since the sidebar is outside the chat column.
 		if hit, ok := m.sidebarLineAtMouse(msg); ok {
+			// The subchat drill-in owns the whole (single-column) view; a file
+			// drill-in can't meaningfully stay open behind it.
+			m = m.exitFileView()
 			if errMsg := m.subchat.enter(m.sessionStore, hit.sessionID, hit.title, m.chatScrollOffset); errMsg != "" {
 				m = m.appendSystemNotice(errMsg)
 			}
@@ -1252,9 +1261,23 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// A click on a PLAN step row drops a transcript card listing the file
 		// changes captured while that step was in progress.
 		if stepIndex, ok := m.planStepAtMouse(msg); ok {
+			// The card lands in the chat transcript; close the file drill-in so
+			// it isn't appended invisibly behind the swapped body.
+			m = m.exitFileView()
 			var cmd tea.Cmd
 			m, cmd = m.openPlanStepDetail(stepIndex)
 			return m, cmd, true
+		}
+		// A click on a FILES row: first click selects the file (its edit cards
+		// tint and the chat scrolls to the most recent one); a click on the
+		// already-selected file — or any FILES click while the drill-in is open —
+		// opens/switches the file view.
+		if path, ok := m.fileRowAtMouse(msg); ok {
+			if m.fileView.active || m.selectedFile == path {
+				m.selectedFile = path
+				return m.openFileView(path), nil, true
+			}
+			return m.selectFile(path), nil, true
 		}
 		line, ok := m.transcriptLineAtMouse(msg)
 		if !ok {
