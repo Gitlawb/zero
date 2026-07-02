@@ -77,6 +77,7 @@ type appDeps struct {
 	runAgentEval           func(context.Context, agentEvalOptions) (agentEvalReport, error)
 	inspectChanges         func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
 	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -177,6 +178,7 @@ func defaultAppDeps() appDeps {
 		runAgentEval:     defaultRunAgentEval,
 		inspectChanges:   zerogit.Inspect,
 		commitChanges:    zerogit.Commit,
+		pushChanges:      zerogit.Push,
 		runTUI:           tui.Run,
 		runEditor:        openEditor,
 		checkUpdate:      update.Check,
@@ -505,6 +507,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.commitChanges == nil {
 		deps.commitChanges = defaults.commitChanges
+	}
+	if deps.pushChanges == nil {
+		deps.pushChanges = defaults.pushChanges
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI

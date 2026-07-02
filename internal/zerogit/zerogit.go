@@ -526,3 +526,70 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+type PushOptions struct {
+	Cwd       string
+	Remote    string
+	Branch    string
+	Force     bool
+	DryRun    bool
+	RunGit    Runner
+	RunGitEnv EnvRunner
+}
+
+type PushResult struct {
+	Remote string
+	Branch string
+	Output string
+}
+
+func Push(ctx context.Context, options PushOptions) (PushResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return PushResult{}, err
+	}
+	runGit, _ := resolveRunners(options.RunGit, options.RunGitEnv)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return PushResult{}, fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	branch := strings.TrimSpace(options.Branch)
+	if branch == "" {
+		branch, err = gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return PushResult{}, fmt.Errorf("resolve current branch: %w", err)
+		}
+	}
+
+	remote := strings.TrimSpace(options.Remote)
+	if remote == "" {
+		if upstream, err := gitOutput(ctx, runGit, root, "config", "branch."+branch+".remote"); err == nil && upstream != "" {
+			remote = upstream
+		} else {
+			remote = "origin"
+		}
+	}
+
+	args := []string{"push"}
+	if options.DryRun {
+		args = append(args, "--dry-run")
+	}
+	if options.Force {
+		args = append(args, "--force-with-lease")
+	}
+	args = append(args, "-u", remote, branch)
+
+	output, err := gitRawOutput(ctx, runGit, root, args...)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("push: %w", err)
+	}
+
+	return PushResult{
+		Remote: remote,
+		Branch: branch,
+		Output: output,
+	}, nil
+}

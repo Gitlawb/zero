@@ -662,3 +662,46 @@ func TestRunExecRejectsWorktreeDirWithoutWorktree(t *testing.T) {
 		t.Fatalf("expected empty stdout, got %q", stdout.String())
 	}
 }
+
+func TestRunChangesPush(t *testing.T) {
+	cwd := t.TempDir()
+	pushed := zerogit.PushResult{
+		Remote: "origin",
+		Branch: "feat/feature-a",
+		Output: "Everything up-to-date",
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push", "--remote", "origin", "--force", "--dry-run"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun {
+				t.Fatalf("unexpected PushOptions: %#v", options)
+			}
+			return pushed, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pushed branch feat/feature-a to remote origin (dry run)") {
+		t.Fatalf("unexpected text output: %q", stdout.String())
+	}
+}
+
+func TestRunChangesPushRejectsIncompatibleFlags(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push", "--base", "main"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--base") {
+		t.Fatalf("expected error about --base, got %q", stderr.String())
+	}
+}

@@ -54,6 +54,9 @@ type Info struct {
 	AgeDays               *int       `json:"ageDays,omitempty"`
 	Contributors90d       *int       `json:"contributors90d,omitempty"`
 	CommitVelocity30d     *int       `json:"commitVelocity30d,omitempty"`
+	BranchCount           int        `json:"branchCount"`
+	CommitCount           int        `json:"commitCount"`
+	TagCount              int        `json:"tagCount"`
 }
 
 // RunGit runs a git subcommand in dir and returns raw stdout. A non-zero exit
@@ -228,6 +231,31 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 		if n, perr := strconv.Atoi(strings.TrimSpace(count)); perr == nil {
 			info.CommitVelocity30d = &n
 		}
+	}
+	if count, err := run(ctx, dir, "rev-list", "--count", "HEAD"); err == nil {
+		if n, perr := strconv.Atoi(strings.TrimSpace(count)); perr == nil {
+			info.CommitCount = n
+		}
+	}
+	if branches, err := run(ctx, dir, "branch", "-a"); err == nil {
+		lines := strings.Split(branches, "\n")
+		count := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+		info.BranchCount = count
+	}
+	if tags, err := run(ctx, dir, "tag"); err == nil {
+		lines := strings.Split(tags, "\n")
+		count := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+		info.TagCount = count
 	}
 
 	return info, nil

@@ -521,3 +521,29 @@ func TestParseStatusZHandlesRenamesAndSpecialPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestPushBranchesToRemote(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "feat/some-feature\n"},
+		{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
+		{Stdout: "Everything up-to-date\n"},
+	}}
+
+	result, err := Push(context.Background(), PushOptions{
+		Cwd:    root,
+		RunGit: runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("Push returned error: %v", err)
+	}
+
+	if result.Remote != "origin" || result.Branch != "feat/some-feature" || !strings.Contains(result.Output, "Everything up-to-date") {
+		t.Fatalf("unexpected push result: %#v", result)
+	}
+
+	if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
+		t.Fatalf("unexpected push command: %q", got)
+	}
+}
