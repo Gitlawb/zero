@@ -46,23 +46,17 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share
 			// the same CatalogID — matching on CatalogID would block creating a
-			// second instance. Skip ManageKey and route directly to the endpoint
-			// step; the user can overwrite an existing instance by re-entering
-			// the same name, or create a new one with a different name.
-			if providerWizardNeedsEndpoint(m.providerWizard.currentProvider()) {
-				m.providerWizard.manageProviderName = ""
-				previous := m.providerWizard.step
-				m.providerWizard.advance()
-				if m.providerWizard.step == providerWizardStepModel && previous != providerWizardStepModel {
-					return m, m.providerModelDiscoveryCmd()
-				}
+			// second instance. Skip ManageKey and fall through to the shared
+			// advance() path below; the user can overwrite by re-entering the
+			// same name or create a new one with a different name.
+			if !providerWizardNeedsEndpoint(m.providerWizard.currentProvider()) {
+				m.providerWizard.manageProviderName = name
+				m.providerWizard.manageKeyCursor = 0
+				m.providerWizard.err = ""
+				m.providerWizard.step = providerWizardStepManageKey
 				return m, nil
 			}
-			m.providerWizard.manageProviderName = name
-			m.providerWizard.manageKeyCursor = 0
-			m.providerWizard.err = ""
-			m.providerWizard.step = providerWizardStepManageKey
-			return m, nil
+			m.providerWizard.manageProviderName = ""
 		}
 	}
 	previous := m.providerWizard.step
