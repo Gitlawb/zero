@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write # push the release-PR branch, create the tag + GitHub Release
   pull-requests: write # open/update the release PR
+  issues: write # create/apply release-tracking labels on the release PR
   actions: write # dispatch release-artifacts.yml once a release is cut
 
 jobs:
