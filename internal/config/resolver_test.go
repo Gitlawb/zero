@@ -1269,6 +1269,45 @@ func TestResolveSandboxBlockUnixSocketsFromFile(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
+	// 1. Project config tries to set network to "allow" (should be ignored).
+	userPath := writeConfig(t, `{}`)
+	projectPath := writeConfig(t, `{
+		"sandbox": {"network": "allow"}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Sandbox.Network == "allow" {
+		t.Fatal("resolved.Sandbox.Network = allow, want empty/deny to prevent project config from weakening sandbox")
+	}
+
+	// 2. User config sets network to "allow", project config sets it to "deny" (tightening is allowed).
+	userPath2 := writeConfig(t, `{
+		"sandbox": {"network": "allow"}
+	}`)
+	projectPath2 := writeConfig(t, `{
+		"sandbox": {"network": "deny"}
+	}`)
+	resolved2, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath2,
+		ProjectConfigPath: projectPath2,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved2.Sandbox.Network != "deny" {
+		t.Fatalf("resolved.Sandbox.Network = %q, want deny (project config allowed to tighten)", resolved2.Sandbox.Network)
+	}
+}
+
 func TestResolveNotifyValid(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"both","focusMode":"always"}}`)
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
