@@ -942,7 +942,8 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.Name)) ||
-			strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID)) ||
+			(!genericProviderCatalogID(provider.ID) &&
+				strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID))) ||
 			strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.ID)) {
 			return profile.Name, true
 		}
@@ -963,7 +964,13 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 	case 1: // Replace
 		wizard.apiKey = ""
 		wizard.err = ""
-		wizard.step = providerWizardStepCredential
+		wizard.baseURL = ""
+		wizard.profileName = ""
+		if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+			wizard.step = providerWizardStepEndpoint
+		} else {
+			wizard.step = providerWizardStepCredential
+		}
 		return m, nil
 	case 2: // Remove
 		if strings.TrimSpace(m.userConfigPath) != "" {
