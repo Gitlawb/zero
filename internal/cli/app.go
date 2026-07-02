@@ -557,8 +557,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		if !errors.Is(err, config.ErrNoActiveProvider) && !errors.Is(err, config.ErrProviderRequiresModel) {
 			return writeAppError(stderr, err.Error(), 1)
 		}
-		resolved = config.ResolvedConfig{}
-		forceSetup = true
+		// ErrNoActiveProvider can mean "nothing configured yet" (needs onboarding)
+		// or "providers ARE configured, just none marked active" (e.g. config.json's
+		// activeProvider is blank/stale). In the second case resolved.Providers still
+		// carries the already-normalized list — prefer falling back to one of those
+		// over wiping everything and forcing the user to re-enter credentials they
+		// already saved.
+		if usable, ok := firstUsableProvider(resolved.Providers); errors.Is(err, config.ErrNoActiveProvider) && ok {
+			resolved.Provider = usable
+			resolved.ActiveProvider = usable.Name
+		} else {
+			resolved = config.ResolvedConfig{}
+			forceSetup = true
+		}
 	}
 	userConfigPath, err := deps.userConfigPath()
 	if err != nil {

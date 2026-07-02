@@ -916,6 +916,25 @@ func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
 	}
 }
 
+func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
+	// Multiple providers configured (e.g. via `zero provider add`) but
+	// activeProvider is blank/stale — a caller like the interactive TUI still
+	// needs the normalized list to fall back to an already-usable provider
+	// instead of forcing a full re-onboarding wizard.
+	path := writeConfig(t, `{"providers":[
+		{"name":"work","provider_kind":"openai","apiKey":"sk-test","model":"gpt-test"},
+		{"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
+	]}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if !errors.Is(err, ErrNoActiveProvider) {
+		t.Fatalf("error = %v, want errors.Is(err, ErrNoActiveProvider)", err)
+	}
+	if len(resolved.Providers) != 2 {
+		t.Fatalf("Providers = %#v, want the 2 normalized profiles preserved despite the error", resolved.Providers)
+	}
+}
+
 func TestResolveTrimsProviderProfileAliasesBeforeFallback(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",

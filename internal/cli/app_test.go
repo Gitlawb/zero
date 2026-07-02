@@ -205,6 +205,67 @@ func TestRunNoArgsEntersSetupWhenResolveReportsNoActiveProvider(t *testing.T) {
 	}
 }
 
+func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var launchedOptions tui.Options
+	launched := false
+	var providerProfile config.ProviderProfile
+	fake := &cliFakeProvider{}
+
+	usable := config.ProviderProfile{
+		Name:         "work",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-test",
+	}
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			// config.json has providers configured but none marked active (e.g. a
+			// blank/stale activeProvider field) — Resolve returns the successfully
+			// normalized providers list alongside ErrNoActiveProvider.
+			return config.ResolvedConfig{Providers: []config.ProviderProfile{usable}},
+				fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerProfile = profile
+			return fake, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0, stderr=%q", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("TUI was not launched")
+	}
+	if launchedOptions.Setup.Visible || launchedOptions.Setup.Required {
+		t.Fatalf("Setup = %#v, want no setup wizard — a usable saved provider exists", launchedOptions.Setup)
+	}
+	if providerProfile.Name != "work" {
+		t.Fatalf("provider used = %q, want fallback to the usable saved provider %q", providerProfile.Name, "work")
+	}
+}
+
 func TestRunNoArgsFailsWhenResolveErrorIsNotProviderRelated(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

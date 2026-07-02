@@ -130,7 +130,11 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
-		return ResolvedConfig{}, err
+		// On ErrNoActiveProvider, providers may still hold the successfully
+		// normalized (but active-less) profile list — keep it so a caller can fall
+		// back to an already-configured usable provider instead of treating this
+		// like a config with nothing set up at all.
+		return ResolvedConfig{Providers: providers}, err
 	}
 
 	return ResolvedConfig{
@@ -834,7 +838,11 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	}
 
 	if !activeFound {
-		return nil, ProviderProfile{}, fmt.Errorf("%w: active provider %q not found", ErrNoActiveProvider, activeName)
+		// Return the successfully normalized list alongside the error (rather than
+		// nil) so a caller like the interactive TUI can still fall back to an
+		// already-configured, usable provider instead of forcing a full
+		// re-onboarding wizard just because none was marked active.
+		return normalized, ProviderProfile{}, fmt.Errorf("%w: active provider %q not found", ErrNoActiveProvider, activeName)
 	}
 	if active.Model == "" {
 		return nil, ProviderProfile{}, &setupFixableError{
