@@ -276,6 +276,16 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 	return true
 }
 
+// firstNonEmptyString returns the first argument that is not empty.
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (provider *Provider) emitChunk(
 	ctx context.Context,
 	chunk streamChunk,
@@ -283,10 +293,12 @@ func (provider *Provider) emitChunk(
 	events chan<- zeroruntime.StreamEvent,
 ) {
 	for _, choice := range chunk.Choices {
-		if choice.Delta.ReasoningContent != "" {
+		// Two dialects for the same thing (see streamDelta): prefer
+		// `reasoning_content`, fall back to `reasoning`. No backend sends both.
+		if reasoning := firstNonEmptyString(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoning != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventReasoning,
-				Content: choice.Delta.ReasoningContent,
+				Content: reasoning,
 			})
 		}
 		if choice.Delta.Content != "" {

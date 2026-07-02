@@ -227,6 +227,33 @@ func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
 	}
 }
 
+// Ollama's OpenAI-compat endpoint, OpenRouter, and most gateways stream
+// thinking under `reasoning` (not DeepSeek's `reasoning_content`). Dropping it
+// made every thinking token on those backends vanish: the model looked frozen
+// for minutes and reasoning-only turns were indistinguishable from a dead
+// provider. The exact shape below is a live capture from ollama glm-5.2:cloud.
+func TestStreamCompletionEmitsOllamaStyleReasoningDeltas(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"The user"},"finish_reason":null}]}`)
+		writeSSE(w, `{"choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":" wants hello"},"finish_reason":null}]}`)
+		writeSSE(w, `{"choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 2 {
+		t.Fatalf("reasoning events = %#v, want two reasoning deltas (ollama `reasoning` field regression)", reasoning)
+	}
+	if reasoning[0].Content != "The user" || reasoning[1].Content != " wants hello" {
+		t.Fatalf("unexpected reasoning events: %#v", reasoning)
+	}
+	text := eventsOfType(events, zeroruntime.StreamEventText)
+	if len(text) != 1 || text[0].Content != "hello" {
+		t.Fatalf("content after thinking must still stream as text, got %#v", text)
+	}
+}
+
 func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. ","content":"Answer."}}]}`)

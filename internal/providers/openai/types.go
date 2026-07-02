@@ -76,8 +76,16 @@ type streamChoice struct {
 }
 
 type streamDelta struct {
-	Content          string                `json:"content"`
+	Content string `json:"content"`
+	// Reasoning/thinking deltas arrive under DIFFERENT keys depending on the
+	// backend dialect: DeepSeek-style servers emit `reasoning_content`, while
+	// ollama's OpenAI-compat endpoint, OpenRouter, and most gateways emit
+	// `reasoning`. Parse both — dropping `reasoning` made every thinking token
+	// on those backends silently vanish (the model looked frozen for minutes,
+	// its thinking was never replayed into the next turn's context, and a
+	// reasoning-only turn was indistinguishable from a dead provider).
 	ReasoningContent string                `json:"reasoning_content"`
+	Reasoning        string                `json:"reasoning"`
 	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
 }
 
