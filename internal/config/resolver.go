@@ -20,6 +20,26 @@ import (
 // onboarding" (drop into the setup wizard) rather than a fatal config error.
 var ErrNoActiveProvider = errors.New("no active provider configured")
 
+// ErrProviderRequiresModel marks a resolve failure caused solely by the active
+// provider missing a model with no catalog default to fall back on (custom
+// openai-/anthropic-compatible endpoints — Zero cannot guess a gateway's model).
+// Like ErrNoActiveProvider, the interactive TUI treats it as "needs onboarding"
+// and drops into the setup wizard so the user can fix it; headless commands
+// (zero config, zero exec) still fail with the actionable message.
+var ErrProviderRequiresModel = errors.New("provider requires model")
+
+// setupFixableError tags an error with a sentinel for errors.Is WITHOUT
+// changing its message: the sentinel's own text must not prefix what the user
+// sees (the wrapped message is already complete and actionable).
+type setupFixableError struct {
+	err      error
+	sentinel error
+}
+
+func (e *setupFixableError) Error() string { return e.err.Error() }
+
+func (e *setupFixableError) Unwrap() []error { return []error{e.err, e.sentinel} }
+
 // defaultMaxTurns is the per-run tool-turn budget when none is configured. 30 was
 // too low for real multi-step agentic work (agents ran out mid-task before reaching
 // later steps); 50 matches the old "deep" preset. Raise per-session with /turns.
@@ -226,8 +246,17 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
 	// are the only config sources for write roots.
+	//
+	// Sandbox.Network from project config may only TIGHTEN (→ "deny"), never
+	// WEAKEN (→ "allow"). A malicious repo must not be able to open network
+	// access for shell commands. Matches the AdditionalWriteRoots posture.
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
-		dst.Sandbox.Network = network
+		// Normalize: anything that isn't literally "allow" counts as deny.
+		if sandbox.NormalizeNetworkMode(sandbox.NetworkMode(network)) != sandbox.NetworkAllow {
+			dst.Sandbox.Network = network
+		}
+		// Silently ignore "allow" from project config — not an error, just
+		// a privilege the project scope does not have.
 	}
 	if src.Sandbox.BlockUnixSockets {
 		dst.Sandbox.BlockUnixSockets = true
@@ -374,6 +403,18 @@ func effectiveProviderKind(profile ProviderProfile) ProviderKind {
 		return providerKindForCatalogTransport(descriptor.Transport)
 	}
 	return ""
+}
+
+// catalogDefaultModel returns the default model of a catalog provider ("" when
+// the id is unknown), used to fill a missing profile.Model for the official-API
+// kinds so a hand-written profile without a model resolves instead of bricking
+// every command that resolves config up front (zero config, bare zero setup).
+func catalogDefaultModel(catalogID string) string {
+	descriptor, ok := providercatalog.Get(catalogID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(descriptor.DefaultModel)
 }
 
 func catalogDescriptorForProfile(profile ProviderProfile) (providercatalog.Descriptor, bool) {
@@ -737,11 +778,16 @@ func unionStrings(base []string, extra []string) []string {
 }
 
 type normalizeOptions struct {
-	defaultOpenAIModel bool
+	// defaultModels fills a missing profile.Model for the official-API provider
+	// kinds (openai from the model registry; anthropic/google from their catalog
+	// descriptors). Off for provider-command configs (command.go), which must
+	// surface exactly what the external command returned rather than inventing
+	// a model behind its back.
+	defaultModels bool
 }
 
 func normalizeProviders(providers []ProviderProfile, activeName string, envMaps ...map[string]string) ([]ProviderProfile, ProviderProfile, error) {
-	return normalizeProvidersWithOptions(providers, activeName, normalizeOptions{defaultOpenAIModel: true}, envMaps...)
+	return normalizeProvidersWithOptions(providers, activeName, normalizeOptions{defaultModels: true}, envMaps...)
 }
 
 func normalizeProvidersWithoutModelDefaults(providers []ProviderProfile, activeName string, envMaps ...map[string]string) ([]ProviderProfile, ProviderProfile, error) {
@@ -791,7 +837,10 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 		return nil, ProviderProfile{}, fmt.Errorf("%w: active provider %q not found", ErrNoActiveProvider, activeName)
 	}
 	if active.Model == "" {
-		return nil, ProviderProfile{}, providerError(active, "provider %s requires model", active.Name)
+		return nil, ProviderProfile{}, &setupFixableError{
+			err:      providerError(active, "provider %s requires model — add \"model\" to its entry in config.json, or re-run: zero setup <catalog-id> --model <model>", active.Name),
+			sentinel: ErrProviderRequiresModel,
+		}
 	}
 
 	return normalized, active, nil
@@ -838,7 +887,7 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	case ProviderKindOpenAI:
 		if profile.BaseURL == "" || isOfficialOpenAIBaseURL(profile.BaseURL) {
 			profile.BaseURL = OpenAIBaseURL
-			if options.defaultOpenAIModel && profile.Model == "" {
+			if options.defaultModels && profile.Model == "" {
 				profile.Model = modelregistry.DefaultModelID
 			}
 			return profile, nil
@@ -855,6 +904,9 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	case ProviderKindAnthropic:
 		if profile.BaseURL == "" || isOfficialAnthropicBaseURL(profile.BaseURL) {
 			profile.BaseURL = AnthropicBaseURL
+			if options.defaultModels && profile.Model == "" {
+				profile.Model = catalogDefaultModel("anthropic")
+			}
 			return profile, nil
 		}
 		return ProviderProfile{}, providerError(profile, "anthropic provider %s requires official baseURL %s", profile.Name, AnthropicBaseURL)
@@ -869,6 +921,9 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	case ProviderKindGoogle:
 		if profile.BaseURL == "" || isOfficialGoogleBaseURL(profile.BaseURL) {
 			profile.BaseURL = GoogleBaseURL
+			if options.defaultModels && profile.Model == "" {
+				profile.Model = catalogDefaultModel("google")
+			}
 			return profile, nil
 		}
 		return ProviderProfile{}, providerError(profile, "google provider %s requires official baseURL %s", profile.Name, GoogleBaseURL)

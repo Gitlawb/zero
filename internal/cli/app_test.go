@@ -1476,3 +1476,75 @@ func TestRunThemeFlagRejectsBadValue(t *testing.T) {
 		t.Fatalf("expected a clear --theme error, got %q", stderr.String())
 	}
 }
+
+// A custom endpoint saved without a model previously bricked bare `zero` and
+// `zero setup` — the exact commands that could have fixed it (the resolve
+// error escaped before the wizard could open). The interactive TUI now treats
+// the requires-model failure as "needs onboarding", same as a missing active
+// provider. The error comes from a REAL Resolve over a real config file, so
+// this exercises the production sentinel wrapping, not a hand-built error.
+func TestRunNoArgsEntersSetupWhenActiveProviderMissesModel(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	brokenConfig := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(brokenConfig, []byte(`{
+		"activeProvider": "gw",
+		"providers": [{"name": "gw", "provider_kind": "openai-compatible", "baseURL": "https://gw.example/v1", "apiKey": "sk-x"}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launched := false
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.Resolve(config.ResolveOptions{UserConfigPath: brokenConfig, Env: map[string]string{}})
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("newProvider must not be called without a resolved provider")
+			return nil, nil
+		},
+		userConfigPath: func() (string, error) { return filepath.Join(t.TempDir(), "zero", "config.json"), nil },
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (setup TUI launched), stderr=%q", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("TUI was not launched; a fixable requires-model config must fall into setup, not exit fatally")
+	}
+	if !launchedOptions.Setup.Visible || !launchedOptions.Setup.Required {
+		t.Fatalf("Setup = %#v, want visible required setup", launchedOptions.Setup)
+	}
+}
+
+// `zero login`/`zero logout` don't exist (it's `zero auth login`); first-run
+// users try them (reported in the wild), so the unknown-command error points at
+// the real command.
+func TestRunUnknownLoginSuggestsAuthLogin(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"login"}, &stdout, &stderr, appDeps{})
+	if exitCode != 2 {
+		t.Fatalf("exit = %d, want 2 (unknown command)", exitCode)
+	}
+	if !strings.Contains(stderr.String(), `"zero auth login"`) {
+		t.Fatalf("stderr = %q, want a zero auth login suggestion", stderr.String())
+	}
+	// An unrelated unknown command gets no misleading suggestion.
+	stderr.Reset()
+	runWithDeps([]string{"frobnicate"}, &stdout, &stderr, appDeps{})
+	if strings.Contains(stderr.String(), "did you mean") {
+		t.Fatalf("stderr = %q, unrelated commands must not get the auth hint", stderr.String())
+	}
+}

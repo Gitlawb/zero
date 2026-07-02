@@ -37,6 +37,35 @@ func (provider *mockProvider) StreamCompletion(ctx context.Context, request zero
 	return ch, nil
 }
 
+type recordingWebSearchTool struct {
+	calls []map[string]any
+}
+
+func (tool *recordingWebSearchTool) Name() string        { return "web_search" }
+func (tool *recordingWebSearchTool) Description() string { return "test web search tool" }
+func (tool *recordingWebSearchTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"query": {Type: "string"},
+		},
+		Required:             []string{"query"},
+		AdditionalProperties: false,
+	}
+}
+func (tool *recordingWebSearchTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect:      tools.SideEffectNetwork,
+		Permission:      tools.PermissionPrompt,
+		Reason:          "Sends model-provided search query text to the configured web search backend.",
+		AdvertiseInAuto: true,
+	}
+}
+func (tool *recordingWebSearchTool) Run(_ context.Context, args map[string]any) tools.Result {
+	tool.calls = append(tool.calls, cloneArgs(args))
+	return tools.Result{Status: tools.StatusOK, Output: "1. T — https://x.test"}
+}
+
 type sandboxDeniedRetryTool struct {
 	calls []map[string]any
 }
@@ -865,7 +894,7 @@ func TestRunRejectsLocalWebFetchBeforePermissionRequest(t *testing.T) {
 	}
 }
 
-func TestRunAdvertisesAllowedWebSearchInAutoMode(t *testing.T) {
+func TestRunAdvertisesPromptedWebSearchInAutoMode(t *testing.T) {
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreNetworkTools() {
@@ -893,6 +922,52 @@ func TestRunAdvertisesAllowedWebSearchInAutoMode(t *testing.T) {
 	}
 	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_search" {
 		t.Fatalf("expected web_search to be advertised in auto mode, got %#v", provider.requests[0].Tools)
+	}
+}
+
+func TestRunRequestsPermissionBeforeWebSearchExecution(t *testing.T) {
+	search := &recordingWebSearchTool{}
+	registry := tools.NewRegistry()
+	registry.Register(search)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "web_search"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"query":"private workspace detail"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+
+	result, err := Run(context.Background(), "search", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "network not approved"}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denied tool call, got %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	if requests[0].ToolName != "web_search" || requests[0].Permission != string(tools.PermissionPrompt) || requests[0].SideEffect != string(tools.SideEffectNetwork) {
+		t.Fatalf("unexpected permission request: %#v", requests[0])
+	}
+	if len(search.calls) != 0 {
+		t.Fatalf("web_search backend must not run when permission is denied, got calls %#v", search.calls)
 	}
 }
 

@@ -72,7 +72,7 @@ func TestPermissionProfileFromPolicyIncludesDefaultTempWriteRoots(t *testing.T) 
 	if !writeRootsContain(profile.FileSystem.WriteRoots, tmpdir) {
 		t.Fatalf("write roots = %#v, want temp root %q", profile.FileSystem.WriteRoots, tmpdir)
 	}
-	if pathExists("/tmp") && !writeRootsContain(profile.FileSystem.WriteRoots, "/tmp") {
+	if runtime.GOOS != "windows" && pathExists("/tmp") && !writeRootsContain(profile.FileSystem.WriteRoots, "/tmp") {
 		t.Fatalf("write roots = %#v, want /tmp", profile.FileSystem.WriteRoots)
 	}
 }

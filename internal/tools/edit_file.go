@@ -79,6 +79,25 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 	content := string(contentBytes)
 	occurrences := strings.Count(content, oldString)
 
+	// CRLF fallback: read_file normalizes \r\n → \n before presenting content to
+	// the model, so the model's old_string will use \n line endings. When the raw
+	// file uses \r\n (common on Windows), the \n-based old_string won't match.
+	// Detect this and transparently normalize: if the direct match fails, translate
+	// old_string's line endings to \r\n and search again. If found, use the CRLF-translated
+	// old_string and new_string for the replacement to preserve the file's existing EOL style
+	// without rewriting EOLs in unrelated parts of the file.
+	if occurrences == 0 && strings.Contains(content, "\r\n") && !strings.Contains(oldString, "\r\n") {
+		crlfOldString := strings.ReplaceAll(oldString, "\n", "\r\n")
+		normalizedOccurrences := strings.Count(content, crlfOldString)
+		if normalizedOccurrences > 0 {
+			occurrences = normalizedOccurrences
+			oldString = crlfOldString
+			if !strings.Contains(newString, "\r\n") {
+				newString = strings.ReplaceAll(newString, "\n", "\r\n")
+			}
+		}
+	}
+
 	if occurrences == 0 {
 		return errorResult("Error: Could not find the exact string to replace in " + relativePath + ". The old_string must match the file byte-for-byte.")
 	}

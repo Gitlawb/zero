@@ -9,22 +9,25 @@ import (
 	"time"
 )
 
-// TestEvaluateExemptsNetworkToolsFromShellNetworkPolicy verifies that the
-// sandbox network policy gates sandboxed shell egress, not first-party
-// in-process web tools.
-func TestEvaluateExemptsNetworkToolsFromShellNetworkPolicy(t *testing.T) {
+// TestEvaluatePromptsForNetworkToolsButExemptsThemFromShellNetworkPolicy verifies
+// that first-party in-process network tools are governed by their permission
+// metadata, not by the sandboxed shell egress policy.
+func TestEvaluatePromptsForNetworkToolsButExemptsThemFromShellNetworkPolicy(t *testing.T) {
 	base := Policy{Mode: ModeEnforce, Network: NetworkDeny}
 
 	engine := NewEngine(EngineOptions{Policy: base})
 	d := engine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow,
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt,
 	})
-	if d.Action != ActionAllow || d.Block != nil {
-		t.Fatalf("web_search must be allowed by the sandbox gate, got %#v", d)
+	if d.Action != ActionPrompt || d.Block != nil {
+		t.Fatalf("web_search must prompt before permission is granted, got %#v", d)
+	}
+	if d.Reason == ReasonNetworkBlocked {
+		t.Fatalf("web_search prompt should come from tool permission, not shell network policy: %#v", d)
 	}
 
 	allowed := engine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow, PermissionGranted: true,
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt, PermissionGranted: true,
 	})
 	if allowed.Action != ActionAllow || allowed.Block != nil {
 		t.Fatalf("granted web_search must be allowed under deny, got %#v", allowed)

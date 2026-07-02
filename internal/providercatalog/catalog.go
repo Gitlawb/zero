@@ -134,6 +134,9 @@ var descriptors = []Descriptor{
 	openAICompat("xiaomi-mimo", "Xiaomi MiMo", "https://api.mimo.xiaomi.com/openai/v1", "mimo-vl", []string{"MIMO_API_KEY", "XIAOMI_API_KEY"}, "xiaomi mimo"),
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
 	openAICompat("zai", "Z.ai", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY", "ZHIPU_API_KEY"}),
+	openAICompat("kilocode", "KiloCode", "https://api.kilo.ai/api/gateway", "anthropic/claude-sonnet-4.6", []string{"KILO_API_KEY"}, "kilo", "kilo gateway"),
+	openAICompat("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "deepseek-v4-flash", []string{"OPENCODE_API_KEY"}, "opencode zen"),
+	openAICompat("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "deepseek-v4-pro", []string{"OPENCODE_API_KEY"}, "opencode go"),
 	openAICompat("atomic-chat", "Atomic Chat", "https://api.atomic.chat/v1", "gpt-4.1", []string{"ATOMIC_CHAT_API_KEY"}),
 	// ChatGPT subscription via a local OAuth proxy. A ChatGPT (Plus/Pro) OAuth
 	// token only works against ChatGPT's own backend (which is Cloudflare-gated to

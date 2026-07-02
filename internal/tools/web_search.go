@@ -81,13 +81,14 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 				Required:             []string{"query"},
 				AdditionalProperties: false,
 			},
-			// Hosted search is a read-only discovery action. It remains marked as
-			// network for metadata, but sandbox network policy is the shell egress
-			// boundary; web_search keeps its own result-domain filtering safeguards.
+			// Hosted search sends model-provided query text to a configured network
+			// backend. Keep it visible in auto mode, but guard execution through the
+			// normal permission flow like web_fetch.
 			safety: Safety{
-				SideEffect: SideEffectNetwork,
-				Permission: PermissionAllow,
-				Reason:     "Performs a web search over the network.",
+				SideEffect:      SideEffectNetwork,
+				Permission:      PermissionPrompt,
+				Reason:          "Sends model-provided search query text to the configured web search backend.",
+				AdvertiseInAuto: true,
 			},
 		},
 		backend: backend,
@@ -95,7 +96,8 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 }
 
 // RunWithSandbox follows the normal web_search path. The sandbox network policy
-// gates sandboxed shell egress, not this in-process hosted search tool.
+// gates sandboxed shell egress; this in-process hosted search tool is guarded by
+// the permission flow plus backend and result-domain safeguards.
 func (tool webSearchTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
 	return tool.Run(ctx, args)
 }

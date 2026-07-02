@@ -250,6 +250,29 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	}
 }
 
+func TestEditFileToolReplacesCRLF(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "code.go")
+	writeTestFile(t, path, "const a = 1\r\nconst b = 2\r\n")
+
+	result := NewEditFileTool(root).Run(context.Background(), map[string]any{
+		"path":       "code.go",
+		"old_string": "const a = 1\nconst b = 2",
+		"new_string": "const a = 42\nconst b = 24",
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected edit ok, got %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "const a = 42\r\nconst b = 24\r\n" {
+		t.Fatalf("unexpected edited content: %q", string(content))
+	}
+}
+
 func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")

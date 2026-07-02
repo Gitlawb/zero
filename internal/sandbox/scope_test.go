@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -128,7 +129,7 @@ func TestNewScopeNormalizesAndValidatesExtraRoots(t *testing.T) {
 	if !stringSliceContains(roots, normalizeWorkspaceRootBestEffort(extra)) {
 		t.Fatalf("Roots()=%v want extra root %q", roots, normalizeWorkspaceRootBestEffort(extra))
 	}
-	if pathExists("/tmp") && !stringSliceContains(roots, normalizeWorkspaceRootBestEffort("/tmp")) {
+	if runtime.GOOS != "windows" && pathExists("/tmp") && !stringSliceContains(roots, normalizeWorkspaceRootBestEffort("/tmp")) {
 		t.Fatalf("Roots()=%v want default /tmp write root", roots)
 	}
 }
