@@ -104,8 +104,8 @@ func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 	if property, ok := search.Parameters().Properties["query"]; !ok || property.Type != "string" {
 		t.Fatalf("web_search must expose a string query property, got %#v", search.Parameters().Properties["query"])
 	}
-	if safety := search.Safety(); safety.Permission != PermissionAllow || safety.AdvertiseInAuto {
-		t.Fatalf("web_search safety = %#v, want allow without prompt-advertise override", safety)
+	if safety := search.Safety(); safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("web_search safety = %#v, want prompt and advertised in auto", safety)
 	}
 }
 

@@ -116,17 +116,52 @@ func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 	}
 }
 
-func TestWebSearchSafetyAllowsHostedSearchWithoutPrompt(t *testing.T) {
+func TestWebSearchSafetyPromptsForHostedSearchButAdvertisesInAuto(t *testing.T) {
 	tool := newWebSearchToolWithBackend(&fakeSearchBackend{})
 	safety := tool.Safety()
 	if safety.SideEffect != SideEffectNetwork {
 		t.Fatalf("side effect = %s, want network", safety.SideEffect)
 	}
-	if safety.Permission != PermissionAllow {
-		t.Fatalf("permission = %s, want allow", safety.Permission)
+	if safety.Permission != PermissionPrompt {
+		t.Fatalf("permission = %s, want prompt", safety.Permission)
 	}
-	if safety.AdvertiseInAuto {
-		t.Fatal("web_search should not need the prompt-tool auto advertisement override")
+	if !safety.AdvertiseInAuto {
+		t.Fatal("web_search should be advertised in auto mode while still requiring permission")
+	}
+}
+
+func TestWebSearchRegistryRequiresPermissionBeforeBackendCall(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{{Title: "T", URL: "https://x.test"}}}
+	registry := NewRegistry()
+	registry.Register(newWebSearchToolWithBackend(backend))
+
+	res := registry.Run(context.Background(), "web_search", map[string]any{"query": "private workspace detail"})
+
+	if res.Status != StatusError {
+		t.Fatalf("expected permission error, got %s: %s", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "Permission required for web_search") {
+		t.Fatalf("expected permission-required output, got %q", res.Output)
+	}
+	if backend.gotQuery != "" {
+		t.Fatalf("backend must not be called before permission, got query %q", backend.gotQuery)
+	}
+}
+
+func TestWebSearchRegistryRunsAfterPermissionGranted(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{{Title: "T", URL: "https://x.test"}}}
+	registry := NewRegistry()
+	registry.Register(newWebSearchToolWithBackend(backend))
+
+	res := registry.RunWithOptions(context.Background(), "web_search", map[string]any{"query": "go errors"}, RunOptions{
+		PermissionGranted: true,
+	})
+
+	if res.Status != StatusOK {
+		t.Fatalf("expected ok, got %s: %s", res.Status, res.Output)
+	}
+	if backend.gotQuery != "go errors" {
+		t.Fatalf("backend query = %q, want %q", backend.gotQuery, "go errors")
 	}
 }
 
