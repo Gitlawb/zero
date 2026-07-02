@@ -128,6 +128,10 @@ func ModelsDevProviderID(provider providercatalog.Descriptor) string {
 		return "nvidia"
 	case "xiaomi-mimo":
 		return "xiaomi"
+	case "zai-cn":
+		return "zai"
+	case "minimaxi-cn":
+		return "minimax"
 	default:
 		return strings.TrimSpace(provider.ID)
 	}
