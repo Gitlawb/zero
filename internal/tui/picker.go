@@ -449,24 +449,6 @@ func pickerItemDedupKey(item pickerItem) string {
 
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
-	// Favorites keep the pre-provider-aware semantics: one row per favorited
-	// model ID, regardless of how many providers offer it. Track seen favorite
-	// model IDs by Value alone so a model favorited once doesn't surface twice
-	// just because it's in multiple provider catalogs.
-	favoriteSeen := map[string]bool{}
-	addFavorites := func(items []pickerItem) {
-		for _, item := range items {
-			if item.Value == "" || !m.favoriteModels[item.Value] || favoriteSeen[item.Value] {
-				continue
-			}
-			item.Group = "Favorites"
-			item.Favorite = true
-			result = append(result, item)
-			favoriteSeen[item.Value] = true
-		}
-	}
-	addFavorites(recent)
-	addFavorites(catalog)
 	// Recent and Catalog use the provider-aware de-dup key so the same model ID
 	// offered by different providers shows as distinct, independently selectable
 	// rows. They still skip any model ID already surfaced under Favorites, so a
@@ -494,13 +476,14 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 		item.Group = "Recent"
 		item.Favorite = m.favoriteModels[modelFavoriteKey(item)]
 		result = append(result, item)
-		seen[key] = true
+		seen[modelFavoriteKey(item)] = true
 	}
-	// Catalog: no global dedup — the same model ID from different providers must
-	// all appear, so the user can pick which provider to use it with. Intra-provider
-	// duplicates are already handled by savedProviderModelPickerItems.
+	// Catalog: only dedup against items already emitted as Favorites or Recent
+	// (same provider+model). The same model ID from a different provider must
+	// still appear — modelFavoriteKey includes the provider name, so a different
+	// OwnerProvider produces a different key and is not skipped.
 	for _, item := range catalog {
-		if item.Value == "" {
+		if item.Value == "" || seen[modelFavoriteKey(item)] {
 			continue
 		}
 		item.Favorite = m.favoriteModels[modelFavoriteKey(item)]

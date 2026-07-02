@@ -498,12 +498,13 @@ func SetProviderDiscoveredModels(path string, name string, models []DiscoveredMo
 
 	for index := range cfg.Providers {
 		if strings.EqualFold(cfg.Providers[index].Name, name) {
-			// Build a lookup of existing models by id to preserve APIModel overrides.
+			// Build a lookup of existing models by lowercased id to preserve
+			// APIModel overrides case-insensitively.
 			existing := map[string]string{}
 			for _, m := range cfg.Providers[index].Models {
 				if id := strings.TrimSpace(m.ID); id != "" {
 					if m.APIModel != "" {
-						existing[id] = m.APIModel
+						existing[strings.ToLower(id)] = m.APIModel
 					}
 				}
 			}
@@ -516,7 +517,7 @@ func SetProviderDiscoveredModels(path string, name string, models []DiscoveredMo
 					continue
 				}
 				dm := DiscoveredModel{ID: id}
-				if override, ok := existing[id]; ok {
+				if override, ok := existing[strings.ToLower(id)]; ok {
 					dm.APIModel = override
 				}
 				merged = append(merged, dm)
@@ -601,10 +602,11 @@ func dedupDiscoveredModels(models []DiscoveredModel) []DiscoveredModel {
 	seen := map[string]bool{}
 	out := make([]DiscoveredModel, 0, len(models))
 	for _, m := range models {
-		if seen[m.ID] {
+		key := strings.ToLower(m.ID)
+		if seen[key] {
 			continue
 		}
-		seen[m.ID] = true
+		seen[key] = true
 		out = append(out, m)
 	}
 	return out
