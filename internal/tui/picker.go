@@ -452,11 +452,17 @@ func registryModelPickerMeta(entry modelregistry.ModelEntry) string {
 }
 
 func modelPickerDisplayName(id string, description string) string {
-	if description = strings.TrimSpace(description); description != "" && !providerWizardGenericModelDescription(description) {
-		return description
-	}
+	// The row title is the model NAME, not its marketing blurb. Catalog/discovery
+	// descriptions (from models.dev) are full sentences, and several models share
+	// the same one — using them as titles showed sentence-long rows that looked like
+	// exact duplicates and hid the actual id (which only survived in the meta line).
+	// Prefer the (prettified) id; fall back to a non-generic description only when
+	// there is no id to name the row.
 	id = strings.TrimSpace(id)
 	if id == "" {
+		if description = strings.TrimSpace(description); description != "" && !providerWizardGenericModelDescription(description) {
+			return description
+		}
 		return "model"
 	}
 	name := id
