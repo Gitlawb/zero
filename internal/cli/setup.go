@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"unicode"
@@ -273,8 +274,8 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	// Persist live-discovered models so per-model apiModel overrides survive.
 	if len(selection.Models) > 0 {
 		if _, err := config.SetProviderDiscoveredModels(configPath, profile.Name, selection.Models); err != nil {
-			// Non-fatal: the provider was already saved. Swallow the error so we
-			// don't block the user from starting work.
+			// Non-fatal: the provider was already saved — log but don't block setup.
+			fmt.Fprintf(os.Stderr, "warning: saved provider but could not persist models: %v\n", err)
 		}
 	}
 

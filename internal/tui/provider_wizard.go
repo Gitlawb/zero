@@ -1119,9 +1119,9 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 			}
 			if len(discovered) > 0 {
 				if _, err := config.SetProviderDiscoveredModels(m.userConfigPath, profile.Name, discovered); err != nil {
-					// Non-fatal: the provider was already saved. Log but don't block.
-					// (Redact the path in case it contains identifying info.)
-					wizard.err = strings.TrimSpace("saved provider but could not persist models")
+					// Non-fatal: the provider was already saved. Surface in the
+					// transcript since the wizard is about to close.
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "saved provider but could not persist models — " + err.Error()})
 				}
 			}
 		}
