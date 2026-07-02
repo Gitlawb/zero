@@ -87,7 +87,7 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 			safety: Safety{
 				SideEffect:      SideEffectNetwork,
 				Permission:      PermissionPrompt,
-				Reason:          "Performs a web search over the network.",
+				Reason:          "Sends model-provided search query text to the configured web search backend.",
 				AdvertiseInAuto: true,
 			},
 		},

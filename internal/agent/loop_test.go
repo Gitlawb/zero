@@ -57,7 +57,7 @@ func (tool *recordingWebSearchTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect:      tools.SideEffectNetwork,
 		Permission:      tools.PermissionPrompt,
-		Reason:          "Performs a web search over the network.",
+		Reason:          "Sends model-provided search query text to the configured web search backend.",
 		AdvertiseInAuto: true,
 	}
 }
