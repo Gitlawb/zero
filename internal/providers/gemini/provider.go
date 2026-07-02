@@ -342,12 +342,77 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 			declarations = append(declarations, geminiFunctionDeclaration{
 				Name:        tool.Name,
 				Description: tool.Description,
-				Parameters:  tool.Parameters,
+				Parameters:  sanitizeGeminiSchema(tool.Parameters),
 			})
 		}
 		mapped.Tools = []geminiToolGroup{{FunctionDeclarations: declarations}}
 	}
 	return mapped, nil
+}
+
+// geminiSchemaFields is the subset of JSON Schema keywords Google's
+// functionDeclarations[].parameters accepts (the Generative AI Schema type).
+// Anything outside it — most notably OpenAI's `additionalProperties`, which Zero
+// emits on every tool's parameters and which Gemini 400s on ("Unknown name
+// \"additionalProperties\" … Cannot find field") — must be dropped before the
+// request goes out. Kept as an allowlist rather than a denylist so a schema
+// keyword Zero (or an MCP server) adds later can't silently leak an unsupported
+// field into the Gemini payload.
+var geminiSchemaFields = map[string]bool{
+	"type": true, "format": true, "title": true, "description": true,
+	"nullable": true, "enum": true, "items": true, "properties": true,
+	"required": true, "anyOf": true, "propertyOrdering": true, "default": true,
+	"minimum": true, "maximum": true, "minItems": true, "maxItems": true,
+	"minLength": true, "maxLength": true, "minProperties": true,
+	"maxProperties": true, "pattern": true, "example": true,
+}
+
+// sanitizeGeminiSchema returns a copy of a JSON-Schema map keeping only the
+// keywords Gemini supports (geminiSchemaFields), recursing through the nested
+// schemas under `properties`, `items`, and `anyOf`. Returns nil for a nil input
+// so a parameterless tool stays parameterless.
+func sanitizeGeminiSchema(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	out := make(map[string]any, len(schema))
+	for key, value := range schema {
+		if !geminiSchemaFields[key] {
+			continue
+		}
+		switch key {
+		case "properties":
+			if props, ok := value.(map[string]any); ok {
+				cleaned := make(map[string]any, len(props))
+				for name, sub := range props {
+					if subMap, ok := sub.(map[string]any); ok {
+						cleaned[name] = sanitizeGeminiSchema(subMap)
+					} else {
+						cleaned[name] = sub
+					}
+				}
+				value = cleaned
+			}
+		case "items":
+			if subMap, ok := value.(map[string]any); ok {
+				value = sanitizeGeminiSchema(subMap)
+			}
+		case "anyOf":
+			if variants, ok := value.([]any); ok {
+				cleaned := make([]any, len(variants))
+				for i, variant := range variants {
+					if subMap, ok := variant.(map[string]any); ok {
+						cleaned[i] = sanitizeGeminiSchema(subMap)
+					} else {
+						cleaned[i] = variant
+					}
+				}
+				value = cleaned
+			}
+		}
+		out[key] = value
+	}
+	return out
 }
 
 func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiContent, error) {

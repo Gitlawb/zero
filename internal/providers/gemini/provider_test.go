@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -503,4 +504,130 @@ func eventsOfType(events []zeroruntime.StreamEvent, eventType zeroruntime.Stream
 		}
 	}
 	return matching
+}
+
+// TestSanitizeGeminiSchemaStripsUnsupportedFields: the sanitizer keeps only
+// Gemini-supported keywords and recurses into properties/items/anyOf, so no
+// OpenAI-ism (additionalProperties, $schema, patternProperties) survives at any
+// depth while legitimate fields (type/description/enum/required/default) stay.
+func TestSanitizeGeminiSchemaStripsUnsupportedFields(t *testing.T) {
+	in := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"$schema":              "https://json-schema.org/draft/2020-12/schema",
+		"required":             []string{"path"},
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "a path",
+				"default":     ".",
+			},
+			"nested": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false, // must be stripped at depth too
+				"properties": map[string]any{
+					"tags": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"type": "string", "additionalProperties": true},
+					},
+				},
+			},
+		},
+	}
+	out := sanitizeGeminiSchema(in)
+
+	assertNoAdditionalProps(t, out, "root")
+	if out["additionalProperties"] != nil {
+		t.Fatal("top-level additionalProperties must be stripped")
+	}
+	if out["$schema"] != nil {
+		t.Fatal("$schema must be stripped")
+	}
+	// Legitimate fields survive.
+	if out["type"] != "object" {
+		t.Fatalf("type should survive, got %v", out["type"])
+	}
+	props := out["properties"].(map[string]any)
+	pathProp := props["path"].(map[string]any)
+	if pathProp["description"] != "a path" || pathProp["default"] != "." {
+		t.Fatalf("legitimate property fields must survive: %#v", pathProp)
+	}
+	// nil input stays nil (parameterless tool).
+	if sanitizeGeminiSchema(nil) != nil {
+		t.Fatal("nil schema should map to nil")
+	}
+}
+
+// assertNoAdditionalProps fails if additionalProperties appears anywhere in the
+// (recursively walked) schema.
+func assertNoAdditionalProps(t *testing.T, node any, path string) {
+	t.Helper()
+	switch v := node.(type) {
+	case map[string]any:
+		if _, ok := v["additionalProperties"]; ok {
+			t.Fatalf("additionalProperties leaked at %s", path)
+		}
+		for k, sub := range v {
+			assertNoAdditionalProps(t, sub, path+"."+k)
+		}
+	case []any:
+		for i, sub := range v {
+			assertNoAdditionalProps(t, sub, fmt.Sprintf("%s[%d]", path, i))
+		}
+	}
+}
+
+// TestGeminiRequestOmitsAdditionalPropertiesInToolSchema: end-to-end, the tool
+// parameters Zero emits (schemaToRuntimeMap always writes additionalProperties)
+// must not reach Gemini — otherwise every functionDeclaration is 400-rejected
+// ("Unknown name additionalProperties"), which broke all tool-using exec calls
+// against Google (issue #373).
+func TestGeminiRequestOmitsAdditionalPropertiesInToolSchema(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"usageMetadata":{"promptTokenCount":1}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{APIKey: "k", BaseURL: server.URL + "/", Model: "models/gemini-2.5-flash"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		Tools: []zeroruntime.ToolDefinition{{
+			Name:        "grep",
+			Description: "search",
+			Parameters: map[string]any{ // exactly what schemaToRuntimeMap produces
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"pattern"},
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string", "description": "regex"},
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	tools := gotBody["tools"].([]any)
+	decls := tools[0].(map[string]any)["functionDeclarations"].([]any)
+	params := decls[0].(map[string]any)["parameters"].(map[string]any)
+	if _, ok := params["additionalProperties"]; ok {
+		t.Fatalf("additionalProperties must not be sent to Gemini: %#v", params)
+	}
+	// The tool is still usable: its real schema survived.
+	if params["type"] != "object" {
+		t.Fatalf("tool parameters type should survive, got %v", params["type"])
+	}
+	props := params["properties"].(map[string]any)
+	if _, ok := props["pattern"]; !ok {
+		t.Fatalf("tool property must survive sanitization: %#v", props)
+	}
 }
