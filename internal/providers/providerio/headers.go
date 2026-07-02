@@ -62,3 +62,17 @@ func CopyHeaders(headers map[string]string) map[string]string {
 	}
 	return copied
 }
+
+func HeadersForCatalog(catalogID string, headers map[string]string) map[string]string {
+	copied := CopyHeaders(headers)
+	if !strings.EqualFold(strings.TrimSpace(catalogID), "aimlapi") {
+		return copied
+	}
+	if copied == nil {
+		copied = map[string]string{}
+	}
+	copied["X-AIMLAPI-Partner-ID"] = "Gitlawb"
+	copied["X-AIMLAPI-Integration-Repo"] = "Gitlawb/zero"
+	copied["X-AIMLAPI-Integration-Version"] = "1.0.0"
+	return copied
+}

@@ -17,6 +17,7 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 		defaultModel string
 	}{
 		{id: "openai", name: "OpenAI", transport: "openai", defaultModel: "gpt-4.1"},
+		{id: "aimlapi", name: "AI/ML API", transport: "openai-compatible", defaultModel: "openai/gpt-5-chat"},
 		{id: "groq", name: "Groq", transport: "openai-compatible", defaultModel: "llama-3.3-70b-versatile"},
 		{id: "longcat", name: "LongCat", transport: "openai-compatible", defaultModel: "LongCat-2.0"},
 		{id: "ollama-cloud", name: "Ollama Cloud", transport: "openai-compatible", defaultModel: "qwen3-coder:480b"},
@@ -44,6 +45,21 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 				t.Fatalf("runtime-supported provider %s should not show unsupported reason, got:\n%s", tt.id, block)
 			}
 		})
+	}
+}
+
+func TestProviderCatalogAIMLAPIRequiresAPIKey(t *testing.T) {
+	output := runProviderCatalogOnboarding(t)
+	block := providerCatalogOnboardingBlock(t, output, "aimlapi")
+
+	for _, want := range []string{
+		"requiresAuth=true",
+		"authEnvVars=AIMLAPI_API_KEY",
+		"setup: zero providers setup aimlapi --set-active",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("expected AIMLAPI catalog block to contain %q, got:\n%s", want, block)
+		}
 	}
 }
 

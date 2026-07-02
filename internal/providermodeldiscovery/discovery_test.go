@@ -52,6 +52,35 @@ func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestDiscoverAIMLAPIModelsAddsAttributionHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for header, want := range map[string]string{
+			"X-AIMLAPI-Partner-ID":          "Gitlawb",
+			"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+			"X-AIMLAPI-Integration-Version": "1.0.0",
+			"X-Trace":                       "test",
+		} {
+			if got := r.Header.Get(header); got != want {
+				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-5-chat"}]}`))
+	}))
+	defer server.Close()
+
+	_, err := Discover(context.Background(), config.ProviderProfile{
+		CatalogID:     "aimlapi",
+		ProviderKind:  config.ProviderKindOpenAICompatible,
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "test-key",
+		CustomHeaders: map[string]string{"X-Trace": "test"},
+	}, Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+}
+
 func TestDiscoverOpenAICompatibleModelsHonorsAuthHeaderValue(t *testing.T) {
 	// A profile can authenticate via a raw auth-header value instead of APIKey;
 	// discovery must send it rather than probe unauthenticated.

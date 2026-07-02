@@ -100,6 +100,7 @@ var descriptors = []Descriptor{
 	// minimax, qwen, google, nvidia, tencent, z-ai). Flat /v1/chat/completions
 	// with a Bearer ogw_live_… key; listed first and badged in every picker.
 	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
+	openAICompat("aimlapi", "AI/ML API", "https://api.aimlapi.com/v1", "openai/gpt-5-chat", []string{"AIMLAPI_API_KEY"}, "aiml api", "ai/ml api"),
 	openAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1", []string{"OPENAI_API_KEY"}),
 	anthropic("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4.5", []string{"ANTHROPIC_API_KEY"}),
 	google("google", "Google", "https://generativelanguage.googleapis.com", "gemini-2.5-pro", []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}, "gemini"),
