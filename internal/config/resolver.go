@@ -225,7 +225,8 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	// WEAKEN (→ "allow"). A malicious repo must not be able to open network
 	// access for shell commands. Matches the AdditionalWriteRoots posture.
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
-		if sandbox.NetworkMode(network) == sandbox.NetworkDeny {
+		// Normalize: anything that isn't literally "allow" counts as deny.
+		if sandbox.NormalizeNetworkMode(sandbox.NetworkMode(network)) != sandbox.NetworkAllow {
 			dst.Sandbox.Network = network
 		}
 		// Silently ignore "allow" from project config — not an error, just
