@@ -51,6 +51,27 @@ The npm package installs a small wrapper plus the matching Zero binary for your
 platform from GitHub Releases. It supports Linux, macOS, and Windows on x64 and
 arm64.
 
+### Bun
+
+Bun does not run dependency lifecycle scripts by default, so the `postinstall`
+that fetches the Zero binary is skipped and the first run fails with
+`No native binary found next to the npm wrapper`.
+
+Install with Bun, then fetch the binary in one of two ways:
+
+```bash
+# Option A: run the installer manually
+bun add @gitlawb/zero
+node node_modules/@gitlawb/zero/scripts/postinstall.mjs
+
+# Option B: allow the postinstall to run on install
+# add to your package.json:  "trustedDependencies": ["@gitlawb/zero"]
+bun add @gitlawb/zero
+```
+
+For global installs (`bun add -g @gitlawb/zero`), use Option A against the
+global install path, or prefer the install scripts below.
+
 ### Install scripts
 
 Linux/macOS:
