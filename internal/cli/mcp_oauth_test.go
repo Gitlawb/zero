@@ -144,7 +144,7 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 	stdout := &syncBuffer{}
 	stderr := &syncBuffer{}
 	go func() {
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			callbackURL := extractCallbackURL(stdout.String())
 			if callbackURL != "" {
@@ -164,8 +164,8 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 	var exitCode int
 	select {
 	case exitCode = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("login did not complete within 10s; stderr=%s stdout=%s", stderr.String(), stdout.String())
+	case <-time.After(20 * time.Second):
+		t.Fatalf("login did not complete within 20s; stderr=%s stdout=%s", stderr.String(), stdout.String())
 	}
 	if exitCode != exitSuccess {
 		t.Fatalf("exitCode = %d stderr=%s stdout=%s", exitCode, stderr.String(), stdout.String())

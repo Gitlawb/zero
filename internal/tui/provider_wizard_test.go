@@ -1167,6 +1167,27 @@ func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
 	}
 }
 
+func TestProviderWizardManageKeyReplaceGeneric(t *testing.T) {
+	m := newModel(context.Background(), Options{UserConfigPath: filepath.Join(t.TempDir(), "config.json")})
+
+	m.providerWizard = &providerWizardState{
+		step:               providerWizardStepManageKey,
+		manageProviderName: "my-custom-openai",
+		manageKeyCursor:    1,
+		providers: []providercatalog.Descriptor{
+			{
+				ID:        "custom-openai-compatible",
+				Transport: providercatalog.TransportOpenAICompatible,
+			},
+		},
+		selectedProvider: 0,
+	}
+	next, _ := m.applyManageKeyChoice()
+	if next.providerWizard == nil || next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("replace for generic provider should route to the endpoint step, got step: %v", next.providerWizard.step)
+	}
+}
+
 func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfig {
 	t.Helper()
 
