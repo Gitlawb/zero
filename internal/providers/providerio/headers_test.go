@@ -1,6 +1,11 @@
 package providerio
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/providercatalog"
+)
 
 func TestHeadersForCatalogLeavesOtherProvidersUnchanged(t *testing.T) {
 	headers := map[string]string{"X-Trace": "test"}
@@ -25,7 +30,7 @@ func TestHeadersForCatalogCopiesAndOverridesAIMLAPIHeaders(t *testing.T) {
 		"X-AIMLAPI-Integration-Repo":    "spoofed/repo",
 		"X-AIMLAPI-Integration-Version": "spoofed-version",
 	}
-	got := HeadersForCatalog(" AIMLAPI ", headers)
+	got := HeadersForCatalog(" "+strings.ToUpper(providercatalog.AIMLAPIID)+" ", headers)
 
 	for header, want := range map[string]string{
 		"X-Trace":                       "test",
