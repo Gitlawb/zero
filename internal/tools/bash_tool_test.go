@@ -406,11 +406,10 @@ func TestBashToolBuildsWrappedSandboxExecCommand(t *testing.T) {
 		},
 	})
 
-	command, plan, cleanup, err := buildBashCommand(context.Background(), "pwd", root, engine)
+	command, plan, err := buildBashCommand(context.Background(), "pwd", root, engine)
 	if err != nil {
 		t.Fatalf("buildBashCommand: %v", err)
 	}
-	t.Cleanup(cleanup)
 	if command.Path != "/usr/bin/sandbox-exec" || !plan.Wrapped {
 		t.Fatalf("command path = %q plan = %#v, want wrapped sandbox-exec", command.Path, plan)
 	}
@@ -520,13 +519,15 @@ func TestBashToolAllowsNonInteractiveCommand(t *testing.T) {
 }
 
 // TestBashToolPreservesEmbeddedQuotesOnWindows pins a real, previously-broken
-// case: cmd.exe's own /S/C remainder parsing strips the first and last
-// literal quote character in the WHOLE remainder (not a matched pair) when
-// /S is present, corrupting a command whose own text contains embedded
-// double quotes - exactly the shape of `python -c "print(15 / 3)"`,
-// `git commit -m "message"`, `node -e "..."`. Before the fix, the helper
-// below received a truncated, mis-quoted argument (starting with a stray
-// literal `"`) instead of the text between the quotes.
+// case: passing commandText as a normal exec.Cmd argument makes Go wrap it in
+// an outer pair of quotes (it contains spaces) with its own quotes escaped as
+// \", and cmd.exe's /C remainder parsing strips the first and last literal
+// quote character in that remainder without undoing the backslash-escaping -
+// corrupting a command whose own text contains embedded double quotes,
+// exactly the shape of `python -c "print(15 / 3)"`, `git commit -m
+// "message"`, `node -e "..."`. Before the fix, the helper below received a
+// truncated, mis-quoted argument (starting with a stray literal `"`) instead
+// of the text between the quotes.
 func TestBashToolPreservesEmbeddedQuotesOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("cmd.exe /S/C quote-remainder parsing is Windows-specific")
@@ -547,6 +548,35 @@ func TestBashToolPreservesEmbeddedQuotesOnWindows(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "hello / world") {
 		t.Fatalf("expected the embedded-quote argument to survive intact, got %q", result.Output)
+	}
+}
+
+// TestBashToolRunsCommandLineForLoopSyntax pins cmd.exe command-line syntax,
+// not batch-file syntax: a `for %i in (...) do ...` loop with a single
+// percent sign is valid typed directly at a cmd.exe prompt (or via
+// `cmd /C "..."`), but requires %%i inside an actual .bat/.cmd FILE, because
+// batch files perform an extra pass of percent-substitution before FOR ever
+// runs, consuming the single percent so the loop variable never binds. An
+// earlier version of this fix ran commandText from a temporary .cmd file
+// instead of passing it straight through to cmd.exe's /C remainder, which
+// silently broke single-percent syntax like this.
+func TestBashToolRunsCommandLineForLoopSyntax(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cmd.exe command-line vs batch-file parsing is Windows-specific")
+	}
+	root := t.TempDir()
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": "for %i in (1 2 3) do echo %i",
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	for _, want := range []string{"1", "2", "3"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("expected the for-loop to expand %%i to %q, got %q", want, result.Output)
+		}
 	}
 }
 

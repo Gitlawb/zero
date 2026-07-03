@@ -87,11 +87,20 @@ func windowsCommandLine(args []string) (string, error) {
 	if len(args) == 0 {
 		return "", errorsNewWindowsProcess("missing command")
 	}
-	out := make([]string, 0, len(args))
 	for _, arg := range args {
 		if strings.ContainsRune(arg, 0) {
 			return "", errorsNewWindowsProcess("command argument contains NUL")
 		}
+	}
+	// Zero's cmd.exe shell invocation needs its final element (the shell
+	// command text) reaching cmd.exe raw, not escaped like a normal argv
+	// element: see WindowsShellCommandLine for why. Every other command this
+	// runner might launch is escaped normally below.
+	if commandLine, ok := windowsShellCommandLineFromArgs(args); ok {
+		return commandLine, nil
+	}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
 		out = append(out, syscall.EscapeArg(arg))
 	}
 	return strings.Join(out, " "), nil

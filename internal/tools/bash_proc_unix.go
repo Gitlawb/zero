@@ -42,3 +42,7 @@ func hardenProcessLifetime(command *exec.Cmd) {
 		return nil
 	}
 }
+
+// applyWindowsShellCommandLine is a no-op outside Windows; there is no
+// cmd.exe command-line-parsing quirk to work around here.
+func applyWindowsShellCommandLine(command *exec.Cmd, commandText string, wrapped bool) {}

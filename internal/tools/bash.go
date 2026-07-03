@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -112,7 +111,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
 		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
 	}
-	command, plan, cleanup, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
 	if err != nil {
 		meta["exit_code"] = "-1"
 		return Result{
@@ -121,10 +120,6 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			Meta:   meta,
 		}
 	}
-	// Release any plan-scoped resources, and any resources buildBashCommand
-	// itself allocated (e.g. a Windows temp script file), once the command has
-	// finished running.
-	defer cleanup()
 	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
 
@@ -225,29 +220,26 @@ func shellIssueBlockResult(issue shellIssue) Result {
 	}
 }
 
-// buildBashCommand returns the exec.Cmd, the sandbox plan, and a cleanup func
-// the caller must run once the command has finished (in addition to
-// plan.Cleanup()) to release any resources this function allocated outside
-// the plan itself, such as the Windows temp script file below.
-func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, func(), error) {
-	name := shellExecutable()
-	args := shellArguments(commandText)
-	cleanup := func() {}
-	if runtime.GOOS == "windows" {
-		scriptName, scriptArgs, scriptCleanup, err := windowsShellCommandSpec(commandText)
-		if err != nil {
-			return nil, zeroSandbox.CommandPlan{}, func() {}, err
-		}
-		name, args, cleanup = scriptName, scriptArgs, scriptCleanup
-	}
+// buildBashCommand returns the exec.Cmd and the sandbox plan for running
+// commandText. On Windows, when the command is not wrapped by the sandbox
+// engine (plan.Wrapped == false), it also overrides the child's raw command
+// line so commandText reaches cmd.exe unescaped; see
+// zeroSandbox.WindowsShellCommandLine for why that matters. The wrapped case
+// gets the same treatment inside the sandboxed runner process itself
+// (internal/sandbox/windows_process_windows.go), since that command line is
+// built there, not here.
+func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	spec := zeroSandbox.CommandSpec{
-		Name: name,
-		Args: args,
+		Name: shellExecutable(),
+		Args: shellArguments(commandText),
 		Dir:  absoluteCwd,
 	}
 	if engine != nil {
 		command, plan, err := engine.CommandContext(ctx, spec)
-		return command, plan, cleanup, err
+		if err == nil {
+			applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
+		}
+		return command, plan, err
 	}
 	plan := zeroSandbox.CommandPlan{
 		Backend: zeroSandbox.Backend{
@@ -261,48 +253,8 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	}
 	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	command.Dir = spec.Dir
-	return command, plan, cleanup, nil
-}
-
-// windowsShellCommandSpec builds the Name/Args for running commandText on
-// Windows by writing it to a temp .cmd file and pointing cmd.exe /c at the
-// file's path, instead of passing commandText itself as the /c argument.
-//
-// cmd.exe's own /S/C remainder parsing does not follow standard
-// CommandLineToArgvW argv-escaping rules: per its documented behavior, WITH
-// /S present it strips the FIRST and LAST literal quote character in the
-// entire remainder (not a matched pair), regardless of how those quotes were
-// escaped for the outer argv. A command with embedded double quotes -
-// `python -c "print(15 / 3)"`, `git commit -m "message"`, `node -e "..."` -
-// gets its quoting corrupted by that stripping before the target program
-// ever sees it: the child ends up with a truncated, mis-quoted argument
-// instead of the original text. Pointing /c at a plain file path sidesteps
-// this entirely, since the /c remainder is then just a path with no quotes
-// to strip.
-func windowsShellCommandSpec(commandText string) (string, []string, func(), error) {
-	script, err := os.CreateTemp("", "zero-bash-*.cmd")
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("create temp shell script: %w", err)
-	}
-	scriptPath := script.Name()
-	cleanup := func() { _ = os.Remove(scriptPath) }
-	// @echo off: cmd.exe treats a /c target ending in .cmd as a batch file, and
-	// batch files echo each line they run (the "C:\path>command" prompt+command
-	// noise) before executing it, unless echo is turned off first. Without
-	// this, that echoed line pollutes captured stdout that callers parse.
-	// CRLF: cmd.exe's script reader is line-oriented, and a bare LF can leave a
-	// stray \r artifact from Windows text-mode line semantics; CRLF matches a
-	// real .cmd file written by a Windows text editor.
-	if _, err := script.WriteString("@echo off\r\n" + commandText + "\r\n"); err != nil {
-		_ = script.Close()
-		cleanup()
-		return "", nil, nil, fmt.Errorf("write temp shell script: %w", err)
-	}
-	if err := script.Close(); err != nil {
-		cleanup()
-		return "", nil, nil, fmt.Errorf("close temp shell script: %w", err)
-	}
-	return "cmd.exe", []string{"/d", "/s", "/c", scriptPath}, cleanup, nil
+	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
+	return command, plan, nil
 }
 
 func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
@@ -362,7 +314,7 @@ func shellExecutable() string {
 
 func shellArguments(command string) []string {
 	if runtime.GOOS == "windows" {
-		return []string{"/d", "/s", "/c", command}
+		return zeroSandbox.WindowsShellArgs(command)
 	}
 	return []string{"-c", command}
 }
