@@ -1669,17 +1669,38 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// when the loop is already running or there is nothing to animate.
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
+		// The agent goroutine that raised this request is BLOCKED waiting on the
+		// decision callback, so every branch below must resolve it exactly once —
+		// or store it in pendingPermission, which resolves it on the user's reply.
+		// Dropping a request without resolving parks the run forever (the reported
+		// "stuck for 33 minutes" deadlock): the agent waits on a decision channel
+		// nothing will ever signal, with no visible prompt and no network activity.
 		if msg.runID != m.activeRunID {
+			// A superseded/stale run: unblock its parked goroutine now rather than
+			// relying on that run's context cancel to fire first.
+			if msg.decide != nil {
+				msg.decide(agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run superseded"})
+			}
+			return m, nil
+		}
+		if msg.request.Action != agent.PermissionActionPrompt {
+			// Not a user-facing prompt (e.g. a sandbox-allowed command that still
+			// blocked because it requested additional permissions). The UI has
+			// nothing to ask, so resolve immediately and FAIL CLOSED — never
+			// silently grant access that was never surfaced to the user. (The agent
+			// now marks such elevation requests as prompts, so in practice this is a
+			// defensive backstop; matches the ACP handler's fail-closed contract.)
+			if msg.decide != nil {
+				msg.decide(autoResolvedPermissionDecision(msg.request.Action))
+			}
 			return m, nil
 		}
 		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
-		if msg.request.Action == agent.PermissionActionPrompt {
-			m.pendingPermission = &pendingPermissionPrompt{
-				request: msg.request,
-				decide:  msg.decide,
-			}
+		m.pendingPermission = &pendingPermissionPrompt{
+			request: msg.request,
+			decide:  msg.decide,
 		}
 		return m, nil
 	case askUserRequestMsg:
@@ -2097,12 +2118,13 @@ func (m model) View() tea.View {
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))
-	} else if m.helpOverlay {
-		content = m.renderKeybindingHelpOverlay(chatWidth(m.width), m.height)
-	} else if m.transcriptDetailed {
-		content = m.detailedTranscriptView()
-	} else {
+	} else if m.helpOverlay || !m.transcriptDetailed {
+		// When helpOverlay is active the help panel is composited into the normal
+		// transcript view as a true overlay (scrim + vertical centering), matching
+		// how the suggestion picker / provider wizard / pickers are drawn.
 		content = m.transcriptView()
+	} else {
+		content = m.detailedTranscriptView()
 	}
 
 	view := tea.NewView(content)
@@ -2173,6 +2195,11 @@ func (m model) transcriptView() string {
 		return body + footer
 	}
 
+	helpOverlayContent := ""
+	if m.helpOverlay {
+		helpOverlayContent = m.renderKeybindingHelpOverlay(width)
+	}
+
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
@@ -2180,6 +2207,8 @@ func (m model) transcriptView() string {
 	pickerOverlay := m.pickerOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case helpOverlayContent != "":
+		viewportOverlay = helpOverlayContent
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -4523,6 +4552,21 @@ func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest,
 		return
 	}
 	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
+}
+
+// autoResolvedPermissionDecision resolves a permission request the TUI cannot
+// turn into a user prompt (Action != prompt). The agent is blocked awaiting a
+// decision, so one must ALWAYS be produced. Only an explicit Cancel is honored
+// as such; every other non-prompt action — including allow — is DENIED, so the
+// UI never silently grants access it did not surface for approval.
+func autoResolvedPermissionDecision(action agent.PermissionAction) agent.PermissionDecision {
+	if action == agent.PermissionActionCancel {
+		return agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run cancelled"}
+	}
+	return agent.PermissionDecision{
+		Action: agent.PermissionDecisionDeny,
+		Reason: "permission request could not be surfaced for approval",
+	}
 }
 
 func (m model) sendAskUserRequest(runID int, request agent.AskUserRequest, answer func([]string)) {

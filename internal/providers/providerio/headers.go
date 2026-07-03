@@ -3,6 +3,8 @@ package providerio
 import (
 	"net/http"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 type AuthHeaders struct {
@@ -64,10 +66,10 @@ func CopyHeaders(headers map[string]string) map[string]string {
 }
 
 func HeadersForCatalog(catalogID string, headers map[string]string) map[string]string {
-	copied := CopyHeaders(headers)
-	if !strings.EqualFold(strings.TrimSpace(catalogID), "aimlapi") {
-		return copied
+	if !strings.EqualFold(strings.TrimSpace(catalogID), providercatalog.AIMLAPIID) {
+		return headers
 	}
+	copied := CopyHeaders(headers)
 	if copied == nil {
 		copied = map[string]string{}
 	}

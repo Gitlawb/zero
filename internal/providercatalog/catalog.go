@@ -34,6 +34,8 @@ const (
 
 var ErrUnknownProvider = errors.New("unknown provider")
 
+const AIMLAPIID = "aimlapi"
+
 type Descriptor struct {
 	ID                  string
 	Name                string
@@ -92,7 +94,7 @@ var descriptors = []Descriptor{
 	// minimax, qwen, google, nvidia, z-ai). Flat /v1/chat/completions with a
 	// Bearer ogw_live_… key; listed first and badged in every picker.
 	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
-	openAICompat("aimlapi", "AI/ML API", "https://api.aimlapi.com/v1", "openai/gpt-5-chat", []string{"AIMLAPI_API_KEY"}, "aiml api", "ai/ml api"),
+	openAICompat(AIMLAPIID, "AI/ML API", "https://api.aimlapi.com/v1", "openai/gpt-5-chat", []string{"AIMLAPI_API_KEY"}, "aiml api", "ai/ml api"),
 	openAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1", []string{"OPENAI_API_KEY"}),
 	anthropic("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4.5", []string{"ANTHROPIC_API_KEY"}),
 	google("google", "Google", "https://generativelanguage.googleapis.com", "gemini-2.5-pro", []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}, "gemini"),
@@ -124,8 +126,10 @@ var descriptors = []Descriptor{
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
+	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
+	anthropicCompat("minimaxi-cn", "MiniMax CN", "https://api.minimaxi.com/anthropic", "MiniMax-M3", []string{"MINIMAXI_API_KEY"}, "minimax cn", "minimax-cn"),
 	openAICompat("mistral", "Mistral", "https://api.mistral.ai/v1", "mistral-large-latest", []string{"MISTRAL_API_KEY"}),
 	openAICompat("github", "GitHub Models", "https://models.inference.ai.azure.com", "openai/gpt-4.1", []string{"GITHUB_TOKEN"}, "github-models"),
 	transportDescriptor("bedrock", "Amazon Bedrock", TransportBedrock, "https://bedrock-runtime.${AWS_REGION}.amazonaws.com", "anthropic.claude-3-5-sonnet-20241022-v2:0", []string{"AWS_ACCESS_KEY_ID", "AWS_PROFILE"}, []APIFormat{APIFormatBedrockConverse}, true),
@@ -134,7 +138,8 @@ var descriptors = []Descriptor{
 	openAICompat("venice", "Venice AI", "https://api.venice.ai/api/v1", "qwen-2.5-qwq-32b", []string{"VENICE_API_KEY"}),
 	openAICompat("xiaomi-mimo", "Xiaomi MiMo", "https://api.mimo.xiaomi.com/openai/v1", "mimo-vl", []string{"MIMO_API_KEY", "XIAOMI_API_KEY"}, "xiaomi mimo"),
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
-	openAICompat("zai", "Z.ai", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY", "ZHIPU_API_KEY"}),
+	openAICompat("zai", "Z.ai", "https://api.z.ai/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY"}, "z.ai"),
+	openAICompat("zai-cn", "Z.ai CN", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZHIPU_API_KEY"}, "z.ai cn"),
 	openAICompat("kilocode", "KiloCode", "https://api.kilo.ai/api/gateway", "anthropic/claude-sonnet-4.6", []string{"KILO_API_KEY"}, "kilo", "kilo gateway"),
 	openAICompat("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "deepseek-v4-flash", []string{"OPENCODE_API_KEY"}, "opencode zen"),
 	openAICompat("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "deepseek-v4-pro", []string{"OPENCODE_API_KEY"}, "opencode go"),

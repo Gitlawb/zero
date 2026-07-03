@@ -1161,6 +1161,71 @@ func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
 	}
 }
 
+func TestAdvanceProviderWizardCustomSkipsManageKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		catalogID string
+		transport providercatalog.Transport
+	}{
+		{
+			name:      "custom-openai-compatible",
+			catalogID: "custom-openai-compatible",
+			transport: providercatalog.TransportOpenAICompatible,
+		},
+		{
+			name:      "custom-anthropic-compatible",
+			catalogID: "custom-anthropic-compatible",
+			transport: providercatalog.TransportAnthropicCompatible,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{savedProviders: []config.ProviderProfile{
+				{Name: "my-gateway", CatalogID: tt.catalogID, APIKeyStored: true},
+			}}
+			m.providerWizard = &providerWizardState{
+				step: providerWizardStepProvider,
+				providers: []providercatalog.Descriptor{
+					{ID: tt.catalogID, Name: tt.name, Transport: tt.transport},
+				},
+				selectedProvider: 0,
+			}
+
+			next, _ := m.advanceProviderWizard()
+			if next.providerWizard == nil {
+				t.Fatal("wizard should not be nil after advancing from provider step")
+			}
+			if next.providerWizard.step == providerWizardStepManageKey {
+				t.Fatal("custom provider should skip ManageKey and route to endpoint, got ManageKey")
+			}
+			if next.providerWizard.step != providerWizardStepEndpoint {
+				t.Fatalf("custom provider should route to endpoint step, got step: %v", next.providerWizard.step)
+			}
+		})
+	}
+}
+
+func TestAdvanceProviderWizardNamedShowsManageKey(t *testing.T) {
+	m := model{savedProviders: []config.ProviderProfile{
+		{Name: "openai", CatalogID: "openai", APIKeyStored: true},
+	}}
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepProvider,
+		providers: []providercatalog.Descriptor{
+			{ID: "openai", Name: "OpenAI", Transport: providercatalog.TransportOpenAI},
+		},
+		selectedProvider: 0,
+	}
+
+	next, _ := m.advanceProviderWizard()
+	if next.providerWizard == nil {
+		t.Fatal("wizard should not be nil after advancing from provider step")
+	}
+	if next.providerWizard.step != providerWizardStepManageKey {
+		t.Fatalf("named provider should route to ManageKey step, got step: %v", next.providerWizard.step)
+	}
+}
+
 func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfig {
 	t.Helper()
 

@@ -8,6 +8,8 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <br>
+  <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
 
 Zero is an AI coding agent for your local terminal. It can inspect a repository,
@@ -50,6 +52,27 @@ zero
 The npm package installs a small wrapper plus the matching Zero binary for your
 platform from GitHub Releases. It supports Linux, macOS, and Windows on x64 and
 arm64.
+
+### Bun
+
+Bun does not run dependency lifecycle scripts by default, so the `postinstall`
+that fetches the Zero binary is skipped and the first run fails with
+`No native binary found next to the npm wrapper`.
+
+Install with Bun, then fetch the binary in one of two ways:
+
+```bash
+# Option A: run the installer manually
+bun add @gitlawb/zero
+node node_modules/@gitlawb/zero/scripts/postinstall.mjs
+
+# Option B: allow the postinstall to run on install
+# add to your package.json:  "trustedDependencies": ["@gitlawb/zero"]
+bun add @gitlawb/zero
+```
+
+For global installs (`bun add -g @gitlawb/zero`), use Option A against the
+global install path, or prefer the install scripts below.
 
 ### Install scripts
 
@@ -122,12 +145,19 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export AIMLAPI_API_KEY=...
+export LONGCAT_API_KEY=...
 ```
 
 To configure AI/ML API directly, run:
 
 ```bash
 zero providers setup aimlapi --set-active
+```
+
+To configure Meituan LongCat (LongCat-2.0) directly, run:
+
+```bash
+zero providers setup longcat --set-active
 ```
 
 For local models, run Ollama or LM Studio and then use `zero setup` or

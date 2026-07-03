@@ -1059,6 +1059,130 @@ func TestResolveAppliesProviderCatalogDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveAppliesMiniMaxCNCatalogDefaults(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "mini-cn",
+		"providers": [{
+			"name": "mini-cn",
+			"catalog_id": "minimaxi-cn"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"MINIMAXI_API_KEY": "sk-cn-mini",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.Provider.CatalogID != "minimaxi-cn" {
+		t.Fatalf("CatalogID = %q, want minimaxi-cn", resolved.Provider.CatalogID)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindAnthropicCompat {
+		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindAnthropicCompat)
+	}
+	if resolved.Provider.BaseURL != "https://api.minimaxi.com/anthropic" {
+		t.Fatalf("BaseURL = %q, want MiniMax CN default", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Model != "MiniMax-M3" {
+		t.Fatalf("Model = %q, want MiniMax-M3", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "MINIMAXI_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want MINIMAXI_API_KEY", resolved.Provider.APIKeyEnv)
+	}
+	if resolved.Provider.APIKey != "sk-cn-mini" {
+		t.Fatalf("APIKey = %q, want env-resolved secret", resolved.Provider.APIKey)
+	}
+}
+
+func TestResolveAppliesZaiCNCatalogDefaults(t *testing.T) {
+	// The "zai-cn" catalog entry preserves the legacy open.bigmodel.cn endpoint
+	// for users who still target the China hosting; "zai" itself now points at
+	// api.z.ai (international). The two env-vars are intentionally distinct
+	// (ZHIPU_API_KEY for China, ZAI_API_KEY for international) so an account on
+	// one side cannot be silently used against the other.
+	path := writeConfig(t, `{
+		"activeProvider": "zai-cn",
+		"providers": [{
+			"name": "zai-cn",
+			"catalog_id": "zai-cn"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"ZHIPU_API_KEY": "sk-zhipu-cn",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.Provider.CatalogID != "zai-cn" {
+		t.Fatalf("CatalogID = %q, want zai-cn", resolved.Provider.CatalogID)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindOpenAICompatible {
+		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindOpenAICompatible)
+	}
+	if resolved.Provider.BaseURL != "https://open.bigmodel.cn/api/paas/v4" {
+		t.Fatalf("BaseURL = %q, want Z.ai China default", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Model != "glm-4.5" {
+		t.Fatalf("Model = %q, want glm-4.5 (China default)", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "ZHIPU_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want ZHIPU_API_KEY", resolved.Provider.APIKeyEnv)
+	}
+	if resolved.Provider.APIKey != "sk-zhipu-cn" {
+		t.Fatalf("APIKey = %q, want env-resolved secret", resolved.Provider.APIKey)
+	}
+}
+
+func TestResolveAppliesZaiInternationalCatalogDefaults(t *testing.T) {
+	// "zai" now resolves to the international endpoint; the catalog default
+	// model stays glm-4.5 (live discovery upgrades to glm-5.2 at runtime).
+	path := writeConfig(t, `{
+		"activeProvider": "zai-intl",
+		"providers": [{
+			"name": "zai-intl",
+			"catalog_id": "zai"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"ZAI_API_KEY": "sk-zai-intl",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.Provider.CatalogID != "zai" {
+		t.Fatalf("CatalogID = %q, want zai", resolved.Provider.CatalogID)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindOpenAICompatible {
+		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindOpenAICompatible)
+	}
+	if resolved.Provider.BaseURL != "https://api.z.ai/api/paas/v4" {
+		t.Fatalf("BaseURL = %q, want Z.ai international default", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Model != "glm-4.5" {
+		t.Fatalf("Model = %q, want glm-4.5 (preserved default; live discovery upgrades to glm-5.2 at runtime)", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "ZAI_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want ZAI_API_KEY", resolved.Provider.APIKeyEnv)
+	}
+	if resolved.Provider.APIKey != "sk-zai-intl" {
+		t.Fatalf("APIKey = %q, want env-resolved secret", resolved.Provider.APIKey)
+	}
+}
+
 func TestResolveProviderCatalogAliasAndLocalNoAuth(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "local",

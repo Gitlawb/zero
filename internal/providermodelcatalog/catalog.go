@@ -21,6 +21,22 @@ type Model struct {
 	Source           string
 }
 
+// Shared by both "minimax" and "minimaxi-cn"; Models() rebuilds a fresh slice
+// per call, so the shared backing slice cannot be mutated by callers.
+var minimaxCuratedModels = []Model{
+	{ID: "MiniMax-M3", Description: "catalog default"},
+	{ID: "MiniMax-M2.1", Description: "agentic coding model"},
+}
+
+// Shared by both "zai" (international, api.z.ai) and "zai-cn" (China,
+// open.bigmodel.cn); same model lineup on both endpoints.
+var zaiCuratedModels = []Model{
+	{ID: "glm-4.5", Description: "catalog default"},
+	{ID: "glm-4.5-air", Description: "fast model"},
+	{ID: "glm-4.6", Description: "latest general model"},
+	{ID: "glm-z1-air", Description: "reasoning model"},
+}
+
 var curatedModels = map[string][]Model{
 	"ollama-cloud": {
 		{ID: "qwen3-coder:480b", Description: "catalog default"},
@@ -88,10 +104,8 @@ var curatedModels = map[string][]Model{
 		{ID: "meta/llama-3.1-70b-instruct", Description: "general model"},
 		{ID: "mistralai/mixtral-8x7b-instruct-v0.1", Description: "mixture model"},
 	},
-	"minimax": {
-		{ID: "MiniMax-M3", Description: "catalog default"},
-		{ID: "MiniMax-M2.1", Description: "agentic coding model"},
-	},
+	"minimax":     minimaxCuratedModels,
+	"minimaxi-cn": minimaxCuratedModels,
 	"mistral": {
 		{ID: "mistral-large-latest", Description: "catalog default"},
 		{ID: "codestral-latest", Description: "coding model"},
@@ -123,12 +137,8 @@ var curatedModels = map[string][]Model{
 	"bankr": {
 		{ID: "bankr-large", Description: "catalog default"},
 	},
-	"zai": {
-		{ID: "glm-4.5", Description: "catalog default"},
-		{ID: "glm-4.5-air", Description: "fast model"},
-		{ID: "glm-4.6", Description: "latest general model"},
-		{ID: "glm-z1-air", Description: "reasoning model"},
-	},
+	"zai":    zaiCuratedModels,
+	"zai-cn": zaiCuratedModels,
 	// OpenGateway smart-routes by model id across its upstream providers
 	// (see /health: xiaomi-mimo, minimax, qwen, google, nvidia, z-ai). These are
 	// the curated coding defaults; the gateway accepts any model its upstreams

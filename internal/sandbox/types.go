@@ -143,9 +143,16 @@ const (
 )
 
 const (
-	EnforcementNative   EnforcementLevel = "native"
-	EnforcementDegraded EnforcementLevel = "degraded"
-	EnforcementDisabled EnforcementLevel = "disabled"
+	EnforcementNative EnforcementLevel = "native"
+	// EnforcementUnelevated is the Windows-only middle tier used when the
+	// elevated `zero sandbox setup` has not run: commands still wrap through the
+	// command runner with a write-restricted token and workspace ACLs (which the
+	// runner can apply without Administrator rights), but the WFP network
+	// filters are absent, so network isolation stays with the in-process
+	// approval gate.
+	EnforcementUnelevated EnforcementLevel = "unelevated"
+	EnforcementDegraded   EnforcementLevel = "degraded"
+	EnforcementDisabled   EnforcementLevel = "disabled"
 )
 
 type Policy struct {

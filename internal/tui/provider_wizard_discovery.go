@@ -44,11 +44,19 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	// keep/replace/remove before re-entering credentials.
 	if m.providerWizard.step == providerWizardStepProvider && !m.providerWizard.oauthMode {
 		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
-			m.providerWizard.manageProviderName = name
-			m.providerWizard.manageKeyCursor = 0
-			m.providerWizard.err = ""
-			m.providerWizard.step = providerWizardStepManageKey
-			return m, nil
+			// Generic/custom providers (custom-openai-compatible etc.) all share
+			// the same CatalogID — matching on CatalogID would block creating a
+			// second instance. Skip ManageKey and fall through to the shared
+			// advance() path below; the user can overwrite by re-entering the
+			// same name or create a new one with a different name.
+			if !providerWizardNeedsEndpoint(m.providerWizard.currentProvider()) {
+				m.providerWizard.manageProviderName = name
+				m.providerWizard.manageKeyCursor = 0
+				m.providerWizard.err = ""
+				m.providerWizard.step = providerWizardStepManageKey
+				return m, nil
+			}
+			m.providerWizard.manageProviderName = ""
 		}
 	}
 	previous := m.providerWizard.step

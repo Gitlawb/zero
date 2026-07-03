@@ -733,7 +733,11 @@ func resolveSSEEndpointURL(baseValue string, endpointValue string) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("parse MCP SSE endpoint URL: %w", err)
 	}
-	return baseURL.ResolveReference(endpointURL).String(), nil
+	resolvedURL := baseURL.ResolveReference(endpointURL)
+	if !sameMCPOrigin(baseURL, resolvedURL) {
+		return "", fmt.Errorf("MCP SSE endpoint origin %s differs from configured server origin %s", mcpOrigin(resolvedURL), mcpOrigin(baseURL))
+	}
+	return resolvedURL.String(), nil
 }
 
 func rpcResponseKey(id any) string {
@@ -873,10 +877,10 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 
 // oauthHTTPClient returns an HTTP client whose transport attaches OAuth bearer
 // tokens and refreshes them on 401 for OAuth-configured servers. Servers that do
-// not declare OAuth get the default client unchanged.
+// not declare OAuth use the default transport with the same MCP redirect guard.
 func oauthHTTPClient(server Server) (*http.Client, error) {
 	if !strings.EqualFold(strings.TrimSpace(server.Auth), ServerAuthOAuth) {
-		return http.DefaultClient, nil
+		return mcpHTTPClient(server, nil), nil
 	}
 	store, err := NewTokenStore(TokenStoreOptions{})
 	if err != nil {
@@ -888,5 +892,5 @@ func oauthHTTPClient(server Server) (*http.Client, error) {
 		httpClient: http.DefaultClient,
 		now:        time.Now,
 	}
-	return &http.Client{Transport: newOAuthRoundTripper(http.DefaultTransport, source, server.Name)}, nil
+	return mcpHTTPClient(server, newOAuthRoundTripper(http.DefaultTransport, source, server.Name)), nil
 }

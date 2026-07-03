@@ -24,8 +24,10 @@ var expectedCatalogIDs = []string{
 	"together",
 	"dashscope",
 	"moonshot",
+	"longcat",
 	"nvidia-nim",
 	"minimax",
+	"minimaxi-cn",
 	"mistral",
 	"github",
 	"bedrock",
@@ -35,6 +37,7 @@ var expectedCatalogIDs = []string{
 	"xiaomi-mimo",
 	"bankr",
 	"zai",
+	"zai-cn",
 	"kilocode",
 	"opencode",
 	"opencode-go",
@@ -119,6 +122,28 @@ func TestAIMLAPIDescriptor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"AIMLAPI_API_KEY"}) {
 		t.Fatalf("AuthEnvVars = %#v, want AIMLAPI_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestLongCatDescriptor(t *testing.T) {
+	descriptor, err := Require("longcat")
+	if err != nil {
+		t.Fatalf("Require(longcat) error = %v", err)
+	}
+	if descriptor.Name != "LongCat" {
+		t.Fatalf("Name = %q, want LongCat", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.longcat.chat/openai" {
+		t.Fatalf("DefaultBaseURL = %q, want LongCat OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "LongCat-2.0" {
+		t.Fatalf("DefaultModel = %q, want LongCat-2.0", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"LONGCAT_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want LONGCAT_API_KEY", descriptor.AuthEnvVars)
 	}
 }
 
@@ -289,8 +314,8 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportGoogle:          {"google"},
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
-		TransportAnthropicCompat: {"minimax", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "custom-anthropic-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
