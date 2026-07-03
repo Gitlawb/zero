@@ -530,7 +530,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
 			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
-			{},                     // ls-remote --symref (no match → falls through)
+			{},                   // ls-remote --symref (no match → falls through)
 			{Stdout: "Everything up-to-date\n"},
 		}}
 
@@ -557,7 +557,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
 			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
-			{},                     // ls-remote --symref (no match)
+			{},                   // ls-remote --symref (no match)
 			{Stdout: "Everything up-to-date\n"},
 		}}
 
@@ -626,9 +626,9 @@ func TestPushBranchesToRemote(t *testing.T) {
 		}}
 
 		result, err := Push(context.Background(), PushOptions{
-			Cwd:                     root,
-			RunGit:                  runner.Run,
-			AllowPushDefaultBranch:  true,
+			Cwd:                    root,
+			RunGit:                 runner.Run,
+			AllowPushDefaultBranch: true,
 		})
 		if err != nil {
 			t.Fatalf("Push returned error: %v", err)

@@ -528,14 +528,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 type PushOptions struct {
-	Cwd                   string
-	Remote                string
-	Branch                string
-	Force                 bool
-	DryRun                bool
+	Cwd                    string
+	Remote                 string
+	Branch                 string
+	Force                  bool
+	DryRun                 bool
 	AllowPushDefaultBranch bool
-	RunGit                Runner
-	RunGitEnv             EnvRunner
+	RunGit                 Runner
+	RunGitEnv              EnvRunner
 }
 
 type PushResult struct {
