@@ -310,9 +310,9 @@ func projectGuidelineLabel(match, gitRoot string) string {
 
 // findProjectContextFile returns the first matching project guideline file
 // in dir. Lookup is case-insensitive on the basename and on the actual
-// filename returned, so a git-tracked file like AGENTS.MD (uppercase MD)
-// still resolves to its true filename on case-sensitive filesystems — the
-// returned path is what should appear in the project guidelines label.
+// filename returned, so a git-tracked file like AGENTS.md still resolves to
+// its true filename on case-sensitive filesystems — the returned path is what
+// should appear in the project guidelines label.
 // Returns "" when nothing matches.
 func findProjectContextFile(dir string) string {
 	for _, name := range projectContextFiles {

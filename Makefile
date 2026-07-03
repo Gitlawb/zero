@@ -1,4 +1,4 @@
-# Zero build/test/lint targets. AGENTS.MD says "Build with `make`" and "Run `make
+# Zero build/test/lint targets. AGENTS.md says "Build with `make`" and "Run `make
 # lint` before opening a PR" — these targets back those instructions.
 .DEFAULT_GOAL := build
 .PHONY: build build-all test test-race vet fmt fmt-check lint tidy clean help
