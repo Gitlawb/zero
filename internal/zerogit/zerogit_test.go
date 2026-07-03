@@ -523,27 +523,98 @@ func TestParseStatusZHandlesRenamesAndSpecialPaths(t *testing.T) {
 }
 
 func TestPushBranchesToRemote(t *testing.T) {
-	root := t.TempDir()
-	runner := &fakeRunner{results: []CommandResult{
-		{Stdout: root + "\n"},
-		{Stdout: "feat/some-feature\n"},
-		{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
-		{Stdout: "Everything up-to-date\n"},
-	}}
+	t.Run("HappyPath", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "feat/some-feature\n"},
+			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
+			{Stdout: "Everything up-to-date\n"},
+		}}
 
-	result, err := Push(context.Background(), PushOptions{
-		Cwd:    root,
-		RunGit: runner.Run,
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+
+		if result.Remote != "origin" || result.Branch != "feat/some-feature" || !strings.Contains(result.Output, "Everything up-to-date") {
+			t.Fatalf("unexpected push result: %#v", result)
+		}
+
+		if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
+			t.Fatalf("unexpected push command: %q", got)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Push returned error: %v", err)
-	}
 
-	if result.Remote != "origin" || result.Branch != "feat/some-feature" || !strings.Contains(result.Output, "Everything up-to-date") {
-		t.Fatalf("unexpected push result: %#v", result)
-	}
+	t.Run("FlagsForceAndDryRun", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "feat/some-feature\n"},
+			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
+			{Stdout: "Everything up-to-date\n"},
+		}}
 
-	if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
-		t.Fatalf("unexpected push command: %q", got)
-	}
+		_, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+			Force:  true,
+			DryRun: true,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+
+		if got := runner.commandLine(3); got != "git push --dry-run --force-with-lease -u origin feat/some-feature" {
+			t.Fatalf("unexpected push command: %q", got)
+		}
+	})
+
+	t.Run("DetachedHEAD", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "HEAD\n"},
+		}}
+
+		_, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err == nil {
+			t.Fatal("expected error on detached HEAD push, got nil")
+		}
+		if !strings.Contains(err.Error(), "cannot push: not currently on a branch") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("FallbackRemoteToOrigin", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "feat/some-feature\n"},
+			{ExitCode: 1, Stderr: "error: no such section"}, // config lookup fails
+			{Stdout: "Everything up-to-date\n"},
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+
+		if result.Remote != "origin" {
+			t.Fatalf("expected fallback remote to be origin, got: %q", result.Remote)
+		}
+
+		if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
+			t.Fatalf("unexpected push command: %q", got)
+		}
+	})
 }

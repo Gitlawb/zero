@@ -54,9 +54,9 @@ type Info struct {
 	AgeDays               *int       `json:"ageDays,omitempty"`
 	Contributors90d       *int       `json:"contributors90d,omitempty"`
 	CommitVelocity30d     *int       `json:"commitVelocity30d,omitempty"`
-	BranchCount           int        `json:"branchCount"`
-	CommitCount           int        `json:"commitCount"`
-	TagCount              int        `json:"tagCount"`
+	BranchCount           *int        `json:"branchCount,omitempty"`
+	CommitCount           *int        `json:"commitCount,omitempty"`
+	TagCount              *int        `json:"tagCount,omitempty"`
 }
 
 // RunGit runs a git subcommand in dir and returns raw stdout. A non-zero exit
@@ -234,28 +234,39 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 	}
 	if count, err := run(ctx, dir, "rev-list", "--count", "HEAD"); err == nil {
 		if n, perr := strconv.Atoi(strings.TrimSpace(count)); perr == nil {
-			info.CommitCount = n
+			info.CommitCount = &n
 		}
 	}
 	if branches, err := run(ctx, dir, "branch", "-a"); err == nil {
-		lines := strings.Split(branches, "\n")
-		count := 0
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				count++
+		set := map[string]bool{}
+		for _, line := range strings.Split(branches, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.Contains(line, "->") {
+				continue
 			}
+			// Strip leading '* ' if it's the current branch.
+			line = strings.TrimPrefix(line, "* ")
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// If it's a remote branch, extract the branch name.
+			// E.g., remotes/origin/main -> main
+			// E.g., remotes/origin/feature/xyz -> feature/xyz
+			if strings.HasPrefix(line, "remotes/") {
+				line = strings.TrimPrefix(line, "remotes/")
+				if slashIdx := strings.Index(line, "/"); slashIdx != -1 {
+					line = line[slashIdx+1:]
+				}
+			}
+			set[line] = true
 		}
-		info.BranchCount = count
+		n := len(set)
+		info.BranchCount = &n
 	}
 	if tags, err := run(ctx, dir, "tag"); err == nil {
-		lines := strings.Split(tags, "\n")
-		count := 0
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		info.TagCount = count
+		n := countNonEmptyLines(tags)
+		info.TagCount = &n
 	}
 
 	return info, nil
@@ -355,4 +366,14 @@ func defaultRunGit(ctx context.Context, dir string, args ...string) (string, err
 		return "", err
 	}
 	return stdout.String(), nil
+}
+
+func countNonEmptyLines(s string) int {
+	count := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }

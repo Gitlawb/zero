@@ -563,6 +563,9 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 			return PushResult{}, fmt.Errorf("resolve current branch: %w", err)
 		}
 	}
+	if branch == "HEAD" {
+		return PushResult{}, fmt.Errorf("cannot push: not currently on a branch")
+	}
 
 	remote := strings.TrimSpace(options.Remote)
 	if remote == "" {
@@ -591,5 +594,70 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 		Remote: remote,
 		Branch: branch,
 		Output: output,
+	}, nil
+}
+
+type PROptions struct {
+	Cwd   string
+	Fill  bool
+	Draft bool
+	Title string
+	Body  string
+	RunGH Runner
+}
+
+type PRResult struct {
+	Output string
+}
+
+func CreatePR(ctx context.Context, options PROptions) (PRResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return PRResult{}, err
+	}
+
+	runGH := options.RunGH
+	if runGH == nil {
+		runGH = func(ctx context.Context, dir string, args ...string) (CommandResult, error) {
+			cmd := exec.CommandContext(ctx, "gh", args...)
+			cmd.Dir = dir
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+
+			var exitCode int
+			if err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode = exitError.ExitCode()
+				} else {
+					exitCode = -1
+				}
+			}
+			return CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, err
+		}
+	}
+
+	prArgs := []string{"pr", "create"}
+	if options.Fill {
+		prArgs = append(prArgs, "--fill")
+	}
+	if options.Draft {
+		prArgs = append(prArgs, "--draft")
+	}
+	if options.Title != "" {
+		prArgs = append(prArgs, "--title", options.Title)
+	}
+	if options.Body != "" {
+		prArgs = append(prArgs, "--body", options.Body)
+	}
+
+	res, err := runGH(ctx, cwd, prArgs...)
+	if err != nil {
+		return PRResult{}, fmt.Errorf("gh pr create failed: %w\n%s", err, res.Stderr)
+	}
+
+	return PRResult{
+		Output: res.Stdout,
 	}, nil
 }

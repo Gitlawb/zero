@@ -43,7 +43,7 @@ func TestCollectCoreMetrics(t *testing.T) {
 			"remote":    "https://github.com/x/y.git\n",
 			"log":       "0\n",
 			"rev-list":  "12\n",
-			"branch":    "  main\n  remotes/origin/main\n",
+			"branch":    "  main\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/feature\n",
 			"tag":       "v0.1.0\nv0.2.0\n",
 		}, nil),
 	})
@@ -87,14 +87,14 @@ func TestCollectCoreMetrics(t *testing.T) {
 	if info.CommitVelocity30d == nil || *info.CommitVelocity30d != 12 {
 		t.Fatalf("CommitVelocity30d=%v want 12", info.CommitVelocity30d)
 	}
-	if info.CommitCount != 12 {
-		t.Fatalf("CommitCount=%d want 12", info.CommitCount)
+	if info.CommitCount == nil || *info.CommitCount != 12 {
+		t.Fatalf("CommitCount=%v want 12", info.CommitCount)
 	}
-	if info.BranchCount != 2 {
-		t.Fatalf("BranchCount=%d want 2", info.BranchCount)
+	if info.BranchCount == nil || *info.BranchCount != 2 {
+		t.Fatalf("BranchCount=%v want 2", info.BranchCount)
 	}
-	if info.TagCount != 2 {
-		t.Fatalf("TagCount=%d want 2", info.TagCount)
+	if info.TagCount == nil || *info.TagCount != 2 {
+		t.Fatalf("TagCount=%v want 2", info.TagCount)
 	}
 }
 

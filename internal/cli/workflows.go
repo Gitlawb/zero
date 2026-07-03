@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -475,8 +473,8 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	if command != "inspect" && options.baseRef != "" {
 		return options, false, execUsageError{"--base is only valid with `zero changes inspect`"}
 	}
-	if command != "push" && (options.remote != "" || options.force) {
-		return options, false, execUsageError{"--remote and --force are only valid with `zero changes push`"}
+	if command != "push" && command != "pr" && (options.remote != "" || options.force) {
+		return options, false, execUsageError{"--remote and --force are only valid with push or pr"}
 	}
 	if command != "pr" && (options.title != "" || options.body != "" || options.fill || options.draft) {
 		return options, false, execUsageError{"--title, --body, --fill, and --draft are only valid with `zero changes pr`"}
@@ -818,9 +816,13 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if options.dryRun {
 		dryRunStr = " (dry run)"
 	}
-	fmt.Fprintf(stdout, "Pushed branch %s to remote %s%s\n", result.Branch, result.Remote, dryRunStr)
+	if _, err := fmt.Fprintf(stdout, "Pushed branch %s to remote %s%s\n", result.Branch, result.Remote, dryRunStr); err != nil {
+		return exitCrash
+	}
 	if result.Output != "" {
-		fmt.Fprintln(stdout, result.Output)
+		if _, err := fmt.Fprintln(stdout, result.Output); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }
@@ -841,45 +843,41 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	fmt.Fprintln(stdout, "Pushing current branch to set upstream...")
+	if !options.json {
+		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
+			return exitCrash
+		}
+	}
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
-		Cwd: workspaceRoot,
+		Cwd:    workspaceRoot,
+		Remote: options.remote,
+		Force:  options.force,
 	})
 	if err != nil {
 		return writeExecUsageError(stderr, fmt.Sprintf("auto-push failed: %v", err))
 	}
-	fmt.Fprintf(stdout, "Pushed branch %s to remote %s\n", pushResult.Branch, pushResult.Remote)
-
-	prArgs := []string{"pr", "create"}
-	if options.fill {
-		prArgs = append(prArgs, "--fill")
-	}
-	if options.draft {
-		prArgs = append(prArgs, "--draft")
-	}
-	if options.title != "" {
-		prArgs = append(prArgs, "--title", options.title)
-	}
-	if options.body != "" {
-		prArgs = append(prArgs, "--body", options.body)
+	if !options.json {
+		if _, err := fmt.Fprintf(stdout, "Pushed branch %s to remote %s\n", pushResult.Branch, pushResult.Remote); err != nil {
+			return exitCrash
+		}
 	}
 
-	cmd := exec.CommandContext(context.Background(), "gh", prArgs...)
-	cmd.Dir = workspaceRoot
-	var ghStdout, ghStderr bytes.Buffer
-	cmd.Stdout = &ghStdout
-	cmd.Stderr = &ghStderr
-
-	err = cmd.Run()
+	prResult, err := deps.createPR(context.Background(), zerogit.PROptions{
+		Cwd:   workspaceRoot,
+		Fill:  options.fill,
+		Draft: options.draft,
+		Title: options.title,
+		Body:  options.body,
+	})
 	if err != nil {
-		return writeExecUsageError(stderr, fmt.Sprintf("gh pr create failed: %s\n%s", err.Error(), ghStderr.String()))
+		return writeExecUsageError(stderr, err.Error())
 	}
 
 	if options.json {
 		res := map[string]string{
 			"branch": pushResult.Branch,
 			"remote": pushResult.Remote,
-			"output": strings.TrimSpace(ghStdout.String()),
+			"output": strings.TrimSpace(prResult.Output),
 		}
 		if err := writePrettyJSON(stdout, res); err != nil {
 			return exitCrash
@@ -887,6 +885,8 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 
-	fmt.Fprintln(stdout, strings.TrimSpace(ghStdout.String()))
+	if _, err := fmt.Fprintln(stdout, strings.TrimSpace(prResult.Output)); err != nil {
+		return exitCrash
+	}
 	return exitSuccess
 }

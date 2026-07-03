@@ -705,3 +705,92 @@ func TestRunChangesPushRejectsIncompatibleFlags(t *testing.T) {
 		t.Fatalf("expected error about --base, got %q", stderr.String())
 	}
 }
+
+func TestRunChangesPR(t *testing.T) {
+	cwd := t.TempDir()
+	pushed := zerogit.PushResult{
+		Remote: "origin",
+		Branch: "feat/feature-a",
+		Output: "Everything up-to-date",
+	}
+
+	t.Run("HappyPath", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		pushCalled := false
+		prCalled := false
+
+		exitCode := runWithDeps([]string{
+			"changes", "pr",
+			"--title", "my title",
+			"--body", "my body",
+			"--fill",
+			"--draft",
+			"--remote", "my-remote",
+			"--force",
+		}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				pushCalled = true
+				if options.Cwd != cwd || options.Remote != "my-remote" || !options.Force {
+					t.Fatalf("unexpected PushOptions: %#v", options)
+				}
+				return pushed, nil
+			},
+			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+				prCalled = true
+				if options.Cwd != cwd || !options.Fill || !options.Draft || options.Title != "my title" || options.Body != "my body" {
+					t.Fatalf("unexpected PROptions: %#v", options)
+				}
+				return zerogit.PRResult{Output: "https://github.com/Gitlawb/zero/pull/123"}, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		if !pushCalled || !prCalled {
+			t.Fatalf("expected push and pr to be called: push=%v pr=%v", pushCalled, prCalled)
+		}
+		outStr := stdout.String()
+		if !strings.Contains(outStr, "Pushing current branch to set upstream...") {
+			t.Fatalf("expected status message in stdout, got %q", outStr)
+		}
+		if !strings.Contains(outStr, "https://github.com/Gitlawb/zero/pull/123") {
+			t.Fatalf("expected PR URL in stdout, got %q", outStr)
+		}
+	})
+
+	t.Run("JSONMode", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{
+			"changes", "pr",
+			"--title", "my title",
+			"--json",
+		}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				return pushed, nil
+			},
+			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+				return zerogit.PRResult{Output: "https://github.com/Gitlawb/zero/pull/123\n"}, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		outStr := stdout.String()
+		// Gating print: should NOT print human status in JSON mode
+		if strings.Contains(outStr, "Pushing current branch") || strings.Contains(outStr, "Pushed branch") {
+			t.Fatalf("expected no human status output in JSON mode, got %q", outStr)
+		}
+
+		var res map[string]string
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("invalid JSON output: %v\n%s", err, outStr)
+		}
+		if res["branch"] != "feat/feature-a" || res["remote"] != "origin" || res["output"] != "https://github.com/Gitlawb/zero/pull/123" {
+			t.Fatalf("unexpected JSON fields: %#v", res)
+		}
+	})
+}
