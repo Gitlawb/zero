@@ -593,6 +593,49 @@ func TestPushBranchesToRemote(t *testing.T) {
 		}
 	})
 
+	t.Run("RejectsDefaultBranch", func(t *testing.T) {
+		for _, branch := range []string{"main", "master"} {
+			root := t.TempDir()
+			runner := &fakeRunner{results: []CommandResult{
+				{Stdout: root + "\n"},
+				{Stdout: branch + "\n"},
+			}}
+
+			_, err := Push(context.Background(), PushOptions{
+				Cwd:    root,
+				RunGit: runner.Run,
+			})
+			if err == nil {
+				t.Fatalf("expected error when pushing %q, got nil", branch)
+			}
+			if !strings.Contains(err.Error(), "default/protected branch") {
+				t.Fatalf("unexpected error for %q: %v", branch, err)
+			}
+		}
+	})
+
+	t.Run("AllowDefaultBranchWithYes", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "main\n"},
+			{Stdout: "origin\n"},
+			{Stdout: "Everything up-to-date\n"},
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:                     root,
+			RunGit:                  runner.Run,
+			AllowPushDefaultBranch:  true,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+		if result.Branch != "main" {
+			t.Fatalf("expected branch main, got %q", result.Branch)
+		}
+	})
+
 	t.Run("FallbackRemoteToOrigin", func(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
@@ -650,6 +693,9 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 		if got := runner.calls[0].args; !reflect.DeepEqual(got, expectedArgs) {
 			t.Fatalf("unexpected gh args: %v, want %v", got, expectedArgs)
 		}
+		if runner.calls[0].dir != root {
+			t.Fatalf("unexpected dir: %q, want %q", runner.calls[0].dir, root)
+		}
 	})
 
 	t.Run("CreatePRMinimal", func(t *testing.T) {
@@ -672,6 +718,9 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 		}
 		if got := runner.calls[0].args; !reflect.DeepEqual(got, expectedArgs) {
 			t.Fatalf("unexpected gh args: %v, want %v", got, expectedArgs)
+		}
+		if runner.calls[0].dir != root {
+			t.Fatalf("unexpected dir: %q, want %q", runner.calls[0].dir, root)
 		}
 	})
 }

@@ -528,13 +528,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 type PushOptions struct {
-	Cwd       string
-	Remote    string
-	Branch    string
-	Force     bool
-	DryRun    bool
-	RunGit    Runner
-	RunGitEnv EnvRunner
+	Cwd                   string
+	Remote                string
+	Branch                string
+	Force                 bool
+	DryRun                bool
+	AllowPushDefaultBranch bool
+	RunGit                Runner
+	RunGitEnv             EnvRunner
 }
 
 type PushResult struct {
@@ -565,6 +566,10 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}
 	if branch == "HEAD" {
 		return PushResult{}, fmt.Errorf("cannot push: not currently on a branch")
+	}
+
+	if !options.AllowPushDefaultBranch && (branch == "main" || branch == "master") {
+		return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
 	}
 
 	remote := strings.TrimSpace(options.Remote)

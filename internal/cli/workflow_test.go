@@ -677,7 +677,7 @@ func TestRunChangesPush(t *testing.T) {
 		exitCode := runWithDeps([]string{"changes", "push", "--remote", "origin", "--force", "--dry-run"}, &stdout, &stderr, appDeps{
 			getwd: func() (string, error) { return cwd, nil },
 			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun {
+				if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun || options.AllowPushDefaultBranch {
 					t.Fatalf("unexpected PushOptions: %#v", options)
 				}
 				return pushed, nil
@@ -754,7 +754,7 @@ func TestRunChangesPR(t *testing.T) {
 			getwd: func() (string, error) { return cwd, nil },
 			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
 				pushCalled = true
-				if options.Cwd != cwd || options.Remote != "my-remote" || !options.Force {
+				if options.Cwd != cwd || options.Remote != "my-remote" || !options.Force || options.AllowPushDefaultBranch {
 					t.Fatalf("unexpected PushOptions: %#v", options)
 				}
 				return pushed, nil
@@ -830,4 +830,59 @@ func TestRunChangesPR(t *testing.T) {
 			t.Fatalf("expected validation error about fill or title, got %q", stderr.String())
 		}
 	})
+
+	t.Run("PushFailureShortCircuits", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		prCalled := false
+		exitCode := runWithDeps([]string{
+			"changes", "pr", "--title", "my title",
+		}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				return zerogit.PushResult{}, errors.New("push failed")
+			},
+			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+				prCalled = true
+				return zerogit.PRResult{}, nil
+			},
+		})
+
+		if exitCode == exitSuccess {
+			t.Fatalf("expected non-success exit code on push failure, got %d", exitCode)
+		}
+		if prCalled {
+			t.Fatalf("expected createPR not to be called after push failure")
+		}
+		if !strings.Contains(stderr.String(), "push failed") {
+			t.Fatalf("expected error about push failure, got %q", stderr.String())
+		}
+	})
+
+	t.Run("RejectsDryRun", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "pr", "--title", "my title", "--dry-run"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+		})
+
+		if exitCode != exitUsage {
+			t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+		}
+		if !strings.Contains(stderr.String(), "--dry-run") {
+			t.Fatalf("expected dry-run validation error, got %q", stderr.String())
+		}
+	})
+}
+
+func TestRunChangesCommitRejectsYes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "commit", "--yes"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--yes") {
+		t.Fatalf("expected error about --yes, got %q", stderr.String())
+	}
 }

@@ -43,6 +43,7 @@ type changesCommandOptions struct {
 	body         string
 	fill         bool
 	draft        bool
+	yes          bool
 }
 
 func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -458,6 +459,8 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			options.fill = true
 		case arg == "--draft":
 			options.draft = true
+		case arg == "--yes":
+			options.yes = true
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown changes flag %q", arg)}
 		default:
@@ -478,6 +481,9 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	}
 	if command != "pr" && (options.title != "" || options.body != "" || options.fill || options.draft) {
 		return options, false, execUsageError{"--title, --body, --fill, and --draft are only valid with `zero changes pr`"}
+	}
+	if command != "push" && command != "pr" && options.yes {
+		return options, false, execUsageError{"--yes is only valid with push or pr"}
 	}
 	return options, false, nil
 }
@@ -773,6 +779,7 @@ Flags:
       --body <text>       PR body
       --fill              Automatically populate PR title and body from commits
       --draft             Create PR as a draft
+      --yes               Confirm pushing to a default/protected branch
       --json              Print JSON output
   -h, --help              Show this help
 `)
@@ -796,10 +803,11 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	}
 
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
-		Cwd:    workspaceRoot,
-		Remote: options.remote,
-		Force:  options.force,
-		DryRun: options.dryRun,
+		Cwd:                     workspaceRoot,
+		Remote:                  options.remote,
+		Force:                   options.force,
+		DryRun:                  options.dryRun,
+		AllowPushDefaultBranch:  options.yes,
 	})
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -852,9 +860,10 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 	}
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
-		Cwd:    workspaceRoot,
-		Remote: options.remote,
-		Force:  options.force,
+		Cwd:                     workspaceRoot,
+		Remote:                  options.remote,
+		Force:                   options.force,
+		AllowPushDefaultBranch:  options.yes,
 	})
 	if err != nil {
 		return writeExecUsageError(stderr, fmt.Sprintf("auto-push failed: %v", err))
@@ -877,10 +886,15 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 
 	if options.json {
-		res := map[string]string{
-			"branch": pushResult.Branch,
-			"remote": pushResult.Remote,
-			"output": strings.TrimSpace(prResult.Output),
+		type prJSONResult struct {
+			Branch string `json:"branch"`
+			Remote string `json:"remote"`
+			Output string `json:"output"`
+		}
+		res := prJSONResult{
+			Branch: pushResult.Branch,
+			Remote: pushResult.Remote,
+			Output: strings.TrimSpace(prResult.Output),
 		}
 		if err := writePrettyJSON(stdout, res); err != nil {
 			return exitCrash

@@ -244,10 +244,11 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 			if line == "" || strings.Contains(line, "->") {
 				continue
 			}
-			// Strip leading '* ' if it's the current branch.
+			// Strip leading '* ' (current branch) or '+ ' (checked out in another worktree).
 			line = strings.TrimPrefix(line, "* ")
+			line = strings.TrimPrefix(line, "+ ")
 			line = strings.TrimSpace(line)
-			if line == "" {
+			if line == "" || strings.HasPrefix(line, "(") {
 				continue
 			}
 			// If it's a remote branch, extract the branch name.
