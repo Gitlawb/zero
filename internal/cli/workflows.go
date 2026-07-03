@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -234,7 +235,9 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 			}
 
 			safeSummary := redactChangeSummary(summary)
-			msg, err := generateAutoCommitMessage(context.Background(), provider, resolved.Provider.Model, safeSummary)
+			genCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			msg, err := generateAutoCommitMessage(genCtx, provider, resolved.Provider.Model, safeSummary)
 			if err != nil {
 				return writeExecUsageError(stderr, fmt.Sprintf("failed to generate commit message: %v", err))
 			}
@@ -764,7 +767,7 @@ Flags:
       --base <ref>        Diff against <ref>...HEAD instead of the working tree
       --diff-bytes <n>    Maximum diff bytes to include
   -m, --message <text>    Commit message for `+"`zero changes commit`"+`
-  -a, --auto              Auto-generate commit message using LLM
+  -a, --auto              Auto-generate commit message using LLM (use --dry-run to preview)
       --dry-run           Preview commit metadata without mutating git state
       --json              Print JSON output
   -h, --help              Show this help
