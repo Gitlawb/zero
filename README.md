@@ -8,6 +8,8 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <br>
+  <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
 
 Zero is an AI coding agent for your local terminal. It can inspect a repository,
