@@ -150,7 +150,13 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 	// resolveScopedPath returns an absolute displayRoot when the target resolved
 	// to an extra (non-workspace) granted root; emit absolute match paths there so
 	// they survive a round-trip through read_file/edit_file (mirrors glob).
-	matches := collectGrepMatches(resolvedRoot, filepath.IsAbs(displayRoot), files, compiled)
+	matches, err := collectGrepMatches(ctx, resolvedRoot, filepath.IsAbs(displayRoot), files, compiled)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Result{Status: StatusError, Output: "Error: grep cancelled."}
+		}
+		return errorResult("Error running grep: " + err.Error())
+	}
 	if len(matches) == 0 {
 		if outputMode == "count" {
 			return okResult("0 matches found")
@@ -353,9 +359,16 @@ func grepFiles(ctx context.Context, resolvedRoot string, target string, globMatc
 	return files, nil
 }
 
-func collectGrepMatches(resolvedRoot string, absolutePaths bool, files []string, compiled *regexp.Regexp) []grepMatch {
+func collectGrepMatches(ctx context.Context, resolvedRoot string, absolutePaths bool, files []string, compiled *regexp.Regexp) ([]grepMatch, error) {
 	matches := []grepMatch{}
 	for _, file := range files {
+		// Checked per file, matching the walk's per-entry check in grepFiles: a
+		// broad search can already have collected many files before the run is
+		// cancelled, and reading/regex-scanning each one is real work that must
+		// stop promptly rather than running to completion.
+		if err := ctx.Err(); err != nil {
+			return matches, err
+		}
 		// Re-confine at read time (defense-in-depth) AND to compute the clean
 		// workspace-relative path used in output.
 		relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
@@ -392,5 +405,5 @@ func collectGrepMatches(resolvedRoot string, absolutePaths bool, files []string,
 			})
 		}
 	}
-	return matches
+	return matches, nil
 }

@@ -2,11 +2,32 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"testing"
 )
+
+// countingCancelContext returns context.Canceled from Err() once it has been
+// called more than "remaining" times, letting a test deterministically
+// cancel a loop after a fixed number of iterations instead of relying on
+// timing. A context.WithTimeout test would be flaky under a loaded or
+// shared CI runner, exactly the kind of test PR #464 was criticized for
+// elsewhere (TestCollectRespectsDeadlineUnderContinuousOutput).
+type countingCancelContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *countingCancelContext) Err() error {
+	c.remaining--
+	if c.remaining < 0 {
+		return context.Canceled
+	}
+	return nil
+}
 
 // buildLargeSearchTree creates n files, each containing a grep-matchable
 // line, so a walk that does NOT respect cancellation would have plenty of
@@ -72,6 +93,34 @@ func TestGrepStillMatchesWithLiveContext(t *testing.T) {
 	result := tool.Run(context.Background(), map[string]any{"pattern": "needle"})
 	if result.Status != StatusOK {
 		t.Fatalf("status = %q, want ok; output=%q", result.Status, result.Output)
+	}
+}
+
+// Before this fix, only grepFiles' walk checked ctx: once the walk had
+// finished discovering candidate files, collectGrepMatches read and
+// regex-scanned every one of them to completion regardless of cancellation.
+// This proves the match-collection phase itself stops partway through,
+// not only when the context was already cancelled before the walk started.
+func TestGrepCollectMatchesStopsMidCollectionOnCancelledContext(t *testing.T) {
+	root := buildLargeSearchTree(t, 50)
+	files := make([]string, 50)
+	for i := range files {
+		files[i] = filepath.Join(root, "file"+strconv.Itoa(i)+".txt")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	compiled := regexp.MustCompile("needle")
+
+	const allowed = 5
+	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
+	matches, err := collectGrepMatches(ctx, resolvedRoot, false, files, compiled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(matches) != allowed {
+		t.Fatalf("matches = %d, want exactly %d collected before cancellation stopped the loop", len(matches), allowed)
 	}
 }
 
