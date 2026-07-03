@@ -561,19 +561,31 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, scriptCleanup, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	output := newExecOutputBuffer()
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
-	stdin, tty, cleanup, err := startExecProcess(command, output, ttyRequested)
+	stdin, tty, processCleanup, err := startExecProcess(command, output, ttyRequested)
 	if err != nil {
 		_ = monitor.Stop()
 		plan.Cleanup()
+		scriptCleanup()
 		cancel()
 		return nil, err
+	}
+	// The session outlives this function (its process keeps running in the
+	// background goroutine below), so buildBashCommand's script cleanup (e.g. a
+	// Windows temp script file) must run alongside startExecProcess's own
+	// cleanup, not be dropped - and not before the process that reads the
+	// script has actually exited.
+	sessionCleanup := func() {
+		if processCleanup != nil {
+			processCleanup()
+		}
+		scriptCleanup()
 	}
 	session := &execSession{
 		id:          id,
@@ -587,7 +599,7 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 		plan:        plan,
 		cancel:      cancel,
 		stdin:       stdin,
-		cleanup:     cleanup,
+		cleanup:     sessionCleanup,
 		output:      output,
 		done:        make(chan struct{}),
 	}

@@ -17,6 +17,18 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 3 && os.Args[1] == "--zero-bash-helper" {
+		if os.Args[2] == "echo-arg" {
+			// Echoes back exactly the one argument it received, to verify a
+			// quoted, space-and-slash-containing argument (the same shape as
+			// `python -c "print(15 / 3)"`) survives the shell invocation
+			// intact instead of being truncated/corrupted.
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "echo-arg requires exactly one argument")
+				os.Exit(1)
+			}
+			fmt.Println(os.Args[3])
+			return
+		}
 		runBashToolHelper(os.Args[2])
 		return
 	}
@@ -394,10 +406,11 @@ func TestBashToolBuildsWrappedSandboxExecCommand(t *testing.T) {
 		},
 	})
 
-	command, plan, err := buildBashCommand(context.Background(), "pwd", root, engine)
+	command, plan, cleanup, err := buildBashCommand(context.Background(), "pwd", root, engine)
 	if err != nil {
 		t.Fatalf("buildBashCommand: %v", err)
 	}
+	t.Cleanup(cleanup)
 	if command.Path != "/usr/bin/sandbox-exec" || !plan.Wrapped {
 		t.Fatalf("command path = %q plan = %#v, want wrapped sandbox-exec", command.Path, plan)
 	}
@@ -503,6 +516,37 @@ func TestBashToolAllowsNonInteractiveCommand(t *testing.T) {
 	}
 	if result.Meta["safety_block"] != "" {
 		t.Fatalf("did not expect a safety block, got %#v", result.Meta)
+	}
+}
+
+// TestBashToolPreservesEmbeddedQuotesOnWindows pins a real, previously-broken
+// case: cmd.exe's own /S/C remainder parsing strips the first and last
+// literal quote character in the WHOLE remainder (not a matched pair) when
+// /S is present, corrupting a command whose own text contains embedded
+// double quotes - exactly the shape of `python -c "print(15 / 3)"`,
+// `git commit -m "message"`, `node -e "..."`. Before the fix, the helper
+// below received a truncated, mis-quoted argument (starting with a stray
+// literal `"`) instead of the text between the quotes.
+func TestBashToolPreservesEmbeddedQuotesOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cmd.exe /S/C quote-remainder parsing is Windows-specific")
+	}
+	root := t.TempDir()
+	executable := shellQuote(os.Args[0])
+	// Space and a slash: the two characters whose position in the original
+	// bug report's SyntaxError ("print(15, truncated right before the /")
+	// showed exactly where the corruption happened.
+	commandText := executable + ` --zero-bash-helper echo-arg "hello / world"`
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": commandText,
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "hello / world") {
+		t.Fatalf("expected the embedded-quote argument to survive intact, got %q", result.Output)
 	}
 }
 
