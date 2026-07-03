@@ -2341,7 +2341,12 @@ func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (s
 	}
 	raw, ok := args["additional_permissions"]
 	if !ok || raw == nil {
-		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf("missing additional_permissions; provide at least one of network or file_system")
+		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
+			"sandbox_permissions was set to %q but no additional_permissions object was provided. "+
+				`Include one, for example additional_permissions: {"network": {"enabled": true}} or `+
+				`{"file_system": {"write": ["/path"]}}. If this command does not need elevated permissions, `+
+				"omit sandbox_permissions entirely and retry",
+			tools.SandboxPermissionsWithAdditionalPermissions)
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -2356,7 +2361,9 @@ func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (s
 		return sandbox.RequestPermissionProfile{}, true, err
 	}
 	if normalized.Empty() {
-		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf("additional_permissions must include at least one requested permission in network or file_system")
+		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
+			"additional_permissions must include at least one of network or file_system, for example " +
+				`{"network": {"enabled": true}} or {"file_system": {"write": ["/path"]}}`)
 	}
 	grantProfile, err := sandbox.RequestPermissionGrantProfile(normalized)
 	if err != nil {

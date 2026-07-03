@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
@@ -77,6 +78,37 @@ func TestExecuteToolCallRejectsAdditionalPermissionsWithoutFlagBeforePrompt(t *t
 	}
 	if promptCalls != 0 {
 		t.Fatalf("OnPermissionRequest called %d times, want 0 (must reject before prompting)", promptCalls)
+	}
+}
+
+// The rejection message must show a concrete, correctly-shaped example: a
+// model that gets this wrong once (attaching sandbox_permissions out of habit
+// from an earlier call, without a valid payload) needs enough in the error to
+// self-correct on retry instead of repeating the identical mistake.
+func TestExecuteToolCallMissingAdditionalPermissionsErrorIsActionable(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+
+	result, err := executeToolCall(
+		context.Background(),
+		registry,
+		ToolCall{
+			ID:        "c1",
+			Name:      "bash",
+			Arguments: `{"command":"ping example.com","sandbox_permissions":"with_additional_permissions"}`,
+		},
+		PermissionModeAuto,
+		Options{},
+	)
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	if !strings.Contains(result.Output, `{"network": {"enabled": true}}`) {
+		t.Fatalf("output = %q, want a concrete additional_permissions example", result.Output)
+	}
+	if !strings.Contains(result.Output, "omit sandbox_permissions") {
+		t.Fatalf("output = %q, want guidance that the flag can simply be omitted", result.Output)
 	}
 }
 
