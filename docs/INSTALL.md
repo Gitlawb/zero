@@ -31,15 +31,24 @@ dependencies (only the installing project's own scripts), so the `postinstall`
 that fetches the Zero binary is silently skipped. The first run then fails with
 `No native binary found next to the npm wrapper`.
 
-To install with Bun, either run the installer manually after installing:
+The simplest fix is to trust the package after installing, which runs the
+blocked postinstall. This works for project and global installs:
 
 ```bash
+# project install
 bun add @gitlawb/zero
-node node_modules/@gitlawb/zero/scripts/postinstall.mjs
+bun pm trust @gitlawb/zero
+
+# global install
+bun add -g @gitlawb/zero
+bun pm -g trust @gitlawb/zero
 ```
 
-Or allow the postinstall to run by adding the package to your project's
-`trustedDependencies` before installing:
+`bun pm untrusted` (or `bun pm -g untrusted`) lists the blocked postinstalls if
+you want to inspect before trusting.
+
+Alternatively, allow the postinstall to run at install time by adding the
+package to your project's `trustedDependencies` before installing:
 
 ```json
 {
@@ -51,8 +60,12 @@ Or allow the postinstall to run by adding the package to your project's
 bun add @gitlawb/zero
 ```
 
-For global installs (`bun add -g @gitlawb/zero`), run the installer manually
-against the global install path, or use the install scripts below.
+On Bun versions that do not have `bun pm trust`, run the installer manually
+after installing:
+
+```bash
+node node_modules/@gitlawb/zero/scripts/postinstall.mjs
+```
 
 Reference: <https://bun.sh/docs/pm/lifecycle>
 

@@ -66,10 +66,12 @@ if (!existsSync(nativePath)) {
       '\n' +
       (ranByBun
         ? 'You installed with Bun, which does not run dependency lifecycle scripts\n' +
-          'by default. To let it run on future installs, add zero to your\n' +
-          'project\'s trustedDependencies:\n' +
+          'by default. Trust the package to run the blocked postinstall:\n' +
+          '  bun pm trust @gitlawb/zero       (project install)\n' +
+          '  bun pm -g trust @gitlawb/zero    (global install)\n' +
+          'On Bun versions without `bun pm trust`, add\n' +
           '  "trustedDependencies": ["@gitlawb/zero"]\n' +
-          'then reinstall.\n' +
+          'to your project package.json and reinstall.\n' +
           '\n'
         : '') +
       'If that fails, build from source: https://github.com/Gitlawb/zero\n' +
