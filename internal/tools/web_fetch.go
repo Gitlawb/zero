@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/minify"
 	"github.com/Gitlawb/zero/internal/redaction"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
@@ -224,10 +225,18 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	}
 	body = redactWebFetchText(body)
 
+	contentTypeHeader := firstNonEmptyString(contentType, "unknown")
+	if strings.Contains(strings.ToLower(contentType), "json") {
+		if toonBody, err := minify.JSONToTOON([]byte(body)); err == nil {
+			body = toonBody
+			contentTypeHeader += " (formatted as TOON to save tokens)"
+		}
+	}
+
 	output := strings.Join([]string{
 		"URL: " + finalURL,
 		"Status: " + webFetchStatusLine(response),
-		"Content-Type: " + firstNonEmptyString(contentType, "unknown"),
+		"Content-Type: " + contentTypeHeader,
 		"Bytes: " + strconv.Itoa(len(body)),
 		"",
 		body,

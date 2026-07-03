@@ -543,3 +543,27 @@ func publicWebFetchResolver(t *testing.T, expectedHost string) webFetchResolver 
 		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
 	})
 }
+
+func TestWebFetchToolConvertsJSONToTOON(t *testing.T) {
+	client := webFetchTestClient(func(request *http.Request) (*http.Response, error) {
+		jsonBody := `{"users": [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Linus"}]}`
+		return webFetchTestResponse(request, http.StatusOK, "application/json", jsonBody), nil
+	})
+	tool := newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "example.com"))
+	result := tool.Run(context.Background(), map[string]any{"url": "https://example.com"})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Run status = %s, want OK. Output: %s", result.Status, result.Output)
+	}
+
+	if !strings.Contains(result.Output, "```toon") {
+		t.Errorf("expected output to contain ```toon code block, got:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "users") {
+		t.Errorf("expected output to contain 'users', got:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Content-Type: application/json (formatted as TOON to save tokens)") {
+		t.Errorf("expected output header to contain formatted as TOON info, got:\n%s", result.Output)
+	}
+}
+

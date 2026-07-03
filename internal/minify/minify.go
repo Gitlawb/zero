@@ -36,6 +36,10 @@ func File(path string, content []byte) Result {
 		}
 		// Unparsable Go (a snippet, generics edge, or syntax error): fall through
 		// to the safe generic path rather than risk a partial AST reprint.
+	} else if ext == ".json" {
+		if out, err := JSONToTOON(content); err == nil {
+			return Result{Content: out, Language: "toon", Applied: true}
+		}
 	} else if style, ok := commentStyles[ext]; ok {
 		// Strip comments with a string-aware lexer, then collapse the whitespace the
 		// removed comments left behind. The stripper only handles languages whose

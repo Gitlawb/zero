@@ -62,3 +62,18 @@ func TestMinifyGenericCollapsesBlanksAndTrims(t *testing.T) {
 		t.Fatalf("generic = %q, want %q", r.Content, "a\n\nb")
 	}
 }
+
+func TestMinifyJSON(t *testing.T) {
+	jsonInput := `{"users": [{"id": 1, "name": "Ada"}]}`
+	r := File("data.json", []byte(jsonInput))
+	if !r.Applied || r.Language != "toon" {
+		t.Fatalf("expected JSON minification, got %+v", r)
+	}
+	if !strings.Contains(r.Content, "```toon") {
+		t.Errorf("expected content to contain ```toon code block, got:\n%s", r.Content)
+	}
+	if !strings.Contains(r.Content, "users") {
+		t.Errorf("expected content to contain 'users', got:\n%s", r.Content)
+	}
+}
+
