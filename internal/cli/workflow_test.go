@@ -692,6 +692,12 @@ func TestParseChangesArgsAuto(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
 		t.Fatalf("expected --message and --auto conflict error, got %v", err)
 	}
+
+	// 4. Reject both empty message and --auto on commit
+	_, _, err = parseChangesArgs([]string{"-m", "", "--auto"}, "commit")
+	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
+		t.Fatalf("expected empty --message and --auto conflict error, got %v", err)
+	}
 }
 
 type mockCommitMsgProvider struct {
@@ -714,7 +720,7 @@ func TestRunChangesCommitAuto(t *testing.T) {
 		Root:   cwd,
 		Branch: "main",
 		Files:  []zerogit.FileChange{{Path: "README.md", Status: "modified"}},
-		Diff:   "some diff content",
+		Diff:   "some diff content with ghp_SECRETKEYHERE",
 	}
 
 	mockProv := &mockCommitMsgProvider{
@@ -760,10 +766,40 @@ func TestRunChangesCommitAuto(t *testing.T) {
 	if !commitCalled {
 		t.Fatal("expected commitChanges to be called")
 	}
-	if !strings.Contains(mockProv.req.Messages[0].Content, "some diff content") {
-		t.Fatalf("expected diff content in prompt, got %q", mockProv.req.Messages[0].Content)
+	// Verify that secret in the diff was redacted
+	promptContent := mockProv.req.Messages[0].Content
+	if strings.Contains(promptContent, "ghp_SECRETKEYHERE") {
+		t.Fatal("expected secret in diff to be redacted, but it was found in the prompt")
+	}
+	if !strings.Contains(promptContent, "[redacted]") && !strings.Contains(promptContent, "redacted") {
+		t.Fatalf("expected redacted diff content in prompt, got: %q", promptContent)
 	}
 	if !strings.Contains(stdout.String(), "Generating commit message using LLM...") {
 		t.Fatalf("expected status message in stdout, got %q", stdout.String())
 	}
+
+	t.Run("EmptyLLMResponse", func(t *testing.T) {
+		mockProvEmpty := &mockCommitMsgProvider{
+			response: "   \n\n   ",
+		}
+		var stdout, stderr bytes.Buffer
+		code := runWithDeps([]string{"changes", "commit", "--auto"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+				return summary, nil
+			},
+			resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+				return execResolvedConfig(), nil
+			},
+			newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+				return mockProvEmpty, nil
+			},
+		})
+		if code == exitSuccess {
+			t.Fatal("expected command to fail when LLM returns empty response, got success")
+		}
+		if !strings.Contains(stderr.String(), "empty commit message") {
+			t.Fatalf("expected empty commit message error in stderr, got %q", stderr.String())
+		}
+	})
 }

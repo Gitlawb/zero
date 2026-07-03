@@ -37,6 +37,7 @@ type changesCommandOptions struct {
 	cwd          string
 	baseRef      string
 	message      string
+	hasMessage   bool
 	dryRun       bool
 	maxDiffBytes int
 	auto         bool
@@ -232,7 +233,8 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 				}
 			}
 
-			msg, err := generateAutoCommitMessage(context.Background(), provider, resolved.Provider.Model, summary)
+			safeSummary := redactChangeSummary(summary)
+			msg, err := generateAutoCommitMessage(context.Background(), provider, resolved.Provider.Model, safeSummary)
 			if err != nil {
 				return writeExecUsageError(stderr, fmt.Sprintf("failed to generate commit message: %v", err))
 			}
@@ -438,9 +440,11 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 				return options, false, err
 			}
 			options.message = value
+			options.hasMessage = true
 			index = next
 		case strings.HasPrefix(arg, "--message="):
 			options.message = strings.TrimSpace(strings.TrimPrefix(arg, "--message="))
+			options.hasMessage = true
 		case arg == "--diff-bytes":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -466,10 +470,10 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			return options, false, execUsageError{fmt.Sprintf("unexpected changes argument %q", arg)}
 		}
 	}
-	if command != "commit" && (options.message != "" || options.dryRun || options.auto) {
+	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
 		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
 	}
-	if command == "commit" && options.message != "" && options.auto {
+	if command == "commit" && options.hasMessage && options.auto {
 		return options, false, execUsageError{"cannot specify both --message and --auto"}
 	}
 	if command == "commit" && options.baseRef != "" {
@@ -799,6 +803,8 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 	}
 	msg = strings.TrimSuffix(msg, "```")
 	msg = strings.TrimSpace(msg)
-
+	if msg == "" {
+		return "", fmt.Errorf("provider returned empty commit message")
+	}
 	return msg, nil
 }
