@@ -36,7 +36,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			title: "Chat",
 			bindings: []keybinding{
 				{"Enter", "send the message"},
-				{"Alt+Enter", "insert a newline (multi-line compose)"},
+				{"Shift+Enter / Alt+Enter", "insert a newline (multi-line compose)"},
 				{"Esc (\u00d72)", "cancel the run / dismiss a popup / clear the input"},
 				{"Ctrl+C", "cancel the run, then quit"},
 				{"?", "show this help (on an empty input)"},

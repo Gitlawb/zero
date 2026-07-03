@@ -1239,7 +1239,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil {
 				return m.choosePicker()
 			}
-			if keyAlt(msg) {
+			if keyAlt(msg) || keyShift(msg) {
 				if next, ok := m.applyComposerKey(msg); ok {
 					return next, nil
 				}

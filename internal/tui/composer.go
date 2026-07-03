@@ -306,7 +306,7 @@ func (m model) composerPositionAtVisualCell(x int, y int, width int) (int, bool)
 func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	state := m.currentComposerState()
 	switch {
-	case keyIs(msg, tea.KeyEnter) && keyAlt(msg):
+	case keyIs(msg, tea.KeyEnter) && (keyAlt(msg) || keyShift(msg)):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
 	case keyCtrl(msg, 'j'):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
