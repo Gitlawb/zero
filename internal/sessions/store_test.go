@@ -581,6 +581,65 @@ func TestFormatExecPromptKeepsConversationMessagesWhenNoisyEventsFollow(t *testi
 	}
 }
 
+func TestFormatExecPromptTruncatesConversationMessagesAfterFilteringNoise(t *testing.T) {
+	events := make([]Event, 0, 100)
+	for sequence := 1; sequence <= 85; sequence++ {
+		events = append(events, Event{
+			Sequence: sequence,
+			Type:     EventMessage,
+			Payload:  json.RawMessage(fmt.Sprintf(`{"role":"user","content":"conversation message %03d"}`, sequence)),
+		})
+		if sequence%10 == 0 {
+			events = append(events, Event{
+				Sequence: 1000 + sequence,
+				Type:     EventToolResult,
+				Payload:  json.RawMessage(fmt.Sprintf(`{"name":"read_file","output":"noisy tool result %03d"}`, sequence)),
+			})
+		}
+	}
+	events = append(events, Event{
+		Sequence: 2000,
+		Type:     EventToolResult,
+		Payload:  json.RawMessage(`{"name":"bash","output":"trailing noisy tool result"}`),
+	})
+
+	contextEvents := promptContextEvents(events)
+	if len(contextEvents) != 80 {
+		t.Fatalf("expected prompt context to keep 80 events, got %d", len(contextEvents))
+	}
+	if contextEvents[0].Sequence != 6 || contextEvents[len(contextEvents)-1].Sequence != 85 {
+		t.Fatalf("expected prompt context to keep message sequences 6-85, got first=%d last=%d", contextEvents[0].Sequence, contextEvents[len(contextEvents)-1].Sequence)
+	}
+
+	prompt := FormatExecPrompt("continue", PreparedExec{
+		Mode:          ModeResume,
+		Session:       Metadata{SessionID: "long-session-with-noise"},
+		ContextEvents: events,
+	})
+
+	if got, want := strings.Count(prompt, "- #"), len(contextEvents); got != want {
+		t.Fatalf("expected prompt to contain %d context event lines, got %d in %q", want, got, prompt)
+	}
+	for _, want := range []string{"conversation message 006", "conversation message 085", "Current user request:", "continue"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got %q", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{
+		"conversation message 001",
+		"conversation message 002",
+		"conversation message 003",
+		"conversation message 004",
+		"conversation message 005",
+		"noisy tool result",
+		"trailing noisy tool result",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("expected prompt to omit %q, got %q", unwanted, prompt)
+		}
+	}
+}
+
 func TestPrepareExecPersistsSpecialistMetadataForNewSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T14:30:00Z")})
 
