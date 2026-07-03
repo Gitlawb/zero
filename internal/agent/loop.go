@@ -816,6 +816,25 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	// A shell command that sets sandbox_permissions: with_additional_permissions
+	// must carry a valid additional_permissions payload; inlineAdditionalPermissionsProfile
+	// is the single source of truth for that shape, and buildPermissionEvent (below)
+	// calls it again to render the prompt's scope text. Check it here, before any
+	// permission prompt is shown: a malformed payload can never be satisfied no
+	// matter what the user decides, so surfacing it as a plain tool error (which the
+	// model can see and retry) is both clearer and avoids presenting a normal-looking
+	// prompt whose "allow" path is guaranteed to fail with a confusing denial.
+	if toolFound && isShellCommandTool(call.Name) {
+		if _, _, err := inlineAdditionalPermissionsProfile(args, options.Cwd); err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: " + err.Error(),
+			}, nil
+		}
+	}
+
 	// ask_user is intercepted in the loop (like permissions) so the question can
 	// be routed to an interactive front-end instead of blocking inside the tool.
 	// When no front-end is wired up it degrades to the tool's own graceful Run().
