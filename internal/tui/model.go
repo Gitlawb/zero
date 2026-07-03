@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentcli"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/lsp"
@@ -74,25 +75,30 @@ type model struct {
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
-	registry                    *tools.Registry
-	sessionStore                *sessions.Store
-	sandboxStore                *sandbox.GrantStore
-	mcpConfig                   config.MCPConfig
-	mcpPermissionStore          *internalmcp.PermissionStore
-	mcpTokenStore               *internalmcp.TokenStore
-	mcpCommand                  func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache           MCPViewState
-	mcpViewStateReady           bool
-	mcpCommandSeq               int
-	mcpCommandCancel            context.CancelFunc
-	sandboxSetupSeq             int
-	sandboxSetupInFlight        bool
-	doctorCommandSeq            int
-	doctorInFlight              bool
-	doctorFrame                 int
-	activeSession               sessions.Metadata
-	sessionEvents               []sessions.Event
+	// detectAgentCLIs probes for installed agent-CLI harnesses (see
+	// agentcli.Detect). Injectable via Options.DetectAgentCLIs so tests can
+	// supply a fake instead of touching the real PATH/filesystem/keychain;
+	// newModel defaults it to agentcli.Detect when unset.
+	detectAgentCLIs      func(agentcli.Deps) []agentcli.Detection
+	registry             *tools.Registry
+	sessionStore         *sessions.Store
+	sandboxStore         *sandbox.GrantStore
+	mcpConfig            config.MCPConfig
+	mcpPermissionStore   *internalmcp.PermissionStore
+	mcpTokenStore        *internalmcp.TokenStore
+	mcpCommand           func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache    MCPViewState
+	mcpViewStateReady    bool
+	mcpCommandSeq        int
+	mcpCommandCancel     context.CancelFunc
+	sandboxSetupSeq      int
+	sandboxSetupInFlight bool
+	doctorCommandSeq     int
+	doctorInFlight       bool
+	doctorFrame          int
+	activeSession        sessions.Metadata
+	sessionEvents        []sessions.Event
 	// titledSessions records session ids for which a model-generated title has
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
@@ -684,6 +690,11 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode = agent.PermissionModeAuto
 	}
 
+	detectAgentCLIs := options.DetectAgentCLIs
+	if detectAgentCLIs == nil {
+		detectAgentCLIs = agentcli.Detect
+	}
+
 	input := textinput.New()
 	input.Prompt = "❯ "
 	input.Placeholder = composerPlaceholder
@@ -725,6 +736,7 @@ func newModel(ctx context.Context, options Options) model {
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		detectAgentCLIs:             detectAgentCLIs,
 		registry:                    registry,
 		sessionStore:                sessionStore,
 		sandboxStore:                sandboxStore,
@@ -754,7 +766,7 @@ func newModel(ctx context.Context, options Options) model {
 		altScreen:                   options.AltScreen,
 		liveUsageCounts:             map[int]int{},
 		swarmSessionMap:             map[string]string{},
-		setup:                       newSetupState(options.Setup),
+		setup:                       newSetupState(options.Setup, detectAgentCLIs),
 		setupSave:                   options.Setup.Save,
 	}
 	// Apply an explicit theme immediately; auto stays on the dark default until

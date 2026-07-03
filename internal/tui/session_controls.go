@@ -342,8 +342,14 @@ func (m model) enableOnlyBash() model {
 // disableOnlyBash restores whatever tool filter was active before /onlybash
 // on, clearing the stash. Applies to the NEXT run, same as /turns — there is
 // no mid-run env propagation to worry about here (unlike /turns' ZERO_MAX_TURNS),
-// so no pending-run guard is needed.
+// so no pending-run guard is needed. Mirrors enableOnlyBash's guard: a no-op
+// unless onlybash is actually active, so "/onlybash off" while it was never
+// turned on can't clobber an operator-configured tool restriction with the
+// (empty) stash fields.
 func (m model) disableOnlyBash() model {
+	if !m.onlyBashActive {
+		return m
+	}
 	m.agentOptions.EnabledTools = m.onlyBashStashedEnabledTools
 	m.agentOptions.DisabledTools = m.onlyBashStashedDisabledTools
 	m.onlyBashStashedEnabledTools = nil

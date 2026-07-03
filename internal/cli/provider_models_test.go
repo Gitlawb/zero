@@ -206,3 +206,40 @@ func TestApplyAuthCLIDiscoveryCredential(t *testing.T) {
 		}
 	})
 }
+
+// TestRunProvidersModelsAuthCLIDispatchUsesInjectedCredentialExtraction covers
+// the full discoveryCredentialProfile AuthCLI branch — harness lookup PLUS
+// credential extraction — through deps.extractAgentCLICredentials, not just
+// the pure applyAuthCLIDiscoveryCredential helper above. Before this seam
+// existed, this branch called agentcli.ExtractCredentials directly and could
+// only be exercised by touching a real PATH/filesystem/keychain.
+func TestRunProvidersModelsAuthCLIDispatchUsesInjectedCredentialExtraction(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{Name: "claude-code", ProviderKind: config.ProviderKindAnthropic, AuthCLI: "claude", Model: "claude-sonnet-4.5"}
+		return config.ResolvedConfig{ActiveProvider: "claude-code", Providers: []config.ProviderProfile{profile}, Provider: profile, MaxTurns: 7}, nil
+	}
+	var extractCalledWith agentcli.Harness
+	deps.extractAgentCLICredentials = func(h agentcli.Harness, _ agentcli.Deps) (agentcli.Credentials, bool, error) {
+		extractCalledWith = h
+		return agentcli.Credentials{AccessToken: "tok-from-fake"}, true, nil
+	}
+	var probed config.ProviderProfile
+	deps.discoverProviderModels = func(_ context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		probed = profile
+		return nil, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "models"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	if extractCalledWith.ID != "claude" {
+		t.Fatalf("extractAgentCLICredentials called with harness %#v, want claude", extractCalledWith)
+	}
+	if probed.AuthHeaderValue != "Bearer tok-from-fake" {
+		t.Fatalf("probed.AuthHeaderValue = %q, want the fake-extracted token, proving the injected seam (not a real ExtractCredentials call) fed the discovery request", probed.AuthHeaderValue)
+	}
+}

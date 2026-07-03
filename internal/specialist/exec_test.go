@@ -6,7 +6,21 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
+
+// TestZeroProviderEnvVarMatchesConfigActiveProviderEnv guards zeroProviderEnvVar
+// against silently drifting from config.ActiveProviderEnv. The two are
+// deliberately separate literals (see zeroProviderEnvVar's doc comment: this
+// package avoids importing internal/config just for one env var name), which
+// means a future rename of one would NOT be caught by the compiler — only by
+// this test actually comparing the values.
+func TestZeroProviderEnvVarMatchesConfigActiveProviderEnv(t *testing.T) {
+	if zeroProviderEnvVar != config.ActiveProviderEnv {
+		t.Fatalf("zeroProviderEnvVar = %q, config.ActiveProviderEnv = %q, want equal", zeroProviderEnvVar, config.ActiveProviderEnv)
+	}
+}
 
 func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 	executor := Executor{

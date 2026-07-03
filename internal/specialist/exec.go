@@ -48,6 +48,7 @@ type Executor struct {
 	PromptFileMaxSize     int
 	Load                  LoadFunc
 	RunChild              RunChildFunc
+	RunHarnessChild       runHarnessChildFunc
 	LaunchBackground      LaunchBackgroundFunc
 	BinaryPath            string
 	Paths                 Paths

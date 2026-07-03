@@ -143,7 +143,13 @@ func exchangeClaudeCodeCode(ctx context.Context, code, state, verifier string, o
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		// Matches the 60s override callers like runAuthClaude/`zero auth claude`
+		// already use for this same endpoint: third-party reports describe
+		// 40-60s responses during platform degradation, and this default is also
+		// on the silent per-request refresh path (agentclicreds.go), where a
+		// false timeout surfaces as a mid-conversation auth error, not just a
+		// slow login screen.
+		client = &http.Client{Timeout: 60 * time.Second}
 	}
 	now := opts.Now
 	if now == nil {
@@ -282,7 +288,13 @@ func RefreshClaudeCode(ctx context.Context, refreshToken string, opts ClaudeCode
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		// Matches the 60s override callers like runAuthClaude/`zero auth claude`
+		// already use for this same endpoint: third-party reports describe
+		// 40-60s responses during platform degradation, and this default is also
+		// on the silent per-request refresh path (agentclicreds.go), where a
+		// false timeout surfaces as a mid-conversation auth error, not just a
+		// slow login screen.
+		client = &http.Client{Timeout: 60 * time.Second}
 	}
 	now := opts.Now
 	if now == nil {

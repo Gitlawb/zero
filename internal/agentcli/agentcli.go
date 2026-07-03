@@ -17,12 +17,20 @@ package agentcli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
+
+// keychainTimeout bounds the `security` shell-out in readKeychain. Without it
+// a stalled keychain (locked/prompting) blocks Detect indefinitely — and
+// agentclicreds.go re-probes credentials on every outbound provider request,
+// so an unbounded hang here would freeze real requests, not just TUI startup.
+const keychainTimeout = 5 * time.Second
 
 // LoginState reports what Detect could establish about a harness's login
 // status from local, non-interactive probes.
@@ -371,7 +379,9 @@ func homeJoin(home, rel string) string {
 // darwin (see resolveDeps): it shells out to the `security` CLI rather than
 // linking a CGo/keychain-access library, keeping this package stdlib-only.
 func readKeychain(service string) ([]byte, error) {
-	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", service, "-w").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), keychainTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", service, "-w").Output()
 	if err != nil {
 		return nil, fmt.Errorf("agentcli: keychain lookup for %q: %w", service, err)
 	}

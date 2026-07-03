@@ -181,10 +181,12 @@ func effectiveProviderKind(profile config.ProviderProfile) config.ProviderKind {
 	return ""
 }
 
+// providerProfileHasCredential delegates to the canonical check so a future
+// credential type added there (as APIKeyStored already was) flows into
+// onboarding advice automatically. Verified equivalent for the dimensions this
+// package cares about — it also does not fold in APIKeyEnv resolution.
 func providerProfileHasCredential(profile config.ProviderProfile) bool {
-	return strings.TrimSpace(profile.APIKey) != "" ||
-		strings.TrimSpace(profile.AuthHeaderValue) != "" ||
-		strings.TrimSpace(profile.AuthCLI) != ""
+	return profile.HasConfiguredCredential()
 }
 
 func firstAuthEnvVar(descriptor providercatalog.Descriptor) string {

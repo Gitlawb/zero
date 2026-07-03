@@ -162,6 +162,19 @@ func TestMissingCredentialActionSkipsLocalAndCredentialedProfiles(t *testing.T) 
 				AuthHeaderValue: "Bearer actual-token",
 			},
 		},
+		{
+			// providerProfileHasCredential delegates to
+			// config.ProviderProfile.HasConfiguredCredential() specifically so this
+			// case — a key held in the encrypted store, not in-memory on the
+			// profile — isn't missed: before that delegation, onboarding advice
+			// would wrongly nag for a credential this profile already has.
+			name: "api key is in the encrypted store (APIKeyStored), not held in-memory",
+			profile: config.ProviderProfile{
+				Name:         "openai",
+				ProviderKind: config.ProviderKindOpenAI,
+				APIKeyStored: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {

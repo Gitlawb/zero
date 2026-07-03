@@ -16,14 +16,15 @@ import (
 // keychain), and advances Welcome -> Method.
 func setupModelWithProviders(t *testing.T, providers []SetupProviderOption, detections []agentcli.Detection) model {
 	t.Helper()
-	m := newModel(context.Background(), Options{Setup: SetupOptions{
-		Visible:   true,
-		Providers: providers,
-	}})
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible:   true,
+			Providers: providers,
+		},
+		DetectAgentCLIs: func(agentcli.Deps) []agentcli.Detection { return detections },
+	})
 	m.width = 100
 	m.height = 30
-	m.setup.agentCLIDetections = detections
-	m.setup.selectedMethod = firstSelectableMethodIndex(m.setupMethodOptions())
 	return pressSetupContinueOnce(m) // Welcome -> Method
 }
 
@@ -128,14 +129,17 @@ func TestSetupMethodOptionsFiltersCLIRowsNotInProviderList(t *testing.T) {
 	if !ok {
 		t.Fatal("test assumption broken: claude missing from the agentcli catalog")
 	}
-	m := newModel(context.Background(), Options{Setup: SetupOptions{
-		Visible: true,
-		// No "anthropic" entry offered by this setup run.
-		Providers: []SetupProviderOption{{ID: "openai", Name: "OpenAI", EnvVar: "OPENAI_API_KEY", RequiresAuth: true}},
-	}})
-	m.setup.agentCLIDetections = []agentcli.Detection{
+	detections := []agentcli.Detection{
 		{Harness: claudeHarness, Path: "/usr/local/bin/claude", Login: agentcli.LoggedIn},
 	}
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			// No "anthropic" entry offered by this setup run.
+			Providers: []SetupProviderOption{{ID: "openai", Name: "OpenAI", EnvVar: "OPENAI_API_KEY", RequiresAuth: true}},
+		},
+		DetectAgentCLIs: func(agentcli.Deps) []agentcli.Detection { return detections },
+	})
 	for _, option := range m.setupMethodOptions() {
 		if option.kind == providerWizardMethodCLI && option.harness.ID == "claude" {
 			t.Fatalf("claude CLI row must be filtered out when anthropic isn't in this setup's provider list: %#v", option)

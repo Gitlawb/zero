@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agentcli"
@@ -153,7 +154,16 @@ func defaultClaudeRefresh(options Options) claudeRefreshFunc {
 // forceRefresh (the 401 retry) skips 1 and 2: a token that just 401'd is not
 // worth re-serving, however fresh it looks.
 func claudeRefreshingBearerResolver(harness agentcli.Harness, deps agentcli.Deps, store cliAuthTokenStore, refresh claudeRefreshFunc) providerio.TokenResolver {
+	var mu sync.Mutex
 	return func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
+		// Concurrent StreamCompletion calls (e.g. parallel tool calls) share this
+		// resolver. Without serializing, two calls that both see a stale token
+		// would race to refresh with the SAME refresh token — and OAuth refresh
+		// tokens are commonly single-use/rotated server-side, so the losing call
+		// fails with a spurious auth error instead of transparently reusing the
+		// winner's freshly-rotated token.
+		mu.Lock()
+		defer mu.Unlock()
 		now := time.Now()
 		var cached oauth.Token
 		if store != nil {

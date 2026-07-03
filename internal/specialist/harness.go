@@ -6,7 +6,16 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agentcli"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
+
+// runHarnessChildFunc runs one harness child to completion; the production
+// default (runHarness's nil case) wraps runChildWithDecoder. Injectable via
+// Executor.RunHarnessChild — mirrors RunChildFunc's role for the self-exec
+// path (executor.runChild) — so tests can stub the child process and exercise
+// runHarness's own logic (session/accounting wiring, decoder selection,
+// result shaping) without spawning a real claude/codex process.
+type runHarnessChildFunc func(ctx context.Context, binaryPath string, args []string, dir string, decoder childDecoder, progress func(streamjson.Event)) (ChildRunResult, error)
 
 // runHarness runs a specialist whose manifest pins an external agent-harness
 // CLI (claude, codex, gemini, ...) instead of self-exec zero. It shares
@@ -44,7 +53,13 @@ func (executor Executor) runHarness(ctx context.Context, manifest Manifest, para
 	// means something to a self-exec zero child that reads it at startup, and a
 	// harness child is a foreign CLI with its own credential/config store.
 	decoder := newHarnessDecoder(detection.Harness.Stream)
-	run, err := runChildWithDecoder(ctx, detection.Path, args, nil, strings.TrimSpace(options.Cwd), decoder, options.Progress)
+	runChild := executor.RunHarnessChild
+	if runChild == nil {
+		runChild = func(ctx context.Context, binaryPath string, args []string, dir string, decoder childDecoder, progress func(streamjson.Event)) (ChildRunResult, error) {
+			return runChildWithDecoder(ctx, binaryPath, args, nil, dir, decoder, progress)
+		}
+	}
+	run, err := runChild(ctx, detection.Path, args, strings.TrimSpace(options.Cwd), decoder, options.Progress)
 	if err != nil {
 		exitCode := run.exitCodeOr(-1)
 		summary := SummarizeStream(run.Events, exitCode)

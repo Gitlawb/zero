@@ -94,25 +94,38 @@ func (d *claudeStreamDecoder) finish(int) []streamjson.Event {
 	return nil
 }
 
-// codexJSONDecoder decodes the NDJSON stdout produced by `codex exec --json`:
-// each line wraps a "msg" whose "type" distinguishes an assistant text chunk
-// ("agent_message"), the run's completion marker ("task_complete"), and a
-// best-effort token usage report ("token_count"). Codex's final answer is
-// "the last agent_message seen", not a dedicated field, so the decoder must
-// remember it across lines.
+// codexJSONDecoder decodes the NDJSON stdout produced by `codex exec --json`.
+// Grounded against a real capture (codex-cli 0.142.5, `codex exec --json
+// --skip-git-repo-check "reply with exactly: hi"`), which emits top-level
+// events — not the legacy `{"msg":{"type":...}}` wrapper this decoder
+// previously expected:
+//
+//	{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"hi"}}
+//	{"type":"turn.completed","usage":{"input_tokens":27089,"cached_input_tokens":4992,"output_tokens":24,"reasoning_output_tokens":17}}
+//
+// "item.completed" fires once per item reaching a terminal state; only
+// item.type "agent_message" carries assistant text the specialist pipeline
+// cares about (other item types — "error" for config/tooling warnings,
+// "command_execution", "file_change" — are noise for this decoder's scope,
+// same as legacy's silent drop of "reasoning"/unknown msg types). Codex's
+// final answer is "the last agent_message seen", not a dedicated field, so
+// the decoder must remember it across lines. "turn.completed" is the run's
+// completion marker and carries token usage.
 type codexJSONDecoder struct {
 	lastMessage string
 	done        bool
 }
 
 type codexLine struct {
-	Msg struct {
-		Type         string `json:"type"`
-		Message      string `json:"message"`
-		InputTokens  *int   `json:"input_tokens"`
-		OutputTokens *int   `json:"output_tokens"`
-		TotalTokens  *int   `json:"total_tokens"`
-	} `json:"msg"`
+	Type string `json:"type"`
+	Item *struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"item"`
+	Usage *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 }
 
 func (d *codexJSONDecoder) decodeLine(line string) []streamjson.Event {
@@ -120,29 +133,34 @@ func (d *codexJSONDecoder) decodeLine(line string) []streamjson.Event {
 	if err := json.Unmarshal([]byte(line), &parsed); err != nil {
 		return nil
 	}
-	switch parsed.Msg.Type {
-	case "agent_message":
-		if parsed.Msg.Message == "" {
+	switch parsed.Type {
+	case "item.completed":
+		if parsed.Item == nil || parsed.Item.Type != "agent_message" || parsed.Item.Text == "" {
 			return nil
 		}
-		d.lastMessage = parsed.Msg.Message
-		return []streamjson.Event{{Type: streamjson.EventText, Delta: parsed.Msg.Message}}
-	case "task_complete":
+		d.lastMessage = parsed.Item.Text
+		return []streamjson.Event{{Type: streamjson.EventText, Delta: parsed.Item.Text}}
+	case "turn.completed":
 		d.done = true
-		return []streamjson.Event{{Type: streamjson.EventFinal, Text: d.lastMessage}}
-	case "token_count":
-		event := streamjson.Event{Type: streamjson.EventUsage}
-		event.PromptTokens = parsed.Msg.InputTokens
-		event.CompletionTokens = parsed.Msg.OutputTokens
-		event.TotalTokens = parsed.Msg.TotalTokens
-		return []streamjson.Event{event}
+		var events []streamjson.Event
+		if parsed.Usage != nil {
+			input, output := parsed.Usage.InputTokens, parsed.Usage.OutputTokens
+			total := input + output
+			events = append(events, streamjson.Event{
+				Type:             streamjson.EventUsage,
+				PromptTokens:     &input,
+				CompletionTokens: &output,
+				TotalTokens:      &total,
+			})
+		}
+		return append(events, streamjson.Event{Type: streamjson.EventFinal, Text: d.lastMessage})
 	default:
 		return nil
 	}
 }
 
 func (d *codexJSONDecoder) finish(int) []streamjson.Event {
-	// task_complete never arrived (e.g. the CLI was killed mid-run) but there
+	// turn.completed never arrived (e.g. the CLI was killed mid-run) but there
 	// was at least one agent_message — still surface it as the final answer
 	// rather than losing it.
 	if d.done || d.lastMessage == "" {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -468,4 +470,58 @@ func TestClaudeRefreshingBearerResolver(t *testing.T) {
 			t.Fatalf("newestClaudeRefreshToken = %q, want the only source with a token", got)
 		}
 	})
+}
+
+// TestClaudeRefreshingBearerResolverSerializesConcurrentRefresh proves the
+// resolver's mutex prevents the race CodeRabbit flagged: concurrent
+// StreamCompletion calls (e.g. parallel tool calls) sharing one resolver must
+// not both see a stale token and both call refresh with the SAME (commonly
+// single-use/rotated) refresh token. Without the lock, every one of the
+// concurrent callers would race into the refresh branch; with it, only the
+// first acquires an expired token, refreshes and saves it, and every other
+// caller — blocked until that finishes — re-checks the now-fresh cached token
+// and short-circuits instead of refreshing again.
+func TestClaudeRefreshingBearerResolverSerializesConcurrentRefresh(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(2 * time.Hour)
+	store := &fakeCLIAuthTokenStore{tokens: map[string]oauth.Token{
+		cliAuthTokenStoreKey: {AccessToken: "at-stale", RefreshToken: "rt-stale", ExpiresAt: past},
+	}}
+
+	var refreshCalls int32
+	var concurrentInFlight int32
+	refresh := claudeRefreshFunc(func(context.Context, string) (oauth.Token, error) {
+		if atomic.AddInt32(&concurrentInFlight, 1) > 1 {
+			t.Error("refresh invoked concurrently: resolver is not serializing access")
+		}
+		defer atomic.AddInt32(&concurrentInFlight, -1)
+		atomic.AddInt32(&refreshCalls, 1)
+		time.Sleep(20 * time.Millisecond) // widen the race window
+		return oauth.Token{AccessToken: "at-fresh", RefreshToken: "rt-fresh", ExpiresAt: future}, nil
+	})
+	// Extracted file credentials are also expired, so every caller that misses
+	// the (initially stale) cache falls through to the refresh branch too.
+	resolver, _ := claudeResolverFixture(t, claudeBlob("at-file-stale", "rt-file-stale", past), store, refresh)
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	for i := range goroutines {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, _, err := resolver(context.Background(), false)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: resolver returned error: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Fatalf("refresh called %d times, want exactly 1 (later callers should reuse the winner's saved token)", got)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/agentcli"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -35,18 +36,23 @@ type Options struct {
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
-	RuntimeMessageSink          func(tea.Msg)
-	Registry                    *tools.Registry
-	SessionStore                *sessions.Store
-	SandboxStore                *sandbox.GrantStore
-	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
+	// DetectAgentCLIs probes the machine for installed agent-CLI harnesses (see
+	// agentcli.Detect). Injectable so tests can supply a fake instead of
+	// touching the real PATH/filesystem/keychain; nil defaults to
+	// agentcli.Detect in newModel.
+	DetectAgentCLIs     func(agentcli.Deps) []agentcli.Detection
+	RuntimeMessageSink  func(tea.Msg)
+	Registry            *tools.Registry
+	SessionStore        *sessions.Store
+	SandboxStore        *sandbox.GrantStore
+	MCPConfig           config.MCPConfig
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
 
 	AgentOptions    agent.Options
 	PermissionMode  agent.PermissionMode

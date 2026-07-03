@@ -47,7 +47,7 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 
 	ctx, stop := signalContext()
 	defer stop()
-	models, err := deps.discoverProviderModels(ctx, discoveryCredentialProfile(profile))
+	models, err := deps.discoverProviderModels(ctx, discoveryCredentialProfile(profile, deps.extractAgentCLICredentials))
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
@@ -106,8 +106,10 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 // discoveryCredentialProfile resolves the profile's API key the same way the
 // runtime does — inline, then the stored credential, then the configured env var —
 // so a `providers models` probe authenticates exactly like a real request. Mirrors
-// discoveredModelContextWindow's credential resolution.
-func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderProfile {
+// discoveredModelContextWindow's credential resolution. extractCreds is
+// deps.extractAgentCLICredentials (agentcli.ExtractCredentials in production);
+// injectable so the AuthCLI branch is testable without a real PATH/keychain.
+func discoveryCredentialProfile(profile config.ProviderProfile, extractCreds func(agentcli.Harness, agentcli.Deps) (agentcli.Credentials, bool, error)) config.ProviderProfile {
 	authed := profile
 	// An AuthCLI profile (e.g. Claude Code) has no API key: its credential is a
 	// live bearer read from the harness's local store. Resolve it first and stamp
@@ -117,7 +119,7 @@ func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderP
 	// live provider sends). Non-AuthCLI profiles fall through to the key paths.
 	if strings.TrimSpace(authed.AuthCLI) != "" {
 		if harness, ok := agentcli.Lookup(authed.AuthCLI); ok && harness.CatalogID != "" {
-			if creds, ok, err := agentcli.ExtractCredentials(harness, agentcli.Deps{}); err == nil && ok {
+			if creds, ok, err := extractCreds(harness, agentcli.Deps{}); err == nil && ok {
 				authed = applyAuthCLIDiscoveryCredential(authed, harness.CatalogID, creds)
 			}
 		}

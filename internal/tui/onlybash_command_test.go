@@ -59,6 +59,26 @@ func TestHandleOnlyBashCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("off while never turned on does not clobber a pre-existing operator filter", func(t *testing.T) {
+		m := model{}
+		m.agentOptions.EnabledTools = []string{"read_file", "grep"}
+		m.agentOptions.DisabledTools = []string{"bash"}
+
+		got, out := m.handleOnlyBashCommand("off")
+		if got.onlyBashActive {
+			t.Fatal("onlyBashActive should stay false")
+		}
+		if want := []string{"read_file", "grep"}; !stringSlicesEqual(got.agentOptions.EnabledTools, want) {
+			t.Fatalf("EnabledTools = %v, want unchanged operator filter %v (onlybash was never on, so off must be a no-op)", got.agentOptions.EnabledTools, want)
+		}
+		if want := []string{"bash"}; !stringSlicesEqual(got.agentOptions.DisabledTools, want) {
+			t.Fatalf("DisabledTools = %v, want unchanged operator filter %v", got.agentOptions.DisabledTools, want)
+		}
+		if !strings.Contains(out, "onlybash: off") {
+			t.Fatalf("status output should still report onlybash: off, got %q", out)
+		}
+	})
+
 	t.Run("a redundant on while already active does not re-stash onlybash's own filter", func(t *testing.T) {
 		m := model{}
 		m.agentOptions.EnabledTools = []string{"read_file"}

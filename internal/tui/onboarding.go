@@ -101,7 +101,13 @@ type setupModelsDiscoveredMsg struct {
 	err              error
 }
 
-func newSetupState(options SetupOptions) setupState {
+// detect probes for installed agent-CLI harnesses; pass agentcli.Detect for
+// real detection or a fake for hermetic tests (see the identical seam on
+// model.detectAgentCLIs / Options.DetectAgentCLIs).
+func newSetupState(options SetupOptions, detect func(agentcli.Deps) []agentcli.Detection) setupState {
+	if detect == nil {
+		detect = agentcli.Detect
+	}
 	providers := append([]SetupProviderOption{}, options.Providers...)
 	if len(providers) == 0 {
 		providers = []SetupProviderOption{{
@@ -121,7 +127,7 @@ func newSetupState(options SetupOptions) setupState {
 	// terminal bracketed paste (Paste: true) is the single paste path.
 	apiKey.KeyMap.Paste.SetEnabled(false)
 	apiKey.Focus()
-	detections := agentcli.Detect(agentcli.Deps{})
+	detections := detect(agentcli.Deps{})
 	state := setupState{
 		visible:            options.Visible,
 		required:           options.Required,
@@ -737,15 +743,10 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 				m.setup.apiKey.SetValue("")
 				m.setup.baseURL = ""
 				m.setup.name = ""
-				m.resetSetupModels()
 				// The CLI row already named the provider — skip straight to model
 				// selection, mirroring applySetupOAuth's post-login jump.
 				m.setup.stage = setupStageModel
-				m.setup.modelErr = ""
-				m.setup.modelGen++
-				cmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
-				m.setup.modelLoad = cmd != nil
-				return m, cmd
+				return m, m.enterModelStage()
 			default:
 				m.setup.providers = m.setup.allProviders
 				m.setup.selected = 0
@@ -795,12 +796,7 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		m.setup.stage = m.nextSetupStage()
 		m.setup.err = ""
 		if m.setup.stage == setupStageModel {
-			m.resetSetupModels()
-			m.setup.modelErr = ""
-			m.setup.modelGen++
-			cmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
-			m.setup.modelLoad = cmd != nil
-			return m, cmd
+			return m, m.enterModelStage()
 		}
 		return m, nil
 	}
@@ -907,6 +903,20 @@ func (m *model) resetSetupModels() {
 	m.setup.modelLoad = false
 	m.setup.modelErr = ""
 	m.setup.modelSrc = "fallback"
+}
+
+// enterModelStage bootstraps the model-selection stage: reset any stale model
+// list/query, clear the last discovery error, bump modelGen (invalidating any
+// in-flight discovery response for a prior provider), and kick off a fresh
+// discovery command. Shared by the CLI-connect fast path (which jumps straight
+// to Model) and the generic advance-to-Model path, so the two can't drift.
+func (m *model) enterModelStage() tea.Cmd {
+	m.resetSetupModels()
+	m.setup.modelErr = ""
+	m.setup.modelGen++
+	cmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
+	m.setup.modelLoad = cmd != nil
+	return cmd
 }
 
 func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {

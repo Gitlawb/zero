@@ -314,16 +314,6 @@ func providerWizardCLIMethodOptions(detections []agentcli.Detection) []providerW
 	options := make([]providerWizardMethodOption, 0, len(detections))
 	for _, detection := range detections {
 		harness := detection.Harness
-		if harness.CatalogID == "" {
-			options = append(options, providerWizardMethodOption{
-				kind:     providerWizardMethodCLI,
-				disabled: true,
-				harness:  harness,
-				label:    harness.DisplayName,
-				subtitle: "Detected — usable as a sub-agent harness; no reusable API credentials.",
-			})
-			continue
-		}
 		loggedIn := detection.Login == agentcli.LoggedIn
 		state := "installed, not logged in"
 		switch detection.Login {
@@ -331,6 +321,17 @@ func providerWizardCLIMethodOptions(detections []agentcli.Detection) []providerW
 			state = "logged in"
 		case agentcli.LoginUnknown:
 			state = "installed"
+		}
+		if harness.CatalogID == "" {
+			options = append(options, providerWizardMethodOption{
+				kind:     providerWizardMethodCLI,
+				disabled: true,
+				harness:  harness,
+				loggedIn: loggedIn,
+				label:    harness.DisplayName,
+				subtitle: "Detected — " + state + "; usable as a sub-agent harness, no reusable API credentials.",
+			})
+			continue
 		}
 		options = append(options, providerWizardMethodOption{
 			kind:     providerWizardMethodCLI,
@@ -400,7 +401,15 @@ type providerWizardState struct {
 	// newProviderWizard) rather than reprobed on every render/keystroke —
 	// agentcli.Detect shells out to `security` for the macOS keychain, which
 	// would make every method-step render/move/canAdvance call pay that cost.
+	// The one exception is advance()'s logged-out rejection path: reprobing
+	// there (not on every render) is what lets a user who just logged in retry
+	// without reopening the wizard.
 	agentCLIDetections []agentcli.Detection
+	// detect is the same probe used to build agentCLIDetections, kept around so
+	// advance() can reprobe a single harness on a logged-out rejection instead
+	// of trusting detection state that's stale by definition (it was captured
+	// at construction, before the user could have run a login command).
+	detect func(agentcli.Deps) []agentcli.Detection
 	// cliHarness is set when the CLI connect method was chosen: the wizard
 	// skips the provider-chooser step entirely (the row already names the
 	// provider) and jumps straight to model selection.
@@ -408,13 +417,18 @@ type providerWizardState struct {
 }
 
 func (m model) newProviderWizard() *providerWizardState {
-	detections := agentcli.Detect(agentcli.Deps{})
+	detect := m.detectAgentCLIs
+	if detect == nil {
+		detect = agentcli.Detect
+	}
+	detections := detect(agentcli.Deps{})
 	providers := providerWizardProviders()
 	wizard := &providerWizardState{
 		step:               providerWizardStepMethod,
 		providers:          providers,
 		selectedProvider:   0,
 		agentCLIDetections: detections,
+		detect:             detect,
 	}
 	wizard.selectedMethod = firstSelectableMethodIndex(wizard.methodOptions())
 	wizard.refreshModels()
@@ -428,6 +442,26 @@ func (wizard *providerWizardState) methodOptions() []providerWizardMethodOption 
 		return nil
 	}
 	return providerWizardMethodOptions(wizard.agentCLIDetections)
+}
+
+// reprobeSelectedHarness re-runs detection and, if harnessID now reports
+// LoggedIn, updates wizard.agentCLIDetections in place and returns the
+// harness's refreshed method-option row. Used only from advance()'s
+// logged-out rejection path — never on every render, so this doesn't reinstate
+// the per-keystroke keychain-probing cost agentCLIDetections' construction-time
+// capture exists to avoid.
+func (wizard *providerWizardState) reprobeSelectedHarness(harnessID string) (providerWizardMethodOption, bool) {
+	if wizard == nil || wizard.detect == nil {
+		return providerWizardMethodOption{}, false
+	}
+	fresh := wizard.detect(agentcli.Deps{})
+	wizard.agentCLIDetections = fresh
+	for _, option := range providerWizardMethodOptions(fresh) {
+		if option.kind == providerWizardMethodCLI && option.harness.ID == harnessID {
+			return option, true
+		}
+	}
+	return providerWizardMethodOption{}, false
 }
 
 func providerWizardProviders() []providercatalog.Descriptor {
@@ -562,9 +596,17 @@ func (wizard *providerWizardState) advance() {
 				return
 			}
 			if !selected.loggedIn {
-				wizard.err = selected.harness.DisplayName + " is not logged in — run `" +
-					selected.harness.LoginCommand() + "` to log in, then try again."
-				return
+				// agentCLIDetections was captured once at construction, so it's
+				// stale by definition — the user may have just run the login
+				// command this same error is telling them to run. Reprobe before
+				// rejecting so a retry (without reopening the wizard) can succeed.
+				if refreshed, ok := wizard.reprobeSelectedHarness(selected.harness.ID); ok && refreshed.loggedIn {
+					selected = refreshed
+				} else {
+					wizard.err = selected.harness.DisplayName + " is not logged in — run `" +
+						selected.harness.LoginCommand() + "` to log in, then try again."
+					return
+				}
 			}
 			descriptor, ok := providercatalog.Get(selected.harness.CatalogID)
 			if !ok {
@@ -1781,6 +1823,7 @@ func providerWizardCLIProfile(harness agentcli.Harness, provider providercatalog
 		Name:         harness.ID,
 		ProviderKind: providerWizardProviderKind(provider),
 		CatalogID:    provider.ID,
+		BaseURL:      provider.DefaultBaseURL,
 		APIFormat:    providerWizardAPIFormat(provider),
 		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
 		AuthCLI:      harness.ID,

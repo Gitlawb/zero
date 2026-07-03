@@ -63,30 +63,35 @@ type appDeps struct {
 	// (Claude Code, Codex, ...) — production: agentcli.Detect with the real
 	// (zero-value) Deps. Tests inject a fake so `zero auth status` and the
 	// credential-advice surfaces never touch a real PATH/keychain.
-	detectAgentCLIs       func(agentcli.Deps) []agentcli.Detection
-	newSessionStore       func() *sessions.Store
-	loadPlugins           func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks             func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir             func() string
-	pluginsDir            func() string
-	toolsDir              func() string
-	newMCPStore           func() (*mcp.PermissionStore, error)
-	newMCPTokenStore      func() (*mcp.TokenStore, error)
-	newSandboxStore       func() (*sandbox.GrantStore, error)
-	selectSandboxBackend  func(sandbox.BackendOptions) sandbox.Backend
-	runSandboxSetupHelper func(path string, args []string, stdout io.Writer, stderr io.Writer) error
-	registerMCPTools      func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree       func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan      func(string) (verify.Plan, error)
-	runVerify             func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify         func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval          func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges        func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges         func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	runTUI                func(context.Context, tui.Options) int
-	runEditor             func(string) error
-	checkUpdate           func(context.Context, update.Options) (update.Result, error)
-	now                   func() time.Time
+	detectAgentCLIs func(agentcli.Deps) []agentcli.Detection
+	// extractAgentCLICredentials reads a detected harness's local credential
+	// store — production: agentcli.ExtractCredentials. Tests inject a fake so
+	// `providers models`'s AuthCLI discovery branch (discoveryCredentialProfile)
+	// never touches a real PATH/filesystem/keychain.
+	extractAgentCLICredentials func(agentcli.Harness, agentcli.Deps) (agentcli.Credentials, bool, error)
+	newSessionStore            func() *sessions.Store
+	loadPlugins                func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks                  func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir                  func() string
+	pluginsDir                 func() string
+	toolsDir                   func() string
+	newMCPStore                func() (*mcp.PermissionStore, error)
+	newMCPTokenStore           func() (*mcp.TokenStore, error)
+	newSandboxStore            func() (*sandbox.GrantStore, error)
+	selectSandboxBackend       func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper      func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools           func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree            func(context.Context, worktrees.Options) (worktrees.Result, error)
+	detectVerifyPlan           func(string) (verify.Plan, error)
+	runVerify                  func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify              func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval               func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges             func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges              func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	runTUI                     func(context.Context, tui.Options) int
+	runEditor                  func(string) error
+	checkUpdate                func(context.Context, update.Options) (update.Result, error)
+	now                        func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -142,10 +147,11 @@ func defaultAppDeps() appDeps {
 				OAuthLoginKey: loginKey,
 			})
 		},
-		probeProviderHealth:    providerhealth.Probe,
-		discoverProviderModels: defaultDiscoverProviderModels,
-		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
-		detectAgentCLIs:        agentcli.Detect,
+		probeProviderHealth:        providerhealth.Probe,
+		discoverProviderModels:     defaultDiscoverProviderModels,
+		detectLocalRuntimes:        provideronboarding.DetectLocalRuntimes,
+		detectAgentCLIs:            agentcli.Detect,
+		extractAgentCLICredentials: agentcli.ExtractCredentials,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -458,6 +464,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.detectAgentCLIs == nil {
 		deps.detectAgentCLIs = defaults.detectAgentCLIs
+	}
+	if deps.extractAgentCLICredentials == nil {
+		deps.extractAgentCLICredentials = defaults.extractAgentCLICredentials
 	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
