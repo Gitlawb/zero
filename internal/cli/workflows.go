@@ -803,11 +803,11 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	}
 
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
-		Cwd:                     workspaceRoot,
-		Remote:                  options.remote,
-		Force:                   options.force,
-		DryRun:                  options.dryRun,
-		AllowPushDefaultBranch:  options.yes,
+		Cwd:                    workspaceRoot,
+		Remote:                 options.remote,
+		Force:                  options.force,
+		DryRun:                 options.dryRun,
+		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -860,10 +860,10 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 	}
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
-		Cwd:                     workspaceRoot,
-		Remote:                  options.remote,
-		Force:                   options.force,
-		AllowPushDefaultBranch:  options.yes,
+		Cwd:                    workspaceRoot,
+		Remote:                 options.remote,
+		Force:                  options.force,
+		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
 		return writeExecUsageError(stderr, fmt.Sprintf("auto-push failed: %v", err))
