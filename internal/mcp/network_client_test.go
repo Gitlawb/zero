@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -146,6 +147,141 @@ func TestOAuthRoundTripperDoesNotRetryAfterSuccessfulNon401(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&source.refreshes); got != 0 {
 		t.Fatalf("refreshes = %d, want 0", got)
+	}
+}
+
+func TestOAuthRoundTripperRejectsCrossOriginRedirectBeforeBearerLeak(t *testing.T) {
+	source := &fakeTokenSource{}
+	source.access.Store("access-secret")
+	source.refreshFunc = func() (string, error) { return "access-fresh", nil }
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("redirect target received Authorization = %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	client := mcpHTTPClient(
+		Server{Name: "oauth-docs", Type: ServerTypeHTTP},
+		newOAuthRoundTripper(http.DefaultTransport, source, "oauth-docs"),
+	)
+	resp, err := client.Get(redirector.URL + "/mcp")
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("Get() error = %v, want cross-origin redirect error", err)
+	}
+	if got := atomic.LoadInt32(&targetHits); got != 0 {
+		t.Fatalf("redirect target hits = %d, want 0", got)
+	}
+}
+
+func TestSameMCPOriginNormalizesDefaultPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		left  string
+		right string
+		want  bool
+	}{
+		{
+			name:  "https default port",
+			left:  "https://example.test/mcp",
+			right: "https://EXAMPLE.test:443/other",
+			want:  true,
+		},
+		{
+			name:  "http default port",
+			left:  "http://example.test/mcp",
+			right: "http://example.test:80/other",
+			want:  true,
+		},
+		{
+			name:  "different scheme",
+			left:  "https://example.test/mcp",
+			right: "http://example.test:443/other",
+			want:  false,
+		},
+		{
+			name:  "different port",
+			left:  "https://example.test/mcp",
+			right: "https://example.test:8443/other",
+			want:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			left, err := url.Parse(tc.left)
+			if err != nil {
+				t.Fatal(err)
+			}
+			right, err := url.Parse(tc.right)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sameMCPOrigin(left, right); got != tc.want {
+				t.Fatalf("sameMCPOrigin(%q, %q) = %v, want %v", tc.left, tc.right, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveSSEEndpointURLRestrictsOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		base     string
+		endpoint string
+		want     string
+		wantErr  string
+	}{
+		{
+			name:     "relative endpoint",
+			base:     "https://example.test/sse",
+			endpoint: "/messages",
+			want:     "https://example.test/messages",
+		},
+		{
+			name:     "absolute same origin",
+			base:     "https://example.test/sse",
+			endpoint: "https://example.test/messages",
+			want:     "https://example.test/messages",
+		},
+		{
+			name:     "default port equivalent",
+			base:     "https://example.test/sse",
+			endpoint: "https://example.test:443/messages",
+			want:     "https://example.test:443/messages",
+		},
+		{
+			name:     "cross origin",
+			base:     "https://example.test/sse",
+			endpoint: "https://evil.test/messages",
+			wantErr:  "differs from configured server origin",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveSSEEndpointURL(tc.base, tc.endpoint)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("resolveSSEEndpointURL() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveSSEEndpointURL() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("resolveSSEEndpointURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

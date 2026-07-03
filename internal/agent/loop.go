@@ -2159,6 +2159,18 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		}
 	}
 
+	// A command that explicitly requests additional sandbox permissions
+	// (sandbox_permissions: with_additional_permissions) is an ELEVATION the user
+	// must consent to, even when the base command's sandbox decision was Allow.
+	// shouldRequestPermission blocks on OnPermissionRequest for exactly this case,
+	// so the event MUST be a prompt — otherwise it carried Action=allow while the
+	// loop waited on a decision, and a UI that renders only prompts (the TUI)
+	// dropped it, deadlocking the run. Keep this consistent with
+	// shouldRequestPermission's own condition.
+	if action == PermissionActionAllow && !permissionGranted && shellCommandAdditionalPermissionsRequested(args) {
+		action = PermissionActionPrompt
+	}
+
 	if safety.Permission == tools.PermissionAllow && action == PermissionActionAllow && !grantMatched && block == nil {
 		return PermissionEvent{}, false
 	}

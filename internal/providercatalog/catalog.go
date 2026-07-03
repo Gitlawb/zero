@@ -123,6 +123,7 @@ var descriptors = []Descriptor{
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
+	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
 	openAICompat("mistral", "Mistral", "https://api.mistral.ai/v1", "mistral-large-latest", []string{"MISTRAL_API_KEY"}),
