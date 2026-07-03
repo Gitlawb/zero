@@ -179,9 +179,9 @@ func TestValidateEndpointAllowsLoopbackOnlyForLocalProvider(t *testing.T) {
 		t.Error("loopback must remain blocked when allowLoopback=false (redirects / non-local)")
 	}
 
-// allowLoopbackOrPrivate relaxes loopback AND private-network ranges — but
-// link-local and other special ranges (cloud metadata, documentation) stay
-// blocked even for a local provider config.
+	// allowLoopbackOrPrivate relaxes loopback AND private-network ranges — but
+	// link-local and other special ranges (cloud metadata, documentation) stay
+	// blocked even for a local provider config.
 	for _, ep := range []string{"http://169.254.169.254/latest/meta-data", "http://192.0.2.1:8080/v1"} {
 		if err := validateEndpoint(ctx, ep, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, true); err == nil {
 			t.Errorf("special-use address %q must stay blocked even with flag=true", ep)
