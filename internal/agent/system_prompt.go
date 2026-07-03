@@ -37,6 +37,13 @@ const fallbackSystemPrompt = "You are Zero, a terminal coding agent. Help with t
 // general-to-specific order.
 var projectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
 
+// userContextFile is the per-user instruction file. It intentionally lives next
+// to the legacy ~/.zero config location so users can keep personal guidance out
+// of individual repositories.
+const userContextFile = ".zero/ZERO.md"
+
+var userHomeDirForPrompt = os.UserHomeDir
+
 // maxProjectContextBytes caps how much of a single project doc is injected so
 // a large guidelines file can't blow the context budget.
 const maxProjectContextBytes = 8 << 10 // 8 KiB per file
@@ -82,6 +89,9 @@ func buildSystemPrompt(options Options) string {
 	}
 	if ws := workspaceContext(options.Cwd); ws != "" {
 		sections = append(sections, ws)
+	}
+	if user := userGuidelines(); user != "" {
+		sections = append(sections, user)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
@@ -262,6 +272,34 @@ func projectGuidelines(cwd, gitRoot string) string {
 		totalUsed += len(content)
 	}
 	return b.String()
+}
+
+// userGuidelines returns the per-user ZERO.md instructions block, if present.
+func userGuidelines() string {
+	home, err := userHomeDirForPrompt()
+	if err != nil {
+		return ""
+	}
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, filepath.FromSlash(userContextFile)))
+	if err != nil {
+		return ""
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return ""
+	}
+	if len(content) > maxProjectContextBytes {
+		cut := maxProjectContextBytes
+		for cut > 0 && !utf8.RuneStart(content[cut]) {
+			cut--
+		}
+		content = content[:cut] + "\n… (truncated)"
+	}
+	return "## User guidelines (" + userContextFile + ")\n\n" + content
 }
 
 // projectGuidelineDirs returns the directory chain from gitRoot to cwd

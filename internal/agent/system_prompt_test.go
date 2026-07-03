@@ -127,6 +127,46 @@ func systemPromptTestBlock(t *testing.T, prompt, start, end string) string {
 	return body
 }
 
+func TestBuildSystemPromptIncludesUserGuidelines(t *testing.T) {
+	home := t.TempDir()
+	writeSystemPromptTestFile(t, home, userContextFile, "  Prefer concise summaries.  \n")
+	t.Cleanup(withSystemPromptTestHome(t, home))
+
+	prompt := buildSystemPrompt(Options{})
+	if !strings.Contains(prompt, "## User guidelines (.zero/ZERO.md)") {
+		t.Fatalf("expected user guidelines header, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Prefer concise summaries.") {
+		t.Fatalf("expected user guidelines content, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "  Prefer concise summaries.  ") {
+		t.Fatalf("expected user guidelines content to be trimmed, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptOmitsUserGuidelinesWithoutHome(t *testing.T) {
+	t.Cleanup(withSystemPromptTestHomeFunc(t, func() (string, error) { return "", os.ErrNotExist }))
+
+	prompt := buildSystemPrompt(Options{})
+	if strings.Contains(prompt, "## User guidelines") {
+		t.Fatalf("expected user guidelines to be omitted without a home directory, got:\n%s", prompt)
+	}
+}
+
+func withSystemPromptTestHome(t *testing.T, home string) func() {
+	t.Helper()
+	return withSystemPromptTestHomeFunc(t, func() (string, error) { return home, nil })
+}
+
+func withSystemPromptTestHomeFunc(t *testing.T, fn func() (string, error)) func() {
+	t.Helper()
+	old := userHomeDirForPrompt
+	userHomeDirForPrompt = fn
+	return func() {
+		userHomeDirForPrompt = old
+	}
+}
+
 func TestBuildSystemPromptInjectsProjectGuidelinesCaseInsensitive(t *testing.T) {
 	// Git tracks AGENTS.md on a case-sensitive filesystem; the
 	// loader must still resolve it when the cwd lookup uses lowercase.
