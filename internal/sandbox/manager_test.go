@@ -72,6 +72,9 @@ func TestPermissionProfileFromPolicyIncludesDefaultTempWriteRoots(t *testing.T) 
 	if !writeRootsContain(profile.FileSystem.WriteRoots, tmpdir) {
 		t.Fatalf("write roots = %#v, want temp root %q", profile.FileSystem.WriteRoots, tmpdir)
 	}
+	// /tmp is a default temp write root on POSIX only (see
+	// defaultTempWriteRootCandidatesForGOOS); on Windows the bare path resolves
+	// against the current drive, so a stray C:\tmp must not turn this on.
 	if runtime.GOOS != "windows" && pathExists("/tmp") && !writeRootsContain(profile.FileSystem.WriteRoots, "/tmp") {
 		t.Fatalf("write roots = %#v, want /tmp", profile.FileSystem.WriteRoots)
 	}
