@@ -161,9 +161,6 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 		return prompt
 	}
 	events := promptContextEvents(prepared.ContextEvents)
-	if len(events) == 0 {
-		return prompt
-	}
 
 	lines := []string{}
 	for _, event := range events {
