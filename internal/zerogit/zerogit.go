@@ -568,16 +568,18 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 		return PushResult{}, fmt.Errorf("cannot push: not currently on a branch")
 	}
 
-	if !options.AllowPushDefaultBranch && (branch == "main" || branch == "master") {
-		return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
-	}
-
 	remote := strings.TrimSpace(options.Remote)
 	if remote == "" {
 		if upstream, err := gitOutput(ctx, runGit, root, "config", "branch."+branch+".remote"); err == nil && upstream != "" {
 			remote = upstream
 		} else {
 			remote = "origin"
+		}
+	}
+
+	if !options.AllowPushDefaultBranch {
+		if isDefaultBranch(ctx, runGit, root, remote, branch) {
+			return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
 		}
 	}
 
@@ -600,6 +602,20 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 		Branch: branch,
 		Output: output,
 	}, nil
+}
+
+func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) bool {
+	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
+				symref := strings.TrimPrefix(line, "ref: refs/heads/")
+				symref = strings.TrimSuffix(symref, "\tHEAD")
+				return branch == symref
+			}
+		}
+	}
+	return branch == "main" || branch == "master"
 }
 
 type PROptions struct {
