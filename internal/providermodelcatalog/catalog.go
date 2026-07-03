@@ -137,7 +137,7 @@ var curatedModels = map[string][]Model{
 	"bankr": {
 		{ID: "bankr-large", Description: "catalog default"},
 	},
-	"zai":     zaiCuratedModels,
+	"zai":    zaiCuratedModels,
 	"zai-cn": zaiCuratedModels,
 	// OpenGateway smart-routes by model id across its upstream providers
 	// (see /health: xiaomi-mimo, minimax, qwen, google, nvidia, z-ai). These are

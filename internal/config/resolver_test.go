@@ -1143,7 +1143,8 @@ func TestResolveAppliesZaiCNCatalogDefaults(t *testing.T) {
 }
 
 func TestResolveAppliesZaiInternationalCatalogDefaults(t *testing.T) {
-	// "zai" now resolves to the international endpoint and the glm-5.2 default.
+	// "zai" now resolves to the international endpoint; the catalog default
+	// model stays glm-4.5 (live discovery upgrades to glm-5.2 at runtime).
 	path := writeConfig(t, `{
 		"activeProvider": "zai-intl",
 		"providers": [{
@@ -1165,11 +1166,20 @@ func TestResolveAppliesZaiInternationalCatalogDefaults(t *testing.T) {
 	if resolved.Provider.CatalogID != "zai" {
 		t.Fatalf("CatalogID = %q, want zai", resolved.Provider.CatalogID)
 	}
+	if resolved.Provider.ProviderKind != ProviderKindOpenAICompatible {
+		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindOpenAICompatible)
+	}
 	if resolved.Provider.BaseURL != "https://api.z.ai/api/paas/v4" {
 		t.Fatalf("BaseURL = %q, want Z.ai international default", resolved.Provider.BaseURL)
 	}
 	if resolved.Provider.Model != "glm-4.5" {
 		t.Fatalf("Model = %q, want glm-4.5 (preserved default; live discovery upgrades to glm-5.2 at runtime)", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "ZAI_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want ZAI_API_KEY", resolved.Provider.APIKeyEnv)
+	}
+	if resolved.Provider.APIKey != "sk-zai-intl" {
+		t.Fatalf("APIKey = %q, want env-resolved secret", resolved.Provider.APIKey)
 	}
 }
 
