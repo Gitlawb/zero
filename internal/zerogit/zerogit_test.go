@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -544,7 +545,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("unexpected push result: %#v", result)
 		}
 
-		if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
+		if got := runner.commandLine(3); got != "git push -u -- origin feat/some-feature" {
 			t.Fatalf("unexpected push command: %q", got)
 		}
 	})
@@ -568,7 +569,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("Push returned error: %v", err)
 		}
 
-		if got := runner.commandLine(3); got != "git push --dry-run --force-with-lease -u origin feat/some-feature" {
+		if got := runner.commandLine(3); got != "git push --dry-run --force-with-lease -u -- origin feat/some-feature" {
 			t.Fatalf("unexpected push command: %q", got)
 		}
 	})
@@ -613,8 +614,64 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("expected fallback remote to be origin, got: %q", result.Remote)
 		}
 
-		if got := runner.commandLine(3); got != "git push -u origin feat/some-feature" {
+		if got := runner.commandLine(3); got != "git push -u -- origin feat/some-feature" {
 			t.Fatalf("unexpected push command: %q", got)
+		}
+	})
+}
+
+func TestCreatePRCommandConstruction(t *testing.T) {
+	t.Run("CreatePRWithAllOptions", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "https://github.com/Gitlawb/zero/pull/123\n"},
+		}}
+
+		result, err := CreatePR(context.Background(), PROptions{
+			Cwd:   root,
+			Fill:  true,
+			Draft: true,
+			Title: "Feat: some title",
+			Body:  "Some body description",
+			RunGH: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("CreatePR returned error: %v", err)
+		}
+
+		if result.Output != "https://github.com/Gitlawb/zero/pull/123\n" {
+			t.Fatalf("unexpected PR result: %#v", result)
+		}
+
+		expectedArgs := []string{"pr", "create", "--fill", "--draft", "--title", "Feat: some title", "--body", "Some body description"}
+		if len(runner.calls) != 1 {
+			t.Fatalf("expected 1 runner call, got %d", len(runner.calls))
+		}
+		if got := runner.calls[0].args; !reflect.DeepEqual(got, expectedArgs) {
+			t.Fatalf("unexpected gh args: %v, want %v", got, expectedArgs)
+		}
+	})
+
+	t.Run("CreatePRMinimal", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "https://github.com/Gitlawb/zero/pull/124\n"},
+		}}
+
+		_, err := CreatePR(context.Background(), PROptions{
+			Cwd:   root,
+			RunGH: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("CreatePR returned error: %v", err)
+		}
+
+		expectedArgs := []string{"pr", "create"}
+		if len(runner.calls) != 1 {
+			t.Fatalf("expected 1 runner call, got %d", len(runner.calls))
+		}
+		if got := runner.calls[0].args; !reflect.DeepEqual(got, expectedArgs) {
+			t.Fatalf("unexpected gh args: %v, want %v", got, expectedArgs)
 		}
 	})
 }

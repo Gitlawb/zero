@@ -671,24 +671,47 @@ func TestRunChangesPush(t *testing.T) {
 		Output: "Everything up-to-date",
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := runWithDeps([]string{"changes", "push", "--remote", "origin", "--force", "--dry-run"}, &stdout, &stderr, appDeps{
-		getwd: func() (string, error) { return cwd, nil },
-		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-			if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun {
-				t.Fatalf("unexpected PushOptions: %#v", options)
-			}
-			return pushed, nil
-		},
+	t.Run("TextMode", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "push", "--remote", "origin", "--force", "--dry-run"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun {
+					t.Fatalf("unexpected PushOptions: %#v", options)
+				}
+				return pushed, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Pushed branch feat/feature-a to remote origin (dry run)") {
+			t.Fatalf("unexpected text output: %q", stdout.String())
+		}
 	})
 
-	if exitCode != exitSuccess {
-		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Pushed branch feat/feature-a to remote origin (dry run)") {
-		t.Fatalf("unexpected text output: %q", stdout.String())
-	}
+	t.Run("JSONMode", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "push", "--json"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				return pushed, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		var res map[string]string
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("invalid JSON output: %v\n%s", err, stdout.String())
+		}
+		if res["remote"] != "origin" || res["branch"] != "feat/feature-a" || res["output"] != "Everything up-to-date" {
+			t.Fatalf("unexpected JSON fields: %#v", res)
+		}
+	})
 }
 
 func TestRunChangesPushRejectsIncompatibleFlags(t *testing.T) {
@@ -791,6 +814,20 @@ func TestRunChangesPR(t *testing.T) {
 		}
 		if res["branch"] != "feat/feature-a" || res["remote"] != "origin" || res["output"] != "https://github.com/Gitlawb/zero/pull/123" {
 			t.Fatalf("unexpected JSON fields: %#v", res)
+		}
+	})
+
+	t.Run("RequiresFillOrTitle", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "pr"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+		})
+
+		if exitCode != exitUsage {
+			t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+		}
+		if !strings.Contains(stderr.String(), "must provide either --fill or --title") {
+			t.Fatalf("expected validation error about fill or title, got %q", stderr.String())
 		}
 	})
 }

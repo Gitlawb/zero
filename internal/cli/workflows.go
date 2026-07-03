@@ -838,6 +838,9 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
+	if !options.fill && options.title == "" {
+		return writeExecUsageError(stderr, "must provide either --fill or --title to run non-interactively")
+	}
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())

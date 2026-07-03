@@ -538,9 +538,9 @@ type PushOptions struct {
 }
 
 type PushResult struct {
-	Remote string
-	Branch string
-	Output string
+	Remote string `json:"remote"`
+	Branch string `json:"branch"`
+	Output string `json:"output"`
 }
 
 func Push(ctx context.Context, options PushOptions) (PushResult, error) {
@@ -583,7 +583,7 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	if options.Force {
 		args = append(args, "--force-with-lease")
 	}
-	args = append(args, "-u", remote, branch)
+	args = append(args, "-u", "--", remote, branch)
 
 	output, err := gitRawOutput(ctx, runGit, root, args...)
 	if err != nil {
@@ -607,7 +607,7 @@ type PROptions struct {
 }
 
 type PRResult struct {
-	Output string
+	Output string `json:"output"`
 }
 
 func CreatePR(ctx context.Context, options PROptions) (PRResult, error) {
