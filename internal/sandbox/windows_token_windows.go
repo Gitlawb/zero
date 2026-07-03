@@ -166,12 +166,16 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 // anonymous pipes — the actual object type this fixes — have no name and are
 // only reachable via an inherited handle, so this is a no-op for them).
 func broadenWindowsRestrictedTokenDefaultDacl(token windows.Token, logonSID *windows.SID) error {
-	oldDacl, err := windowsTokenDefaultDacl(token)
+	oldDacl, oldDaclBuf, err := windowsTokenDefaultDacl(token)
 	if err != nil {
 		return fmt.Errorf("read token default DACL: %w", err)
 	}
+	// The second (WRITE-type) access check only needs a read/write match; a
+	// full GENERIC_ALL grant (which also implies DELETE, WRITE_DAC, and
+	// WRITE_OWNER) is broader than the pipe/event/mutex use case this exists
+	// for actually requires.
 	access := []windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_ALL,
+		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE,
 		AccessMode:        windows.GRANT_ACCESS,
 		Inheritance:       windows.NO_INHERITANCE,
 		Trustee: windows.TRUSTEE{
@@ -182,6 +186,14 @@ func broadenWindowsRestrictedTokenDefaultDacl(token windows.Token, logonSID *win
 		},
 	}}
 	newDacl, err := setEntriesInACL(access, oldDacl)
+	// oldDacl points INTO oldDaclBuf (see windowsTokenDefaultDacl) and is
+	// dereferenced by native code inside setEntriesInACL, above. Nothing in Go
+	// references oldDaclBuf once windowsTokenDefaultDacl returned, so without
+	// this KeepAlive it is eligible for GC the moment an allocation in this
+	// function (the EXPLICIT_ACCESS literal, TrusteeValueFromSID) hits a
+	// safepoint, before the native call ever reads it - a real, if narrow,
+	// use-after-free window in security-boundary code.
+	runtime.KeepAlive(oldDaclBuf)
 	if err != nil {
 		return fmt.Errorf("merge token default DACL: %w", err)
 	}
@@ -196,20 +208,25 @@ type windowsTokenDefaultDaclInfo struct {
 	DefaultDacl *windows.ACL
 }
 
-func windowsTokenDefaultDacl(token windows.Token) (*windows.ACL, error) {
+// windowsTokenDefaultDacl returns the token's current default DACL along with
+// the buffer backing it. TOKEN_DEFAULT_DACL embeds the ACL data inside the
+// same allocation GetTokenInformation fills, so the returned *windows.ACL is
+// only valid for as long as the returned buffer stays reachable: the caller
+// must runtime.KeepAlive(buf) until every native call that dereferences the
+// ACL has completed. A KeepAlive inside this function, ending at its own
+// return, would not protect any use by the caller after that.
+func windowsTokenDefaultDacl(token windows.Token) (*windows.ACL, []byte, error) {
 	var size uint32
 	err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, nil, 0, &size)
 	if err == nil || err != windows.ERROR_INSUFFICIENT_BUFFER {
-		return nil, fmt.Errorf("size TokenDefaultDacl: %w", err)
+		return nil, nil, fmt.Errorf("size TokenDefaultDacl: %w", err)
 	}
 	buf := make([]byte, size)
 	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, &buf[0], size, &size); err != nil {
-		return nil, fmt.Errorf("get TokenDefaultDacl: %w", err)
+		return nil, nil, fmt.Errorf("get TokenDefaultDacl: %w", err)
 	}
 	info := (*windowsTokenDefaultDaclInfo)(unsafe.Pointer(&buf[0]))
-	dacl := info.DefaultDacl
-	runtime.KeepAlive(buf)
-	return dacl, nil
+	return info.DefaultDacl, buf, nil
 }
 
 func windowsSetTokenDefaultDacl(token windows.Token, dacl *windows.ACL) error {
@@ -226,7 +243,11 @@ func setEntriesInACL(entries []windows.EXPLICIT_ACCESS, oldACL *windows.ACL) (*w
 		return nil, errors.New("setEntriesInACL requires at least one entry")
 	}
 	var newACL *windows.ACL
-	ret, _, callErr := procSetEntriesInAclW.Call(
+	// SetEntriesInAclW reports failure directly in its return value (ERROR_SUCCESS
+	// on success, a Win32 error code otherwise); unlike many Win32 APIs it does not
+	// set the thread's last-error, so the syscall trio's second/third return
+	// values (which surface GetLastError) are not meaningful here.
+	ret, _, _ := procSetEntriesInAclW.Call(
 		uintptr(len(entries)),
 		uintptr(unsafe.Pointer(&entries[0])),
 		uintptr(unsafe.Pointer(oldACL)),
@@ -234,10 +255,7 @@ func setEntriesInACL(entries []windows.EXPLICIT_ACCESS, oldACL *windows.ACL) (*w
 	)
 	runtime.KeepAlive(entries)
 	if ret != 0 {
-		if callErr != syscall.Errno(0) {
-			return nil, fmt.Errorf("SetEntriesInAclW: %w", callErr)
-		}
-		return nil, fmt.Errorf("SetEntriesInAclW failed with status %d", ret)
+		return nil, fmt.Errorf("SetEntriesInAclW: %w", syscall.Errno(ret))
 	}
 	return newACL, nil
 }
