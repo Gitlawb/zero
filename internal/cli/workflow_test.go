@@ -712,6 +712,22 @@ func TestRunChangesPush(t *testing.T) {
 			t.Fatalf("unexpected JSON fields: %#v", res)
 		}
 	})
+
+	t.Run("AcceptsYes", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "push", "--yes"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+				if !options.AllowPushDefaultBranch {
+					t.Fatalf("expected AllowPushDefaultBranch=true with --yes, got false")
+				}
+				return pushed, nil
+			},
+		})
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+	})
 }
 
 func TestRunChangesPushRejectsIncompatibleFlags(t *testing.T) {
