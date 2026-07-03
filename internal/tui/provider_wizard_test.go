@@ -1174,6 +1174,10 @@ func TestProviderWizardManageKeyReplaceGeneric(t *testing.T) {
 		step:               providerWizardStepManageKey,
 		manageProviderName: "my-custom-openai",
 		manageKeyCursor:    1,
+		apiKey:             "stale-key",
+		baseURL:            "https://stale.example.com",
+		profileName:        "stale-profile",
+		err:                "stale error",
 		providers: []providercatalog.Descriptor{
 			{
 				ID:        "custom-openai-compatible",
@@ -1185,6 +1189,9 @@ func TestProviderWizardManageKeyReplaceGeneric(t *testing.T) {
 	next, _ := m.applyManageKeyChoice()
 	if next.providerWizard == nil || next.providerWizard.step != providerWizardStepEndpoint {
 		t.Fatalf("replace for generic provider should route to the endpoint step, got step: %v", next.providerWizard.step)
+	}
+	if next.providerWizard.apiKey != "" || next.providerWizard.baseURL != "" || next.providerWizard.profileName != "" || next.providerWizard.err != "" {
+		t.Fatal("replace should clear stale apiKey/baseURL/profileName/err before routing")
 	}
 }
 
