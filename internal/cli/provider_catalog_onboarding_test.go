@@ -18,6 +18,7 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 	}{
 		{id: "openai", name: "OpenAI", transport: "openai", defaultModel: "gpt-4.1"},
 		{id: "groq", name: "Groq", transport: "openai-compatible", defaultModel: "llama-3.3-70b-versatile"},
+		{id: "longcat", name: "LongCat", transport: "openai-compatible", defaultModel: "LongCat-2.0"},
 		{id: "ollama-cloud", name: "Ollama Cloud", transport: "openai-compatible", defaultModel: "qwen3-coder:480b"},
 		{id: "ollama", name: "Ollama Local", transport: "openai-compatible", defaultModel: "llama3.1"},
 	}
@@ -43,6 +44,21 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 				t.Fatalf("runtime-supported provider %s should not show unsupported reason, got:\n%s", tt.id, block)
 			}
 		})
+	}
+}
+
+func TestProviderCatalogLongCatRequiresAPIKey(t *testing.T) {
+	output := runProviderCatalogOnboarding(t)
+	block := providerCatalogOnboardingBlock(t, output, "longcat")
+
+	for _, want := range []string{
+		"requiresAuth=true",
+		"authEnvVars=LONGCAT_API_KEY",
+		"setup: zero providers setup longcat --set-active",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("expected LongCat catalog block to contain %q, got:\n%s", want, block)
+		}
 	}
 }
 

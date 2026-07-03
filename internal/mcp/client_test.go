@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -211,6 +212,85 @@ func TestHTTPClientListsAndCallsTools(t *testing.T) {
 	}
 }
 
+func TestHTTPClientFollowsSameOriginRedirect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/mcp" {
+			http.Redirect(response, request, "/redirected", http.StatusTemporaryRedirect)
+			return
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/redirected" {
+			t.Errorf("request = %s %s, want POST /redirected", request.Method, request.URL.Path)
+			http.Error(response, "bad request", http.StatusNotFound)
+			return
+		}
+		if got := request.Header.Get("X-Api-Key"); got != "secret" {
+			t.Errorf("X-Api-Key = %q, want secret", got)
+			http.Error(response, "missing auth", http.StatusUnauthorized)
+			return
+		}
+
+		message := readHTTPRPCMessage(t, request)
+		switch message.Method {
+		case "initialize":
+			writeHTTPRPCResponse(t, response, message.ID, map[string]any{"protocolVersion": "2024-11-05"})
+		case "notifications/initialized":
+			response.WriteHeader(http.StatusAccepted)
+		default:
+			writeHTTPRPCResponse(t, response, message.ID, map[string]any{})
+		}
+	}))
+	defer testServer.Close()
+
+	client, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeHTTP,
+		URL:     testServer.URL + "/mcp",
+		Headers: map[string]string{"X-Api-Key": "secret"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestHTTPClientRejectsCrossOriginRedirectBeforeSendingHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		if got := request.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("redirect target received X-Api-Key = %q", got)
+		}
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, target.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	_, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeHTTP,
+		URL:     redirector.URL + "/mcp",
+		Headers: map[string]string{"X-Api-Key": "secret"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("Connect() error = %v, want cross-origin redirect error", err)
+	}
+	if got := atomic.LoadInt32(&targetHits); got != 0 {
+		t.Fatalf("redirect target hits = %d, want 0", got)
+	}
+}
+
 func TestSSEClientListsAndCallsToolsFromRemoteStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -337,6 +417,53 @@ func TestSSEClientListsAndCallsToolsFromRemoteStream(t *testing.T) {
 	}
 	if got := TextContent(result.Content); got != "lookup: zero" {
 		t.Fatalf("CallTool() text = %q, want lookup result", got)
+	}
+}
+
+func TestSSEClientRejectsCrossOriginEndpointBeforeSendingHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		if got := request.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("SSE endpoint target received X-Api-Key = %q", got)
+		}
+		response.WriteHeader(http.StatusAccepted)
+	}))
+	defer target.Close()
+
+	stream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("X-Api-Key"); got != "secret" {
+			t.Errorf("X-Api-Key = %q, want secret on configured SSE server", got)
+			http.Error(response, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		if request.Method != http.MethodGet || request.URL.Path != "/sse" {
+			t.Errorf("request = %s %s, want GET /sse", request.Method, request.URL.Path)
+			http.Error(response, "bad request", http.StatusNotFound)
+			return
+		}
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(response, "event: endpoint\ndata: %s/messages\n\n", target.URL)
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer stream.Close()
+
+	_, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeSSE,
+		URL:     stream.URL + "/sse",
+		Headers: map[string]string{"X-Api-Key": "secret"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "endpoint origin") {
+		t.Fatalf("Connect() error = %v, want cross-origin endpoint error", err)
+	}
+	if got := atomic.LoadInt32(&targetHits); got != 0 {
+		t.Fatalf("SSE endpoint target hits = %d, want 0", got)
 	}
 }
 

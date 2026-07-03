@@ -124,9 +124,9 @@ func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) str
 	return "  " + keyCell + "  " + desc
 }
 
-// renderKeybindingHelpOverlay renders the framed, centered `?` help overlay for
-// the given terminal dimensions.
-func (m model) renderKeybindingHelpOverlay(width int, height int) string {
+// the given terminal width. Vertical centering is handled by the caller's
+// overlay compositing pipeline (overlayViewportLines in transcriptView).
+func (m model) renderKeybindingHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
 	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
