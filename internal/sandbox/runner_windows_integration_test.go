@@ -132,6 +132,64 @@ exit 0
 	}
 }
 
+// TestWindowsUnelevatedRealSandboxSmoke exercises the unelevated tier end to
+// end WITHOUT running the elevated setup helper: the command runner applies
+// the workspace ACLs itself, a write inside the workspace succeeds under the
+// restricted token, and a write outside every granted root is denied. Unlike
+// the elevated smoke above it needs no Administrator terminal.
+func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	}
+	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{root},
+			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	config := WindowsSandboxCommandArgsOptions{
+		SandboxHome:       sandboxHome,
+		CommandCWD:        root,
+		WorkspaceRoots:    []string{root},
+		PermissionProfile: profile,
+		SandboxLevel:      WindowsSandboxLevelUnelevated,
+	}
+
+	// cmd.exe rather than powershell.exe: managed PowerShell cannot initialize
+	// its crypto provider under a write-restricted token on some hosts
+	// (0x8009001d, the same restricted-token limitation the runner documents for
+	// Schannel), and the write-jail assertion only needs a native shell.
+	insideMarker := filepath.Join(root, "unelevated-write-ok.txt")
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		"cmd.exe", "/d", "/s", "/c", "echo ok>" + insideMarker,
+	}, 0)
+	if bytes, err := os.ReadFile(insideMarker); err != nil || strings.TrimSpace(string(bytes)) != "ok" {
+		t.Fatalf("unelevated sandboxed write marker = %q, %v; want ok", bytes, err)
+	}
+	if _, err := os.Stat(WindowsUnelevatedSetupMarkerPath(sandboxHome)); err != nil {
+		t.Fatalf("expected the unelevated setup marker to be recorded: %v", err)
+	}
+
+	outsideMarker := filepath.Join(outside, "unelevated-write-denied.txt")
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		"cmd.exe", "/d", "/s", "/c", "echo leaked>" + outsideMarker,
+	}, 1)
+	if _, err := os.Stat(outsideMarker); err == nil {
+		t.Fatalf("unelevated sandbox allowed a write outside every granted root")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat outside marker: %v", err)
+	}
+}
+
 func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) string {
 	t.Helper()
 	if path := os.Getenv(envKey); path != "" {
