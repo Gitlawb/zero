@@ -555,6 +555,32 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	}
 }
 
+func TestFormatExecPromptKeepsConversationMessagesWhenNoisyEventsFollow(t *testing.T) {
+	events := []Event{
+		{Sequence: 1, Type: EventMessage, Payload: json.RawMessage(`{"role":"user","content":"first user request"}`)},
+		{Sequence: 2, Type: EventMessage, Payload: json.RawMessage(`{"role":"assistant","content":"first assistant answer"}`)},
+	}
+	for sequence := 3; sequence <= 45; sequence++ {
+		events = append(events, Event{Sequence: sequence, Type: EventToolResult, Payload: json.RawMessage(`{"name":"read_file","output":"noisy tool result"}`)})
+	}
+	events = append(events, Event{Sequence: 46, Type: EventMessage, Payload: json.RawMessage(`{"role":"user","content":"latest user request"}`)})
+
+	prompt := FormatExecPrompt("continue", PreparedExec{
+		Mode:          ModeResume,
+		Session:       Metadata{SessionID: "session-with-noise"},
+		ContextEvents: events,
+	})
+
+	for _, want := range []string{"first user request", "first assistant answer", "latest user request", "Current user request:", "continue"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got %q", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "noisy tool result") {
+		t.Fatalf("expected prompt to omit noisy non-conversation events, got %q", prompt)
+	}
+}
+
 func TestPrepareExecPersistsSpecialistMetadataForNewSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T14:30:00Z")})
 
