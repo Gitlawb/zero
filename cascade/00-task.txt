@@ -1,5 +1,0 @@
-Full code review of the zero repository (Go 1.25 terminal coding agent, ~134k LOC, 968 files under internal/ and cmd/).
-Goal: surface defects worth fixing — correctness bugs, data races, security issues (credential handling, command execution, sandbox escapes), resource leaks, error-handling gaps, API misuse.
-Priority packages: internal/agent, internal/providers, internal/tools, internal/sessions, internal/sandbox, internal/credstore, internal/oauth, internal/secrets, internal/config, internal/tui, cmd/zero.
-Exceptions only: report high-confidence findings a maintainer would act on, not style nits. Repo is clean on main; fixes will be applied to the working tree.
-Build/test: go build ./... ; go test ./<pkg>/ ; go vet ./...
