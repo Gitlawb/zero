@@ -138,6 +138,38 @@ func TestWindowsUnelevatedSetupMarkerEvictsOldestPastCap(t *testing.T) {
 	}
 }
 
+func TestLoadWindowsUnelevatedSetupMarkerSelfHealsCorruptFile(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".zero-sandbox")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir sandbox home: %v", err)
+	}
+	path := WindowsUnelevatedSetupMarkerPath(home)
+	// A truncated body must reset like an unknown schema, not brick every
+	// unelevated command until the file is hand-deleted.
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"appliedPlans":[{"aclPlanHash":"h`), 0o600); err != nil {
+		t.Fatalf("write corrupt marker: %v", err)
+	}
+	marker, err := loadWindowsUnelevatedSetupMarker(home)
+	if err != nil {
+		t.Fatalf("corrupt marker must self-heal, got error: %v", err)
+	}
+	if len(marker.AppliedPlans) != 0 || marker.SchemaVersion != windowsUnelevatedSetupMarkerSchemaVersion {
+		t.Fatalf("corrupt marker must reset to empty current-schema marker, got %+v", marker)
+	}
+	// The healed marker must accept new recordings over the corrupt file.
+	applied := WindowsUnelevatedAppliedPlan{ACLPlanHash: "hash-heal", ACLPlanEntries: 2}
+	if err := recordWindowsUnelevatedAppliedPlan(home, applied); err != nil {
+		t.Fatalf("record over corrupt marker: %v", err)
+	}
+	marker, err = loadWindowsUnelevatedSetupMarker(home)
+	if err != nil {
+		t.Fatalf("reload healed marker: %v", err)
+	}
+	if !marker.contains(applied) {
+		t.Fatalf("healed marker = %+v, want the recorded plan", marker)
+	}
+}
+
 func TestLoadWindowsUnelevatedSetupMarkerResetsUnknownSchema(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".zero-sandbox")
 	if err := os.MkdirAll(home, 0o700); err != nil {

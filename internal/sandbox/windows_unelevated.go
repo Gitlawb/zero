@@ -61,8 +61,10 @@ func buildWindowsUnelevatedAppliedPlan(config WindowsSandboxCommandConfig) (Wind
 
 // loadWindowsUnelevatedSetupMarker reads the marker; a missing file is the
 // common first-run state and returns an empty marker, not an error. A marker
-// with an unexpected schema version is treated as empty so the runner re-applies
-// (and rewrites) rather than failing.
+// with an unexpected schema version or a corrupt/truncated body is likewise
+// treated as empty so the runner re-applies (and rewrites) rather than failing:
+// the marker only memoizes idempotent ACL applies, so resetting it can only
+// cost redundant work, never skip enforcement.
 func loadWindowsUnelevatedSetupMarker(sandboxHome string) (WindowsUnelevatedSetupMarker, error) {
 	sandboxHome = strings.TrimSpace(sandboxHome)
 	if sandboxHome == "" {
@@ -78,7 +80,7 @@ func loadWindowsUnelevatedSetupMarker(sandboxHome string) (WindowsUnelevatedSetu
 	}
 	var marker WindowsUnelevatedSetupMarker
 	if err := json.Unmarshal(bytes, &marker); err != nil {
-		return WindowsUnelevatedSetupMarker{}, fmt.Errorf("parse windows unelevated setup marker %s: %w", path, err)
+		return WindowsUnelevatedSetupMarker{SchemaVersion: windowsUnelevatedSetupMarkerSchemaVersion}, nil
 	}
 	if marker.SchemaVersion != windowsUnelevatedSetupMarkerSchemaVersion {
 		return WindowsUnelevatedSetupMarker{SchemaVersion: windowsUnelevatedSetupMarkerSchemaVersion}, nil
