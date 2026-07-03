@@ -386,17 +386,24 @@ func (m model) contextWindowSegment() string {
 }
 
 // humanCount renders a token count the way the status line wants it: 999,
-// 12.4K, 200K.
+// 12.4K, 200K, 1M, 1.2M.
 func humanCount(n int) string {
 	if n < 0 {
 		n = 0
 	}
-	if n < 1000 {
+	switch {
+	case n < 1000:
 		return strconv.Itoa(n)
+	case n < 1_000_000:
+		return humanCountScaled(float64(n)/1000, "K")
+	default:
+		return humanCountScaled(float64(n)/1_000_000, "M")
 	}
-	value := float64(n) / 1000
-	text := fmt.Sprintf("%.1fK", value)
-	return strings.Replace(text, ".0K", "K", 1)
+}
+
+func humanCountScaled(value float64, suffix string) string {
+	text := fmt.Sprintf("%.1f%s", value, suffix)
+	return strings.Replace(text, ".0"+suffix, suffix, 1)
 }
 
 // formatContextWindow renders a model's context window for the title bar
