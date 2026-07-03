@@ -540,63 +540,6 @@ func SetProviderDiscoveredModels(path string, name string, models []DiscoveredMo
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
-// IsAnthropicModelFunc is a function type used by PersistTwoProfiles to
-// classify model IDs as Anthropic-compatible or OpenAI-compatible.
-type IsAnthropicModelFunc func(modelID string) bool
-
-// PersistTwoProfiles splits a list of discovered models by API transport
-// (OpenAI-compatible vs Anthropic-compatible) and, when BOTH formats are
-// present, persists each group to its own named profile. If all models
-// share one format this is a no-op (the primary profile already covers them).
-//
-// The classifier parameter determines which models go to which profile;
-// pass providermodeldiscovery.IsAnthropicModel for gateway providers.
-func PersistTwoProfiles(path string, catalogID string, baseURL string, models []DiscoveredModel, apiKey string, apiKeyEnv string, isAnthropic IsAnthropicModelFunc) {
-	var openAI, anthropic []DiscoveredModel
-	for _, m := range models {
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
-			continue
-		}
-		if isAnthropic != nil && isAnthropic(id) {
-			anthropic = append(anthropic, m)
-		} else {
-			openAI = append(openAI, m)
-		}
-	}
-	// Only split when models of both formats exist.
-	if len(openAI) > 0 && len(anthropic) > 0 {
-		persistProfileGroup(path, catalogID+"-openaisdk", catalogID, baseURL, ProviderKindOpenAICompatible, "chat-completions", openAI, apiKey, apiKeyEnv, true)
-		persistProfileGroup(path, catalogID+"-anthropicsdk", catalogID, baseURL, ProviderKindAnthropicCompat, "messages", anthropic, apiKey, apiKeyEnv, false)
-	}
-}
-
-func persistProfileGroup(path string, name string, catalogID string, baseURL string, kind ProviderKind, apiFormat string, models []DiscoveredModel, apiKey string, apiKeyEnv string, setActive bool) {
-	if len(models) == 0 {
-		return
-	}
-	profile := ProviderProfile{
-		Name:         name,
-		CatalogID:    catalogID,
-		BaseURL:      baseURL,
-		ProviderKind: kind,
-		APIFormat:    apiFormat,
-		Model:        models[0].ID,
-	}
-	if key := strings.TrimSpace(apiKey); key != "" {
-		profile.APIKey = key
-	} else if env := strings.TrimSpace(apiKeyEnv); env != "" {
-		profile.APIKeyEnv = env
-	}
-	profile = SecureProviderProfile(profile, path)
-	if _, err := UpsertProvider(path, profile, setActive); err != nil {
-		return
-	}
-	if _, err := SetProviderDiscoveredModels(path, name, models); err != nil {
-		return
-	}
-}
-
 // dedupDiscoveredModels returns a copy with duplicate IDs removed (first wins).
 func dedupDiscoveredModels(models []DiscoveredModel) []DiscoveredModel {
 	seen := map[string]bool{}
