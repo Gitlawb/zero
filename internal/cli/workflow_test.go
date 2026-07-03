@@ -694,7 +694,7 @@ func TestParseChangesArgsAuto(t *testing.T) {
 	}
 
 	// 4. Reject both empty message and --auto on commit
-	_, _, err = parseChangesArgs([]string{"-m", "", "--auto"}, "commit")
+	_, _, err = parseChangesArgs([]string{"--message=", "--auto"}, "commit")
 	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
 		t.Fatalf("expected empty --message and --auto conflict error, got %v", err)
 	}
@@ -771,7 +771,7 @@ func TestRunChangesCommitAuto(t *testing.T) {
 	if strings.Contains(promptContent, "ghp_SECRETKEYHERE") {
 		t.Fatal("expected secret in diff to be redacted, but it was found in the prompt")
 	}
-	if !strings.Contains(promptContent, "[redacted]") && !strings.Contains(promptContent, "redacted") {
+	if !strings.Contains(promptContent, "[REDACTED]") && !strings.Contains(promptContent, "REDACTED") {
 		t.Fatalf("expected redacted diff content in prompt, got: %q", promptContent)
 	}
 	if !strings.Contains(stdout.String(), "Generating commit message using LLM...") {
