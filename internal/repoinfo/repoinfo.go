@@ -54,9 +54,9 @@ type Info struct {
 	AgeDays               *int       `json:"ageDays,omitempty"`
 	Contributors90d       *int       `json:"contributors90d,omitempty"`
 	CommitVelocity30d     *int       `json:"commitVelocity30d,omitempty"`
-	BranchCount           *int        `json:"branchCount,omitempty"`
-	CommitCount           *int        `json:"commitCount,omitempty"`
-	TagCount              *int        `json:"tagCount,omitempty"`
+	BranchCount           *int       `json:"branchCount,omitempty"`
+	CommitCount           *int       `json:"commitCount,omitempty"`
+	TagCount              *int       `json:"tagCount,omitempty"`
 }
 
 // RunGit runs a git subcommand in dir and returns raw stdout. A non-zero exit
