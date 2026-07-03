@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - action.yml
+      - docs/GITHUB_ACTION.md
       - .github/workflows/zero-action-smoke.yml
   push:
     branches:
       - main
     paths:
       - action.yml
+      - docs/GITHUB_ACTION.md
       - .github/workflows/zero-action-smoke.yml
 
 jobs:
@@ -29,7 +31,8 @@ jobs:
           import sys, yaml
 
           with open("action.yml", "r", encoding="utf-8") as handle:
-              doc = yaml.safe_load(handle)
+              action_raw = handle.read()
+          doc = yaml.safe_load(action_raw)
 
           assert isinstance(doc, dict), "action.yml must be a mapping"
           assert doc.get("name"), "action must declare a name"
@@ -64,6 +67,19 @@ jobs:
           serialized = yaml.safe_dump(doc)
           assert "--skip-permissions-unsafe" not in serialized, \
               "action must never pass --skip-permissions-unsafe"
+
+          run_zero = next((step for step in steps if step.get("name") == "Run ZERO"), None)
+          assert run_zero is not None, "action.yml must contain a Run ZERO step"
+          run_zero_script = run_zero.get("run") or ""
+          assert 'export "${ZERO_INPUT_API_KEY_ENV}=${ZERO_INPUT_API_KEY}"' in run_zero_script, \
+              "Run ZERO must export the provider key for the current step"
+          assert "later steps inherit" not in action_raw.lower(), \
+              "provider keys must not be documented as inherited by later steps"
+          for line in run_zero_script.splitlines():
+              if "GITHUB_ENV" in line and (
+                  "ZERO_INPUT_API_KEY" in line or "ZERO_INPUT_API_KEY_ENV" in line
+              ):
+                  raise AssertionError("provider key must not be persisted to GITHUB_ENV")
 
           print(f"action.yml OK: {len(inputs)} inputs, {len(outputs)} outputs, {len(steps)} steps")
           PY

@@ -27,14 +27,14 @@ inputs:
   api-key:
     description: >-
       The provider API key. Pass it from a repository or organization secret;
-      it is exported into the step environment and never written to the log.
+      it is exported only for the ZERO step and never written to the log.
     required: false
     default: ""
   api-key-env:
     description: >-
       Name of the environment variable the chosen provider reads its key from
       (for example OPENAI_API_KEY or ANTHROPIC_API_KEY). When set together with
-      api-key, that variable is exported for the run. Leave the action
+      api-key, that variable is exported only for the ZERO step. Leave the action
       provider-agnostic by passing the env name your provider expects rather
       than hardcoding one here.
     required: false
@@ -192,10 +192,9 @@ runs:
             echo "::error::api-key-env must be a valid environment variable name." >&2
             exit 2
           fi
-          # Export in-process so the zero invocation in this same run block sees
-          # it, and append to GITHUB_ENV so any later steps inherit it too.
+          # Export in-process for this Run ZERO step so zero can read it; do
+          # not persist provider credentials to later job steps.
           export "${ZERO_INPUT_API_KEY_ENV}=${ZERO_INPUT_API_KEY}"
-          printf '%s=%s\n' "${ZERO_INPUT_API_KEY_ENV}" "${ZERO_INPUT_API_KEY}" >> "${GITHUB_ENV}"
         fi
         if [ -n "${ZERO_INPUT_PROVIDER}" ]; then
           export ZERO_PROVIDER="${ZERO_INPUT_PROVIDER}"

@@ -41,8 +41,9 @@ jobs:
 > provider-neutral: `api-key-env` is the environment variable name the chosen
 > provider reads its key from (for example `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
 > `OPENROUTER_API_KEY`), and `api-key` is the secret value. The action exports
-> that variable for the run and never prints it. If your repository already
-> commits a `.zero/config.json` with an active provider, you can omit `provider`.
+> that variable only for the ZERO step and never prints it. If your repository
+> already commits a `.zero/config.json` with an active provider, you can omit
+> `provider`.
 
 ## Inputs
 
@@ -51,8 +52,8 @@ jobs:
 | `prompt` | one of `prompt`/`prompt-file` | `""` | The instruction for ZERO to execute. |
 | `prompt-file` | one of `prompt`/`prompt-file` | `""` | Path (relative to `working-directory`) to a file whose contents are the prompt. |
 | `provider` | no | `""` | Provider id to activate (e.g. `openai`, `anthropic`, `gemini`, `ollama`, or any compatible endpoint). |
-| `api-key` | no | `""` | The provider API key. Pass from a secret; never logged. |
-| `api-key-env` | no | `""` | Env var name the provider reads its key from (e.g. `OPENAI_API_KEY`). Exported with `api-key`. |
+| `api-key` | no | `""` | The provider API key. Pass from a secret; exported only for the ZERO step and never logged. |
+| `api-key-env` | no | `""` | Env var name the provider reads its key from (e.g. `OPENAI_API_KEY`). Exported only for the ZERO step when used with `api-key`. |
 | `model` | no | `""` | Model id. Defaults to the resolved provider's default. |
 | `mode` | no | `""` | Run mode (`zero exec --mode`), e.g. `smart`, `deep`, `fast`. |
 | `auto` | no | `low` | Autonomy ceiling (`zero exec --auto`): `low`, `medium`, or `high`. Conservative by default. |
@@ -162,9 +163,10 @@ jobs:
 ## Security notes
 
 - **Secrets are passed as Action secrets and never logged.** The action exports
-  `api-key` (under `api-key-env`) and `slack-webhook-url` into the step
-  environment only. They are never echoed, and ZERO redacts secret-shaped
-  strings from its own output.
+  `api-key` (under `api-key-env`) only for the ZERO step. `slack-webhook-url`
+  is passed only to the Slack post step. They are never echoed or persisted to
+  later workflow steps, and ZERO redacts secret-shaped strings from its own
+  output.
 - **The sandbox is always active.** This action never passes
   `--skip-permissions-unsafe`, so writes stay inside the checked-out repository
   (plus any roots you grant with `add-dir`). Unsafe mode is never enabled
