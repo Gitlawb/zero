@@ -41,6 +41,7 @@ events when present.
 
 ```json
 { "schemaVersion": 2, "type": "run_start", "runId": "run_20260603_abc123", "sessionId": "zero_20260603100000_abc123", "cwd": "/repo", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1" }
+{ "schemaVersion": 2, "type": "reasoning", "runId": "run_20260603_abc123", "delta": "Thinking..." }
 { "schemaVersion": 2, "type": "text", "runId": "run_20260603_abc123", "delta": "..." }
 { "schemaVersion": 2, "type": "tool_call", "runId": "run_20260603_abc123", "id": "call_1", "name": "read_file", "args": { "path": "README.md" }, "sideEffect": "read" }
 { "schemaVersion": 2, "type": "permission_request", "runId": "run_20260603_abc123", "id": "call_2", "name": "write_file", "action": "prompt", "permission": "prompt", "permissionMode": "ask", "sideEffect": "write", "reason": "Creates or overwrites files." }
@@ -50,6 +51,10 @@ events when present.
 { "schemaVersion": 2, "type": "final", "runId": "run_20260603_abc123", "text": "..." }
 { "schemaVersion": 2, "type": "run_end", "runId": "run_20260603_abc123", "status": "success", "exitCode": 0 }
 ```
+
+`reasoning` events carry live model reasoning/status deltas for providers that
+stream them separately from answer text. They are liveness/progress events only:
+they are not folded into `text` or the final answer.
 
 Permission events may include structured sandbox metadata:
 

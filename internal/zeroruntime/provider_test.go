@@ -312,6 +312,9 @@ func TestCollectStreamWithOptionsEmitsTextReasoningAndUsageCallbacks(t *testing.
 	if collected.Text != "Hello zero" {
 		t.Fatalf("text = %q, want Hello zero", collected.Text)
 	}
+	if !collected.HasReasoning {
+		t.Fatal("expected reasoning stream to mark collected turn as reasoning-bearing")
+	}
 	if len(textDeltas) != 2 || textDeltas[0] != "Hello " || textDeltas[1] != "zero" {
 		t.Fatalf("unexpected text callbacks: %#v", textDeltas)
 	}

@@ -80,6 +80,16 @@ func (writer *execEventWriter) text(delta string) {
 	writer.writeStdout(delta)
 }
 
+func (writer *execEventWriter) reasoning(delta string) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{"type": "reasoning", "delta": delta})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventReasoning, RunID: writer.runID, Delta: delta})
+	}
+}
+
 func (writer *execEventWriter) toolCall(call agent.ToolCall, registry *tools.Registry) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{

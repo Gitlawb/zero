@@ -283,10 +283,10 @@ func (provider *Provider) emitChunk(
 	events chan<- zeroruntime.StreamEvent,
 ) {
 	for _, choice := range chunk.Choices {
-		if choice.Delta.ReasoningContent != "" {
+		if reasoning := choice.Delta.reasoningText(); reasoning != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventReasoning,
-				Content: choice.Delta.ReasoningContent,
+				Content: reasoning,
 			})
 		}
 		if choice.Delta.Content != "" {
@@ -315,6 +315,13 @@ func (provider *Provider) emitChunk(
 			},
 		})
 	}
+}
+
+func (delta streamDelta) reasoningText() string {
+	if delta.ReasoningContent != "" {
+		return delta.ReasoningContent
+	}
+	return delta.Reasoning
 }
 
 // mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
