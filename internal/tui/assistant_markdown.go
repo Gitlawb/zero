@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -237,8 +238,10 @@ func renderAssistantMarkdownPlainText(text string, proseMeasure int, tableMeasur
 }
 
 func stripMarkdownRenderControls(text string) string {
-	text = strings.ReplaceAll(text, markdownBoldStart, "")
-	return strings.ReplaceAll(text, markdownBoldEnd, "")
+	// renderAssistantMarkdownText embeds markdownBoldStart/markdownBoldEnd
+	// markers for prose text, and highlightCodeAuto embeds ANSI color sequences
+	// for fenced code blocks. Strip everything so clipboard text is pure plain text.
+	return ansi.Strip(text)
 }
 
 func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
