@@ -101,6 +101,26 @@ func TestGrepStillMatchesWithLiveContext(t *testing.T) {
 // regex-scanned every one of them to completion regardless of cancellation.
 // This proves the match-collection phase itself stops partway through,
 // not only when the context was already cancelled before the walk started.
+// grepFiles must stop mid-walk once ctx is cancelled, not only when the
+// context was already cancelled before WalkDir starts.
+func TestGrepFilesStopsMidWalkOnCancelledContext(t *testing.T) {
+	root := buildLargeSearchTree(t, 50)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	const allowed = 5
+	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
+	files, err := grepFiles(ctx, resolvedRoot, root, nil, readExcluder{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(files) >= 50 {
+		t.Fatalf("files = %d; walk should stop mid-traversal instead of visiting every entry", len(files))
+	}
+}
+
 func TestGrepCollectMatchesStopsMidCollectionOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 50)
 	files := make([]string, 50)
@@ -121,6 +141,24 @@ func TestGrepCollectMatchesStopsMidCollectionOnCancelledContext(t *testing.T) {
 	}
 	if len(matches) != allowed {
 		t.Fatalf("matches = %d, want exactly %d collected before cancellation stopped the loop", len(matches), allowed)
+	}
+}
+
+func TestScanGlobStopsMidWalkOnCancelledContext(t *testing.T) {
+	root := buildLargeSearchTree(t, 50)
+	matcher, err := compileGlob("**/*.txt")
+	if err != nil {
+		t.Fatalf("compileGlob: %v", err)
+	}
+
+	const allowed = 5
+	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
+	matches, err := scanGlob(ctx, root, root, matcher, false, readExcluder{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if len(matches) >= 50 {
+		t.Fatalf("matches = %d; walk should stop mid-traversal instead of visiting every entry", len(matches))
 	}
 }
 

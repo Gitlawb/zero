@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -91,8 +90,8 @@ func (tool globTool) runWith(ctx context.Context, args map[string]any, exclude r
 
 	matches, err := scanGlob(ctx, root, displayRoot, matcher, includeDirs, exclude)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return Result{Status: StatusError, Output: "Error: glob cancelled."}
+		if res, ok := searchCancelledResult("glob", err); ok {
+			return res
 		}
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}

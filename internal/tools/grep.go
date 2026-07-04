@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,8 +140,8 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 
 	files, err := grepFiles(ctx, resolvedRoot, target, globMatcher, exclude)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return Result{Status: StatusError, Output: "Error: grep cancelled."}
+		if res, ok := searchCancelledResult("grep", err); ok {
+			return res
 		}
 		return errorResult("Error running grep: " + err.Error())
 	}
@@ -152,8 +151,8 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 	// they survive a round-trip through read_file/edit_file (mirrors glob).
 	matches, err := collectGrepMatches(ctx, resolvedRoot, filepath.IsAbs(displayRoot), files, compiled)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return Result{Status: StatusError, Output: "Error: grep cancelled."}
+		if res, ok := searchCancelledResult("grep", err); ok {
+			return res
 		}
 		return errorResult("Error running grep: " + err.Error())
 	}
