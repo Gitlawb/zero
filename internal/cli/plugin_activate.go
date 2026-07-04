@@ -3,7 +3,9 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -55,6 +57,27 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 	}
 
 	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots}
+}
+
+// skillInfos resolves the reusable skills the model can load via the skill tool —
+// the default skills dir merged with any plugin skill roots, the same set the
+// plugin-aware skill tool resolves against — as plain data for the agent's system
+// prompt. It returns nil when no skills are installed, so a skill-less run leaves
+// the prompt byte-identical.
+func (a pluginActivation) skillInfos(defaultDir string) []agent.SkillInfo {
+	merged, _ := plugins.MergedSkills(defaultDir, a.skillRoots)
+	if len(merged) == 0 {
+		return nil
+	}
+	infos := make([]agent.SkillInfo, 0, len(merged))
+	for _, skill := range merged {
+		name := strings.TrimSpace(skill.Name)
+		if name == "" {
+			continue
+		}
+		infos = append(infos, agent.SkillInfo{Name: name, Description: strings.TrimSpace(skill.Description)})
+	}
+	return infos
 }
 
 // formatLoadDiagnostic renders a plugin load diagnostic into a single warning

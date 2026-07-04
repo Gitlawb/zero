@@ -11,6 +11,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/usage"
 )
 
 const tuiSessionTitleLimit = 80
@@ -37,6 +38,51 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 	m.activeSession = session
 	m.sessionEvents = []sessions.Event{}
 	return m, nil
+}
+
+// startNewSession abandons the visible conversation and the agent's in-context
+// history and begins a fresh session in place. The current session already lives
+// on disk (its events are persisted as they happen), so it stays resumable via
+// /resume; here we only clear the in-memory conversation and the per-session
+// usage/compaction counters, then let the next prompt lazily create a new session
+// through ensureActiveSession — the same seam a cold start uses. Model, provider,
+// permission mode, and response style are intentionally preserved: /new starts a
+// clean conversation, not a clean configuration.
+func (m model) startNewSession() model {
+	previousID := m.activeSession.SessionID
+
+	m.activeSession = sessions.Metadata{}
+	m.sessionEvents = nil
+
+	// Reset the per-session usage + compaction display so the new session starts
+	// from zero instead of inheriting the previous conversation's token/cost totals.
+	if m.usageTracker != nil {
+		m.usageTracker.Reset()
+	}
+	m.lastUsage = usage.Normalized{}
+	m.lastUsageSeen = false
+	m.unpricedRequests = 0
+	m.unpricedTokens = 0
+	m.compactRequests = 0
+	m.compactFrame = 0
+	m.lastCompactResult = nil
+	m.lastCompactError = ""
+	m.turnLatencySum = 0
+	m.turnLatencyCount = 0
+	m.turnTTFTSum = 0
+	m.turnTTFTCount = 0
+
+	note := "Started a new session."
+	if previousID != "" {
+		note = "New session started. Previous session saved as " + previousID +
+			" — resume it anytime with /resume " + previousID + "."
+	}
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: note})
+	// Scrollback above can't be un-printed; a faint divider marks the boundary and
+	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).
+	m.resetFlushFrontier("· new session ·")
+	return m
 }
 
 func (m model) appendSessionEvent(eventType sessions.EventType, payload any) (model, error) {

@@ -340,8 +340,11 @@ func TestClearCommandResetsTranscript(t *testing.T) {
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if len(next.transcript) != 1 || next.transcript[0].kind != rowWelcome {
-		t.Fatalf("expected clear to reset transcript, got %#v", next.transcript)
+	if len(next.transcript) != 2 || next.transcript[0].kind != rowWelcome {
+		t.Fatalf("expected clear to reset transcript to welcome + note, got %#v", next.transcript)
+	}
+	if !transcriptContains(next.transcript, "/new") {
+		t.Fatalf("expected clear to point users to /new, got %#v", next.transcript)
 	}
 }
 

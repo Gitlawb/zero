@@ -803,6 +803,25 @@ func (m model) usageSummaryText() string {
 	return usage.FormatSummary(summary) + "; " + formatUnpricedUsage(m.unpricedRequests, m.unpricedTokens)
 }
 
+// cacheEfficiencyText reports the session's prompt-cache hit rate for /context so a
+// user can see whether cache reads are actually saving work. A low rate across
+// several turns usually means the cacheable prefix is churning (e.g. a tool list
+// that shifts mid-session), so it flags that case to make slowness diagnosable.
+func (m model) cacheEfficiencyText() string {
+	if m.usageTracker == nil {
+		return "usage unavailable"
+	}
+	summary := m.usageTracker.Summary()
+	if summary.InputTokens <= 0 {
+		return "n/a"
+	}
+	text := usage.FormatCacheEfficiency(summary)
+	if summary.RecordCount > 5 && summary.CacheHitRate() < 0.5 {
+		text += " — low; prefix may be unstable"
+	}
+	return text
+}
+
 func formatUnpricedUsage(requests int, tokens int) string {
 	requestLabel := "requests"
 	if requests == 1 {

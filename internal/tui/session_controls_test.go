@@ -148,21 +148,21 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /style to be handled without starting an agent run")
 	}
-	if !transcriptContains(next.transcript, "active style: balanced") || !transcriptContains(next.transcript, "concise") {
+	if !transcriptContains(next.transcript, "active style: concise") || !transcriptContains(next.transcript, "explanatory") {
 		t.Fatalf("expected style list transcript, got %#v", next.transcript)
 	}
 
-	next.input.SetValue("/style concise")
+	next.input.SetValue("/style explanatory")
 	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
-		t.Fatal("expected /style concise to be handled without starting an agent run")
+		t.Fatal("expected /style explanatory to be handled without starting an agent run")
 	}
-	if next.responseStyle != "concise" {
-		t.Fatalf("expected concise style, got %q", next.responseStyle)
+	if next.responseStyle != "explanatory" {
+		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: concise") {
+	if !transcriptContains(next.transcript, "active style: explanatory") {
 		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
 	}
 }
@@ -621,7 +621,7 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /context to be handled without starting an agent run")
 	}
-	for _, want := range []string{"usage      1 request, 120 tokens", "style      balanced", "effort     auto", "compaction  idle"} {
+	for _, want := range []string{"usage      1 request, 120 tokens", "style      concise", "effort     auto", "compaction  idle"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected context transcript to contain %q, got %#v", want, next.transcript)
 		}

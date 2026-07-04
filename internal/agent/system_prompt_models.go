@@ -6,11 +6,13 @@ import "strings"
 //
 // Different model families respond to different framing: the GPT family benefits
 // from an explicit markdown/output spec and a strong "prefer native tools" nudge;
-// Gemini benefits from explicit tool-preference and conciseness guidance; the
-// Claude family is already well-aligned with the core prompt and only needs a
-// light comment-discipline nudge. modelPromptAddendum returns the family-specific
-// block appended after the core prompt. Classification is by model id (the agent
-// only has the model string — no registry dependency).
+// Gemini benefits from explicit tool-preference and conciseness guidance. The
+// Claude family is already aligned with the core prompt and needs no addendum —
+// comment discipline is universal in the core prompt now, so every family gets it.
+// modelPromptAddendum returns the family-specific block appended after the core
+// prompt, or "" when the family is unknown or needs no specialization.
+// Classification is by model id (the agent only has the model string — no registry
+// dependency).
 
 const (
 	familyOpenAI    = "openai"
@@ -45,9 +47,10 @@ func modelPromptAddendum(model string) string {
 		return openAIPromptAddendum
 	case familyGemini:
 		return geminiPromptAddendum
-	case familyAnthropic:
-		return anthropicPromptAddendum
 	default:
+		// Anthropic (aligned with the core prompt) and unknown families get no
+		// family-specific block; comment discipline now lives in the core prompt
+		// for every model.
 		return ""
 	}
 }
@@ -69,9 +72,4 @@ const geminiPromptAddendum = `<model_guidance>
 - Be concise and concrete. When you run a shell command with side effects, state
   in one short clause why it is needed.
 - Use update_plan for any multi-step task and keep it current.
-</model_guidance>`
-
-const anthropicPromptAddendum = `<model_guidance>
-- Do not add code comments unless the user asks or the surrounding code is
-  comment-dense; match the file's existing comment density.
 </model_guidance>`

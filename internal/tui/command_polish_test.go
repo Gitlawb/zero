@@ -377,7 +377,7 @@ func TestContextCommandCardHandlesNilRegistryAndStableStyle(t *testing.T) {
 	for _, want := range []string{
 		"Context",
 		"0 tools",
-		"style      balanced",
+		"style      concise",
 		"root        unknown",
 	} {
 		assertContains(t, text, want)
