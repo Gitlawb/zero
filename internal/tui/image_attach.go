@@ -98,16 +98,9 @@ func (m model) modelSupportsVisionTUI() bool {
 	if trimmed == "" {
 		return false
 	}
-	// Check the curated registry first.
-	registry, err := modelregistry.DefaultRegistry()
-	if err == nil {
-		if modelregistry.SupportsVision(registry, trimmed) {
-			return true
-		}
-		// Catalog knows this model and it lacks vision — trust that.
-		if _, known := registry.Get(trimmed); known {
-			return false
-		}
+	// The curated catalog is authoritative only when it knows the model.
+	if entry, known := m.modelCatalog.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
 	}
 	// Check the discovered model list (from models.dev) for InputModalities
 	// containing "image". This covers custom/ollama/cloud models not in the

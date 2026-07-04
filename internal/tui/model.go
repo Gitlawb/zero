@@ -67,6 +67,7 @@ type model struct {
 	gitBranch                   string
 	providerName                string
 	modelName                   string
+	modelCatalog                modelregistry.Registry
 	providerProfile             config.ProviderProfile
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
@@ -661,9 +662,13 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
 	sandboxStore := options.SandboxStore
+	modelCatalog, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		panic(err)
+	}
 	usageTracker := options.UsageTracker
 	if usageTracker == nil {
-		usageTracker = usage.NewTracker(usage.TrackerOptions{})
+		usageTracker = usage.NewTracker(usage.TrackerOptions{Registry: &modelCatalog})
 	}
 	prService := options.PrService
 	if prService == nil {
@@ -715,6 +720,7 @@ func newModel(ctx context.Context, options Options) model {
 		gitBranch:                   gitBranch(cwd),
 		providerName:                options.ProviderName,
 		modelName:                   options.ModelName,
+		modelCatalog:                modelCatalog,
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recapsEnabled:               options.RecapsEnabled,
