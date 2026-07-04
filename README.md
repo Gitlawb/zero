@@ -12,6 +12,25 @@
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
 
+> ### 📣 Announcement — Zero now means *zero*: zero-knowledge run attestation
+>
+> Zero can now prove an agent run happened — **exactly once, produced by a
+> specific model set — without revealing a single token of it.** The new
+> [`internal/attest`](internal/attest) package (stdlib-only, zero dependencies)
+> folds every run event into a SHA-256 hash chain; the chain head is a 32-byte
+> payload commitment, and a nullifier (`SHA-256(secret ‖ context ‖ nonce)`,
+> bit-compatible with clawd-zk's `@clawd/zk-client`) gives one-shot replay
+> protection on Solana via `publish_attestation` — for ~$0.005 per run.
+> Transcripts stay local and re-verify offline with `VerifyJSONL`.
+>
+> The package also ships a **static no-recursion gate**: a call-graph test that
+> fails the build on any direct or mutual recursion, making "zero recursion"
+> an enforced invariant of the attestation core rather than a slogan.
+> Details in [docs/ATTESTATION.md](docs/ATTESTATION.md). The full flat-scheduler
+> engine this was distilled from (queued subagents, ZK God Mode model racing,
+> NL intent routing) lives in
+> [ClawdBot's `pkg/zero`](https://github.com/Solizardking/clawd-go-bot).
+
 Zero is an AI coding agent for your local terminal. It can inspect a repository,
 edit files, run commands, use browser/terminal helpers, and keep durable local
 sessions while you choose the model and the permission level.
@@ -315,6 +334,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 ## Documentation
 
 - [Install](docs/INSTALL.md)
+- [ZK run attestation](docs/ATTESTATION.md)
 - [Update flow](docs/UPDATE.md)
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md)
 - [Specialists](docs/SPECIALISTS.md)
