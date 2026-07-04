@@ -160,6 +160,7 @@ zero
 | `/spec`、`/plan` | 在构建之前起草和审查计划 |
 | `/image` | 为视觉模型附加图片 |
 | `/resume`、`/rewind` | 继续或回滚本地会话 |
+| `/new` | 原地开始一个新会话（之前的会话仍保留在磁盘上） |
 | `/compact`、`/context` | 管理上下文使用 |
 | `/permissions`、`/tools` | 检查可用工具和策略 |
 | `/add-dir` | 为此会话授予额外的写入目录 |
@@ -246,6 +247,7 @@ zero changes          检查和提交本地 Git 变更
 zero usage            Token 使用量和估算成本
 zero cron             定时智能体任务
 zero update           检查更新版本
+zero upgrade          下载、验证并安装最新版本
 ```
 
 ## 外观和无障碍
