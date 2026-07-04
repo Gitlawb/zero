@@ -187,6 +187,13 @@ func TestUpDownArrowsScrollDetailedTranscript(t *testing.T) {
 	if m.chatScrollOffset != 1 {
 		t.Fatalf("KeyUp should scroll one line up, got chatScrollOffset=%d", m.chatScrollOffset)
 	}
+
+	// Arrow down scrolls back toward bottom.
+	updated, _ = m.Update(testKey(tea.KeyDown))
+	m = updated.(model)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("KeyDown after KeyUp should return to bottom, got chatScrollOffset=%d", m.chatScrollOffset)
+	}
 }
 
 func numberedLines(count int) string {
