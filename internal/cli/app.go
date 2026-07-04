@@ -740,6 +740,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
+			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
 		},
 		PermissionMode: permissionMode,
 		Notify:         resolved.Notify,

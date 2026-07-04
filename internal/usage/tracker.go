@@ -219,6 +219,29 @@ func FormatSummary(summary Summary) string {
 	return fmt.Sprintf("%s %s, %s tokens, %s", comma(summary.RecordCount), requestLabel, comma(summary.TotalTokens), summary.FormattedTotalCost)
 }
 
+// CacheHitRate is the fraction of input tokens served from the provider's prompt
+// cache. CachedInputTokens is clamped to InputTokens in Normalize, so the result is
+// always in [0,1]; it is 0 when no input has been recorded.
+func (summary Summary) CacheHitRate() float64 {
+	if summary.InputTokens <= 0 {
+		return 0
+	}
+	return float64(summary.CachedInputTokens) / float64(summary.InputTokens)
+}
+
+// FormatCacheEfficiency renders the prompt-cache hit rate for display, e.g.
+// "63% (8,200 cached / 13,100 input)", so a user can see whether cache reads are
+// actually saving work. Returns "n/a" until some input has been recorded.
+func FormatCacheEfficiency(summary Summary) string {
+	if summary.InputTokens <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.0f%% (%s cached / %s input)",
+		summary.CacheHitRate()*100,
+		comma(summary.CachedInputTokens),
+		comma(summary.InputTokens))
+}
+
 func addUsageToSummary(summary *Summary, usage Normalized) {
 	summary.InputTokens += usage.InputTokens
 	summary.CachedInputTokens += usage.CachedInputTokens

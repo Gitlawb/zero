@@ -174,6 +174,16 @@ type SpecialistInfo struct {
 	WhenToUse string
 }
 
+// SkillInfo is a one-line summary of a reusable, on-demand skill (its name and
+// frontmatter description) surfaced to the system prompt so the model can invoke
+// the right skill with the skill tool on the first try instead of guessing a name
+// and reading the failure. Like SpecialistInfo it is plain data, so the agent
+// package needs no dependency on internal/skills.
+type SkillInfo struct {
+	Name        string
+	Description string
+}
+
 type Options struct {
 	MaxTurns int
 	// DeferThreshold activates deferred MCP-tool loading: when the number of
@@ -189,6 +199,12 @@ type Options struct {
 	// populated only where the Task tool is actually registered, so an empty slice
 	// (the default) reproduces the previous prompt byte-for-byte.
 	Specialists []SpecialistInfo
+	// Skills lists the reusable skills installed for this run (the default skills
+	// dir merged with any plugin skill roots). When non-empty the system prompt
+	// gains an <available_skills> block naming them so the model loads the right one
+	// via the skill tool on the first try. Empty (the default) reproduces the
+	// previous prompt byte-for-byte.
+	Skills []SkillInfo
 	// Specialist/sub-agent metadata is carried through exec now and consumed by
 	// the specialist runtime in later slices.
 	SessionID        string

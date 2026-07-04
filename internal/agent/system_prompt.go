@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -86,6 +87,9 @@ func buildSystemPrompt(options Options) string {
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
 	}
+	if skillsBlock := skillsContext(options); skillsBlock != "" {
+		sections = append(sections, skillsBlock)
+	}
 	if style := responseStyleContext(options); style != "" {
 		sections = append(sections, style)
 	}
@@ -162,6 +166,64 @@ func specialistDelegationContext(options Options) string {
 	}
 	b.WriteString("</specialists>")
 	return b.String()
+}
+
+// skillsContext lists the reusable skills the model can pull in on demand via the
+// skill tool, so it invokes the right one on the first try instead of guessing a
+// name, failing, and reading the error. It mirrors specialistDelegationContext:
+// names + one-line descriptions only (never skill bodies), and it renders nothing
+// when no skills are installed, so a skill-less run reproduces the previous prompt
+// byte-for-byte.
+// skillsContextListBudget bounds the bytes spent listing individual skills so a
+// workspace with dozens of them can't bloat every turn's prompt. Skills past the
+// budget are summarized as a count rather than dropped — the model can still load
+// any of them by name (an unknown name returns the full list from the skill tool).
+const skillsContextListBudget = 640
+
+func skillsContext(options Options) string {
+	if len(options.Skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<available_skills>\n")
+	b.WriteString("Reusable, on-demand instruction sets you can load with the skill tool. When a request matches one, call skill with its exact name to pull in its guidance before acting — do not guess names or skip a relevant skill.\n")
+	listed, spent, omitted := 0, 0, 0
+	for _, info := range options.Skills {
+		name := strings.TrimSpace(info.Name)
+		if name == "" {
+			continue
+		}
+		line := "- " + name
+		if desc := strings.TrimSpace(info.Description); desc != "" {
+			line += ": " + truncateForSkillLine(desc)
+		}
+		line += "\n"
+		// Always list at least one skill; past the budget, summarize the remainder
+		// as a count instead of silently dropping it.
+		if listed > 0 && spent+len(line) > skillsContextListBudget {
+			omitted++
+			continue
+		}
+		b.WriteString(line)
+		spent += len(line)
+		listed++
+	}
+	if omitted > 0 {
+		b.WriteString("- …and " + strconv.Itoa(omitted) + " more (call skill with a name; an unknown name lists them all)\n")
+	}
+	b.WriteString("</available_skills>")
+	return b.String()
+}
+
+// truncateForSkillLine keeps a skill's one-line description short so a single
+// verbose description can't dominate the skills-list budget.
+func truncateForSkillLine(desc string) string {
+	const maxDescRunes = 100
+	runes := []rune(desc)
+	if len(runes) <= maxDescRunes {
+		return desc
+	}
+	return strings.TrimSpace(string(runes[:maxDescRunes])) + "…"
 }
 
 func sessionRuntimeContext(options Options) string {

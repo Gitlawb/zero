@@ -21,12 +21,17 @@ import (
 // the agent loop owns the provider wiring.
 
 // defaultCompactionPreserveLast is how many trailing messages are kept verbatim
-// when the caller does not specify a preserve count.
-const defaultCompactionPreserveLast = 8
+// when the caller does not specify a preserve count. Kept in sync with the replay
+// reconstruction default in internal/sessions/replay.go.
+const defaultCompactionPreserveLast = 6
 
 // compactionTriggerRatio is the fraction of the context window at which
-// proactive compaction kicks in (top of each turn).
-const compactionTriggerRatio = 0.8
+// proactive compaction kicks in (top of each turn). NOTE: this is speculative
+// tuning — validate against the per-turn latency/compaction metrics (roadmap 5.2)
+// before trusting it. Measured fixed overhead is ~7.4k tokens (not the ~16k the
+// roadmap assumed), so context fills slower; if data shows 0.7 triggers redundant
+// summarization, raise it back toward 0.8.
+const compactionTriggerRatio = 0.7
 
 // summaryLabel prefixes the injected summary so it is unmistakable in the
 // transcript (and so tests can assert on it).

@@ -29,9 +29,11 @@ func TestBuildSystemPromptAppendsModelAddendum(t *testing.T) {
 	if got := buildSystemPrompt(Options{Model: "gpt-5"}); !strings.Contains(got, openAIPromptAddendum) {
 		t.Fatalf("expected the OpenAI addendum in the gpt-5 prompt")
 	}
+	// Claude is aligned with the core prompt and gets no family addendum now that
+	// comment discipline is universal; it must not pick up another family's block.
 	claude := buildSystemPrompt(Options{Model: "claude-opus-4-6"})
-	if !strings.Contains(claude, anthropicPromptAddendum) {
-		t.Fatalf("expected the Anthropic addendum in the claude prompt")
+	if strings.Contains(claude, "<model_guidance>") {
+		t.Fatalf("expected no model_guidance block for Claude (aligned with core prompt)")
 	}
 	if strings.Contains(claude, openAIPromptAddendum) {
 		t.Fatalf("the claude prompt must not contain the OpenAI addendum")

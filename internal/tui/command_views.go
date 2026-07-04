@@ -559,6 +559,21 @@ func (m model) modelText(args string) string {
 	})
 }
 
+// avgTurnLatencyText reports the session's rolling average turn wall-time for
+// /context — the "is it slow?" signal a user otherwise can only feel. "n/a" until
+// a turn has completed.
+func (m model) avgTurnLatencyText() string {
+	if m.turnLatencyCount == 0 {
+		return "n/a"
+	}
+	avgSeconds := m.turnLatencySum.Seconds() / float64(m.turnLatencyCount)
+	if m.turnTTFTCount > 0 {
+		ttftSeconds := m.turnTTFTSum.Seconds() / float64(m.turnTTFTCount)
+		return fmt.Sprintf("%.1fs avg (%.1fs to first token, %d turns)", avgSeconds, ttftSeconds, m.turnLatencyCount)
+	}
+	return fmt.Sprintf("%.1fs avg (%d turns)", avgSeconds, m.turnLatencyCount)
+}
+
 func (m model) contextText() string {
 	toolCount := len(m.registeredTools())
 	return renderCommandCardTranscript(commandCard{
@@ -578,6 +593,8 @@ func (m model) contextText() string {
 					{Key: "effort", Value: m.effortDisplay()},
 					{Key: "style", Value: displayValue(m.responseStyle, defaultResponseStyle)},
 					{Key: "usage", Value: m.usageSummaryText()},
+					{Key: "cache", Value: m.cacheEfficiencyText()},
+					{Key: "latency", Value: m.avgTurnLatencyText()},
 					{Key: "max turns", Value: fmt.Sprint(m.agentOptions.MaxTurns)},
 				},
 			},

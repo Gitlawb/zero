@@ -2470,74 +2470,95 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 
 	active := options.DeferThreshold > 0 && eligible >= options.DeferThreshold && loaderUsable
 
-	definitions := make([]zeroruntime.ToolDefinition, 0, len(visible))
-	exposedNames := make(map[string]bool, len(visible))
+	// INACTIVE: every visible tool eager (except tool_search), alpha-sorted. With no
+	// deferral there is no mid-session loading, so this is byte-stable across turns
+	// and byte-identical to the pre-deferral output.
+	if !active {
+		definitions := make([]zeroruntime.ToolDefinition, 0, len(visible))
+		for _, tool := range visible {
+			if tool.Name() == tools.ToolSearchToolName {
+				continue
+			}
+			definitions = append(definitions, runtimeToolDefinition(tool))
+		}
+		sort.Slice(definitions, func(left int, right int) bool {
+			return definitions[left].Name < definitions[right].Name
+		})
+		return definitions, ""
+	}
+
+	// ACTIVE: lay the tools array out so its cacheable prefix does NOT shift when a
+	// deferred tool loads mid-session. The tools block is part of the provider's
+	// cached prefix; if a load reorders it, the cache invalidates from that point
+	// through the system prompt and messages — on EVERY load. Previously the whole
+	// array was alpha-sorted each turn, so a newly loaded tool was INSERTED into the
+	// middle and shifted every later definition. Instead we build three append-only
+	// regions:
+	//   1. non-deferred tools, alpha-sorted — always present, identical every turn;
+	//   2. tool_search — always present, right after the stable block;
+	//   3. loaded deferred tools, alpha-sorted — APPENDED, so an unloaded->loaded
+	//      transition grows the tail instead of inserting into the eager block.
+	// (tool_search's discovery text still shrinks as tools load, so keeping it and
+	// the loaded tail AFTER the eager block preserves the eager tools' cache across a
+	// load; fully stabilizing the loader's own description is a scoped follow-up.)
+	eager := make([]zeroruntime.ToolDefinition, 0, len(visible))
+	loadedTail := make([]zeroruntime.ToolDefinition, 0)
 	var hiddenTools []tools.Tool
 	for _, tool := range visible {
 		name := tool.Name()
-		deferred := tools.IsDeferred(tool)
-
-		if !active {
-			// Inactive: byte-identical to legacy, but tool_search is never advertised.
-			if name == tools.ToolSearchToolName {
-				continue
+		if name == tools.ToolSearchToolName {
+			continue // added explicitly between the eager block and the loaded tail
+		}
+		if tools.IsDeferred(tool) {
+			if loaded[name] {
+				loadedTail = append(loadedTail, runtimeToolDefinition(tool))
+			} else {
+				hiddenTools = append(hiddenTools, tool)
 			}
-			definitions = append(definitions, zeroruntime.ToolDefinition{
-				Name:        name,
-				Description: tool.Description(),
-				Parameters:  schemaToRuntimeMap(tool.Parameters()),
-			})
-			exposedNames[name] = true
 			continue
 		}
-
-		// Active path.
-		if deferred && !loaded[name] {
-			hiddenTools = append(hiddenTools, tool)
-			continue
-		}
-		definitions = append(definitions, zeroruntime.ToolDefinition{
-			Name:        name,
-			Description: tool.Description(),
-			Parameters:  schemaToRuntimeMap(tool.Parameters()),
-		})
-		exposedNames[name] = true
+		eager = append(eager, runtimeToolDefinition(tool))
 	}
-
-	// On the ACTIVE path tool_search is guaranteed runnable (active implies
-	// loaderUsable), so it must ALWAYS be reachable — even when a non-empty
-	// EnabledTools allowlist omits it (the operator allowlisted the deferred
-	// tools, not the loader). Expose its full definition whenever it is not
-	// already in the exposed set. This never runs on the inactive path, so the
-	// byte-identical below-threshold output is preserved.
-	discovery := ""
-	if active && len(hiddenTools) > 0 {
-		discovery = tools.BuildToolSearchDescription(hiddenTools)
-	}
-	if active && !exposedNames[tools.ToolSearchToolName] {
-		description := loader.Description()
-		if discovery != "" {
-			description = discovery
-		}
-		definitions = append(definitions, zeroruntime.ToolDefinition{
-			Name:        loader.Name(),
-			Description: description,
-			Parameters:  schemaToRuntimeMap(loader.Parameters()),
-		})
-	} else if active && discovery != "" {
-		for i := range definitions {
-			if definitions[i].Name == tools.ToolSearchToolName {
-				definitions[i].Description = discovery
-				break
-			}
-		}
-	}
-
-	sort.Slice(definitions, func(left int, right int) bool {
-		return definitions[left].Name < definitions[right].Name
+	sort.Slice(eager, func(left int, right int) bool {
+		return eager[left].Name < eager[right].Name
+	})
+	sort.Slice(loadedTail, func(left int, right int) bool {
+		return loadedTail[left].Name < loadedTail[right].Name
 	})
 
+	discovery := ""
+	if len(hiddenTools) > 0 {
+		discovery = tools.BuildToolSearchDescription(hiddenTools)
+	}
+
+	// tool_search is guaranteed runnable on the active path, so it is ALWAYS exposed
+	// — even when a non-empty EnabledTools allowlist omits it (the operator
+	// allowlisted the deferred tools, not the loader). It sits right after the stable
+	// eager block and carries the discovery list for still-hidden tools.
+	description := loader.Description()
+	if discovery != "" {
+		description = discovery
+	}
+	definitions := make([]zeroruntime.ToolDefinition, 0, len(eager)+1+len(loadedTail))
+	definitions = append(definitions, eager...)
+	definitions = append(definitions, zeroruntime.ToolDefinition{
+		Name:        loader.Name(),
+		Description: description,
+		Parameters:  schemaToRuntimeMap(loader.Parameters()),
+	})
+	definitions = append(definitions, loadedTail...)
+
 	return definitions, discovery
+}
+
+// runtimeToolDefinition renders a tool's advertised definition (name, description,
+// JSON-schema parameters) as sent to the provider.
+func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
+	return zeroruntime.ToolDefinition{
+		Name:        tool.Name(),
+		Description: tool.Description(),
+		Parameters:  schemaToRuntimeMap(tool.Parameters()),
+	}
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {

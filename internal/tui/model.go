@@ -36,7 +36,7 @@ import (
 )
 
 const tuiToolOutputLimit = 240
-const defaultResponseStyle = "balanced"
+const defaultResponseStyle = "concise"
 const chatWheelScrollLines = 5
 const ctrlCExitConfirmDuration = 3 * time.Second
 const ctrlCExitConfirmText = "Press Ctrl+C again to exit"
@@ -100,35 +100,42 @@ type model struct {
 	titledSessions map[string]bool
 	// retitle* drive the sequential /retitle backfill: queued session ids still
 	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue          []string
-	retitleActive         bool
-	retitleTotal          int
-	retitleDone           int
-	retitleOK             int
-	usageTracker          *usage.Tracker
-	sessionCompactor      SessionCompactor
-	prService             *PrService
-	prState               PrState
-	prWatcherStop         func()
-	runtimeMessageSink    func(tea.Msg)
-	agentOptions          agent.Options
-	notifier              *notify.Notifier
-	permissionMode        agent.PermissionMode
-	selfCorrectTests      bool
-	reasoningEffort       modelregistry.ReasoningEffort
-	responseStyle         string
-	themeMode             themeMode // palette preference: auto (default), dark, light
-	hasDarkBg             bool      // last terminal background-detection result (auto mode)
-	userAgent             string
-	compactRequests       int
-	compactInFlight       bool
-	compactFrame          int
-	lastCompactResult     *CompactResult
-	lastCompactError      string
-	unpricedRequests      int
-	unpricedTokens        int
-	lastUsage             usage.Normalized
-	lastUsageSeen         bool
+	retitleQueue       []string
+	retitleActive      bool
+	retitleTotal       int
+	retitleDone        int
+	retitleOK          int
+	usageTracker       *usage.Tracker
+	sessionCompactor   SessionCompactor
+	prService          *PrService
+	prState            PrState
+	prWatcherStop      func()
+	runtimeMessageSink func(tea.Msg)
+	agentOptions       agent.Options
+	notifier           *notify.Notifier
+	permissionMode     agent.PermissionMode
+	selfCorrectTests   bool
+	reasoningEffort    modelregistry.ReasoningEffort
+	responseStyle      string
+	themeMode          themeMode // palette preference: auto (default), dark, light
+	hasDarkBg          bool      // last terminal background-detection result (auto mode)
+	userAgent          string
+	compactRequests    int
+	compactInFlight    bool
+	compactFrame       int
+	lastCompactResult  *CompactResult
+	lastCompactError   string
+	unpricedRequests   int
+	unpricedTokens     int
+	lastUsage          usage.Normalized
+	lastUsageSeen      bool
+	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
+	// /context can show a rolling average turn latency (the "is it slow?" signal).
+	// Reset by /new.
+	turnLatencySum        time.Duration
+	turnLatencyCount      int
+	turnTTFTSum           time.Duration
+	turnTTFTCount         int
 	transcript            []transcriptRow
 	transcriptDetailed    bool
 	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
@@ -451,6 +458,9 @@ type agentResponseMsg struct {
 	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
+	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
+	// tool-only or errored turn). Set only on the success path.
+	ttft time.Duration
 }
 
 type agentRowMsg struct {
@@ -1856,6 +1866,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingText = ""
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
+		// Roll the completed run's wall-time into the session's rolling average so
+		// /context can surface typical turn latency, not just token counts.
+		if msg.turnElapsed > 0 {
+			m.turnLatencySum += msg.turnElapsed
+			m.turnLatencyCount++
+		}
+		if msg.ttft > 0 {
+			m.turnTTFTSum += msg.ttft
+			m.turnTTFTCount++
+		}
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
 		}
@@ -3615,10 +3635,23 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandClear:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+		// Clearing wipes the visible transcript only — the session's context is
+		// intact, so the next prompt still replays the full history. Say so, and
+		// point to /new, so "cleared screen" isn't mistaken for "fresh context."
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Transcript cleared. The agent still has the full session context — use /new to start a fresh session."})
 		// Scrollback above can't be un-printed; a faint divider marks where the
 		// cleared surface ended and the frontier restarts for the fresh transcript.
 		m.resetFlushFrontier("· cleared ·")
 		return m, nil
+	case commandNew:
+		// A fresh session mid-run would strand the in-flight turn's events; make the
+		// user cancel first. Idle, /new saves the current session (already on disk)
+		// and clears the conversation in place.
+		if m.pending || m.compactInFlight {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
+			return m, nil
+		}
+		return m.startNewSession(), nil
 	case commandExit:
 		// /exit gets the same protection as Ctrl+C: cancel any in-flight run and
 		// defer the quit until its checkpoint session events flush — quitting
@@ -4103,6 +4136,9 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
+		// firstTokenAt is stamped when the first token (reasoning or text) streams,
+		// so the turn can report time-to-first-token alongside total wall time.
+		var firstTokenAt time.Time
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -4195,6 +4231,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
+			if firstTokenAt.IsZero() {
+				firstTokenAt = m.now()
+			}
 			if strings.TrimSpace(reasoningText) != "" {
 				flushReasoning(m.now())
 			}
@@ -4290,6 +4329,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
+			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
+				firstTokenAt = now
+			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
 			}
@@ -4526,6 +4568,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		flushReasoning(m.now())
 		elapsed := m.now().Sub(started)
+		ttft := time.Duration(0)
+		if !firstTokenAt.IsZero() {
+			ttft = firstTokenAt.Sub(started)
+		}
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -4543,7 +4589,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
 	}
 }
 
