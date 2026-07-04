@@ -15,18 +15,25 @@ func TestClassify(t *testing.T) {
 		{"nil-ish empty", "", Unknown},
 		{"providerio auth prefix", "auth error: your API key is missing or invalid — run `zero auth`", Auth},
 		{"raw 401", "provider request error: 401 Unauthorized", Auth},
-		{"invalid api key", "Error: invalid_api_key: incorrect key provided", Auth},
+		{"invalid api key", "provider request error: invalid_api_key: incorrect key provided", Auth},
 		{"rate limit prefix", "rate limit error: 429 too many requests", RateLimit},
 		{"overloaded", "provider error: model is overloaded, please retry", RateLimit},
-		{"resource exhausted gemini", "rpc error: code = ResourceExhausted desc = quota exceeded", RateLimit},
-		{"context length openai", "This model's maximum context length is 128000 tokens", ContextOverflow},
+		{"resource exhausted gemini", "provider stream error: rpc error: code = ResourceExhausted desc = quota exceeded", RateLimit},
+		{"context length openai", "provider request error: this model's maximum context length is 128000 tokens", ContextOverflow},
 		{"context_length_exceeded", "provider request error: context_length_exceeded", ContextOverflow},
 		{"model not found", "provider request error: 404 the model `gpt-9` does not exist", ModelNotFound},
-		{"unknown model", "unknown model: sonnet-99", ModelNotFound},
-		{"dns failure", "Post \"https://api...\": dial tcp: lookup api.foo.com: no such host", Connectivity},
-		{"connection refused", "dial tcp 127.0.0.1:443: connection refused", Connectivity},
-		{"deadline", "context deadline exceeded (Client.Timeout exceeded)", Connectivity},
-		{"gibberish", "provider error: something totally unexpected happened", Unknown},
+		{"unknown model", "provider request error: unknown model: sonnet-99", ModelNotFound},
+		{"dns failure", "provider stream error: Post \"https://api...\": dial tcp: lookup api.foo.com: no such host", Connectivity},
+		{"connection refused", "provider stream error: dial tcp 127.0.0.1:443: connection refused", Connectivity},
+		{"deadline", "provider stream error: context deadline exceeded (Client.Timeout exceeded)", Connectivity},
+		{"provider-marked but no sub-signature", "provider error: something totally unexpected happened", Unknown},
+
+		// Local (non-provider) failures must NOT be classified — no provider marker,
+		// so no bogus recovery hint attaches to them.
+		{"local fs permission denied", "open /etc/shadow: permission denied", Unknown},
+		{"local file missing", "stat foo.go: no such file or directory", Unknown},
+		{"local model config typo", "unknown model: sonnet-99", Unknown},
+		{"tool timeout local", "tool bash timed out after 600s", Unknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,7 +54,7 @@ func TestClassifyNil(t *testing.T) {
 // mentioning both "context length" and a timeout is an overflow, not a network
 // problem.
 func TestContextOverflowBeatsConnectivity(t *testing.T) {
-	err := errors.New("maximum context length exceeded; request timeout")
+	err := errors.New("provider request error: maximum context length exceeded; request timeout")
 	if got := Classify(err); got != ContextOverflow {
 		t.Fatalf("Classify = %v, want ContextOverflow", got)
 	}
@@ -57,9 +64,9 @@ func TestHintsPresentForKnownCategories(t *testing.T) {
 	known := []error{
 		errors.New("auth error: bad key"),
 		errors.New("rate limit error: 429"),
-		errors.New("dial tcp: no such host"),
-		errors.New("model does not exist"),
-		errors.New("maximum context length is 128000 tokens"),
+		errors.New("provider stream error: dial tcp: no such host"),
+		errors.New("provider request error: model does not exist"),
+		errors.New("provider request error: maximum context length is 128000 tokens"),
 	}
 	for _, err := range known {
 		if h := TUIHint(err); strings.TrimSpace(h) == "" {

@@ -26,17 +26,38 @@ const (
 	ContextOverflow
 )
 
+// providerMarkers are the prefixes the provider layer attaches to every
+// provider-originated failure: providerio.ClassifiedError emits "auth error:",
+// "rate limit error:", "provider error:", and "provider request error:", and the
+// streaming paths wrap transport/decoding failures as "provider stream error:".
+// A UI surface's error can also be a *local* failure (a tool's "permission
+// denied", a "file does not exist", a config error), so Classify only proceeds
+// past this gate for messages that are recognizably from the provider — otherwise
+// a broad substring like "does not exist" would attach a bogus /model hint to an
+// unrelated local error.
+var providerMarkers = []string{
+	"auth error:",
+	"rate limit error:",
+	"provider error:",
+	"provider request error:",
+	"provider stream error:",
+}
+
 // Classify buckets err by scanning its message for known signatures. It is a
 // deliberately conservative string heuristic — the provider layer has already
 // discarded the numeric HTTP status by the time the error reaches a UI surface,
-// so the message is all we have. Order matters: more specific signatures are
-// tested before broader ones (e.g. "context length" as overflow before the
-// generic "timeout" as connectivity).
+// so the message is all we have. It first gates on a provider-origin marker (see
+// providerMarkers) so local failures never draw a provider hint, then sub-classifies.
+// Order matters: more specific signatures are tested before broader ones (e.g.
+// "context length" as overflow before the generic "timeout" as connectivity).
 func Classify(err error) Category {
 	if err == nil {
 		return Unknown
 	}
 	m := strings.ToLower(err.Error())
+	if !containsAny(m, providerMarkers...) {
+		return Unknown
+	}
 	switch {
 	case containsAny(m, "auth error:", "unauthorized", "api key", "api_key", "invalid_api_key",
 		"authentication", "permission denied", "forbidden", "401", "403"):
