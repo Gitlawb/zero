@@ -18,6 +18,40 @@ import (
 const defaultBashTimeoutMS = 120000
 const maxBashTimeoutMS = 600000
 
+const maxBashOutputBytes = 16 * 1024 * 1024 // 16 MiB - prevent OOM on large command output
+
+// cappedWriter wraps a bytes.Buffer and stops accepting bytes after max,
+// setting a flag instead. Used to cap stdout/stderr capture during
+// command.Run() instead of only truncating afterward.
+//
+// The buffer is a named field rather than embedded on purpose: embedding
+// *bytes.Buffer would promote its ReadFrom method, and exec.Cmd's Run()
+// drives non-*os.File Stdout/Stderr writers through io.Copy, which prefers
+// io.ReaderFrom over Write when the destination implements it. That would
+// let the child process's output flow straight into the buffer via the
+// promoted ReadFrom, bypassing the cap entirely and defeating the whole
+// point of this type.
+type cappedWriter struct {
+	buf       *bytes.Buffer
+	max       int
+	truncated *bool
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.max {
+		*c.truncated = true
+		remain := c.max - c.buf.Len()
+		if remain > 0 {
+			c.buf.Write(p[:remain])
+		}
+		return len(p), nil
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedWriter) String() string { return c.buf.String() }
+func (c *cappedWriter) Len() int       { return c.buf.Len() }
+
 type bashTool struct {
 	baseTool
 	workspaceRoot string
@@ -124,10 +158,12 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	stdoutTruncated := false
+	stderrTruncated := false
+	stdout := &cappedWriter{buf: &bytes.Buffer{}, max: maxBashOutputBytes, truncated: &stdoutTruncated}
+	stderr := &cappedWriter{buf: &bytes.Buffer{}, max: maxBashOutputBytes, truncated: &stderrTruncated}
+	command.Stdout = stdout
+	command.Stderr = stderr
 
 	// Kill the shell as a process group on timeout and bound the post-kill I/O
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
@@ -159,7 +195,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
 		return Result{
 			Status: StatusError,
-			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
+			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta, stdoutTruncated, stderrTruncated),
 			Meta:   meta,
 		}
 	}
@@ -168,13 +204,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if meta[SandboxLikelyDeniedMeta] == "true" {
 		return Result{
 			Status: StatusError,
-			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
+			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta, stdoutTruncated, stderrTruncated),
 			Meta:   meta,
 		}
 	}
 	return Result{
 		Status: StatusOK,
-		Output: formatBashOutput(stdout.String(), stderrText, exitCode),
+		Output: formatBashOutputWithTruncation(stdout.String(), stderrText, exitCode, stdoutTruncated, stderrTruncated),
 		Meta:   meta,
 	}
 }
@@ -319,6 +355,10 @@ func commandExitCode(err error) int {
 }
 
 func formatBashOutput(stdout string, stderr string, exitCode int) string {
+	return formatBashOutputWithTruncation(stdout, stderr, exitCode, false, false)
+}
+
+func formatBashOutputWithTruncation(stdout string, stderr string, exitCode int, stdoutTruncated, stderrTruncated bool) string {
 	parts := []string{}
 	stdout = strings.TrimRight(stdout, "\r\n")
 	stderr = strings.TrimRight(stderr, "\r\n")
@@ -339,14 +379,20 @@ func formatBashOutput(stdout string, stderr string, exitCode int) string {
 	if n := len(outFindings) + len(errFindings); n > 0 {
 		parts = append(parts, fmt.Sprintf("[zero] redacted %d likely secret(s) from this output before showing it.", n))
 	}
+	if stdoutTruncated {
+		parts = append(parts, "[zero] output truncated at 16 MiB")
+	}
+	if stderrTruncated {
+		parts = append(parts, "[zero] stderr truncated at 16 MiB")
+	}
 	if len(parts) == 0 {
 		return "Command completed with no output."
 	}
 	return strings.Join(parts, "\n")
 }
 
-func formatBashOutputWithShellHint(command string, stdout string, stderr string, exitCode int, meta map[string]string) string {
-	output := formatBashOutput(stdout, stderr, exitCode)
+func formatBashOutputWithShellHint(command string, stdout string, stderr string, exitCode int, meta map[string]string, stdoutTruncated, stderrTruncated bool) string {
+	output := formatBashOutputWithTruncation(stdout, stderr, exitCode, stdoutTruncated, stderrTruncated)
 	if issue := detectShellOutputIssue(command, stdout+"\n"+stderr, runtime.GOOS); issue != nil {
 		meta["shell_issue"] = issue.Kind
 		output = appendShellIssueHint(output, *issue)

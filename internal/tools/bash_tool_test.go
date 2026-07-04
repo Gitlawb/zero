@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -47,6 +49,13 @@ func runBashToolHelper(command string) {
 	case "long-sleep":
 		time.Sleep(5 * time.Second)
 		fmt.Println("long sleep finished")
+	case "large-output":
+		// Writes well beyond maxBashOutputBytes so tests can verify the
+		// capped writer stops growing memory instead of buffering it all.
+		chunk := bytes.Repeat([]byte("x"), 1024*1024)
+		for i := 0; i < 20; i++ {
+			os.Stdout.Write(chunk)
+		}
 	case "http-server":
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -295,6 +304,94 @@ func TestBashToolReturnsNonzeroExitAsError(t *testing.T) {
 	}
 	if result.Meta["exit_code"] != "7" {
 		t.Fatalf("expected exit_code metadata 7, got %q", result.Meta["exit_code"])
+	}
+}
+
+func TestBashToolCapsLargeStdoutAndReportsTruncation(t *testing.T) {
+	result := NewBashTool(t.TempDir()).Run(context.Background(), map[string]any{
+		"command": helperCommand("large-output"),
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "output truncated at 16 MiB") {
+		t.Fatalf("expected truncation notice, got output of length %d", len(result.Output))
+	}
+	if len(result.Output) > maxBashOutputBytes+4096 {
+		t.Fatalf("expected output to stay bounded near the cap, got length %d", len(result.Output))
+	}
+}
+
+func TestCappedWriterStopsGrowingAfterMax(t *testing.T) {
+	truncated := false
+	writer := &cappedWriter{buf: &bytes.Buffer{}, max: 10, truncated: &truncated}
+
+	n, err := writer.Write([]byte("0123456789"))
+	if err != nil || n != 10 {
+		t.Fatalf("first write = (%d, %v), want (10, nil)", n, err)
+	}
+	if truncated {
+		t.Fatalf("truncated flag set early, buffer exactly at max")
+	}
+	if writer.Len() != 10 {
+		t.Fatalf("buffer length = %d, want 10", writer.Len())
+	}
+
+	n, err = writer.Write([]byte("overflow"))
+	if err != nil || n != len("overflow") {
+		t.Fatalf("second write = (%d, %v), want (%d, nil)", n, err, len("overflow"))
+	}
+	if !truncated {
+		t.Fatalf("expected truncated flag to be set once max exceeded")
+	}
+	if writer.Len() != 10 {
+		t.Fatalf("buffer should not grow past max, got length %d", writer.Len())
+	}
+}
+
+func TestCappedWriterCapturesPartialWriteThatCrossesMax(t *testing.T) {
+	truncated := false
+	writer := &cappedWriter{buf: &bytes.Buffer{}, max: 10, truncated: &truncated}
+
+	n, err := writer.Write([]byte("012345"))
+	if err != nil || n != 6 {
+		t.Fatalf("first write = (%d, %v), want (6, nil)", n, err)
+	}
+
+	n, err = writer.Write([]byte("6789ABCDEF"))
+	if err != nil || n != 10 {
+		t.Fatalf("second write = (%d, %v), want (10, nil)", n, err)
+	}
+	if !truncated {
+		t.Fatalf("expected truncated flag to be set")
+	}
+	if got, want := writer.String(), "0123456789"; got != want {
+		t.Fatalf("buffer contents = %q, want %q", got, want)
+	}
+}
+
+func TestCappedWriterEnforcesCapThroughIOCopy(t *testing.T) {
+	// exec.Cmd drives a non-*os.File Stdout/Stderr through io.Copy, which
+	// prefers io.ReaderFrom over Write when the destination implements it.
+	// This reproduces that path directly (regression test for the bug where
+	// embedding *bytes.Buffer promoted ReadFrom and bypassed the cap).
+	truncated := false
+	writer := &cappedWriter{buf: &bytes.Buffer{}, max: 10, truncated: &truncated}
+
+	if _, ok := any(writer).(io.ReaderFrom); ok {
+		t.Fatalf("cappedWriter must not implement io.ReaderFrom, or io.Copy bypasses Write and the cap")
+	}
+
+	source := bytes.NewReader([]byte("0123456789overflow"))
+	if _, err := io.Copy(writer, source); err != nil {
+		t.Fatalf("io.Copy returned error: %v", err)
+	}
+	if !truncated {
+		t.Fatalf("expected truncated flag to be set")
+	}
+	if writer.Len() != 10 {
+		t.Fatalf("expected io.Copy through cappedWriter to stay capped at 10 bytes, got %d", writer.Len())
 	}
 }
 
