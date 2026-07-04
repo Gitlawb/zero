@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/repomap"
 	"github.com/Gitlawb/zero/internal/workspaceseed"
 )
@@ -37,12 +38,13 @@ const fallbackSystemPrompt = "You are Zero, a terminal coding agent. Help with t
 // general-to-specific order.
 var projectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
 
-// userContextFile is the per-user instruction file. It intentionally lives next
-// to the legacy ~/.zero config location so users can keep personal guidance out
+// userContextFile is the per-user instruction file, resolved under
+// config.UserConfigDir()/zero/ alongside the rest of Zero's per-user config
+// (config.json, commands, specialists) so users can keep personal guidance out
 // of individual repositories.
-const userContextFile = ".zero/ZERO.md"
+const userContextFile = "ZERO.md"
 
-var userHomeDirForPrompt = os.UserHomeDir
+var userConfigDirForPrompt = config.UserConfigDir
 
 // maxProjectContextBytes caps how much of a single project doc is injected so
 // a large guidelines file can't blow the context budget.
@@ -275,16 +277,24 @@ func projectGuidelines(cwd, gitRoot string) string {
 }
 
 // userGuidelines returns the per-user ZERO.md instructions block, if present.
+// The file lives in config.UserConfigDir()/zero/ next to Zero's other
+// per-user config; the basename match is case-insensitive so a file saved as
+// zero.md still resolves on case-sensitive filesystems, mirroring the project
+// guideline loader.
 func userGuidelines() string {
-	home, err := userHomeDirForPrompt()
+	configDir, err := userConfigDirForPrompt()
 	if err != nil {
 		return ""
 	}
-	home = strings.TrimSpace(home)
-	if home == "" {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, filepath.FromSlash(userContextFile)))
+	match := findUserContextFile(filepath.Join(configDir, "zero"))
+	if match == "" {
+		return ""
+	}
+	data, err := os.ReadFile(match)
 	if err != nil {
 		return ""
 	}
@@ -299,7 +309,22 @@ func userGuidelines() string {
 		}
 		content = content[:cut] + "\n… (truncated)"
 	}
-	return "## User guidelines (" + userContextFile + ")\n\n" + content
+	return "## User guidelines (" + filepath.Base(match) + ")\n\n" + content
+}
+
+// findUserContextFile returns the on-disk path of the user guideline file in
+// dir, matching the basename case-insensitively, or "" when absent.
+func findUserContextFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(e.Name(), userContextFile) {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // projectGuidelineDirs returns the directory chain from gitRoot to cwd

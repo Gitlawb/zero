@@ -128,12 +128,12 @@ func systemPromptTestBlock(t *testing.T, prompt, start, end string) string {
 }
 
 func TestBuildSystemPromptIncludesUserGuidelines(t *testing.T) {
-	home := t.TempDir()
-	writeSystemPromptTestFile(t, home, userContextFile, "  Prefer concise summaries.  \n")
-	t.Cleanup(withSystemPromptTestHome(t, home))
+	configDir := t.TempDir()
+	writeSystemPromptTestFile(t, configDir, "zero/ZERO.md", "  Prefer concise summaries.  \n")
+	t.Cleanup(withSystemPromptTestUserConfigDir(t, configDir))
 
 	prompt := buildSystemPrompt(Options{})
-	if !strings.Contains(prompt, "## User guidelines (.zero/ZERO.md)") {
+	if !strings.Contains(prompt, "## User guidelines (ZERO.md)") {
 		t.Fatalf("expected user guidelines header, got:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "Prefer concise summaries.") {
@@ -144,26 +144,40 @@ func TestBuildSystemPromptIncludesUserGuidelines(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPromptOmitsUserGuidelinesWithoutHome(t *testing.T) {
-	t.Cleanup(withSystemPromptTestHomeFunc(t, func() (string, error) { return "", os.ErrNotExist }))
+func TestBuildSystemPromptIncludesUserGuidelinesCaseInsensitive(t *testing.T) {
+	configDir := t.TempDir()
+	writeSystemPromptTestFile(t, configDir, "zero/zero.md", "Prefer concise summaries.\n")
+	t.Cleanup(withSystemPromptTestUserConfigDir(t, configDir))
 
 	prompt := buildSystemPrompt(Options{})
-	if strings.Contains(prompt, "## User guidelines") {
-		t.Fatalf("expected user guidelines to be omitted without a home directory, got:\n%s", prompt)
+	if !strings.Contains(prompt, "## User guidelines (zero.md)") {
+		t.Fatalf("expected case-insensitive zero.md resolution, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Prefer concise summaries.") {
+		t.Fatalf("expected user guidelines content, got:\n%s", prompt)
 	}
 }
 
-func withSystemPromptTestHome(t *testing.T, home string) func() {
-	t.Helper()
-	return withSystemPromptTestHomeFunc(t, func() (string, error) { return home, nil })
+func TestBuildSystemPromptOmitsUserGuidelinesWithoutConfigDir(t *testing.T) {
+	t.Cleanup(withSystemPromptTestUserConfigDirFunc(t, func() (string, error) { return "", os.ErrNotExist }))
+
+	prompt := buildSystemPrompt(Options{})
+	if strings.Contains(prompt, "## User guidelines") {
+		t.Fatalf("expected user guidelines to be omitted without a config directory, got:\n%s", prompt)
+	}
 }
 
-func withSystemPromptTestHomeFunc(t *testing.T, fn func() (string, error)) func() {
+func withSystemPromptTestUserConfigDir(t *testing.T, dir string) func() {
 	t.Helper()
-	old := userHomeDirForPrompt
-	userHomeDirForPrompt = fn
+	return withSystemPromptTestUserConfigDirFunc(t, func() (string, error) { return dir, nil })
+}
+
+func withSystemPromptTestUserConfigDirFunc(t *testing.T, fn func() (string, error)) func() {
+	t.Helper()
+	old := userConfigDirForPrompt
+	userConfigDirForPrompt = fn
 	return func() {
-		userHomeDirForPrompt = old
+		userConfigDirForPrompt = old
 	}
 }
 
