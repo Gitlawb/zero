@@ -50,6 +50,22 @@ func TestDetectShellOutputIssueFlagsMsysSignalPipeError(t *testing.T) {
 	}
 }
 
+func TestDetectShellOutputIssueFlagsMsysTerminatingWithMsysMarker(t *testing.T) {
+	output := `1 [main] tail (4321) tail: *** MapViewOfFileEx failed, Win32 error 5.  Terminating.`
+	issue := detectShellOutputIssue(`git log | tail -5`, output, "windows")
+	if issue == nil || issue.Kind != "windows_msys_sandbox" {
+		t.Fatalf("expected MSYS output issue, got %#v", issue)
+	}
+}
+
+func TestDetectShellOutputIssueIgnoresNonMsysWin32Error5(t *testing.T) {
+	output := `myapp.exe: unable to open service handle, Win32 error 5 (access denied). Terminating worker.`
+	issue := detectShellOutputIssue(`myapp.exe run`, output, "windows")
+	if issue != nil {
+		t.Fatalf("expected no issue for non-MSYS access-denied output, got %#v", issue)
+	}
+}
+
 func TestShellIssueBlockResultMsysCommand(t *testing.T) {
 	result := shellIssueBlockResult(*detectShellCommandIssue(`cat README.md`, "windows"))
 	if result.Status != StatusError {

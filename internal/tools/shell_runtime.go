@@ -129,7 +129,17 @@ func msysRuntimeFailedInOutput(lower string) bool {
 	if strings.Contains(lower, "usr\\bin\\") && strings.Contains(lower, "fatal error") {
 		return true
 	}
-	return strings.Contains(lower, "win32 error 5") && strings.Contains(lower, "terminating")
+	if !strings.Contains(lower, "win32 error 5") || !strings.Contains(lower, "terminating") {
+		return false
+	}
+	// Anchor the broad win32-error-5 fallback to an MSYS-specific marker so
+	// unrelated access-denied failures are not mislabeled as MSYS sandbox
+	// incompatibilities.
+	return strings.Contains(lower, `usr\bin\`) ||
+		strings.Contains(lower, "cygheap") ||
+		strings.Contains(lower, "msys-2.0.dll") ||
+		strings.Contains(lower, "cygwin1.dll") ||
+		strings.Contains(lower, "[main]")
 }
 
 func appendShellIssueHint(output string, issue shellIssue) string {
