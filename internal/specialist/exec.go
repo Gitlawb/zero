@@ -25,6 +25,7 @@ import (
 const (
 	sessionTagSpecialist     = "specialist"
 	promptFileThresholdBytes = 4 * 1024
+	maxSpecialistDepth       = 8 // hard cap to prevent infinite recursion/resource exhaustion via Task
 )
 
 const SessionTagSpecialist = sessionTagSpecialist
@@ -217,6 +218,9 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 	}
 	if options.CurrentDepth < 0 {
 		return ExecResult{}, fmt.Errorf("current depth cannot be negative")
+	}
+	if options.CurrentDepth > maxSpecialistDepth {
+		return ExecResult{}, fmt.Errorf("specialist nesting depth %d exceeds maximum %d", options.CurrentDepth, maxSpecialistDepth)
 	}
 	if strings.TrimSpace(params.Prompt) == "" {
 		return ExecResult{}, fmt.Errorf("specialist prompt is required")

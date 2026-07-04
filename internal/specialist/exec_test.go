@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -333,6 +334,15 @@ func TestBuildArgsRejectsInvalidInputs(t *testing.T) {
 				t.Fatalf("BuildArgs error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunRejectsDepthExceedingMax(t *testing.T) {
+	_, err := (Executor{}).Run(context.Background(), TaskParameters{
+		Prompt: "hi",
+	}, TaskRunOptions{CurrentDepth: maxSpecialistDepth + 1})
+	if err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("Run error = %v, want depth error", err)
 	}
 }
 
