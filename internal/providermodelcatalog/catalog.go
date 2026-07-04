@@ -157,15 +157,9 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
-	"opencode-go-openai": {
-		{ID: "glm-5.2", Description: "catalog default"},
-		{ID: "glm-4.5", Description: "general model"},
-		{ID: "glm-4.6", Description: "latest model"},
-		{ID: "deepseek-chat", Description: "coding model"},
-	},
 	"opencode-go-anthropic": {
 		{ID: "MiniMax-M3", Description: "catalog default"},
-		{ID: "MiniMax-M2.1", Description: "coding model"},
+		{ID: "MiniMax-M2.7", Description: "coding model"},
 		{ID: "qwen-plus", Description: "Qwen balanced model"},
 		{ID: "qwen-max", Description: "Qwen strong model"},
 	},
