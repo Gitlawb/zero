@@ -17,22 +17,31 @@ type shellIssue struct {
 	Suggestion string
 }
 
+const windowsMsysSandboxKind = "windows_msys_sandbox"
+
 const windowsMsysSandboxSuggestion = "MSYS/Cygwin coreutils from Git for Windows cannot run under Zero's write-restricted Windows sandbox. Prefer Zero native tools (grep, read_file with offset/limit, list_directory, glob), cmd.exe findstr/more, or PowerShell Select-Object -First/-Last. If host-level execution is truly required, rerun with sandbox_permissions: \"require_escalated\" and a narrow justification."
+
+// windowsMsysProneNames is the single source of truth for POSIX coreutil names
+// that commonly resolve to a Git-for-Windows MSYS/Cygwin binary rather than a
+// cmd.exe-native command, and so fail under the write-restricted Windows
+// sandbox (#458). Every Windows MSYS-detection path (the preflight command
+// scan below, the exported MsysProneCommandName, and the known-safe-segment
+// guard in internal/agent/command_prefix.go) derives from this one set, so
+// they cannot drift out of sync with each other.
+var windowsMsysProneNames = map[string]bool{
+	"cat": true, "cut": true, "expr": true, "grep": true, "head": true,
+	"id": true, "ls": true, "nl": true, "paste": true, "rev": true,
+	"seq": true, "stat": true, "tail": true, "tr": true, "uname": true,
+	"uniq": true, "wc": true, "which": true, "awk": true, "sed": true,
+	"xargs": true,
+}
 
 var (
 	windowsBashStyleCDPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)cd\s+/(?:[a-ce-z0-9_./~-]|d[a-z0-9_./~-])[a-z0-9_./~-]*`)
-	windowsLSCommandPattern   = regexp.MustCompile(`(?i)(^|[&|;]\s*)ls\b(?:\s+|$)`)
 	// windowsMsysBinaryPathPattern catches explicit Git-for-Windows / MSYS usr\bin
 	// paths. These executables are valid Windows PE files but fail under the
 	// write-restricted sandbox with CreateFileMapping ACCESS_DENIED (#458).
 	windowsMsysBinaryPathPattern = regexp.MustCompile(`(?i)(?:\\usr\\bin\\|\\mingw64\\bin\\|msys-2\.0\.dll|cygwin1\.dll)`)
-	// windowsMsysPosixExecutablePattern catches quoted or unquoted invocations of
-	// MSYS coreutils by executable name (e.g. head.exe), including full paths.
-	windowsMsysPosixExecutablePattern = regexp.MustCompile(`(?i)(?:^|[&|;\s"])(?:[\w .:\\-]+\\)?(head|tail|grep|cat|cut|wc|nl|paste|tr|uniq|rev|seq|stat|uname|which|id|awk|sed|xargs)\.exe(?:\s+|$|")`)
-	// windowsPosixUtilityPattern catches POSIX coreutils invoked as bare command
-	// names (usually via PATH to Git usr\bin). Most often piped, e.g.
-	// `git log ... | head`, but also standalone `cat file.txt`.
-	windowsPosixUtilityPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)(head|tail|grep|cat|cut|wc|nl|paste|tr|uniq|rev|seq|stat|uname|which|id|awk|sed|xargs)(?:\s+|$)`)
 )
 
 func detectShellRuntime(goos string) shellRuntime {
@@ -57,21 +66,81 @@ func shellGuidanceForGOOS(goos string) string {
 // MsysProneCommandName reports whether a bare command name commonly resolves to
 // a Git-for-Windows MSYS binary that fails under the Windows restricted sandbox.
 func MsysProneCommandName(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "cat", "cut", "expr", "grep", "head", "id", "ls", "nl", "paste", "rev",
-		"seq", "stat", "tail", "tr", "uname", "uniq", "wc", "which", "awk", "sed", "xargs":
-		return true
-	default:
-		return false
-	}
+	return windowsMsysProneNames[strings.ToLower(strings.TrimSpace(name))]
 }
 
 func windowsMsysSandboxIssue(message string) *shellIssue {
 	return &shellIssue{
-		Kind:       "windows_msys_sandbox",
+		Kind:       windowsMsysSandboxKind,
 		Message:    message,
 		Suggestion: windowsMsysSandboxSuggestion,
 	}
+}
+
+// windowsCommandSegments splits a command into cmd.exe-operator-separated
+// segments (&, |, ;, and their doubled forms &&/||), respecting double quotes
+// (cmd.exe's grouping construct), so an operator or command name mentioned
+// inside a quoted argument (e.g. a commit message or PR comment body) is not
+// mistaken for a real segment boundary or invocation.
+func windowsCommandSegments(command string) []string {
+	var segments []string
+	var current strings.Builder
+	inQuotes := false
+	for _, c := range command {
+		if c == '"' {
+			inQuotes = !inQuotes
+			current.WriteRune(c)
+			continue
+		}
+		if !inQuotes && (c == '&' || c == '|' || c == ';') {
+			if seg := strings.TrimSpace(current.String()); seg != "" {
+				segments = append(segments, seg)
+			}
+			current.Reset()
+			continue
+		}
+		current.WriteRune(c)
+	}
+	if seg := strings.TrimSpace(current.String()); seg != "" {
+		segments = append(segments, seg)
+	}
+	return segments
+}
+
+// firstCommandWord returns the first token of a command segment. A leading
+// double-quoted span counts as one token with its quotes stripped, since
+// cmd.exe treats a quoted path as a single argument: the command invoked by
+// `"C:\Program Files\Git\usr\bin\head.exe" file.txt` is the quoted path, not
+// "C:\Program.
+func firstCommandWord(segment string) string {
+	trimmed := strings.TrimSpace(segment)
+	if trimmed == "" {
+		return ""
+	}
+	if trimmed[0] == '"' {
+		if end := strings.IndexByte(trimmed[1:], '"'); end >= 0 {
+			return trimmed[1 : end+1]
+		}
+		return trimmed[1:]
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// msysProneCommandWord reports whether word (the first token of a command
+// segment, as returned by firstCommandWord) names an MSYS-prone coreutil,
+// bare or with a directory prefix and/or .exe suffix (head, head.exe,
+// C:\...\usr\bin\head.exe, ...).
+func msysProneCommandWord(word string) bool {
+	word = strings.Trim(word, `"`)
+	if i := strings.LastIndexAny(word, `\/`); i >= 0 {
+		word = word[i+1:]
+	}
+	word = strings.TrimSuffix(strings.ToLower(word), ".exe")
+	return MsysProneCommandName(word)
 }
 
 func detectShellCommandIssue(command string, goos string) *shellIssue {
@@ -79,20 +148,26 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 		return nil
 	}
 	trimmed := strings.TrimSpace(command)
-	if windowsMsysBinaryPathPattern.MatchString(trimmed) ||
-		windowsMsysPosixExecutablePattern.MatchString(trimmed) {
+	if windowsMsysBinaryPathPattern.MatchString(trimmed) {
 		return windowsMsysSandboxIssue("Command invokes an MSYS/Cygwin binary path that cannot run under Zero's Windows sandbox.")
 	}
-	if windowsBashStyleCDPattern.MatchString(trimmed) ||
-		windowsLSCommandPattern.MatchString(trimmed) {
+	if windowsBashStyleCDPattern.MatchString(trimmed) {
 		return &shellIssue{
 			Kind:       "windows_shell_syntax",
 			Message:    "Command looks like POSIX/Bash syntax, but Zero runs bash tool commands through Windows cmd.exe on this host.",
 			Suggestion: "Use the cwd argument instead of cd, use Windows cmd.exe syntax, or use native tools such as list_directory, read_file, grep, and glob.",
 		}
 	}
-	if windowsPosixUtilityPattern.MatchString(trimmed) {
-		return windowsMsysSandboxIssue("Command uses a POSIX coreutil (head/tail/grep/cat/...) that commonly resolves to Git-for-Windows MSYS binaries incompatible with the Windows sandbox.")
+	// Check the first word of each operator-separated segment (not the raw
+	// text anywhere in the command) against the single MSYS-prone name set,
+	// covering bare names (head), .exe names (head.exe), and directory-
+	// prefixed forms (C:\...\head.exe) uniformly. Being segment/word anchored
+	// rather than a whole-string regex, it never matches text that only
+	// appears inside a quoted argument.
+	for _, segment := range windowsCommandSegments(trimmed) {
+		if msysProneCommandWord(firstCommandWord(segment)) {
+			return windowsMsysSandboxIssue("Command uses a POSIX coreutil (head/tail/grep/cat/...) that commonly resolves to Git-for-Windows MSYS binaries incompatible with the Windows sandbox.")
+		}
 	}
 	return nil
 }

@@ -86,3 +86,45 @@ func TestMsysProneCommandName(t *testing.T) {
 		t.Fatalf("unexpected MsysProneCommandName results")
 	}
 }
+
+// TestDetectShellCommandIssueFlagsExprAndLsConsistently guards against the
+// preflight regex list drifting from the canonical windowsMsysProneNames set
+// (both listed expr and ls as MSYS-prone, but the old regex alternations
+// omitted expr entirely and let ls hit the older windows_shell_syntax branch
+// first, so it never got MSYS-kind guidance).
+func TestDetectShellCommandIssueFlagsExprAndLsConsistently(t *testing.T) {
+	for _, command := range []string{
+		`expr 1 + 1`,
+		`expr.exe 1 + 1`,
+		`ls -la`,
+		`ls`,
+	} {
+		issue := detectShellCommandIssue(command, "windows")
+		if issue == nil || issue.Kind != windowsMsysSandboxKind {
+			t.Fatalf("expected windows_msys_sandbox for %q, got %#v", command, issue)
+		}
+	}
+}
+
+// TestDetectShellCommandIssueIgnoresQuotedMsysMentions guards against
+// treating an MSYS-prone name that only appears inside a quoted argument
+// (e.g. a commit message, a PR comment body, or a doc string discussing the
+// command) as an actual invocation. The preflight check must anchor on the
+// first word of each command segment, not scan the raw text anywhere.
+func TestDetectShellCommandIssueIgnoresQuotedMsysMentions(t *testing.T) {
+	for _, command := range []string{
+		`git commit -m "fix head.exe crash"`,
+		`gh pr comment --body "grep.exe fails under MSYS"`,
+		`echo "log | head is broken on windows"`,
+		`git commit -m "note: | head does not work here"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected quoted MSYS mention to pass for %q, got %#v", command, issue)
+		}
+	}
+
+	// A real invocation alongside quoted text must still be caught.
+	if issue := detectShellCommandIssue(`echo "not a real command" && head file.txt`, "windows"); issue == nil || issue.Kind != windowsMsysSandboxKind {
+		t.Fatalf("expected real head invocation to still be flagged, got %#v", issue)
+	}
+}

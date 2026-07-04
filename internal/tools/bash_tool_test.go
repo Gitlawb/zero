@@ -438,6 +438,70 @@ func TestRegistryRunsWithDegradedUnavailableNativeSandbox(t *testing.T) {
 	}
 }
 
+// TestBashToolRequireEscalatedMsysGuard covers the boundary of the fix for an
+// escalation-vs-preflight ordering bug: the MSYS sandbox guard exists only
+// because MSYS/Cygwin coreutils fail under the write-restricted sandbox, so
+// once sandbox_permissions: require_escalated is actually approved (running
+// the command unsandboxed), the guard must get out of the way, but an
+// unrelated windows_shell_syntax issue (a real cmd.exe syntax problem, not a
+// sandbox interaction) must still block regardless of escalation.
+func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only MSYS sandbox guard")
+	}
+	root := t.TempDir()
+	newEngine := func() *sandbox.Engine {
+		return sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+		})
+	}
+	registry := NewRegistry()
+	registry.Register(NewBashTool(root))
+
+	t.Run("default sandboxing still blocks an MSYS-prone command", func(t *testing.T) {
+		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+			"command": "cat somefile.txt",
+		}, RunOptions{
+			PermissionGranted: true,
+			Sandbox:           newEngine(),
+			PermissionMode:    string(sandbox.PermissionModeAsk),
+		})
+		if result.Meta["shell_issue"] != "windows_msys_sandbox" {
+			t.Fatalf("expected windows_msys_sandbox block without escalation, got %#v", result)
+		}
+	})
+
+	t.Run("approved require_escalated bypasses the MSYS guard", func(t *testing.T) {
+		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+			"command":             "cat somefile.txt",
+			"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+		}, RunOptions{
+			PermissionGranted: true,
+			Sandbox:           newEngine(),
+			PermissionMode:    string(sandbox.PermissionModeAsk),
+		})
+		if result.Meta["shell_issue"] != "" {
+			t.Fatalf("expected approved require_escalated to bypass the MSYS guard, got blocked: %#v", result)
+		}
+	})
+
+	t.Run("approved require_escalated still blocks an unrelated syntax issue", func(t *testing.T) {
+		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+			"command":             `cd /d/tmp/zero-pr-158 && dir`,
+			"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+		}, RunOptions{
+			PermissionGranted: true,
+			Sandbox:           newEngine(),
+			PermissionMode:    string(sandbox.PermissionModeAsk),
+		})
+		if result.Meta["shell_issue"] != "windows_shell_syntax" {
+			t.Fatalf("expected windows_shell_syntax block to still apply under require_escalated, got %#v", result)
+		}
+	})
+}
+
 func TestBashToolRunsWithDegradedUnavailableNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := sandbox.DefaultPolicy()
