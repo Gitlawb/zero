@@ -278,6 +278,8 @@ Plugin commands run with the plugin directory as their working directory. Use re
 
 > **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
 
+> **Example (community).** [`toshi`](https://github.com/philpof102-svg/toshi) is a small community plugin that follows this exact format — a terminal-companion mascot (a stdio MCP + a side WebView) you can `zero plugins add` to see the plugin system end to end. GPL-3.0.
+
 ## 7. Configuration locations
 
 Three layers, applied in order (later layers override earlier ones):
