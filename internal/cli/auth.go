@@ -301,12 +301,27 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if len(parsed.positional) != 1 {
 		return writeExecUsageError(stderr, "usage: zero auth login <provider> [--device] [--scope <scope>]")
 	}
+	provider := parsed.positional[0]
+	// ChatGPT (Codex) requires a fixed redirect_uri (http://localhost:1455/
+	// auth/callback) and mandatory authorize params (id_token_add_organizations,
+	// codex_cli_simplified_flow, originator) that the generic loopback flow
+	// cannot supply. Route it to the dedicated ChatGPT login so
+	// `zero auth login chatgpt` behaves identically to `zero auth chatgpt`.
+	if strings.EqualFold(provider, "chatgpt") {
+		if parsed.device {
+			return writeExecUsageError(stderr, "ChatGPT login does not support --device (it is loopback-only)")
+		}
+		if len(parsed.scopes) > 0 {
+			return writeExecUsageError(stderr, "ChatGPT login does not support --scope (the required scopes are fixed by the Codex client registration)")
+		}
+		return runAuthChatGPT(nil, stdout, stderr, deps)
+	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	status, err := manager.Login(context.Background(), oauth.LoginOptions{
-		Provider:    parsed.positional[0],
+		Provider:    provider,
 		Device:      parsed.device,
 		ExtraScopes: parsed.scopes,
 	})
@@ -489,8 +504,9 @@ Commands:
 A provider is any OAuth 2.0 / OIDC server. "openrouter" ('zero auth openrouter')
 works out of the box. "xai" ('zero auth login xai') uses a built-in preset that is
 off by default — enable it with ZERO_OAUTH_ALLOW_PRESETS=1, or set the
-ZERO_OAUTH_XAI_* vars yourself. Any preset field is overridable via the env vars
-below. For a custom provider named <name>, set:
+ZERO_OAUTH_XAI_* vars yourself. "chatgpt" ('zero auth login chatgpt' or
+'zero auth chatgpt') uses a fixed-port loopback flow against the Codex backend.
+Any preset field is overridable via the env vars below. For a custom provider named <name>, set:
   ZERO_OAUTH_<NAME>_CLIENT_ID       (required)
   ZERO_OAUTH_<NAME>_CLIENT_SECRET   (optional)
   ZERO_OAUTH_<NAME>_AUTHORIZE_URL   ZERO_OAUTH_<NAME>_TOKEN_URL

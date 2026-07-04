@@ -118,6 +118,8 @@ func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 		"xiaomi-mimo":  "xiaomi",
 		"dashscope":    "alibaba",
 		"ollama-cloud": "ollama-cloud",
+		"zai-cn":       "zai",
+		"minimaxi-cn":  "minimax",
 	}
 	for zeroID, want := range tests {
 		provider, ok := providercatalog.Get(zeroID)

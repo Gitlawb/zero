@@ -112,6 +112,25 @@ func (p PreferencesConfig) RecapsEnabled() bool {
 	return p.Recaps == nil || *p.Recaps
 }
 
+// KeyBindingDef defines one key binding string (e.g. "ctrl+o") that the TUI
+// can remap. An empty string means "use the built-in default" for that action.
+type KeyBindingDef string
+
+// KeyBindingsConfig holds the subset of TUI keybindings that users may remap
+// via config.json. Each field defaults to a sensible built-in when empty.
+type KeyBindingsConfig struct {
+	// ToggleDetailed toggles the detailed transcript view (default: ctrl+o).
+	ToggleDetailed KeyBindingDef `json:"toggleDetailed,omitempty"`
+	// ToggleMouse toggles mouse capture release (default: ctrl+e).
+	ToggleMouse KeyBindingDef `json:"toggleMouse,omitempty"`
+	// CycleReasoning cycles through reasoning effort levels (default: ctrl+t).
+	CycleReasoning KeyBindingDef `json:"cycleReasoning,omitempty"`
+	// TogglePlan toggles the plan panel expansion (default: ctrl+p).
+	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
+	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
+	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
+}
+
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.
 // Helpers are discovered lazily by the tool that needs them; no setup command or
 // background probe is required during startup.
@@ -206,6 +225,7 @@ type FileConfig struct {
 	Tools          ToolsConfig        `json:"tools,omitempty"`
 	Swarm          SwarmConfig        `json:"swarm,omitempty"`
 	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
+	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
 }
 
@@ -220,6 +240,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Tools          ToolsConfig         `json:"tools,omitempty"`
 		Swarm          SwarmConfig         `json:"swarm,omitempty"`
 		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
+		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
 	}
 	raw := rawConfig{
@@ -232,6 +253,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Tools:          cfg.Tools,
 		Swarm:          cfg.Swarm,
 		Preferences:    cfg.Preferences,
+		KeyBindings:    cfg.KeyBindings,
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -256,6 +278,7 @@ type Overrides struct {
 	Sandbox        SandboxConfig
 	Notify         NotifyConfig
 	Tools          ToolsConfig
+	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
 }
 
@@ -270,6 +293,7 @@ type ResolvedConfig struct {
 	Tools          ToolsConfig
 	Swarm          SwarmConfig
 	Preferences    PreferencesConfig
+	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
 }
 
@@ -316,6 +340,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Tools           ToolsConfig                `json:"tools"`
 		Swarm           SwarmConfig                `json:"swarm"`
 		Preferences     PreferencesConfig          `json:"preferences"`
+		KeyBindings     KeyBindingsConfig          `json:"keybindings"`
 		LocalControl    LocalControlConfig         `json:"localControl"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
@@ -342,6 +367,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Tools = raw.Tools
 	cfg.Swarm = raw.Swarm
 	cfg.Preferences = raw.Preferences
+	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}

@@ -6,13 +6,16 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/testrunner"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type worktreeCommandOptions struct {
@@ -35,6 +38,7 @@ type changesCommandOptions struct {
 	cwd          string
 	baseRef      string
 	message      string
+	hasMessage   bool
 	dryRun       bool
 	maxDiffBytes int
 	remote       string
@@ -44,6 +48,7 @@ type changesCommandOptions struct {
 	fill         bool
 	draft        bool
 	yes          bool
+	auto         bool
 }
 
 func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -205,9 +210,52 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		}
 		return exitSuccess
 	case "commit":
+		var message string
+		if options.auto {
+			summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{
+				Cwd:          workspaceRoot,
+				MaxDiffBytes: options.maxDiffBytes,
+			})
+			if err != nil {
+				return writeExecUsageError(stderr, fmt.Sprintf("failed to inspect changes: %v", err))
+			}
+			if summary.Clean {
+				return writeExecUsageError(stderr, "no changes to commit")
+			}
+
+			resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+			if err != nil {
+				return writeExecUsageError(stderr, fmt.Sprintf("failed to resolve config: %v", err))
+			}
+			if !config.HasProviderProfile(resolved.Provider) {
+				return writeExecUsageError(stderr, "no provider configured for auto-commit message")
+			}
+			provider, err := deps.newProvider(resolved.Provider)
+			if err != nil {
+				return writeExecUsageError(stderr, fmt.Sprintf("failed to create provider: %v", err))
+			}
+
+			if !options.json {
+				if _, err := fmt.Fprintln(stdout, "Generating commit message using LLM..."); err != nil {
+					return exitCrash
+				}
+			}
+
+			safeSummary := redactChangeSummary(summary)
+			genCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			msg, err := generateAutoCommitMessage(genCtx, provider, resolved.Provider.Model, safeSummary)
+			if err != nil {
+				return writeExecUsageError(stderr, fmt.Sprintf("failed to generate commit message: %v", err))
+			}
+			message = msg
+		} else {
+			message = options.message
+		}
+
 		result, err := deps.commitChanges(context.Background(), zerogit.CommitOptions{
 			Cwd:          workspaceRoot,
-			Message:      options.message,
+			Message:      message,
 			DryRun:       options.dryRun,
 			MaxDiffBytes: options.maxDiffBytes,
 		})
@@ -406,9 +454,11 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 				return options, false, err
 			}
 			options.message = value
+			options.hasMessage = true
 			index = next
 		case strings.HasPrefix(arg, "--message="):
 			options.message = strings.TrimSpace(strings.TrimPrefix(arg, "--message="))
+			options.hasMessage = true
 		case arg == "--diff-bytes":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -461,6 +511,8 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			options.draft = true
 		case arg == "--yes":
 			options.yes = true
+		case arg == "-a" || arg == "--auto":
+			options.auto = true
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown changes flag %q", arg)}
 		default:
@@ -469,6 +521,11 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	}
 	if command != "commit" && options.message != "" {
 		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
+	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
+		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
+	}
+	if command == "commit" && options.hasMessage && options.auto {
+		return options, false, execUsageError{"cannot specify both --message and --auto"}
 	}
 	if command != "commit" && command != "push" && options.dryRun {
 		return options, false, execUsageError{"--dry-run is only valid with commit or push"}
@@ -780,6 +837,8 @@ Flags:
       --fill              Automatically populate PR title and body from commits
       --draft             Create PR as a draft
       --yes               Confirm pushing to a default/protected branch
+  -a, --auto              Auto-generate commit message using LLM (use --dry-run to preview)
+      --dry-run           Preview commit metadata without mutating git state
       --json              Print JSON output
   -h, --help              Show this help
 `)
@@ -906,4 +965,39 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitCrash
 	}
 	return exitSuccess
+func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provider, model string, summary zerogit.ChangeSummary) (string, error) {
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString("Analyze the following git diff and generate a concise, conventional commit message.\n")
+	promptBuilder.WriteString("The commit message subject line must be 72 characters or fewer, starting with a conventional commit type (e.g., feat, fix, docs, style, refactor, test, chore) followed by a colon and space, and a lowercase description.\n")
+	promptBuilder.WriteString("You may optionally include a blank line and a bulleted list of changes for the body if there are multiple files or complex changes.\n")
+	promptBuilder.WriteString("Output ONLY the raw commit message text. Do not wrap the message in markdown code block fence, do not include quotes or any introduction/explanation.\n\n")
+	promptBuilder.WriteString("Git Diff:\n")
+	promptBuilder.WriteString(summary.Diff)
+
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: promptBuilder.String()},
+		},
+	}
+	stream, err := provider.StreamCompletion(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	collected := zeroruntime.CollectStream(ctx, stream)
+	if collected.Error != "" {
+		return "", fmt.Errorf("%s", collected.Error)
+	}
+
+	msg := strings.TrimSpace(collected.Text)
+	if strings.HasPrefix(msg, "```") {
+		if idx := strings.Index(msg, "\n"); idx != -1 {
+			msg = msg[idx+1:]
+		}
+	}
+	msg = strings.TrimSuffix(msg, "```")
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "", fmt.Errorf("provider returned empty commit message")
+	}
+	return msg, nil
 }

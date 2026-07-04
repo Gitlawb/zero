@@ -12,6 +12,7 @@ import (
 
 type updateOptions struct {
 	check      bool
+	apply      bool
 	json       bool
 	repository string
 	endpoint   string
@@ -20,6 +21,18 @@ type updateOptions struct {
 }
 
 func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runUpdateCommand(args, stdout, stderr, deps, false)
+}
+
+func runUpgrade(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runUpdateCommand(args, stdout, stderr, deps, true)
+}
+
+// runUpdateCommand backs both `zero update` and `zero upgrade`. defaultApply
+// makes `--apply` the implicit behavior for `zero upgrade` when neither
+// `--check` nor `--apply` is passed explicitly; `zero update` keeps requiring
+// one of the two so existing scripts around `zero update --check` don't change.
+func runUpdateCommand(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, defaultApply bool) int {
 	options, help, err := parseUpdateArgs(args)
 	if err != nil {
 		return writeUsageError(stderr, err.Error())
@@ -30,10 +43,19 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		}
 		return exitSuccess
 	}
-	if !options.check {
-		return writeUsageError(stderr, "Only `zero update --check` is available right now.")
+	if options.check && options.apply {
+		return writeUsageError(stderr, "Pass only one of --check or --apply.")
 	}
-	checkOptions := update.Options{
+	if !options.check && !options.apply {
+		if !defaultApply {
+			return writeUsageError(stderr, "Pass --check to check for updates or --apply to install one (or use `zero upgrade`).")
+		}
+		options.apply = true
+	}
+	if options.apply && options.target != "" {
+		return writeUsageError(stderr, "--target cannot be combined with --apply; it only verifies release assets for --check.")
+	}
+	updateOptions := update.Options{
 		CurrentVersion: version,
 		Repository:     options.repository,
 		Endpoint:       options.endpoint,
@@ -44,10 +66,26 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		if err != nil {
 			return writeUsageError(stderr, err.Error())
 		}
-		checkOptions.GOOS = target.GOOS
-		checkOptions.GOARCH = target.GOARCH
+		updateOptions.GOOS = target.GOOS
+		updateOptions.GOARCH = target.GOARCH
 	}
-	result, err := deps.checkUpdate(context.Background(), checkOptions)
+	if options.apply {
+		result, err := deps.applyUpdate(context.Background(), updateOptions)
+		if err != nil {
+			return writeAppError(stderr, "Could not install update: "+err.Error(), exitCrash)
+		}
+		if options.json {
+			if err := writePrettyJSON(stdout, result); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
+		if _, err := fmt.Fprintln(stdout, update.FormatApply(result)); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	result, err := deps.checkUpdate(context.Background(), updateOptions)
 	if err != nil {
 		return writeAppError(stderr, "Could not check for updates: "+err.Error(), exitCrash)
 	}
@@ -72,6 +110,8 @@ func parseUpdateArgs(args []string) (updateOptions, bool, error) {
 			return options, true, nil
 		case arg == "--check":
 			options.check = true
+		case arg == "--apply":
+			options.apply = true
 		case arg == "--json":
 			options.json = true
 		case arg == "--repo":
@@ -155,14 +195,17 @@ func parseUpdateTarget(value string) (string, error) {
 func writeUpdateHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero update --check [flags]
+  zero update --apply [flags]
+  zero upgrade [flags]
 
 Flags:
       --check                 Check the latest GitHub release without installing
-      --json                  Print the update check result as JSON
+      --apply                 Download, verify, and install the latest release
+      --json                  Print the update result as JSON
       --repo <owner/repo>     Repository to check when no endpoint is provided
       --endpoint <url|repo>   Release API URL or owner/repo slug to check
       --timeout <duration>    Release check timeout (default 5s)
-      --target <platform>     Release target to verify (for example windows-x64)
+      --target <platform>     Release target to verify with --check (for example windows-x64); not valid with --apply
   -h, --help                  Show this help
 `)
 	return err

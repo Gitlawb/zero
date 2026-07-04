@@ -54,8 +54,28 @@ const nativePath = join(packageRoot, zeroBinaryName());
 const localControlHelpers = localControlHelperManifest(packageRoot);
 
 if (!existsSync(nativePath)) {
+  const postinstallScript = join(packageRoot, 'scripts', 'postinstall.mjs');
+  const ranByBun = process.execPath.includes('bun') || !!process.versions?.bun;
   console.error(
-    '[zero] No native binary found next to the npm wrapper. Reinstall the zero package or run `go run ./cmd/zero-release build` from the repository.'
+    '[zero] No native binary found next to the npm wrapper.\n' +
+      'The platform binary is fetched at install time by a postinstall script,\n' +
+      'which did not run (or was skipped) for this install.\n' +
+      '\n' +
+      'Fix it now by running the installer manually:\n' +
+      `  node "${postinstallScript}"\n` +
+      '\n' +
+      (ranByBun
+        ? 'You installed with Bun, which does not run dependency lifecycle scripts\n' +
+          'by default. Trust the package to run the blocked postinstall:\n' +
+          '  bun pm trust @gitlawb/zero       (project install)\n' +
+          '  bun pm -g trust @gitlawb/zero    (global install)\n' +
+          'On Bun versions without `bun pm trust`, add\n' +
+          '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+          'to your project package.json and reinstall.\n' +
+          '\n'
+        : '') +
+      'If that fails, build from source: https://github.com/Gitlawb/zero\n' +
+      '(go run ./cmd/zero, requires Go 1.25+).',
   );
   process.exit(1);
 }

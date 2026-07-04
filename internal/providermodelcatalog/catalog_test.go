@@ -37,6 +37,16 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			want:     []string{"mistral-large-latest", "codestral-latest"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
+		{
+			provider: "minimaxi-cn",
+			want:     []string{"MiniMax-M3", "MiniMax-M2.1"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
+		},
+		{
+			provider: "zai-cn",
+			want:     []string{"glm-4.5", "glm-4.6", "glm-4.5-air", "glm-z1-air"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -87,4 +97,67 @@ func modelIDs(models []Model) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+// Pins the contract that MiniMax CN exposes exactly the same model IDs as the
+// international provider; a divergence here is almost always a mistake.
+func TestMiniMaxCNModelsMirrorInternational(t *testing.T) {
+	intl, ok := providercatalog.Get("minimax")
+	if !ok {
+		t.Fatal("provider minimax missing from catalog")
+	}
+	cn, ok := providercatalog.Get("minimaxi-cn")
+	if !ok {
+		t.Fatal("provider minimaxi-cn missing from catalog")
+	}
+	intlModels := Models(intl)
+	cnModels := Models(cn)
+	if len(intlModels) != len(cnModels) {
+		t.Fatalf("model count mismatch: international=%d china=%d", len(intlModels), len(cnModels))
+	}
+	intlIDs := map[string]string{}
+	for _, m := range intlModels {
+		intlIDs[m.ID] = m.Description
+	}
+	for _, m := range cnModels {
+		wantDesc, ok := intlIDs[m.ID]
+		if !ok {
+			t.Fatalf("china provider exposes %q which is not in the international catalog", m.ID)
+		}
+		if m.Description != wantDesc {
+			t.Fatalf("model %q description diverged: international=%q china=%q", m.ID, wantDesc, m.Description)
+		}
+	}
+}
+
+// Same contract as TestMiniMaxCNModelsMirrorInternational, for Z.ai: the
+// international (api.z.ai) and China (open.bigmodel.cn) endpoints expose the
+// same model lineup.
+func TestZaiCNModelsMirrorInternational(t *testing.T) {
+	intl, ok := providercatalog.Get("zai")
+	if !ok {
+		t.Fatal("provider zai missing from catalog")
+	}
+	cn, ok := providercatalog.Get("zai-cn")
+	if !ok {
+		t.Fatal("provider zai-cn missing from catalog")
+	}
+	intlModels := Models(intl)
+	cnModels := Models(cn)
+	if len(intlModels) != len(cnModels) {
+		t.Fatalf("model count mismatch: international=%d china=%d", len(intlModels), len(cnModels))
+	}
+	intlIDs := map[string]string{}
+	for _, m := range intlModels {
+		intlIDs[m.ID] = m.Description
+	}
+	for _, m := range cnModels {
+		wantDesc, ok := intlIDs[m.ID]
+		if !ok {
+			t.Fatalf("china provider exposes %q which is not in the international catalog", m.ID)
+		}
+		if m.Description != wantDesc {
+			t.Fatalf("model %q description diverged: international=%q china=%q", m.ID, wantDesc, m.Description)
+		}
+	}
 }

@@ -1167,6 +1167,71 @@ func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
 	}
 }
 
+func TestAdvanceProviderWizardCustomSkipsManageKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		catalogID string
+		transport providercatalog.Transport
+	}{
+		{
+			name:      "custom-openai-compatible",
+			catalogID: "custom-openai-compatible",
+			transport: providercatalog.TransportOpenAICompatible,
+		},
+		{
+			name:      "custom-anthropic-compatible",
+			catalogID: "custom-anthropic-compatible",
+			transport: providercatalog.TransportAnthropicCompatible,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{savedProviders: []config.ProviderProfile{
+				{Name: "my-gateway", CatalogID: tt.catalogID, APIKeyStored: true},
+			}}
+			m.providerWizard = &providerWizardState{
+				step: providerWizardStepProvider,
+				providers: []providercatalog.Descriptor{
+					{ID: tt.catalogID, Name: tt.name, Transport: tt.transport},
+				},
+				selectedProvider: 0,
+			}
+
+			next, _ := m.advanceProviderWizard()
+			if next.providerWizard == nil {
+				t.Fatal("wizard should not be nil after advancing from provider step")
+			}
+			if next.providerWizard.step == providerWizardStepManageKey {
+				t.Fatal("custom provider should skip ManageKey and route to endpoint, got ManageKey")
+			}
+			if next.providerWizard.step != providerWizardStepEndpoint {
+				t.Fatalf("custom provider should route to endpoint step, got step: %v", next.providerWizard.step)
+			}
+		})
+	}
+}
+
+func TestAdvanceProviderWizardNamedShowsManageKey(t *testing.T) {
+	m := model{savedProviders: []config.ProviderProfile{
+		{Name: "openai", CatalogID: "openai", APIKeyStored: true},
+	}}
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepProvider,
+		providers: []providercatalog.Descriptor{
+			{ID: "openai", Name: "OpenAI", Transport: providercatalog.TransportOpenAI},
+		},
+		selectedProvider: 0,
+	}
+
+	next, _ := m.advanceProviderWizard()
+	if next.providerWizard == nil {
+		t.Fatal("wizard should not be nil after advancing from provider step")
+	}
+	if next.providerWizard.step != providerWizardStepManageKey {
+		t.Fatalf("named provider should route to ManageKey step, got step: %v", next.providerWizard.step)
+	}
+}
+
 func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfig {
 	t.Helper()
 
@@ -1289,4 +1354,140 @@ func TestApplyProviderWizardPersistFailureLeavesLiveStateUnchanged(t *testing.T)
 	if got := os.Getenv(config.ActiveProviderEnv); got != "old-provider" {
 		t.Fatalf("%s = %q, want it unchanged on persist failure (children would diverge from parent)", config.ActiveProviderEnv, got)
 	}
+}
+
+func TestProviderSearchFiltersByNameIDAndAlias(t *testing.T) {
+	wizard := &providerWizardState{
+		step: providerWizardStepProvider,
+		providers: []providercatalog.Descriptor{
+			{ID: "openai", Name: "OpenAI", Aliases: []string{"chatgpt"}},
+			{ID: "anthropic", Name: "Anthropic", Aliases: []string{"claude"}},
+			{ID: "google", Name: "Google", Aliases: []string{"gemini"}},
+			{ID: "groq", Name: "Groq", Aliases: []string{}},
+		},
+	}
+
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"openai", []string{"openai"}},
+		{"anthropic", []string{"anthropic"}},
+		{"claude", []string{"anthropic"}},
+		{"gemini", []string{"google"}},
+		{"chatgpt", []string{"openai"}},
+		{"groq", []string{"groq"}},
+		{"GROQ", []string{"groq"}},
+		{"nomatch", nil},
+		{"", []string{"openai", "anthropic", "google", "groq"}},
+	}
+
+	for _, tt := range tests {
+		t.Run("query="+tt.query, func(t *testing.T) {
+			wizard.providerSearch = tt.query
+			got := wizard.filteredProviders()
+			if len(got) != len(tt.want) {
+				t.Fatalf("filteredProviders(%q) = %d results, want %d", tt.query, len(got), len(tt.want))
+			}
+			for i, id := range tt.want {
+				if got[i].ID != id {
+					t.Fatalf("filteredProviders(%q)[%d] = %q, want %q", tt.query, i, got[i].ID, id)
+				}
+			}
+		})
+	}
+}
+
+func TestProviderSearchResetsSelectedProviderOnEdit(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+
+	// Move to a later provider, then type a search query.
+	m.providerWizard.selectedProvider = 3
+	updated, _ := m.Update(testKeyText("anth"))
+	next := updated.(model)
+	if next.providerWizard.selectedProvider != 0 {
+		t.Fatalf("selectedProvider after typing = %d, want 0 (reset on edit)", next.providerWizard.selectedProvider)
+	}
+}
+
+func TestProviderSearchFilteredAdvanceSelectsCorrectProvider(t *testing.T) {
+	wizard := &providerWizardState{
+		step: providerWizardStepProvider,
+		providers: []providercatalog.Descriptor{
+			{ID: "openai", Name: "OpenAI", AuthEnvVars: []string{"OPENAI_API_KEY"}, RequiresAuth: true},
+			{ID: "anthropic", Name: "Anthropic", AuthEnvVars: []string{"ANTHROPIC_API_KEY"}, RequiresAuth: true},
+			{ID: "google", Name: "Google", AuthEnvVars: []string{"GOOGLE_API_KEY"}, RequiresAuth: true},
+			{ID: "groq", Name: "Groq", AuthEnvVars: []string{"GROQ_API_KEY"}, RequiresAuth: true},
+		},
+		selectedProvider: 0,
+	}
+
+	// Type a search that matches exactly "groq".
+	wizard.providerSearch = "groq"
+	filtered := wizard.filteredProviders()
+	if len(filtered) != 1 || filtered[0].ID != "groq" {
+		t.Fatalf("expected exactly groq in filtered results, got %v", providerWizardIDs(filtered))
+	}
+
+	// currentProvider() via filtered list should be groq.
+	if got := wizard.currentProvider().ID; got != "groq" {
+		t.Fatalf("currentProvider() = %q, want groq", got)
+	}
+}
+
+func TestProviderSearchEmptyMatchEnterIsNoop(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+
+	// Type a query that matches nothing.
+	updated, _ := m.Update(testKeyText("zzzzz"))
+	next := updated.(model)
+	if len(next.providerWizard.filteredProviders()) != 0 {
+		t.Fatal("expected zero filtered providers")
+	}
+
+	// Enter should be a no-op.
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepProvider {
+		t.Fatalf("wizard step = %v, want provider (empty match Enter should be no-op)", next.providerWizard.step)
+	}
+	if next.providerWizard.providerSearch != "zzzzz" {
+		t.Fatalf("providerSearch = %q, want query preserved on noop", next.providerWizard.providerSearch)
+	}
+}
+
+func TestProviderSearchClearRestoresFullList(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+
+	initialCount := len(m.providerWizard.filteredProviders())
+	if initialCount == 0 {
+		t.Fatal("expected providers in the wizard")
+	}
+
+	// Type a search query.
+	updated, _ := m.Update(testKeyText("open"))
+	next := updated.(model)
+	filtered := next.providerWizard.filteredProviders()
+	if len(filtered) >= initialCount {
+		t.Fatalf("search should narrow results: got %d, want < %d", len(filtered), initialCount)
+	}
+
+	// Ctrl+U clears the search.
+	updated, _ = next.Update(testKeyCtrl('u'))
+	next = updated.(model)
+	restored := next.providerWizard.filteredProviders()
+	if len(restored) != initialCount {
+		t.Fatalf("after clear, filtered count = %d, want %d", len(restored), initialCount)
+	}
+}
+
+func providerWizardIDs(descriptors []providercatalog.Descriptor) []string {
+	ids := make([]string, len(descriptors))
+	for i, d := range descriptors {
+		ids[i] = d.ID
+	}
+	return ids
 }

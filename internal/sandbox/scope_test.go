@@ -129,6 +129,9 @@ func TestNewScopeNormalizesAndValidatesExtraRoots(t *testing.T) {
 	if !stringSliceContains(roots, normalizeWorkspaceRootBestEffort(extra)) {
 		t.Fatalf("Roots()=%v want extra root %q", roots, normalizeWorkspaceRootBestEffort(extra))
 	}
+	// /tmp is a default temp write root on POSIX only (see
+	// defaultTempWriteRootCandidatesForGOOS); on Windows the bare path resolves
+	// against the current drive, so a stray C:\tmp must not turn this on.
 	if runtime.GOOS != "windows" && pathExists("/tmp") && !stringSliceContains(roots, normalizeWorkspaceRootBestEffort("/tmp")) {
 		t.Fatalf("Roots()=%v want default /tmp write root", roots)
 	}

@@ -20,6 +20,11 @@ type shellIssue struct {
 var (
 	windowsBashStyleCDPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)cd\s+/(?:[a-ce-z0-9_./~-]|d[a-z0-9_./~-])[a-z0-9_./~-]*`)
 	windowsLSCommandPattern   = regexp.MustCompile(`(?i)(^|[&|;]\s*)ls\b(?:\s+|$)`)
+	// windowsPosixUtilityPattern catches the other common POSIX coreutils/grep
+	// family commands cmd.exe has no equivalent for (unlike `dir`/`findstr`,
+	// which sound similar enough that a model might reach for the POSIX name
+	// instead) — most often seen piped in, e.g. `git log ... | head`.
+	windowsPosixUtilityPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)(head|tail|grep|wc|awk|sed|cut|xargs|tr)(?:\s+|$)`)
 )
 
 func detectShellRuntime(goos string) shellRuntime {
@@ -55,6 +60,13 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 			Kind:       "windows_shell_syntax",
 			Message:    "Command looks like POSIX/Bash syntax, but Zero runs bash tool commands through Windows cmd.exe on this host.",
 			Suggestion: "Use the cwd argument instead of cd, use Windows cmd.exe syntax, or use native tools such as list_directory, read_file, grep, and glob.",
+		}
+	}
+	if windowsPosixUtilityPattern.MatchString(trimmed) {
+		return &shellIssue{
+			Kind:       "windows_shell_syntax",
+			Message:    "Command uses a POSIX utility (head/tail/grep/wc/awk/sed/cut/xargs/tr) that Windows cmd.exe does not have.",
+			Suggestion: "Use cmd.exe equivalents (e.g. `findstr` for grep, `more` to page output) or Zero's native tools (grep, read_file with offset/limit) instead of piping to a POSIX utility.",
 		}
 	}
 	return nil

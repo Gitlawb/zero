@@ -24,6 +24,51 @@ Requirements:
 - Node.js 18+
 - network access to npm and GitHub Releases
 
+## Bun
+
+Bun is "default-secure" and does not run lifecycle scripts of installed
+dependencies (only the installing project's own scripts), so the `postinstall`
+that fetches the Zero binary is silently skipped. The first run then fails with
+`No native binary found next to the npm wrapper`.
+
+The simplest fix is to trust the package after installing, which runs the
+blocked postinstall. This works for project and global installs:
+
+```bash
+# project install
+bun add @gitlawb/zero
+bun pm trust @gitlawb/zero
+
+# global install
+bun add -g @gitlawb/zero
+bun pm -g trust @gitlawb/zero
+```
+
+`bun pm untrusted` (or `bun pm -g untrusted`) lists the blocked postinstalls if
+you want to inspect before trusting.
+
+Alternatively, allow the postinstall to run at install time by adding the
+package to your project's `trustedDependencies` before installing:
+
+```json
+{
+  "trustedDependencies": ["@gitlawb/zero"]
+}
+```
+
+```bash
+bun add @gitlawb/zero
+```
+
+On Bun versions that do not have `bun pm trust`, run the installer manually
+after installing:
+
+```bash
+node node_modules/@gitlawb/zero/scripts/postinstall.mjs
+```
+
+Reference: <https://bun.sh/docs/pm/lifecycle>
+
 ## Linux And macOS Script
 
 Install the latest release:

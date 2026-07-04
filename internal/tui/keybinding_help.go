@@ -5,6 +5,10 @@
 // lists them grouped, so the keymap is discoverable the way the reference TUIs
 // do it. The list is declarative and hand-curated to match the real handlers in
 // model.go's Update switch; keep them in sync when a binding changes.
+//
+// Configurable bindings (toggleDetailed, toggleMouse, cycleReasoning,
+// togglePlan, toggleSidebar) pull their key label from m.keyBindings so a user
+// who remaps them in config.json sees the actual chords, not the defaults.
 package tui
 
 import "strings"
@@ -21,63 +25,67 @@ type keybindingGroup struct {
 	bindings []keybinding
 }
 
-// keybindingGroups is the full, grouped shortcut list shown by the `?` overlay.
+// buildKeybindingGroups returns the full, grouped shortcut list shown by the
+// `?` overlay. Configurable bindings use the user's remapped labels (via
+// m.keyBindings) when present; unconfigured bindings get their built-in labels.
 // Sourced from the real key cases in model.go (Update) — not invented. When a
-// binding is added/changed there, update it here too (a test guards that the
-// data is non-empty and well-formed, but it can't verify the bindings exist).
-var keybindingGroups = []keybindingGroup{
-	{
-		title: "Chat",
-		bindings: []keybinding{
-			{"Enter", "send the message"},
-			{"Alt+Enter", "insert a newline (multi-line compose)"},
-			{"Esc (×2)", "cancel the run / dismiss a popup / clear the input"},
-			{"Ctrl+C", "cancel the run, then quit"},
-			{"?", "show this help (on an empty input)"},
+// binding is added/changed there, update this method too.
+func (m model) buildKeybindingGroups() []keybindingGroup {
+	return []keybindingGroup{
+		{
+			title: "Chat",
+			bindings: []keybinding{
+				{"Enter", "send the message"},
+				{"Alt+Enter", "insert a newline (multi-line compose)"},
+				{"Esc (\u00d72)", "cancel the run / dismiss a popup / clear the input"},
+				{"Ctrl+C", "cancel the run, then quit"},
+				{"?", "show this help (on an empty input)"},
+			},
 		},
-	},
-	{
-		title: "Model & run controls",
-		bindings: []keybinding{
-			{"Ctrl+T", "cycle reasoning effort (auto → low → medium → high)"},
-			{"Shift+Tab", "cycle permission mode (auto ↔ ask)"},
-			{"Ctrl+P", "expand / collapse the plan panel"},
+		{
+			title: "Model & run controls",
+			bindings: []keybinding{
+				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
+				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
+				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel"},
+			},
 		},
-	},
-	{
-		title: "Navigation & scrollback",
-		bindings: []keybinding{
-			{"PgUp / PgDn", "scroll the transcript by a page"},
-			{"↑ / ↓", "scroll, or move within a popup / multi-line input"},
-			{"Ctrl+O", "toggle the detailed (full-screen) transcript"},
-			{"Ctrl+B", "hide / show the right context sidebar"},
-			{"Ctrl+E", "release the mouse to drag-select & copy text"},
-			{"Tab", "accept the autocomplete / picker selection"},
+		{
+			title: "Navigation & scrollback",
+			bindings: []keybinding{
+				{"PgUp / PgDn", "scroll the transcript by a page"},
+				{"\u2191 / \u2193", "scroll, or move within a popup / multi-line input"},
+				{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
+				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "hide / show the right context sidebar"},
+				{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},
+				{"Tab", "accept the autocomplete / picker selection"},
+			},
 		},
-	},
-	{
-		title: "Specialists & pickers",
-		bindings: []keybinding{
-			{"Click a specialist card", "drill into its sub-session"},
-			{"↑ / Esc (in a sub-session)", "return to the main chat"},
-			{"Ctrl+F (in /model)", "toggle the highlighted model as a favorite"},
-			{"Click a tool card", "expand / collapse its output"},
-			{"Right-click", "paste the clipboard"},
+		{
+			title: "Specialists & pickers",
+			bindings: []keybinding{
+				{"Click a specialist card", "drill into its sub-session"},
+				{"\u2191 / Esc (in a sub-session)", "return to the main chat"},
+				{"Ctrl+F (in /model)", "toggle the highlighted model as a favorite"},
+				{"Click a tool card", "expand / collapse its output"},
+				{"Right-click", "paste the clipboard"},
+			},
 		},
-	},
+	}
 }
 
 // keybindingHelpFooter is the dismiss hint shown at the bottom of the overlay.
-const keybindingHelpFooter = "? or Esc to close · /help for slash commands"
+const keybindingHelpFooter = "? or Esc to close \u00b7 /help for slash commands"
 
 // renderKeybindingHelpLines builds the overlay body lines (group titles +
 // aligned key/description rows + footer), wrapped to the inner width. Exposed
 // separately from the framed renderer so tests can assert on content without
 // the border chrome.
 func (m model) renderKeybindingHelpLines(innerWidth int) []string {
-	keyColumn := keybindingKeyColumnWidth()
+	groups := m.buildKeybindingGroups()
+	keyColumn := keybindingKeyColumnWidth(groups)
 	lines := make([]string, 0, 64)
-	for index, group := range keybindingGroups {
+	for index, group := range groups {
 		if index > 0 {
 			lines = append(lines, "")
 		}
@@ -93,9 +101,9 @@ func (m model) renderKeybindingHelpLines(innerWidth int) []string {
 
 // keybindingKeyColumnWidth returns the width of the key column: the widest key
 // chord across all groups, so the descriptions align in a clean second column.
-func keybindingKeyColumnWidth() int {
+func keybindingKeyColumnWidth(groups []keybindingGroup) int {
 	widest := 0
-	for _, group := range keybindingGroups {
+	for _, group := range groups {
 		for _, binding := range group.bindings {
 			if n := len([]rune(binding.keys)); n > widest {
 				widest = n
@@ -124,9 +132,9 @@ func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) str
 	return "  " + keyCell + "  " + desc
 }
 
-// renderKeybindingHelpOverlay renders the framed, centered `?` help overlay for
-// the given terminal dimensions.
-func (m model) renderKeybindingHelpOverlay(width int, height int) string {
+// the given terminal width. Vertical centering is handled by the caller's
+// overlay compositing pipeline (overlayViewportLines in transcriptView).
+func (m model) renderKeybindingHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
 	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, zeroTheme.panel)

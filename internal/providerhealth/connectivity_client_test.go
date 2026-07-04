@@ -169,8 +169,8 @@ func TestValidateEndpointAllowsLoopbackOnlyForLocalProvider(t *testing.T) {
 		if err := validateEndpoint(ctx, ep, r, true); err != nil {
 			t.Errorf("local provider endpoint %q should be allowed with allowLoopback=true, got %v", ep, err)
 		}
-		if !endpointIsLoopback(ep) {
-			t.Errorf("endpointIsLoopback(%q) = false, want true", ep)
+		if !endpointIsLoopbackOrPrivate(ep) {
+			t.Errorf("endpointIsLoopbackOrPrivate(%q) = false, want true", ep)
 		}
 	}
 
@@ -179,14 +179,27 @@ func TestValidateEndpointAllowsLoopbackOnlyForLocalProvider(t *testing.T) {
 		t.Error("loopback must remain blocked when allowLoopback=false (redirects / non-local)")
 	}
 
-	// allowLoopback relaxes loopback ONLY — other special ranges (cloud metadata,
-	// link-local, private) stay blocked even for a local provider config.
-	for _, ep := range []string{"http://169.254.169.254/latest/meta-data", "http://10.0.0.5:8080/v1"} {
+	// allowLoopbackOrPrivate relaxes loopback AND private-network ranges — but
+	// link-local and other special ranges (cloud metadata, documentation) stay
+	// blocked even for a local provider config.
+	for _, ep := range []string{"http://169.254.169.254/latest/meta-data", "http://192.0.2.1:8080/v1"} {
 		if err := validateEndpoint(ctx, ep, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, true); err == nil {
-			t.Errorf("non-loopback special address %q must stay blocked even with allowLoopback=true", ep)
+			t.Errorf("special-use address %q must stay blocked even with flag=true", ep)
 		}
-		if endpointIsLoopback(ep) {
-			t.Errorf("endpointIsLoopback(%q) = true, want false", ep)
+		if endpointIsLoopbackOrPrivate(ep) {
+			t.Errorf("endpointIsLoopbackOrPrivate(%q) = true, want false", ep)
+		}
+	}
+
+	// Private-network addresses (192.168.x.y / 10.x.y.z / 172.16.x.y) are
+	// now allowed when the flag is true — the user is pointing at their own
+	// LAN box (e.g. llama.cpp on another local machine).
+	for _, ep := range []string{"http://192.168.1.100:8080/v1", "http://10.0.0.5:8080/v1", "http://172.16.0.10:8080/v1"} {
+		if err := validateEndpoint(ctx, ep, staticResolver{addr: netip.MustParseAddr("192.168.1.100")}, true); err != nil {
+			t.Errorf("private-network address %q should be allowed with flag=true, got %v", ep, err)
+		}
+		if !endpointIsLoopbackOrPrivate(ep) {
+			t.Errorf("endpointIsLoopbackOrPrivate(%q) = false, want true", ep)
 		}
 	}
 }

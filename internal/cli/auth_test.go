@@ -156,3 +156,44 @@ func TestRunAuthHelp(t *testing.T) {
 		}
 	}
 }
+
+// TestRunAuthLoginChatGPTRoutesToDedicatedFlow verifies `zero auth login
+// chatgpt` reaches the dedicated ChatGPT login (fixed-port loopback + mandatory
+// authorize params), not the generic manager path. The generic login accepts
+// --device, so a ChatGPT-specific rejection proves the routing took effect.
+// See issue #430: the generic path built a random-port 127.0.0.1 redirect_uri
+// without the required extra params, so OpenAI's authorize endpoint rejected it.
+func TestRunAuthLoginChatGPTRoutesToDedicatedFlow(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "login", "chatgpt", "--device"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatal("auth login chatgpt --device should be rejected (ChatGPT is loopback-only)")
+	}
+	if !strings.Contains(stderr.String(), "ChatGPT login does not support --device") {
+		t.Fatalf("stderr = %q, want the ChatGPT-specific --device rejection", stderr.String())
+	}
+	// Case-insensitive provider name should still route.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "login", "ChatGPT", "--device"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatal("auth login ChatGPT --device should be rejected")
+	}
+	if !strings.Contains(stderr.String(), "ChatGPT login does not support --device") {
+		t.Fatalf("stderr = %q, want the ChatGPT-specific rejection (case-insensitive)", stderr.String())
+	}
+}
+
+// TestRunAuthLoginChatGPTRejectsScope mirrors the --device rejection: --scope
+// must not be silently dropped on the ChatGPT path. The Codex client
+// registration pins a fixed scope set (incl. api.connectors.*), so custom
+// scopes are rejected up front rather than plumbed through.
+func TestRunAuthLoginChatGPTRejectsScope(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "login", "chatgpt", "--scope", "custom-scope"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatal("auth login chatgpt --scope should be rejected")
+	}
+	if !strings.Contains(stderr.String(), "ChatGPT login does not support --scope") {
+		t.Fatalf("stderr = %q, want the ChatGPT-specific --scope rejection", stderr.String())
+	}
+}

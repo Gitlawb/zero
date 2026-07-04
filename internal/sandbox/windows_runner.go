@@ -95,8 +95,14 @@ type WindowsSandboxLevel string
 
 const (
 	WindowsSandboxLevelRestrictedToken WindowsSandboxLevel = "restricted-token"
-	WindowsSandboxLevelElevated        WindowsSandboxLevel = "elevated"
-	WindowsSandboxLevelDisabled        WindowsSandboxLevel = "disabled"
+	// WindowsSandboxLevelUnelevated is the restricted-token tier without the
+	// elevated setup: the runner applies the workspace ACL plan itself before
+	// launching (no Administrator rights needed) and skips the elevated setup
+	// marker check. Network is NOT enforced at this level — the WFP filters need
+	// the elevated setup — so callers must keep network behind the approval gate.
+	WindowsSandboxLevelUnelevated WindowsSandboxLevel = "unelevated"
+	WindowsSandboxLevelElevated   WindowsSandboxLevel = "elevated"
+	WindowsSandboxLevelDisabled   WindowsSandboxLevel = "disabled"
 )
 
 type WindowsSandboxCommandArgsOptions struct {
@@ -271,13 +277,20 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 		return CommandPlan{}, err
 	}
 	childEnv := windowsSandboxChildEnv(spec.Env, policy, execRequest.WorkspaceRoot)
+	// The unelevated enforcement tier maps to the runner's unelevated level: same
+	// restricted token, but the runner applies the workspace ACLs itself instead
+	// of requiring the elevated setup marker.
+	level := WindowsSandboxLevelRestrictedToken
+	if execRequest.EnforcementLevel == EnforcementUnelevated {
+		level = WindowsSandboxLevelUnelevated
+	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
 		SandboxHome:       sandboxHome,
 		CommandCWD:        spec.Dir,
 		WorkspaceRoots:    []string{execRequest.WorkspaceRoot},
 		PermissionProfile: execRequest.PermissionProfile,
 		Env:               childEnv,
-		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+		SandboxLevel:      level,
 		Command:           append([]string{spec.Name}, spec.Args...),
 	})
 	if err != nil {
@@ -381,7 +394,7 @@ func nextWindowsSandboxFlagValue(args []string, index int) (string, int, error) 
 
 func validWindowsSandboxLevel(level WindowsSandboxLevel) bool {
 	switch level {
-	case WindowsSandboxLevelRestrictedToken, WindowsSandboxLevelElevated, WindowsSandboxLevelDisabled:
+	case WindowsSandboxLevelRestrictedToken, WindowsSandboxLevelUnelevated, WindowsSandboxLevelElevated, WindowsSandboxLevelDisabled:
 		return true
 	default:
 		return false

@@ -14,7 +14,7 @@
 // Env overrides (testing / mirrors / locked-down installs):
 //   ZERO_SKIP_DOWNLOAD=1      skip entirely, exit 0 (wrapper will guide if run)
 //   ZERO_INSTALL_DRY_RUN=1    print the resolved plan as JSON, no network, exit 0
-//   ZERO_INSTALL_PLATFORM=…   override process.platform (linux|darwin|win32)
+//   ZERO_INSTALL_PLATFORM=…   override process.platform (linux|darwin|win32|android)
 //   ZERO_INSTALL_ARCH=…       override process.arch (x64|arm64)
 //   ZERO_REPO=owner/name      override the GitHub repo (default Gitlawb/zero)
 //   ZERO_GITHUB_BASE_URL=…    override the download host (default https://github.com)
@@ -65,6 +65,7 @@ function warnSkip(message) {
 function resolvePlatform(p) {
   switch (p) {
     case 'linux':
+    case 'android':
       return 'linux';
     case 'darwin':
       return 'macos';

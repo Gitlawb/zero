@@ -160,10 +160,7 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 	if prepared.Mode == ModeNew || len(prepared.ContextEvents) == 0 {
 		return prompt
 	}
-	events := prepared.ContextEvents
-	if len(events) > 20 {
-		events = events[len(events)-20:]
-	}
+	events := promptContextEvents(prepared.ContextEvents)
 
 	lines := []string{}
 	for _, event := range events {
@@ -185,6 +182,25 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 		"Current user request:",
 		prompt,
 	}, "\n")
+}
+
+func promptContextEvents(events []Event) []Event {
+	const maxPromptContextEvents = 80
+
+	filtered := make([]Event, 0, len(events))
+	for _, event := range events {
+		switch event.Type {
+		case EventMessage, EventCompaction, EventSessionFork, EventSessionChild, EventSpecialistStart, EventSpecialistStop, EventError:
+			filtered = append(filtered, event)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = append(filtered, events...)
+	}
+	if len(filtered) > maxPromptContextEvents {
+		filtered = filtered[len(filtered)-maxPromptContextEvents:]
+	}
+	return filtered
 }
 
 func forkTitle(title string) string {

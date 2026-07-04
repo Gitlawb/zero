@@ -269,7 +269,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	request, allowLoopback, err := healthRequest(requestCtx, profile, kind, options)
+	request, allowLoopbackOrPrivate, err := healthRequest(requestCtx, profile, kind, options)
 	if err != nil {
 		category := CategoryConfig
 		var safety endpointSafetyError
@@ -280,7 +280,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	}
 	client := options.HTTPClient
 	if client == nil {
-		client = newConnectivityClient(timeout, options.Resolver, sensitiveAuthHeaderNames(profile, kind), allowLoopback)
+		client = newConnectivityClient(timeout, options.Resolver, sensitiveAuthHeaderNames(profile, kind), allowLoopbackOrPrivate)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -332,8 +332,8 @@ func healthRequest(ctx context.Context, profile config.ProviderProfile, kind con
 	// Loopback is permitted only when the user's OWN configured base_url is loopback
 	// (a local provider like Ollama/LM Studio) — never for a redirect target. This is
 	// the flag returned to the caller so the dial path applies the same policy. (AUDIT-H1)
-	allowLoopback := endpointIsLoopback(endpoint)
-	if err := validateEndpoint(ctx, endpoint, options.Resolver, allowLoopback); err != nil {
+	allowLoopbackOrPrivate := endpointIsLoopbackOrPrivate(endpoint)
+	if err := validateEndpoint(ctx, endpoint, options.Resolver, allowLoopbackOrPrivate); err != nil {
 		return nil, false, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -344,7 +344,7 @@ func healthRequest(ctx context.Context, profile config.ProviderProfile, kind con
 		request.Header.Set("User-Agent", options.UserAgent)
 	}
 	applyAuth(request, profile, kind)
-	return request, allowLoopback, nil
+	return request, allowLoopbackOrPrivate, nil
 }
 
 func resolvedBaseURL(profile config.ProviderProfile, kind config.ProviderKind) (string, error) {
@@ -367,11 +367,11 @@ func resolvedBaseURL(profile config.ProviderProfile, kind config.ProviderKind) (
 }
 
 // validateEndpoint enforces the SSRF policy for the provider connectivity probe.
-// allowLoopback permits loopback hosts (localhost / 127.0.0.0/8 / ::1) ONLY — it is
-// set true exclusively for the user's own explicitly-configured local provider
-// base_url (e.g. Ollama/LM Studio), never for redirect targets, and it relaxes
-// loopback alone (other private/special ranges, incl. cloud metadata, stay blocked).
-func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, allowLoopback bool) error {
+// allowLoopbackOrPrivate permits loopback hosts (localhost / 127.0.0.0/8 / ::1)
+// and private-network hosts (192.168.0.0/16 / 10.0.0.0/8 / 172.16.0.0/12) — it
+// is set true exclusively for the user's own explicitly-configured base_url
+// (e.g. Ollama/LM Studio on the LAN), never for redirect targets.
+func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, allowLoopbackOrPrivate bool) error {
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return err
@@ -385,13 +385,13 @@ func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, a
 	}
 	normalized := strings.TrimSuffix(strings.ToLower(host), ".")
 	if normalized == "localhost" || strings.HasSuffix(normalized, ".localhost") {
-		if allowLoopback {
+		if allowLoopbackOrPrivate {
 			return nil // user-configured local provider; loopback is intentional
 		}
 		return endpointSafetyError{message: "provider connectivity URL is unsafe: localhost hosts are blocked"}
 	}
 	if addr, err := netip.ParseAddr(normalized); err == nil {
-		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopback && addr.IsLoopback()) {
+		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
 			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 		}
 		return nil
@@ -407,17 +407,19 @@ func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, a
 		return endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
 	}
 	for _, addr := range addrs {
-		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopback && addr.IsLoopback()) {
+		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
 			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 		}
 	}
 	return nil
 }
 
-// endpointIsLoopback reports whether the configured endpoint's host is a loopback
-// host the user typed themselves (localhost or a 127.0.0.0/8 / ::1 literal). Used to
-// decide whether the connectivity probe may reach the user's own local provider.
-func endpointIsLoopback(endpoint string) bool {
+// endpointIsLoopbackOrPrivate reports whether the configured endpoint's host is a loopback
+// or private-network host the user typed themselves — a local provider on the LAN
+// (e.g. 192.168.x.y / 10.x.y.z) or localhost. Used to decide whether the
+// connectivity probe may relax address-blocking and reach the user's own
+// explicitly-configured provider.
+func endpointIsLoopbackOrPrivate(endpoint string) bool {
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return false
@@ -427,7 +429,7 @@ func endpointIsLoopback(endpoint string) bool {
 		return true
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.IsLoopback()
+		return addr.IsLoopback() || addr.IsPrivate()
 	}
 	return false
 }
@@ -446,7 +448,7 @@ const maxConnectivityRedirects = 5
 //     time and then dials the validated IP literal, closing the TOCTOU window
 //     between the pre-flight validateEndpoint check and the actual connection
 //     (DNS rebinding).
-func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHeaders []string, allowLoopback bool) *http.Client {
+func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHeaders []string, allowLoopbackOrPrivate bool) *http.Client {
 	if resolver == nil {
 		resolver = defaultResolver{}
 	}
@@ -456,7 +458,7 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 	} else {
 		transport = &http.Transport{}
 	}
-	transport.DialContext = safeDialContext(resolver, allowLoopback)
+	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate)
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
@@ -476,8 +478,8 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 				}
 			}
 			// Redirects are NEVER allowed to reach loopback, even for a local provider:
-			// allowLoopback covers only the user's own configured base_url, not a 3xx
-			// target (which could be attacker-controlled SSRF). (AUDIT-H1)
+			// allowLoopbackOrPrivate covers only the user's own configured base_url,
+			// not a 3xx target (which could be attacker-controlled SSRF). (AUDIT-H1)
 			return validateEndpoint(req.Context(), req.URL.String(), resolver, false)
 		},
 	}
@@ -519,7 +521,7 @@ func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.Provid
 // safeDialContext returns a dial function that resolves the target host, refuses
 // the connection if any resolved address is blocked, then dials the validated IP
 // literal so the kernel cannot re-resolve to a different address after the check.
-func safeDialContext(resolver Resolver, allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
+func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
@@ -527,7 +529,7 @@ func safeDialContext(resolver Resolver, allowLoopback bool) func(context.Context
 			return nil, err
 		}
 		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
-			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopback && addr.IsLoopback()) {
+			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
 				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 			}
 			return dialer.DialContext(ctx, network, address)
@@ -540,7 +542,7 @@ func safeDialContext(resolver Resolver, allowLoopback bool) func(context.Context
 			return nil, endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
 		}
 		for _, addr := range addrs {
-			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopback && addr.IsLoopback()) {
+			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
 				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 			}
 		}

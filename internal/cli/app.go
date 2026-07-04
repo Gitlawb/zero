@@ -82,6 +82,7 @@ type appDeps struct {
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
+	applyUpdate            func(context.Context, update.Options) (update.ApplyResult, error)
 	now                    func() time.Time
 }
 
@@ -184,6 +185,7 @@ func defaultAppDeps() appDeps {
 		runTUI:           tui.Run,
 		runEditor:        openEditor,
 		checkUpdate:      update.Check,
+		applyUpdate:      update.Apply,
 		now:              time.Now,
 	}
 }
@@ -387,6 +389,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSandbox(args[1:], stdout, stderr, deps)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr, deps)
+	case "upgrade":
+		return runUpgrade(args[1:], stdout, stderr, deps)
 	case "worktrees", "worktree":
 		return runWorktrees(args[1:], stdout, stderr, deps)
 	case "verify":
@@ -525,6 +529,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.checkUpdate == nil {
 		deps.checkUpdate = defaults.checkUpdate
 	}
+	if deps.applyUpdate == nil {
+		deps.applyUpdate = defaults.applyUpdate
+	}
 	if deps.now == nil {
 		deps.now = defaults.now
 	}
@@ -567,8 +574,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		if !errors.Is(err, config.ErrNoActiveProvider) && !errors.Is(err, config.ErrProviderRequiresModel) {
 			return writeAppError(stderr, err.Error(), 1)
 		}
-		resolved = config.ResolvedConfig{}
-		forceSetup = true
+		// ErrNoActiveProvider can mean "nothing configured yet" (needs onboarding)
+		// or "providers ARE configured, just none marked active" (e.g. config.json's
+		// activeProvider is blank/stale). In the second case resolved.Providers still
+		// carries the already-normalized list — prefer falling back to one of those
+		// over wiping everything and forcing the user to re-enter credentials they
+		// already saved.
+		if usable, ok := firstUsableProvider(resolved.Providers); errors.Is(err, config.ErrNoActiveProvider) && ok {
+			resolved.Provider = usable
+			resolved.ActiveProvider = usable.Name
+		} else {
+			resolved = config.ResolvedConfig{}
+			forceSetup = true
+		}
 	}
 	userConfigPath, err := deps.userConfigPath()
 	if err != nil {
@@ -753,6 +771,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		},
 		PermissionMode: permissionMode,
 		Notify:         resolved.Notify,
+		KeyBindings:    resolved.KeyBindings,
 		Setup: tui.SetupOptions{
 			Visible:    setupVisible,
 			Required:   needsSetup,
@@ -1168,7 +1187,8 @@ func profileHasCredential(profile config.ProviderProfile) bool {
 }
 
 // baseURLIsLoopback reports whether a provider base_url points at a loopback host
-// (a keyless local provider like Ollama/LM Studio), which needs no API key.
+// or a private-network host (192.168.x.y / 10.x.y.z / 172.16.x.y) — a local
+// provider like Ollama/LM Studio that needs no API key.
 func baseURLIsLoopback(baseURL string) bool {
 	u := strings.TrimSpace(baseURL)
 	if u == "" {
@@ -1183,7 +1203,7 @@ func baseURLIsLoopback(baseURL string) bool {
 		return true
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.IsLoopback()
+		return addr.IsLoopback() || addr.IsPrivate()
 	}
 	return false
 }

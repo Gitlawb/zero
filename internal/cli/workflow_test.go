@@ -663,242 +663,143 @@ func TestRunExecRejectsWorktreeDirWithoutWorktree(t *testing.T) {
 	}
 }
 
-func TestRunChangesPush(t *testing.T) {
-	cwd := t.TempDir()
-	pushed := zerogit.PushResult{
-		Remote: "origin",
-		Branch: "feat/feature-a",
-		Output: "Everything up-to-date",
+func TestParseChangesArgsAuto(t *testing.T) {
+	// 1. Correct parsing of auto
+	for _, args := range [][]string{
+		{"--auto"},
+		{"-a"},
+	} {
+		options, help, err := parseChangesArgs(args, "commit")
+		if err != nil {
+			t.Fatalf("parseChangesArgs(%v) error: %v", args, err)
+		}
+		if help {
+			t.Fatalf("parseChangesArgs(%v) returned help", args)
+		}
+		if !options.auto {
+			t.Fatalf("auto = false, want true (args %v)", args)
+		}
 	}
 
-	t.Run("TextMode", func(t *testing.T) {
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		exitCode := runWithDeps([]string{"changes", "push", "--remote", "origin", "--force", "--dry-run"}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				if options.Cwd != cwd || options.Remote != "origin" || !options.Force || !options.DryRun || options.AllowPushDefaultBranch {
-					t.Fatalf("unexpected PushOptions: %#v", options)
-				}
-				return pushed, nil
-			},
-		})
+	// 2. Reject --auto on inspect
+	_, _, err := parseChangesArgs([]string{"--auto"}, "inspect")
+	if err == nil || !strings.Contains(err.Error(), "--auto") {
+		t.Fatalf("expected --auto rejection on inspect, got %v", err)
+	}
 
-		if exitCode != exitSuccess {
-			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
-		}
-		if !strings.Contains(stdout.String(), "Pushed branch feat/feature-a to remote origin (dry run)") {
-			t.Fatalf("unexpected text output: %q", stdout.String())
-		}
-	})
+	// 3. Reject both --message and --auto on commit
+	_, _, err = parseChangesArgs([]string{"--message", "foo", "--auto"}, "commit")
+	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
+		t.Fatalf("expected --message and --auto conflict error, got %v", err)
+	}
 
-	t.Run("JSONMode", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		exitCode := runWithDeps([]string{"changes", "push", "--json"}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				return pushed, nil
-			},
-		})
-
-		if exitCode != exitSuccess {
-			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
-		}
-		var res map[string]string
-		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-			t.Fatalf("invalid JSON output: %v\n%s", err, stdout.String())
-		}
-		if res["remote"] != "origin" || res["branch"] != "feat/feature-a" || res["output"] != "Everything up-to-date" {
-			t.Fatalf("unexpected JSON fields: %#v", res)
-		}
-	})
-
-	t.Run("AcceptsYes", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		exitCode := runWithDeps([]string{"changes", "push", "--yes"}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				if !options.AllowPushDefaultBranch {
-					t.Fatalf("expected AllowPushDefaultBranch=true with --yes, got false")
-				}
-				return pushed, nil
-			},
-		})
-		if exitCode != exitSuccess {
-			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
-		}
-	})
+	// 4. Reject both empty message and --auto on commit
+	_, _, err = parseChangesArgs([]string{"--message=", "--auto"}, "commit")
+	if err == nil || !strings.Contains(err.Error(), "cannot specify both --message and --auto") {
+		t.Fatalf("expected empty --message and --auto conflict error, got %v", err)
+	}
 }
 
-func TestRunChangesPushRejectsIncompatibleFlags(t *testing.T) {
+type mockCommitMsgProvider struct {
+	response string
+	req      zeroruntime.CompletionRequest
+}
+
+func (p *mockCommitMsgProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.req = request
+	events := make(chan zeroruntime.StreamEvent, 2)
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: p.response}
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(events)
+	return events, nil
+}
+
+func TestRunChangesCommitAuto(t *testing.T) {
+	cwd := t.TempDir()
+	summary := zerogit.ChangeSummary{
+		Root:   cwd,
+		Branch: "main",
+		Files:  []zerogit.FileChange{{Path: "README.md", Status: "modified"}},
+		Diff:   "some diff content with ghp_SECRETKEYHERE",
+	}
+
+	mockProv := &mockCommitMsgProvider{
+		response: "```\nfeat: auto commit message\n```",
+	}
+
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithDeps([]string{"changes", "push", "--base", "main"}, &stdout, &stderr, appDeps{
-		getwd: func() (string, error) { return t.TempDir(), nil },
+	commitCalled := false
+
+	exitCode := runWithDeps([]string{"changes", "commit", "--auto"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return summary, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			cfg := execResolvedConfig()
+			cfg.Provider.Name = "openai"
+			cfg.Provider.Model = "gpt-4o"
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return mockProv, nil
+		},
+		commitChanges: func(ctx context.Context, options zerogit.CommitOptions) (zerogit.CommitResult, error) {
+			commitCalled = true
+			if options.Message != "feat: auto commit message" {
+				t.Fatalf("expected commit message 'feat: auto commit message', got %q", options.Message)
+			}
+			return zerogit.CommitResult{
+				Root:       cwd,
+				Message:    options.Message,
+				Committed:  true,
+				CommitHash: "abc1234",
+				Before:     summary,
+			}, nil
+		},
 	})
 
-	if exitCode != exitUsage {
-		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "--base") {
-		t.Fatalf("expected error about --base, got %q", stderr.String())
+	if !commitCalled {
+		t.Fatal("expected commitChanges to be called")
 	}
-}
+	// Verify that secret in the diff was redacted
+	promptContent := mockProv.req.Messages[0].Content
+	if strings.Contains(promptContent, "ghp_SECRETKEYHERE") {
+		t.Fatal("expected secret in diff to be redacted, but it was found in the prompt")
+	}
+	if !strings.Contains(promptContent, "[REDACTED]") && !strings.Contains(promptContent, "REDACTED") {
+		t.Fatalf("expected redacted diff content in prompt, got: %q", promptContent)
+	}
+	if !strings.Contains(stdout.String(), "Generating commit message using LLM...") {
+		t.Fatalf("expected status message in stdout, got %q", stdout.String())
+	}
 
-func TestRunChangesPR(t *testing.T) {
-	cwd := t.TempDir()
-	pushed := zerogit.PushResult{
-		Remote: "origin",
-		Branch: "feat/feature-a",
-		Output: "Everything up-to-date",
-	}
-
-	t.Run("HappyPath", func(t *testing.T) {
+	t.Run("EmptyLLMResponse", func(t *testing.T) {
+		mockProvEmpty := &mockCommitMsgProvider{
+			response: "   \n\n   ",
+		}
 		var stdout, stderr bytes.Buffer
-		pushCalled := false
-		prCalled := false
-
-		exitCode := runWithDeps([]string{
-			"changes", "pr",
-			"--title", "my title",
-			"--body", "my body",
-			"--fill",
-			"--draft",
-			"--remote", "my-remote",
-			"--force",
-		}, &stdout, &stderr, appDeps{
+		code := runWithDeps([]string{"changes", "commit", "--auto"}, &stdout, &stderr, appDeps{
 			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				pushCalled = true
-				if options.Cwd != cwd || options.Remote != "my-remote" || !options.Force || options.AllowPushDefaultBranch {
-					t.Fatalf("unexpected PushOptions: %#v", options)
-				}
-				return pushed, nil
+			inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+				return summary, nil
 			},
-			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
-				prCalled = true
-				if options.Cwd != cwd || !options.Fill || !options.Draft || options.Title != "my title" || options.Body != "my body" {
-					t.Fatalf("unexpected PROptions: %#v", options)
-				}
-				return zerogit.PRResult{Output: "https://github.com/Gitlawb/zero/pull/123"}, nil
+			resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+				return execResolvedConfig(), nil
+			},
+			newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+				return mockProvEmpty, nil
 			},
 		})
-
-		if exitCode != exitSuccess {
-			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		if code == exitSuccess {
+			t.Fatal("expected command to fail when LLM returns empty response, got success")
 		}
-		if !pushCalled || !prCalled {
-			t.Fatalf("expected push and pr to be called: push=%v pr=%v", pushCalled, prCalled)
-		}
-		outStr := stdout.String()
-		if !strings.Contains(outStr, "Pushing current branch to set upstream...") {
-			t.Fatalf("expected status message in stdout, got %q", outStr)
-		}
-		if !strings.Contains(outStr, "https://github.com/Gitlawb/zero/pull/123") {
-			t.Fatalf("expected PR URL in stdout, got %q", outStr)
+		if !strings.Contains(stderr.String(), "empty commit message") {
+			t.Fatalf("expected empty commit message error in stderr, got %q", stderr.String())
 		}
 	})
-
-	t.Run("JSONMode", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		exitCode := runWithDeps([]string{
-			"changes", "pr",
-			"--title", "my title",
-			"--json",
-		}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				return pushed, nil
-			},
-			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
-				return zerogit.PRResult{Output: "https://github.com/Gitlawb/zero/pull/123\n"}, nil
-			},
-		})
-
-		if exitCode != exitSuccess {
-			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
-		}
-		outStr := stdout.String()
-		// Gating print: should NOT print human status in JSON mode
-		if strings.Contains(outStr, "Pushing current branch") || strings.Contains(outStr, "Pushed branch") {
-			t.Fatalf("expected no human status output in JSON mode, got %q", outStr)
-		}
-
-		var res map[string]string
-		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-			t.Fatalf("invalid JSON output: %v\n%s", err, outStr)
-		}
-		if res["branch"] != "feat/feature-a" || res["remote"] != "origin" || res["output"] != "https://github.com/Gitlawb/zero/pull/123" {
-			t.Fatalf("unexpected JSON fields: %#v", res)
-		}
-	})
-
-	t.Run("RequiresFillOrTitle", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		exitCode := runWithDeps([]string{"changes", "pr"}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-		})
-
-		if exitCode != exitUsage {
-			t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
-		}
-		if !strings.Contains(stderr.String(), "must provide either --fill or --title") {
-			t.Fatalf("expected validation error about fill or title, got %q", stderr.String())
-		}
-	})
-
-	t.Run("PushFailureShortCircuits", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		prCalled := false
-		exitCode := runWithDeps([]string{
-			"changes", "pr", "--title", "my title",
-		}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-			pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
-				return zerogit.PushResult{}, errors.New("push failed")
-			},
-			createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
-				prCalled = true
-				return zerogit.PRResult{}, nil
-			},
-		})
-
-		if exitCode == exitSuccess {
-			t.Fatalf("expected non-success exit code on push failure, got %d", exitCode)
-		}
-		if prCalled {
-			t.Fatalf("expected createPR not to be called after push failure")
-		}
-		if !strings.Contains(stderr.String(), "push failed") {
-			t.Fatalf("expected error about push failure, got %q", stderr.String())
-		}
-	})
-
-	t.Run("RejectsDryRun", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		exitCode := runWithDeps([]string{"changes", "pr", "--title", "my title", "--dry-run"}, &stdout, &stderr, appDeps{
-			getwd: func() (string, error) { return cwd, nil },
-		})
-
-		if exitCode != exitUsage {
-			t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
-		}
-		if !strings.Contains(stderr.String(), "--dry-run") {
-			t.Fatalf("expected dry-run validation error, got %q", stderr.String())
-		}
-	})
-}
-
-func TestRunChangesCommitRejectsYes(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	exitCode := runWithDeps([]string{"changes", "commit", "--yes"}, &stdout, &stderr, appDeps{
-		getwd: func() (string, error) { return t.TempDir(), nil },
-	})
-
-	if exitCode != exitUsage {
-		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
-	}
-	if !strings.Contains(stderr.String(), "--yes") {
-		t.Fatalf("expected error about --yes, got %q", stderr.String())
-	}
 }

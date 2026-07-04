@@ -130,7 +130,11 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
-		return ResolvedConfig{}, err
+		// On ErrNoActiveProvider, providers may still hold the successfully
+		// normalized (but active-less) profile list — keep it so a caller can fall
+		// back to an already-configured usable provider instead of treating this
+		// like a config with nothing set up at all.
+		return ResolvedConfig{Providers: providers}, err
 	}
 
 	return ResolvedConfig{
@@ -144,6 +148,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Tools:          cfg.Tools,
 		Swarm:          cfg.Swarm,
 		Preferences:    cfg.Preferences,
+		KeyBindings:    cfg.KeyBindings,
 		LocalControl:   cfg.LocalControl,
 	}, nil
 }
@@ -225,6 +230,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		dst.Preferences.Theme = strings.TrimSpace(src.Preferences.Theme)
 	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
+	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -277,6 +283,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
+	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project
 	// must not be able to make browser, desktop, or terminal automation tools
 	// appear in the model's tool surface.
@@ -665,6 +672,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		cfg.Tools.deferThresholdSet = true
 	}
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
+	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
 	}
@@ -697,6 +705,24 @@ func mergeLocalControlDriverConfig(dst *LocalControlDriverConfig, src LocalContr
 	}
 	if driver := strings.TrimSpace(src.Driver); driver != "" {
 		dst.Driver = driver
+	}
+}
+
+func mergeKeyBindings(dst *KeyBindingsConfig, src KeyBindingsConfig) {
+	if src.ToggleDetailed != "" {
+		dst.ToggleDetailed = src.ToggleDetailed
+	}
+	if src.ToggleMouse != "" {
+		dst.ToggleMouse = src.ToggleMouse
+	}
+	if src.CycleReasoning != "" {
+		dst.CycleReasoning = src.CycleReasoning
+	}
+	if src.TogglePlan != "" {
+		dst.TogglePlan = src.TogglePlan
+	}
+	if src.ToggleSidebar != "" {
+		dst.ToggleSidebar = src.ToggleSidebar
 	}
 }
 
@@ -834,7 +860,11 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	}
 
 	if !activeFound {
-		return nil, ProviderProfile{}, fmt.Errorf("%w: active provider %q not found", ErrNoActiveProvider, activeName)
+		// Return the successfully normalized list alongside the error (rather than
+		// nil) so a caller like the interactive TUI can still fall back to an
+		// already-configured, usable provider instead of forcing a full
+		// re-onboarding wizard just because none was marked active.
+		return normalized, ProviderProfile{}, fmt.Errorf("%w: active provider %q not found", ErrNoActiveProvider, activeName)
 	}
 	if active.Model == "" {
 		return nil, ProviderProfile{}, &setupFixableError{

@@ -619,7 +619,15 @@ func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) 
 		strings.TrimSpace(profile.Name) == "" ||
 		strings.TrimSpace(profile.CatalogID) == ""
 	if normalizeIdentity {
-		profile.Name = provider.ID
+		// Only canonicalize an empty or generic placeholder name — never clobber a
+		// real user-provided profile name. The credential store is keyed by
+		// profile.Name (SecureProviderProfile stores under Name), so rewriting it
+		// here made the later profileWithCredential lookup miss the saved key and
+		// rebuild a keyless provider — a 401 on every /model switch for any profile
+		// named differently from its catalog id (e.g. "my-openai").
+		if strings.TrimSpace(profile.Name) == "" || genericProviderCatalogID(profile.Name) {
+			profile.Name = provider.ID
+		}
 		profile.CatalogID = provider.ID
 	}
 	if strings.TrimSpace(profile.BaseURL) == "" {

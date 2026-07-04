@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -451,6 +452,11 @@ func providerProfileIsLocal(profile config.ProviderProfile) bool {
 	}
 	switch strings.ToLower(parsed.Hostname()) {
 	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	// Also treat explicit private-network IPs (192.168.x.y, 10.x.y.z,
+	// 172.16-31.x.y) as local — the user is pointing at their own LAN box.
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && ip.IsPrivate() {
 		return true
 	}
 	return false

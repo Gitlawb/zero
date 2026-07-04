@@ -161,6 +161,35 @@ func TestDetectShellCommandIssueRequiresActualLSCommand(t *testing.T) {
 	}
 }
 
+func TestDetectShellCommandIssueFlagsPipedPosixUtilities(t *testing.T) {
+	for _, command := range []string{
+		`git log --oneline -- pinokio_compat.py | head`,
+		`git blame -L 40,46 pinokio_compat.py --format=%author | grep summary`,
+		`cat file.txt | wc -l`,
+		`some_command | tail -n 20`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+			t.Fatalf("expected POSIX utility pipeline to be flagged for %q", command)
+		}
+	}
+}
+
+func TestDetectShellCommandIssueAllowsUnrelatedCommands(t *testing.T) {
+	for _, command := range []string{
+		`git log --oneline`,
+		`dir /b`,
+		`findstr /r "summary" file.txt`,
+		`echo header text`,
+		`tail-log.sh`,
+		`grep-cli --version`,
+		`sed.exe --help`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected unrelated command to pass for %q, got %#v", command, issue)
+		}
+	}
+}
+
 func TestDetectShellOutputIssueAddsWindowsSyntaxHint(t *testing.T) {
 	issue := detectShellOutputIssue(`cd /d/tmp/zero-pr-158 && ls -la`, "The syntax of the command is incorrect.", "windows")
 	if issue == nil {

@@ -19,6 +19,13 @@ var errWindowsSandboxNotInitialized = errors.New(
 const windowsSetupDowngradeReason = "Windows OS sandbox inactive — commands run with workspace path-confinement and " +
 	"per-command approval only. Run `zero sandbox setup` from an elevated (Administrator) terminal for full filesystem and network isolation."
 
+// windowsUnelevatedDowngradeReason is surfaced when Windows runs the sandbox in
+// the unelevated tier: the restricted-token write-jail is enforced (the command
+// runner applies the workspace ACLs itself, which needs no Administrator
+// rights), but the WFP network filters are Administrator-only and absent.
+const windowsUnelevatedDowngradeReason = "Windows sandbox running unelevated — the filesystem write-jail is enforced, but network " +
+	"isolation still relies on per-command approval. Run `zero sandbox setup` from an elevated (Administrator) terminal for OS-level network enforcement."
+
 // windowsSandboxInitialized reports whether the per-host Windows sandbox setup
 // marker exists. A missing marker is the common fresh-install state, so the
 // caller degrades rather than bricking the command. Indirected through a var so
@@ -174,19 +181,28 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
-	// Windows: the OS sandbox needs a one-time elevated `zero sandbox setup` (it
-	// applies WFP network filters + workspace ACLs and writes a marker). Without
-	// it the command runner hard-fails — so on the default preference, DEGRADE to
-	// the in-process policy gate + per-command approval (matching Linux/macOS when
-	// their sandbox is unavailable) instead of bricking every command. A strict
-	// caller (--sandbox require) still gets a clear error pointing at setup.
+	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
+	// (it applies WFP network filters + workspace ACLs and writes a marker).
+	// Without it, a restricted-filesystem profile can still run in the UNELEVATED
+	// tier: the command runner applies the workspace ACL plan itself (DACL edits
+	// on user-owned roots need no Administrator rights) and wraps the command in
+	// the write-restricted token, so the filesystem write-jail holds. Only the
+	// WFP network filters are Administrator-only, so network stays with the
+	// in-process approval gate at that tier. A profile that needs the sandbox
+	// solely for network isolation gains nothing from the unelevated tier and
+	// DEGRADES to the policy gate as before. A strict caller (--sandbox require)
+	// still gets a clear error pointing at setup.
 	windowsNeedsSetup := false
 	if manager.goos == "windows" && requiresPlatformSandbox && enforcementLevel == EnforcementNative && !windowsSandboxInitialized() {
 		if preference == SandboxPreferenceRequire {
 			return SandboxExecutionRequest{}, errWindowsSandboxNotInitialized
 		}
-		enforcementLevel = EnforcementDegraded
 		windowsNeedsSetup = true
+		if profile.FileSystem.Kind == FileSystemRestricted {
+			enforcementLevel = EnforcementUnelevated
+		} else {
+			enforcementLevel = EnforcementDegraded
+		}
 	}
 	targetBackend := manager.targetBackend(preference, policy, requiresPlatformSandbox)
 	downgradeReason := ""
@@ -196,7 +212,11 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 			downgradeReason = windowsSetupDowngradeReason
 		}
 	}
-	wrapped := backend.CommandWrapping && backend.Available && enforcementLevel == EnforcementNative
+	if enforcementLevel == EnforcementUnelevated {
+		downgradeReason = windowsUnelevatedDowngradeReason
+	}
+	wrapped := backend.CommandWrapping && backend.Available &&
+		(enforcementLevel == EnforcementNative || enforcementLevel == EnforcementUnelevated)
 	markers := backend.SandboxEnvMarkers(policy)
 	if !wrapped && backend.Name != BackendWSL {
 		markers = nil

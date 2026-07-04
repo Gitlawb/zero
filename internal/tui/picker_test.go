@@ -976,3 +976,49 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 		t.Fatal("switching to ollama should warm both the generic and ollama-specific discovery commands")
 	}
 }
+
+func TestNormalizeProfileForProviderPreservesCustomName(t *testing.T) {
+	openai, ok := providercatalog.Get("openai")
+	if !ok {
+		t.Fatal("openai descriptor missing from catalog")
+	}
+
+	// A first-party provider set up with a custom profile name and the baseURL at
+	// the catalog default. normalizeIdentity is true here (baseURL matches), but
+	// the real name must survive: it is the credential-store key, so clobbering it
+	// dropped the saved key and 401'd every /model switch (issue #440).
+	m := model{providerProfile: config.ProviderProfile{
+		Name:         "my-openai",
+		CatalogID:    "openai",
+		BaseURL:      openai.DefaultBaseURL,
+		APIKeyStored: true,
+	}}
+	got := m.normalizeProfileForProvider(openai)
+	if got.Name != "my-openai" {
+		t.Fatalf("Name = %q, want it preserved as %q (credential store is keyed by Name)", got.Name, "my-openai")
+	}
+	if got.CatalogID != "openai" {
+		t.Fatalf("CatalogID = %q, want it canonicalized to %q", got.CatalogID, "openai")
+	}
+}
+
+func TestNormalizeProfileForProviderCanonicalizesPlaceholderName(t *testing.T) {
+	openai, ok := providercatalog.Get("openai")
+	if !ok {
+		t.Fatal("openai descriptor missing from catalog")
+	}
+
+	// Empty and generic placeholder names still get canonicalized to the catalog
+	// id — those carry no meaningful credential-store key to preserve.
+	for _, name := range []string{"", "custom-openai-compatible"} {
+		m := model{providerProfile: config.ProviderProfile{
+			Name:      name,
+			BaseURL:   openai.DefaultBaseURL,
+			CatalogID: name,
+		}}
+		got := m.normalizeProfileForProvider(openai)
+		if got.Name != "openai" {
+			t.Fatalf("Name = %q for placeholder %q, want canonicalized to %q", got.Name, name, "openai")
+		}
+	}
+}

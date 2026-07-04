@@ -128,7 +128,7 @@ func systemPromptTestBlock(t *testing.T, prompt, start, end string) string {
 }
 
 func TestBuildSystemPromptInjectsProjectGuidelinesCaseInsensitive(t *testing.T) {
-	// Git tracks AGENTS.MD (uppercase MD) on a case-sensitive filesystem; the
+	// Git tracks AGENTS.md on a case-sensitive filesystem; the
 	// loader must still resolve it when the cwd lookup uses lowercase.
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.MD"), []byte("Always run `make lint`."), 0o644); err != nil {

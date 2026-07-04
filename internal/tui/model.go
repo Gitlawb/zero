@@ -117,6 +117,7 @@ type model struct {
 	selfCorrectTests      bool
 	reasoningEffort       modelregistry.ReasoningEffort
 	responseStyle         string
+	keyBindings           keyBindings
 	themeMode             themeMode // palette preference: auto (default), dark, light
 	hasDarkBg             bool      // last terminal background-detection result (auto mode)
 	userAgent             string
@@ -726,6 +727,7 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
+		keyBindings:                 resolveKeyBindings(options.KeyBindings),
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		userAgent:                   options.UserAgent,
@@ -1078,7 +1080,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case keyCtrl(msg, 'c'):
 			return m.handleCtrlC()
-		case keyCtrl(msg, 'o'):
+		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
@@ -1088,12 +1090,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.setFileViewMode(fileViewFull), nil
 			}
 			return m.setFileViewMode(fileViewDiff), nil
-		case keyCtrl(msg, 'e'):
+		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection).
 			m.mouseReleased = !m.mouseReleased
 			if m.mouseReleased {
-				return m.appendSystemNotice("Mouse released — drag to select and copy text. Press Ctrl+E again to re-enable mouse interaction (clicks, right-click paste)."), nil
+				mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
+				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
 		case keyIs(msg, tea.KeyEsc):
@@ -1268,7 +1271,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
-		case keyCtrl(msg, 't'):
+		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -1281,20 +1284,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
-		case keyCtrl(msg, 'p'):
+		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
 			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
 			if m.noBlockingModal() && !m.plan.isEmpty() {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
-		case keyCtrl(msg, 'b'):
+		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }):
 			// Ctrl+B collapses / restores the right context sidebar. Only acts when
 			// the sidebar would otherwise be on screen (managed mode, wide enough,
 			// real conversation) so it's a no-op — not a confusing notice — on the
 			// home screen or a narrow terminal. Hiding reflows the chat to full
 			// width, so mirror the width-change bookkeeping (re-wrap the streaming
 			// fade, resize the composer) the WindowSizeMsg path does.
-			if m.noBlockingModal() && m.sidebarAvailable() {
+			if m.noBlockingModal() && m.sidebarToggleAllowed() {
 				// Just show/hide — no transcript notice. The reflow IS the feedback,
 				// and emitting a line every toggle piled up noise in the chat.
 				m.sidebarHidden = !m.sidebarHidden
@@ -1669,17 +1672,38 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// when the loop is already running or there is nothing to animate.
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
+		// The agent goroutine that raised this request is BLOCKED waiting on the
+		// decision callback, so every branch below must resolve it exactly once —
+		// or store it in pendingPermission, which resolves it on the user's reply.
+		// Dropping a request without resolving parks the run forever (the reported
+		// "stuck for 33 minutes" deadlock): the agent waits on a decision channel
+		// nothing will ever signal, with no visible prompt and no network activity.
 		if msg.runID != m.activeRunID {
+			// A superseded/stale run: unblock its parked goroutine now rather than
+			// relying on that run's context cancel to fire first.
+			if msg.decide != nil {
+				msg.decide(agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run superseded"})
+			}
+			return m, nil
+		}
+		if msg.request.Action != agent.PermissionActionPrompt {
+			// Not a user-facing prompt (e.g. a sandbox-allowed command that still
+			// blocked because it requested additional permissions). The UI has
+			// nothing to ask, so resolve immediately and FAIL CLOSED — never
+			// silently grant access that was never surfaced to the user. (The agent
+			// now marks such elevation requests as prompts, so in practice this is a
+			// defensive backstop; matches the ACP handler's fail-closed contract.)
+			if msg.decide != nil {
+				msg.decide(autoResolvedPermissionDecision(msg.request.Action))
+			}
 			return m, nil
 		}
 		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
-		if msg.request.Action == agent.PermissionActionPrompt {
-			m.pendingPermission = &pendingPermissionPrompt{
-				request: msg.request,
-				decide:  msg.decide,
-			}
+		m.pendingPermission = &pendingPermissionPrompt{
+			request: msg.request,
+			decide:  msg.decide,
 		}
 		return m, nil
 	case askUserRequestMsg:
@@ -2097,12 +2121,13 @@ func (m model) View() tea.View {
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))
-	} else if m.helpOverlay {
-		content = m.renderKeybindingHelpOverlay(chatWidth(m.width), m.height)
-	} else if m.transcriptDetailed {
-		content = m.detailedTranscriptView()
-	} else {
+	} else if m.helpOverlay || !m.transcriptDetailed {
+		// When helpOverlay is active the help panel is composited into the normal
+		// transcript view as a true overlay (scrim + vertical centering), matching
+		// how the suggestion picker / provider wizard / pickers are drawn.
 		content = m.transcriptView()
+	} else {
+		content = m.detailedTranscriptView()
 	}
 
 	view := tea.NewView(content)
@@ -2173,6 +2198,11 @@ func (m model) transcriptView() string {
 		return body + footer
 	}
 
+	helpOverlayContent := ""
+	if m.helpOverlay {
+		helpOverlayContent = m.renderKeybindingHelpOverlay(width)
+	}
+
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
@@ -2180,6 +2210,8 @@ func (m model) transcriptView() string {
 	pickerOverlay := m.pickerOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case helpOverlayContent != "":
+		viewportOverlay = helpOverlayContent
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -2331,6 +2363,10 @@ func (m model) composerIdleHint() string {
 		m.subchat.active || m.suggestionsActive() || m.transcriptDetailed {
 		return ""
 	}
+	sidebarKey := labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")
+	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
+	mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
+
 	var hint string
 	switch widthTier(m.width) {
 	case tierTiny:
@@ -2338,9 +2374,9 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+E copy"
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
 	default:
-		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+O detail · Ctrl+E copy · Shift+Tab mode"
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -4523,6 +4559,21 @@ func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest,
 		return
 	}
 	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
+}
+
+// autoResolvedPermissionDecision resolves a permission request the TUI cannot
+// turn into a user prompt (Action != prompt). The agent is blocked awaiting a
+// decision, so one must ALWAYS be produced. Only an explicit Cancel is honored
+// as such; every other non-prompt action — including allow — is DENIED, so the
+// UI never silently grants access it did not surface for approval.
+func autoResolvedPermissionDecision(action agent.PermissionAction) agent.PermissionDecision {
+	if action == agent.PermissionActionCancel {
+		return agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run cancelled"}
+	}
+	return agent.PermissionDecision{
+		Action: agent.PermissionDecisionDeny,
+		Reason: "permission request could not be surfaced for approval",
+	}
 }
 
 func (m model) sendAskUserRequest(runID int, request agent.AskUserRequest, answer func([]string)) {

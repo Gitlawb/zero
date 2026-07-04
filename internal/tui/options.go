@@ -64,6 +64,10 @@ type Options struct {
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
 
+	// KeyBindings configures remappable TUI keybindings. An empty/zero
+	// KeyBindingsConfig means "use built-in defaults" for each action.
+	KeyBindings config.KeyBindingsConfig
+
 	// AltScreen tells the model it is running inside Bubble Tea's alternate
 	// screen. Run sets this for the interactive app; tests can leave it false
 	// to exercise the native scrollback renderer.

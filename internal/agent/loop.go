@@ -816,6 +816,25 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	// A shell command that sets sandbox_permissions: with_additional_permissions
+	// must carry a valid additional_permissions payload; inlineAdditionalPermissionsProfile
+	// is the single source of truth for that shape, and buildPermissionEvent (below)
+	// calls it again to render the prompt's scope text. Check it here, before any
+	// permission prompt is shown: a malformed payload can never be satisfied no
+	// matter what the user decides, so surfacing it as a plain tool error (which the
+	// model can see and retry) is both clearer and avoids presenting a normal-looking
+	// prompt whose "allow" path is guaranteed to fail with a confusing denial.
+	if toolFound && isShellCommandTool(call.Name) {
+		if _, _, err := inlineAdditionalPermissionsProfile(args, options.Cwd); err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: " + err.Error(),
+			}, nil
+		}
+	}
+
 	// ask_user is intercepted in the loop (like permissions) so the question can
 	// be routed to an interactive front-end instead of blocking inside the tool.
 	// When no front-end is wired up it degrades to the tool's own graceful Run().
@@ -2159,6 +2178,18 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		}
 	}
 
+	// A command that explicitly requests additional sandbox permissions
+	// (sandbox_permissions: with_additional_permissions) is an ELEVATION the user
+	// must consent to, even when the base command's sandbox decision was Allow.
+	// shouldRequestPermission blocks on OnPermissionRequest for exactly this case,
+	// so the event MUST be a prompt — otherwise it carried Action=allow while the
+	// loop waited on a decision, and a UI that renders only prompts (the TUI)
+	// dropped it, deadlocking the run. Keep this consistent with
+	// shouldRequestPermission's own condition.
+	if action == PermissionActionAllow && !permissionGranted && shellCommandAdditionalPermissionsRequested(args) {
+		action = PermissionActionPrompt
+	}
+
 	if safety.Permission == tools.PermissionAllow && action == PermissionActionAllow && !grantMatched && block == nil {
 		return PermissionEvent{}, false
 	}
@@ -2310,7 +2341,12 @@ func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (s
 	}
 	raw, ok := args["additional_permissions"]
 	if !ok || raw == nil {
-		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf("missing additional_permissions; provide at least one of network or file_system")
+		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
+			"sandbox_permissions was set to %q but no additional_permissions object was provided. "+
+				`Include one, for example additional_permissions: {"network": {"enabled": true}} or `+
+				`{"file_system": {"write": ["/path"]}}. If this command does not need elevated permissions, `+
+				"omit sandbox_permissions entirely and retry",
+			tools.SandboxPermissionsWithAdditionalPermissions)
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -2325,7 +2361,9 @@ func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (s
 		return sandbox.RequestPermissionProfile{}, true, err
 	}
 	if normalized.Empty() {
-		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf("additional_permissions must include at least one requested permission in network or file_system")
+		return sandbox.RequestPermissionProfile{}, true, fmt.Errorf(
+			"additional_permissions must include at least one of network or file_system, for example " +
+				`{"network": {"enabled": true}} or {"file_system": {"write": ["/path"]}}`)
 	}
 	grantProfile, err := sandbox.RequestPermissionGrantProfile(normalized)
 	if err != nil {
