@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -275,7 +276,11 @@ func knownSafeCommandSegment(command []string) bool {
 	if len(command) == 0 {
 		return false
 	}
-	switch commandName(command[0]) {
+	name := commandName(command[0])
+	if runtime.GOOS == "windows" && tools.MsysProneCommandName(name) {
+		return false
+	}
+	switch name {
 	case "cat", "cd", "cut", "echo", "expr", "false", "grep", "head", "id",
 		"ls", "nl", "paste", "pwd", "rev", "seq", "stat", "tail", "tr",
 		"true", "uname", "uniq", "wc", "which", "whoami":

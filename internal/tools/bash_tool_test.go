@@ -181,8 +181,12 @@ func TestDetectShellCommandIssueFlagsPipedPosixUtilities(t *testing.T) {
 		`cat file.txt | wc -l`,
 		`some_command | tail -n 20`,
 	} {
-		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+		issue := detectShellCommandIssue(command, "windows")
+		if issue == nil {
 			t.Fatalf("expected POSIX utility pipeline to be flagged for %q", command)
+		}
+		if issue.Kind != "windows_msys_sandbox" {
+			t.Fatalf("expected windows_msys_sandbox for %q, got %q", command, issue.Kind)
 		}
 	}
 }
@@ -195,7 +199,7 @@ func TestDetectShellCommandIssueAllowsUnrelatedCommands(t *testing.T) {
 		`echo header text`,
 		`tail-log.sh`,
 		`grep-cli --version`,
-		`sed.exe --help`,
+		`mytool.exe --help`,
 	} {
 		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
 			t.Fatalf("expected unrelated command to pass for %q, got %#v", command, issue)

@@ -286,7 +286,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
 	if runtime.GOOS == "windows" {
-		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
+		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories. Do not pipe to or invoke POSIX coreutils from Git for Windows (usr\\bin head/grep/tail/cat/...): they are MSYS binaries and fail under the write-restricted sandbox; use native Zero tools (grep, read_file, list_directory, glob) or cmd.exe findstr/more instead, or sandbox_permissions require_escalated only when host-level execution is truly required.\n")
 	} else {
 		b.WriteString("Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
 	}

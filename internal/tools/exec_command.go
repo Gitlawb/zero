@@ -860,6 +860,12 @@ func execToolResult(input execToolResultInput) Result {
 		status = StatusError
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
+	if status == StatusError && input.exited && !input.interrupted {
+		if issue := detectShellOutputIssue(input.commandText, output, runtimeGOOS()); issue != nil {
+			meta["shell_issue"] = issue.Kind
+			body = appendShellIssueHint(body, *issue)
+		}
+	}
 	if input.outputBufferTruncated {
 		// Appended after truncateExecOutput's own head/tail slicing, not
 		// embedded in the text that goes through it — a marker inside that

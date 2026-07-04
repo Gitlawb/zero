@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestProposedCommandPrefixUsesSafeSimpleCommands(t *testing.T) {
@@ -120,10 +122,32 @@ func TestProposedCommandPrefixRejectsUnsafeLaunchers(t *testing.T) {
 func TestMatchCommandPrefixCoversSegmentedCommandWithSafeTail(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir()})
 	engine.GrantCommandPrefixForSession("bash", []string{"ps", "aux"})
+	// head is MSYS-prone on Windows (#458) and must not count as a known-safe tail.
+	command := "ps aux | head -5"
+	if runtime.GOOS == "windows" {
+		command = "ps aux | echo ok"
+	}
 
-	grant, ok, session := matchCommandPrefix("bash", map[string]any{"command": "ps aux | head -5"}, Options{Sandbox: engine})
+	grant, ok, session := matchCommandPrefix("bash", map[string]any{"command": command}, Options{Sandbox: engine})
 	if !ok || !session || !equalStringSlices(grant.Prefix, []string{"ps", "aux"}) {
 		t.Fatalf("match = %#v ok=%v session=%v, want session ps aux prefix", grant, ok, session)
+	}
+}
+
+func TestKnownSafeCommandSegmentRejectsMsysProneOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only known-safe MSYS guard")
+	}
+	for _, command := range [][]string{{"head", "-5"}, {"cat", "file.txt"}, {"grep", "pat"}} {
+		if knownSafeCommandSegment(command) {
+			t.Fatalf("expected %q to be unsafe on Windows, got known-safe", command)
+		}
+	}
+	if !knownSafeCommandSegment([]string{"echo", "ok"}) {
+		t.Fatal("expected echo to remain known-safe on Windows")
+	}
+	if !tools.MsysProneCommandName("head") {
+		t.Fatal("expected head to be MSYS-prone")
 	}
 }
 
