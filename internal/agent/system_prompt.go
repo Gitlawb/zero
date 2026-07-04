@@ -262,13 +262,7 @@ func projectGuidelines(cwd, gitRoot string) string {
 		if remaining := maxProjectContextTotalBytes - totalUsed; remaining < limit {
 			limit = remaining
 		}
-		if len(content) > limit {
-			cut := limit
-			for cut > 0 && !utf8.RuneStart(content[cut]) {
-				cut--
-			}
-			content = content[:cut] + "\n… (truncated)"
-		}
+		content = truncateGuidelineContent(content, limit)
 		label := projectGuidelineLabel(match, gitRoot)
 		b.WriteString("\n\n## Project guidelines (" + label + ")\n\n" + content)
 		totalUsed += len(content)
@@ -290,7 +284,7 @@ func userGuidelines() string {
 	if configDir == "" {
 		return ""
 	}
-	match := findUserContextFile(filepath.Join(configDir, "zero"))
+	match := findCaseInsensitiveFile(filepath.Join(configDir, "zero"), userContextFile)
 	if match == "" {
 		return ""
 	}
@@ -302,25 +296,32 @@ func userGuidelines() string {
 	if content == "" {
 		return ""
 	}
-	if len(content) > maxProjectContextBytes {
-		cut := maxProjectContextBytes
-		for cut > 0 && !utf8.RuneStart(content[cut]) {
-			cut--
-		}
-		content = content[:cut] + "\n… (truncated)"
-	}
+	content = truncateGuidelineContent(content, maxProjectContextBytes)
 	return "## User guidelines (" + filepath.Base(match) + ")\n\n" + content
 }
 
-// findUserContextFile returns the on-disk path of the user guideline file in
-// dir, matching the basename case-insensitively, or "" when absent.
-func findUserContextFile(dir string) string {
+// truncateGuidelineContent caps content at limit bytes without splitting a
+// UTF-8 rune, appending a truncation marker when anything was cut.
+func truncateGuidelineContent(content string, limit int) string {
+	if len(content) <= limit {
+		return content
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(content[cut]) {
+		cut--
+	}
+	return content[:cut] + "\n… (truncated)"
+}
+
+// findCaseInsensitiveFile returns the on-disk path of the regular file in dir
+// whose name matches basename case-insensitively, or "" when absent.
+func findCaseInsensitiveFile(dir, basename string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(e.Name(), userContextFile) {
+		if !e.IsDir() && strings.EqualFold(e.Name(), basename) {
 			return filepath.Join(dir, e.Name())
 		}
 	}
@@ -379,23 +380,16 @@ func projectGuidelineLabel(match, gitRoot string) string {
 // Returns "" when nothing matches.
 func findProjectContextFile(dir string) string {
 	for _, name := range projectContextFiles {
-		baseLower := strings.ToLower(filepath.Base(name))
 		// Walk to the file's parent through dir with case-insensitive segment
-		// matching, then find a regular file with the same lowercased
-		// basename. This works on both case-sensitive and case-insensitive
-		// filesystems and always returns the on-disk filename.
+		// matching, then find a regular file with the same basename. This works
+		// on both case-sensitive and case-insensitive filesystems and always
+		// returns the on-disk filename.
 		parent, ok := resolveDirCaseInsensitive(filepath.Dir(filepath.Join(dir, name)), dir)
 		if !ok {
 			continue
 		}
-		entries, err := os.ReadDir(parent)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.ToLower(e.Name()) == baseLower {
-				return filepath.Join(parent, e.Name())
-			}
+		if match := findCaseInsensitiveFile(parent, filepath.Base(name)); match != "" {
+			return match
 		}
 	}
 	return ""
