@@ -1151,6 +1151,29 @@ func (m model) setupProvider() SetupProviderOption {
 	return m.setup.providers[index]
 }
 
+// setupErrorAffordance returns a faint one-line recovery hint tailored to the
+// current setup stage, so a first-run error points the user at the inline fix
+// instead of leaving them staring at a red line. Empty for stages whose footer
+// already makes recovery obvious. Each hint names only keys the stage's footer
+// confirms, so the guidance is always accurate.
+func (m model) setupErrorAffordance() string {
+	switch m.setup.stage {
+	case setupStageEndpoint:
+		return "→ edit the endpoint above, then Enter to retry (← to go back)"
+	case setupStageCredentials:
+		if m.setupCredentialInputActive() {
+			return "→ re-enter the key above, then Enter to retry (← to go back)"
+		}
+	case setupStageName:
+		return "→ edit the name above, then Enter to continue (← to go back)"
+	case setupStageModel:
+		if !m.setup.modelLoad {
+			return "→ pick another model with ↑/↓, or type to search"
+		}
+	}
+	return ""
+}
+
 func (m model) setupView(width int) string {
 	if width <= 0 {
 		width = defaultStartupWidth
@@ -1159,6 +1182,9 @@ func (m model) setupView(width int) string {
 	content := m.setupStageLines(width, height)
 	if m.setup.err != "" {
 		content = append(content, "", zeroTheme.red.Render("error: "+m.setup.err))
+		if hint := m.setupErrorAffordance(); hint != "" {
+			content = append(content, zeroTheme.faint.Render(hint))
+		}
 	}
 	progress := m.setupProgressText()
 	footer := m.setupFooter()
