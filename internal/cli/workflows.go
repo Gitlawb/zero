@@ -521,6 +521,7 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	}
 	if command != "commit" && options.message != "" {
 		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
+	}
 	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
 		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
 	}
@@ -965,6 +966,8 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitCrash
 	}
 	return exitSuccess
+}
+
 func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provider, model string, summary zerogit.ChangeSummary) (string, error) {
 	var promptBuilder strings.Builder
 	promptBuilder.WriteString("Analyze the following git diff and generate a concise, conventional commit message.\n")
