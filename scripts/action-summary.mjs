@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const SUMMARY_LIMIT = 280;
 const STRUCTURED_FORMATS = new Set(['json', 'stream-json']);
@@ -28,8 +29,7 @@ function lastNonEmptyLine(contents) {
 }
 
 function summarizeStructured(contents) {
-  let finalText;
-  let errorMessage;
+  let summary;
 
   for (const line of String(contents ?? '').split(/\r?\n/)) {
     if (!line.trim()) {
@@ -44,17 +44,14 @@ function summarizeStructured(contents) {
     }
 
     if (event?.type === 'final' && typeof event.text === 'string') {
-      finalText = event.text;
+      summary = event.text;
     } else if (event?.type === 'error' && typeof event.message === 'string') {
-      errorMessage = event.message;
+      summary = event.message;
     }
   }
 
-  if (finalText !== undefined) {
-    return normalizeSummary(finalText);
-  }
-  if (errorMessage !== undefined) {
-    return normalizeSummary(errorMessage);
+  if (summary !== undefined) {
+    return normalizeSummary(summary);
   }
   return normalizeSummary(lastNonEmptyLine(contents));
 }
@@ -67,7 +64,14 @@ export function summarizeOutput(format, contents) {
   return summarizeStructured(contents);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function isMainModule() {
+  return (
+    process.argv[1] !== undefined &&
+    pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+  );
+}
+
+if (isMainModule()) {
   const [format, outputFile] = process.argv.slice(2);
   let contents = '';
   try {

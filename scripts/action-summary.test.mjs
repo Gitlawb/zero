@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { summarizeOutput } from './action-summary.mjs';
 
 const scriptPath = fileURLToPath(new URL('./action-summary.mjs', import.meta.url));
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 function jsonl(events) {
   return events.map((event) => JSON.stringify(event)).join('\n');
@@ -32,6 +33,16 @@ test('stream-json error followed by run_end returns error message', () => {
   assert.equal(summarizeOutput('stream-json', output), 'provider request failed');
 });
 
+test('stream-json final then error returns error message', () => {
+  const output = jsonl([
+    { type: 'final', text: 'partial answer' },
+    { type: 'error', code: 'incomplete', message: 'run stopped with work unfinished' },
+    { type: 'run_end', status: 'incomplete', exitCode: 4 },
+  ]);
+
+  assert.equal(summarizeOutput('stream-json', output), 'run stopped with work unfinished');
+});
+
 test('json final followed by done returns final text', () => {
   const output = jsonl([
     { type: 'final', text: 'Review complete.' },
@@ -48,6 +59,16 @@ test('json error followed by done returns error message', () => {
   ]);
 
   assert.equal(summarizeOutput('json', output), 'command failed');
+});
+
+test('json final then error returns error message', () => {
+  const output = jsonl([
+    { type: 'final', text: 'partial answer' },
+    { type: 'error', code: 'incomplete', message: 'run stopped with work unfinished' },
+    { type: 'done', exit_code: 4 },
+  ]);
+
+  assert.equal(summarizeOutput('json', output), 'run stopped with work unfinished');
 });
 
 test('text output returns last non-empty line', () => {
@@ -96,6 +117,31 @@ test('cli reads output file and prints summary', () => {
     assert.equal(result.status, 0);
     assert.equal(result.stderr, '');
     assert.equal(result.stdout, 'CLI summary\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cli runs when invoked with relative script path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-action-summary-'));
+  try {
+    const outputFile = join(dir, 'zero-output.jsonl');
+    writeFileSync(
+      outputFile,
+      jsonl([
+        { type: 'final', text: 'relative CLI summary' },
+        { type: 'run_end', status: 'success', exitCode: 0 },
+      ]),
+    );
+
+    const result = spawnSync(process.execPath, ['scripts/action-summary.mjs', 'stream-json', outputFile], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, 'relative CLI summary\n');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
