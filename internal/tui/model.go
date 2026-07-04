@@ -265,7 +265,12 @@ type model struct {
 	historyIdx   int
 	historyDraft string
 
-	streamingText              string // live assistant text for the current segment
+	// streamingText is the live assistant text for the current segment, accumulated
+	// as []byte so each delta is an O(1) amortized append instead of the O(n²) that
+	// string += delta incurs across a long generation. Read via streamingTextString().
+	// A []byte (not strings.Builder) because the model is copied by value on every
+	// Update, which would trip strings.Builder's copy check.
+	streamingText              []byte
 	streamingReasoning         string // live provider reasoning for the current segment
 	streamingReasoningExpanded bool
 	// turnStreamedRunes accumulates every reasoning+answer rune streamed in the
@@ -1584,7 +1589,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Streaming text means any in-progress tool call has finished — clear the
 		// live "writing" block so it doesn't linger over new prose.
 		m.clearStreamingToolCall()
-		m.streamingText += msg.delta
+		m.streamingText = append(m.streamingText, msg.delta...)
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		// recordStreamingDelta appends a time.Time to lineAges for every
 		// newline in the delta and bumps lastStreamActivity. It also
@@ -1867,7 +1872,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
-			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 			}
 			// The error row terminates the turn, so it carries the done-line
@@ -1883,7 +1888,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				turnElapsed: msg.turnElapsed,
 			})
 		}
-		m.streamingText = ""
+		m.streamingText = nil
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
 		if msg.specReview != nil {
@@ -2048,14 +2053,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streamingReasoning = ""
 				m.streamingReasoningExpanded = false
 			}
-			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 				// This interim narration is the agent explaining what it's about to
 				// do — attribute it to the active plan step so the step-detail card
 				// can replay the agent's own account of the work.
 				m = m.captureStepNarration(text)
 			}
-			m.streamingText = ""
+			m.streamingText = nil
 			// The tool call has finalized into its card — drop the live "writing"
 			// preview so it doesn't linger or duplicate beneath the card.
 			m.clearStreamingToolCall()
@@ -2786,7 +2791,7 @@ func (m model) liveReasoningBodyCap() int {
 }
 
 func (m model) interimBlock(width int) string {
-	text := strings.TrimRight(m.streamingText, "\n")
+	text := strings.TrimRight(m.streamingTextString(), "\n")
 	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
@@ -2850,7 +2855,7 @@ func (m model) spinnerGlyph() string {
 // (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
 // transcript scan — so it can't misreport on a long, output-less step.
 func (m model) workingActivity() string {
-	if strings.TrimSpace(m.streamingText) != "" {
+	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
 	return "thinking"
@@ -4086,7 +4091,7 @@ func (m *model) cancelRun() {
 		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
-		if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 		}
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Run cancelled."})
@@ -4107,7 +4112,7 @@ func (m *model) cancelRun() {
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
-	m.streamingText = ""
+	m.streamingText = nil
 	m.streamingReasoning = ""
 	m.streamingReasoningExpanded = false
 	// Hard-stop the fade and drop the per-line age map. The next turn's
@@ -4638,6 +4643,13 @@ func (m model) sendAgentText(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentTextMsg{runID: runID, delta: delta})
+}
+
+// streamingTextString returns the accumulated live assistant text. streamingText
+// is stored as []byte for O(1) amortized appends; the conversion here is bounded
+// by the segment length, the same cost the renderer already pays.
+func (m model) streamingTextString() string {
+	return string(m.streamingText)
 }
 
 func (m model) sendToolCallStreamStart(runID int, id, name string) {

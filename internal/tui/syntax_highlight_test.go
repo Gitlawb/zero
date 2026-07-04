@@ -7,7 +7,7 @@ import (
 
 func TestStreamingCodeRendersHighlighted(t *testing.T) {
 	m := model{
-		streamingText: "```go\nfunc main() {}\n```",
+		streamingText: []byte("```go\nfunc main() {}\n```"),
 		pending:       true,
 	}
 	out := m.interimBlock(80)
@@ -86,7 +86,7 @@ func TestStreamingMarkdownStablePrefixUsesRenderCache(t *testing.T) {
 
 func TestStreamingBuffersOpenFencedCodeBlock(t *testing.T) {
 	open := model{
-		streamingText: "Here is the script:\n```python\nfrom datetime import datetime\nprint(datetime.now())",
+		streamingText: []byte("Here is the script:\n```python\nfrom datetime import datetime\nprint(datetime.now())"),
 		pending:       true,
 	}
 	openOut := plainRender(t, open.interimBlock(90))
@@ -98,7 +98,7 @@ func TestStreamingBuffersOpenFencedCodeBlock(t *testing.T) {
 	}
 
 	closed := model{
-		streamingText: open.streamingText + "\n```",
+		streamingText: []byte(string(open.streamingText) + "\n```"),
 		pending:       true,
 	}
 	closedOut := closed.interimBlock(90)

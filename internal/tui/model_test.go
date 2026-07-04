@@ -2298,7 +2298,7 @@ func TestStreamingAssistantAfterToolCardGetsRuleSeparator(t *testing.T) {
 	m.width, m.height = 120, 40
 	m.altScreen = true
 	m.pending = true
-	m.streamingText = "Done."
+	m.streamingText = []byte("Done.")
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowUser, text: "run it"},
 		transcriptRow{kind: rowAssistant, text: "I'll run it first."},

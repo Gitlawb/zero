@@ -224,14 +224,14 @@ func TestCommandCardRowTrimsIndentedActionsLabel(t *testing.T) {
 func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
-	m.streamingText = "I'll add a --version flag"
+	m.streamingText = []byte("I'll add a --version flag")
 	got := plainRender(t, m.interimBlock(96))
 	if !strings.Contains(got, "I'll add a --version flag") || !strings.Contains(got, "▌") {
 		t.Fatalf("interim block = %q, want streamed text with trailing cursor", got)
 	}
 
 	// Before the first delta the block falls back to the liveness spinner.
-	m.streamingText = ""
+	m.streamingText = nil
 	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "Working") {
 		t.Fatalf("empty interim block = %q, want the liveness label", got)
 	}
@@ -240,13 +240,13 @@ func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 func TestInterimBlockRendersStreamingMarkdownTable(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
-	m.streamingText = strings.Join([]string{
+	m.streamingText = []byte(strings.Join([]string{
 		"Here's the comparison:",
 		"",
 		"| Category | System A | System B |",
 		"|---|---|---|",
 		"| **Label** | Alpha | Beta |",
-	}, "\n")
+	}, "\n"))
 
 	rendered := m.interimBlock(72)
 	got := plainRender(t, rendered)
@@ -1528,10 +1528,10 @@ func TestCancelRunClearsStreamingText(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
 	m.activeRunID = 3
-	m.streamingText = "partial answer from a doomed run"
+	m.streamingText = []byte("partial answer from a doomed run")
 	m.cancelRun()
-	if m.streamingText != "" {
-		t.Fatalf("cancelRun must clear streamingText, got %q", m.streamingText)
+	if len(m.streamingText) != 0 {
+		t.Fatalf("cancelRun must clear streamingText, got %q", string(m.streamingText))
 	}
 }
 

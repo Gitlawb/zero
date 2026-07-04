@@ -366,7 +366,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 	}
 
 	if m.pending {
-		pendingShowsAssistantText := m.pendingPermission == nil && m.pendingAskUser == nil && strings.TrimSpace(m.streamingText) != ""
+		pendingShowsAssistantText := m.pendingPermission == nil && m.pendingAskUser == nil && strings.TrimSpace(m.streamingTextString()) != ""
 		if pendingShowsAssistantText && havePreviousKind && shouldRuleBeforeTurn(previousKind, rowAssistant) {
 			items = append(items, transcriptRuleBodyItem(contentWidth, gutter))
 		} else {
