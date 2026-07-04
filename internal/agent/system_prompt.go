@@ -300,17 +300,25 @@ func userGuidelines() string {
 	return "## User guidelines (" + filepath.Base(match) + ")\n\n" + content
 }
 
+// truncationMarker is appended to guideline content that was cut short.
+const truncationMarker = "\n… (truncated)"
+
 // truncateGuidelineContent caps content at limit bytes without splitting a
-// UTF-8 rune, appending a truncation marker when anything was cut.
+// UTF-8 rune, appending a truncation marker when anything was cut. Space for
+// the marker is reserved before choosing the cut point, so the returned
+// string never exceeds limit (assuming limit is larger than the marker).
 func truncateGuidelineContent(content string, limit int) string {
 	if len(content) <= limit {
 		return content
 	}
-	cut := limit
+	cut := limit - len(truncationMarker)
+	if cut < 0 {
+		cut = 0
+	}
 	for cut > 0 && !utf8.RuneStart(content[cut]) {
 		cut--
 	}
-	return content[:cut] + "\n… (truncated)"
+	return content[:cut] + truncationMarker
 }
 
 // findCaseInsensitiveFile returns the on-disk path of the regular file in dir

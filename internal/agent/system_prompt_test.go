@@ -310,6 +310,18 @@ func TestBuildSystemPromptProjectGuidelinesTruncatesAtTotalCap(t *testing.T) {
 	}
 }
 
+func TestTruncateGuidelineContentStaysWithinLimit(t *testing.T) {
+	limit := 64
+	content := strings.Repeat("x", limit+1)
+	got := truncateGuidelineContent(content, limit)
+	if len(got) > limit {
+		t.Fatalf("truncated result is %d bytes, want at most %d", len(got), limit)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+}
+
 func TestProjectGuidelineDirsOrdersRootToLeaf(t *testing.T) {
 	root := filepath.Join("r")
 	leaf := filepath.Join(root, "a", "b")
