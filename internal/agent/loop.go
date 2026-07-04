@@ -475,11 +475,35 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// between tool_results breaks strict provider replay) — same after-batch
 		// rationale as turnRequestedModel above.
 		var changedFilesThisBatch []string
+		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
+		// executed concurrently, consumed strictly in order below.
+		var precomputed []precomputedToolResult
+		precomputedStart, precomputedEnd := 0, 0
 		for index, call := range collected.ToolCalls {
+			// When this call starts a consecutive run of >= 2 auto-allowed read-only
+			// calls, execute the whole run concurrently now (see parallel_tools.go).
+			// The scan happens lazily at the run's first index — never ahead of a
+			// pending mutating call — so read-after-write ordering is preserved.
+			if index >= precomputedEnd {
+				runEnd := index
+				for runEnd < len(collected.ToolCalls) && parallelSafeToolCall(registry, collected.ToolCalls[runEnd], options) {
+					runEnd++
+				}
+				if runEnd-index >= 2 {
+					precomputed = executeParallelReadBatch(ctx, registry, collected.ToolCalls, index, runEnd, permissionMode, options)
+					precomputedStart, precomputedEnd = index, runEnd
+				}
+			}
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
 			}
-			toolResult, abortErr := executeToolCall(ctx, registry, call, permissionMode, options)
+			var toolResult ToolResult
+			var abortErr error
+			if index >= precomputedStart && index < precomputedEnd {
+				toolResult, abortErr = precomputed[index-precomputedStart].result, precomputed[index-precomputedStart].abortErr
+			} else {
+				toolResult, abortErr = executeToolCall(ctx, registry, call, permissionMode, options)
+			}
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
