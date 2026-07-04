@@ -1424,6 +1424,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.transcriptDetailed {
+				m = m.clearHover()
 				return m.scrollChat(1), nil
 			}
 			if m.pendingPermission != nil {

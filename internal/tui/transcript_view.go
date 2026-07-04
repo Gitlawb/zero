@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 func (m model) toggleDetailedTranscript() model {
 	m.transcriptDetailed = !m.transcriptDetailed
@@ -37,7 +40,9 @@ func (m model) detailedTranscriptFooter(width int) string {
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		return rightAlignedLine(zeroTheme.ink.Render(copyStatus), width)
 	}
-	hint := zeroTheme.faint.Render("Esc close | Ctrl+O toggle")
+
+	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
+	hint := zeroTheme.faint.Render(fmt.Sprintf("Esc close | %s toggle", detailKey))
 	if jt := m.jumpToBottomHint(); jt != "" {
 		return fitStyledLine(joinHeaderLine(hint, jt, width), width)
 	}
