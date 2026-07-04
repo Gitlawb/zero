@@ -28,7 +28,7 @@ func TestBackoffWithJitterBounds(t *testing.T) {
 		base := backoffBase(attempt)
 		lo := time.Duration(float64(base) * 0.5)
 		hi := time.Duration(float64(base) * 1.5)
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			got := BackoffWithJitter(attempt)
 			if got < lo || got >= hi {
 				t.Fatalf("BackoffWithJitter(%d) = %s, want in [%s,%s)", attempt, got, lo, hi)

@@ -86,7 +86,7 @@ func TestAskUserSingleTypeMyOwnSubmitsTypedText(t *testing.T) {
 	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
 
 	// Move from SQLite (1) to the "type your own" entry (index 3).
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		updated, _ := next.Update(testKey(tea.KeyDown))
 		next = updated.(model)
 	}
@@ -168,7 +168,7 @@ func TestAskUserTypeMyOwnEscReturnsToPicker(t *testing.T) {
 	var answers [][]string
 	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
 
-	for i := 0; i < 2; i++ { // to type-your-own
+	for range 2 { // to type-your-own
 		updated, _ := next.Update(testKey(tea.KeyDown))
 		next = updated.(model)
 	}

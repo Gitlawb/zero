@@ -27,7 +27,7 @@ func (stat DiffStat) NetLOC() int {
 // DiffStat without panicking.
 func ParseDiffStat(stat string) DiffStat {
 	summary := ""
-	for _, line := range strings.Split(stat, "\n") {
+	for line := range strings.SplitSeq(stat, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.Contains(trimmed, "changed,") || strings.Contains(trimmed, "changed ") {
 			if strings.Contains(trimmed, "file") {
@@ -39,7 +39,7 @@ func ParseDiffStat(stat string) DiffStat {
 		return DiffStat{}
 	}
 	result := DiffStat{}
-	for _, segment := range strings.Split(summary, ",") {
+	for segment := range strings.SplitSeq(summary, ",") {
 		segment = strings.TrimSpace(segment)
 		fields := strings.Fields(segment)
 		if len(fields) < 2 {

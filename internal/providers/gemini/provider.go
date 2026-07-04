@@ -440,7 +440,7 @@ func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiConten
 				FunctionResponse: &geminiFunctionResponse{
 					ID:       message.ToolCallID,
 					Name:     name,
-					Response: map[string]interface{}{"result": content},
+					Response: map[string]any{"result": content},
 				},
 			}})
 		case zeroruntime.MessageRoleAssistant:

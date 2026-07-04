@@ -238,26 +238,26 @@ func doctorSection(output commandOutput, title string) *commandSection {
 
 func assertRowsContain(t *testing.T, rows []commandRow, wants ...string) {
 	t.Helper()
-	text := ""
+	var text strings.Builder
 	for _, row := range rows {
-		text += row.Text + "\n"
+		text.WriteString(row.Text + "\n")
 	}
 	for _, want := range wants {
-		if !strings.Contains(text, want) {
-			t.Fatalf("rows missing %q:\n%s", want, text)
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("rows missing %q:\n%s", want, text.String())
 		}
 	}
 }
 
 func assertRowsDoNotContain(t *testing.T, rows []commandRow, wants ...string) {
 	t.Helper()
-	text := ""
+	var text strings.Builder
 	for _, row := range rows {
-		text += row.Text + "\n"
+		text.WriteString(row.Text);text.WriteString("\n")
 	}
 	for _, want := range wants {
-		if strings.Contains(text, want) {
-			t.Fatalf("rows unexpectedly contain %q:\n%s", want, text)
+		if strings.Contains(text.String(), want) {
+			t.Fatalf("rows unexpectedly contain %q:\n%s", want, text.String())
 		}
 	}
 }

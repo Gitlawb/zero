@@ -83,7 +83,7 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 // already renders. Falls back to the generic body if the text isn't a plan.
 func planSummaryCardBody(req toolBodyRequest) cardBody {
 	total, done, active, failed := 0, 0, 0, 0
-	for _, line := range strings.Split(req.detail, "\n") {
+	for line := range strings.SplitSeq(req.detail, "\n") {
 		line = strings.TrimSpace(line)
 		if !isNumberedPlanLine(line) {
 			continue

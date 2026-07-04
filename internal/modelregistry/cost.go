@@ -61,10 +61,7 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	}
 	// Cache-read and cache-write are disjoint subsets of the input.
 	if requestedCacheWriteTokens > inputTokens-requestedCachedInputTokens {
-		requestedCacheWriteTokens = inputTokens - requestedCachedInputTokens
-		if requestedCacheWriteTokens < 0 {
-			requestedCacheWriteTokens = 0
-		}
+		requestedCacheWriteTokens = max(inputTokens-requestedCachedInputTokens, 0)
 	}
 
 	tier, err := selectCostTier(model.Cost, inputTokens)
@@ -88,10 +85,7 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	if cacheWriteRate > 0 {
 		cacheWriteTokens = requestedCacheWriteTokens
 	}
-	uncachedInputTokens := inputTokens - cachedInputTokens - cacheWriteTokens
-	if uncachedInputTokens < 0 {
-		uncachedInputTokens = 0
-	}
+	uncachedInputTokens := max(inputTokens-cachedInputTokens-cacheWriteTokens, 0)
 	inputCost := costForTokens(uncachedInputTokens, inputRate)
 	cachedInputCost := costForTokens(cachedInputTokens, cachedRate)
 	cacheWriteCost := costForTokens(cacheWriteTokens, cacheWriteRate)

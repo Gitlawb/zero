@@ -375,7 +375,7 @@ func SHA256File(path string) (string, error) {
 
 func ParseSHA256Checksum(text string) (ParsedChecksum, error) {
 	lines := []string{}
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			lines = append(lines, line)

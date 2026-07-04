@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"maps"
 	"os"
 	"strings"
 )
@@ -21,9 +22,7 @@ func envWithPresetsAllowed(base map[string]string) map[string]string {
 			}
 		}
 	} else {
-		for k, v := range base {
-			env[k] = v
-		}
+		maps.Copy(env, base)
 	}
 	env["ZERO_OAUTH_ALLOW_PRESETS"] = "1"
 	return env

@@ -133,7 +133,7 @@ func TestCaptureDisabled(t *testing.T) {
 func TestTruncateEvents(t *testing.T) {
 	store, _ := newCkStore(t)
 	var seqs []int
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		ev, err := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{"i": i}})
 		if err != nil {
 			t.Fatal(err)

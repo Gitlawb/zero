@@ -173,7 +173,7 @@ func (sc *SelfCorrector) feedback(report CorrectionReport, corrective bool) stri
 		}
 		fmt.Fprintf(&b, "%s (%s): %s\n", result.Name, strings.Join(result.Command, " "), result.Status)
 		for _, line := range verifyResultLines(result) {
-			b.WriteString("  " + line + "\n")
+			b.WriteString("  ");b.WriteString(line);b.WriteString("\n")
 		}
 	}
 

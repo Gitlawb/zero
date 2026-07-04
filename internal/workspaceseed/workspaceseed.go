@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -249,11 +250,8 @@ func detectedProjectFiles(paths []string) []string {
 func memoryFiles(paths []string) []string {
 	out := []string{}
 	for _, candidate := range []string{"AGENTS.md", "ZERO.md"} {
-		for _, rel := range paths {
-			if rel == candidate {
-				out = append(out, candidate)
-				break
-			}
+		if slices.Contains(paths, candidate) {
+			out = append(out, candidate)
 		}
 	}
 	return out

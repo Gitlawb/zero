@@ -289,7 +289,7 @@ func formatTaskOutputSummary(task background.Task, summary StreamResult, rawLine
 func summarizeTaskData(data string, exitCode int) (StreamResult, []string) {
 	events := []streamjson.Event{}
 	rawLines := []string{}
-	for _, line := range strings.Split(data, "\n") {
+	for line := range strings.SplitSeq(data, "\n") {
 		rawLine := strings.TrimSuffix(line, "\r")
 		trimmed := strings.TrimSpace(rawLine)
 		if trimmed == "" {

@@ -281,7 +281,7 @@ func splitFrontmatter(normalized string) (string, string, bool) {
 // Matching is case-insensitive on the key; the first occurrence wins.
 func frontmatterValue(frontmatter string, key string) string {
 	prefix := strings.ToLower(key) + ":"
-	for _, line := range strings.Split(frontmatter, "\n") {
+	for line := range strings.SplitSeq(frontmatter, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
 			value := strings.TrimSpace(trimmed[len(prefix):])

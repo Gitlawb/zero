@@ -2,6 +2,7 @@ package modelregistry
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -53,10 +54,8 @@ func (registry Registry) ResolveWithFallback(input string) (ModelEntry, string, 
 func EffectiveReasoningEffort(model ModelEntry, requested ReasoningEffort) ReasoningEffort {
 	efforts := effectiveReasoningEfforts(model)
 	if requested != "" {
-		for _, effort := range efforts {
-			if effort == requested {
-				return requested
-			}
+		if slices.Contains(efforts, requested) {
+			return requested
 		}
 	}
 	if model.DefaultReasoningEffort != "" {

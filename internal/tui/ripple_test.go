@@ -95,7 +95,7 @@ func TestRipplePhaseShiftChangesBytesAcrossString(t *testing.T) {
 // phase must produce distinct outputs (the run-state text actually changes).
 func TestRippleAdvancesPhaseAcrossFrames(t *testing.T) {
 	seen := map[string]bool{}
-	for phase := 0; phase < 12; phase++ {
+	for phase := range 12 {
 		seen[rippleText("Working", ripplePalette(), phase, 6)] = true
 	}
 	if len(seen) < 2 {

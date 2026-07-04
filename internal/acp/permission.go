@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -85,12 +86,7 @@ func decisionFromOutcome(outcome RequestPermissionOutcome, offered []agent.Permi
 }
 
 func actionOffered(action agent.PermissionDecisionAction, offered []agent.PermissionDecisionAction) bool {
-	for _, a := range offered {
-		if a == action {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(offered, action)
 }
 
 // permissionToolCall builds the ToolCall descriptor embedded in a

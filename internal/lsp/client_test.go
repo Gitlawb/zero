@@ -107,7 +107,7 @@ func TestClientMatchesConcurrentResponsesByID(t *testing.T) {
 	go call("alpha")
 	go call("beta")
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case r := <-results:
 			if r.err != nil {

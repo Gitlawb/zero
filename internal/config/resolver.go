@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"strconv"
@@ -774,9 +775,7 @@ func copyMCPStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	copied := make(map[string]string, len(values))
-	for key, value := range values {
-		copied[key] = value
-	}
+	maps.Copy(copied, values)
 	return copied
 }
 

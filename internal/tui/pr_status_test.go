@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -102,15 +103,15 @@ func TestBuildPRSegments(t *testing.T) {
 	}
 
 	segments := BuildPRSegments(state, false)
-	gotText := ""
+	var gotText strings.Builder
 	for _, segment := range segments {
-		gotText += segment.Text
+		gotText.WriteString(segment.Text)
 		if segment.URL != state.PrURL {
 			t.Fatalf("segment %#v should carry PR hyperlink", segment)
 		}
 	}
-	if gotText != "+42 -7 #1337" {
-		t.Fatalf("segments text = %q", gotText)
+	if gotText.String() != "+42 -7 #1337" {
+		t.Fatalf("segments text = %q", gotText.String())
 	}
 }
 
@@ -166,10 +167,5 @@ func (runner *fakePRRunner) Run(ctx context.Context, cwd string, name string, ar
 }
 
 func (runner *fakePRRunner) called(call string) bool {
-	for _, actual := range runner.calls {
-		if actual == call {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(runner.calls, call)
 }

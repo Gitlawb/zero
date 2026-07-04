@@ -30,7 +30,7 @@ type Task struct {
 	ExpectedChangedFiles  []string      `json:"expectedChangedFiles"`
 	ForbiddenChangedFiles []string      `json:"forbiddenChangedFiles,omitempty"`
 	RequiredTraceEvents   []string      `json:"requiredTraceEvents,omitempty"`
-	ContextChecks         ContextChecks `json:"contextChecks,omitempty"`
+	ContextChecks         ContextChecks `json:"contextChecks"`
 }
 
 type Command struct {

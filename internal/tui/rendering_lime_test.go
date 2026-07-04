@@ -450,7 +450,7 @@ func TestMarkdownTableConvertsHtmlBreaks(t *testing.T) {
 
 func countMarkdownRuleLines(rendered string) int {
 	count := 0
-	for _, line := range strings.Split(rendered, "\n") {
+	for line := range strings.SplitSeq(rendered, "\n") {
 		if strings.Contains(line, "─┼─") {
 			count++
 		}
@@ -632,7 +632,7 @@ func TestSelectableExpandedReasoningRowsAreClamped(t *testing.T) {
 	}
 
 	rendered, _ := m.renderSelectableReasoningRow(0, row, width, 0)
-	for _, line := range strings.Split(rendered, "\n") {
+	for line := range strings.SplitSeq(rendered, "\n") {
 		if got := lipgloss.Width(plainRender(t, line)); got > width {
 			t.Fatalf("line width = %d, want <= %d:\n%s", got, width, rendered)
 		}
@@ -839,7 +839,7 @@ func TestNarrationSelectionGeometry(t *testing.T) {
 			t.Errorf("meta %d copy text should be chrome-free, got %q", i, meta.text)
 		}
 	}
-	for _, line := range strings.Split(rendered, "\n") {
+	for line := range strings.SplitSeq(rendered, "\n") {
 		if w := lipgloss.Width(line); w > 90 {
 			t.Errorf("narration line width %d exceeds 90: %q", w, line)
 		}
@@ -942,7 +942,7 @@ func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 
 	// The 16-line cap keeps long diffs bounded.
 	long := []string{"+++ b/big.go", "@@ -0,0 +1,40 @@"}
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		long = append(long, "+line")
 	}
 	row.detail = strings.Join(long, "\n")
@@ -1535,7 +1535,7 @@ func TestToolCardLinesAllSameWidth(t *testing.T) {
 	detail := "internal/cli/root.go:41: fs := flag.NewFlagSet"
 	row := transcriptRow{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: detail}
 	card := plainRender(t, m.renderRow(row, 60, buildRowContext(nil)))
-	for _, line := range strings.Split(card, "\n") {
+	for line := range strings.SplitSeq(card, "\n") {
 		if got := len([]rune(line)); got != 60 {
 			t.Fatalf("card line width %d, want 60: %q", got, line)
 		}

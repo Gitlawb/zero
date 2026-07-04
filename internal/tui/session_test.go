@@ -463,7 +463,7 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 		finalCh <- execCmd(cmd)
 	}()
 
-	for received := 0; received < expectedRuntimeMessages; received++ {
+	for range expectedRuntimeMessages {
 		runtimeMsg := receiveRuntimeMessage(t, runtimeMessages)
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)

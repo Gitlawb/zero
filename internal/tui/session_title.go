@@ -112,7 +112,7 @@ func cleanGeneratedTitle(raw string) string {
 	}
 	// Use the first line with real content after trimming markup — a model may
 	// open with a bare code fence or blank line before the title itself.
-	for _, line := range strings.Split(title, "\n") {
+	for line := range strings.SplitSeq(title, "\n") {
 		if trimmed := strings.Trim(line, titleTrimCutset); trimmed != "" {
 			title = trimmed
 			break

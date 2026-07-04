@@ -560,7 +560,7 @@ func shortTaskName(task string) string {
 		return ""
 	}
 	picked := make([]string, 0, 2)
-	for _, w := range strings.Fields(task) {
+	for w := range strings.FieldsSeq(task) {
 		clean := strings.Trim(w, ".,:;!?\"'`()[]{}")
 		if clean == "" {
 			continue
@@ -919,17 +919,14 @@ func (m model) sidebarTokenText() string {
 // to their column widths and to the same row count first, so every joined row
 // is exactly chatWidth + 1 + sidebarWidth cells and the columns stay aligned.
 func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
-	rows := len(chat)
-	if len(sidebar) > rows {
-		rows = len(sidebar)
-	}
+	rows := max(len(sidebar), len(chat))
 	// A cell of air on each side of the rule (" │ ") so the columns don't butt
 	// flush against it. The chat side gets its gutter from the leading space; the
 	// sidebar side from the trailing space (plus items' own leading inset, which
 	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
 	divider := " " + zeroTheme.line.Render("│") + " "
 	out := make([]string, rows)
-	for i := 0; i < rows; i++ {
+	for i := range rows {
 		left := ""
 		if i < len(chat) {
 			left = chat[i]

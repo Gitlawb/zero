@@ -2419,10 +2419,7 @@ func (m model) pinnedPlanMaxHeight() int {
 	if m.height <= 0 {
 		return 12
 	}
-	budget := m.height / 3
-	if budget < 3 {
-		budget = 3
-	}
+	budget := max(m.height/3, 3)
 	return budget
 }
 
@@ -2481,10 +2478,7 @@ func (m model) scrollableTranscriptFrame(header string, footer string) transcrip
 		}
 	}
 
-	bodyHeight := m.height - len(headerLines) - len(footerLines)
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
+	bodyHeight := max(m.height-len(headerLines)-len(footerLines), 1)
 	width := m.chatColumnWidth()
 	footerTop := len(headerLines) + bodyHeight
 	frame := transcriptFrameLayout{
@@ -3001,7 +2995,7 @@ func formatWorkingElapsed(d time.Duration) string {
 // tokens arrive. Returns nil when there is no reasoning text.
 func reasoningPreviewLines(reasoning string, width int) []string {
 	var lines []string
-	for _, raw := range strings.Split(strings.TrimSpace(reasoning), "\n") {
+	for raw := range strings.SplitSeq(strings.TrimSpace(reasoning), "\n") {
 		if t := strings.TrimSpace(raw); t != "" {
 			lines = append(lines, t)
 		}
@@ -3012,10 +3006,7 @@ func reasoningPreviewLines(reasoning string, width int) []string {
 	if len(lines) > 2 {
 		lines = lines[len(lines)-2:]
 	}
-	avail := width - 2
-	if avail < 8 {
-		avail = 8
-	}
+	avail := max(width-2, 8)
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		out = append(out, "  "+zeroTheme.faint.Render(previewTail(line, avail)))
@@ -3764,12 +3755,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleResumeCommand(command.text)
-		if strings.HasPrefix(text, sessionsCardsPrefix) {
+		if after, ok := strings.CutPrefix(text, sessionsCardsPrefix); ok {
 			// The list payload renders as stacked session cards, not a note.
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 				kind: rowSystem,
 				tool: "sessions",
-				text: strings.TrimPrefix(text, sessionsCardsPrefix),
+				text: after,
 			})
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})

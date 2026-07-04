@@ -39,7 +39,7 @@ func registryHasToolSearch(registry *tools.Registry) bool {
 
 func TestRegisterToolSearchIfEligibleRegistersAtThreshold(t *testing.T) {
 	registry := tools.NewRegistry()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		registry.Register(cliFakeDeferredTool{name: "mcp_srv_t" + string(rune('a'+i))})
 	}
 
@@ -66,7 +66,7 @@ func TestRegisterToolSearchIfEligibleSkipsBelowThreshold(t *testing.T) {
 
 func TestRegisterToolSearchIfEligibleSkipsWhenThresholdZero(t *testing.T) {
 	registry := tools.NewRegistry()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		registry.Register(cliFakeDeferredTool{name: "mcp_srv_t" + string(rune('a'+i))})
 	}
 

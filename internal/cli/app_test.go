@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -812,13 +813,7 @@ func TestRunSkipPermissionsUnsafeMergesAddDirGrants(t *testing.T) {
 				t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
 			}
 			roots := launchedOptions.AgentOptions.Sandbox.Scope().Roots()
-			found := false
-			for _, root := range roots {
-				if root == resolvedExtra {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(roots, resolvedExtra)
 			if !found {
 				t.Fatalf("scope roots = %v, want extra root %q", roots, resolvedExtra)
 			}

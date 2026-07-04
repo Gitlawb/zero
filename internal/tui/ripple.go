@@ -68,13 +68,7 @@ func rippleText(text string, palette []lipgloss.Style, phase, waveLen int) strin
 
 	var b strings.Builder
 	for i, r := range text {
-		level := rippleLevel(i+phase, travel, waveLen)
-		if level < 0 {
-			level = 0
-		}
-		if level > travel {
-			level = travel
-		}
+		level := min(max(rippleLevel(i+phase, travel, waveLen), 0), travel)
 		b.WriteString(palette[level].Render(string(r)))
 	}
 	return b.String()

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -344,10 +345,8 @@ func resolveCommand(name string) (commandDefinition, bool) {
 		if normalized == command.name {
 			return command, true
 		}
-		for _, alias := range command.aliases {
-			if normalized == alias {
-				return command, true
-			}
+		if slices.Contains(command.aliases, normalized) {
+			return command, true
 		}
 	}
 	return commandDefinition{}, false

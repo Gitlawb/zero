@@ -50,7 +50,7 @@ func (t richMCPTool) Deferred() bool { return true }
 func TestDeferralTokenSavingsMeasurement(t *testing.T) {
 	const mcpToolCount = 6
 	registry := tools.NewRegistry()
-	for i := 0; i < mcpToolCount; i++ {
+	for i := range mcpToolCount {
 		registry.Register(richMCPTool{name: fmt.Sprintf("mcp__websearch__search_v%d", i)})
 	}
 	registry.Register(fakeToolSearchTool{})

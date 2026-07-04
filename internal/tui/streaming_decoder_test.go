@@ -92,7 +92,7 @@ func TestStreamingDecoderTailIsBounded(t *testing.T) {
 	d := newStreamingDecoder()
 	var b strings.Builder
 	b.WriteString(`{"path":"x","content":"`)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		b.WriteString("line\\n") // 100 escaped newlines
 	}
 	b.WriteString(`"}`)

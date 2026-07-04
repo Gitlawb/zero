@@ -233,8 +233,8 @@ func NormalizeImageMediaType(s string) string {
 	}
 	// Strip a data: URI wrapper, keeping the media type between "data:" and ";".
 	if rest, ok := strings.CutPrefix(s, "data:"); ok {
-		if i := strings.IndexByte(rest, ';'); i >= 0 {
-			s = rest[:i]
+		if before, _, ok0 := strings.Cut(rest, ";"); ok0 {
+			s = before
 		} else {
 			s = rest
 		}

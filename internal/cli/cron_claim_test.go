@@ -19,14 +19,12 @@ func TestFireJobClaimPreventsDoubleFire(t *testing.T) {
 	// Two schedulers fire the same due job concurrently; the atomic claim must let
 	// exactly one through, so the job never double-fires (M9).
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 2 {
+		wg.Go(func() {
 			job, _ := store.Get(due.ID)
 			var out, errb bytes.Buffer
 			fireJob(store, nowFn, job, &out, &errb, fx.run)
-		}()
+		})
 	}
 	wg.Wait()
 

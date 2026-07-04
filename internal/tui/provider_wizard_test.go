@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1068,7 +1069,7 @@ func finishProviderWizardModelDiscoveryForTest(t *testing.T, m model) model {
 
 func providerWizardManyModelsForTest(count int) []providerWizardModel {
 	models := make([]providerWizardModel, 0, count)
-	for index := 0; index < count; index++ {
+	for index := range count {
 		models = append(models, providerWizardModel{
 			ID:          fmt.Sprintf("provider/model-%02d", index),
 			Description: fmt.Sprintf("Model %02d", index),
@@ -1247,12 +1248,7 @@ func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfi
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 // Applying the wizard switches the live provider, so it must export

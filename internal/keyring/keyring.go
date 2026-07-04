@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -194,12 +195,7 @@ func isNotFound(err error, codes ...int) bool {
 		return false
 	}
 	code := coder.ExitCode()
-	for _, c := range codes {
-		if code == c {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(codes, code)
 }
 
 // wrap adds operation context to a tool error, leaving nil untouched.

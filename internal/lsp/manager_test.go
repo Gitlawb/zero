@@ -181,14 +181,12 @@ func TestManagerCheckConcurrentReusesOneServer(t *testing.T) {
 	defer m.Shutdown(context.Background())
 
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			if _, err := m.Check(context.Background(), "main.go", "package main"); err != nil {
 				t.Errorf("concurrent Check: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

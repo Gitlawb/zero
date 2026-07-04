@@ -289,7 +289,7 @@ func TestScanSSEDataWithContextContentResetsOnData(t *testing.T) {
 		// One data line every 30ms for ~300ms (well past the 120ms content window,
 		// with comfortable slack under the 100ms idle timeout), so the content
 		// watchdog keeps resetting, then close cleanly.
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			if _, err := io.WriteString(pw, "data: chunk\n\n"); err != nil {
 				return
 			}

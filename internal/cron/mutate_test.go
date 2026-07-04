@@ -19,10 +19,8 @@ func TestMutateIsAtomicUnderConcurrency(t *testing.T) {
 	const goroutines = 20
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			<-start
 			_, merr := store.Mutate(job.ID, func(current Job, readErr error) (Job, error) {
 				if readErr != nil {
@@ -34,7 +32,7 @@ func TestMutateIsAtomicUnderConcurrency(t *testing.T) {
 			if merr != nil {
 				t.Errorf("Mutate: %v", merr)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

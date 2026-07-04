@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/credstore"
@@ -200,10 +201,8 @@ func (profile ProviderProfile) OAuthLoginCandidates() []string {
 		if s == "" {
 			return
 		}
-		for _, existing := range names {
-			if existing == s { // case-sensitive: the store lookup is case-sensitive
-				return
-			}
+		if slices.Contains(names, s) { // case-sensitive: the store lookup is case-sensitive
+			return
 		}
 		names = append(names, s)
 	}

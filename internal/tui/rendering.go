@@ -376,13 +376,7 @@ func displayPath(cwd string, p string) string {
 
 // sayMeasure is the narrow prose wrap width for compact secondary text.
 func sayMeasure(width int) int {
-	measure := width - 4
-	if measure > 74 {
-		measure = 74
-	}
-	if measure < 16 {
-		measure = 16
-	}
+	measure := max(min(width-4, 74), 16)
 	return measure
 }
 
@@ -396,13 +390,7 @@ const assistantMeasureCap = 96
 // assistantMeasureCap, with a 16-col floor. Left-aligned (the cap just shortens
 // lines; it does not center).
 func assistantMeasure(width int) int {
-	measure := width
-	if measure > assistantMeasureCap {
-		measure = assistantMeasureCap
-	}
-	if measure < 16 {
-		measure = 16
-	}
+	measure := max(min(width, assistantMeasureCap), 16)
 	return measure
 }
 
@@ -416,7 +404,7 @@ func wrapPlainText(text string, measure int) []string {
 		measure = 1
 	}
 	out := []string{}
-	for _, paragraph := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for paragraph := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(paragraph) == "" {
 			out = append(out, "")
 			continue
@@ -442,7 +430,7 @@ func wrapPlainText(text string, measure int) []string {
 			continue
 		}
 		line := ""
-		for _, word := range strings.Fields(body) {
+		for word := range strings.FieldsSeq(body) {
 			for lipgloss.Width(word) > available {
 				if line != "" {
 					out = append(out, indent+line)
@@ -963,7 +951,7 @@ func renderDoctorResultCard(text string, width int) string {
 }
 
 func doctorResultBorderStyle(text string) lipgloss.Style {
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		switch strings.TrimSpace(line) {
 		case "status: ok":
 			return zeroTheme.green
@@ -1242,13 +1230,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	// so existing fill(style) call sites render bare foregrounds on that canvas.
 	fill := func(style lipgloss.Style) lipgloss.Style { return style }
 	confirm := len(questions)
-	active := prompt.active
-	if active < 0 {
-		active = 0
-	}
-	if active > confirm {
-		active = confirm
-	}
+	active := min(max(prompt.active, 0), confirm)
 	multi := len(questions) > 1
 
 	var lines []string
@@ -1787,7 +1769,7 @@ func singleLineToolHeadText(text string) string {
 		return ""
 	}
 	parts := []string{}
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(text, "\r", "\n"), "\n") {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
 			parts = append(parts, trimmed)
 		}
@@ -1884,7 +1866,7 @@ type diffMetadata struct {
 
 func diffCardMetadata(detail string) diffMetadata {
 	meta := diffMetadata{}
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++ "):
 			meta.path = strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")), "b/")
@@ -2243,9 +2225,9 @@ func exploreTarget(name string, hint string, arg string, detail string) string {
 }
 
 func readDetailPath(detail string) string {
-	for _, line := range strings.Split(detail, "\n") {
-		if strings.HasPrefix(line, "File: ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "File: "))
+	for line := range strings.SplitSeq(detail, "\n") {
+		if after, ok := strings.CutPrefix(line, "File: "); ok {
+			return strings.TrimSpace(after)
 		}
 	}
 	return ""
@@ -2279,7 +2261,7 @@ func localControlChildLine(text string, width int) string {
 
 func browserOpenSummary(detail string, target string) string {
 	target = strings.TrimRight(strings.TrimSpace(target), "/")
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "✓"))
 		if line == "" {
 			continue
@@ -2297,7 +2279,7 @@ func browserOpenSummary(detail string, target string) string {
 }
 
 func firstLocalControlSummaryLine(detail string) string {
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "✓"))
 		switch {
 		case line == "":
@@ -2312,10 +2294,10 @@ func firstLocalControlSummaryLine(detail string) string {
 }
 
 func artifactCapturedPath(detail string) string {
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Artifact captured:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Artifact captured:"))
+		if after, ok := strings.CutPrefix(line, "Artifact captured:"); ok {
+			return strings.TrimSpace(after)
 		}
 	}
 	return ""
@@ -2325,7 +2307,7 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 	footer := ""
 	output := []commandOutputLine{}
 	section := "stdout"
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		switch {
 		case line == "stdout:":
 			section = "stdout"
@@ -2353,7 +2335,7 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 	output := []commandOutputLine{}
 	section := ""
 	interrupted := false
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		switch {
 		case line == "output:":
 			section = "output"
@@ -2440,7 +2422,7 @@ func truncateDisplayWidth(text string, budget int) string {
 // record without separators is a plain trailing hint.
 func renderSessionsCards(payload string, width int) string {
 	blocks := []string{}
-	for _, record := range strings.Split(payload, "\n") {
+	for record := range strings.SplitSeq(payload, "\n") {
 		fields := strings.Split(record, sessionsCardFieldSep)
 		if len(fields) < 4 {
 			blocks = append(blocks, fitStyledLine(zeroTheme.faint.Render(record), width))

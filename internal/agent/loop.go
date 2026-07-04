@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2435,9 +2437,7 @@ func cloneArgs(args map[string]any) map[string]any {
 		return nil
 	}
 	copied := make(map[string]any, len(args))
-	for key, value := range args {
-		copied[key] = value
-	}
+	maps.Copy(copied, args)
 	return copied
 }
 
@@ -2604,12 +2604,7 @@ func ToolAllowedByFilters(name string, enabledTools []string, disabledTools []st
 }
 
 func containsToolName(names []string, name string) bool {
-	for _, candidate := range names {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(names, name)
 }
 
 func schemaToRuntimeMap(schema tools.Schema) map[string]any {
@@ -2728,7 +2723,7 @@ func loadedToolsFromResult(meta map[string]string) []string {
 		return nil
 	}
 	var names []string
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
 			names = append(names, trimmed)
 		}

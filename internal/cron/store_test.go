@@ -77,7 +77,7 @@ func TestStoreAddListGetRemove(t *testing.T) {
 func TestStoreAppendRun(t *testing.T) {
 	s := newTestStore(t)
 	job, _ := s.Add(Job{Expr: "* * * * *", Prompt: "x", Status: StatusActive})
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := s.AppendRun(job.ID, RunRecord{JobID: job.ID, At: time.Unix(int64(i), 0).UTC(), ExitCode: i}); err != nil {
 			t.Fatalf("AppendRun: %v", err)
 		}

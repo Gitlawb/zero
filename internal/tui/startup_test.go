@@ -79,7 +79,7 @@ func TestBorderedBlockFitsLongStyledLines(t *testing.T) {
 func assertRenderedLineWidths(t *testing.T, block string, width int) {
 	t.Helper()
 
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		if got := lipgloss.Width(line); got != width {
 			t.Fatalf("expected line width %d, got %d for %q", width, got, line)
 		}

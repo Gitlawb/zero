@@ -370,7 +370,7 @@ func TestFullFlowStoresTokens(t *testing.T) {
 		redirect := parsed.Query().Get("redirect_uri")
 		go func() {
 			cbURL := redirect + "?code=auth-code&state=" + url.QueryEscape(state)
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				resp, err := http.Get(cbURL)
 				if err == nil {
 					resp.Body.Close()

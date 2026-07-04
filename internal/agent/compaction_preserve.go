@@ -248,11 +248,11 @@ func projectInstructionBlock(content string) (string, string) {
 	if !strings.HasPrefix(content, projectInstructionsHeadingPrefix) {
 		return "", ""
 	}
-	firstLineEnd := strings.IndexByte(content, '\n')
-	if firstLineEnd < 0 {
+	before, _, ok := strings.Cut(content, "\n")
+	if !ok {
 		return "", ""
 	}
-	heading := strings.TrimSpace(content[:firstLineEnd])
+	heading := strings.TrimSpace(before)
 	if !strings.Contains(heading, projectInstructionsHeadingMarker) {
 		return "", ""
 	}
@@ -296,10 +296,7 @@ func capBody(body string) string {
 	if len(body) <= maxPreservedSkillBytes {
 		return body
 	}
-	limit := maxPreservedSkillBytes - len(truncationNote)
-	if limit < 0 {
-		limit = 0
-	}
+	limit := max(maxPreservedSkillBytes-len(truncationNote), 0)
 	// Walk back to the start of a rune so a multibyte sequence is never split.
 	for limit > 0 && !utf8.RuneStart(body[limit]) {
 		limit--

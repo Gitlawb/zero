@@ -213,18 +213,12 @@ func startupHeaderLine(width int, candidates []headerCandidate) string {
 }
 
 func centerLine(line string, width int) string {
-	padding := (width - lipgloss.Width(line)) / 2
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max((width-lipgloss.Width(line))/2, 0)
 	return strings.Repeat(" ", padding) + line
 }
 
 func rightAlignedLine(line string, width int) string {
-	padding := width - lipgloss.Width(line)
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(width-lipgloss.Width(line), 0)
 	return strings.Repeat(" ", padding) + line
 }
 

@@ -406,8 +406,8 @@ func streamJSONExitCode(output []byte) (int, bool) {
 }
 
 func firstLine(text string) string {
-	if index := strings.IndexByte(text, '\n'); index >= 0 {
-		return strings.TrimSpace(text[:index])
+	if before, _, ok := strings.Cut(text, "\n"); ok {
+		return strings.TrimSpace(before)
 	}
 	return text
 }

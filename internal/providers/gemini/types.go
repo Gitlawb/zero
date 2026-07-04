@@ -48,9 +48,9 @@ type geminiFunctionCall struct {
 }
 
 type geminiFunctionResponse struct {
-	ID       string                 `json:"id,omitempty"`
-	Name     string                 `json:"name"`
-	Response map[string]interface{} `json:"response"`
+	ID       string         `json:"id,omitempty"`
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
 }
 
 type geminiToolGroup struct {

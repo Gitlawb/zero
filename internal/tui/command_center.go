@@ -74,7 +74,7 @@ func (m model) doctorText(connectivity bool) string {
 }
 
 func parseDoctorCommandArgs(args string) (connectivity bool, fix bool, help bool, err error) {
-	for _, field := range strings.Fields(args) {
+	for field := range strings.FieldsSeq(args) {
 		switch strings.ToLower(field) {
 		case "--connectivity", "connectivity":
 			connectivity = true
@@ -274,15 +274,12 @@ func (m model) resumeText() string {
 			}},
 		})
 	}
-	limit := len(sessions)
-	if limit > 8 {
-		limit = 8
-	}
+	limit := min(len(sessions), 8)
 	// The list renders as stacked cards (renderSessionsCards); each record is
 	// one session's fields joined by the unit separator so the renderer can
 	// restyle them at the current width. Flow and data are unchanged.
 	records := make([]string, 0, limit+1)
-	for index := 0; index < limit; index++ {
+	for index := range limit {
 		session := sessions[index]
 		meta := strings.Join([]string{
 			sanitizeCardField(displayValue(session.ModelID, "no model")),

@@ -556,8 +556,8 @@ func runDaemonLink(args []string, stdout io.Writer, stderr io.Writer) int {
 			return writeDaemonUsage(stdout, exitSuccess)
 		}
 		name, inlineVal, hasInline := a, "", false
-		if eq := strings.IndexByte(a, '='); eq >= 0 {
-			name, inlineVal, hasInline = a[:eq], a[eq+1:], true
+		if before, after, ok := strings.Cut(a, "="); ok {
+			name, inlineVal, hasInline = before, after, true
 		}
 		dst, ok := flags[name]
 		if !ok {

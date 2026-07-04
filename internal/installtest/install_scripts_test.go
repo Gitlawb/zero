@@ -161,7 +161,7 @@ func newUnixInstallFixture(t *testing.T) unixInstallFixture {
 
 	archiveBytes := readFile(t, fixture.archivePath)
 	sum := sha256.Sum256(archiveBytes)
-	writeFile(t, fixture.checksumPath, []byte(fmt.Sprintf("%x  %s\n", sum, archiveName)), 0o644)
+	writeFile(t, fixture.checksumPath, fmt.Appendf(nil, "%x  %s\n", sum, archiveName), 0o644)
 
 	mockCurl := fmt.Sprintf(`#!/usr/bin/env sh
 set -eu

@@ -467,8 +467,8 @@ func gitBranch(cwd string) string {
 		return ""
 	}
 	ref := strings.TrimSpace(string(data))
-	if strings.HasPrefix(ref, "ref: ") {
-		ref = strings.TrimPrefix(ref, "ref: ")
+	if after, ok := strings.CutPrefix(ref, "ref: "); ok {
+		ref = after
 		return strings.TrimPrefix(ref, "refs/heads/")
 	}
 	if len(ref) >= 7 {
@@ -966,7 +966,7 @@ func looksLikeDiff(text string) bool {
 		return false
 	}
 	hasOld, hasNew := false, false
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		switch {
 		case hunkHeaderPattern.MatchString(line):
 			return true

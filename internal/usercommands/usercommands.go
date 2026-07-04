@@ -202,7 +202,7 @@ func splitFrontmatter(normalized string) (string, string, bool) {
 
 func frontmatterValue(frontmatter, key string) string {
 	prefix := strings.ToLower(key) + ":"
-	for _, line := range strings.Split(frontmatter, "\n") {
+	for line := range strings.SplitSeq(frontmatter, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
 			return strings.Trim(strings.TrimSpace(trimmed[len(prefix):]), `"'`)

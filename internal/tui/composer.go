@@ -496,7 +496,7 @@ func composerPastePreviewLabelWithIndex(label string, pasteNumber int) string {
 func composerPastePreviewVisualLineCount(text string, wrapWidth int) int {
 	wrapWidth = maxInt(1, wrapWidth)
 	total := 0
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		width := lipgloss.Width(line)
 		total += maxInt(1, (width+wrapWidth-1)/wrapWidth)
 	}

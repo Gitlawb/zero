@@ -110,7 +110,7 @@ func (s *Store) Add(job Job) (Job, error) {
 
 func (s *Store) allocID() (string, error) {
 	base := s.now().UTC().Format("20060102-150405")
-	for n := 0; n < 100; n++ {
+	for n := range 100 {
 		id := base
 		if n > 0 {
 			id = fmt.Sprintf("%s-%d", base, n)

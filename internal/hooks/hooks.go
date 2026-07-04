@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -483,7 +484,7 @@ func (store *AuditStore) ReadEvents() ([]AuditEvent, error) {
 		return nil, err
 	}
 	events := []AuditEvent{}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -565,10 +566,7 @@ func (store *AuditStore) lastSequence() (int, error) {
 		return 0, nil
 	}
 	const tailWindow = 8 * 1024
-	start := size - tailWindow
-	if start < 0 {
-		start = 0
-	}
+	start := max(size-tailWindow, 0)
 	buf := make([]byte, size-start)
 	// ReadAt may return io.EOF with a short read if the file shrank between Stat
 	// and here; treat EOF as non-fatal and use only the bytes actually read.
@@ -890,12 +888,7 @@ func KnownEvents() []Event {
 
 // IsValidEvent reports whether event is one Zero recognizes.
 func IsValidEvent(event Event) bool {
-	for _, known := range KnownEvents() {
-		if event == known {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(KnownEvents(), event)
 }
 
 func parseEvent(raw any, field string) (Event, error) {

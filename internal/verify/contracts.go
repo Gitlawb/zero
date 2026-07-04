@@ -61,7 +61,7 @@ type Event struct {
 	Status        Status               `json:"status,omitempty"`
 	ExitCode      int                  `json:"exitCode,omitempty"`
 	OK            bool                 `json:"ok,omitempty"`
-	Summary       Summary              `json:"summary,omitempty"`
+	Summary       Summary              `json:"summary"`
 	StartedAt     string               `json:"startedAt,omitempty"`
 	EndedAt       string               `json:"endedAt,omitempty"`
 	DurationMs    int                  `json:"durationMs,omitempty"`

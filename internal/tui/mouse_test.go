@@ -452,7 +452,7 @@ func TestTranscriptSelectionDragPastTopEdgeAutoScrolls(t *testing.T) {
 	// between a local dev shell and CI's non-TTY runners — set it explicitly
 	// so the test is deterministic regardless of environment.
 	m.reducedMotion = false
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	textY := topmostVisibleTranscriptMouseY(t, m)
@@ -505,7 +505,7 @@ func TestTranscriptSelectionDragPastBottomEdgeAutoScrolls(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.reducedMotion = false // deterministic across local/CI TTY-detection differences
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	m.chatScrollOffset = chatWheelScrollLines * 3 // scrolled up, away from the bottom
@@ -554,7 +554,7 @@ func TestTranscriptSelectionEdgeGlideStopsWhenDragReturnsToBody(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.reducedMotion = false // deterministic across local/CI TTY-detection differences
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	textY := topmostVisibleTranscriptMouseY(t, m)
@@ -596,7 +596,7 @@ func TestTranscriptSelectionEdgeGlideRecoversAfterKeypressInterrupt(t *testing.T
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.reducedMotion = false // deterministic across local/CI TTY-detection differences
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	textY := topmostVisibleTranscriptMouseY(t, m)

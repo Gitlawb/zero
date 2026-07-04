@@ -343,7 +343,7 @@ func validSedPrintArg(arg string) bool {
 	if body == "" {
 		return false
 	}
-	for _, part := range strings.Split(body, ",") {
+	for part := range strings.SplitSeq(body, ",") {
 		if part == "" {
 			return false
 		}
@@ -466,8 +466,8 @@ func commandName(raw string) string {
 	}
 	name = strings.ToLower(name)
 	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
-		if strings.HasSuffix(name, suffix) {
-			return strings.TrimSuffix(name, suffix)
+		if before, ok := strings.CutSuffix(name, suffix); ok {
+			return before
 		}
 	}
 	return name

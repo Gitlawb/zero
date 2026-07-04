@@ -269,7 +269,7 @@ func summarizeOutput(values ...string) *OutputSummary {
 	contextLines := 0
 	truncated := false
 	for _, value := range values {
-		for _, line := range strings.Split(value, "\n") {
+		for line := range strings.SplitSeq(value, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
 				continue

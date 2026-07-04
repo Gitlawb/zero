@@ -310,14 +310,14 @@ func TestApplyRewindDoesNotDeadlock(t *testing.T) {
 func TestCaptureAndPruneConcurrent(t *testing.T) {
 	store, ws := newCkStore(t)
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		name := filepath.Join(ws, "f"+string(rune('a'+i%10))+".txt")
 		mustWriteFile(t, name, "content-"+string(rune('0'+i%10)))
 	}
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 20; i++ {
+		for i := range 20 {
 			rel := "f" + string(rune('a'+i%10)) + ".txt"
 			if _, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{rel}); err != nil {
 				t.Errorf("CaptureToolCheckpoint: %v", err)
@@ -327,7 +327,7 @@ func TestCaptureAndPruneConcurrent(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if _, err := store.pruneOrphanBlobs("s"); err != nil {
 				t.Errorf("pruneOrphanBlobs: %v", err)
 				return
@@ -372,16 +372,14 @@ func TestSessionFileLockSerializesAcrossStores(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		close(started)
 		// This must block until storeA releases the OS lock.
 		if _, err := storeB.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{}}); err != nil {
 			t.Errorf("storeB AppendEvent: %v", err)
 		}
 		close(done)
-	}()
+	})
 
 	<-started
 	select {

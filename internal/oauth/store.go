@@ -69,7 +69,7 @@ type Status struct {
 	TokenType       string    `json:"tokenType,omitempty"`
 	Account         string    `json:"account,omitempty"`
 	Scopes          []string  `json:"scopes,omitempty"`
-	ExpiresAt       time.Time `json:"expiresAt,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
 	Expired         bool      `json:"expired"`
 }
 
@@ -487,7 +487,7 @@ func FormatStatuses(statuses []Status) string {
 		}
 		b.WriteString("logged in")
 		if st.Account != "" {
-			b.WriteString(" as " + st.Account)
+			b.WriteString(" as ");b.WriteString(st.Account)
 		}
 		if st.HasRefreshToken {
 			b.WriteString(" (refreshable)")

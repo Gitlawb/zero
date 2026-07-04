@@ -83,7 +83,7 @@ func gitSweepCmd(parent context.Context, cwd string, baseline bool) tea.Cmd {
 // "old -> new" (keep the new side); untracked entries are "?? path".
 func parseGitPorcelain(out string) []gitSweepFile {
 	var files []gitSweepFile
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if len(line) < 4 {
 			continue
 		}
@@ -106,8 +106,8 @@ func parseGitPorcelain(out string) []gitSweepFile {
 // cutRename splits a porcelain rename value "old -> new", returning the new
 // path. found is false for ordinary (non-rename) paths.
 func cutRename(path string) (string, string, bool) {
-	if idx := strings.Index(path, " -> "); idx >= 0 {
-		return path[idx+4:], path[:idx], true
+	if before, after, ok := strings.Cut(path, " -> "); ok {
+		return after, before, true
 	}
 	return "", "", false
 }

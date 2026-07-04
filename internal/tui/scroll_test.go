@@ -15,7 +15,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	m.mouseCapture = true
 	m.inputHistory = []string{"old prompt"}
 	m.historyIdx = len(m.inputHistory)
-	for index := 0; index < 12; index++ {
+	for index := range 12 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
@@ -36,7 +36,7 @@ func TestScrollChatClampsOffsetAtTranscriptTop(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 14
-	for index := 0; index < 40; index++ {
+	for index := range 40 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
 	}
 	maxOffset := m.chatMaxScrollOffset()
@@ -116,7 +116,7 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	m.width = 90
 	m.height = 10
 	m.gitBranch = "feat/pinned-header"
-	for index := 0; index < 14; index++ {
+	for index := range 14 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
@@ -161,7 +161,7 @@ func TestEmptySubmitKeepsChatScrollOffset(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 14
-	for index := 0; index < 12; index++ {
+	for index := range 12 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
@@ -189,7 +189,7 @@ func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 20
-	for index := 0; index < 30; index++ {
+	for index := range 30 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
 	}
 

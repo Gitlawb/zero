@@ -1,6 +1,7 @@
 package providerio
 
 import (
+	"maps"
 	"net/http"
 	"strings"
 )
@@ -57,8 +58,6 @@ func CopyHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	copied := make(map[string]string, len(headers))
-	for key, value := range headers {
-		copied[key] = value
-	}
+	maps.Copy(copied, headers)
 	return copied
 }

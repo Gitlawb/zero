@@ -14,7 +14,7 @@ func seqTestStore(t *testing.T) *Store {
 
 func appendN(t *testing.T, store *Store, sid string, n int) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for range n {
 		if _, err := store.AppendEvent(sid, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
 			t.Fatal(err)
 		}

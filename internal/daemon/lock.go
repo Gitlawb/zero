@@ -35,7 +35,7 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 		isAlive = processAlive
 	}
 	// At most two passes: create, or detect-stale-then-retry once.
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			// A failed PID write would leave a malformed lock file that another

@@ -522,7 +522,7 @@ type sandboxCommandFlags struct {
 
 func parseSandboxCommandOptions(args []string, flags sandboxCommandFlags) (sandboxCommandOptions, bool, error) {
 	options := sandboxCommandOptions{}
-	for index := 0; index < len(args); index++ {
+	for index := range args {
 		arg := args[index]
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":

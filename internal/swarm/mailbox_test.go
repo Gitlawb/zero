@@ -98,7 +98,7 @@ func TestMailboxOversizeMessageRejected(t *testing.T) {
 func TestMailboxFullRejected(t *testing.T) {
 	mb := newTestMailbox(t)
 	mb.MaxMessages = 2
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := mb.Send("team", "bob", Message{From: "a", Body: "ok"}); err != nil {
 			t.Fatalf("Send %d: %v", i, err)
 		}
@@ -289,14 +289,12 @@ func TestMailboxConcurrentSends(t *testing.T) {
 	const n = 200
 	var wg sync.WaitGroup
 	var failures atomic.Int32
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			if err := mb.Send("team", "bob", Message{From: "a", Body: "concurrent"}); err != nil {
 				failures.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if f := failures.Load(); f != 0 {

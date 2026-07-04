@@ -235,8 +235,8 @@ func scanSSEPayloads(scanner *bufio.Scanner, handle func(data string) bool, onCo
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimLeft(strings.TrimPrefix(line, "data:"), " \t"))
+		if after, ok := strings.CutPrefix(line, "data:"); ok {
+			dataLines = append(dataLines, strings.TrimLeft(after, " \t"))
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -489,15 +489,15 @@ func UpstreamUnreachable(message string) (string, bool) {
 func upstreamHost(message string) string {
 	if index := strings.Index(message, "\"http"); index >= 0 {
 		rest := message[index+1:]
-		if end := strings.IndexByte(rest, '"'); end >= 0 {
-			if parsed, err := url.Parse(rest[:end]); err == nil && parsed.Host != "" {
+		if before, _, ok := strings.Cut(rest, "\""); ok {
+			if parsed, err := url.Parse(before); err == nil && parsed.Host != "" {
 				return parsed.Host
 			}
 		}
 	}
 	const dialPrefix = "dial tcp "
-	if index := strings.Index(message, dialPrefix); index >= 0 {
-		rest := message[index+len(dialPrefix):]
+	if _, after, ok := strings.Cut(message, dialPrefix); ok {
+		rest := after
 		if end := strings.Index(rest, ": "); end >= 0 {
 			rest = rest[:end]
 		}

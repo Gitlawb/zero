@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,12 +90,7 @@ func cronRun(store *cron.Store, now func() time.Time, args []string, stdout io.W
 
 // contains reports whether ss contains want.
 func contains(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ss, want)
 }
 
 // reconcileOverdue (forever-mode startup, non --catch-up) reschedules jobs that
@@ -291,7 +287,7 @@ func cronTruncate(s string, max int) string {
 // failure detail rides on stdout, so this recovers it for the run record.
 func extractStreamJSONError(output string) string {
 	found := ""
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

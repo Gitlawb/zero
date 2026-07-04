@@ -64,7 +64,7 @@ func TestTranscriptSelectionExtendsAcrossWheelScroll(t *testing.T) {
 	// content, see transcriptViewport.window: start = totalLines-height-offset), so
 	// with overflow content the topmost VISIBLE line is not the transcript's first
 	// line — topmostVisibleTranscriptMouseY (window-aware) finds it correctly.
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	textY := topmostVisibleTranscriptMouseY(t, m)

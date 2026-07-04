@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -127,11 +128,8 @@ func (m model) fileViewResultRows() []transcriptRow {
 		if row.kind != rowToolResult {
 			continue
 		}
-		for _, p := range row.changedFiles {
-			if p == m.fileView.path {
-				rows = append(rows, row)
-				break
-			}
+		if slices.Contains(row.changedFiles, m.fileView.path) {
+			rows = append(rows, row)
 		}
 	}
 	return rows
@@ -238,7 +236,7 @@ func (m model) renderFileViewFull(width int) string {
 func (m model) fileViewChangedLines() map[string]bool {
 	changed := map[string]bool{}
 	for _, row := range m.fileViewResultRows() {
-		for _, line := range strings.Split(row.detail, "\n") {
+		for line := range strings.SplitSeq(row.detail, "\n") {
 			if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
 				continue
 			}

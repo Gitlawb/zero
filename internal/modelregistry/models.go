@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -172,13 +173,7 @@ func (model ModelEntry) Validate() error {
 		}
 		// The default must be one the model actually supports, else
 		// EffectiveReasoningEffort would hand back an unsupported effort.
-		supported := false
-		for _, effort := range model.ReasoningEfforts {
-			if effort == model.DefaultReasoningEffort {
-				supported = true
-				break
-			}
-		}
+		supported := slices.Contains(model.ReasoningEfforts, model.DefaultReasoningEffort)
 		if !supported {
 			return fmt.Errorf("default reasoning effort %q is not in the model's supported efforts", model.DefaultReasoningEffort)
 		}
@@ -271,24 +266,14 @@ func validateCostTiers(tiers []ModelCostTier) error {
 }
 
 func (model ModelEntry) Supports(capability ModelCapability) bool {
-	for _, candidate := range model.Capabilities {
-		if candidate == capability {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(model.Capabilities, capability)
 }
 
 func (model ModelEntry) AllowsProvider(provider ProviderKind) bool {
 	if len(model.APIProviders) == 0 {
 		return model.Provider == provider
 	}
-	for _, candidate := range model.APIProviders {
-		if candidate == provider {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(model.APIProviders, provider)
 }
 
 type Registry struct {

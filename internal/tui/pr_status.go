@@ -268,7 +268,7 @@ func getLocalDiffStats(ctx context.Context, cwd string, baseBranch string, run p
 func parseGitNumStat(output string) (int, int) {
 	additions := 0
 	deletions := 0
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue

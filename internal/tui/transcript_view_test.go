@@ -128,7 +128,7 @@ func TestPgUpDownScrollsDetailedTranscript(t *testing.T) {
 	m := transcriptViewTestModel()
 	m.altScreen = true
 	// Fill the transcript enough to overflow the 30-row viewport.
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "line content", final: true})
 	}
 	m.flushed = len(m.transcript)
@@ -162,7 +162,7 @@ func TestPgUpDownScrollsDetailedTranscript(t *testing.T) {
 func TestUpDownArrowsScrollDetailedTranscript(t *testing.T) {
 	m := transcriptViewTestModel()
 	m.altScreen = true
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "line content", final: true})
 	}
 	m.flushed = len(m.transcript)

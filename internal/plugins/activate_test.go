@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -520,12 +521,7 @@ func writeTestSkill(t *testing.T, dir string, name string, body string) {
 }
 
 func envContains(env []string, want string) bool {
-	for _, entry := range env {
-		if entry == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(env, want)
 }
 
 func containsSubstring(values []string, want string) bool {

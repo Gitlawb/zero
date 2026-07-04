@@ -96,7 +96,7 @@ func sandboxSetupResultText(result SandboxSetupCommandResult) string {
 func sandboxSetupResultLines(result SandboxSetupCommandResult) []string {
 	lines := []string{}
 	for _, text := range []string{result.Output, result.Error} {
-		for _, line := range strings.Split(text, "\n") {
+		for line := range strings.SplitSeq(text, "\n") {
 			line = strings.TrimSpace(line)
 			if line != "" {
 				lines = append(lines, line)

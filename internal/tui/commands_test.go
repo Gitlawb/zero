@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -915,12 +916,7 @@ func (tool commandTestMCPTool) MCPServerName() string {
 }
 
 func commandTestStringSliceContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func commandSuggestionNamesContain(suggestions []commandSuggestion, want string) bool {

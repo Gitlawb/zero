@@ -44,7 +44,7 @@ type Event struct {
 	Status      verify.Status  `json:"status,omitempty"`
 	OK          bool           `json:"ok,omitempty"`
 	StopReason  StopReason     `json:"stopReason,omitempty"`
-	Summary     verify.Summary `json:"summary,omitempty"`
+	Summary     verify.Summary `json:"summary"`
 	StartedAt   string         `json:"startedAt,omitempty"`
 	EndedAt     string         `json:"endedAt,omitempty"`
 	Error       string         `json:"error,omitempty"`

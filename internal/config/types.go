@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -136,9 +137,9 @@ type KeyBindingsConfig struct {
 // background probe is required during startup.
 type LocalControlConfig struct {
 	Enabled      bool                     `json:"enabled,omitempty"`
-	Browser      LocalControlDriverConfig `json:"browser,omitempty"`
-	Desktop      LocalControlDriverConfig `json:"desktop,omitempty"`
-	Terminal     LocalControlDriverConfig `json:"terminal,omitempty"`
+	Browser      LocalControlDriverConfig `json:"browser"`
+	Desktop      LocalControlDriverConfig `json:"desktop"`
+	Terminal     LocalControlDriverConfig `json:"terminal"`
 	ArtifactsDir string                   `json:"artifactsDir,omitempty"`
 	enabledSet   bool
 }
@@ -219,14 +220,14 @@ type FileConfig struct {
 	ActiveProvider string             `json:"activeProvider,omitempty"`
 	Providers      []ProviderProfile  `json:"providers,omitempty"`
 	MaxTurns       int                `json:"maxTurns,omitempty"`
-	MCP            MCPConfig          `json:"mcp,omitempty"`
-	Sandbox        SandboxConfig      `json:"sandbox,omitempty"`
-	Notify         NotifyConfig       `json:"notify,omitempty"`
-	Tools          ToolsConfig        `json:"tools,omitempty"`
-	Swarm          SwarmConfig        `json:"swarm,omitempty"`
-	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
-	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
-	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
+	MCP            MCPConfig          `json:"mcp"`
+	Sandbox        SandboxConfig      `json:"sandbox"`
+	Notify         NotifyConfig       `json:"notify"`
+	Tools          ToolsConfig        `json:"tools"`
+	Swarm          SwarmConfig        `json:"swarm"`
+	Preferences    PreferencesConfig  `json:"preferences"`
+	KeyBindings    KeyBindingsConfig  `json:"keybindings"`
+	LocalControl   LocalControlConfig `json:"localControl"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
@@ -234,13 +235,13 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		ActiveProvider string              `json:"activeProvider,omitempty"`
 		Providers      []ProviderProfile   `json:"providers,omitempty"`
 		MaxTurns       int                 `json:"maxTurns,omitempty"`
-		MCP            MCPConfig           `json:"mcp,omitempty"`
-		Sandbox        SandboxConfig       `json:"sandbox,omitempty"`
-		Notify         NotifyConfig        `json:"notify,omitempty"`
-		Tools          ToolsConfig         `json:"tools,omitempty"`
-		Swarm          SwarmConfig         `json:"swarm,omitempty"`
-		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
-		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
+		MCP            MCPConfig           `json:"mcp"`
+		Sandbox        SandboxConfig       `json:"sandbox"`
+		Notify         NotifyConfig        `json:"notify"`
+		Tools          ToolsConfig         `json:"tools"`
+		Swarm          SwarmConfig         `json:"swarm"`
+		Preferences    PreferencesConfig   `json:"preferences"`
+		KeyBindings    KeyBindingsConfig   `json:"keybindings"`
 		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
 	}
 	raw := rawConfig{
@@ -372,9 +373,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}
-	for name, server := range raw.MCPServers {
-		cfg.MCP.Servers[name] = server
-	}
+	maps.Copy(cfg.MCP.Servers, raw.MCPServers)
 	for name, server := range raw.MCPServersSnake {
 		if _, exists := cfg.MCP.Servers[name]; exists {
 			return fmt.Errorf("MCP server %q is defined in both mcpServers and mcp_servers; mcp_servers would override mcpServers", name)
@@ -596,8 +595,6 @@ func copyStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	copied := make(map[string]string, len(values))
-	for key, value := range values {
-		copied[key] = value
-	}
+	maps.Copy(copied, values)
 	return copied
 }

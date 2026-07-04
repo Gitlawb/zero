@@ -290,10 +290,7 @@ func capDocumentText(text string) (string, bool) {
 	// Reserve room for the marker so the final payload (text + marker) stays at or
 	// under the advertised cap. If the marker alone would not fit, cut to nothing
 	// and return just the marker.
-	cut := MaxDocumentTextBytes - len(documentTruncatedMarker)
-	if cut < 0 {
-		cut = 0
-	}
+	cut := max(MaxDocumentTextBytes-len(documentTruncatedMarker), 0)
 	// Back up to a rune boundary so we never split a multi-byte character.
 	for cut > 0 && !utf8RuneStart(text[cut]) {
 		cut--
@@ -426,10 +423,7 @@ func loadRenderedPage(name string) (zeroruntime.ImageBlock, error) {
 	if len(data) > MaxImageBytes {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("rendered page %s exceeds the per-image limit", filepath.Base(name))
 	}
-	sniffLen := len(data)
-	if sniffLen > 512 {
-		sniffLen = 512
-	}
+	sniffLen := min(len(data), 512)
 	mediaType := zeroruntime.NormalizeImageMediaType(http.DetectContentType(data[:sniffLen]))
 	if mediaType == "" {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("rendered page %s has an unsupported image type", filepath.Base(name))

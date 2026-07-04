@@ -38,7 +38,7 @@ type Manifest struct {
 	ResolvedTools []string  `json:"resolvedTools,omitempty"`
 	Location      Location  `json:"location"`
 	FilePath      string    `json:"filePath"`
-	LastModified  time.Time `json:"lastModified,omitempty"`
+	LastModified  time.Time `json:"lastModified"`
 	Warnings      []string  `json:"warnings,omitempty"`
 }
 

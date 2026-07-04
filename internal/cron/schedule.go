@@ -78,7 +78,7 @@ func parseField(field string, min, max int, names map[string]int) (uint64, bool,
 		return full(min, max), true, nil
 	}
 	var set uint64
-	for _, item := range strings.Split(field, ",") {
+	for item := range strings.SplitSeq(field, ",") {
 		if item == "" {
 			return 0, false, fmt.Errorf("empty list element in %q", field)
 		}
@@ -94,9 +94,9 @@ func parseField(field string, min, max int, names map[string]int) (uint64, bool,
 func parseItem(item string, min, max int, names map[string]int) (uint64, error) {
 	rangePart := item
 	step := 1
-	if slash := strings.IndexByte(item, '/'); slash >= 0 {
-		rangePart = item[:slash]
-		stepStr := item[slash+1:]
+	if before, after, ok := strings.Cut(item, "/"); ok {
+		rangePart = before
+		stepStr := after
 		n, err := strconv.Atoi(stepStr)
 		if err != nil || n <= 0 {
 			return 0, fmt.Errorf("invalid step %q in %q", stepStr, item)

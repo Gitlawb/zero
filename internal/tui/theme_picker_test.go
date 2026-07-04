@@ -151,7 +151,7 @@ func TestThemePickerPreviewsOnMove(t *testing.T) {
 	m = updated.(model)
 
 	// Each Down moves to the next theme and live-applies its palette; Up follows back.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		updated, _ = m.Update(testKey(tea.KeyDown))
 		m = updated.(model)
 		assertPreviewMatchesSelection(t, m)

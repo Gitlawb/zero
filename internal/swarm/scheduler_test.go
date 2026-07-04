@@ -36,7 +36,7 @@ func TestSchedulerFiresAndCountsRuns(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		ticks <- time.Time{}
 		want := i + 1
 		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == want })
@@ -142,7 +142,7 @@ func TestSchedulerCloseStopsJobs(t *testing.T) {
 	sched := sw.Scheduler()
 	ticks := make(chan time.Time)
 	sched.newTicker = testTicker(ticks)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
@@ -186,7 +186,7 @@ func TestSchedulerDailyRecomputesNextDelay(t *testing.T) {
 		Schedule{Every: 24 * time.Hour, Daily: true, Hour: 11, Minute: 0, FirstDelay: nextDailyDelay(base, 11, 0), MaxRuns: 2}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		ticks <- time.Time{}
 		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == i+1 })
 	}

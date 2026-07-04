@@ -124,7 +124,7 @@ func runProvidersSetup(args []string, stdout io.Writer, stderr io.Writer, deps a
 
 func parseProviderUseArgs(args []string) (providerUseOptions, bool, error) {
 	options := providerUseOptions{}
-	for index := 0; index < len(args); index++ {
+	for index := range args {
 		arg := args[index]
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":

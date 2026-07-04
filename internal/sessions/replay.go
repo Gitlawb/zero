@@ -158,10 +158,7 @@ func (store *Store) PlanCompaction(sessionID string, options CompactionOptions) 
 	if maxPromptChars <= 0 {
 		maxPromptChars = defaultCompactionMaxPromptChars
 	}
-	split := len(events) - preserveLast
-	if split < 0 {
-		split = 0
-	}
+	split := max(len(events)-preserveLast, 0)
 	compactable := events[:split]
 	preserved := events[split:]
 	prompt, truncated := buildCompactionPrompt(compactable, maxPromptChars)

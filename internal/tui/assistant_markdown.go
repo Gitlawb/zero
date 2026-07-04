@@ -875,7 +875,7 @@ func markdownTableCellWidthParts(cell string) []string {
 		if part.bullet {
 			line = "- " + line
 		}
-		for _, segment := range strings.Split(line, "\n") {
+		for segment := range strings.SplitSeq(line, "\n") {
 			if segment != "" {
 				lines = append(lines, segment)
 			}
@@ -971,8 +971,8 @@ func isMarkdownListLine(trimmed string) bool {
 
 func renderMarkdownStandaloneLine(line string) string {
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, ">") {
-		return "│ " + strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+	if after, ok := strings.CutPrefix(trimmed, ">"); ok {
+		return "│ " + strings.TrimSpace(after)
 	}
 	return strings.TrimRight(line, " ")
 }
@@ -987,7 +987,7 @@ func wrapMarkdownInline(text string, measure int) []string {
 		measure = 1
 	}
 	out := []string{}
-	for _, paragraph := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for paragraph := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(paragraph) == "" {
 			out = append(out, "")
 			continue
@@ -1063,7 +1063,7 @@ func wrapMarkdownInlineWithPrefixes(firstPrefix string, continuationPrefix strin
 func markdownInlineWords(segments []markdownInlineSegment) []markdownInlineSegment {
 	words := []markdownInlineSegment{}
 	for _, segment := range segments {
-		for _, word := range strings.Fields(segment.text) {
+		for word := range strings.FieldsSeq(segment.text) {
 			words = append(words, markdownInlineSegment{text: word, bold: segment.bold})
 		}
 	}
@@ -1246,7 +1246,7 @@ func markdownIsWordRune(r rune) bool {
 
 func longestMarkdownWordWidth(text string) int {
 	longest := 0
-	for _, word := range strings.Fields(text) {
+	for word := range strings.FieldsSeq(text) {
 		if width := lipgloss.Width(word); width > longest {
 			longest = width
 		}

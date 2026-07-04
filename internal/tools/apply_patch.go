@@ -178,7 +178,7 @@ func patchHeaderPaths(patch string) []string {
 	var paths []string
 	oldRemaining, newRemaining := 0, 0
 	inHunk := false
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
 		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
 			switch {
 			case strings.HasPrefix(line, "-"):
@@ -240,7 +240,7 @@ func parseHunkCounts(line string) (int, int) {
 		rangeSection = before // drop the section heading after the closing "@@"
 	}
 	old, next := 0, 0
-	for _, field := range strings.Fields(rangeSection) {
+	for field := range strings.FieldsSeq(rangeSection) {
 		switch {
 		case strings.HasPrefix(field, "-"):
 			old = hunkCount(field[1:])

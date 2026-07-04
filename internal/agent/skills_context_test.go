@@ -8,7 +8,7 @@ import (
 
 func TestSkillsContextCapsLongList(t *testing.T) {
 	skills := make([]SkillInfo, 0, 40)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		n := strconv.Itoa(i)
 		skills = append(skills, SkillInfo{Name: "skill-" + n, Description: "does something useful, number " + n})
 	}

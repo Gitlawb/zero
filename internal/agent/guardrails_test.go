@@ -293,7 +293,7 @@ func TestRunInjectsStalePlanReminderAfterManyToolCalls(t *testing.T) {
 	turns := [][]zeroruntime.StreamEvent{
 		toolTurn("plan-1", "update_plan", `{"plan":[{"content":"step one"}]}`),
 	}
-	for i := 0; i < staleToolCallThreshold+2; i++ {
+	for range staleToolCallThreshold + 2 {
 		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
 	}
 	turns = append(turns, textTurn("done"))
@@ -327,7 +327,7 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 	}
 	// Enough tool calls to exceed the threshold by a wide margin; the reminder
 	// must fire once for the interval, not on every subsequent turn.
-	for i := 0; i < staleToolCallThreshold*2; i++ {
+	for range staleToolCallThreshold * 2 {
 		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
 	}
 	turns = append(turns, textTurn("done"))
@@ -357,7 +357,7 @@ func TestRunInjectsToolOnlyProgressReminder(t *testing.T) {
 	registry.Register(tools.NewReadFileTool(root))
 
 	turns := make([][]zeroruntime.StreamEvent, 0, toolOnlyProgressReminderAt+1)
-	for i := 0; i < toolOnlyProgressReminderAt; i++ {
+	for range toolOnlyProgressReminderAt {
 		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
 	}
 	turns = append(turns, textTurn("done"))
@@ -408,7 +408,7 @@ func repeatedFlakyTurns(n int) [][]zeroruntime.StreamEvent {
 		{Type: zeroruntime.StreamEventDone},
 	}
 	turns := make([][]zeroruntime.StreamEvent, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		turns = append(turns, turn)
 	}
 	return turns

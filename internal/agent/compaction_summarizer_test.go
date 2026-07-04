@@ -109,7 +109,7 @@ func TestSummarizeWithFallbackChunksOnContextLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("summarizeWithFallback failed: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if !strings.Contains(summary, fmt.Sprintf("msg-%d", i)) {
 			t.Fatalf("combined summary missing msg-%d: %q", i, summary)
 		}

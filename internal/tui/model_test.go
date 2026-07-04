@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2505,7 +2506,7 @@ func findTranscriptRow(rows []transcriptRow, kind rowKind) (transcriptRow, bool)
 
 func transcriptHasMarkedModelEntry(rows []transcriptRow) bool {
 	for _, row := range rows {
-		for _, line := range strings.Split(row.text, "\n") {
+		for line := range strings.SplitSeq(row.text, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "* ") && strings.Contains(trimmed, " (") {
 				return true
@@ -2516,12 +2517,7 @@ func transcriptHasMarkedModelEntry(rows []transcriptRow) bool {
 }
 
 func stringSliceContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func testPromptPermissionEvent() agent.PermissionEvent {

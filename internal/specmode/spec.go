@@ -55,7 +55,7 @@ func SaveDraft(options SaveOptions) (SavedSpec, error) {
 		return SavedSpec{}, fmt.Errorf("create spec directory: %w", err)
 	}
 
-	for suffix := 0; suffix < 1000; suffix++ {
+	for suffix := range 1000 {
 		id := date + "-" + slug
 		if suffix > 0 {
 			id = fmt.Sprintf("%s-%s-%d", date, slug, suffix+1)

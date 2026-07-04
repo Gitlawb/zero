@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +173,7 @@ func TestRunSummarizesPlainCommandErrors(t *testing.T) {
 
 func TestRunFailureSummaryTruncatesOnlyOnOverflow(t *testing.T) {
 	lines := []string{}
-	for index := 0; index < maxOutputSummaryLines; index++ {
+	for range maxOutputSummaryLines {
 		lines = append(lines, "--- FAIL: TestExact (0.00s)")
 	}
 	exact := summarizeOutput(strings.Join(lines, "\n"))
@@ -327,12 +328,7 @@ func checkIDs(checks []Check) []string {
 }
 
 func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func checksByID(checks []Check) map[string]Check {

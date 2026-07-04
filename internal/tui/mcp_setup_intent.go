@@ -112,7 +112,7 @@ func promptContainsSetupEndpoint(prompt string, endpoint string) bool {
 }
 
 func firstURLWithHost(value string, host string) string {
-	for _, field := range strings.Fields(value) {
+	for field := range strings.FieldsSeq(value) {
 		candidate := strings.Trim(field, `"'()[]<>.,;`)
 		parsed, err := url.Parse(candidate)
 		if err == nil && strings.EqualFold(parsed.Host, host) {

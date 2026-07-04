@@ -29,7 +29,7 @@ func TestAuditStoreSequenceConcurrent(t *testing.T) {
 	var mu sync.Mutex
 	seqs := make([]int, 0, storeCount*perStore)
 	for _, st := range stores {
-		for i := 0; i < perStore; i++ {
+		for range perStore {
 			wg.Add(1)
 			go func(st *AuditStore) {
 				defer wg.Done()

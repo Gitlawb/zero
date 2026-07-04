@@ -33,7 +33,7 @@ type Task struct {
 	Status         Status    `json:"status"`
 	OutputFile     string    `json:"outputFile"`
 	StartedAt      time.Time `json:"startedAt"`
-	CompletedAt    time.Time `json:"completedAt,omitempty"`
+	CompletedAt    time.Time `json:"completedAt"`
 	ExitCode       int       `json:"exitCode,omitempty"`
 }
 

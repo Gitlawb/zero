@@ -262,7 +262,7 @@ func parseStatus(status string) []FileChange {
 
 func parseNameStatus(output string) []FileChange {
 	files := []FileChange{}
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -469,10 +469,7 @@ func truncateString(value string, maxBytes int) (string, bool) {
 		marker := "\n" + redaction.RedactedSecret
 		budget := maxBytes - len(suffix) - len(marker)
 		if budget <= 0 {
-			allowed := maxBytes - len(suffix)
-			if allowed > len(redaction.RedactedSecret) {
-				allowed = len(redaction.RedactedSecret)
-			}
+			allowed := min(maxBytes-len(suffix), len(redaction.RedactedSecret))
 			return redaction.RedactedSecret[:allowed] + suffix, true
 		}
 		return cutGitRuneBoundary(value, budget) + marker + suffix, true

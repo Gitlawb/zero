@@ -8,7 +8,7 @@ import (
 
 func ParseTraceEventKeys(stdout string) []string {
 	seen := map[string]bool{}
-	for _, line := range strings.Split(stdout, "\n") {
+	for line := range strings.SplitSeq(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

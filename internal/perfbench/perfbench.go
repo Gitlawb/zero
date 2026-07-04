@@ -403,10 +403,7 @@ func createWarning(metric string, statistic string, observed float64, threshold 
 }
 
 func percentile(sortedSamples []float64, percentileValue float64) float64 {
-	index := int(math.Ceil((percentileValue/100)*float64(len(sortedSamples)))) - 1
-	if index < 0 {
-		index = 0
-	}
+	index := max(int(math.Ceil((percentileValue/100)*float64(len(sortedSamples))))-1, 0)
 	if index >= len(sortedSamples) {
 		index = len(sortedSamples) - 1
 	}

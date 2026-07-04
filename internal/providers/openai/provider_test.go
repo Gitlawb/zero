@@ -945,17 +945,17 @@ func TestStreamCompletionJoinsMultiLineDataFields(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 	events := collectProviderEvents(t, provider)
-	var text string
+	var text strings.Builder
 	for _, e := range events {
 		if e.Type == zeroruntime.StreamEventText {
-			text += e.Content
+			text.WriteString(e.Content)
 		}
 		if e.Type == zeroruntime.StreamEventError {
 			t.Fatalf("multi-line data field produced an error: %q", e.Error)
 		}
 	}
-	if text != "joined" {
-		t.Fatalf("text = %q, want %q (continuation data: line dropped?)", text, "joined")
+	if text.String() != "joined" {
+		t.Fatalf("text = %q, want %q (continuation data: line dropped?)", text.String(), "joined")
 	}
 }
 

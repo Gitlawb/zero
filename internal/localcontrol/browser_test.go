@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -219,12 +220,7 @@ func quoteJSON(value string) string {
 }
 
 func envContains(env []string, want string) bool {
-	for _, item := range env {
-		if item == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(env, want)
 }
 
 func envValue(env []string, key string) string {

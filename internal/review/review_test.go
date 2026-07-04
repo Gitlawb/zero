@@ -113,7 +113,7 @@ func TestParseChangedFilesSortsStableList(t *testing.T) {
 
 func TestBuildMarkdownCapsChangedFiles(t *testing.T) {
 	files := make([]string, 0, 14)
-	for index := 0; index < 14; index++ {
+	for index := range 14 {
 		files = append(files, fmt.Sprintf("file-%02d.go", index))
 	}
 	markdown := BuildMarkdown(SummaryInput{

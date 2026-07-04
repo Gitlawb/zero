@@ -134,12 +134,10 @@ func (s *Server) Serve() error {
 			}
 		}
 		s.trackConn(conn)
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
+		s.wg.Go(func() {
 			defer s.untrackConn(conn)
 			s.handleConn(conn)
-		}()
+		})
 	}
 }
 

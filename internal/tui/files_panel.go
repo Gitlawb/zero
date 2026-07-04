@@ -14,6 +14,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -125,7 +126,7 @@ func perFileDiffStats(detail string) map[string][2]int {
 		}
 		return strings.TrimPrefix(path, prefix)
 	}
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		switch {
 		case strings.HasPrefix(line, "--- "):
 			oldPath = normalize(line, "a/")
@@ -323,12 +324,7 @@ func (m model) rowTouchesSelectedFile(row transcriptRow) bool {
 	if m.selectedFile == "" || row.kind != rowToolResult {
 		return false
 	}
-	for _, path := range row.changedFiles {
-		if path == m.selectedFile {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(row.changedFiles, m.selectedFile)
 }
 
 // lastRowIndexForFile returns the transcript index of the most recent
@@ -339,10 +335,8 @@ func (m model) lastRowIndexForFile(path string) int {
 		if row.kind != rowToolResult {
 			continue
 		}
-		for _, p := range row.changedFiles {
-			if p == path {
-				return i
-			}
+		if slices.Contains(row.changedFiles, path) {
+			return i
 		}
 	}
 	return -1

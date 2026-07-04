@@ -35,7 +35,7 @@ type recapGeneratedMsg struct {
 // cleanGeneratedRecap normalizes a raw model response into a single recap line:
 // the first non-empty line, surrounding markup stripped.
 func cleanGeneratedRecap(raw string) string {
-	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(raw), "\n") {
 		if trimmed := strings.Trim(line, " \t\r\n\"'`*#"); trimmed != "" {
 			return trimmed
 		}

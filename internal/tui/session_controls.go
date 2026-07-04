@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -175,12 +176,7 @@ func (m model) cycleReasoningEffort() (model, tea.Cmd) {
 }
 
 func reasoningEffortAllowed(efforts []modelregistry.ReasoningEffort, want modelregistry.ReasoningEffort) bool {
-	for _, effort := range efforts {
-		if effort == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(efforts, want)
 }
 
 // reasoningEffortIndex returns the position of want in efforts, or -1. Sibling
@@ -313,12 +309,7 @@ func (m model) selfCorrectText() string {
 }
 
 func responseStyleAllowed(value string) bool {
-	for _, style := range responseStyles {
-		if value == style {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(responseStyles, value)
 }
 
 func (m model) handleCompactCommand(args string) (model, string, tea.Cmd) {

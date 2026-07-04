@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -32,12 +33,7 @@ func suggestionNames(m model) []string {
 }
 
 func contains(names []string, want string) bool {
-	for _, name := range names {
-		if name == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(names, want)
 }
 
 func TestSuggestionsSurfaceMatchingCommands(t *testing.T) {
@@ -330,7 +326,7 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	m.width, m.height = 96, 32
 	m.altScreen = true
 	m.headerPrinted = true
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+i)))
 	}
 	m.chatScrollOffset = 12
@@ -810,7 +806,7 @@ func TestFileSuggestionsBoundCountsDirectories(t *testing.T) {
 	root := t.TempDir()
 	// Many empty directories sort before "zzz" lexically, so WalkDir visits them
 	// first and exhausts the budget before reaching the matching file.
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if err := os.MkdirAll(filepath.Join(root, "dir"+string(rune('a'+i%26))+string(rune('0'+i/26))), 0o755); err != nil {
 			t.Fatal(err)
 		}

@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -208,12 +209,7 @@ func TestDefaultRegistryReasoningModelsHaveDefaultEffort(t *testing.T) {
 }
 
 func reasoningEffortAllowedIn(efforts []ReasoningEffort, want ReasoningEffort) bool {
-	for _, effort := range efforts {
-		if effort == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(efforts, want)
 }
 
 func TestDefaultRegistryUpgradeTargets(t *testing.T) {

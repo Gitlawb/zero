@@ -268,10 +268,7 @@ func (m model) renderPlanPanel(width int) string {
 
 	showSteps := state.expanded || !state.isComplete()
 	if showSteps {
-		maxContent := width - 15
-		if maxContent < 4 {
-			maxContent = 4
-		}
+		maxContent := max(width-15, 4)
 		for _, step := range state.steps {
 			lines = append(lines, renderPlanStepLine(step, now, maxContent))
 		}
@@ -347,10 +344,7 @@ func (m model) renderPlanSummaryLine(width int) string {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN · %d/%d complete", done, total))
 	}
 	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinnerGlyph(), done, total)
-	room := width - len([]rune(label)) - 1
-	if room < 4 {
-		room = 4
-	}
+	room := max(width-len([]rune(label))-1, 4)
 	return zeroTheme.accent.Render(label + truncateStep(current, room))
 }
 

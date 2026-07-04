@@ -155,12 +155,10 @@ func ageDimLine(line string, bornAt, now time.Time, base lipgloss.Style) string 
 	if bornAt.IsZero() {
 		return base.Render(line)
 	}
-	age := now.Sub(bornAt)
-	if age < 0 {
+	age := max(now.Sub(bornAt),
 		// Clock skew (e.g. the test fixture hand-codes bornAt in the
 		// future). Treat as freshest.
-		age = 0
-	}
+		0)
 	if age >= streamingFadeDuration {
 		return base.Render(line)
 	}

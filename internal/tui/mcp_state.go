@@ -441,8 +441,8 @@ func mcpToolName(registryName string, serverName string) string {
 	}
 	if serverName != "" {
 		prefix := mcpStateSanitizeToolNamePart(serverName) + "_"
-		if strings.HasPrefix(rest, prefix) {
-			return strings.TrimPrefix(rest, prefix)
+		if after, ok0 := strings.CutPrefix(rest, prefix); ok0 {
+			return after
 		}
 	}
 	if _, name, ok := strings.Cut(rest, "_"); ok {

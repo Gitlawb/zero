@@ -31,8 +31,8 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	// payload.
 	var cardPayload string
 	for _, row := range next.transcript {
-		if strings.HasPrefix(row.text, "\x00command-card\x00") {
-			cardPayload = strings.TrimPrefix(row.text, "\x00command-card\x00")
+		if after, ok := strings.CutPrefix(row.text, "\x00command-card\x00"); ok {
+			cardPayload = after
 			break
 		}
 	}

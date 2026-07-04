@@ -495,7 +495,7 @@ func (t *collectTool) RunWithOptions(ctx context.Context, args map[string]any, _
 		if task.Err != "" {
 			line += "\n      error: " + collapse(task.Err)
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(line);b.WriteString("\n")
 	}
 	out := strings.TrimRight(b.String(), "\n")
 	res := okResult(out, "swarm", fmt.Sprintf("%d task(s)", len(tasks)))

@@ -28,10 +28,8 @@ func TestAppendEventUnlessExistsIsAtomic(t *testing.T) {
 	var wg sync.WaitGroup
 	var appended int32
 	start := make(chan struct{})
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			<-start
 			_, ok, err := store.AppendEventUnlessExists("s", AppendEventInput{Type: once, Payload: map[string]any{"n": 1}}, exists)
 			if err != nil {
@@ -41,7 +39,7 @@ func TestAppendEventUnlessExistsIsAtomic(t *testing.T) {
 			if ok {
 				atomic.AddInt32(&appended, 1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

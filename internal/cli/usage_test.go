@@ -171,7 +171,6 @@ func TestRunUsageEmptySessionRejected(t *testing.T) {
 		{name: "session-id spaced empty", args: []string{"usage", "report", "--session-id", ""}, flag: "--session-id"},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
@@ -286,7 +285,6 @@ func TestRunUsageInvalidSince(t *testing.T) {
 		{"2026-06-01", false}, // valid
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run("since="+tc.since, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			exitCode := runWithDeps([]string{"usage", "report", "--since", tc.since}, &stdout, &stderr, appDeps{

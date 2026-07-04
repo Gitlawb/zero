@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -590,12 +591,7 @@ func filterJSONWriteRoots(value any, excluded map[string]struct{}) any {
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {

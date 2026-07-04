@@ -270,11 +270,11 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 }
 
 func fetchDataRelease(endpoint string) (Release, error) {
-	comma := strings.Index(endpoint, ",")
-	if comma == -1 {
+	_, after, ok := strings.Cut(endpoint, ",")
+	if !ok {
 		return Release{}, fmt.Errorf("invalid data update endpoint")
 	}
-	payload, err := url.QueryUnescape(endpoint[comma+1:])
+	payload, err := url.QueryUnescape(after)
 	if err != nil {
 		return Release{}, err
 	}

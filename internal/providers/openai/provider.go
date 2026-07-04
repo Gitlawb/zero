@@ -108,10 +108,7 @@ func New(options Options) (*Provider, error) {
 	// pooled connection (the macOS-only "both providers stall" bug).
 	httpClient := providerio.HTTPClient(options.HTTPClient)
 
-	maxTokens := options.MaxTokens
-	if maxTokens < 0 {
-		maxTokens = 0
-	}
+	maxTokens := max(options.MaxTokens, 0)
 
 	return &Provider{
 		apiKey:            options.APIKey,

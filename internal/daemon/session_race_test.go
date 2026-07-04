@@ -12,15 +12,13 @@ import (
 // "send on closed channel"). Reverting that lock-hold makes this test panic/race;
 // with it, it passes. Run with: go test -race ./internal/daemon
 func TestSessionLineRaceWithCancelAndFinish(t *testing.T) {
-	for iter := 0; iter < 30; iter++ {
+	for range 30 {
 		sess := newSession("s", "", 0)
 		sess.Started()
 
 		stop := make(chan struct{})
 		var pump sync.WaitGroup
-		pump.Add(1)
-		go func() {
-			defer pump.Done()
+		pump.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -29,19 +27,17 @@ func TestSessionLineRaceWithCancelAndFinish(t *testing.T) {
 					sess.Line("x") // hammers the broadcast/send path
 				}
 			}
-		}()
+		})
 
 		// Repeatedly attach, spin up a drainer, and cancel while Line runs. Each
 		// cancel closes the subscriber channel under s.mu, racing the pump's send.
 		var drainers sync.WaitGroup
-		for i := 0; i < 150; i++ {
+		for range 150 {
 			_, live, cancel := sess.Subscribe()
-			drainers.Add(1)
-			go func() {
-				defer drainers.Done()
+			drainers.Go(func() {
 				for range live {
 				}
-			}()
+			})
 			cancel()
 		}
 

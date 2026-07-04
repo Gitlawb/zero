@@ -1166,11 +1166,11 @@ func (m model) setupView(width int) string {
 	topGap := maxInt(0, (height-len(content)-3)/2)
 	bottomGap := maxInt(0, height-topGap-len(content)-2)
 	lines := make([]string, 0, height)
-	for i := 0; i < topGap; i++ {
+	for range topGap {
 		lines = append(lines, "")
 	}
 	lines = append(lines, centerSetupLines(content, width)...)
-	for i := 0; i < bottomGap; i++ {
+	for range bottomGap {
 		lines = append(lines, "")
 	}
 	lines = append(lines, centerLine(fitStyledLine(progress, width), width))
@@ -1348,13 +1348,7 @@ func setupModelMaxVisible(height int, total int) int {
 	if total <= 0 {
 		return 0
 	}
-	maxVisible := height - 12
-	if maxVisible < 5 {
-		maxVisible = 5
-	}
-	if maxVisible > 18 {
-		maxVisible = 18
-	}
+	maxVisible := min(max(height-12, 5), 18)
 	if maxVisible > total {
 		return total
 	}
@@ -1559,10 +1553,7 @@ func setupProviderMaxVisible(height int, total int) int {
 	if total <= 0 {
 		return 0
 	}
-	maxVisible := height - 8
-	if maxVisible < 6 {
-		maxVisible = 6
-	}
+	maxVisible := max(height-8, 6)
 	if maxVisible > total {
 		return total
 	}

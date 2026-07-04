@@ -72,10 +72,7 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
 	}
 
-	sniffLen := len(data)
-	if sniffLen > 512 {
-		sniffLen = 512
-	}
+	sniffLen := min(len(data), 512)
 	mediaType := zeroruntime.NormalizeImageMediaType(http.DetectContentType(data[:sniffLen]))
 	if mediaType == "" {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("unsupported image type for %s (allowed: png, jpeg, gif, webp)", path)

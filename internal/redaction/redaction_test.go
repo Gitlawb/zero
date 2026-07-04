@@ -2,6 +2,7 @@ package redaction
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -133,10 +134,8 @@ func containsCircular(v any) bool {
 			}
 		}
 	case []any:
-		for _, val := range t {
-			if containsCircular(val) {
-				return true
-			}
+		if slices.ContainsFunc(t, containsCircular) {
+			return true
 		}
 	}
 	return false

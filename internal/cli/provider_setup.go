@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -374,7 +375,7 @@ func parseProviderAddArgs(args []string) (providerAddOptions, bool, error) {
 
 func parseProviderCheckArgs(args []string) (providerCheckOptions, bool, error) {
 	options := providerCheckOptions{}
-	for index := 0; index < len(args); index++ {
+	for index := range args {
 		arg := args[index]
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":
@@ -541,8 +542,6 @@ func copyProviderHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	copied := make(map[string]string, len(headers))
-	for key, value := range headers {
-		copied[key] = value
-	}
+	maps.Copy(copied, headers)
 	return copied
 }

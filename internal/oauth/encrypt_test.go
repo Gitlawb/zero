@@ -16,7 +16,7 @@ func TestLoadOrCreateSecretConcurrentConverges(t *testing.T) {
 	secrets := make([][]byte, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -26,7 +26,7 @@ func TestLoadOrCreateSecretConcurrentConverges(t *testing.T) {
 	wg.Wait()
 	// Exactly one creator wins; every racer must converge on the same on-disk
 	// secret rather than reading a half-published file or orphaning its own.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if errs[i] != nil {
 			t.Fatalf("goroutine %d: %v", i, errs[i])
 		}

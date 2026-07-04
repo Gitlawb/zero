@@ -284,10 +284,7 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	// Description truncation. The header reserves room for the icon, the name,
 	// the two " · " separators, the elapsed string, and a safety margin. Clamp
 	// to zero so very long names never underflow.
-	descMax := width - len(info.name) - 25
-	if descMax < 0 {
-		descMax = 0
-	}
+	descMax := max(width-len(info.name)-25, 0)
 	description := truncateRunes(info.description, descMax)
 
 	// Header line: icon + name + " · " + description + " · " + elapsed.
@@ -340,10 +337,7 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 
 	// Optional error detail line.
 	if info.status == specialistError && strings.TrimSpace(info.errorMsg) != "" {
-		errMax := width - 4
-		if errMax < 1 {
-			errMax = 1
-		}
+		errMax := max(width-4, 1)
 		errMsg := truncateRunes(strings.TrimSpace(info.errorMsg), errMax)
 		lines = append(lines, zeroTheme.red.Render("  "+errMsg))
 	}

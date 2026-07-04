@@ -118,16 +118,10 @@ func keybindingKeyColumnWidth(groups []keybindingGroup) int {
 // to fit innerWidth.
 func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) string {
 	keys := binding.keys
-	pad := keyColumn - len([]rune(keys))
-	if pad < 0 {
-		pad = 0
-	}
+	pad := max(keyColumn-len([]rune(keys)), 0)
 	keyCell := zeroTheme.ink.Render(keys) + strings.Repeat(" ", pad)
 	// Indent(2) + keyCell + gap(2) consumed before the description.
-	descBudget := innerWidth - 2 - keyColumn - 2
-	if descBudget < 4 {
-		descBudget = 4
-	}
+	descBudget := max(innerWidth-2-keyColumn-2, 4)
 	desc := zeroTheme.muted.Render(truncateRunes(binding.desc, descBudget))
 	return "  " + keyCell + "  " + desc
 }
@@ -145,12 +139,6 @@ func (m model) renderKeybindingHelpOverlay(width int) string {
 // descriptions don't truncate next to the key column, capped, and never wider
 // than the terminal.
 func keybindingHelpOverlayWidth(terminalWidth int) int {
-	width := 76
-	if terminalWidth-4 < width {
-		width = terminalWidth - 4
-	}
-	if width < 24 {
-		width = 24
-	}
+	width := max(min(terminalWidth-4, 76), 24)
 	return width
 }

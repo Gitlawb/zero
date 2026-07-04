@@ -91,7 +91,7 @@ func TestReadEventsToleratesTornTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
 			t.Fatalf("AppendEvent: %v", err)
 		}
@@ -465,7 +465,7 @@ func TestStoreAppendEventSerializesConcurrentWriters(t *testing.T) {
 	const total = 24
 	var wg sync.WaitGroup
 	errs := make(chan error, total)
-	for index := 0; index < total; index++ {
+	for index := range total {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()

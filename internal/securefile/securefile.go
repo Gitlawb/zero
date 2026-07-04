@@ -106,7 +106,7 @@ func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 func createSecretFile(path string) ([]byte, error) {
 	lockPath := path + ".lock"
 	var lastErr error
-	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
+	for range secretRetryAttempts {
 		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_ = lock.Close()
@@ -165,7 +165,7 @@ func writeNewSecretFile(path string) ([]byte, error) {
 
 func readSecretFileRetry(path string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
+	for range secretRetryAttempts {
 		data, err := readSecretFile(path)
 		if !isTransientSecretAccessError(err) {
 			return data, err

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -316,16 +317,14 @@ func appendAgentEvalModel(models []string, value string) []string {
 	if value == "" {
 		return models
 	}
-	for _, model := range models {
-		if model == value {
-			return models
-		}
+	if slices.Contains(models, value) {
+		return models
 	}
 	return append(models, value)
 }
 
 func appendAgentEvalModels(models []string, value string) []string {
-	for _, model := range strings.Split(value, ",") {
+	for model := range strings.SplitSeq(value, ",") {
 		models = appendAgentEvalModel(models, model)
 	}
 	return models

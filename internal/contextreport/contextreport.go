@@ -126,10 +126,7 @@ func Build(options Options) (Report, error) {
 	report.UsedTokens = used
 	if report.ContextWindow > 0 {
 		report.UsedFraction = float64(report.UsedTokens) / float64(report.ContextWindow)
-		report.FreeTokens = report.ContextWindow - report.UsedTokens
-		if report.FreeTokens < 0 {
-			report.FreeTokens = 0
-		}
+		report.FreeTokens = max(report.ContextWindow-report.UsedTokens, 0)
 	}
 	categories = append(categories, category(CategoryFree, "Free", report.FreeTokens, report.ContextWindow))
 	report.Categories = categories

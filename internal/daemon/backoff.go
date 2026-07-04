@@ -21,7 +21,7 @@ func backoffBase(attempt int) time.Duration {
 	// Shift carefully: cap before overflow. 2^attempt * 1s exceeds the cap well
 	// before any int64 overflow (cap is 5m), so clamp once it would exceed it.
 	d := backoffUnit
-	for i := 0; i < attempt; i++ {
+	for range attempt {
 		d *= 2
 		if d >= backoffCap {
 			return backoffCap

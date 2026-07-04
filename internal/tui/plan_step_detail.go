@@ -517,7 +517,7 @@ func planCommandLines(items []planStepWork) []string {
 // +++/--- file headers. Output that isn't a diff (e.g. a written file's body or
 // command stdout) yields no counts.
 func planDiffStat(detail string) (added, removed int) {
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
 			continue
@@ -538,7 +538,7 @@ func planDetailExcerpt(detail string, max int) []string {
 		return nil
 	}
 	var kept []string
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -621,7 +621,7 @@ func planWrapText(s string, width int) []string {
 		width = 8
 	}
 	var out []string
-	for _, para := range strings.Split(strings.TrimSpace(s), "\n") {
+	for para := range strings.SplitSeq(strings.TrimSpace(s), "\n") {
 		words := strings.Fields(para)
 		if len(words) == 0 {
 			continue

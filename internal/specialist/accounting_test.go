@@ -299,12 +299,10 @@ func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
 	// Many finishers race the same (child, run) stop. Exactly one event must land;
 	// run under -race to also catch the check-then-append data race.
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			executor.recordSpecialistStop(input, summary, "success", 0, nil, true)
-		}()
+		})
 	}
 	wg.Wait()
 

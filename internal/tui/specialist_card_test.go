@@ -189,7 +189,7 @@ func TestRenderSpecialistCard(t *testing.T) {
 	}
 	plain := ansiPattern.ReplaceAllString(got, "")
 	// Left-rule: every line starts with │.
-	for _, line := range strings.Split(plain, "\n") {
+	for line := range strings.SplitSeq(plain, "\n") {
 		if !strings.HasPrefix(line, "│") {
 			t.Errorf("card line %q should start with │ (left-rule)", line)
 		}
@@ -276,7 +276,7 @@ func TestRenderLeftRuleCard(t *testing.T) {
 	}
 	plain := ansiPattern.ReplaceAllString(got, "")
 	// Left rule present on every line.
-	for _, line := range strings.Split(plain, "\n") {
+	for line := range strings.SplitSeq(plain, "\n") {
 		if !strings.HasPrefix(line, "│") {
 			t.Errorf("line %q should start with left rule │", line)
 		}

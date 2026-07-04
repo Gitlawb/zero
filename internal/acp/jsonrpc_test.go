@@ -158,7 +158,7 @@ func TestConnSurvivesMalformedLine(t *testing.T) {
 
 	dec := json.NewDecoder(clientR)
 	var sawParseError, sawPong bool
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		var msg struct {
 			Result any `json:"result"`
 			Error  *struct {

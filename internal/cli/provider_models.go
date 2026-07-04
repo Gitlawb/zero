@@ -128,7 +128,7 @@ func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderP
 
 func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error) {
 	options := providerModelsOptions{}
-	for index := 0; index < len(args); index++ {
+	for index := range args {
 		arg := args[index]
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":

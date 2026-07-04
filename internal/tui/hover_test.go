@@ -231,7 +231,7 @@ func TestHoverChangesSidebarRenderOutput(t *testing.T) {
 
 func TestHoverClearsOnWheelScroll(t *testing.T) {
 	m := mouseTestModel()
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		m.transcript = appendRow(m.transcript, rowUser, "line content")
 	}
 	m.hover = hoverTarget{kind: hoverTranscript, bodyY: 5}

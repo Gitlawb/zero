@@ -112,7 +112,7 @@ func TestTinyTierSingleSegmentAndRailLessCards(t *testing.T) {
 
 	row := transcriptRow{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "a.go:1: x"}
 	card := plainRender(t, m.renderRow(row, 40, buildRowContext(nil)))
-	for _, line := range strings.Split(card, "\n") {
+	for line := range strings.SplitSeq(card, "\n") {
 		if strings.HasPrefix(line, "│") || strings.HasSuffix(line, "│") {
 			t.Fatalf("tiny card keeps side borders: %q", line)
 		}

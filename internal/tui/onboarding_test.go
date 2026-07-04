@@ -1121,7 +1121,7 @@ func TestSetupProviderStepOmitsModelDetails(t *testing.T) {
 	if strings.Contains(view, "Default model:") || strings.Contains(view, "gpt-4.1") || strings.Contains(view, "claude-sonnet-4.5") {
 		t.Fatalf("provider step should not render model details:\n%s", view)
 	}
-	for _, line := range strings.Split(view, "\n") {
+	for line := range strings.SplitSeq(view, "\n") {
 		row := strings.TrimSpace(line)
 		if strings.Contains(row, "Choose a provider") {
 			titleColumn = displayColumn(line, "Choose a provider")
@@ -1183,7 +1183,7 @@ func TestSetupProviderSelectionDoesNotShiftBlock(t *testing.T) {
 
 func TestSetupProviderLongCatalogUsesVisibleWindow(t *testing.T) {
 	providers := make([]SetupProviderOption, 0, 14)
-	for index := 0; index < 14; index++ {
+	for index := range 14 {
 		providers = append(providers, SetupProviderOption{
 			ID:           "provider",
 			Name:         "Provider " + string(rune('A'+index)),
@@ -1489,7 +1489,7 @@ func pressSetupContinueOnce(m model) model {
 func displayColumnForVisibleLine(t *testing.T, view any, marker string) int {
 	t.Helper()
 	rendered := plainRender(t, view)
-	for _, line := range strings.Split(rendered, "\n") {
+	for line := range strings.SplitSeq(rendered, "\n") {
 		if strings.Contains(line, marker) {
 			return displayColumn(line, marker)
 		}
@@ -1499,11 +1499,11 @@ func displayColumnForVisibleLine(t *testing.T, view any, marker string) int {
 }
 
 func displayColumn(line string, marker string) int {
-	index := strings.Index(line, marker)
-	if index < 0 {
+	before, _, ok := strings.Cut(line, marker)
+	if !ok {
 		return -1
 	}
-	return lipgloss.Width(line[:index])
+	return lipgloss.Width(before)
 }
 
 func assertSetupLineCentered(t *testing.T, view any, marker string, width int) {
@@ -1521,7 +1521,7 @@ func assertSetupLineCentered(t *testing.T, view any, marker string, width int) {
 func visibleLineForMarker(t *testing.T, view any, marker string) string {
 	t.Helper()
 	rendered := plainRender(t, view)
-	for _, line := range strings.Split(rendered, "\n") {
+	for line := range strings.SplitSeq(rendered, "\n") {
 		if strings.Contains(line, marker) {
 			return line
 		}

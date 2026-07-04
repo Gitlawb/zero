@@ -3,6 +3,7 @@ package repoinfo
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,10 +94,8 @@ func TestCollectContributorsUnique(t *testing.T) {
 		case "ls-tree":
 			return lsTree, nil
 		case "log":
-			for _, a := range args {
-				if a == "--format=%aN" {
-					return "Ann\nBob\nAnn\n\n", nil
-				}
+			if slices.Contains(args, "--format=%aN") {
+				return "Ann\nBob\nAnn\n\n", nil
 			}
 			return "0\n", nil // first-commit ts
 		case "rev-parse":
@@ -134,10 +133,8 @@ func TestCollectHistoryMetricsFailSoft(t *testing.T) {
 		case "rev-list":
 			return "4\n", nil
 		case "log":
-			for _, a := range args {
-				if a == "--format=%aN" {
-					return "", errors.New("boom")
-				}
+			if slices.Contains(args, "--format=%aN") {
+				return "", errors.New("boom")
 			}
 			return "0\n", nil
 		}

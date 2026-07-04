@@ -243,7 +243,7 @@ func TestOpenFileViewSamePathIsNoOp(t *testing.T) {
 func TestFileViewFullBodyTruncatesLongFile(t *testing.T) {
 	dir := t.TempDir()
 	var b strings.Builder
-	for i := 0; i < fileViewMaxLines+50; i++ {
+	for i := range fileViewMaxLines + 50 {
 		fmt.Fprintf(&b, "line %d\n", i)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(b.String()), 0o644); err != nil {

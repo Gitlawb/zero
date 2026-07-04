@@ -159,9 +159,9 @@ func specialistDelegationContext(options Options) string {
 			continue
 		}
 		if desc := strings.TrimSpace(info.WhenToUse); desc != "" {
-			b.WriteString("- " + name + ": " + desc + "\n")
+			b.WriteString("- ");b.WriteString(name);b.WriteString(": ");b.WriteString(desc);b.WriteString("\n")
 		} else {
-			b.WriteString("- " + name + "\n")
+			b.WriteString("- ");b.WriteString(name);b.WriteString("\n")
 		}
 	}
 	b.WriteString("</specialists>")
@@ -209,7 +209,7 @@ func skillsContext(options Options) string {
 		listed++
 	}
 	if omitted > 0 {
-		b.WriteString("- …and " + strconv.Itoa(omitted) + " more (call skill with a name; an unknown name lists them all)\n")
+		b.WriteString("- …and ");b.WriteString(strconv.Itoa(omitted));b.WriteString(" more (call skill with a name; an unknown name lists them all)\n")
 	}
 	b.WriteString("</available_skills>")
 	return b.String()
@@ -235,10 +235,10 @@ func sessionRuntimeContext(options Options) string {
 	var b strings.Builder
 	b.WriteString("<session>\n")
 	if provider != "" {
-		b.WriteString("Active provider: " + provider + "\n")
+		b.WriteString("Active provider: ");b.WriteString(provider);b.WriteString("\n")
 	}
 	if model != "" {
-		b.WriteString("Active model: " + model + "\n")
+		b.WriteString("Active model: ");b.WriteString(model);b.WriteString("\n")
 	}
 	b.WriteString("Use the active provider/model above when answering questions about what is currently running. Persisted config commands may show saved defaults that differ from this live run/session.\n")
 	b.WriteString("</session>")
@@ -256,7 +256,7 @@ func workspaceContext(cwd string) string {
 	}
 	var b strings.Builder
 	b.WriteString("<environment>\n")
-	b.WriteString("Working directory: " + cwd + "\n")
+	b.WriteString("Working directory: ");b.WriteString(cwd);b.WriteString("\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
 	if runtime.GOOS == "windows" {
 		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
@@ -264,13 +264,13 @@ func workspaceContext(cwd string) string {
 		b.WriteString("Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
 	}
 	if branch := gitBranchForPrompt(cwd); branch != "" {
-		b.WriteString("Git branch: " + branch + "\n")
+		b.WriteString("Git branch: ");b.WriteString(branch);b.WriteString("\n")
 	}
 	b.WriteString("</environment>")
 
 	b.WriteString(projectGuidelines(cwd, findProjectGitRoot(cwd)))
 	if repoMap := repoMapContext(cwd); repoMap != "" {
-		b.WriteString("\n\n## Repo map\n\n" + repoMap)
+		b.WriteString("\n\n## Repo map\n\n");b.WriteString(repoMap)
 	}
 	return b.String()
 }
@@ -320,7 +320,7 @@ func projectGuidelines(cwd, gitRoot string) string {
 			content = content[:cut] + "\n… (truncated)"
 		}
 		label := projectGuidelineLabel(match, gitRoot)
-		b.WriteString("\n\n## Project guidelines (" + label + ")\n\n" + content)
+		b.WriteString("\n\n## Project guidelines (");b.WriteString(label);b.WriteString(")\n\n");b.WriteString(content)
 		totalUsed += len(content)
 	}
 	return b.String()
@@ -347,7 +347,7 @@ func projectGuidelineDirs(cwd, gitRoot string) []string {
 	}
 	dirs := []string{gitRoot}
 	cur := gitRoot
-	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		if seg == "" || seg == "." {
 			continue
 		}
@@ -547,8 +547,8 @@ func gitBranchForPrompt(cwd string) string {
 		return ""
 	}
 	ref := strings.TrimSpace(string(data))
-	if strings.HasPrefix(ref, "ref: ") {
-		return strings.TrimPrefix(strings.TrimPrefix(ref, "ref: "), "refs/heads/")
+	if after, ok := strings.CutPrefix(ref, "ref: "); ok {
+		return strings.TrimPrefix(after, "refs/heads/")
 	}
 	if len(ref) >= 7 {
 		return ref[:7]

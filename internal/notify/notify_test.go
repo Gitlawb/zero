@@ -101,7 +101,7 @@ func TestNotifierDefaultFocusFalse(t *testing.T) {
 func TestNotifyRaceSafe(t *testing.T) {
 	n := New(&bytes.Buffer{}, Config{Mode: ModeBell, FocusMode: FocusAlways})
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(2)
 		go func() { defer wg.Done(); n.SetFocused(true) }()
 		go func() { defer wg.Done(); n.Notify(Completion, "x") }()
@@ -234,7 +234,7 @@ func TestNotifierFanOutRaceSafe(t *testing.T) {
 	n := New(&bytes.Buffer{}, Config{Mode: ModeBell, FocusMode: FocusAlways})
 	n.AddSink(&recordingSink{})
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(3)
 		go func() { defer wg.Done(); n.SetFocused(true) }()
 		go func() { defer wg.Done(); n.AddSink(&recordingSink{}) }()
