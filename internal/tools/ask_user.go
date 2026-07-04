@@ -272,15 +272,36 @@ func coerceAskUserOptions(optionsValue, descsValue any) (labels []string, descri
 // FormatAskUserAnswers renders question/answer pairs into a clear, model-readable
 // block. Missing answers are surfaced explicitly so the model never silently
 // treats an unanswered question as answered.
+//
+// It distinguishes two shapes of "empty" the model would otherwise conflate: a
+// wholesale dismissal (the user closed the prompt without answering ANYTHING) is
+// flagged up front as a skip, so the model doesn't invent a default; a single
+// blank field amid other answers is marked "(left blank)".
 func FormatAskUserAnswers(questions []AskUserQuestion, answers []string) string {
-	lines := make([]string, 0, len(questions)*3)
+	anyAnswered := false
+	for index := range questions {
+		if index < len(answers) && strings.TrimSpace(answers[index]) != "" {
+			anyAnswered = true
+			break
+		}
+	}
+
+	lines := make([]string, 0, len(questions)*3+2)
+	if len(questions) > 0 && !anyAnswered {
+		lines = append(lines, "[note] The user dismissed this prompt without answering. Treat this as a skip: do not assume a default — ask again more specifically, or proceed only if the intent is already unambiguous.")
+		lines = append(lines, "")
+	}
 	for index, question := range questions {
 		answer := ""
 		if index < len(answers) {
 			answer = strings.TrimSpace(answers[index])
 		}
 		if answer == "" {
-			answer = "(no answer provided)"
+			if anyAnswered {
+				answer = "(left blank)"
+			} else {
+				answer = "(skipped)"
+			}
 		}
 		lines = append(lines, fmt.Sprintf("%d. [question] %s", index+1, question.Question))
 		lines = append(lines, "[answer] "+answer)
