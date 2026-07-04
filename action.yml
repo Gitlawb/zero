@@ -250,7 +250,7 @@ runs:
 
         # Best-effort one-line summary. Structured output ends with lifecycle
         # metadata, so parse final/error events instead of tailing stdout.
-        summary="$(node "${ACTION_PATH}/scripts/action-summary.mjs" "${ZERO_INPUT_OUTPUT_FORMAT}" "${output_file}")"
+        summary="$(node "${ACTION_PATH}/scripts/action-summary.mjs" "${ZERO_INPUT_OUTPUT_FORMAT}" "${output_file}" || true)"
         {
           echo "summary<<ZERO_EOF"
           printf '%s\n' "${summary}"
