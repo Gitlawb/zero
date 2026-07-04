@@ -200,25 +200,36 @@ func normalizeHostScope(raw string) string {
 // directory itself or any descendant; a host grant matches its exact normalized
 // host. A narrower grant never covers a tool-wide request (reqScope == ""), so
 // such a request re-prompts (fail-safe).
+//
+// File and dir comparisons go through filepath.Rel (via scopePathEqual and the
+// shared pathWithinRoot helper) rather than a plain string comparison, so they
+// apply the same case-folding as the workspace-boundary check on Windows --
+// otherwise a persisted grant (including a deny) could be silently bypassed by
+// spelling the same path with different case.
 func grantCovers(grant Grant, reqScope string) bool {
 	switch grant.ScopeKind {
 	case ScopeToolWide:
 		return true
 	case ScopeFile:
-		return reqScope != "" && reqScope == grant.Scope
+		return reqScope != "" && scopePathEqual(grant.Scope, reqScope)
 	case ScopeDir:
 		if reqScope == "" || grant.Scope == "" {
 			return false
 		}
-		if reqScope == grant.Scope {
-			return true
-		}
-		return strings.HasPrefix(reqScope, grant.Scope+string(filepath.Separator))
+		return pathWithinRoot(grant.Scope, reqScope)
 	case ScopeHost:
 		return reqScope != "" && normalizeHostScope(reqScope) == normalizeHostScope(grant.Scope)
 	default:
 		return false
 	}
+}
+
+// scopePathEqual reports whether two absolute, cleaned scope paths refer to
+// the same file, applying the same case-folding filepath.Rel already uses for
+// directory-boundary checks (case-insensitive path components on Windows).
+func scopePathEqual(a, b string) bool {
+	rel, err := filepath.Rel(a, b)
+	return err == nil && rel == "."
 }
 
 // scopeSpecificity ranks scope kinds so the most precise covering allow wins when

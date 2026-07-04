@@ -745,6 +745,8 @@ func newModel(ctx context.Context, options Options) model {
 	notify.MaybeAddWebhookSink(notifier, os.Getenv, nil)
 	notifier.SetFocused(true)
 
+	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
@@ -783,7 +785,7 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
-		keyBindings:                 resolveKeyBindings(options.KeyBindings),
+		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		userAgent:                   options.UserAgent,
@@ -819,6 +821,9 @@ func newModel(ctx context.Context, options Options) model {
 		m.lspManager = lsp.NewManager(cwd)
 	}
 	m.refreshMCPViewState()
+	for _, warning := range keyBindingWarnings {
+		m = m.appendSystemNotice(warning)
+	}
 	return m
 }
 

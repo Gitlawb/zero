@@ -207,6 +207,33 @@ func TestDetectShellCommandIssueAllowsUnrelatedCommands(t *testing.T) {
 	}
 }
 
+// Operator/utility-name text that only appears inside a quoted argument must
+// not be mistaken for real shell syntax — e.g. `echo "foo; ls -la"` is a
+// harmless echo, not a bash-style `ls` invocation, and quoted `head`/`grep`
+// text isn't a piped POSIX utility.
+func TestDetectShellCommandIssueIgnoresQuotedContent(t *testing.T) {
+	for _, command := range []string{
+		`echo "foo; ls -la"`,
+		`echo "run head over the file"`,
+		`echo 'ls -la is a common bash command'`,
+		`echo "grep for the pattern"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected quoted content to be ignored for %q, got %#v", command, issue)
+		}
+	}
+
+	// Sanity: the same utility names still get flagged when they're NOT quoted.
+	for _, command := range []string{
+		`echo "foo" ; ls -la`,
+		`git log | head`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+			t.Fatalf("expected unquoted shell syntax to still be flagged for %q", command)
+		}
+	}
+}
+
 func TestDetectShellOutputIssueAddsWindowsSyntaxHint(t *testing.T) {
 	issue := detectShellOutputIssue("The syntax of the command is incorrect.", "windows")
 	if issue == nil {

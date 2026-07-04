@@ -148,8 +148,8 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	if err := downloadFile(downloadCtx, asset.ChecksumURL, checksumPath); err != nil {
 		return nil, fmt.Errorf("download release checksum: %w", err)
 	}
-	if _, err := release.VerifySHA256Checksum(checksumPath); err != nil {
-		return nil, fmt.Errorf("verify release checksum: %w", err)
+	if err := verifyArchiveChecksum(checksumPath, asset.ArchiveName); err != nil {
+		return nil, err
 	}
 
 	extractDir := filepath.Join(tempDir, "extracted")
@@ -198,6 +198,23 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	}
 
 	return warnings, nil
+}
+
+// verifyArchiveChecksum verifies the checksum file at checksumPath and
+// cross-checks it names expectedArchiveName. VerifySHA256Checksum hashes
+// whichever file the checksum text names, not necessarily the archive we
+// downloaded — this mirrors the cross-check VerifyReleaseChecksums already
+// does, so a checksum file that names a different file can't be used to
+// verify (and thereby vouch for) the wrong bytes before extraction.
+func verifyArchiveChecksum(checksumPath string, expectedArchiveName string) error {
+	verified, err := release.VerifySHA256Checksum(checksumPath)
+	if err != nil {
+		return fmt.Errorf("verify release checksum: %w", err)
+	}
+	if verified.ArchiveName != expectedArchiveName {
+		return fmt.Errorf("checksum file references %s, expected %s", verified.ArchiveName, expectedArchiveName)
+	}
+	return nil
 }
 
 // installBinary stages sourcePath next to targetPath (same directory, so the

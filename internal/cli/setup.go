@@ -351,11 +351,12 @@ func oauthLoggedInProviders() map[string]bool {
 }
 
 // firstUsableProvider returns the saved provider best suited to run without
-// onboarding: the first usable (inline credential present, or no-auth/local)
-// non-local provider, else the first usable local one. It lets the CLI fall back
-// to an already-configured login when the active provider happens to lack a
-// credential, instead of re-running onboarding every launch.
+// onboarding: the first usable (inline credential, stored OAuth login, or
+// no-auth/local) non-local provider, else the first usable local one. It lets
+// the CLI fall back to an already-configured login when the active provider
+// happens to lack a credential, instead of re-running onboarding every launch.
 func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderProfile, bool) {
+	logins := oauthLoggedInProviders()
 	var localFallback config.ProviderProfile
 	haveLocal := false
 	for _, profile := range providers {
@@ -371,7 +372,11 @@ func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderPro
 				continue
 			}
 		}
-		if _, missing := setupMissingCredentialEnv(profile); missing {
+		// A stored OAuth login (e.g. `zero auth login xai`) is a credential too, even
+		// when the profile has no inline key / env var — mirrors setupRequired and
+		// usableSavedProviders so this fallback doesn't force onboarding for a
+		// provider the user is already authenticated with.
+		if _, missing := setupMissingCredentialEnv(profile); missing && !providerHasOAuthLogin(profile, logins) {
 			continue
 		}
 		if providerProfileIsLocal(profile) {

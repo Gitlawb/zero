@@ -300,3 +300,38 @@ func TestApplyStandaloneUpdateRejectsChecksumMismatch(t *testing.T) {
 		t.Fatalf("executable should be untouched after checksum failure, got %q", data)
 	}
 }
+
+// VerifySHA256Checksum hashes whichever file the checksum text names, which
+// isn't necessarily the archive the caller asked to verify. A checksum file
+// that correctly verifies against a DIFFERENT (but real, correctly-hashed)
+// file must still be rejected, not treated as vouching for the requested
+// archive.
+func TestVerifyArchiveChecksumRejectsFilenameMismatch(t *testing.T) {
+	dir := t.TempDir()
+
+	decoyName := "decoy.tar.gz"
+	decoyPath := filepath.Join(dir, decoyName)
+	if err := os.WriteFile(decoyPath, []byte("decoy contents"), 0o644); err != nil {
+		t.Fatalf("WriteFile decoy: %v", err)
+	}
+	decoyChecksum, err := release.SHA256File(decoyPath)
+	if err != nil {
+		t.Fatalf("SHA256File: %v", err)
+	}
+	checksumText, err := release.FormatSHA256Checksum(decoyChecksum, decoyName)
+	if err != nil {
+		t.Fatalf("FormatSHA256Checksum: %v", err)
+	}
+	checksumPath := filepath.Join(dir, "real.tar.gz.sha256")
+	if err := os.WriteFile(checksumPath, []byte(checksumText), 0o644); err != nil {
+		t.Fatalf("WriteFile checksum: %v", err)
+	}
+
+	err = verifyArchiveChecksum(checksumPath, "real.tar.gz")
+	if err == nil {
+		t.Fatal("expected error when checksum file references a different archive")
+	}
+	if !strings.Contains(err.Error(), decoyName) || !strings.Contains(err.Error(), "real.tar.gz") {
+		t.Fatalf("expected error to name both the referenced file and the expected one, got %q", err)
+	}
+}
