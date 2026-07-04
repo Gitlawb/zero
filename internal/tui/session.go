@@ -72,6 +72,15 @@ func (m model) startNewSession() model {
 	m.turnTTFTSum = 0
 	m.turnTTFTCount = 0
 
+	// Staged input belongs to the previous conversation. Attachments and a queued
+	// message are only consumed at prompt-submit, so without clearing them here the
+	// fresh session's first prompt would silently inherit the old session's images,
+	// documents, or queued text.
+	m.pendingImages = nil
+	m.pendingImageLabels = nil
+	m.pendingDocuments = nil
+	m.queuedMessage = ""
+
 	note := "Started a new session."
 	if previousID != "" {
 		note = "New session started. Previous session saved as " + previousID +

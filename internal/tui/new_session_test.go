@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func TestStartNewSessionResetsState(t *testing.T) {
@@ -14,6 +15,11 @@ func TestStartNewSessionResetsState(t *testing.T) {
 	m.activeSession = sessions.Metadata{SessionID: "sess-old"}
 	m.sessionEvents = []sessions.Event{{Type: sessions.EventMessage}}
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "hello"})
+	// Stage attachments + a queued message that /new must not leak into the new session.
+	m.pendingImages = make([]zeroruntime.ImageBlock, 1)
+	m.pendingImageLabels = []string{"pic.png"}
+	m.pendingDocuments = []pendingDocument{{label: "doc.pdf"}}
+	m.queuedMessage = "queued"
 
 	next := m.startNewSession()
 
@@ -29,6 +35,11 @@ func TestStartNewSessionResetsState(t *testing.T) {
 	// The note must name the prior session id so the user can /resume it.
 	if !transcriptContains(next.transcript, "sess-old") {
 		t.Fatalf("expected note to reference previous session id, got %#v", next.transcript)
+	}
+	// Staged attachments and the queued message must not leak into the new session.
+	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 || len(next.pendingDocuments) != 0 || next.queuedMessage != "" {
+		t.Fatalf("startNewSession must clear staged input, got images=%d labels=%d docs=%d queued=%q",
+			len(next.pendingImages), len(next.pendingImageLabels), len(next.pendingDocuments), next.queuedMessage)
 	}
 }
 
