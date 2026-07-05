@@ -173,7 +173,7 @@ func TestLoadDuplicateFrontmatterNamePicksStableWinner(t *testing.T) {
 	writeSkill(t, dir, "zzz-second", "---\nname: shared\ndescription: from zzz\n---\nbody from zzz\n")
 
 	// Loading repeatedly must always yield the same single winner.
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		loaded, err := Load(dir)
 		if err != nil {
 			t.Fatalf("Load returned error: %v", err)

@@ -141,7 +141,7 @@ func TestConcurrencyCapAndQueueDrains(t *testing.T) {
 	l.gate = gate
 	sw := newSwarmFor(t, l) // MaxTeamSize 2
 	pol := Policy{Model: "m"}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := sw.Spawn(pol, "team", "teammate", "task", ""); err != nil {
 			t.Fatalf("Spawn %d: %v", i, err)
 		}
