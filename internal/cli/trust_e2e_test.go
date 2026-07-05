@@ -121,6 +121,65 @@ func TestTrustGateBlocksToolHookThroughAgentRun(t *testing.T) {
 	}
 }
 
+// TestTrustGateFiresInDefaultAutoMode is the in-scope proof for the security
+// report: the beforeTool hook fires in the DEFAULT permission mode (auto), NOT
+// only under --skip-permissions-unsafe. marker_tool has PermissionAllow safety,
+// so effectivePermission grants it at loop.go without a prompt regardless of
+// mode; dispatchBeforeTool then runs the project hook. This means the
+// vulnerability is reachable in normal operation with the sandbox ON, so it is
+// not the "requires the user to disable the sandbox" out-of-scope case.
+//
+// Trusted => the hook fires in auto mode without any unsafe flag; untrusted =>
+// the gate blocks it, also in auto mode. No OnPermissionRequest is wired: an
+// auto-allowed tool needs no approval callback, which is the whole point.
+func TestTrustGateFiresInDefaultAutoMode(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeMarkerHook(t, repo, marker)
+
+	runOnce := func(mode agent.PermissionMode) {
+		reg := tools.NewRegistry()
+		reg.Register(markerTool{})
+		disp, _ := newHookDispatcherWithExtra(repo, nil, repo)
+		if _, err := agent.Run(context.Background(), "go", toolThenTextProvider{toolName: "marker_tool"}, agent.Options{
+			Registry:       reg,
+			Hooks:          disp,
+			PermissionMode: mode,
+			MaxTurns:       3,
+		}); err != nil {
+			t.Fatalf("agent.Run (%s): %v", mode, err)
+		}
+	}
+
+	// Untrusted, default auto mode: the gate excludes the project layer, so the
+	// hook must NOT fire even though the tool call is permitted.
+	_ = os.Remove(marker)
+	runOnce(agent.PermissionModeAuto)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("UNTRUSTED auto mode: project beforeTool hook ran -- gate failed OPEN in the default mode")
+	}
+
+	// Trusted, default auto mode (sandbox on, NO --skip-permissions-unsafe): the
+	// auto-allowed tool is granted with no prompt and its beforeTool hook fires.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(marker)
+	runOnce(agent.PermissionModeAuto)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TRUSTED auto mode: project beforeTool hook did NOT fire without an unsafe flag (marker absent): %v", err)
+	}
+
+	// And it is not an auto-only quirk: ask mode (also sandboxed, non-unsafe)
+	// fires the same way for an auto-allowed tool.
+	_ = os.Remove(marker)
+	runOnce(agent.PermissionModeAsk)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TRUSTED ask mode: project beforeTool hook did NOT fire (marker absent): %v", err)
+	}
+}
+
 // runExecTrust drives the full exec entry point with a fake worktree and a
 // tool-calling provider, returning the exit code. The provider calls the core
 // "glob" tool so dispatchBeforeTool fires inside the real exec-built registry.
