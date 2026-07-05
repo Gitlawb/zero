@@ -491,6 +491,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					continue
 				}
 			}
+			// Finalization diagnostics gate: edits from this run may still have
+			// checks in flight — the per-turn drain waits only briefly and defers
+			// to "a later turn", but a final answer means there is no later turn.
+			// Wait out the full inline-era budget once; an introduced error gives
+			// the model one more turn to see (and fix) it instead of being lost.
+			// Free for runs that never edited: an idle collector returns "".
+			if nudge := postEditDiagnostics.drainFinal(ctx); nudge != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: nudge,
+				})
+				continue
+			}
 			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
 			return result, nil
@@ -699,10 +712,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// not success, so a run that loops to the turn limit isn't reported as done.
 	//
 	// The final-answer call is one more model request, so diagnostics from the
-	// LAST turn's edits get the same pre-request drain the loop gives every
-	// other turn — otherwise an error introduced by the final edit would go
-	// unreported in the summary.
-	if nudge := postEditDiagnostics.drain(ctx); nudge != "" {
+	// LAST turn's edits get a drain too — with the finalization budget, since
+	// there is no later turn to defer to — otherwise an error introduced by
+	// the final edit would go unreported in the summary.
+	if nudge := postEditDiagnostics.drainFinal(ctx); nudge != "" {
 		messages = append(messages, zeroruntime.Message{
 			Role:    zeroruntime.MessageRoleUser,
 			Content: nudge,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/secrets"
 )
 
 // Spill-to-disk for truncated tool output. When a command produces more than
@@ -90,8 +91,10 @@ func spillDir() (string, error) {
 // spillTruncatedOutput writes the full pre-truncation output to the spill
 // directory and returns the file path, or "" when spilling fails. Output is
 // scrubbed with the same configured-key redaction the registry applies at the
-// tool boundary, so a spilled file never holds a secret the transcript would
-// have hidden.
+// tool boundary PLUS the pattern-based secret scanner (AWS keys, tokens, PEM
+// blocks, JWTs) that bash applies to its model-visible output — a spill runs
+// before that formatter, so without the scan here a spilled file would hold
+// pattern-matched credentials in cleartext that the transcript hides.
 func spillTruncatedOutput(toolName, output string) string {
 	dir, err := spillDir()
 	if err != nil {
@@ -110,6 +113,7 @@ func spillTruncatedOutput(toolName, output string) string {
 	}
 	defer file.Close()
 	scrubbed := redaction.RedactString(output, redaction.Options{})
+	scrubbed, _ = secrets.Redact(scrubbed)
 	if _, err := file.WriteString(scrubbed); err != nil {
 		_ = os.Remove(file.Name())
 		return ""

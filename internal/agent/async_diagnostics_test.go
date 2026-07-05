@@ -274,3 +274,65 @@ func TestRunDrainsAsyncDiagnosticsBeforeMaxTurnsFinalAnswer(t *testing.T) {
 		t.Fatal("max-turns final-answer request missing the diagnostics nudge")
 	}
 }
+
+// When the model finalizes while a slow check is still in flight (the
+// per-turn drain missed it), the finalization gate must wait it out and give
+// the model one more turn with the nudge instead of dropping the errors.
+func TestRunFinalizationGateDeliversLateDiagnostics(t *testing.T) {
+	previous := asyncDiagnosticsDrainTimeout
+	asyncDiagnosticsDrainTimeout = time.Millisecond
+	defer func() { asyncDiagnosticsDrainTimeout = previous }()
+
+	registry := tools.NewRegistry()
+	registry.Register(changedFilesTool{})
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "fake_edit"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done after fix"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "fix main.go", provider, Options{
+		Registry: registry,
+		Cwd:      t.TempDir(),
+		FileDiagnostics: func(context.Context, string) string {
+			// Slower than the (shortened) per-turn drain, well under the
+			// finalization budget.
+			time.Sleep(100 * time.Millisecond)
+			return "main.go:1:1 error: boom"
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done after fix" {
+		t.Fatalf("final answer = %q, want the post-nudge answer", result.FinalAnswer)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("expected a third request carrying the late nudge, got %d requests", len(provider.requests))
+	}
+	found := false
+	for _, message := range provider.requests[2].Messages {
+		if message.Role == zeroruntime.MessageRoleUser && strings.HasPrefix(message.Content, asyncDiagnosticsNudge) {
+			if !strings.Contains(message.Content, "boom") {
+				t.Fatalf("nudge missing diagnostics: %q", message.Content)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("finalization gate did not deliver the late diagnostics nudge")
+	}
+}

@@ -36,6 +36,13 @@ import (
 // A var so tests can shorten the wait.
 var asyncDiagnosticsDrainTimeout = 3 * time.Second
 
+// asyncDiagnosticsFinalDrainTimeout is the wait used when the run is about to
+// FINALIZE (natural completion or the max-turns summary): there is no later
+// turn to defer to, so the gate waits out the old inline-era budget rather
+// than silently dropping an error the last edit introduced. A var so tests
+// can shorten the wait.
+var asyncDiagnosticsFinalDrainTimeout = 10 * time.Second
+
 // asyncDiagnosticsNudge prefixes the drained diagnostics blocks; phrased like
 // the old inline block so the model reacts the same way.
 const asyncDiagnosticsNudge = "Diagnostics after your recent edits (fix any errors you introduced):\n"
@@ -125,6 +132,16 @@ func (diagnostics *asyncDiagnostics) work(ctx context.Context, done chan struct{
 // all completed error blocks as one nudge. Returns "" when there is nothing
 // to report or the worker is still busy (results then surface next turn).
 func (diagnostics *asyncDiagnostics) drain(ctx context.Context) string {
+	return diagnostics.drainWithin(ctx, asyncDiagnosticsDrainTimeout)
+}
+
+// drainFinal is drain with the finalization budget: called before the run's
+// last model request, where an undelivered result would otherwise be lost.
+func (diagnostics *asyncDiagnostics) drainFinal(ctx context.Context) string {
+	return diagnostics.drainWithin(ctx, asyncDiagnosticsFinalDrainTimeout)
+}
+
+func (diagnostics *asyncDiagnostics) drainWithin(ctx context.Context, timeout time.Duration) string {
 	if diagnostics == nil {
 		return ""
 	}
@@ -132,7 +149,7 @@ func (diagnostics *asyncDiagnostics) drain(ctx context.Context) string {
 	busy := diagnostics.working
 	diagnostics.mu.Unlock()
 	if busy != nil {
-		timer := time.NewTimer(asyncDiagnosticsDrainTimeout)
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		select {
 		case <-busy:

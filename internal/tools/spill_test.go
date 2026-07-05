@@ -63,6 +63,33 @@ func TestSweepSpillDirRemovesOnlyOldFiles(t *testing.T) {
 	}
 }
 
+// A spill happens BEFORE bash's model-facing formatter runs its pattern-based
+// secret scan, so the spill itself must scrub pattern-matched credentials —
+// otherwise the file would hold in cleartext exactly what the transcript hides.
+func TestSpillTruncatedOutputScrubsPatternSecrets(t *testing.T) {
+	setTestTempDir(t)
+	githubToken := "ghp_" + strings.Repeat("a", 36)
+	body := "before\nAKIAIOSFODNN7EXAMPLE\n" + githubToken + "\nafter"
+
+	path := spillTruncatedOutput("bash", body)
+	if path == "" {
+		t.Fatal("spill must return a file path")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "AKIAIOSFODNN7EXAMPLE") {
+		t.Fatal("AWS access key reached the spill file in cleartext")
+	}
+	if strings.Contains(string(content), githubToken) {
+		t.Fatal("GitHub token reached the spill file in cleartext")
+	}
+	if !strings.Contains(string(content), "before") || !strings.Contains(string(content), "after") {
+		t.Fatalf("non-secret content must survive the scrub: %q", content)
+	}
+}
+
 func TestSpillTruncatedOutputWritesFile(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	path := spillTruncatedOutput("exec_command", "some output body")
