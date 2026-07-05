@@ -140,6 +140,12 @@ type LoadOptions struct {
 	Cwd                           string
 	Env                           map[string]string
 	AllowManifestToolAutoApproval bool
+	// ExcludeProject drops every SourceProject root before discovery. It is
+	// applied to the resolved root slice regardless of whether the roots came
+	// from Roots or ResolveRoots, so a caller passing an explicit SourceProject
+	// root cannot bypass the exclusion. The zero value (false) preserves the
+	// default behavior of loading both user and project roots.
+	ExcludeProject bool
 }
 
 type ParseManifestOptions struct {
@@ -198,6 +204,17 @@ func Load(options LoadOptions) (LoadResult, error) {
 			return LoadResult{}, err
 		}
 		roots = resolvedRoots
+	}
+
+	if options.ExcludeProject {
+		filtered := roots[:0:0]
+		for _, root := range roots {
+			if root.Source == SourceProject {
+				continue
+			}
+			filtered = append(filtered, root)
+		}
+		roots = filtered
 	}
 
 	diagnostics := []Diagnostic{}

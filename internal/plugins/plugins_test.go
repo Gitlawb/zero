@@ -380,6 +380,103 @@ func TestLoadPluginsDiscoversDiagnosticsAndProjectPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadDiscoversProjectPluginWhenNotExcluded(t *testing.T) {
+	dir := t.TempDir()
+	writePluginManifest(t, filepath.Join(dir, ".zero", "plugins", "demo"), map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.project",
+		"name":          "Project Plugin",
+		"version":       "0.1.0",
+	})
+
+	result, err := Load(LoadOptions{
+		Cwd: dir,
+		Env: map[string]string{"XDG_CONFIG_HOME": filepath.Join(dir, "xdg")},
+	})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !hasPlugin(result.Plugins, "zero.project") {
+		t.Fatalf("expected project plugin to be discovered, got %#v", result.Plugins)
+	}
+}
+
+func TestLoadExcludesProjectPlugin(t *testing.T) {
+	dir := t.TempDir()
+	writePluginManifest(t, filepath.Join(dir, ".zero", "plugins", "demo"), map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.project",
+		"name":          "Project Plugin",
+		"version":       "0.1.0",
+	})
+
+	result, err := Load(LoadOptions{
+		Cwd:            dir,
+		Env:            map[string]string{"XDG_CONFIG_HOME": filepath.Join(dir, "xdg")},
+		ExcludeProject: true,
+	})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if hasPlugin(result.Plugins, "zero.project") {
+		t.Fatalf("project plugin should be excluded, got %#v", result.Plugins)
+	}
+}
+
+func TestLoadKeepsUserPluginWhenProjectExcluded(t *testing.T) {
+	dir := t.TempDir()
+	// User plugin lives under the resolved XDG config home; project plugin under ./.zero.
+	writePluginManifest(t, filepath.Join(dir, "xdg", "zero", "plugins", "user"), map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.user",
+		"name":          "User Plugin",
+		"version":       "0.1.0",
+	})
+	writePluginManifest(t, filepath.Join(dir, ".zero", "plugins", "demo"), map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.project",
+		"name":          "Project Plugin",
+		"version":       "0.1.0",
+	})
+
+	result, err := Load(LoadOptions{
+		Cwd:            dir,
+		Env:            map[string]string{"XDG_CONFIG_HOME": filepath.Join(dir, "xdg")},
+		ExcludeProject: true,
+	})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !hasPlugin(result.Plugins, "zero.user") {
+		t.Fatalf("user plugin should still be discovered, got %#v", result.Plugins)
+	}
+	if hasPlugin(result.Plugins, "zero.project") {
+		t.Fatalf("project plugin should be excluded, got %#v", result.Plugins)
+	}
+}
+
+func TestLoadExcludeProjectFiltersExplicitProjectRoots(t *testing.T) {
+	dir := t.TempDir()
+	projectRoot := filepath.Join(dir, "project-plugins")
+	writePluginManifest(t, filepath.Join(projectRoot, "demo"), map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.project",
+		"name":          "Project Plugin",
+		"version":       "0.1.0",
+	})
+
+	result, err := Load(LoadOptions{
+		Roots:          []Root{{Source: SourceProject, Path: projectRoot}},
+		ExcludeProject: true,
+	})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(result.Plugins) != 0 {
+		t.Fatalf("explicit project root should be filtered when ExcludeProject is set, got %#v", result.Plugins)
+	}
+}
+
 func TestResolveRootsUsesConfigHomeAndProjectRoot(t *testing.T) {
 	dir := t.TempDir()
 	roots, err := ResolveRoots(ResolveRootOptions{
@@ -409,6 +506,15 @@ func writePluginManifest(t *testing.T, pluginDir string, manifest map[string]any
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func hasPlugin(plugins []LoadedPlugin, pluginID string) bool {
+	for _, plugin := range plugins {
+		if plugin.ID == pluginID {
+			return true
+		}
+	}
+	return false
 }
 
 func hasPluginDiagnostic(diagnostics []Diagnostic, kind DiagnosticKind, pluginID string) bool {
