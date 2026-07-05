@@ -11,10 +11,10 @@ import (
 // authTransport intercepts HTTP requests and records the Authorization header
 // so tests can verify whether fetchRelease sent credentials.
 type authTransport struct {
-	t             *testing.T
-	receivedAuth  string
-	responseBody  string
-	responseCode  int
+	t            *testing.T
+	receivedAuth string
+	responseBody string
+	responseCode int
 }
 
 func (at *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -27,9 +27,9 @@ func (at *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		at.responseCode = 200
 	}
 	return &http.Response{
-		StatusCode:    at.responseCode,
-		Body:          io.NopCloser(strings.NewReader(at.responseBody)),
-		Header:        make(http.Header),
+		StatusCode: at.responseCode,
+		Body:       io.NopCloser(strings.NewReader(at.responseBody)),
+		Header:     make(http.Header),
 	}, nil
 }
 
