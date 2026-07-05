@@ -1,0 +1,213 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/workspacetrust"
+	"github.com/Gitlawb/zero/internal/worktrees"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+// These tests close the end-to-end gap the chokepoint unit tests leave open:
+// they drive the REAL agent loop (and, for the worktree cases, the real exec
+// entry point) with a fake provider that emits a tool call, so a project
+// beforeTool hook actually fires (or is gated away) through production code, not
+// a direct dispatcher call.
+
+// markerTool is a minimal, always-allowed tool the fake provider "calls" so the
+// agent loop reaches dispatchBeforeTool (which only fires for a registered,
+// permitted tool). Its own Run is a no-op; the observable effect is the project
+// beforeTool hook the gate did or did not load.
+type markerTool struct{}
+
+func (markerTool) Name() string        { return "marker_tool" }
+func (markerTool) Description() string { return "test-only no-op tool" }
+func (markerTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (markerTool) Safety() tools.Safety { return tools.Safety{Permission: tools.PermissionAllow} }
+func (markerTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "ok"}
+}
+
+// toolThenTextProvider calls toolName on the first turn, then answers with text so
+// the loop terminates. It detects "first turn" by the absence of a prior tool
+// result in the message history.
+type toolThenTextProvider struct{ toolName string }
+
+func (p toolThenTextProvider) StreamCompletion(_ context.Context, req zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	toolAlreadyCalled := false
+	for _, m := range req.Messages {
+		if m.Role == zeroruntime.MessageRoleTool {
+			toolAlreadyCalled = true
+			break
+		}
+	}
+	ch := make(chan zeroruntime.StreamEvent, 8)
+	go func() {
+		defer close(ch)
+		if toolAlreadyCalled {
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+			return
+		}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: p.toolName}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "c1", ArgumentsFragment: `{"pattern":"*"}`}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	}()
+	return ch, nil
+}
+
+// writeMarkerHook writes a ./.zero/hooks.json under dir whose enabled beforeTool
+// hook touches markerPath when it fires.
+func writeMarkerHook(t *testing.T, dir, markerPath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".zero"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"enabled":true,"hooks":[{"id":"m","event":"beforeTool","command":"/bin/sh","args":["-c","touch '` + markerPath + `'"],"enabled":true}]}`
+	if err := os.WriteFile(filepath.Join(dir, ".zero", "hooks.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTrustGateBlocksToolHookThroughAgentRun closes gap #2: the gate blocks a
+// real tool call's beforeTool hook through the production agent.Run loop, not
+// just a direct dispatcher call. Untrusted => the project hook is not in the
+// dispatcher, so the tool call fires nothing. Trusted => it fires.
+func TestTrustGateBlocksToolHookThroughAgentRun(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeMarkerHook(t, repo, marker)
+
+	runOnce := func() {
+		reg := tools.NewRegistry()
+		reg.Register(markerTool{})
+		disp, _ := newHookDispatcherWithExtra(repo, nil, repo)
+		if _, err := agent.Run(context.Background(), "go", toolThenTextProvider{toolName: "marker_tool"}, agent.Options{
+			Registry:       reg,
+			Hooks:          disp,
+			PermissionMode: agent.PermissionModeUnsafe,
+			MaxTurns:       3,
+		}); err != nil {
+			t.Fatalf("agent.Run: %v", err)
+		}
+	}
+
+	// Untrusted: gate excludes the project layer; the beforeTool hook must not run.
+	_ = os.Remove(marker)
+	runOnce()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("UNTRUSTED: project beforeTool hook ran through agent.Run (marker exists) -- gate failed OPEN")
+	}
+
+	// Trusted: the hook is in the dispatcher; the tool call fires it.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(marker)
+	runOnce()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TRUSTED: project beforeTool hook did NOT run (marker absent): %v", err)
+	}
+}
+
+// runExecTrust drives the full exec entry point with a fake worktree and a
+// tool-calling provider, returning the exit code. The provider calls the core
+// "glob" tool so dispatchBeforeTool fires inside the real exec-built registry.
+func runExecTrust(t *testing.T, extraArgs []string, launchDir, worktreeDir string) int {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	args := append([]string{"exec", "--worktree", "--skip-permissions-unsafe", "--max-turns", "3"}, extraArgs...)
+	args = append(args, "go")
+	var out, errBuf bytes.Buffer
+	return runWithDeps(args, &out, &errBuf, appDeps{
+		getwd: func() (string, error) { return launchDir, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Path: worktreeDir}, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return toolThenTextProvider{toolName: "glob"}, nil
+		},
+	})
+}
+
+// TestExecWorktreeInheritsTrustEndToEnd closes gap #1 for the exec path: trust is
+// keyed on the ORIGINAL launch dir, not the generated worktree path. The worktree
+// checkout carries the committed .zero/hooks.json; the gate must load it only when
+// the SOURCE repo (launch dir) is trusted, proving exec.go captures trustRoot
+// before the --worktree reassignment and threads it into the chokepoint.
+func TestExecWorktreeInheritsTrustEndToEnd(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()     // original launch dir -- the trust key
+	worktree := t.TempDir() // simulated worktree checkout (workspaceRoot after reassignment)
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeMarkerHook(t, worktree, marker) // the checkout carries the committed hook
+
+	// Untrusted source repo: worktree hooks must NOT run.
+	_ = os.Remove(marker)
+	if code := runExecTrust(t, nil, repo, worktree); code != exitSuccess {
+		t.Fatalf("exec --worktree (untrusted) exit = %d", code)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("UNTRUSTED worktree: project hook ran -- exec keyed trust on the worktree path or failed open")
+	}
+
+	// Trusted source repo: the worktree inherits its trust, so the hook runs.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(marker)
+	if code := runExecTrust(t, nil, repo, worktree); code != exitSuccess {
+		t.Fatalf("exec --worktree (trusted) exit = %d", code)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TRUSTED worktree: project hook did NOT run (marker absent) -- worktree trust inheritance broken: %v", err)
+	}
+}
+
+// TestExecSpecWorktreeInheritsTrustEndToEnd closes gap #1 for the spec-draft path
+// (the exact --use-spec --worktree combination the review fix addressed): the
+// spec-draft chokepoint must also key trust on the original launch dir.
+func TestExecSpecWorktreeInheritsTrustEndToEnd(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	worktree := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeMarkerHook(t, worktree, marker)
+
+	// The spec-draft flow itself exits non-zero here (the fake provider does not
+	// submit a real spec), which is orthogonal to trust: the hook dispatcher is
+	// built (keyed on run.trustRoot) before the agent runs, and glob (a read-only
+	// allow tool) is advertised in spec-draft, so beforeTool still fires. We assert
+	// only the marker, the trust behavior, not the spec-flow exit code.
+
+	// Untrusted: spec-draft in a worktree of an untrusted repo runs no project hook.
+	_ = os.Remove(marker)
+	_ = runExecTrust(t, []string{"--use-spec"}, repo, worktree)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("UNTRUSTED spec-draft worktree: project hook ran -- spec-draft keyed trust on the worktree path")
+	}
+
+	// Trusted: the spec-draft path inherits the source repo's trust.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(marker)
+	_ = runExecTrust(t, []string{"--use-spec"}, repo, worktree)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TRUSTED spec-draft worktree: project hook did NOT run -- spec-draft trust inheritance broken: %v", err)
+	}
+}
