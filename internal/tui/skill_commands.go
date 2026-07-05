@@ -39,13 +39,27 @@ func (m model) handleSkillCommand(raw string) (model, tea.Cmd, bool) {
 		})
 		return m, nil, true
 	}
-	prompt := body
+	return m.launchOrDeferExpandedPrompt(skillInvocationPrompt(body, args))
+}
+
+// bareSkillInvocationNote is appended when a skill is invoked with no request.
+// The body alone is instructions with no target ("review the PR" — which PR?),
+// and without this note the model improvises one instead of asking. The wording
+// is conditional so self-contained skills (no target needed) still just run.
+const bareSkillInvocationNote = "The user invoked this skill directly without providing a request. " +
+	"If these instructions need a target or details that are not already clear from the conversation " +
+	"(which pull request, file, branch, topic, …), ask for them first — do not guess or pick one yourself. " +
+	"If the instructions are self-contained, proceed."
+
+// skillInvocationPrompt builds the agent prompt for a skill invocation: the
+// skill body (its instructions), then either the user's request or — for a bare
+// invocation — the ask-first note above. Mirrors usercommands.Expand's
+// no-placeholder behavior for the args case.
+func skillInvocationPrompt(body, args string) string {
 	if args != "" {
-		// Mirror usercommands.Expand's no-placeholder behavior: the skill body is
-		// the guidance, the typed args are the specific request it applies to.
-		prompt += "\n\n" + args
+		return body + "\n\n" + args
 	}
-	return m.launchOrDeferExpandedPrompt(prompt)
+	return body + "\n\n" + bareSkillInvocationNote
 }
 
 // launchOrDeferExpandedPrompt applies the same run-state guards the plain
@@ -123,7 +137,7 @@ func (m model) invokeSkillByName(name string) (model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		next, teaCmd, _ := m.launchOrDeferExpandedPrompt(body)
+		next, teaCmd, _ := m.launchOrDeferExpandedPrompt(skillInvocationPrompt(body, ""))
 		return next, teaCmd
 	}
 	// The picker row came from a slightly older load (TTL cache) and the skill

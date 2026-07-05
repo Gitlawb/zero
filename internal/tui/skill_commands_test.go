@@ -62,6 +62,23 @@ func TestSkillCommandWithoutArgs(t *testing.T) {
 	if !transcriptContains(next.transcript, "Review the diff for correctness.") {
 		t.Fatalf("bare skill invocation should submit the body, got %#v", next.transcript)
 	}
+	// A bare invocation carries the ask-first note: instructions with no target
+	// must make the model ask ("which PR?") instead of improvising one.
+	if !transcriptContains(next.transcript, "ask for them first") {
+		t.Fatalf("bare invocation should carry the clarify-first note, got %#v", next.transcript)
+	}
+}
+
+// An invocation WITH a request must not carry the ask-first note — the user
+// already said what to apply the skill to.
+func TestSkillCommandWithArgsHasNoClarifyNote(t *testing.T) {
+	m := newSkillTestModel(t, skills.Skill{Name: "reviewer", Content: "Review the diff."})
+
+	next := submitInput(t, m, "/reviewer PR 484 reconnect changes")
+
+	if transcriptContains(next.transcript, "ask for them first") {
+		t.Fatalf("args invocation must not carry the clarify note, got %#v", next.transcript)
+	}
 }
 
 // A skill's frontmatter name is free-form; invocation matches its lowercased
