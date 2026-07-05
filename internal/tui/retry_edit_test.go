@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func TestCommandsRegistered(t *testing.T) {
@@ -28,6 +30,32 @@ func TestEditRecallsLastPrompt(t *testing.T) {
 
 	if got := next.composerValue(); got != "refactor the parser" {
 		t.Fatalf("/edit should recall last prompt into composer, got %q", got)
+	}
+}
+
+// /edit must re-stage the remembered attachments alongside the recalled text, so an
+// edited resend of a vision/PDF-backed prompt carries the same image/document
+// context instead of silently sending a text-only version.
+func TestEditRestagesAttachments(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m.lastPrompt = "describe the diagram"
+	m.lastImages = []zeroruntime.ImageBlock{{MediaType: "image/png"}}
+	m.lastImageLabels = []string{"diagram.png"}
+	m.lastDocuments = []pendingDocument{{label: "spec.pdf", text: "notes"}}
+	m.input.SetValue("/edit")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if got := next.composerValue(); got != "describe the diagram" {
+		t.Fatalf("/edit should recall the prompt text, got %q", got)
+	}
+	if len(next.pendingImages) != 1 || len(next.pendingImageLabels) != 1 || next.pendingImageLabels[0] != "diagram.png" {
+		t.Fatalf("/edit should re-stage the remembered image, got imgs=%d labels=%v",
+			len(next.pendingImages), next.pendingImageLabels)
+	}
+	if len(next.pendingDocuments) != 1 || next.pendingDocuments[0].label != "spec.pdf" {
+		t.Fatalf("/edit should re-stage the remembered document, got %#v", next.pendingDocuments)
 	}
 }
 

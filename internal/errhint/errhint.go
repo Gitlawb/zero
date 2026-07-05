@@ -134,6 +134,15 @@ func containsAny(haystack string, needles ...string) bool {
 // "completed in 4290ms" or "request id 14015" — so an incidental number can't be
 // mis-bucketed as an auth/rate-limit failure.
 func containsStatusCode(haystack string, codes ...string) bool {
+	return HasStatusCode(haystack, codes...)
+}
+
+// HasStatusCode reports whether haystack contains any of the given HTTP status
+// codes as a standalone number — not embedded in a longer digit run like
+// "completed in 4290ms" or "request id 14015". Exported so other packages (e.g.
+// the reconnect classifier) can gate on a status code without re-implementing
+// the digit-boundary check.
+func HasStatusCode(haystack string, codes ...string) bool {
 	for _, code := range codes {
 		for from := 0; ; {
 			rel := strings.Index(haystack[from:], code)

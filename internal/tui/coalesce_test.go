@@ -28,17 +28,32 @@ func (r *recorder) snapshot() []tea.Msg {
 	return out
 }
 
+// manualTimer is a coalesceTimer that never fires on its own, so a test can prove
+// buffering deterministically without racing the real 16ms frame timer: the flush
+// happens only when the test calls c.flush() explicitly.
+type manualTimer struct{ stopped bool }
+
+func (m *manualTimer) Stop() bool {
+	prev := m.stopped
+	m.stopped = true
+	return !prev
+}
+
 // Rapid deltas within one frame collapse into a single agentTextMsg carrying the
 // concatenated text.
 func TestCoalescerBatchesDeltas(t *testing.T) {
 	rec := &recorder{}
 	c := newTextCoalescer(rec.forward)
+	// Swap in a timer that never auto-fires so the "still buffered" assertion below
+	// cannot flake if the scheduler pauses this goroutine past the frame interval.
+	c.afterFunc = func(func()) coalesceTimer { return &manualTimer{} }
 
 	c.send(agentTextMsg{runID: 1, delta: "Hel"})
 	c.send(agentTextMsg{runID: 1, delta: "lo, "})
 	c.send(agentTextMsg{runID: 1, delta: "world"})
 
-	// Nothing forwarded yet — still buffered within the frame.
+	// Nothing forwarded yet — still buffered within the frame (the timer we injected
+	// never fires; only the explicit flush below delivers the text).
 	if got := rec.snapshot(); len(got) != 0 {
 		t.Fatalf("deltas should buffer, forwarded %d early: %#v", len(got), got)
 	}

@@ -102,10 +102,12 @@ func TestShouldReconnectClassification(t *testing.T) {
 		"context length exceeded", "invalid api key", "model not found",
 		"400 bad request: unsupported parameter",
 		// HTTP 5xx statuses are handled by providerio.SendWithRetry (503) or are
-		// non-idempotent (502); the reconnect path must not double-retry them. (A
-		// "504 Gateway Timeout" still reconnects via the generic "timeout" transport
-		// signal — an accepted overlap, since a gateway timeout saw no response.)
+		// non-idempotent (500/502/504); the reconnect path must not double-retry
+		// them. "504 Gateway Timeout" must NOT slip through on the generic "timeout"
+		// transport signal — a gateway timeout is non-idempotent, since the upstream
+		// may have already processed the completion POST before giving up.
 		"503 Service Unavailable", "502 Bad Gateway",
+		"504 Gateway Timeout", "500 Internal Server Error",
 	}
 	for _, m := range notDisconnects {
 		if shouldReconnect(ctx, errors.New(m)) {

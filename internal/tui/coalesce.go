@@ -28,15 +28,31 @@ const streamCoalesceInterval = 16 * time.Millisecond
 // drains and forwards atomically, and the other caller blocks until it is done.
 type textCoalescer struct {
 	forward func(tea.Msg) // downstream sink (external sink + program.Send)
+	// afterFunc schedules fn to run after one frame interval and returns a
+	// stoppable timer. Defaults to a real time.AfterFunc(streamCoalesceInterval, …);
+	// tests swap in a controllable timer so flush timing is deterministic instead of
+	// racing the 16ms wall clock.
+	afterFunc func(fn func()) coalesceTimer
 
 	mu    sync.Mutex
 	buf   []byte
 	runID int
-	timer *time.Timer
+	timer coalesceTimer
+}
+
+// coalesceTimer is the subset of *time.Timer the coalescer needs. Abstracted
+// behind afterFunc so a test can substitute a timer it controls.
+type coalesceTimer interface {
+	Stop() bool
 }
 
 func newTextCoalescer(forward func(tea.Msg)) *textCoalescer {
-	return &textCoalescer{forward: forward}
+	return &textCoalescer{
+		forward: forward,
+		afterFunc: func(fn func()) coalesceTimer {
+			return time.AfterFunc(streamCoalesceInterval, fn)
+		},
+	}
 }
 
 // send is the coalescing entry point installed as the RuntimeMessageSink.
@@ -62,7 +78,7 @@ func (c *textCoalescer) send(msg tea.Msg) {
 	c.runID = text.runID
 	c.buf = append(c.buf, text.delta...)
 	if c.timer == nil {
-		c.timer = time.AfterFunc(streamCoalesceInterval, c.flush)
+		c.timer = c.afterFunc(c.flush)
 	}
 }
 

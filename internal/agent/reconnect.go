@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/errhint"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -107,13 +108,19 @@ func shouldReconnect(ctx context.Context, err error) bool {
 	if isContextLimitError(msg) || isImageRejectionError(err) {
 		return false
 	}
-	// Transport-level disconnects only. HTTP 5xx statuses are deliberately NOT
-	// matched here: 503 already exhausted providerio.SendWithRetry (retrying it
-	// again is a redundant double-retry), and 502/500/504 are non-idempotent by
-	// providerio's rule (the completion POST may have been processed), so replaying
-	// the connect risks duplicate billable work. A genuine transport failure (EOF,
-	// reset, refused, timeout) means no response was received, which is safe to
-	// reconnect.
+	// HTTP 5xx statuses are non-reconnectable and must be excluded BEFORE the
+	// transport substring match below — otherwise "504 Gateway Timeout" would slip
+	// through on the generic "timeout" needle. 503 already exhausted
+	// providerio.SendWithRetry (retrying is a redundant double-retry); 500/502/504
+	// are non-idempotent by providerio's rule — the completion POST may already
+	// have reached the model before the upstream/gateway gave up, so replaying the
+	// connect risks duplicate billable work. Digit-boundary matched so an
+	// incidental "504" inside a latency/id number is not mistaken for a status.
+	if errhint.HasStatusCode(msg, "500", "502", "503", "504") {
+		return false
+	}
+	// Transport-level disconnects only. A genuine transport failure (EOF, reset,
+	// refused, timeout) means no response was received, which is safe to reconnect.
 	for _, needle := range []string{
 		"eof",
 		"connection reset",

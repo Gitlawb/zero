@@ -3971,6 +3971,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Edit\nno previous prompt to recall."})
 			return m, nil
 		}
+		// Re-stage the remembered attachments alongside the recalled text so an
+		// edited resend carries the same image/PDF context — the reappearing chip
+		// row is the visible confirmation. Without this, editing a vision- or
+		// document-backed prompt would silently submit a text-only version and
+		// answer a different task (the same gap /retry guards against).
+		m.pendingImages = m.lastImages
+		m.pendingImageLabels = m.lastImageLabels
+		m.pendingDocuments = m.lastDocuments
 		m.input.SetValue(m.lastPrompt)
 		return m, nil
 	case commandCopy:

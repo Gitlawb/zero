@@ -117,14 +117,17 @@ type skillEntry struct {
 }
 
 // recentEdits returns the files mutated by write_file/edit_file calls in messages
-// — latest note per path, in first-seen order — as skillEntry{name: path, body:
+// — latest note per path, in last-seen order — as skillEntry{name: path, body:
 // note}. After compaction elides the editing turns, this tells the model WHAT it
 // changed in each file (from the tool's result) so it need not re-read to
 // rediscover its own footprint. Capped at maxRecentEdits paths.
+//
+// Ordering is by LAST edit, not first: re-editing a file moves it to the newest
+// position so the tail cap below keeps the file the model most recently touched
+// rather than an earlier, now-stale entry.
 func recentEdits(messages []zeroruntime.Message) []skillEntry {
 	pathByID := map[string]string{}
-	order := make([]string, 0)
-	seen := map[string]bool{}
+	sequence := make([]string, 0)
 	for _, message := range messages {
 		for _, call := range message.ToolCalls {
 			if call.Name != toolNameWriteFile && call.Name != toolNameEditFile {
@@ -137,12 +140,10 @@ func recentEdits(messages []zeroruntime.Message) []skillEntry {
 			if call.ID != "" {
 				pathByID[call.ID] = path
 			}
-			if !seen[path] {
-				seen[path] = true
-				order = append(order, path)
-			}
+			sequence = append(sequence, path)
 		}
 	}
+	order := lastSeenOrder(sequence)
 	if len(order) == 0 {
 		return nil
 	}
@@ -157,7 +158,7 @@ func recentEdits(messages []zeroruntime.Message) []skillEntry {
 		}
 	}
 
-	// Keep the most recent maxRecentEdits paths (the tail of first-seen order).
+	// Keep the most recent maxRecentEdits paths (the tail of last-seen order).
 	if len(order) > maxRecentEdits {
 		order = order[len(order)-maxRecentEdits:]
 	}
@@ -166,6 +167,23 @@ func recentEdits(messages []zeroruntime.Message) []skillEntry {
 		entries = append(entries, skillEntry{name: path, body: noteByPath[path]})
 	}
 	return entries
+}
+
+// lastSeenOrder dedupes paths keeping each at its LAST occurrence, preserving
+// chronological order otherwise. A re-edited path therefore lands at the newest
+// position rather than staying pinned to where it first appeared.
+func lastSeenOrder(paths []string) []string {
+	lastIdx := make(map[string]int, len(paths))
+	for i, p := range paths {
+		lastIdx[p] = i
+	}
+	order := make([]string, 0, len(lastIdx))
+	for i, p := range paths {
+		if lastIdx[p] == i {
+			order = append(order, p)
+		}
+	}
+	return order
 }
 
 // editPathFromArguments pulls the target file path from a write_file/edit_file
@@ -457,9 +475,10 @@ func appendPreservedState(summary string, middle []zeroruntime.Message) string {
 	}
 
 	// Recent edits: merge edits preserved earlier with fresh write_file/edit_file
-	// results in middle (newer note per path wins), so the model keeps an
-	// authoritative record of what it changed across repeated compactions.
-	edits := capRecentEdits(mergeSkillEntries(preservedEditsToEntries(priorState.RecentEdits), recentEdits(middle)))
+	// results in middle (newer note per path wins AND moves to the newest
+	// position), so the tail cap keeps the files the model most recently touched
+	// across repeated compactions rather than dropping a just-re-edited file.
+	edits := capRecentEdits(mergeRecentEdits(preservedEditsToEntries(priorState.RecentEdits), recentEdits(middle)))
 
 	// Tools: preserve deferred tool_search schemas from the transcript. Fresh
 	// loads override older carried copies by name.
@@ -478,6 +497,40 @@ func appendPreservedState(summary string, middle []zeroruntime.Message) string {
 		summary += "\n\n" + block
 	}
 	return summary
+}
+
+// mergeRecentEdits overlays fresh edits onto edits preserved by an earlier
+// compaction. Unlike mergeSkillEntries (which keeps refreshed entries in their
+// original slot), a path touched again by a fresh edit MOVES to the newest
+// position and takes the fresh note, so capRecentEdits — which keeps only the
+// most-recent tail — never drops a file the model just re-edited. Paths present
+// only in the older set keep their relative order, ahead of the fresh ones.
+func mergeRecentEdits(older, newer []skillEntry) []skillEntry {
+	if len(newer) == 0 {
+		return older
+	}
+	freshBody := make(map[string]string, len(newer))
+	freshOrder := make([]string, 0, len(newer))
+	for _, e := range newer {
+		if _, ok := freshBody[e.name]; !ok {
+			freshOrder = append(freshOrder, e.name)
+		}
+		freshBody[e.name] = e.body
+	}
+	merged := make([]skillEntry, 0, len(older)+len(freshOrder))
+	// Older entries that were NOT re-edited keep their position, oldest first.
+	for _, e := range older {
+		if _, refreshed := freshBody[e.name]; refreshed {
+			continue // re-appended at its newest position below
+		}
+		merged = append(merged, e)
+	}
+	// Fresh edits follow, in last-seen order, each carrying the fresh note — so
+	// the most recently touched files sit at the tail the cap preserves.
+	for _, name := range freshOrder {
+		merged = append(merged, skillEntry{name: name, body: freshBody[name]})
+	}
+	return merged
 }
 
 // capRecentEdits bounds the preserved edit list to the most recent maxRecentEdits
