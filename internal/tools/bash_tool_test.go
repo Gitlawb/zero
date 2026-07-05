@@ -482,7 +482,13 @@ func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
 			Sandbox:           newEngine(),
 			PermissionMode:    string(sandbox.PermissionModeAsk),
 		})
-		if result.Meta["shell_issue"] != "" {
+		// Assert on the preflight block sentinel (exit_code "-1", set only by
+		// shellIssueBlockResult) rather than shell_issue: once the guard is
+		// bypassed, "cat somefile.txt" actually runs, and its real,
+		// PATH-dependent output could otherwise trip the unrelated
+		// post-execution detectShellOutputIssue heuristic and make this
+		// assertion flaky for reasons unrelated to the guard under test.
+		if result.Meta["exit_code"] == "-1" {
 			t.Fatalf("expected approved require_escalated to bypass the MSYS guard, got blocked: %#v", result)
 		}
 	})
