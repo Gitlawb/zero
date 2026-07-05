@@ -37,9 +37,34 @@ func TestProposedCommandPrefixHonorsValidatedRequestedPrefix(t *testing.T) {
 
 func TestProposedCommandPrefixSupportsSegmentedCommands(t *testing.T) {
 	got := proposedCommandPrefix("bash", map[string]any{"command": "ps aux | head -5"})
+	if runtime.GOOS == "windows" {
+		// head is MSYS-prone on Windows (#458), so proposedCommandPrefix must
+		// not offer "ps aux" as a reusable prefix here: approving it would
+		// escalate the whole command, including the uncovered head segment,
+		// to bypass the sandbox unreviewed. See
+		// TestProposedCommandPrefixRejectsPrefixLeavingUnsafeTailUncovered for
+		// the platform-independent regression coverage of this behavior.
+		if got != nil {
+			t.Fatalf("expected no prefix on Windows because head is MSYS-prone, got %#v", got)
+		}
+		return
+	}
 	want := []string{"ps", "aux"}
 	if !equalStringSlices(got, want) {
 		t.Fatalf("prefix = %#v, want %#v", got, want)
+	}
+}
+
+// TestProposedCommandPrefixRejectsPrefixLeavingUnsafeTailUncovered guards
+// against proposedCommandPrefix offering to approve one segment of a
+// multi-segment command (e.g. "ps aux") while a different segment (e.g. "npm
+// install") is not known-safe. shellExecutionArgsForApproval escalates the
+// entire command once any prefix is approved, so an uncovered unsafe segment
+// would bypass the sandbox unreviewed. Uses npm, which is never known-safe on
+// any platform, so the assertion does not depend on runtime.GOOS.
+func TestProposedCommandPrefixRejectsPrefixLeavingUnsafeTailUncovered(t *testing.T) {
+	if got := proposedCommandPrefix("bash", map[string]any{"command": "ps aux && npm install"}); got != nil {
+		t.Fatalf("expected no prefix because npm segment is not known-safe, got %#v", got)
 	}
 }
 

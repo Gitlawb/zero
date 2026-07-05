@@ -78,21 +78,33 @@ func windowsMsysSandboxIssue(message string) *shellIssue {
 }
 
 // windowsCommandSegments splits a command into cmd.exe-operator-separated
-// segments (&, |, ;, and their doubled forms &&/||), respecting double quotes
-// (cmd.exe's grouping construct), so an operator or command name mentioned
-// inside a quoted argument (e.g. a commit message or PR comment body) is not
-// mistaken for a real segment boundary or invocation.
+// segments (&, |, and their doubled forms &&/||), respecting double quotes
+// (cmd.exe's grouping construct) and the caret (^) escape character, so an
+// operator or command name mentioned inside a quoted argument (e.g. a commit
+// message or PR comment body), or an operator escaped with ^ (cmd.exe prints
+// `echo ^| head` as literal text instead of piping to head), is not mistaken
+// for a real segment boundary or invocation. Unlike bash, cmd.exe does not
+// treat ; as a statement separator, so it is left as ordinary argument text
+// (e.g. `echo foo; head` is a single `echo` invocation with literal args).
 func windowsCommandSegments(command string) []string {
 	var segments []string
 	var current strings.Builder
 	inQuotes := false
-	for _, c := range command {
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		if !inQuotes && c == '^' && i+1 < len(runes) {
+			current.WriteRune(c)
+			i++
+			current.WriteRune(runes[i])
+			continue
+		}
 		if c == '"' {
 			inQuotes = !inQuotes
 			current.WriteRune(c)
 			continue
 		}
-		if !inQuotes && (c == '&' || c == '|' || c == ';') {
+		if !inQuotes && (c == '&' || c == '|') {
 			if seg := strings.TrimSpace(current.String()); seg != "" {
 				segments = append(segments, seg)
 			}
@@ -148,9 +160,6 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 		return nil
 	}
 	trimmed := strings.TrimSpace(command)
-	if windowsMsysBinaryPathPattern.MatchString(trimmed) {
-		return windowsMsysSandboxIssue("Command invokes an MSYS/Cygwin binary path that cannot run under Zero's Windows sandbox.")
-	}
 	if windowsBashStyleCDPattern.MatchString(trimmed) {
 		return &shellIssue{
 			Kind:       "windows_shell_syntax",
@@ -159,13 +168,18 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 		}
 	}
 	// Check the first word of each operator-separated segment (not the raw
-	// text anywhere in the command) against the single MSYS-prone name set,
-	// covering bare names (head), .exe names (head.exe), and directory-
-	// prefixed forms (C:\...\head.exe) uniformly. Being segment/word anchored
-	// rather than a whole-string regex, it never matches text that only
-	// appears inside a quoted argument.
+	// text anywhere in the command) against the MSYS binary-path pattern and
+	// the single MSYS-prone name set, covering bare names (head), .exe names
+	// (head.exe), and directory-prefixed forms (C:\...\head.exe) uniformly.
+	// Being segment/word anchored rather than a whole-string regex or scan,
+	// neither check matches text that only appears inside a quoted argument
+	// (e.g. a commit message or PR comment body discussing head.exe).
 	for _, segment := range windowsCommandSegments(trimmed) {
-		if msysProneCommandWord(firstCommandWord(segment)) {
+		word := firstCommandWord(segment)
+		if windowsMsysBinaryPathPattern.MatchString(word) {
+			return windowsMsysSandboxIssue("Command invokes an MSYS/Cygwin binary path that cannot run under Zero's Windows sandbox.")
+		}
+		if msysProneCommandWord(word) {
 			return windowsMsysSandboxIssue("Command uses a POSIX coreutil (head/tail/grep/cat/...) that commonly resolves to Git-for-Windows MSYS binaries incompatible with the Windows sandbox.")
 		}
 	}

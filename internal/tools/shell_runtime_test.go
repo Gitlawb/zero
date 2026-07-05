@@ -128,3 +128,48 @@ func TestDetectShellCommandIssueIgnoresQuotedMsysMentions(t *testing.T) {
 		t.Fatalf("expected real head invocation to still be flagged, got %#v", issue)
 	}
 }
+
+// TestDetectShellCommandIssueIgnoresQuotedMsysPathMentions guards the
+// explicit MSYS-binary-path check the same way as the coreutil-name check:
+// a full usr\bin\ path that only appears inside a quoted argument (e.g. a
+// commit message describing the failure) must not be treated as an
+// invocation, since the path check is now anchored to the first word of each
+// command segment rather than scanned across the raw command text.
+func TestDetectShellCommandIssueIgnoresQuotedMsysPathMentions(t *testing.T) {
+	for _, command := range []string{
+		`git commit -m "C:\Program Files\Git\usr\bin\head.exe fails"`,
+		`gh pr comment --body "C:\Git\usr\bin\grep.exe is blocked"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected quoted MSYS path mention to pass for %q, got %#v", command, issue)
+		}
+	}
+
+	// A real invocation by full path must still be caught.
+	if issue := detectShellCommandIssue(`C:\Git\usr\bin\grep.exe pattern file.txt`, "windows"); issue == nil || issue.Kind != windowsMsysSandboxKind {
+		t.Fatalf("expected real MSYS path invocation to still be flagged, got %#v", issue)
+	}
+}
+
+// TestDetectShellCommandIssueRespectsCaretEscapedOperators guards against
+// misreading cmd.exe's ^ escape character: `echo ^| head` prints the pipe and
+// "head" as literal text (the caret escapes the pipe so it never splits into
+// a separate `head` invocation), and `echo foo; head` is a single `echo`
+// command with literal arguments since cmd.exe (unlike bash) does not treat
+// ; as a statement separator.
+func TestDetectShellCommandIssueRespectsCaretEscapedOperators(t *testing.T) {
+	for _, command := range []string{
+		`echo ^| head`,
+		`echo ^& head`,
+		`echo foo; head`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected no issue for %q, got %#v", command, issue)
+		}
+	}
+
+	// An unescaped pipe must still split into a real head invocation.
+	if issue := detectShellCommandIssue(`echo foo | head`, "windows"); issue == nil || issue.Kind != windowsMsysSandboxKind {
+		t.Fatalf("expected real head invocation to still be flagged, got %#v", issue)
+	}
+}
