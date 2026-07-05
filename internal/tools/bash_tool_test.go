@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +238,43 @@ func TestBashToolRunsCommandInWorkspace(t *testing.T) {
 	}
 	if result.Meta["cwd"] != "." {
 		t.Fatalf("expected cwd metadata ., got %q", result.Meta["cwd"])
+	}
+}
+
+// A command with runaway output must not be buffered whole in memory: the capture
+// is bounded to head+tail, yet raw_bytes still reports the true (much larger) size.
+// If capture were unbounded this would balloon Zero's memory before truncation.
+func TestBashToolBoundsRunawayOutputCapture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell pipeline (yes | head)")
+	}
+	const produced = 500000 // ~5× the 96 KiB budget
+
+	result := NewBashTool(t.TempDir()).Run(context.Background(), map[string]any{
+		"command": fmt.Sprintf("yes ABCDEFGH | head -c %d", produced),
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !result.Truncated || result.Meta["truncated"] != "true" {
+		t.Fatalf("runaway output should be flagged truncated, meta=%v", result.Meta)
+	}
+	if !strings.Contains(result.Output, "output truncated") {
+		t.Fatalf("expected a truncation marker in output")
+	}
+	// The emitted (model-visible) text is capped near the budget...
+	if len(result.Output) > bashOutputBudgetBytes+1024 {
+		t.Fatalf("emitted %d bytes far exceeds budget %d", len(result.Output), bashOutputBudgetBytes)
+	}
+	// ...but raw_bytes reflects the full stream, proving the total was counted while
+	// only a bounded slice was ever held (raw >> the ~2×budget retention cap).
+	raw, err := strconv.Atoi(result.Meta["raw_bytes"])
+	if err != nil {
+		t.Fatalf("raw_bytes not an int: %q", result.Meta["raw_bytes"])
+	}
+	if raw < produced {
+		t.Fatalf("raw_bytes = %d, want >= %d (full stream counted)", raw, produced)
 	}
 }
 

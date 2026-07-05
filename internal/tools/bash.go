@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -124,10 +123,14 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	// Bound the capture so a command with runaway output (`cat huge.log`, `yes`)
+	// can't grow Zero's memory before truncation: only the head+tail each stream
+	// will ever surface to the model are retained, the middle is discarded as it
+	// streams, and the true size is counted for the truncation marker.
+	stdout := newBoundedBuffer(bashOutputBudgetBytes, bashOutputBudgetBytes)
+	stderr := newBoundedBuffer(bashOutputBudgetBytes, bashOutputBudgetBytes)
+	command.Stdout = stdout
+	command.Stderr = stderr
 
 	// Kill the shell as a process group on timeout and bound the post-kill I/O
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
@@ -139,7 +142,12 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)
-	stderrText := appendSandboxBlocks(stderr.String(), monitor.Stop())
+	stdoutText := stdout.retained()
+	stderrRetained := stderr.retained()
+	stderrText := appendSandboxBlocks(stderrRetained, monitor.Stop())
+	// Sandbox blocks are extra model-visible stderr bytes appended after capture;
+	// count them toward the true total so the budget/marker stay accurate.
+	stderrTotal := stderr.total + (len(stderrText) - len(stderrRetained))
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 		return Result{
@@ -156,8 +164,8 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 				Meta:   meta,
 			}
 		}
-		markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
-		outText, errText, truncated := budgetBashOutput(stdout.String(), stderrText, meta)
+		markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
+		outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
 		return Result{
 			Status:    StatusError,
 			Output:    formatBashOutputWithShellHint(commandText, outText, errText, exitCode, meta),
@@ -166,8 +174,8 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		}
 	}
 
-	markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
-	outText, errText, truncated := budgetBashOutput(stdout.String(), stderrText, meta)
+	markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
+	outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
 	if meta[SandboxLikelyDeniedMeta] == "true" {
 		return Result{
 			Status:    StatusError,
@@ -363,8 +371,17 @@ const bashOutputBudgetBytes = 96 * 1024
 // the read/search tools). Detection that needs the full output (sandbox-denial
 // scanning) must run on the raw strings before this is applied.
 func budgetBashOutput(stdout string, stderr string, meta map[string]string) (string, string, bool) {
-	outText, outRaw, outTrunc := truncateHeadTail(stdout, bashOutputBudgetBytes)
-	errText, errRaw, errTrunc := truncateHeadTail(stderr, bashOutputBudgetBytes)
+	return budgetBashCapture(stdout, len(stdout), stderr, len(stderr), meta)
+}
+
+// budgetBashCapture is budgetBashOutput for the streaming-capture path: outTotal
+// and errTotal are the true byte counts (from boundedBuffer.total), which may
+// exceed the retained strings when the middle was dropped during capture. Meta's
+// raw_bytes therefore reflects everything the command produced, not just what was
+// kept in memory.
+func budgetBashCapture(out string, outTotal int, errStr string, errTotal int, meta map[string]string) (string, string, bool) {
+	outText, outRaw, outTrunc := truncateHeadTailWithTotal(out, outTotal, bashOutputBudgetBytes)
+	errText, errRaw, errTrunc := truncateHeadTailWithTotal(errStr, errTotal, bashOutputBudgetBytes)
 	truncated := outTrunc || errTrunc
 	if meta != nil {
 		emitted := len(outText) + len(errText)
@@ -378,22 +395,85 @@ func budgetBashOutput(stdout string, stderr string, meta map[string]string) (str
 	return outText, errText, truncated
 }
 
+// boundedBuffer is an io.Writer that retains at most headCap bytes from the start
+// and tailCap bytes from the end of a stream while counting the total written, so
+// a command emitting unbounded output (`cat huge.log`, `yes`) cannot grow Zero's
+// memory: the middle is discarded as it arrives instead of buffered whole and then
+// truncated. total records the full size for the truncation marker even though the
+// middle is never held. Not safe for concurrent writes; exec drives Stdout and
+// Stderr from separate goroutines, so each stream gets its own buffer.
+type boundedBuffer struct {
+	head    []byte
+	headCap int
+	tail    []byte
+	tailCap int
+	total   int
+}
+
+func newBoundedBuffer(headCap, tailCap int) *boundedBuffer {
+	return &boundedBuffer{headCap: headCap, tailCap: tailCap}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	b.total += n
+	// Fill the head until it reaches headCap; the head is written once and frozen.
+	if len(b.head) < b.headCap {
+		take := b.headCap - len(b.head)
+		if take > len(p) {
+			take = len(p)
+		}
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	// Anything past the head feeds a rolling tail that keeps only the last tailCap
+	// bytes. Compact once it grows past 2×tailCap so the append stays amortized O(1)
+	// while memory never exceeds ~2×tailCap.
+	if len(p) > 0 && b.tailCap > 0 {
+		b.tail = append(b.tail, p...)
+		if len(b.tail) > 2*b.tailCap {
+			b.tail = append(b.tail[:0], b.tail[len(b.tail)-b.tailCap:]...)
+		}
+	}
+	return n, nil
+}
+
+// retained returns the kept head+tail bytes (marker-less) as a string. The junction
+// between head and tail lands in the middle, which the display budget trims away;
+// callers that need the true size read total separately.
+func (b *boundedBuffer) retained() string {
+	if len(b.tail) > b.tailCap {
+		// Not yet compacted since the last overflow; expose only the last tailCap.
+		return string(b.head) + string(b.tail[len(b.tail)-b.tailCap:])
+	}
+	return string(b.head) + string(b.tail)
+}
+
 // truncateHeadTail keeps the first and last halves of value when it exceeds
 // maxBytes, dropping the middle behind a marker. Returns the possibly-truncated
 // text, the raw byte length, and whether truncation happened.
 func truncateHeadTail(value string, maxBytes int) (string, int, bool) {
-	raw := len(value)
-	if maxBytes <= 0 || raw <= maxBytes {
-		return value, raw, false
+	// value holds the whole stream, so its length is the true raw size.
+	return truncateHeadTailWithTotal(value, len(value), maxBytes)
+}
+
+// truncateHeadTailWithTotal head+tail-truncates value to maxBytes, using total —
+// the full original byte count — for the "N bytes omitted" marker and the raw
+// count. total may exceed len(value) when the middle was already discarded during
+// bounded capture (boundedBuffer): value then holds only the retained head+tail,
+// and this trims it to the display budget while still reporting the true total.
+func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, bool) {
+	if maxBytes <= 0 || total <= maxBytes {
+		return value, total, false
 	}
-	marker := fmt.Sprintf("\n[zero] output truncated: %d bytes omitted from the middle — redirect to a file and read_file a range for the full text\n", raw-maxBytes)
+	marker := fmt.Sprintf("\n[zero] output truncated: %d bytes omitted from the middle — redirect to a file and read_file a range for the full text\n", total-maxBytes)
 	budget := maxBytes - len(marker)
 	if budget < 0 {
 		budget = 0
 	}
 	head := budget / 2
 	tail := budget - head
-	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), raw, true
+	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), total, true
 }
 
 func formatBashOutputWithShellHint(command string, stdout string, stderr string, exitCode int, meta map[string]string) string {
