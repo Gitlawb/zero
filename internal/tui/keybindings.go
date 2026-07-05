@@ -265,12 +265,10 @@ func (m model) keyMatch(b parsedBinding, msg tea.KeyMsg, defaultFn func(tea.KeyM
 	return defaultFn(msg)
 }
 
-// reservedBindings lists the hardcoded (non-configurable) chords the main key
-// dispatch switch in model.go always checks ahead of the five configurable
-// bindings. That switch has no collision detection of its own, so a
-// configured binding equal to one of these would make the hardcoded action
-// permanently unreachable — sanitizeKeyBindings reverts such a binding to its
-// default instead.
+// reservedBindings lists hardcoded (non-configurable) chords handled directly in
+// model.go's key dispatch. If a configurable binding uses one of these chords,
+// one of the actions becomes unreachable (depending on switch order), so
+// sanitizeKeyBindings reverts the configurable binding back to its default.
 var reservedBindings = []struct {
 	binding     parsedBinding
 	description string
