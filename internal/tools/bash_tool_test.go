@@ -208,7 +208,7 @@ func TestDetectShellCommandIssueAllowsUnrelatedCommands(t *testing.T) {
 }
 
 func TestDetectShellOutputIssueAddsWindowsSyntaxHint(t *testing.T) {
-	issue := detectShellOutputIssue(`cd /d/tmp/zero-pr-158 && ls -la`, "The syntax of the command is incorrect.", "windows")
+	issue := detectShellOutputIssue("The syntax of the command is incorrect.", "windows")
 	if issue == nil {
 		t.Fatal("expected Windows syntax error to get shell guidance")
 	}
@@ -506,6 +506,35 @@ func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
 			t.Fatalf("expected windows_shell_syntax block to still apply under require_escalated, got %#v", result)
 		}
 	})
+}
+
+// TestBashToolIgnoresMsysMarkersInCommandArgumentsAfterFailure guards the
+// post-execution MSYS heuristic against treating the command line itself as
+// evidence. The helper command below fails for a reason unrelated to MSYS
+// (a plain non-zero exit), but its own argument text quotes an MSYS crash
+// marker the way a PR-comment or commit-message argument might. Before the
+// fix, detectShellOutputIssue scanned command+output together and would have
+// misdiagnosed this as an MSYS sandbox failure even though the real
+// stdout/stderr never mentions MSYS at all.
+func TestBashToolIgnoresMsysMarkersInCommandArgumentsAfterFailure(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only MSYS output guard")
+	}
+	root := t.TempDir()
+	// The helper only reads argv[2] ("fail"); this trailing quoted argument is
+	// otherwise unused by the helper but still part of the command line text.
+	command := helperCommand("fail") + ` "fatal error - CreateFileMapping S-1-5-21, Win32 error 5. Terminating. cygheap_user::init"`
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": command,
+	})
+
+	if result.Status != StatusError || result.Meta["exit_code"] != "7" {
+		t.Fatalf("expected the helper's real exit 7 failure, got %s: %#v", result.Status, result)
+	}
+	if result.Meta["shell_issue"] == "windows_msys_sandbox" {
+		t.Fatalf("expected the MSYS marker in the command's own argument text to be ignored, got %#v", result)
+	}
 }
 
 func TestBashToolRunsWithDegradedUnavailableNativeSandbox(t *testing.T) {

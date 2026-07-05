@@ -32,7 +32,7 @@ func TestDetectShellCommandIssueFlagsStandaloneCat(t *testing.T) {
 
 func TestDetectShellOutputIssueFlagsMsysCreateFileMappingError(t *testing.T) {
 	output := `0 [main] head (3568) C:\Program Files\Git\usr\bin\head.exe: *** fatal error - CreateFileMapping S-1-5-21-3149109338-1484423945-518236903-1001.1, Win32 error 5.  Terminating.`
-	issue := detectShellOutputIssue(`git log | head -5`, output, "windows")
+	issue := detectShellOutputIssue(output, "windows")
 	if issue == nil || issue.Kind != "windows_msys_sandbox" {
 		t.Fatalf("expected MSYS output issue, got %#v", issue)
 	}
@@ -44,7 +44,7 @@ func TestDetectShellOutputIssueFlagsMsysCreateFileMappingError(t *testing.T) {
 func TestDetectShellOutputIssueFlagsMsysSignalPipeError(t *testing.T) {
 	output := `0 [main] head (39684) cygheap_user::init: NtSetInformationToken (TokenDefaultDacl), 0xC0000022
 648 [main] head (39684) C:\Program Files\Git\usr\bin\head.exe: *** fatal error - couldn't create signal pipe, Win32 error 5`
-	issue := detectShellOutputIssue(`"C:\Program Files\Git\usr\bin\head.exe" --version`, output, "windows")
+	issue := detectShellOutputIssue(output, "windows")
 	if issue == nil || issue.Kind != "windows_msys_sandbox" {
 		t.Fatalf("expected MSYS output issue, got %#v", issue)
 	}
@@ -52,7 +52,7 @@ func TestDetectShellOutputIssueFlagsMsysSignalPipeError(t *testing.T) {
 
 func TestDetectShellOutputIssueFlagsMsysTerminatingWithMsysMarker(t *testing.T) {
 	output := `1 [main] tail (4321) tail: *** MapViewOfFileEx failed, Win32 error 5.  Terminating.`
-	issue := detectShellOutputIssue(`git log | tail -5`, output, "windows")
+	issue := detectShellOutputIssue(output, "windows")
 	if issue == nil || issue.Kind != "windows_msys_sandbox" {
 		t.Fatalf("expected MSYS output issue, got %#v", issue)
 	}
@@ -60,7 +60,7 @@ func TestDetectShellOutputIssueFlagsMsysTerminatingWithMsysMarker(t *testing.T) 
 
 func TestDetectShellOutputIssueIgnoresNonMsysWin32Error5(t *testing.T) {
 	output := `myapp.exe: unable to open service handle, Win32 error 5 (access denied). Terminating worker.`
-	issue := detectShellOutputIssue(`myapp.exe run`, output, "windows")
+	issue := detectShellOutputIssue(output, "windows")
 	if issue != nil {
 		t.Fatalf("expected no issue for non-MSYS access-denied output, got %#v", issue)
 	}
@@ -171,5 +171,38 @@ func TestDetectShellCommandIssueRespectsCaretEscapedOperators(t *testing.T) {
 	// An unescaped pipe must still split into a real head invocation.
 	if issue := detectShellCommandIssue(`echo foo | head`, "windows"); issue == nil || issue.Kind != windowsMsysSandboxKind {
 		t.Fatalf("expected real head invocation to still be flagged, got %#v", issue)
+	}
+}
+
+// TestDetectShellCommandIssueFlagsRedirectionAttachedToCommand guards against
+// firstCommandWord treating cmd.exe redirection operators as part of the
+// command name. cmd.exe accepts redirection with no separating space
+// (head>out.txt, cat<in.txt), so splitting only on whitespace would return
+// "head>out.txt" as one word and miss the invoked command entirely.
+func TestDetectShellCommandIssueFlagsRedirectionAttachedToCommand(t *testing.T) {
+	for _, command := range []string{
+		`some-command | head>out.txt`,
+		`cat<in.txt`,
+		`grep>matches.txt pattern`,
+	} {
+		issue := detectShellCommandIssue(command, "windows")
+		if issue == nil || issue.Kind != windowsMsysSandboxKind {
+			t.Fatalf("expected windows_msys_sandbox for %q, got %#v", command, issue)
+		}
+	}
+}
+
+// TestDetectShellOutputIssueSignatureOmitsCommandText documents, at the type
+// level, that detectShellOutputIssue can no longer take the command line as
+// evidence: it only accepts the real output. Harmless output must not be
+// flagged, and output that genuinely carries the MSYS failure markers must
+// still be flagged.
+func TestDetectShellOutputIssueSignatureOmitsCommandText(t *testing.T) {
+	if issue := detectShellOutputIssue("hello from bash", "windows"); issue != nil {
+		t.Fatalf("expected no issue for harmless output, got %#v", issue)
+	}
+	output := `0 [main] head (3568) C:\Program Files\Git\usr\bin\head.exe: *** fatal error - CreateFileMapping ..., Win32 error 5.  Terminating.`
+	if issue := detectShellOutputIssue(output, "windows"); issue == nil || issue.Kind != windowsMsysSandboxKind {
+		t.Fatalf("expected real MSYS output to still be flagged, got %#v", issue)
 	}
 }

@@ -3,6 +3,7 @@ package tools
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 type shellRuntime struct {
@@ -123,7 +124,11 @@ func windowsCommandSegments(command string) []string {
 // double-quoted span counts as one token with its quotes stripped, since
 // cmd.exe treats a quoted path as a single argument: the command invoked by
 // `"C:\Program Files\Git\usr\bin\head.exe" file.txt` is the quoted path, not
-// "C:\Program.
+// "C:\Program. For an unquoted command, the token ends at whitespace or a
+// redirection operator (<, >): cmd.exe accepts redirection attached directly
+// to the command name with no separating space (head>out.txt, cat<in.txt), so
+// stopping only at whitespace would return "head>out.txt" as one word and
+// miss the invoked command.
 func firstCommandWord(segment string) string {
 	trimmed := strings.TrimSpace(segment)
 	if trimmed == "" {
@@ -135,11 +140,14 @@ func firstCommandWord(segment string) string {
 		}
 		return trimmed[1:]
 	}
-	fields := strings.Fields(trimmed)
-	if len(fields) == 0 {
-		return ""
+	if end := strings.IndexFunc(trimmed, isCommandWordBoundary); end >= 0 {
+		return trimmed[:end]
 	}
-	return fields[0]
+	return trimmed
+}
+
+func isCommandWordBoundary(r rune) bool {
+	return unicode.IsSpace(r) || r == '<' || r == '>'
 }
 
 // msysProneCommandWord reports whether word (the first token of a command
@@ -186,11 +194,18 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 	return nil
 }
 
-func detectShellOutputIssue(command string, output string, goos string) *shellIssue {
+// detectShellOutputIssue looks for MSYS runtime crash markers and cmd.exe
+// syntax-error text in output only, never in the command that was run. The
+// command line is attacker/user-controlled argument text (e.g. a `gh pr
+// comment --body` quoting a sample failure), not something the shell
+// produced, so treating it as evidence would reintroduce the same
+// quoted-text false positives the preflight command-position check exists to
+// avoid, just after execution instead of before it.
+func detectShellOutputIssue(output string, goos string) *shellIssue {
 	if goos != "windows" {
 		return nil
 	}
-	lower := strings.ToLower(command + "\n" + output)
+	lower := strings.ToLower(output)
 	if msysRuntimeFailedInOutput(lower) {
 		return windowsMsysSandboxIssue("An MSYS/Cygwin runtime failed under Zero's Windows sandbox (ACCESS_DENIED during MSYS startup).")
 	}

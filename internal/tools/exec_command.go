@@ -866,7 +866,7 @@ func execToolResult(input execToolResultInput) Result {
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	if status == StatusError && input.exited && !input.interrupted {
-		if issue := detectShellOutputIssue(input.commandText, output, runtimeGOOS()); issue != nil {
+		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
 		}

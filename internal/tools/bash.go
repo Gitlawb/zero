@@ -171,7 +171,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
 		return Result{
 			Status:    StatusError,
-			Output:    formatBashOutputWithShellHint(commandText, outText, errText, exitCode, meta),
+			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
 			Truncated: truncated,
 			Meta:      meta,
 		}
@@ -182,7 +182,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if meta[SandboxLikelyDeniedMeta] == "true" {
 		return Result{
 			Status:    StatusError,
-			Output:    formatBashOutputWithShellHint(commandText, outText, errText, exitCode, meta),
+			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
 			Truncated: truncated,
 			Meta:      meta,
 		}
@@ -563,9 +563,9 @@ func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, 
 	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), total, true
 }
 
-func formatBashOutputWithShellHint(command string, stdout string, stderr string, exitCode int, meta map[string]string) string {
+func formatBashOutputWithShellHint(stdout string, stderr string, exitCode int, meta map[string]string) string {
 	output := formatBashOutput(stdout, stderr, exitCode)
-	if issue := detectShellOutputIssue(command, stdout+"\n"+stderr, runtime.GOOS); issue != nil {
+	if issue := detectShellOutputIssue(stdout+"\n"+stderr, runtime.GOOS); issue != nil {
 		meta["shell_issue"] = issue.Kind
 		output = appendShellIssueHint(output, *issue)
 	}
