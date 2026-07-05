@@ -331,34 +331,46 @@ func TestPermissionCursorCtrlD(t *testing.T) {
 }
 
 func TestShiftUpWithComposerDoesNotScroll(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	for index := 0; index < 12; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
+	}
 	m.input.SetValue("hello world")
 	m.input.CursorEnd()
 
 	// Without the composer guard, Shift+Up would scroll the transcript.
 	// With the guard, it should break out of the switch and let the input
 	// field handle the key (multiline navigation).
+	scrollBefore := m.chatScrollOffset
 	updated, cmd := m.Update(testKeyShift(tea.KeyUp))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("Shift+Up with non-empty composer should not return a command")
 	}
-	if !next.transcriptScrollOffset.Equal(m.transcriptScrollOffset) {
-		t.Fatal("Shift+Up with non-empty composer should not scroll the transcript")
+	if next.chatScrollOffset != scrollBefore {
+		t.Fatalf("Shift+Up with non-empty composer scrolled transcript: offset %d -> %d", scrollBefore, next.chatScrollOffset)
 	}
 }
 
 func TestShiftDownWithComposerDoesNotScroll(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	for index := 0; index < 12; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
+	}
 	m.input.SetValue("hello world")
 	m.input.CursorEnd()
 
+	scrollBefore := m.chatScrollOffset
 	updated, cmd := m.Update(testKeyShift(tea.KeyDown))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("Shift+Down with non-empty composer should not return a command")
 	}
-	if !next.transcriptScrollOffset.Equal(m.transcriptScrollOffset) {
-		t.Fatal("Shift+Down with non-empty composer should not scroll the transcript")
+	if next.chatScrollOffset != scrollBefore {
+		t.Fatalf("Shift+Down with non-empty composer scrolled transcript: offset %d -> %d", scrollBefore, next.chatScrollOffset)
 	}
 }
