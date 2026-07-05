@@ -28,7 +28,7 @@ const (
 	webFetchTimeout         = 30 * time.Second
 	webFetchRedirectLimit   = 5
 	webFetchErrorBodyLimit  = 4 * 1024
-	webFetchPublicOnlyHint  = "web_fetch only supports public remote HTTP/HTTPS URLs. For localhost or private network URLs, use bash with curl so sandbox network permission can apply."
+	webFetchPublicOnlyHint  = "web_fetch only supports public remote HTTP/HTTPS URLs. For localhost or private network URLs, use bash with curl so sandbox network permission can apply"
 )
 
 type webFetchTool struct {
@@ -348,7 +348,7 @@ func webFetchRedirectPolicy(previous func(*http.Request, []*http.Request) error,
 			return fmt.Errorf("too many redirects: maximum is %d", webFetchRedirectLimit)
 		}
 		if err := validateParsedWebFetchURL(request.Context(), request.URL, resolver); err != nil {
-			return fmt.Errorf("Unsafe redirect URL: %w", err)
+			return fmt.Errorf("unsafe redirect URL: %w", err)
 		}
 		if previous != nil {
 			return previous(request, via)

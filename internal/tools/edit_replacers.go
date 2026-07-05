@@ -58,7 +58,7 @@ func fuzzyEditMatch(content, find string, replaceAll bool) (string, error) {
 				continue
 			}
 			seen[search] = true
-			if strings.Index(content, search) < 0 {
+			if !strings.Contains(content, search) {
 				continue
 			}
 			candidates = append(candidates, search)

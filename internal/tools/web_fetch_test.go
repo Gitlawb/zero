@@ -405,7 +405,7 @@ func TestWebFetchToolRejectsUnsafeRedirects(t *testing.T) {
 			if result.Status != StatusError {
 				t.Fatalf("expected redirect safety error, got %s: %s", result.Status, result.Output)
 			}
-			if !strings.Contains(result.Output, "Unsafe redirect URL") {
+			if !strings.Contains(result.Output, "unsafe redirect URL") {
 				t.Fatalf("expected unsafe redirect message, got %q", result.Output)
 			}
 		})
