@@ -24,6 +24,9 @@ func TestAsyncDiagnosticsNilCollectorNoOps(t *testing.T) {
 }
 
 func TestAsyncDiagnosticsCollectsAndDrainsOnce(t *testing.T) {
+	// A real absolute root: a literal "/ws" is not filepath.IsAbs on Windows
+	// (no drive letter), which is exactly what the assertions below check.
+	root := t.TempDir()
 	var mu sync.Mutex
 	var checked []string
 	check := func(_ context.Context, absPath string) string {
@@ -35,7 +38,7 @@ func TestAsyncDiagnosticsCollectsAndDrainsOnce(t *testing.T) {
 		}
 		return "ERR " + filepath.Base(absPath)
 	}
-	diagnostics := newAsyncDiagnostics(check, "/ws")
+	diagnostics := newAsyncDiagnostics(check, root)
 	diagnostics.enqueue(context.Background(), []string{"broken.go", "clean.go"})
 
 	nudge := diagnostics.drain(context.Background())
@@ -47,8 +50,8 @@ func TestAsyncDiagnosticsCollectsAndDrainsOnce(t *testing.T) {
 	}
 	mu.Lock()
 	for _, path := range checked {
-		if !filepath.IsAbs(path) || !strings.HasPrefix(path, filepath.FromSlash("/ws")) {
-			t.Fatalf("check received %q, want workspace-absolute path", path)
+		if !filepath.IsAbs(path) || !strings.HasPrefix(path, root+string(filepath.Separator)) {
+			t.Fatalf("check received %q, want path under workspace root %q", path, root)
 		}
 	}
 	mu.Unlock()
@@ -173,12 +176,13 @@ func TestRunDeliversAsyncDiagnosticsNudgeNextTurn(t *testing.T) {
 			},
 		},
 	}
+	root := t.TempDir()
 	var checkedPath string
 	var mu sync.Mutex
 
 	result, err := Run(context.Background(), "fix main.go", provider, Options{
 		Registry: registry,
-		Cwd:      filepath.FromSlash("/ws"),
+		Cwd:      root,
 		FileDiagnostics: func(_ context.Context, absPath string) string {
 			mu.Lock()
 			checkedPath = absPath
@@ -217,7 +221,7 @@ func TestRunDeliversAsyncDiagnosticsNudgeNextTurn(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if want := filepath.Join(filepath.FromSlash("/ws"), "main.go"); checkedPath != want {
+	if want := filepath.Join(root, "main.go"); checkedPath != want {
 		t.Fatalf("checked path = %q, want %q", checkedPath, want)
 	}
 }
@@ -245,7 +249,7 @@ func TestRunDrainsAsyncDiagnosticsBeforeMaxTurnsFinalAnswer(t *testing.T) {
 
 	result, err := Run(context.Background(), "fix main.go", provider, Options{
 		Registry: registry,
-		Cwd:      filepath.FromSlash("/ws"),
+		Cwd:      t.TempDir(),
 		MaxTurns: 1,
 		FileDiagnostics: func(context.Context, string) string {
 			return "main.go:1:1 error: boom"
