@@ -20,6 +20,10 @@ func TestStartNewSessionResetsState(t *testing.T) {
 	m.pendingImageLabels = []string{"pic.png"}
 	m.pendingDocuments = []pendingDocument{{label: "doc.pdf"}}
 	m.queuedMessage = "queued"
+	// The /retry attachment snapshot is prior-session state too and must not survive.
+	m.lastImages = make([]zeroruntime.ImageBlock, 1)
+	m.lastImageLabels = []string{"pic.png"}
+	m.lastDocuments = []pendingDocument{{label: "doc.pdf"}}
 
 	next := m.startNewSession()
 
@@ -40,6 +44,11 @@ func TestStartNewSessionResetsState(t *testing.T) {
 	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 || len(next.pendingDocuments) != 0 || next.queuedMessage != "" {
 		t.Fatalf("startNewSession must clear staged input, got images=%d labels=%d docs=%d queued=%q",
 			len(next.pendingImages), len(next.pendingImageLabels), len(next.pendingDocuments), next.queuedMessage)
+	}
+	// The /retry snapshot must not leak the previous session's attachments.
+	if len(next.lastImages) != 0 || len(next.lastImageLabels) != 0 || len(next.lastDocuments) != 0 {
+		t.Fatalf("startNewSession must clear the retry snapshot, got images=%d labels=%d docs=%d",
+			len(next.lastImages), len(next.lastImageLabels), len(next.lastDocuments))
 	}
 }
 

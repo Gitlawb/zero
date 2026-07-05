@@ -269,6 +269,15 @@ type model struct {
 	// lastPrompt is the verbatim text of the most recent submitted prompt, so
 	// /retry can resend it and /edit can recall it into the composer.
 	lastPrompt string
+	// lastImages/lastImageLabels/lastDocuments remember the attachments consumed
+	// by the most recent submitted prompt. launchPrompt clears the pending queues
+	// once a turn is sent, so /retry re-stages these to reproduce the exact same
+	// request — otherwise a vision/PDF-backed prompt would silently retry as
+	// text-only and answer a different task. They share the underlying image bytes
+	// with the sent turn (never mutated in place), so no deep copy is needed.
+	lastImages      []zeroruntime.ImageBlock
+	lastImageLabels []string
+	lastDocuments   []pendingDocument
 	// historyIdx == len(inputHistory) means "not navigating"; historyDraft
 	// preserves whatever was typed before recall started.
 	inputHistory []string
@@ -3949,6 +3958,13 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\nno previous prompt to resend."})
 			return m, nil
 		}
+		// Re-stage the attachments the last prompt carried so launchPrompt rebuilds
+		// an identical request (document preamble + images + vision re-check). Without
+		// this the queues are empty and /retry would resend a text-only prompt,
+		// silently dropping the image/PDF context and answering a different task.
+		m.pendingImages = m.lastImages
+		m.pendingImageLabels = m.lastImageLabels
+		m.pendingDocuments = m.lastDocuments
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
@@ -3982,8 +3998,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 // stays identical to immediate submissions.
 func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// Remember the verbatim prompt (before specialist/document expansion) so /retry
-	// and /edit can act on exactly what the user submitted.
+	// and /edit can act on exactly what the user submitted. Snapshot the staged
+	// attachments too: launchPrompt clears the pending queues below, so /retry
+	// re-stages these to resend an identical vision/PDF-backed request rather than
+	// a degraded text-only one.
 	m.lastPrompt = prompt
+	m.lastImages = m.pendingImages
+	m.lastImageLabels = m.pendingImageLabels
+	m.lastDocuments = m.pendingDocuments
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{

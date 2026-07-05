@@ -483,3 +483,76 @@ func TestRenderAttachmentChips(t *testing.T) {
 		t.Fatalf("chip row %q should not show file names", got)
 	}
 }
+
+// TestRetryResendsAttachments guards the /retry contract: it must resend the exact
+// request the last prompt carried — including its staged image and PDF document —
+// not a degraded text-only prompt. launchPrompt clears the pending queues once a
+// turn is sent, so without re-staging the remembered snapshot a vision/document-
+// backed turn that failed would silently retry as a different task.
+func TestRetryResendsAttachments(t *testing.T) {
+	root := t.TempDir()
+
+	captured := make(chan []zeroruntime.ImageBlock, 1)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ok"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          root,
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+	})
+	m.agentOptions.OnText = func(string) {}
+	m.captureRunImages = func(imgs []zeroruntime.ImageBlock) { captured <- imgs }
+
+	// State left after a prior vision+PDF prompt was submitted: the pending queues
+	// are cleared, but the remembered snapshot survives so /retry can reproduce it.
+	m.lastPrompt = "describe both"
+	m.lastImages = []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte{0x89, 'P', 'N', 'G'}}}
+	m.lastImageLabels = []string{"photo.png"}
+	m.lastDocuments = []pendingDocument{{label: "spec.pdf", text: "Top secret design notes"}}
+
+	m.input.SetValue("/retry")
+	updated, cmd := m.handleSubmit()
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("/retry with a remembered prompt should launch a run")
+	}
+	// The retried turn re-consumes and then clears the queues, exactly like a fresh
+	// submit; the snapshot must survive so a second /retry stays reproducible.
+	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 || len(next.pendingDocuments) != 0 {
+		t.Fatalf("retry must clear pending queues after resend, got imgs=%d labels=%d docs=%d",
+			len(next.pendingImages), len(next.pendingImageLabels), len(next.pendingDocuments))
+	}
+	if len(next.lastImages) != 1 || len(next.lastDocuments) != 1 {
+		t.Fatalf("retry must keep the snapshot for a subsequent retry, got imgs=%d docs=%d",
+			len(next.lastImages), len(next.lastDocuments))
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	_ = updated.(model)
+
+	select {
+	case imgs := <-captured:
+		if len(imgs) != 1 || imgs[0].MediaType != "image/png" {
+			t.Fatalf("retried run must resend the remembered image, got %#v", imgs)
+		}
+	default:
+		t.Fatal("expected the retried run to receive the remembered image")
+	}
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	msgs := provider.requests[0].Messages
+	last := msgs[len(msgs)-1]
+	if !strings.Contains(last.Content, "Top secret design notes") {
+		t.Fatalf("retried prompt should re-prepend the document text, got:\n%s", last.Content)
+	}
+	if !strings.Contains(last.Content, "describe both") {
+		t.Fatalf("retried prompt should include the remembered user text, got:\n%s", last.Content)
+	}
+}
