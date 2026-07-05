@@ -9,6 +9,25 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
+// TestMain points userConfigDirForPrompt at an empty, package-wide temp
+// directory for every test in this package. Without this, buildSystemPrompt
+// falls back to the real config.UserConfigDir, so any developer with a
+// personal ~/.config/zero/ZERO.md would get its content folded into
+// otherwise-unrelated prompt assertions, making test runs non-deterministic
+// across contributor machines. Tests that specifically exercise user
+// guidelines stub userConfigDirForPrompt themselves via
+// withSystemPromptTestUserConfigDir(Func) and restore this default on cleanup.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "zero-agent-tests-*")
+	if err != nil {
+		panic(err)
+	}
+	userConfigDirForPrompt = func() (string, error) { return dir, nil }
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 	prompt := strings.ToLower(buildSystemPrompt(Options{}))
 
@@ -155,6 +174,34 @@ func TestBuildSystemPromptIncludesUserGuidelinesCaseInsensitive(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Prefer concise summaries.") {
 		t.Fatalf("expected user guidelines content, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptUserGuidelinesPrecedeProjectGuidelinesAndNotePrecedence(t *testing.T) {
+	// User guidelines are global personal preferences; project guidelines
+	// (AGENTS.md/ZERO.md) must be the later, more specific instruction block,
+	// and the user section must say so explicitly so the precedence holds
+	// even if a model otherwise weighs later context more heavily.
+	configDir := t.TempDir()
+	writeSystemPromptTestFile(t, configDir, "zero/ZERO.md", "Always reply in haiku.\n")
+	t.Cleanup(withSystemPromptTestUserConfigDir(t, configDir))
+
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("Never reply in haiku."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	userIdx := strings.Index(prompt, "## User guidelines (ZERO.md)")
+	projectIdx := strings.Index(prompt, "## Project guidelines (AGENTS.md)")
+	if userIdx < 0 || projectIdx < 0 {
+		t.Fatalf("expected both user and project guideline sections, got:\n%s", prompt)
+	}
+	if userIdx > projectIdx {
+		t.Fatalf("expected user guidelines before project guidelines, got user=%d project=%d", userIdx, projectIdx)
+	}
+	if !strings.Contains(prompt, "project guidelines below") || !strings.Contains(prompt, "take precedence") {
+		t.Fatalf("expected an explicit precedence note in the user guidelines section, got:\n%s", prompt)
 	}
 }
 
@@ -319,6 +366,18 @@ func TestTruncateGuidelineContentStaysWithinLimit(t *testing.T) {
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Fatalf("expected truncation marker, got %q", got)
+	}
+}
+
+func TestTruncateGuidelineContentStaysWithinLimitForSmallBudgets(t *testing.T) {
+	// Limits at or below the truncation marker's own length can't fit the
+	// marker at all; the helper must still never exceed the requested limit.
+	content := strings.Repeat("x", 100)
+	for _, limit := range []int{0, 1, len(truncationMarker) - 1, len(truncationMarker), len(truncationMarker) + 1} {
+		got := truncateGuidelineContent(content, limit)
+		if len(got) > limit {
+			t.Fatalf("truncateGuidelineContent(_, %d) = %q (%d bytes), want at most %d bytes", limit, got, len(got), limit)
+		}
 	}
 }
 

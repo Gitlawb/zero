@@ -89,11 +89,15 @@ func buildSystemPrompt(options Options) string {
 	if seed := workspaceSeedContext(options.Cwd); seed != "" {
 		sections = append(sections, seed)
 	}
-	if ws := workspaceContext(options.Cwd); ws != "" {
-		sections = append(sections, ws)
-	}
+	// User guidelines are injected before workspace/project guidelines so the
+	// project's AGENTS.md/ZERO.md is the later, more specific instruction
+	// block. See userGuidelines for the explicit precedence note carried in
+	// the section text itself.
 	if user := userGuidelines(); user != "" {
 		sections = append(sections, user)
+	}
+	if ws := workspaceContext(options.Cwd); ws != "" {
+		sections = append(sections, ws)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
@@ -274,7 +278,11 @@ func projectGuidelines(cwd, gitRoot string) string {
 // The file lives in config.UserConfigDir()/zero/ next to Zero's other
 // per-user config; the basename match is case-insensitive so a file saved as
 // zero.md still resolves on case-sensitive filesystems, mirroring the project
-// guideline loader.
+// guideline loader. The section carries an explicit precedence note because
+// this is a global, personal preferences file: it is injected earlier in the
+// prompt than the project's AGENTS.md/ZERO.md (see buildSystemPrompt), and
+// the note keeps that precedence unambiguous even if a model weighs later
+// context more heavily than section order alone implies.
 func userGuidelines() string {
 	configDir, err := userConfigDirForPrompt()
 	if err != nil {
@@ -297,7 +305,10 @@ func userGuidelines() string {
 		return ""
 	}
 	content = truncateGuidelineContent(content, maxProjectContextBytes)
-	return "## User guidelines (" + filepath.Base(match) + ")\n\n" + content
+	return "## User guidelines (" + filepath.Base(match) + ")\n\n" +
+		"These are the operator's personal preferences, not project policy. " +
+		"Where they conflict with a repository's project guidelines below (AGENTS.md/ZERO.md), the project guidelines take precedence.\n\n" +
+		content
 }
 
 // truncationMarker is appended to guideline content that was cut short.
@@ -305,11 +316,15 @@ const truncationMarker = "\n… (truncated)"
 
 // truncateGuidelineContent caps content at limit bytes without splitting a
 // UTF-8 rune, appending a truncation marker when anything was cut. Space for
-// the marker is reserved before choosing the cut point, so the returned
-// string never exceeds limit (assuming limit is larger than the marker).
+// the marker is reserved before choosing the cut point. When limit is too
+// small to fit the marker itself, the marker is dropped instead, so the
+// returned string never exceeds limit for any non-negative limit.
 func truncateGuidelineContent(content string, limit int) string {
 	if len(content) <= limit {
 		return content
+	}
+	if limit <= 0 {
+		return ""
 	}
 	cut := limit - len(truncationMarker)
 	if cut < 0 {
@@ -318,7 +333,16 @@ func truncateGuidelineContent(content string, limit int) string {
 	for cut > 0 && !utf8.RuneStart(content[cut]) {
 		cut--
 	}
-	return content[:cut] + truncationMarker
+	if truncated := content[:cut] + truncationMarker; len(truncated) <= limit {
+		return truncated
+	}
+	// limit is smaller than the marker itself: fall back to a hard,
+	// rune-safe cut at limit bytes with no marker rather than exceeding it.
+	end := limit
+	for end > 0 && !utf8.RuneStart(content[end]) {
+		end--
+	}
+	return content[:end]
 }
 
 // findCaseInsensitiveFile returns the on-disk path of the regular file in dir

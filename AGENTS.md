@@ -47,6 +47,12 @@ Tips:
 - In a monorepo, drop a narrower `AGENTS.md` in each sub-tree (e.g. `services/api/AGENTS.md`). Zero picks those up automatically when you launch from inside the sub-tree.
 - A YAML frontmatter block (`---\n...\n---`) at the top is preserved verbatim in the injected prompt but is not parsed for `globs:` or `alwaysApply:` scoping today — keep the body self-contained.
 
+### Personal guidelines, across every project
+
+For preferences that follow *you*, not a specific repo (tone, tooling habits, workflow), drop a `ZERO.md` in your user config directory: `~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\Roaming\zero\ZERO.md` on Windows — the same directory as `config.json` and your personal specialists. Same format and 8 KiB cap as the project files above, and the same case-insensitive basename match.
+
+This file is injected as its own `## User guidelines` section, before the project's `AGENTS.md`/`ZERO.md`, and is labeled as personal preference in the prompt: project guidelines are the later, more specific instruction and take precedence over it when the two conflict.
+
 ## 2. Custom specialists
 
 Specialists are Zero's sub-agents. Three scopes, in priority order:
@@ -307,6 +313,7 @@ A team that wants every contributor's Zero to behave the same way commits:
 Each contributor adds only:
 
 - `~/.config/zero/config.json` — their personal API keys, theme, default mode.
+- `~/.config/zero/ZERO.md` — personal preferences that follow them across every project (see section 1).
 - `~/.local/share/zero/skills/` — personal skills they keep across projects.
 
 That's it. Run `zero` from the repo root and the agent has the team's full instruction set, every contributor's personal setup, and nothing else.
