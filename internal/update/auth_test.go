@@ -60,6 +60,7 @@ func TestFetchReleaseFallsBackToGithubToken(t *testing.T) {
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
 	t.Setenv("GITHUB_TOKEN", "fallback_token")
+	t.Setenv("ZERO_GITHUB_TOKEN", "") // clear ambient precedence var
 
 	_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
 	if err != nil {
@@ -113,6 +114,9 @@ func TestFetchReleaseNoAuthWhenTokensNotSet(t *testing.T) {
 	oldClient := http.DefaultClient
 	http.DefaultClient = &http.Client{Transport: at}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
+
+	t.Setenv("ZERO_GITHUB_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
 
 	_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
 	if err != nil {
