@@ -380,10 +380,10 @@ func formatBashOutputWithTruncation(stdout string, stderr string, exitCode int, 
 		parts = append(parts, fmt.Sprintf("[zero] redacted %d likely secret(s) from this output before showing it.", n))
 	}
 	if stdoutTruncated {
-		parts = append(parts, "[zero] output truncated at 16 MiB")
+		parts = append(parts, fmt.Sprintf("[zero] output truncated at %d MiB", maxBashOutputBytes/(1024*1024)))
 	}
 	if stderrTruncated {
-		parts = append(parts, "[zero] stderr truncated at 16 MiB")
+		parts = append(parts, fmt.Sprintf("[zero] stderr truncated at %d MiB", maxBashOutputBytes/(1024*1024)))
 	}
 	if len(parts) == 0 {
 		return "Command completed with no output."

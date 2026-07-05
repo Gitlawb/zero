@@ -315,8 +315,9 @@ func TestBashToolCapsLargeStdoutAndReportsTruncation(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "output truncated at 16 MiB") {
-		t.Fatalf("expected truncation notice, got output of length %d", len(result.Output))
+	wantNotice := fmt.Sprintf("output truncated at %d MiB", maxBashOutputBytes/(1024*1024))
+	if !strings.Contains(result.Output, wantNotice) {
+		t.Fatalf("expected truncation notice %q, got output of length %d", wantNotice, len(result.Output))
 	}
 	if len(result.Output) > maxBashOutputBytes+4096 {
 		t.Fatalf("expected output to stay bounded near the cap, got length %d", len(result.Output))
