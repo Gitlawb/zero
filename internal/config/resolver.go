@@ -167,6 +167,12 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 		if path == "" {
 			continue
 		}
+		// Drop the project layer when the workspace is untrusted, so a cloned repo's
+		// ./.zero/config.json cannot register (and spawn) stdio MCP servers. Fail-closed:
+		// only a trusted workspace clears ExcludeProject. Defaults and user config still load.
+		if options.ExcludeProject && path == options.ProjectConfigPath {
+			continue
+		}
 		fileConfig, err := loadConfigFile(path)
 		if err != nil {
 			return MCPConfig{}, err

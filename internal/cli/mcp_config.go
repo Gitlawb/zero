@@ -243,7 +243,12 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	// `mcp check` connects to (spawns) the named server below to enumerate its tools,
+	// so it is a spawn site: gate the project layer behind the trust check (fail-closed)
+	// so a cloned repo cannot have `zero mcp check <its-server>` run its command. No
+	// --worktree reassignment on this command path, so trustRoot == cwd.
+	mcpExcludeProject, _ := resolveTrust(cwd)
+	cfg, err := deps.resolveMCPConfig(cwd, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}

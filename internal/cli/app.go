@@ -51,7 +51,7 @@ type appDeps struct {
 	stdin            io.Reader
 	userConfigPath   func() (string, error)
 	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
+	resolveMCPConfig func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error)
 	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
@@ -125,11 +125,12 @@ func defaultAppDeps() appDeps {
 			options.Overrides = overrides
 			return config.Resolve(options)
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
 				return config.MCPConfig{}, err
 			}
+			options.ExcludeProject = excludeProject
 			return config.ResolveMCP(options)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -671,7 +672,11 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
+	// The TUI has no --worktree reassignment, so trustRoot == workspaceRoot here.
+	// Gate the project MCP layer behind the workspace-trust check (fail-closed): an
+	// untrusted workspace must not spawn its ./.zero/config.json stdio MCP servers.
+	mcpExcludeProject, _ := resolveTrust(workspaceRoot)
+	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
@@ -806,7 +811,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			var stdout, stderr bytes.Buffer
 			exitCode := runMCPWithContext(ctx, args, &stdout, &stderr, deps)
 			nextConfig := lastKnownMCPConfig
-			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+			if refreshed, err := deps.resolveMCPConfig(workspaceRoot, mcpExcludeProject); err == nil {
 				lastKnownMCPConfig = refreshed
 				nextConfig = refreshed
 			}

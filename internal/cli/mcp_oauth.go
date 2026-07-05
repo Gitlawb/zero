@@ -202,7 +202,11 @@ func resolveOAuthServer(deps appDeps, serverName string) (mcp.Server, error) {
 	if err != nil {
 		return mcp.Server{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	// OAuth login runs an HTTP authorization flow against server.URL and never execs a
+	// stdio server.Command (resolveOAuthServer requires auth:"oauth", which is URL-based),
+	// so this cannot run a cloned repo's command. Left ungated (excludeProject=false) like
+	// the other report/lookup sites; the arbitrary-command surface is the stdio spawn paths.
+	cfg, err := deps.resolveMCPConfig(cwd, false)
 	if err != nil {
 		return mcp.Server{}, err
 	}

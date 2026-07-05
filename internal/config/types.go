@@ -398,6 +398,11 @@ type ResolveOptions struct {
 	ProviderCommand   string
 	Env               map[string]string
 	Overrides         Overrides
+	// ExcludeProject drops the project config layer (ProjectConfigPath) from MCP
+	// resolution when the workspace is untrusted, so a cloned repo's ./.zero/config.json
+	// cannot spawn stdio MCP servers. It is fail-closed: only a trusted workspace sets
+	// it false. Mirrors the ExcludeProject option hooks and plugins already honor.
+	ExcludeProject bool
 }
 
 type Overrides struct {

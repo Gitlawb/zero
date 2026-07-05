@@ -19,8 +19,15 @@ type mcpToolListItem struct {
 	Permission  string `json:"permission"`
 }
 
-func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, autonomy mcp.PermissionAutonomy) (mcpToolRuntime, error) {
-	cfg, err := deps.resolveMCPConfig(workspaceRoot)
+// registerMCPToolsForWorkspace resolves and registers the workspace's MCP servers.
+// This spawns stdio servers, so it gates the project config layer behind the
+// workspace-trust check: trustRoot is the ORIGINAL launch directory (resolved before
+// any --worktree reassignment) so a worktree of a trusted repo inherits that trust.
+// resolveTrust fails closed, so an empty trustRoot or a store-read error excludes the
+// project layer and a cloned repo cannot spawn its ./.zero/config.json MCP servers.
+func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, autonomy mcp.PermissionAutonomy, trustRoot string) (mcpToolRuntime, error) {
+	excludeProject, _ := resolveTrust(trustRoot)
+	cfg, err := deps.resolveMCPConfig(workspaceRoot, excludeProject)
 	if err != nil {
 		return nil, err
 	}

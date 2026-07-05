@@ -122,7 +122,7 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 	deps := appDeps{
 		getwd:            func() (string, error) { return cwd, nil },
 		newMCPTokenStore: func() (*mcp.TokenStore, error) { return store, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"remote": {
 					Type: "http",
@@ -194,7 +194,7 @@ func TestRunMCPOAuthLoginRejectsNonOAuthServer(t *testing.T) {
 	deps := appDeps{
 		getwd:            func() (string, error) { return cwd, nil },
 		newMCPTokenStore: func() (*mcp.TokenStore, error) { return store, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"plain": {Type: "http", URL: "https://plain.invalid/mcp"},
 			}}, nil
