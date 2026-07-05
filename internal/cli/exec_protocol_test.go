@@ -551,13 +551,16 @@ func TestRunExecStreamJSONEmitsReasoningEvents(t *testing.T) {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
 	events := decodeJSONLines(t, stdout.String())
-	reasoning := findJSONEvent(t, events, "reasoning")
+	reasoningIdx, reasoning := findJSONEventIndex(t, events, "reasoning")
 	if reasoning["delta"] != "Thinking. " {
 		t.Fatalf("unexpected reasoning event: %#v", reasoning)
 	}
-	text := findJSONEvent(t, events, "text")
+	textIdx, text := findJSONEventIndex(t, events, "text")
 	if text["delta"] != "done" {
 		t.Fatalf("unexpected text event: %#v", text)
+	}
+	if reasoningIdx >= textIdx {
+		t.Fatalf("expected reasoning event before text event, got indices %d and %d", reasoningIdx, textIdx)
 	}
 	final := findJSONEvent(t, events, "final")
 	if final["text"] != "done" {
@@ -824,13 +827,19 @@ func (provider toolCallingExecProvider) StreamCompletion(ctx context.Context, re
 
 func findJSONEvent(t *testing.T, events []map[string]any, eventType string) map[string]any {
 	t.Helper()
-	for _, event := range events {
+	_, event := findJSONEventIndex(t, events, eventType)
+	return event
+}
+
+func findJSONEventIndex(t *testing.T, events []map[string]any, eventType string) (int, map[string]any) {
+	t.Helper()
+	for idx, event := range events {
 		if event["type"] == eventType {
-			return event
+			return idx, event
 		}
 	}
 	t.Fatalf("event %q not found in %#v", eventType, events)
-	return nil
+	return -1, nil
 }
 
 func findSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.EventType) sessions.Event {
