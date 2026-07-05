@@ -154,7 +154,7 @@ func TestPermissionStoreSerializesConcurrentStoreInstances(t *testing.T) {
 	var wait sync.WaitGroup
 	errs := make(chan error, grantCount)
 
-	for index := 0; index < grantCount; index++ {
+	for index := range grantCount {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()

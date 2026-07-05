@@ -25,7 +25,7 @@ type StoredToken struct {
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	TokenType    string    `json:"token_type,omitempty"`
 	Scopes       []string  `json:"scopes,omitempty"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 // TokenStatus is a redaction-safe summary of a stored token. It deliberately
@@ -36,7 +36,7 @@ type TokenStatus struct {
 	HasRefreshToken bool      `json:"hasRefreshToken"`
 	TokenType       string    `json:"tokenType,omitempty"`
 	Scopes          []string  `json:"scopes,omitempty"`
-	ExpiresAt       time.Time `json:"expiresAt,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
 	Expired         bool      `json:"expired"`
 }
 

@@ -36,7 +36,7 @@ type Token struct {
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	TokenType    string    `json:"token_type,omitempty"`
 	Scopes       []string  `json:"scopes,omitempty"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at"`
 	// Account is an optional non-secret identifier (email / account id) shown in
 	// status output; never a credential.
 	Account string `json:"account,omitempty"`

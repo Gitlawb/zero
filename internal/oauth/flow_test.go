@@ -33,7 +33,7 @@ func TestNewPKCE(t *testing.T) {
 
 func TestNewStateUnique(t *testing.T) {
 	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		s, err := NewState()
 		if err != nil {
 			t.Fatalf("NewState: %v", err)

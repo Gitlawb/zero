@@ -69,7 +69,7 @@ type Status struct {
 	TokenType       string    `json:"tokenType,omitempty"`
 	Account         string    `json:"account,omitempty"`
 	Scopes          []string  `json:"scopes,omitempty"`
-	ExpiresAt       time.Time `json:"expiresAt,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
 	Expired         bool      `json:"expired"`
 }
 

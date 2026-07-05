@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -213,13 +214,7 @@ func TestResolveConfigChatGPTPreset(t *testing.T) {
 		}
 	}
 	for _, required := range []string{"api.connectors.read", "api.connectors.invoke"} {
-		found := false
-		for _, s := range cfg.Scopes {
-			if s == required {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cfg.Scopes, required)
 		if !found {
 			t.Fatalf("missing required scope %q in %v", required, cfg.Scopes)
 		}

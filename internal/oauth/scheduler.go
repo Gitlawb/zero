@@ -96,10 +96,7 @@ func (s *RefreshScheduler) loop(ctx context.Context, m *Manager, key string, don
 // sessions do not refresh in lockstep.
 func (s *RefreshScheduler) delayUntilRefresh(expiresAt time.Time, buffer time.Duration, now time.Time) time.Duration {
 	target := expiresAt.Add(-buffer)
-	delay := target.Sub(now)
-	if delay < 0 {
-		delay = 0
-	}
+	delay := max(target.Sub(now), 0)
 	// Jitter up to ~10% of the buffer, derived from the expiry nanos (no RNG dep).
 	if buffer > 0 {
 		jitter := time.Duration(expiresAt.UnixNano()%int64(buffer/10+1)) % (buffer/10 + 1)
