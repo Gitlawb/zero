@@ -9,9 +9,9 @@ import (
 )
 
 // runTrust implements `zero trust`, letting the user opt a workspace into running
-// its project-scoped executable config (hooks, plugins). Trust is keyed on the
-// exact normalized working directory, matching the exact-match trust model and
-// cwd-relative project-config discovery.
+// its project-scoped executable config (hooks, plugins, MCP servers). Trust is
+// keyed on the exact normalized working directory, matching the exact-match trust
+// model and cwd-relative project-config discovery.
 //
 //	zero trust                trust the current working directory
 //	zero trust list           print the trusted roots, one per line
@@ -109,7 +109,8 @@ func writeTrustUsage(w io.Writer) {
   zero trust list           List trusted workspace roots
   zero trust remove [path]  Untrust the current directory, or a named path
 
-Trust lets Zero run a workspace's project-scoped hooks and plugins
-(./.zero/hooks.json, ./.zero/plugins/). Trust is exact per directory.
+Trust lets Zero run a workspace's project-scoped hooks, plugins, and MCP
+servers (./.zero/hooks.json, ./.zero/plugins/, project MCP config). Trust is
+exact per directory.
 `)
 }
