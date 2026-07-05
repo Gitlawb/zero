@@ -406,6 +406,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runWorktrees(args[1:], stdout, stderr, deps)
 	case "verify":
 		return runVerifyCommand(args[1:], stdout, stderr, deps)
+	case "trust":
+		return runTrust(args[1:], stdout, stderr, deps)
 	case "eval":
 		return runAgentEvalCommand(args[1:], stdout, stderr, deps)
 	case "changes", "change":
