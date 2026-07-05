@@ -1259,3 +1259,48 @@ func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
 		t.Fatalf("assistant tool calls dropped: %#v", req.Messages[1])
 	}
 }
+
+// TestOpenAIRequestPromptCacheKey locks in prompt_cache_key forwarding: a
+// session-carrying request serializes the key so the backend can route to a
+// replica holding the cached prefix, a keyless request omits the field
+// entirely (strict servers see byte-identical requests to before), and
+// ZERO_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
+func TestOpenAIRequestPromptCacheKey(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+
+	req := provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "sess_123" {
+		t.Fatalf("PromptCacheKey = %q, want sess_123", req.PromptCacheKey)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"prompt_cache_key":"sess_123"`) {
+		t.Fatalf("prompt_cache_key not serialized: %s", data)
+	}
+
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{Messages: messages})
+	if data, err = json.Marshal(req); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "prompt_cache_key") {
+		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
+	}
+
+	t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", "1")
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "" {
+		t.Fatalf("kill switch ignored; PromptCacheKey = %q", req.PromptCacheKey)
+	}
+}

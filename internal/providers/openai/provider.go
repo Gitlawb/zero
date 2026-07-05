@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -420,6 +421,13 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	// models) is simply omitted. Only forward the values the API accepts.
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
+	}
+	// prompt_cache_key is a documented OpenAI parameter; compatible servers
+	// ignore unknown fields, but a strict endpoint that rejects it can be
+	// accommodated with ZERO_DISABLE_PROMPT_CACHE_KEY=1.
+	if key := strings.TrimSpace(request.PromptCacheKey); key != "" &&
+		os.Getenv("ZERO_DISABLE_PROMPT_CACHE_KEY") == "" {
+		mapped.PromptCacheKey = key
 	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))

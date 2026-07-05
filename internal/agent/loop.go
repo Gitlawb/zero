@@ -173,6 +173,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Messages:        copyMessages(messages),
 			Tools:           exposed,
 			ReasoningEffort: options.ReasoningEffort,
+			PromptCacheKey:  options.SessionID,
 		}
 
 		// Report the per-category context budget for this turn so a surface can
@@ -208,6 +209,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					Messages:        copyMessages(messages),
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
+					PromptCacheKey:  options.SessionID,
 				}
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
@@ -268,6 +270,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					Messages:        copyMessages(messages),
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
+					PromptCacheKey:  options.SessionID,
 				}
 				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
@@ -326,6 +329,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Messages:        copyMessages(messages),
 				Tools:           exposed,
 				ReasoningEffort: options.ReasoningEffort,
+				PromptCacheKey:  options.SessionID,
 			}
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
@@ -705,6 +709,7 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 	stream, err := streamWithReconnect(ctx, provider, zeroruntime.CompletionRequest{
 		Messages:        copyMessages(finalMessages),
 		ReasoningEffort: options.ReasoningEffort,
+		PromptCacheKey:  options.SessionID,
 	}, reconnectNoticeFor(options))
 	if err != nil {
 		return "", messages, ""
