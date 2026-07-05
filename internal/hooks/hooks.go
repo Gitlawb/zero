@@ -98,6 +98,9 @@ type LoadOptions struct {
 	Env               map[string]string
 	UserConfigPath    string
 	ProjectConfigPath string
+	// ExcludeProject drops the project layer (./.zero/hooks.json) so only the
+	// user layer loads. Its zero value (false) preserves the user+project merge.
+	ExcludeProject bool
 }
 
 type StoreOptions struct {
@@ -220,6 +223,9 @@ func LoadConfig(options LoadOptions) (LoadResult, error) {
 		{source: SourceUser, path: userConfigPath},
 		{source: SourceProject, path: projectConfigPath},
 	} {
+		if candidate.source == SourceProject && options.ExcludeProject {
+			continue
+		}
 		layer, ok := readLayer(candidate.source, candidate.path, &diagnostics)
 		if ok {
 			layers = append(layers, layer)
