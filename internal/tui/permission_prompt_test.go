@@ -329,3 +329,36 @@ func TestPermissionCursorCtrlD(t *testing.T) {
 		t.Fatalf("Ctrl+D from 0 should advance to 1, got %d", m.pendingPermission.cursor)
 	}
 }
+
+func TestShiftUpWithComposerDoesNotScroll(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("hello world")
+	m.input.CursorEnd()
+
+	// Without the composer guard, Shift+Up would scroll the transcript.
+	// With the guard, it should break out of the switch and let the input
+	// field handle the key (multiline navigation).
+	updated, cmd := m.Update(testKeyShift(tea.KeyUp))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("Shift+Up with non-empty composer should not return a command")
+	}
+	if !next.transcriptScrollOffset.Equal(m.transcriptScrollOffset) {
+		t.Fatal("Shift+Up with non-empty composer should not scroll the transcript")
+	}
+}
+
+func TestShiftDownWithComposerDoesNotScroll(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("hello world")
+	m.input.CursorEnd()
+
+	updated, cmd := m.Update(testKeyShift(tea.KeyDown))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("Shift+Down with non-empty composer should not return a command")
+	}
+	if !next.transcriptScrollOffset.Equal(m.transcriptScrollOffset) {
+		t.Fatal("Shift+Down with non-empty composer should not scroll the transcript")
+	}
+}

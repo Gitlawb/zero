@@ -1428,6 +1428,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.suggestionsActive() {
 				break
 			}
+			if m.composerValue() != "" {
+				break
+			}
 			m = m.clearHover()
 			return m.scrollChat(1), nil
 		case keyShift(msg) && keyIs(msg, tea.KeyDown):
@@ -1453,6 +1456,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.suggestionsActive() {
+				break
+			}
+			if m.composerValue() != "" {
 				break
 			}
 			m = m.clearHover()

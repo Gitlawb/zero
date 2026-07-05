@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -1001,4 +1002,102 @@ func setupMouseTestModel() model {
 	m.height = 30
 	m.altScreen = true
 	return m
+}
+
+// Helpers for mouseModeForTermEnv tests
+func setenv(t *testing.T, key, value string) {
+	t.Helper()
+	prev, existed := os.LookupEnv(key)
+	os.Setenv(key, value)
+	t.Cleanup(func() {
+		if existed {
+			os.Setenv(key, prev)
+		} else {
+			os.Unsetenv(key)
+		}
+	})
+}
+
+func unsetenv(t *testing.T, key string) {
+	t.Helper()
+	prev, existed := os.LookupEnv(key)
+	if existed {
+		os.Unsetenv(key)
+	}
+	t.Cleanup(func() {
+		if existed {
+			os.Setenv(key, prev)
+		}
+	})
+}
+
+func TestMouseModeForTermEnvDefaultDesktop(t *testing.T) {
+	unsetenv(t, "TERMUX_VERSION")
+	unsetenv(t, "PREFIX")
+	unsetenv(t, "ANDROID_ROOT")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeAllMotion {
+		t.Fatalf("default desktop env: got %v, want MouseModeAllMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvTermuxVersion(t *testing.T) {
+	unsetenv(t, "PREFIX")
+	unsetenv(t, "ANDROID_ROOT")
+	setenv(t, "TERMUX_VERSION", "0.118.0")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeCellMotion {
+		t.Fatalf("TERMUX_VERSION=0.118.0: got %v, want MouseModeCellMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvPrefix(t *testing.T) {
+	unsetenv(t, "TERMUX_VERSION")
+	unsetenv(t, "ANDROID_ROOT")
+	setenv(t, "PREFIX", "/data/data/com.termux/files/usr")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeCellMotion {
+		t.Fatalf("PREFIX set: got %v, want MouseModeCellMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvPrefixUnrelated(t *testing.T) {
+	unsetenv(t, "TERMUX_VERSION")
+	unsetenv(t, "ANDROID_ROOT")
+	setenv(t, "PREFIX", "/opt/homebrew")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeAllMotion {
+		t.Fatalf("PREFIX non-Termux: got %v, want MouseModeAllMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvAndroidRoot(t *testing.T) {
+	unsetenv(t, "TERMUX_VERSION")
+	unsetenv(t, "PREFIX")
+	setenv(t, "ANDROID_ROOT", "/system")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeCellMotion {
+		t.Fatalf("ANDROID_ROOT=/system: got %v, want MouseModeCellMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvAndroidRootUnrelated(t *testing.T) {
+	unsetenv(t, "TERMUX_VERSION")
+	unsetenv(t, "PREFIX")
+	setenv(t, "ANDROID_ROOT", "/var/mybogus")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeAllMotion {
+		t.Fatalf("ANDROID_ROOT non-Android: got %v, want MouseModeAllMotion", got)
+	}
+}
+
+func TestMouseModeForTermEnvTermuxVersionWins(t *testing.T) {
+	// TERMUX_VERSION takes precedence even when PREFIX or ANDROID_ROOT is also set
+	setenv(t, "TERMUX_VERSION", "0.118.0")
+	setenv(t, "PREFIX", "/data/data/com.termux/files/usr")
+	setenv(t, "ANDROID_ROOT", "/system")
+
+	if got := mouseModeForTermEnv(); got != tea.MouseModeCellMotion {
+		t.Fatalf("all Termux signals: got %v, want MouseModeCellMotion", got)
+	}
 }
