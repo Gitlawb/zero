@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -2393,12 +2394,7 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 }
 
 func containsPermissionDecision(decisions []PermissionDecisionAction, want PermissionDecisionAction) bool {
-	for _, decision := range decisions {
-		if decision == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(decisions, want)
 }
 
 // cancelMidStreamProvider cancels the run while the provider stream is open and
