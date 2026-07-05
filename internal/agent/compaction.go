@@ -196,10 +196,7 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 
 	// Naive boundary: keep the last preserveLast messages. Then widen the suffix
 	// backward to a safe boundary so it never starts on a tool result.
-	boundary := len(messages) - preserveLast
-	if boundary < systemEnd {
-		boundary = systemEnd
-	}
+	boundary := max(len(messages)-preserveLast, systemEnd)
 	boundary = safeSuffixBoundary(messages, systemEnd, boundary)
 
 	middle := messages[systemEnd:boundary]
