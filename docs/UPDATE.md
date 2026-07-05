@@ -42,3 +42,19 @@ Endpoint resolution order:
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero update --check`
 before reinstalling.
+
+## Authentication
+
+Unauthenticated GitHub API requests are subject to strict
+[rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+If you see `403 Forbidden` during update checks, set a GitHub personal access token:
+
+| Environment variable | Role |
+|---|---|
+| `ZERO_GITHUB_TOKEN` | Used for update checks (takes precedence) |
+| `GITHUB_TOKEN` | Fallback when `ZERO_GITHUB_TOKEN` is not set |
+
+Tokens are **only** sent to `https://api.github.com`. Custom endpoints (set via
+`--endpoint` or `ZERO_UPDATE_RELEASE_URL`) and plain HTTP URLs never receive
+credentials, so you can safely point Zero at a private mirror without leaking
+your token.

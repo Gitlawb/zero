@@ -254,9 +254,9 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "zero/update")
-	if token := os.Getenv(EnvUpdateToken); token != "" && request.URL.Hostname() == "api.github.com" {
+	if token := os.Getenv(EnvUpdateToken); token != "" && request.URL.Scheme == "https" && request.URL.Hostname() == "api.github.com" {
 		request.Header.Set("Authorization", "Bearer "+token)
-	} else if token := os.Getenv("GITHUB_TOKEN"); token != "" && request.URL.Hostname() == "api.github.com" {
+	} else if token := os.Getenv("GITHUB_TOKEN"); token != "" && request.URL.Scheme == "https" && request.URL.Hostname() == "api.github.com" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	response, err := http.DefaultClient.Do(request)
