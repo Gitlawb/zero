@@ -56,7 +56,7 @@ func shortenDescription(desc string, max int) string {
 		max = defaultShortenMax
 	}
 	var lines []string
-	for _, raw := range strings.Split(desc, "\n") {
+	for raw := range strings.SplitSeq(desc, "\n") {
 		if line := normalizeDescriptionLine(raw); line != "" {
 			lines = append(lines, collapseWhitespace.ReplaceAllString(line, " "))
 		}

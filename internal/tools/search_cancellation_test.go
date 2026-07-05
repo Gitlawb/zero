@@ -35,7 +35,7 @@ func (c *countingCancelContext) Err() error {
 func buildLargeSearchTree(t *testing.T, n int) string {
 	t.Helper()
 	root := t.TempDir()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		path := filepath.Join(root, "file"+strconv.Itoa(i)+".txt")
 		if err := os.WriteFile(path, []byte("needle\n"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)

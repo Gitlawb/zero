@@ -172,7 +172,7 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 	}
 
 	current := root
-	for _, segment := range strings.Split(filepath.Clean(relative), string(filepath.Separator)) {
+	for segment := range strings.SplitSeq(filepath.Clean(relative), string(filepath.Separator)) {
 		if segment == "." || segment == "" {
 			continue
 		}

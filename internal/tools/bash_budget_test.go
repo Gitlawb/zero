@@ -67,8 +67,8 @@ func TestBudgetBashOutputTruncatesHeadAndTail(t *testing.T) {
 func TestBoundedBufferKeepsHeadAndTailBounded(t *testing.T) {
 	b := newBoundedBuffer(8, 8)
 	total := 0
-	for i := 0; i < 1000; i++ {
-		chunk := []byte(fmt.Sprintf("%05d.", i)) // 6 bytes each
+	for i := range 1000 {
+		chunk := fmt.Appendf(nil, "%05d.", i) // 6 bytes each
 		n, err := b.Write(chunk)
 		if err != nil || n != len(chunk) {
 			t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(chunk))

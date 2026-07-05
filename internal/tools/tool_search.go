@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -165,7 +166,7 @@ func (tool toolSearchTool) eagerToolsForQuery(query string, enabled []string, di
 	}
 	hit := map[string]bool{}
 	if rest, ok := strings.CutPrefix(query, "select:"); ok {
-		for _, raw := range strings.Split(rest, ",") {
+		for raw := range strings.SplitSeq(rest, ",") {
 			if name := strings.TrimSpace(raw); name != "" && eager[name] {
 				hit[name] = true
 			}
@@ -214,12 +215,7 @@ func toolAllowedByFilters(name string, enabled []string, disabled []string) bool
 }
 
 func containsName(names []string, name string) bool {
-	for _, candidate := range names {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(names, name)
 }
 
 // resolveExact maps a comma-separated name list (the part after "select:") to
@@ -232,7 +228,7 @@ func (tool toolSearchTool) resolveExact(list string, deferred []Tool) []Tool {
 	}
 	var matches []Tool
 	seen := make(map[string]bool)
-	for _, raw := range strings.Split(list, ",") {
+	for raw := range strings.SplitSeq(list, ",") {
 		name := strings.TrimSpace(raw)
 		if name == "" || seen[name] {
 			continue

@@ -58,7 +58,7 @@ func fuzzyEditMatch(content, find string, replaceAll bool) (string, error) {
 				continue
 			}
 			seen[search] = true
-			if strings.Index(content, search) < 0 {
+			if !strings.Contains(content, search) {
 				continue
 			}
 			candidates = append(candidates, search)
@@ -95,10 +95,7 @@ func fuzzyEditMatch(content, find string, replaceAll bool) (string, error) {
 func isDisproportionateEditMatch(search, find string) bool {
 	findLines := strings.Count(find, "\n") + 1
 	searchLines := strings.Count(search, "\n") + 1
-	limit := findLines + 3
-	if findLines*2 > limit {
-		limit = findLines * 2
-	}
+	limit := max(findLines*2, findLines+3)
 	if searchLines >= limit {
 		return true
 	}
@@ -107,10 +104,7 @@ func isDisproportionateEditMatch(search, find string) bool {
 	}
 	searchTrimmed := len(strings.TrimSpace(search))
 	findTrimmed := len(strings.TrimSpace(find))
-	byteLimit := findTrimmed + 500
-	if findTrimmed*4 > byteLimit {
-		byteLimit = findTrimmed * 4
-	}
+	byteLimit := max(findTrimmed*4, findTrimmed+500)
 	return searchTrimmed > byteLimit
 }
 
@@ -160,14 +154,11 @@ func blockAnchorReplacer(content, find string) []string {
 	firstAnchor := strings.TrimSpace(findLines[0])
 	lastAnchor := strings.TrimSpace(findLines[len(findLines)-1])
 	searchBlockSize := len(findLines)
-	maxLineDelta := searchBlockSize / 4
-	if maxLineDelta < 1 {
-		maxLineDelta = 1
-	}
+	maxLineDelta := max(searchBlockSize/4, 1)
 
 	type span struct{ start, end int }
 	var candidates []span
-	for i := 0; i < len(contentLines); i++ {
+	for i := range contentLines {
 		if strings.TrimSpace(contentLines[i]) != firstAnchor {
 			continue
 		}
@@ -195,10 +186,7 @@ func blockAnchorReplacer(content, find string) []string {
 
 	middleSimilarity := func(candidate span) float64 {
 		actualBlockSize := candidate.end - candidate.start + 1
-		linesToCheck := searchBlockSize - 2
-		if actualBlockSize-2 < linesToCheck {
-			linesToCheck = actualBlockSize - 2
-		}
+		linesToCheck := min(actualBlockSize-2, searchBlockSize-2)
 		if linesToCheck <= 0 {
 			return 1.0
 		}
@@ -206,10 +194,7 @@ func blockAnchorReplacer(content, find string) []string {
 		for j := 1; j < searchBlockSize-1 && j < actualBlockSize-1; j++ {
 			contentLine := strings.TrimSpace(contentLines[candidate.start+j])
 			findLine := strings.TrimSpace(findLines[j])
-			maxLen := len(contentLine)
-			if len(findLine) > maxLen {
-				maxLen = len(findLine)
-			}
+			maxLen := max(len(findLine), len(contentLine))
 			if maxLen == 0 {
 				continue
 			}
@@ -419,7 +404,7 @@ func contextAwareReplacer(content, find string) []string {
 	firstAnchor := strings.TrimSpace(findLines[0])
 	lastAnchor := strings.TrimSpace(findLines[len(findLines)-1])
 	var candidates []string
-	for i := 0; i < len(contentLines); i++ {
+	for i := range contentLines {
 		if strings.TrimSpace(contentLines[i]) != firstAnchor {
 			continue
 		}
@@ -539,13 +524,7 @@ func levenshtein(a, b string) int {
 			if a[i-1] == b[j-1] {
 				cost = 0
 			}
-			minimum := previous[j] + 1
-			if current[j-1]+1 < minimum {
-				minimum = current[j-1] + 1
-			}
-			if previous[j-1]+cost < minimum {
-				minimum = previous[j-1] + cost
-			}
+			minimum := min(previous[j-1]+cost, min(current[j-1]+1, previous[j]+1))
 			current[j] = minimum
 		}
 		previous, current = current, previous

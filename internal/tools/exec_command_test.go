@@ -207,7 +207,7 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 }
 
 func parseListeningAddress(output string) string {
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
 		for index, field := range fields {
 			if field == "listening" && index+1 < len(fields) {
@@ -372,7 +372,7 @@ func TestExecOutputBufferCapsUndrainedData(t *testing.T) {
 
 	chunk := strings.Repeat("x", 1024)
 	writes := (maxExecOutputBufferBytes / len(chunk)) + 10 // comfortably over the cap
-	for i := 0; i < writes; i++ {
+	for range writes {
 		if _, err := buffer.Write([]byte(chunk)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -477,7 +477,7 @@ func TestCollectRespectsDeadlineUnderContinuousOutput(t *testing.T) {
 	const writers = 8
 	chunk := []byte(strings.Repeat("x", 256))
 	wg.Add(writers)
-	for i := 0; i < writers; i++ {
+	for range writers {
 		go func() {
 			defer wg.Done()
 			for {
@@ -854,7 +854,7 @@ func TestExecSessionPruneDoesNotRaceTouch(t *testing.T) {
 	// both concurrently under -race; with the snapshot-under-session.mu fix it is
 	// clean, without it the race detector flags lastUsedAt.
 	mgr := newExecSessionManager()
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		s := &execSession{id: 1000 + i, lastUsedAt: time.Now(), done: make(chan struct{})}
 		mgr.sessions[s.id] = s
 	}
@@ -862,9 +862,7 @@ func TestExecSessionPruneDoesNotRaceTouch(t *testing.T) {
 
 	stop := make(chan struct{})
 	var writer sync.WaitGroup
-	writer.Add(1)
-	go func() {
-		defer writer.Done()
+	writer.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -873,9 +871,9 @@ func TestExecSessionPruneDoesNotRaceTouch(t *testing.T) {
 				target.touch()
 			}
 		}
-	}()
+	})
 
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		mgr.mu.Lock()
 		_ = mgr.sessionToPruneLocked()
 		mgr.mu.Unlock()

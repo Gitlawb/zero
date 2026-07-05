@@ -92,7 +92,6 @@ func commandReferencesEntry(tool plugins.ToolExtension, entryPath string, plugin
 // against the real plugin schema, and a tool command that references the entry.
 func TestScaffoldCoversAllRuntimes(t *testing.T) {
 	for _, runtime := range []tools.ScaffoldRuntime{tools.RuntimeShell, tools.RuntimeNode, tools.RuntimePython} {
-		runtime := runtime
 		t.Run(string(runtime), func(t *testing.T) {
 			dir := t.TempDir()
 			name := "tool-" + string(runtime)

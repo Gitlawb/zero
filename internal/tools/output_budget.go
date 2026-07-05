@@ -28,10 +28,7 @@ func applyOutputBudget(output string, maxBytes int, hint string) outputBudgetRes
 	}
 
 	marker := fmt.Sprintf("\n\n[truncated: output exceeded %d bytes; %s]", maxBytes, hint)
-	budget := maxBytes - len(marker)
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(maxBytes-len(marker), 0)
 	result.Output = utf8Prefix(output, budget) + marker
 	result.Truncated = true
 	result.EmittedBytes = len(result.Output)

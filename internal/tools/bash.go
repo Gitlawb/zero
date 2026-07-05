@@ -431,10 +431,7 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	b.total += n
 	// Fill the head until it reaches headCap; the head is written once and frozen.
 	if len(b.head) < b.headCap {
-		take := b.headCap - len(b.head)
-		if take > len(p) {
-			take = len(p)
-		}
+		take := min(b.headCap-len(b.head), len(p))
 		b.head = append(b.head, p[:take]...)
 		p = p[take:]
 	}
@@ -479,10 +476,7 @@ func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, 
 		return value, total, false
 	}
 	marker := fmt.Sprintf("\n[zero] output truncated: %d bytes omitted from the middle — redirect to a file and read_file a range for the full text\n", total-maxBytes)
-	budget := maxBytes - len(marker)
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(maxBytes-len(marker), 0)
 	head := budget / 2
 	tail := budget - head
 	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), total, true
