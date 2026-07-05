@@ -349,13 +349,24 @@ func TestRunRejectsDepthExceedingMax(t *testing.T) {
 // TestRunRejectsDepthAtMax covers the boundary: a parent already AT the cap
 // must be rejected too, since this Run call would launch a child one level
 // past it (--depth CurrentDepth+1). Only checking ">" here would let that
-// child start before the guard ever caught it.
+// child start before the guard ever caught it. The guard sits before the
+// fresh/resume branch in Run, so both call shapes must be proven to reject
+// here rather than falling through to runFresh/runResume.
 func TestRunRejectsDepthAtMax(t *testing.T) {
-	_, err := (Executor{}).Run(context.Background(), TaskParameters{
-		Prompt: "hi",
-	}, TaskRunOptions{CurrentDepth: maxSpecialistDepth})
-	if err == nil || !strings.Contains(err.Error(), "depth") {
-		t.Fatalf("Run error = %v, want depth error", err)
+	tests := []struct {
+		name   string
+		params TaskParameters
+	}{
+		{name: "fresh", params: TaskParameters{Prompt: "hi"}},
+		{name: "resume", params: TaskParameters{Prompt: "hi", Resume: "child_session"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (Executor{}).Run(context.Background(), tc.params, TaskRunOptions{CurrentDepth: maxSpecialistDepth})
+			if err == nil || !strings.Contains(err.Error(), "depth") {
+				t.Fatalf("Run error = %v, want depth error", err)
+			}
+		})
 	}
 }
 
