@@ -100,9 +100,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # govulncheck and deadcode resolve a toolchain from their own modules, which
-      # can drop below the version go.mod requires and then fail to load our
-      # packages. Pin GOTOOLCHAIN to the go.mod toolchain so both run under it.
+      # govulncheck, deadcode, and golangci-lint each resolve a toolchain from
+      # their own modules, which can drop below the version go.mod requires and
+      # then fail to load our packages. Pin GOTOOLCHAIN to the go.mod toolchain
+      # so all three run under it.
       - name: Pin toolchain from go.mod
         run: |
           toolchain="$(awk '/^toolchain /{print $2}' go.mod)"
@@ -120,3 +121,13 @@ jobs:
       - name: deadcode (advisory)
         continue-on-error: true
         run: go run golang.org/x/tools/cmd/deadcode@v0.46.0 -test=false ./...
+
+      # Advisory: catches what deadcode's whole-program reachability analysis
+      # doesn't, unused private functions/assignments reachable within a
+      # package but never actually called, plus staticcheck-style correctness
+      # and readability issues. Scoped to a few linters rather than the full
+      # default battery, and non-blocking, while the existing findings across
+      # the repo are cleaned up incrementally (see #527).
+      - name: golangci-lint (advisory)
+        continue-on-error: true
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...
