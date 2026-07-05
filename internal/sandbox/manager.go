@@ -122,6 +122,23 @@ func (manager SandboxManager) Backend() Backend {
 	return manager.backend
 }
 
+// isExecutable checks whether a file is executable. On Unix, this checks the
+// execute permission bits. On Windows, Go's os.FileMode does not set execute
+// bits, so we check for common executable extensions instead.
+func isExecutable(fi os.FileInfo) bool {
+	if !fi.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		name := strings.ToLower(fi.Name())
+		return strings.HasSuffix(name, ".exe") ||
+			strings.HasSuffix(name, ".com") ||
+			strings.HasSuffix(name, ".bat") ||
+			strings.HasSuffix(name, ".cmd")
+	}
+	return fi.Mode()&0o111 != 0
+}
+
 // lookupExecutable checks whether a named binary exists and is executable,
 // using os.Stat instead of exec.LookPath. exec.LookPath internally uses the
 // faccessat2 syscall, which is blocked by Android's seccomp filter (SIGSYS).
@@ -129,9 +146,12 @@ func lookupExecutable(name string) (string, error) {
 	if !strings.Contains(name, string(os.PathSeparator)) {
 		path := os.Getenv("PATH")
 		for _, dir := range strings.Split(path, string(os.PathListSeparator)) {
+			if dir == "" {
+				continue // skip empty entries (e.g. trailing colon)
+			}
 			candidate := filepath.Join(dir, name)
 			if fi, err := os.Stat(candidate); err == nil {
-				if fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+				if isExecutable(fi) {
 					return candidate, nil
 				}
 			}
@@ -142,7 +162,7 @@ func lookupExecutable(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+	if isExecutable(fi) {
 		return name, nil
 	}
 	return "", errors.New("executable file not found")
