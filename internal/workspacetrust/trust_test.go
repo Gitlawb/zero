@@ -264,3 +264,45 @@ func storePath(t *testing.T) string {
 	}
 	return p
 }
+
+// TestIsTrustedSymlinkRetargetNotTrusted is a regression test for the false
+// positive an external adversarial review found: IsTrusted must compare stored
+// entries as canonical literals and only normalize the incoming query, so a
+// trusted path later replaced by a symlink to attacker content does NOT stay
+// trusted. If IsTrusted re-normalizes stored entries, the stored path re-resolves
+// through the new symlink and matches (fail-open).
+func TestIsTrustedSymlinkRetargetNotTrusted(t *testing.T) {
+	setUserConfigRoot(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "repo")
+	attacker := filepath.Join(base, "attacker")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attacker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Trust(real); err != nil {
+		t.Fatalf("Trust(real): %v", err)
+	}
+	if ok, err := IsTrusted(real); err != nil || !ok {
+		t.Fatalf("real dir should be trusted before retarget: ok=%v err=%v", ok, err)
+	}
+
+	// Replace the trusted real directory with a symlink to attacker content.
+	if err := os.Remove(real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, real); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	ok, err := IsTrusted(real)
+	if err != nil {
+		t.Fatalf("IsTrusted after retarget: %v", err)
+	}
+	if ok {
+		t.Fatal("SECURITY: a trusted path replaced by a symlink to other content is still trusted (false positive)")
+	}
+}

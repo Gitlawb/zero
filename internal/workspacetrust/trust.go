@@ -40,9 +40,10 @@ func storeFilePath() (string, error) {
 
 // normalize resolves a workspace root to its canonical absolute form:
 // filepath.Abs then filepath.EvalSymlinks, falling back to the Abs path when
-// EvalSymlinks errors (typically because the path does not exist). Normalizing
-// both stored and queried roots is security-critical: without it a relative or
-// symlinked path could bypass or forge a match.
+// EvalSymlinks errors (typically because the path does not exist). Each incoming
+// path is normalized once, at its Trust/Untrust/IsTrusted entry point; stored
+// entries are then compared as canonical literals and never re-resolved (so a
+// retargeted symlink cannot drift or forge a stored match).
 func normalize(workspaceRoot string) (string, error) {
 	abs, err := filepath.Abs(workspaceRoot)
 	if err != nil {
@@ -83,25 +84,27 @@ func loadStore() (store, error) {
 // directory and rename it into place. The parent directory is created with mode
 // 0o700. This mirrors the atomic-write-with-perms convention in
 // internal/securefile/securefile.go (a plaintext write, no encryption here).
+//
+// Entries are NOT re-normalized here: they are already canonical (each incoming
+// path is normalized once at its Trust/Untrust entry point). Re-resolving stored
+// entries through the filesystem would re-follow symlinks at write time and let a
+// retargeted symlink drift the stored value.
 func saveStore(s store) error {
 	path, err := storeFilePath()
 	if err != nil {
 		return err
 	}
 
-	// Normalize, dedupe, and sort so the on-disk form is stable.
+	// Dedupe and sort so the on-disk form is stable. Entries are treated as
+	// already-canonical literals, never re-resolved.
 	seen := make(map[string]struct{}, len(s.Trusted))
 	roots := make([]string, 0, len(s.Trusted))
 	for _, entry := range s.Trusted {
-		norm, nerr := normalize(entry)
-		if nerr != nil {
-			return nerr
-		}
-		if _, ok := seen[norm]; ok {
+		if _, ok := seen[entry]; ok {
 			continue
 		}
-		seen[norm] = struct{}{}
-		roots = append(roots, norm)
+		seen[entry] = struct{}{}
+		roots = append(roots, entry)
 	}
 	sort.Strings(roots)
 
@@ -156,12 +159,13 @@ func IsTrusted(workspaceRoot string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// Compare stored entries literally: they are already canonical (normalized at
+	// Trust time). Re-normalizing them here would re-run EvalSymlinks on every
+	// check, so a trusted path later replaced by a symlink to attacker content
+	// would re-resolve to the new target and match (a false positive). Only the
+	// incoming query is normalized.
 	for _, entry := range s.Trusted {
-		norm, nerr := normalize(entry)
-		if nerr != nil {
-			return false, nerr
-		}
-		if norm == query {
+		if entry == query {
 			return true, nil
 		}
 	}
@@ -196,14 +200,10 @@ func Untrust(workspaceRoot string) error {
 	}
 	kept := make([]string, 0, len(s.Trusted))
 	for _, entry := range s.Trusted {
-		norm, nerr := normalize(entry)
-		if nerr != nil {
-			return nerr
-		}
-		if norm == target {
+		if entry == target {
 			continue
 		}
-		kept = append(kept, norm)
+		kept = append(kept, entry)
 	}
 	return saveStore(store{Trusted: kept})
 }
@@ -215,14 +215,7 @@ func List() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	roots := make([]string, 0, len(s.Trusted))
-	for _, entry := range s.Trusted {
-		norm, nerr := normalize(entry)
-		if nerr != nil {
-			return nil, nerr
-		}
-		roots = append(roots, norm)
-	}
+	roots := append([]string(nil), s.Trusted...)
 	sort.Strings(roots)
 	return roots, nil
 }
