@@ -123,13 +123,24 @@ func (m model) appendSessionEvent(eventType sessions.EventType, payload any) (mo
 
 func (m model) appendSessionEvents(events []pendingSessionEvent) (model, []transcriptRow) {
 	rows := []transcriptRow{}
+	if m.activeSession.SessionID == "" || len(events) == 0 {
+		return m, rows
+	}
+	inputs := make([]sessions.AppendEventInput, 0, len(events))
 	for _, event := range events {
-		next, err := m.appendSessionEvent(event.Type, event.Payload)
-		if err != nil {
-			rows = append(rows, transcriptRow{kind: rowError, text: "session record error: " + err.Error()})
-			continue
-		}
-		m = next
+		inputs = append(inputs, sessions.AppendEventInput{Type: event.Type, Payload: event.Payload})
+	}
+	appended, err := m.sessionStore.AppendEvents(m.activeSession.SessionID, inputs)
+	if err != nil {
+		rows = append(rows, transcriptRow{kind: rowError, text: "session record error: " + err.Error()})
+		return m, rows
+	}
+	if len(appended) > 0 {
+		last := appended[len(appended)-1]
+		m.activeSession.UpdatedAt = last.CreatedAt
+		m.activeSession.EventCount = last.Sequence
+		m.activeSession.LastEventType = last.Type
+		m.sessionEvents = append(m.sessionEvents, appended...)
 	}
 	return m, rows
 }
@@ -142,13 +153,12 @@ func (m model) appendSessionEventsTo(sessionID string, events []pendingSessionEv
 	if m.sessionStore == nil || sessionID == "" {
 		return rows
 	}
+	inputs := make([]sessions.AppendEventInput, 0, len(events))
 	for _, event := range events {
-		if _, err := m.sessionStore.AppendEvent(sessionID, sessions.AppendEventInput{
-			Type:    event.Type,
-			Payload: event.Payload,
-		}); err != nil {
-			rows = append(rows, transcriptRow{kind: rowError, text: "session record error: " + err.Error()})
-		}
+		inputs = append(inputs, sessions.AppendEventInput{Type: event.Type, Payload: event.Payload})
+	}
+	if _, err := m.sessionStore.AppendEvents(sessionID, inputs); err != nil {
+		rows = append(rows, transcriptRow{kind: rowError, text: "session record error: " + err.Error()})
 	}
 	return rows
 }
