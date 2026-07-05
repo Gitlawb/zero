@@ -138,3 +138,41 @@ func TestRunTrustUnknownSubcommand(t *testing.T) {
 		t.Fatalf("unknown subcommand should not write to stdout, got %q", out.String())
 	}
 }
+
+// TestRunTrustRemoveTooManyArgs proves `trust remove a b` (more than one path) is a
+// usage error: exit code 2, usage on stderr, nothing on stdout, and no store change.
+func TestRunTrustRemoveTooManyArgs(t *testing.T) {
+	setTrustConfigRoot(t)
+	deps := trustDeps(t.TempDir())
+
+	var out, errBuf bytes.Buffer
+	if code := runTrust([]string{"remove", "a", "b"}, &out, &errBuf, deps); code != exitUsage {
+		t.Fatalf("remove with two args returned %d, want %d", code, exitUsage)
+	}
+	if errBuf.Len() == 0 {
+		t.Fatalf("remove with two args should write usage to stderr, stderr was empty")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("remove with two args should not write to stdout, got %q", out.String())
+	}
+}
+
+// TestRunTrustHelp proves the -h / --help / help subcommands print usage to stderr,
+// nothing to stdout, and return the usage exit code.
+func TestRunTrustHelp(t *testing.T) {
+	setTrustConfigRoot(t)
+	deps := trustDeps(t.TempDir())
+
+	for _, flag := range []string{"-h", "--help", "help"} {
+		var out, errBuf bytes.Buffer
+		if code := runTrust([]string{flag}, &out, &errBuf, deps); code != exitUsage {
+			t.Fatalf("trust %s returned %d, want %d", flag, code, exitUsage)
+		}
+		if !strings.Contains(errBuf.String(), "Usage") {
+			t.Fatalf("trust %s stderr = %q, want it to contain usage text", flag, errBuf.String())
+		}
+		if out.Len() != 0 {
+			t.Fatalf("trust %s should not write to stdout, got %q", flag, out.String())
+		}
+	}
+}

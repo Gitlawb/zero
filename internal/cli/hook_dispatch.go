@@ -29,6 +29,13 @@ type trustSkip struct {
 // any error OR an empty trustRoot as untrusted, so a forgotten or future call site
 // cannot fail open. It returns whether the project layer should be excluded and
 // whether the decision was driven by a store-read error.
+//
+// Each chokepoint (hooks and plugins) calls this itself rather than the caller
+// resolving trust once and passing a bool down. That is deliberate: keeping the
+// check inside the chokepoint is what makes the gate fail-closed by construction.
+// Do NOT hoist it to the callers behind an excludeProject bool whose zero value
+// includes the project layer, that reintroduces a fail-open default. The extra
+// store read per session is negligible.
 func resolveTrust(trustRoot string) (excludeProject bool, trustCheckErrored bool) {
 	if trustRoot == "" {
 		return true, false

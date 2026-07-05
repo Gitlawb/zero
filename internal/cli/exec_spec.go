@@ -26,6 +26,10 @@ type execSpecDraftRun struct {
 	stderr             io.Writer
 	deps               appDeps
 	workspaceRoot      string
+	// trustRoot is the ORIGINAL launch directory (captured before any --worktree
+	// reassignment), so a --use-spec run inside a --worktree of a trusted repo
+	// still keys the trust check on the source repo, not the generated worktree path.
+	trustRoot          string
 	registry           *tools.Registry
 	modelRegistry      modelregistry.Registry
 	resolved           config.ResolvedConfig
@@ -96,11 +100,11 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	var draftInfo execSpecDraftInfo
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
-	// The spec-draft path has no --worktree reassignment and no plugin activation,
-	// so the trust root is the workspace root itself and the plugin skip is empty.
-	// Emit at most one notice when project hooks were dropped for an untrusted
-	// workspace.
-	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.workspaceRoot)
+	// The spec-draft path activates no plugins, so the plugin skip is empty. Trust
+	// keys on run.trustRoot (the original launch dir), not run.workspaceRoot, which
+	// may be a --worktree path; this keeps a --use-spec --worktree run of a trusted
+	// repo trusted. Emit at most one notice when project hooks were dropped.
+	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.trustRoot)
 	emitTrustNotice(run.stderr, hookSkip, trustSkip{})
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:        run.resolved.MaxTurns,

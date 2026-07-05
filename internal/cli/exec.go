@@ -419,6 +419,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			stderr:             stderr,
 			deps:               deps,
 			workspaceRoot:      workspaceRoot,
+			trustRoot:          trustRoot,
 			registry:           registry,
 			modelRegistry:      modelRegistry,
 			resolved:           resolved,
