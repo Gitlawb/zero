@@ -1,6 +1,35 @@
 package tui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"os"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+// mouseModeForTermEnv detects Termux / proot environments where MouseModeAllMotion
+// (escape sequence \x1b[?1003h) is unreliable and breaks touch-gesture scrolling.
+// CellMotion still delivers wheel events for scroll, click-for-selection, and drag,
+// so it is a safe fallback that keeps the main interaction paths working without
+// the hover-highlight polish that AllMotion enables.
+func mouseModeForTermEnv() tea.MouseMode {
+	term := os.Getenv("TERMUX_VERSION")
+	proot := os.Getenv("PROOT_CWD")
+	container := os.Getenv("CONTAINER")
+
+	// Termux on Android — touch gestures send wheel events through proot
+	// unreliably with AllMotion (1003 tracking). Drop to CellMotion.
+	if term != "" || proot != "" || container != "" {
+		return tea.MouseModeCellMotion
+	}
+
+	// Also check for known Android environment variables
+	androidRoot := os.Getenv("ANDROID_ROOT")
+	if androidRoot == "/system" {
+		return tea.MouseModeCellMotion
+	}
+
+	return tea.MouseModeAllMotion
+}
 
 type mouseOverlayHit struct {
 	x int

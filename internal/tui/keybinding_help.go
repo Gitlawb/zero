@@ -54,7 +54,9 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			title: "Navigation & scrollback",
 			bindings: []keybinding{
 				{"PgUp / PgDn", "scroll the transcript by a page"},
-				{"\u2191 / \u2193", "scroll, or move within a popup / multi-line input"},
+				{"↑ / ↓", "scroll, or move within a popup / multi-line input"},
+				{"Shift+↑ / Shift+↓", "scroll line by line"},
+				{"Ctrl+U / Ctrl+D", "scroll half a page (Termux-friendly)"},
 				{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
 				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "hide / show the right context sidebar"},
 				{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},

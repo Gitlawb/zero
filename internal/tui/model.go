@@ -320,7 +320,13 @@ type model struct {
 	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
 	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
 	// (clickable suggestions, right-click paste, transcript select) pause while on.
-	mouseReleased       bool
+	mouseReleased bool
+	// mouseMode is the Bubble Tea mouse-tracking mode to request while capture
+	// is active. AllMotion by default; falls back to CellMotion under Termux
+	// (where AllMotion's 1003 tracking is unreliable, especially via proot,
+	// breaking touch-gesture scrolling). CellMotion still reports wheel events
+	// correctly. Set via mouseModeForTermEnv at model construction.
+	mouseMode tea.MouseMode
 	transcriptSelection transcriptSelectionState
 	// hover identifies the single clickable row (if any) currently under the
 	// mouse cursor with no button pressed, so it renders in a distinct style —
@@ -762,6 +768,12 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
+	// Detect Termux / proot environments where MouseModeAllMotion (escape
+	// sequence \x1b[?1003h) is unreliable and breaks touch-gesture scrolling.
+	// CellMotion still delivers wheel events for scroll, click-for-selection,
+	// and drag, so it is a safe fallback that keeps the main interaction paths
+	// working without the hover-highlight polish that AllMotion enables.
+	m.mouseMode = mouseModeForTermEnv()
 	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
 	// disabled: it read as a distracting glow rather than a subtle liveness cue.
 	// Streaming text always renders statically at base ink (the disabled path in
@@ -1389,6 +1401,39 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m = m.clearHover()
 			return m.scrollChat(-m.chatPageScrollLines()), nil
+		// Termux/Android-friendly scroll keys — Ctrl+U/D for half-page,
+		// Shift+Up/Down for line scroll. These work without PgUp/PgDn keys
+		// and without reliable mouse-wheel events through proot.
+		case keyCtrl(msg, 'u'):
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			if m.composerValue() != "" {
+				break // let the input field handle it (undo in some terminals)
+			}
+			m = m.clearHover()
+			return m.scrollChat(m.chatPageScrollLines()/2 + 1), nil
+		case keyCtrl(msg, 'd'):
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			if m.composerValue() != "" {
+				break
+			}
+			m = m.clearHover()
+			return m.scrollChat(-(m.chatPageScrollLines()/2 + 1)), nil
+		case keyShift(msg) && keyIs(msg, tea.KeyUp):
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			m = m.clearHover()
+			return m.scrollChat(1), nil
+		case keyShift(msg) && keyIs(msg, tea.KeyDown):
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			m = m.clearHover()
+			return m.scrollChat(-1), nil
 		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				return m, nil
@@ -2171,8 +2216,10 @@ func (m model) View() tea.View {
 		// MouseMode docs. AllMotion has marginally worse terminal compatibility
 		// but is well supported by the terminals this app targets; the existing
 		// 15ms mouse-event throttle (mouseEventThrottleInterval) already bounds
-		// the redraw rate from the extra motion events.
-		view.MouseMode = tea.MouseModeAllMotion
+		// the redraw rate from the extra motion events. On Termux / proot the
+		// model falls back to CellMotion (see mouseModeForTermEnv) so touch-
+		// gesture scrolling still works there.
+		view.MouseMode = m.mouseMode
 	}
 	return view
 }
