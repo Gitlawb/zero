@@ -711,7 +711,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
 	// deferral count, and it fails OPEN — a malformed plugin is warned and skipped.
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	// The interactive TUI is not worktree-reassigned, so the trust root is the
+	// launch directory itself.
+	trustRoot := workspaceRoot
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot)
 	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
@@ -758,6 +761,11 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if userConfigPath != "" {
 		sttDownloadRoot = filepath.Join(filepath.Dir(userConfigPath), "stt")
 	}
+	// Build the hooks dispatcher out of the AgentOptions literal so its trust skip
+	// report can be combined with the plugin activation's, and emit at most one
+	// notice when project hooks/plugins were dropped for an untrusted workspace.
+	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
+	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip)
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
@@ -815,7 +823,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
 			FileTracker:    fileTracker,
-			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+			Hooks:          hookDispatcher,
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),

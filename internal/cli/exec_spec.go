@@ -96,6 +96,12 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	var draftInfo execSpecDraftInfo
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
+	// The spec-draft path has no --worktree reassignment and no plugin activation,
+	// so the trust root is the workspace root itself and the plugin skip is empty.
+	// Emit at most one notice when project hooks were dropped for an untrusted
+	// workspace.
+	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.workspaceRoot)
+	emitTrustNotice(run.stderr, hookSkip, trustSkip{})
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:        run.resolved.MaxTurns,
 		ContextWindow:   resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
@@ -112,7 +118,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		Autonomy:        "low",
 		Sandbox:         run.sandboxEngine,
 		FileTracker:     tools.NewFileTracker(),
-		Hooks:           newHookDispatcher(run.workspaceRoot),
+		Hooks:           hookDispatcher,
 		EnabledTools:    run.options.enabledTools,
 		DisabledTools:   run.options.disabledTools,
 		OnText:          writer.text,

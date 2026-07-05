@@ -155,6 +155,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
+	// trustRoot is the ORIGINAL launch directory, captured before any --worktree
+	// reassignment below, so a worktree of a trusted repo inherits that repo's
+	// trust instead of being seen as a fresh untrusted path.
+	trustRoot := workspaceRoot
 	if options.worktree {
 		preparedWorktree, err := deps.prepareWorktree(context.Background(), worktrees.Options{
 			Cwd:     workspaceRoot,
@@ -210,7 +214,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// registry and collect their hooks + skill roots for the dispatcher and skill
 	// tool below. Done before --list-tools and filter validation so plugin tools
 	// are listable and filter-validatable; it fails OPEN (a bad plugin is skipped).
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot)
 	if options.useSpec {
 		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
 	}
@@ -519,6 +523,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			writer.warning(notice)
 		}
 	}
+	// Build the hooks dispatcher out of the struct literal so its trust skip report
+	// can be combined with the plugin activation's, and emit at most one notice when
+	// project hooks/plugins were dropped for an untrusted workspace.
+	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
+	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
@@ -549,7 +558,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		RequireCompletionSignal: true,
 		Sandbox:                 sandboxEngine,
 		FileTracker:             fileTracker,
-		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+		Hooks:                   hookDispatcher,
 		EnabledTools:            options.enabledTools,
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
