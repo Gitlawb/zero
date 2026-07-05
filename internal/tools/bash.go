@@ -536,14 +536,6 @@ func (b *boundedBuffer) retained() string {
 	return string(b.head) + string(b.tail)
 }
 
-// truncateHeadTail keeps the first and last halves of value when it exceeds
-// maxBytes, dropping the middle behind a marker. Returns the possibly-truncated
-// text, the raw byte length, and whether truncation happened.
-func truncateHeadTail(value string, maxBytes int) (string, int, bool) {
-	// value holds the whole stream, so its length is the true raw size.
-	return truncateHeadTailWithTotal(value, len(value), maxBytes)
-}
-
 // truncateHeadTailWithTotal head+tail-truncates value to maxBytes, using total —
 // the full original byte count — for the "N bytes omitted" marker and the raw
 // count. total may exceed len(value) when the middle was already discarded during
