@@ -21,11 +21,11 @@ import (
 )
 
 type execSpecDraftRun struct {
-	options            execOptions
-	stdout             io.Writer
-	stderr             io.Writer
-	deps               appDeps
-	workspaceRoot      string
+	options       execOptions
+	stdout        io.Writer
+	stderr        io.Writer
+	deps          appDeps
+	workspaceRoot string
 	// trustRoot is the ORIGINAL launch directory (captured before any --worktree
 	// reassignment), so a --use-spec run inside a --worktree of a trusted repo
 	// still keys the trust check on the source repo, not the generated worktree path.
