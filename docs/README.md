@@ -17,6 +17,7 @@ Zero.
 
 ## Maintainer Docs
 
+- [How Zero Works](HOW_ZERO_WORKS.md)
 - [npm wrapper smoke checklist](NPM_WRAPPER_SMOKE.md)
 - [Benchmarks](BENCHMARK.md)
 - [Performance benchmarks](PERFORMANCE.md)
