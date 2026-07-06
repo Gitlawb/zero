@@ -472,10 +472,8 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 }
 
 // SetProviderDiscoveredModels persists a fresh list of discovered models for a
-// named provider. The merge preserves any existing APIModel overrides for ids
-// that survive into the new set, so a manual per-model mapping is not wiped by
-// a subsequent discovery refresh. Models whose id is absent from the new set
-// are dropped. The resulting list is sorted by id.
+// named provider. Models whose id is absent from the new set are dropped.
+// The resulting list is deduplicated (first occurrence wins) and sorted by id.
 func SetProviderDiscoveredModels(path string, name string, models []DiscoveredModel) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -498,18 +496,8 @@ func SetProviderDiscoveredModels(path string, name string, models []DiscoveredMo
 
 	for index := range cfg.Providers {
 		if strings.EqualFold(cfg.Providers[index].Name, name) {
-			// Build a lookup of existing models by lowercased id to preserve
-			// APIModel overrides case-insensitively.
-			existing := map[string]string{}
-			for _, m := range cfg.Providers[index].Models {
-				if id := strings.TrimSpace(m.ID); id != "" {
-					if m.APIModel != "" {
-						existing[strings.ToLower(id)] = m.APIModel
-					}
-				}
-			}
-
-			// Merge: keep existing APIModel for surviving ids, use fresh id order.
+			// Build the merged list from fresh models, keeping the caller's order
+			// until dedup+sort.
 			merged := make([]DiscoveredModel, 0, len(models))
 			for _, m := range models {
 				id := strings.TrimSpace(m.ID)
@@ -517,9 +505,6 @@ func SetProviderDiscoveredModels(path string, name string, models []DiscoveredMo
 					continue
 				}
 				dm := DiscoveredModel{ID: id}
-				if override, ok := existing[strings.ToLower(id)]; ok {
-					dm.APIModel = override
-				}
 				merged = append(merged, dm)
 			}
 

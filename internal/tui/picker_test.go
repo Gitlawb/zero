@@ -182,7 +182,7 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	})
 	m = updated.(model)
 	loaded := plainRender(t, m.pickerOverlay(100))
-	assertContains(t, loaded, "live-cloud-a")
+	assertContains(t, loaded, "Live Cloud A")
 }
 
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {

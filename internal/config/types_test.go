@@ -36,7 +36,6 @@ func TestToolsConfigJSONRoundTrip(t *testing.T) {
 func TestDiscoveredModelJSONRoundTrip(t *testing.T) {
 	models := []DiscoveredModel{
 		{ID: "glm-5.1"},
-		{ID: "glm-5.2", APIModel: "glm-5.2-api"},
 	}
 	encoded, err := json.Marshal(models)
 	if err != nil {
@@ -47,20 +46,17 @@ func TestDiscoveredModelJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if len(decoded) != 2 {
-		t.Fatalf("len = %d, want 2", len(decoded))
+	if len(decoded) != 1 {
+		t.Fatalf("len = %d, want 1", len(decoded))
 	}
-	if decoded[0].ID != "glm-5.1" || decoded[0].APIModel != "" {
+	if decoded[0].ID != "glm-5.1" {
 		t.Fatalf("decoded[0] = %#v, want {ID: glm-5.1}", decoded[0])
-	}
-	if decoded[1].ID != "glm-5.2" || decoded[1].APIModel != "glm-5.2-api" {
-		t.Fatalf("decoded[1] = %#v, want {ID: glm-5.2, APIModel: glm-5.2-api}", decoded[1])
 	}
 }
 
 func TestProviderProfileModelsRoundTripsThroughUnmarshalJSON(t *testing.T) {
 	// Verify that the custom UnmarshalJSON for ProviderProfile handles "models".
-	input := `{"name":"test","models":[{"id":"glm-5.1"},{"id":"glm-5.2","apiModel":"glm-5.2-api"}]}`
+	input := `{"name":"test","models":[{"id":"glm-5.1"},{"id":"glm-5.2"}]}`
 	var profile ProviderProfile
 	if err := json.Unmarshal([]byte(input), &profile); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
@@ -68,10 +64,10 @@ func TestProviderProfileModelsRoundTripsThroughUnmarshalJSON(t *testing.T) {
 	if len(profile.Models) != 2 {
 		t.Fatalf("len(Models) = %d, want 2", len(profile.Models))
 	}
-	if profile.Models[0].ID != "glm-5.1" || profile.Models[0].APIModel != "" {
+	if profile.Models[0].ID != "glm-5.1" {
 		t.Fatalf("Models[0] = %#v", profile.Models[0])
 	}
-	if profile.Models[1].ID != "glm-5.2" || profile.Models[1].APIModel != "glm-5.2-api" {
+	if profile.Models[1].ID != "glm-5.2" {
 		t.Fatalf("Models[1] = %#v", profile.Models[1])
 	}
 

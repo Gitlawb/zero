@@ -26,6 +26,13 @@ type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	command := "summary"
+
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command = strings.ToLower(strings.TrimSpace(args[0]))
+		args = args[1:]
+	}
+
 	options, help, err := parseCommandCenterArgs(args, false, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -37,21 +44,14 @@ func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		return exitSuccess
 	}
 
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
-	if exitCode != exitSuccess {
-		return exitCode
+	switch command {
+	case "summary":
+		return runConfigSummary(options, stdout, stderr, deps)
+	case "cleanup":
+		return runConfigCleanup(options, stdout, stderr, deps)
+	default:
+		return writeExecUsageError(stderr, fmt.Sprintf("unknown command: %s", command))
 	}
-	summary := summarizeConfig(resolved)
-	if options.json {
-		if err := writePrettyJSON(stdout, summary); err != nil {
-			return exitCrash
-		}
-		return exitSuccess
-	}
-	if _, err := fmt.Fprintln(stdout, formatConfigSummary(summary)); err != nil {
-		return exitCrash
-	}
-	return exitSuccess
 }
 
 func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -461,7 +461,8 @@ func formatProviderCatalogValue(value string, fallback string) string {
 
 func writeConfigHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
-  zero config [flags]
+  zero config summary [flags]
+  zero config cleanup [flags]
 
 Inspects resolved Go configuration without printing secrets.
 

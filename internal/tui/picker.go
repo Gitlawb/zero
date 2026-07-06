@@ -525,7 +525,7 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 func providerModelPickerItem(provider providercatalog.Descriptor, model providermodelcatalog.Model, group string) pickerItem {
 	item := pickerItem{
 		Group: group,
-		Label: model.ID,
+		Label: modelPickerDisplayName(model.ID, model.Description),
 		Value: model.ID,
 	}
 	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)
@@ -536,7 +536,7 @@ func providerModelPickerItem(provider providercatalog.Descriptor, model provider
 func discoveredModelPickerItem(provider providercatalog.Descriptor, model providermodeldiscovery.Model, group string) pickerItem {
 	item := pickerItem{
 		Group: group,
-		Label: model.ID,
+		Label: modelPickerDisplayName(model.ID, model.Description),
 		Value: model.ID,
 	}
 	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)

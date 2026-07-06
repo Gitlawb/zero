@@ -344,7 +344,7 @@ func TestRecapsPreferenceRoundTrips(t *testing.T) {
 	}
 }
 
-func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T) {
+func TestSetProviderDiscoveredModelsAddsAndMerges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "opencode",
@@ -356,18 +356,18 @@ func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T
 				Model:        "glm-5.2",
 				Models: []DiscoveredModel{
 					{ID: "glm-5.1"},
-					{ID: "glm-5.2", APIModel: "glm-5.2-custom"},
+					{ID: "glm-5.2"},
 					{ID: "glm-5.3"},
 				},
 			},
 		},
 	}, 0o600)
 
-	// First call: add a set that drops glm-5.3, keeps glm-5.1/5.2, and adds a new one.
+	// First call: add a set that drops glm-5.3, keeps glm-5.1/5.2, and adds glm-5.4.
 	fresh := []DiscoveredModel{
 		{ID: "glm-5.1"},
-		{ID: "glm-5.2"}, // should preserve APIModel "glm-5.2-custom"
-		{ID: "glm-5.4"}, // new model, no APIModel override
+		{ID: "glm-5.2"},
+		{ID: "glm-5.4"},
 	}
 	cfg, err := SetProviderDiscoveredModels(path, "opencode", fresh)
 	if err != nil {
@@ -379,16 +379,14 @@ func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T
 		t.Fatalf("len(Models) = %d, want 3", len(got))
 	}
 
-	// glm-5.1 should have no APIModel (was empty, no override set).
-	if got[0].ID != "glm-5.1" || got[0].APIModel != "" {
+	// Models should be sorted by id: glm-5.1, glm-5.2, glm-5.4.
+	if got[0].ID != "glm-5.1" {
 		t.Fatalf("Models[0] = %#v, want {ID: glm-5.1}", got[0])
 	}
-	// glm-5.2 should preserve its APIModel override.
-	if got[1].ID != "glm-5.2" || got[1].APIModel != "glm-5.2-custom" {
-		t.Fatalf("Models[1] = %#v, want {ID: glm-5.2, APIModel: glm-5.2-custom}", got[1])
+	if got[1].ID != "glm-5.2" {
+		t.Fatalf("Models[1] = %#v, want {ID: glm-5.2}", got[1])
 	}
-	// glm-5.4 should have no APIModel.
-	if got[2].ID != "glm-5.4" || got[2].APIModel != "" {
+	if got[2].ID != "glm-5.4" {
 		t.Fatalf("Models[2] = %#v, want {ID: glm-5.4}", got[2])
 	}
 
@@ -405,13 +403,11 @@ func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T
 	if len(got) != 3 {
 		t.Fatalf("persisted len(Models) = %d, want 3", len(got))
 	}
-	if got[1].APIModel != "glm-5.2-custom" {
-		t.Fatalf("persisted Models[1].APIModel = %q, want glm-5.2-custom", got[1].APIModel)
-	}
 
-	// Preserve APIModel even when the fresh set explicitly omits it (no APIModel set).
+	// Second call: replace with a single model and verify dedup (duplicate input).
 	secondFresh := []DiscoveredModel{
 		{ID: "glm-5.2"},
+		{ID: "glm-5.2"}, // duplicate — should be dropped
 	}
 	cfg, err = SetProviderDiscoveredModels(path, "opencode", secondFresh)
 	if err != nil {
@@ -420,8 +416,8 @@ func TestSetProviderDiscoveredModelsAddsAndMergesPreservingAPIModel(t *testing.T
 	if len(cfg.Providers[0].Models) != 1 {
 		t.Fatalf("after second call len(Models) = %d, want 1", len(cfg.Providers[0].Models))
 	}
-	if cfg.Providers[0].Models[0].APIModel != "glm-5.2-custom" {
-		t.Fatalf("after second call APIModel = %q, want glm-5.2-custom preserved", cfg.Providers[0].Models[0].APIModel)
+	if cfg.Providers[0].Models[0].ID != "glm-5.2" {
+		t.Fatalf("after second call Models[0].ID = %q, want glm-5.2", cfg.Providers[0].Models[0].ID)
 	}
 }
 

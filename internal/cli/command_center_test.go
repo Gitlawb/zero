@@ -60,6 +60,100 @@ func TestRunConfigPrintsJSONSummary(t *testing.T) {
 	}
 }
 
+func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	workspace := t.TempDir()
+	xdgConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	userConfigPath := filepath.Join(xdgConfigHome, "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	writeFileConfigFixture(t, userConfigPath, config.FileConfig{
+		ActiveProvider: "openai",
+		Providers: []config.ProviderProfile{
+			{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+		Preferences: config.PreferencesConfig{FavoriteModels: []string{
+			"openai/gpt-4.1",
+			"project/sonnet",
+			"legacy-bare",
+			"openai/",
+			"stale/model",
+		}},
+	})
+
+	projectConfigPath := filepath.Join(workspace, ".zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o700); err != nil {
+		t.Fatalf("mkdir project config dir: %v", err)
+	}
+	writeFileConfigFixture(t, projectConfigPath, config.FileConfig{
+		Providers: []config.ProviderProfile{
+			{Name: "project", ProviderKind: config.ProviderKindAnthropic, Model: "claude-sonnet-4"},
+		},
+	})
+
+	exitCode := runWithDeps([]string{"config", "cleanup"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return workspace, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "removed 2 favorite model entries") {
+		t.Fatalf("unexpected cleanup output: %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+
+	cfg := readFileConfig(t, userConfigPath)
+	want := []string{"openai/gpt-4.1", "project/sonnet", "stale/model"}
+	if !sameStringSet(cfg.Preferences.FavoriteModels, want) {
+		t.Fatalf("FavoriteModels = %#v, want %#v", cfg.Preferences.FavoriteModels, want)
+	}
+}
+
+func TestRunConfigCleanupJSON(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	workspace := t.TempDir()
+	xdgConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	userConfigPath := filepath.Join(xdgConfigHome, "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	writeFileConfigFixture(t, userConfigPath, config.FileConfig{
+		ActiveProvider: "openai",
+		Providers:      []config.ProviderProfile{{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}},
+		Preferences:    config.PreferencesConfig{FavoriteModels: []string{"openai/gpt-4.1", "legacy-bare"}},
+	})
+
+	exitCode := runWithDeps([]string{"config", "cleanup", "--json"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return workspace, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var payload struct {
+		RemovedFavorites int `json:"removedFavorites"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode config cleanup JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.RemovedFavorites != 1 {
+		t.Fatalf("removedFavorites = %d, want 1", payload.RemovedFavorites)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunConfigAndProvidersRedactBaseURLSecrets(t *testing.T) {
 	deps := commandCenterSecretBaseURLDeps(t)
 	commands := [][]string{
@@ -801,6 +895,35 @@ func providerSetupDeps(configPath string) appDeps {
 			return configPath, nil
 		},
 	}
+}
+
+func writeFileConfigFixture(t *testing.T, path string, cfg config.FileConfig) {
+	t.Helper()
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode config %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config %s: %v", path, err)
+	}
+}
+
+func sameStringSet(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func readFileConfig(t *testing.T, path string) config.FileConfig {

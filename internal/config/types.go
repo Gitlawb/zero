@@ -20,12 +20,9 @@ const (
 	ProviderKindOpenAICompatible ProviderKind = "openai-compatible"
 )
 
-// DiscoveredModel represents a model discovered from a provider's /models
-// endpoint. The APIModel field is reserved for per-model API name overrides
-// (filled in later — not yet wired into the factory).
+// DiscoveredModel represents a model discovered from a provider's /models endpoint.
 type DiscoveredModel struct {
-	ID       string `json:"id"`
-	APIModel string `json:"apiModel,omitempty"`
+	ID string `json:"id"`
 }
 
 type ProviderProfile struct {
