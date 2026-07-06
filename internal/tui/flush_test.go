@@ -121,7 +121,7 @@ func TestEscCancellationLeavesVisibleMarker(t *testing.T) {
 	m.pending = true
 	m.activeRunID = 5
 	m.runCancel = func() {}
-	m.streamingText = "half an answer"
+	m.streamingText = []byte("half an answer")
 
 	updated, _ := m.Update(testKey(tea.KeyEsc))
 	next := updated.(model)
@@ -133,7 +133,7 @@ func TestEscCancellationLeavesVisibleMarker(t *testing.T) {
 	if !transcriptContains(next.transcript, "half an answer") {
 		t.Fatalf("expected the partial streamed answer to be preserved, got %#v", next.transcript)
 	}
-	if next.streamingText != "" {
+	if len(next.streamingText) != 0 {
 		t.Fatal("streaming text should be cleared after cancel")
 	}
 }

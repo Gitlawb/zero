@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -44,7 +45,7 @@ func (tool editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
 }
 
-func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
+func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
@@ -98,6 +99,35 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		}
 	}
 
+	// Fuzzy fallback: when the exact string (and its CRLF translation) is absent,
+	// run a cascade of tolerant matchers (trimmed lines, block anchors, collapsed
+	// whitespace, indentation drift, escape normalization) to locate the span the
+	// model intended. Only a span that occurs literally in the file is accepted,
+	// so the replacement applied below is still exact.
+	if occurrences == 0 {
+		findOld, findNew := oldString, newString
+		if strings.Contains(content, "\r\n") && !strings.Contains(findOld, "\r\n") {
+			findOld = strings.ReplaceAll(findOld, "\n", "\r\n")
+			findNew = strings.ReplaceAll(findNew, "\n", "\r\n")
+		}
+		search, ferr := fuzzyEditMatch(content, findOld, replaceAll)
+		switch {
+		case ferr == nil:
+			oldString = search
+			// The model's new_string was written at old_string's (mismatched)
+			// indentation; re-shape it to the span actually being replaced so a
+			// tolerant match never strips indentation or a trailing CR.
+			newString = adaptReplacementToSpan(search, findOld, findNew)
+			occurrences = strings.Count(content, search)
+		case errors.Is(ferr, errEditFuzzyAmbiguous):
+			return errorResult("Error: old_string matches multiple locations in " + relativePath + " even after fuzzy matching. Provide more surrounding context to make the match unique, or pass replace_all: true.")
+		case errors.Is(ferr, errEditFuzzyNotFound):
+			// Fall through to the exact-match error below.
+		default:
+			return errorResult("Error editing " + relativePath + ": " + ferr.Error())
+		}
+	}
+
 	if occurrences == 0 {
 		return errorResult("Error: Could not find the exact string to replace in " + relativePath + ". The old_string must match the file byte-for-byte.")
 	}
@@ -120,6 +150,10 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
+	// FileTracker re-baseline: recording pre-format content would make the very
+	// next edit look like an external modification and trip the conflict guard.
+	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
@@ -130,6 +164,7 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line

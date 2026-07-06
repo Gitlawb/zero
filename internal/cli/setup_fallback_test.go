@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 )
 
 func TestFirstUsableProviderPrefersRemoteKeyed(t *testing.T) {
@@ -63,6 +66,31 @@ func TestFirstUsableProviderSkipsUnresolvableCatalogWithoutBaseURL(t *testing.T)
 	got, ok := firstUsableProvider(providers)
 	if !ok || got.Name != "custom" {
 		t.Fatalf("want custom-endpoint fallback, got %q ok=%v", got.Name, ok)
+	}
+}
+
+// An OAuth-only provider (no inline key, no env var) must be selectable as a
+// fallback, matching setupRequired/usableSavedProviders — otherwise a fully
+// authenticated user gets forced back into onboarding when activeProvider
+// goes stale.
+func TestFirstUsableProviderRecognizesOAuthLogin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tok.json")
+	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	providers := []config.ProviderProfile{
+		{Name: "xai", CatalogID: "xai", APIKeyEnv: "XAI_API_KEY"}, // no inline key/env, but logged in via OAuth
+	}
+	got, ok := firstUsableProvider(providers)
+	if !ok || got.Name != "xai" {
+		t.Fatalf("want OAuth-logged-in provider (xai), got %q ok=%v", got.Name, ok)
 	}
 }
 

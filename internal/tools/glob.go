@@ -45,18 +45,18 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 	}
 }
 
-func (tool globTool) Run(_ context.Context, args map[string]any) Result {
-	return tool.runWith(args, readExcluder{})
+func (tool globTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.runWith(ctx, args, readExcluder{})
 }
 
 // RunWithSandbox runs glob while skipping subtrees the sandbox policy denies
 // reads to (DenyRead). With no DenyRead configured the excluder is a no-op and
 // behavior is unchanged.
-func (tool globTool) RunWithSandbox(_ context.Context, args map[string]any, engine *sandbox.Engine) Result {
-	return tool.runWith(args, sandboxReadExcluder(engine))
+func (tool globTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result {
+	return tool.runWith(ctx, args, sandboxReadExcluder(engine))
 }
 
-func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
+func (tool globTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "glob", "match", "query", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
@@ -88,8 +88,11 @@ func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
 
-	matches, err := scanGlob(root, displayRoot, matcher, includeDirs, exclude)
+	matches, err := scanGlob(ctx, root, displayRoot, matcher, includeDirs, exclude)
 	if err != nil {
+		if res, ok := searchCancelledResult("glob", err); ok {
+			return res
+		}
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
 	if len(matches) == 0 {
@@ -126,9 +129,15 @@ func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
 	}
 }
 
-func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool, exclude readExcluder) ([]string, error) {
+func scanGlob(ctx context.Context, root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool, exclude readExcluder) ([]string, error) {
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		// Checked first, ahead of walkErr: an unscoped scan over a large tree can
+		// run long enough that cancelling the run must stop the walk promptly
+		// rather than visiting every remaining entry to completion.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			if path == root {
 				return walkErr

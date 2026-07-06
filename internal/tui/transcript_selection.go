@@ -107,7 +107,7 @@ type transcriptBodyLayout struct {
 }
 
 func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
-	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay))
+	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay, false))
 }
 
 func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
@@ -210,7 +210,7 @@ func (m model) renderHoverHighlight(rendered string, selectable []transcriptSele
 	return strings.Join(lines, "\n")
 }
 
-func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
+func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool) []transcriptBodyItem {
 	// File drill-in: the chat column's body swaps to the viewed file's
 	// diff/content. Swapping HERE (the single source every consumer reads) keeps
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
@@ -241,9 +241,19 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 	} else {
 		rc := buildRowContext(m.transcript)
 		shownAny := false
-		previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
+		// The detailed view shows the full transcript from index 0, not
+		// the managed region after m.flushed.
+		startIdx := m.flushed
+		if detailed {
+			startIdx = 0
+		}
+		renderRowFn := transcriptRowDispatchFn(m.renderTranscriptRow)
+		if detailed {
+			renderRowFn = transcriptRowDispatchFn(m.renderTranscriptDetailedRow)
+		}
+		previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
 		specialistSummaryEmitted := false
-		for index := m.flushed; index < len(m.transcript); index++ {
+		for index := startIdx; index < len(m.transcript); index++ {
 			row := m.transcript[index]
 			// A welcome row carries no Lime visual (the empty state replaced it)
 			// and a resolved tool call collapses into its result's card.
@@ -344,16 +354,18 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				}
 			}
 			rowIndex, transcriptRow := index, row
-			// Key the height cache on contentWidth (the wrap width drives line count);
-			// the gutter is a horizontal-only post-pad and never changes height.
-			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, contentWidth, rc)
+			bodyCap := cardBodyMaxLines
+			if detailed {
+				bodyCap = 0
+			}
+			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKeyOpts(transcriptRow, contentWidth, rc, bodyCap)
 			items = append(items, transcriptBodyItem{
 				kind:              transcriptBodyItemRow,
 				rowIndex:          rowIndex,
 				heightCacheKey:    heightCacheKey,
 				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
+					rendered, selectable := renderRowFn(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
 					return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
 				},
 			})
@@ -366,7 +378,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 	}
 
 	if m.pending {
-		pendingShowsAssistantText := m.pendingPermission == nil && m.pendingAskUser == nil && strings.TrimSpace(m.streamingText) != ""
+		pendingShowsAssistantText := m.pendingPermission == nil && m.pendingAskUser == nil && strings.TrimSpace(m.streamingTextString()) != ""
 		if pendingShowsAssistantText && havePreviousKind && shouldRuleBeforeTurn(previousKind, rowAssistant) {
 			items = append(items, transcriptRuleBodyItem(contentWidth, gutter))
 		} else {
@@ -635,8 +647,17 @@ func transcriptBlockBodyHeightCacheKey(kind transcriptBodyItemKind, block string
 	return b.String()
 }
 
-func (m model) transcriptRowBodyHeightCacheKey(row transcriptRow, width int, rc rowContext) (string, bool) {
-	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+// rowRenderFn abstracts row rendering for normal vs detailed mode:
+// m.renderRow for normal (bodyCap: cardBodyMaxLines) and m.renderRowDetailed
+// for detailed (bodyCap: 0).
+type rowRenderFn func(transcriptRow, int, rowContext) string
+
+// transcriptRowDispatchFn dispatches row-kind rendering for the transcript body
+// pipeline, producing rendered text and selectable-line geometry.
+type transcriptRowDispatchFn func(int, transcriptRow, int, rowContext, int) (string, []transcriptSelectableLine)
+
+func (m model) transcriptRowBodyHeightCacheKeyOpts(row transcriptRow, width int, rc rowContext, bodyCap int) (string, bool) {
+	opts := cardRenderOptions{bodyCap: bodyCap, cwd: m.cwd}
 	rowKey, stable := m.renderRowCacheKey(row, width, rc, opts, false)
 	if rowKey == "" {
 		return "", false
@@ -648,6 +669,17 @@ func (m model) transcriptRowBodyHeightCacheKey(row transcriptRow, width int, rc 
 }
 
 func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+}
+
+// renderTranscriptDetailedRow routes through renderTranscriptRowFn with
+// renderRowDetailed (bodyCap: 0) so tool output appears uncapped.
+func (m model) renderTranscriptDetailedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	return m.renderTranscriptRowFn(rowIndex, row, width, rc, startBodyY, m.renderRowDetailed)
+}
+
+// renderTranscriptRowFn dispatches row-kind rendering using the provided renderFn.
+func (m model) renderTranscriptRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
 	switch row.kind {
 	case rowUser:
 		return m.renderSelectableUserRow(rowIndex, row, width, startBodyY)
@@ -656,21 +688,26 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 	case rowReasoning:
 		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
 	case rowSystem, rowError, rowToolCall, rowPermission, rowAskUser:
-		return m.renderSelectableRenderedRow(rowIndex, row, width, rc, startBodyY)
+		return m.renderSelectableRenderedRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	case rowToolResult:
-		return m.renderSelectableToolResultRow(rowIndex, row, width, rc, startBodyY)
+		return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	case rowSpecialist:
-		return m.renderSelectableSpecialistRow(rowIndex, row, width, rc, startBodyY)
+		return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, renderFn)
 	default:
-		return m.renderRow(row, width, rc), nil
+		rendered := renderFn(row, width, rc)
+		if rendered == "" {
+			return "", nil
+		}
+		selectable := selectableLinesFromRendered(rowIndex, rendered, startBodyY, 0)
+		return rendered, selectable
 	}
 }
 
 // renderSelectableToolResultRow renders the tool result card and marks its head
 // (first line) as a clickable collapse/expand toggle. Body/footer text remains
 // selectable so copying a visible transcript range includes command output.
-func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	rendered := m.renderRow(row, width, rc)
+func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+	rendered := renderFn(row, width, rc)
 	if rendered == "" {
 		return "", nil
 	}
@@ -694,8 +731,12 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 	return rendered, selectable
 }
 
-func (m model) renderSelectableRenderedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	rendered := m.renderRow(row, width, rc)
+func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+}
+
+func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+	rendered := renderFn(row, width, rc)
 	if rendered == "" {
 		return "", nil
 	}
@@ -828,11 +869,8 @@ func (m model) renderTranscriptSelectableStyledLine(line transcriptSelectableLin
 	return prefix + zeroTheme.selection.Render(selected) + suffix
 }
 
-// renderSelectableSpecialistRow renders a specialist card and marks every line
-// as a clickable specialistCard selectable line carrying the childSessionID.
-// A left-click or Enter on any card line drills into that specialist's subchat.
-func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	rendered := m.renderRow(row, width, rc)
+func (m model) renderSelectableSpecialistRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
+	rendered := renderFn(row, width, rc)
 	if rendered == "" || row.specialistInfo == nil {
 		return "", nil
 	}
@@ -846,9 +884,6 @@ func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, wi
 			specialistCard: true,
 			specialistID:   row.specialistInfo.childSessionID,
 		}
-		// Carry the line's plain text + start so a selection dragged THROUGH the
-		// card copies its content; the specialistCard flag still makes a direct
-		// click drill into the sub-session (handled on press, before selection).
 		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY+i, lines[i], boxed); ok {
 			sl.text = meta.text
 			sl.textStart = meta.textStart
@@ -856,6 +891,13 @@ func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, wi
 		selectable[i] = sl
 	}
 	return rendered, selectable
+}
+
+// renderSelectableSpecialistRow renders a specialist card and marks every line
+// as a clickable specialistCard selectable line carrying the childSessionID.
+// A left-click or Enter on any card line drills into that specialist's subchat.
+func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -1030,12 +1072,18 @@ func splitPlainAtDisplayWidth(text string, width int) (string, string) {
 // selection previously resolved against transcript rows that weren't even
 // visible while viewing a subagent/swarm child session.
 func (m model) transcriptHitTestSource() (header string, items []transcriptBodyItem, width int) {
+	if m.transcriptDetailed {
+		width = chatWidth(m.width)
+		header = detailedTranscriptHeader(width) + "\n" + zeroTheme.line.Render(strings.Repeat("-", width))
+		items = m.transcriptBodyItems(width, "", true)
+		return
+	}
 	if m.subchat.active {
 		width = chatWidth(m.width)
 		return renderSubchatNavBar(m.subchat.childSessionTitle, width), m.transcriptBodyItemsFromRows(m.subchat.childRows, width), width
 	}
 	width = m.chatColumnWidth()
-	return m.pinnedTitleBar(width), m.transcriptBodyItems(width, ""), width
+	return m.pinnedTitleBar(width), m.transcriptBodyItems(width, "", false), width
 }
 
 // transcriptHitTestBlocked reports whether mouse hit-testing must be skipped
@@ -1049,7 +1097,11 @@ func (m model) transcriptHitTestBlocked() bool {
 // (nearest-line fallback for scroll-driven selection extension).
 func (m model) transcriptHitTestLayout() (frame transcriptFrameLayout, window transcriptViewportWindow, layout transcriptBodyLayout) {
 	header, items, width := m.transcriptHitTestSource()
-	frame = m.scrollableTranscriptFrame(header, m.footerView(width))
+	footer := m.footerView(width)
+	if m.transcriptDetailed {
+		footer = m.detailedTranscriptFooter(width)
+	}
+	frame = m.scrollableTranscriptFrame(header, footer)
 	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
 	window = transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
 	layout = layoutVisibleTranscriptBodyItems(items, metrics, window)

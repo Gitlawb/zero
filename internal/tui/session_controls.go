@@ -326,8 +326,10 @@ func (m model) handleCompactCommand(args string) (model, string, tea.Cmd) {
 	if args == "status" {
 		return m, m.compactText(false), nil
 	}
-	if args != "" {
-		return m, "Compact\nusage: /compact [status]", nil
+	// Bare "/compact" already triggers compaction; accept "now" too since that is
+	// what users reach for when they see the context gauge climbing.
+	if args != "" && args != "now" {
+		return m, "Compact\nusage: /compact [status|now]", nil
 	}
 	if m.compactInFlight {
 		return m, m.compactText(true), nil

@@ -846,13 +846,13 @@ func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
 }
 
 func TestModelContextWindowResolution(t *testing.T) {
-	m := model{}
 	// Registered model → the exact registry window (compare to the registry value so
 	// this doesn't break on a benign catalog update).
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("load default registry: %v", err)
 	}
+	m := model{modelCatalog: registry}
 	entry, ok := registry.Resolve("gpt-4.1")
 	if !ok || entry.ContextLimits.ContextWindow <= 0 {
 		t.Fatalf("gpt-4.1 should resolve a positive window in the registry")

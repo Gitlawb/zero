@@ -141,6 +141,46 @@ func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testin
 	}
 }
 
+// TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval mirrors
+// TestBashToolRequireEscalatedMsysGuard for exec_command: the MSYS sandbox
+// guard exists only because MSYS/Cygwin coreutils fail under the
+// write-restricted sandbox, so once require_escalated is actually approved
+// (unsandboxed execution), the guard must not block the same command it was
+// meant to let escalate past.
+func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only MSYS sandbox guard")
+	}
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	registry := NewRegistry()
+	registry.Register(NewScopedExecCommandTool(root, nil, manager))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+	})
+
+	result := registry.RunWithOptions(context.Background(), ExecCommandToolName, map[string]any{
+		"cmd":                 "cat somefile.txt",
+		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+	}, RunOptions{
+		PermissionGranted: true,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionModeAsk),
+	})
+
+	// Assert on the preflight block sentinel (exit_code "-1", set only by
+	// shellIssueBlockResult) rather than shell_issue: once the guard is
+	// bypassed, "cat somefile.txt" actually runs, and its real,
+	// PATH-dependent output could otherwise trip the unrelated
+	// post-execution detectShellOutputIssue heuristic and make this
+	// assertion flaky for reasons unrelated to the guard under test.
+	if result.Meta["exit_code"] == "-1" {
+		t.Fatalf("expected approved require_escalated to bypass the MSYS guard, got blocked: %#v", result)
+	}
+}
+
 func TestExecCommandReturnsExitCodeWhenCommandCompletesDuringInitialYield(t *testing.T) {
 	root := t.TempDir()
 	manager := newExecSessionManager()

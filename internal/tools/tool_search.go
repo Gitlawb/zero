@@ -261,10 +261,16 @@ func (tool toolSearchTool) rankByKeyword(query string, deferred []Tool) []Tool {
 	for index, candidate := range deferred {
 		name := strings.ToLower(candidate.Name())
 		desc := strings.ToLower(candidate.Description())
+		nameSquashed := squashSeparators(name)
 		score := 0
 		for _, keyword := range keywords {
-			if strings.Contains(name, keyword) {
+			switch {
+			case strings.Contains(name, keyword):
 				score += 2
+			case strings.Contains(nameSquashed, squashSeparators(keyword)):
+				// Separator-insensitive fallback: "webfetch" matches "web_fetch".
+				// Ranked below an exact substring so precise queries still win.
+				score++
 			}
 			if strings.Contains(desc, keyword) {
 				score++
@@ -288,6 +294,19 @@ func (tool toolSearchTool) rankByKeyword(query string, deferred []Tool) []Tool {
 		matches = append(matches, entry.tool)
 	}
 	return matches
+}
+
+// squashSeparators drops separators so "web_fetch", "web-fetch", and "web fetch"
+// all normalize to "webfetch". It lets a query missing the separators still match
+// a tool name, the common way a model mistypes a tool ("webfetch").
+func squashSeparators(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '_', '-', ' ', '.':
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // noMatchMessage reports that nothing loaded and names the available deferred

@@ -26,6 +26,8 @@ const (
 	secretRetryDelay    = 2 * time.Millisecond
 )
 
+var openSecretLockFile = os.OpenFile
+
 // Crypter encrypts a blob at rest with AES-256-GCM under a per-user random secret
 // persisted (0600) at secretPath.
 type Crypter struct {
@@ -107,7 +109,7 @@ func createSecretFile(path string) ([]byte, error) {
 	lockPath := path + ".lock"
 	var lastErr error
 	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
-		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		lock, err := openSecretLockFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_ = lock.Close()
 			defer os.Remove(lockPath)
@@ -118,20 +120,25 @@ func createSecretFile(path string) ([]byte, error) {
 			}
 			return writeNewSecretFile(path)
 		}
-		if !errors.Is(err, os.ErrExist) {
+		// On Windows a concurrent holder's os.Remove leaves the lock file in a
+		// "delete pending" state, so an O_EXCL create races it with
+		// ERROR_ACCESS_DENIED (os.ErrPermission) rather than ErrExist. Treat that
+		// as contention and retry too -- mirroring oauth's createSecretFile --
+		// otherwise concurrent secret creation spuriously fails on Windows.
+		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, fmt.Errorf("securefile: create secret lock: %w", err)
 		}
+		// Remember the lock-creation error itself rather than a subsequent
+		// "secret file doesn't exist yet" read error -- otherwise a real
+		// contention/ACL problem is masked by the expected-while-waiting
+		// ErrNotExist once the retries are exhausted.
+		lastErr = err
 		if data, rerr := readSecretFileRetry(path); rerr == nil {
 			return data, nil
-		} else {
-			lastErr = rerr
 		}
 		time.Sleep(secretRetryDelay)
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("securefile: timed out waiting for secret %s: %w", path, lastErr)
-	}
-	return nil, fmt.Errorf("securefile: timed out waiting for secret lock %s", lockPath)
+	return nil, fmt.Errorf("securefile: timed out waiting for secret %s: %w", path, lastErr)
 }
 
 func writeNewSecretFile(path string) ([]byte, error) {

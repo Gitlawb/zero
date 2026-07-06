@@ -224,14 +224,14 @@ func TestCommandCardRowTrimsIndentedActionsLabel(t *testing.T) {
 func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
-	m.streamingText = "I'll add a --version flag"
+	m.streamingText = []byte("I'll add a --version flag")
 	got := plainRender(t, m.interimBlock(96))
 	if !strings.Contains(got, "I'll add a --version flag") || !strings.Contains(got, "▌") {
 		t.Fatalf("interim block = %q, want streamed text with trailing cursor", got)
 	}
 
 	// Before the first delta the block falls back to the liveness spinner.
-	m.streamingText = ""
+	m.streamingText = nil
 	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "Working") {
 		t.Fatalf("empty interim block = %q, want the liveness label", got)
 	}
@@ -240,13 +240,13 @@ func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 func TestInterimBlockRendersStreamingMarkdownTable(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
-	m.streamingText = strings.Join([]string{
+	m.streamingText = []byte(strings.Join([]string{
 		"Here's the comparison:",
 		"",
 		"| Category | System A | System B |",
 		"|---|---|---|",
 		"| **Label** | Alpha | Beta |",
-	}, "\n")
+	}, "\n"))
 
 	rendered := m.interimBlock(72)
 	got := plainRender(t, rendered)
@@ -507,6 +507,50 @@ func TestSelectableAssistantRowKeepsMarkdownSemanticsPlain(t *testing.T) {
 		}
 		if ansiPattern.MatchString(line.text) {
 			t.Fatalf("selectable metadata leaked ANSI escapes in %#v", line)
+		}
+	}
+}
+
+func TestStripMarkdownRenderControlsStripsAllANSI(t *testing.T) {
+	// Bold markers that renderAssistantMarkdownText embeds for prose formatting.
+	withBold := "\x1b[1mhello\x1b[22m world"
+	if got := stripMarkdownRenderControls(withBold); got != "hello world" {
+		t.Fatalf("stripMarkdownRenderControls(%q) = %q, want %q", withBold, got, "hello world")
+	}
+	// Color sequences from highlightCodeAuto for fenced code blocks.
+	withColor := "\x1b[38;2;236;236;238mdef\x1b[0m hello():"
+	if got := stripMarkdownRenderControls(withColor); got != "def hello():" {
+		t.Fatalf("stripMarkdownRenderControls(%q) = %q, want %q", withColor, got, "def hello():")
+	}
+	// Sequences that combine both (bold + underline + color).
+	withBoldColor := "\x1b[1;4;38;2;236;236;238mW\x1b[m"
+	if got := stripMarkdownRenderControls(withBoldColor); got != "W" {
+		t.Fatalf("stripMarkdownRenderControls(%q) = %q, want %q", withBoldColor, got, "W")
+	}
+}
+
+func TestSelectedTranscriptTextStripsANSIFromHighlightedCode(t *testing.T) {
+	m := limeTestModel()
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.headerPrinted = true
+	code := `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello")
+}`
+	row := transcriptRow{kind: rowAssistant, text: "First, here's the code:\n\n```go\n" + code + "\n```\n\nThat's it.", final: true}
+	m.transcript = append(m.transcript, row)
+	m.flushed = len(m.transcript)
+
+	// The highlighted code block contains ANSI color sequences from chroma;
+	// verify none survive in the selectable text used for clipboard copy.
+	_, selectable := m.renderSelectableAssistantRow(0, row, 72, 0)
+	for _, line := range selectable {
+		if ansiPattern.MatchString(line.text) {
+			t.Fatalf("selectable text leaked ANSI escapes: %q", line.text)
 		}
 	}
 }
@@ -1528,10 +1572,10 @@ func TestCancelRunClearsStreamingText(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
 	m.activeRunID = 3
-	m.streamingText = "partial answer from a doomed run"
+	m.streamingText = []byte("partial answer from a doomed run")
 	m.cancelRun()
-	if m.streamingText != "" {
-		t.Fatalf("cancelRun must clear streamingText, got %q", m.streamingText)
+	if len(m.streamingText) != 0 {
+		t.Fatalf("cancelRun must clear streamingText, got %q", string(m.streamingText))
 	}
 }
 

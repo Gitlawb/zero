@@ -180,6 +180,7 @@ runs:
         ZERO_INPUT_ADD_DIR: ${{ inputs.add-dir }}
         ZERO_INPUT_WORKTREE: ${{ inputs.worktree }}
         ZERO_INPUT_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        ACTION_PATH: ${{ github.action_path }}
         RUNNER_TEMP: ${{ runner.temp }}
       run: |
         set -euo pipefail
@@ -247,10 +248,9 @@ runs:
         echo "exit-code=${code}" >> "${GITHUB_OUTPUT}"
         echo "output-file=${output_file}" >> "${GITHUB_OUTPUT}"
 
-        # Best-effort one-line summary: last non-empty line of the captured output.
-        summary="$(grep -v '^[[:space:]]*$' "${output_file}" | tail -n 1 || true)"
-        # Keep the summary single-line and bounded for the step output.
-        summary="$(printf '%s' "${summary}" | cut -c1-280)"
+        # Best-effort one-line summary. Structured output ends with lifecycle
+        # metadata, so parse final/error events instead of tailing stdout.
+        summary="$(node "${ACTION_PATH}/scripts/action-summary.mjs" "${ZERO_INPUT_OUTPUT_FORMAT}" "${output_file}" || true)"
         {
           echo "summary<<ZERO_EOF"
           printf '%s\n' "${summary}"

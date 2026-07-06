@@ -405,7 +405,33 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		}
 		mapped.Tools[len(mapped.Tools)-1].CacheControl = &cacheControl{Type: cacheEphemeral}
 	}
+	applyMessageCacheBreakpoints(mapped.Messages)
 	return mapped, nil
+}
+
+// applyMessageCacheBreakpoints marks the last content block of the final two
+// messages with cache_control so the conversation transcript is cached
+// turn-over-turn, not just the system prompt and tool definitions. Two message
+// breakpoints (not one) keep the previous turn's prefix a cache hit while the
+// newest suffix is being written. Anthropic allows at most 4 breakpoints per
+// request: system + tools use two above, these use the remaining two. Thinking
+// blocks cannot carry cache_control, so the marker goes on the last block that
+// can.
+func applyMessageCacheBreakpoints(messages []anthropicMessage) {
+	marked := 0
+	for i := len(messages) - 1; i >= 0 && marked < 2; i-- {
+		blocks := contentBlocks(messages[i].Content)
+		for j := len(blocks) - 1; j >= 0; j-- {
+			blockType, _ := blocks[j]["type"].(string)
+			if blockType == "thinking" || blockType == "redacted_thinking" {
+				continue
+			}
+			blocks[j]["cache_control"] = map[string]any{"type": cacheEphemeral}
+			messages[i].Content = blocks
+			marked++
+			break
+		}
+	}
 }
 
 func mapMessages(messages []zeroruntime.Message) (string, []anthropicMessage, error) {

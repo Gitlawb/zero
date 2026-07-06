@@ -299,7 +299,8 @@ func TestModifiedEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 		key  tea.Msg
 	}{
 		{name: "alt enter", key: testKeyAlt(tea.KeyEnter)},
-		{name: "shift enter", key: testKeyCtrl('j')},
+		{name: "shift enter", key: testKeyShift(tea.KeyEnter)},
+		{name: "ctrl j", key: testKeyCtrl('j')},
 	}
 
 	for _, tc := range tests {

@@ -7,6 +7,33 @@ import (
 	"testing"
 )
 
+func TestCreateSecretFileRetriesOnPermissionContention(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "k.secret")
+	attempts := 0
+	origOpen := openSecretLockFile
+	openSecretLockFile = func(path string, flag int, perm os.FileMode) (*os.File, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, os.ErrPermission
+		}
+		return os.OpenFile(path, flag, perm)
+	}
+	t.Cleanup(func() {
+		openSecretLockFile = origOpen
+	})
+
+	secret, err := createSecretFile(secretPath)
+	if err != nil {
+		t.Fatalf("createSecretFile should retry on permission contention: %v", err)
+	}
+	if len(secret) != secretBytes {
+		t.Fatalf("secret length = %d, want %d", len(secret), secretBytes)
+	}
+	if attempts < 2 {
+		t.Fatalf("expected at least 2 lock attempts, got %d", attempts)
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	secret := filepath.Join(t.TempDir(), "k.secret")
 	c := NewCrypter(secret)

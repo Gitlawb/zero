@@ -617,6 +617,35 @@ func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveUsesAnthropicEnvBaseURLAsCompatible(t *testing.T) {
+	// ANTHROPIC_BASE_URL pointing at a proxy/gateway must resolve to an
+	// anthropic-compatible provider (mirroring OPENAI_BASE_URL), not the "requires
+	// official baseURL" rejection — issue #479. The env is user-controlled, so a
+	// custom URL there is a deliberate gateway choice, unlike a project config.json.
+	resolved, err := Resolve(ResolveOptions{
+		Env: map[string]string{
+			"ANTHROPIC_API_KEY":  "sk-ant-env",
+			"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
+			"ANTHROPIC_MODEL":    "claude-custom",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.ActiveProvider != "anthropic" {
+		t.Fatalf("ActiveProvider = %q, want anthropic", resolved.ActiveProvider)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindAnthropicCompat {
+		t.Fatalf("ProviderKind = %q, want anthropic-compatible", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.BaseURL != "https://gateway.example/anthropic" {
+		t.Fatalf("BaseURL = %q, want gateway URL", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.APIKey != "sk-ant-env" || resolved.Provider.Model != "claude-custom" {
+		t.Fatalf("Provider = %#v, want env credentials/model", resolved.Provider)
+	}
+}
+
 func TestResolveUsesOpenAIAPIKeyOnlyWithDefaultModel(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{

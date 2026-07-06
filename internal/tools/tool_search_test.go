@@ -184,6 +184,29 @@ func TestToolSearchKeywordRanksByNameThenDescription(t *testing.T) {
 	}
 }
 
+// A query missing the name's separators still matches: "webfetch" -> web_fetch.
+func TestToolSearchKeywordMatchesSeparatorInsensitive(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(searchFakeTool{
+		name:        "web_fetch",
+		description: "Fetch a URL.",
+		parameters:  Schema{Type: "object", AdditionalProperties: false},
+	})
+	reg.Register(searchFakeTool{
+		name:        "stock_quote",
+		description: "Get a stock price.",
+		parameters:  Schema{Type: "object", AdditionalProperties: false},
+	})
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+
+	result := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "webfetch"}, RunOptions{})
+
+	if got := result.Meta["load_tools"]; got != "web_fetch" {
+		t.Fatalf("load_tools = %q, want web_fetch (separator-insensitive match)", got)
+	}
+}
+
 func TestToolSearchKeywordExcludesNonMatches(t *testing.T) {
 	reg := newDeferredFixtureRegistry()
 	tool := NewToolSearchTool(reg).(optionsAwareTool)

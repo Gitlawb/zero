@@ -309,3 +309,70 @@ func TestPermissionRenderShowsNetworkTargetAndHostScopedAlways(t *testing.T) {
 		t.Fatalf("network prompt should render target label, got %q", got)
 	}
 }
+
+// TestPermissionCursorCtrlU ensures Ctrl+U moves the permission cursor UP
+// (toward the first option). Regression: the original implementation moved
+// the cursor DOWN on Ctrl+U and UP on Ctrl+D.
+func TestPermissionCursorCtrlU(t *testing.T) {
+	m := pendingPermissionModel(t, func(agent.PermissionDecision) {})
+	m.pendingPermission.cursor = 2 // middle option
+
+	updated, _ := m.Update(testKeyCtrl('u'))
+	next := updated.(model)
+	if next.pendingPermission.cursor != 1 {
+		t.Fatalf("Ctrl+U moved cursor to %d, want 1 (one step up)", next.pendingPermission.cursor)
+	}
+}
+
+// TestPermissionCursorCtrlD ensures Ctrl+D moves the permission cursor DOWN
+// (toward the last option). Regression: the original implementation moved
+// the cursor UP on Ctrl+D and DOWN on Ctrl+U.
+func TestPermissionCursorCtrlD(t *testing.T) {
+	m := pendingPermissionModel(t, func(agent.PermissionDecision) {})
+	m.pendingPermission.cursor = 0 // first option
+
+	updated, _ := m.Update(testKeyCtrl('d'))
+	next := updated.(model)
+	if next.pendingPermission.cursor != 1 {
+		t.Fatalf("Ctrl+D moved cursor to %d, want 1 (one step down)", next.pendingPermission.cursor)
+	}
+}
+
+// TestShiftUpComposerGuard ensures Shift+Up does NOT scroll the transcript
+// when the composer has text, so it falls through to the input's own line
+// navigation.
+func TestShiftUpComposerGuard(t *testing.T) {
+	m := mouseTestModel()
+	// Add enough transcript rows so scrolling is valid.
+	for i := 0; i < 20; i++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "line")
+	}
+	m.input.SetValue("some text")
+	m.chatScrollOffset = 5
+
+	updated, cmd := m.Update(testKeyShift(tea.KeyUp))
+	next := updated.(model)
+	_ = cmd
+	if got := next.chatScrollOffset; got != 5 {
+		t.Fatalf("Shift+Up with non-empty composer scrolled offset to %d, want 5 (unchanged)", got)
+	}
+}
+
+// TestShiftDownComposerGuard ensures Shift+Down does NOT scroll the transcript
+// when the composer has text, falling through to the input's navigation.
+func TestShiftDownComposerGuard(t *testing.T) {
+	m := mouseTestModel()
+	// Add enough transcript rows so scrolling is valid.
+	for i := 0; i < 20; i++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "line")
+	}
+	m.input.SetValue("some text")
+	m.chatScrollOffset = 3
+
+	updated, cmd := m.Update(testKeyShift(tea.KeyDown))
+	next := updated.(model)
+	_ = cmd
+	if got := next.chatScrollOffset; got != 3 {
+		t.Fatalf("Shift+Down with non-empty composer scrolled offset to %d, want 3 (unchanged)", got)
+	}
+}

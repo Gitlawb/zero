@@ -21,6 +21,11 @@ const (
 
 var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
 
+// procSetEntriesInAclW merges new ACEs into an existing ACL. Not wrapped by
+// x/sys/windows (its internal setEntriesInAcl is unexported), so it is
+// declared directly the same way procCreateRestrictedToken is.
+var procSetEntriesInAclW = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetEntriesInAclW")
+
 type windowsLocalSID struct {
 	sid *windows.SID
 }
@@ -122,7 +127,137 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 		_ = restricted.Close()
 		return 0, err
 	}
+	if err := broadenWindowsRestrictedTokenDefaultDacl(restricted, sidFromBytes(logonSID)); err != nil {
+		_ = restricted.Close()
+		return 0, err
+	}
+	runtime.KeepAlive(logonSID)
 	return restricted, nil
+}
+
+// broadenWindowsRestrictedTokenDefaultDacl adds the token's own logon SID to
+// its default DACL (the DACL applied to any kernel object the token's process
+// creates WITHOUT an explicit security descriptor, e.g. anonymous pipes,
+// events, mutexes).
+//
+// A WRITE_RESTRICTED token requires a WRITE-type access check to match BOTH
+// the normal enabled-SID grant AND a SEPARATE grant to one of the token's
+// restricted SIDs. CreateRestrictedToken does not touch the default DACL it
+// inherits from the base token, so newly created objects only carry ACEs for
+// the base token's normal identity (owner, SYSTEM, Administrators) — none of
+// which are in the restricted-SID list — so the second check fails. This
+// breaks anything that creates a pipe/handle for itself with default
+// security, which is exactly what any tool using a language runtime's
+// "spawn a subprocess and capture its output" primitive does (Go's os/exec,
+// and by extension `gh`, and many other CLI tools that shell out
+// internally): CreatePipe() succeeds, but the creating process's own token
+// then fails to actually read/write the handle it just made.
+//
+// The logon SID is already unconditionally present in this token's
+// restricted-SID list (see createWindowsRestrictedTokenFromBase), so adding
+// it here — and ONLY it — to the default DACL is the minimal change that
+// satisfies the WRITE_RESTRICTED extra check for self-created objects. It
+// does not touch file-system access: NTFS write-jailing is enforced by the
+// explicit ACL grants applied to workspace paths (windows_acl.go), which are
+// created WITH an explicit security descriptor and never consult the token's
+// default DACL. The exposure is bounded to the same logon session (other
+// processes running as the same signed-in user could, in principle, open a
+// NAMED kernel object the sandboxed process creates with default security;
+// anonymous pipes — the actual object type this fixes — have no name and are
+// only reachable via an inherited handle, so this is a no-op for them).
+func broadenWindowsRestrictedTokenDefaultDacl(token windows.Token, logonSID *windows.SID) error {
+	oldDacl, oldDaclBuf, err := windowsTokenDefaultDacl(token)
+	if err != nil {
+		return fmt.Errorf("read token default DACL: %w", err)
+	}
+	// The second (WRITE-type) access check only needs a read/write match; a
+	// full GENERIC_ALL grant (which also implies DELETE, WRITE_DAC, and
+	// WRITE_OWNER) is broader than the pipe/event/mutex use case this exists
+	// for actually requires.
+	access := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			MultipleTrusteeOperation: windows.NO_MULTIPLE_TRUSTEE,
+			TrusteeForm:              windows.TRUSTEE_IS_SID,
+			TrusteeType:              windows.TRUSTEE_IS_USER,
+			TrusteeValue:             windows.TrusteeValueFromSID(logonSID),
+		},
+	}}
+	newDacl, err := setEntriesInACL(access, oldDacl)
+	// oldDacl points INTO oldDaclBuf (see windowsTokenDefaultDacl) and is
+	// dereferenced by native code inside setEntriesInACL, above. Nothing in Go
+	// references oldDaclBuf once windowsTokenDefaultDacl returned, so without
+	// this KeepAlive it is eligible for GC the moment an allocation in this
+	// function (the EXPLICIT_ACCESS literal, TrusteeValueFromSID) hits a
+	// safepoint, before the native call ever reads it - a real, if narrow,
+	// use-after-free window in security-boundary code.
+	runtime.KeepAlive(oldDaclBuf)
+	if err != nil {
+		return fmt.Errorf("merge token default DACL: %w", err)
+	}
+	defer func() { _, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(newDacl))) }()
+	if err := windowsSetTokenDefaultDacl(token, newDacl); err != nil {
+		return fmt.Errorf("set token default DACL: %w", err)
+	}
+	return nil
+}
+
+type windowsTokenDefaultDaclInfo struct {
+	DefaultDacl *windows.ACL
+}
+
+// windowsTokenDefaultDacl returns the token's current default DACL along with
+// the buffer backing it. TOKEN_DEFAULT_DACL embeds the ACL data inside the
+// same allocation GetTokenInformation fills, so the returned *windows.ACL is
+// only valid for as long as the returned buffer stays reachable: the caller
+// must runtime.KeepAlive(buf) until every native call that dereferences the
+// ACL has completed. A KeepAlive inside this function, ending at its own
+// return, would not protect any use by the caller after that.
+func windowsTokenDefaultDacl(token windows.Token) (*windows.ACL, []byte, error) {
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, nil, 0, &size)
+	if err == nil || err != windows.ERROR_INSUFFICIENT_BUFFER {
+		return nil, nil, fmt.Errorf("size TokenDefaultDacl: %w", err)
+	}
+	buf := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, &buf[0], size, &size); err != nil {
+		return nil, nil, fmt.Errorf("get TokenDefaultDacl: %w", err)
+	}
+	info := (*windowsTokenDefaultDaclInfo)(unsafe.Pointer(&buf[0]))
+	return info.DefaultDacl, buf, nil
+}
+
+func windowsSetTokenDefaultDacl(token windows.Token, dacl *windows.ACL) error {
+	info := windowsTokenDefaultDaclInfo{DefaultDacl: dacl}
+	err := windows.SetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	runtime.KeepAlive(info)
+	return err
+}
+
+// setEntriesInACL merges entries into oldACL via Win32 SetEntriesInAclW,
+// returning a newly allocated ACL the caller must free with windows.LocalFree.
+func setEntriesInACL(entries []windows.EXPLICIT_ACCESS, oldACL *windows.ACL) (*windows.ACL, error) {
+	if len(entries) == 0 {
+		return nil, errors.New("setEntriesInACL requires at least one entry")
+	}
+	var newACL *windows.ACL
+	// SetEntriesInAclW reports failure directly in its return value (ERROR_SUCCESS
+	// on success, a Win32 error code otherwise); unlike many Win32 APIs it does not
+	// set the thread's last-error, so the syscall trio's second/third return
+	// values (which surface GetLastError) are not meaningful here.
+	ret, _, _ := procSetEntriesInAclW.Call(
+		uintptr(len(entries)),
+		uintptr(unsafe.Pointer(&entries[0])),
+		uintptr(unsafe.Pointer(oldACL)),
+		uintptr(unsafe.Pointer(&newACL)),
+	)
+	runtime.KeepAlive(entries)
+	if ret != 0 {
+		return nil, fmt.Errorf("SetEntriesInAclW: %w", syscall.Errno(ret))
+	}
+	return newACL, nil
 }
 
 func copyWindowsLogonSID(token windows.Token) ([]byte, error) {

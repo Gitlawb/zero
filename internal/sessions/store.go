@@ -153,6 +153,11 @@ type AppendEventInput struct {
 	Payload any
 }
 
+type preparedAppendEvent struct {
+	Type    EventType
+	Payload json.RawMessage
+}
+
 type RecordSpecInput struct {
 	SpecID              string
 	SpecFilePath        string
@@ -426,7 +431,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if err != nil {
 		return Metadata{}, err
 	}
-	copied := 0
+	copyInputs := []AppendEventInput{}
 	for _, event := range events {
 		// Do NOT copy usage accounting into the fork. It already counted against the
 		// parent, and a usage report that aggregates the parent and the fork would
@@ -435,11 +440,12 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		if event.Type == EventUsage {
 			continue
 		}
-		if _, err := store.AppendEvent(fork.SessionID, AppendEventInput{Type: event.Type, Payload: event.Payload}); err != nil {
-			return Metadata{}, err
-		}
-		copied++
+		copyInputs = append(copyInputs, AppendEventInput{Type: event.Type, Payload: event.Payload})
 	}
+	if _, err := store.AppendEvents(fork.SessionID, copyInputs); err != nil {
+		return Metadata{}, err
+	}
+	copied := len(copyInputs)
 	// Copy the parent's content-addressed checkpoint blobs into the fork so the
 	// copied EventSessionCheckpoint events resolve to real blobs and a rewind on
 	// the fork can restore file content (otherwise rewind reads missing blobs
@@ -513,19 +519,34 @@ func (store *Store) RecordSpec(sessionID string, input RecordSpecInput) (Metadat
 }
 
 func (store *Store) AppendEvent(sessionID string, input AppendEventInput) (Event, error) {
-	if !ValidSessionID(sessionID) {
-		return Event{}, fmt.Errorf("invalid zero session id %q", sessionID)
-	}
-	if strings.TrimSpace(string(input.Type)) == "" {
-		return Event{}, fmt.Errorf("zero session event type is required")
-	}
-	unlock, err := store.lockSession(sessionID)
+	events, err := store.AppendEvents(sessionID, []AppendEventInput{input})
 	if err != nil {
 		return Event{}, err
 	}
+	return events[0], nil
+}
+
+// AppendEvents appends a batch of events atomically under one session lock and
+// durability pass. The returned events have contiguous sequences in input order.
+// An empty batch is a no-op and does not rewrite metadata.
+func (store *Store) AppendEvents(sessionID string, inputs []AppendEventInput) ([]Event, error) {
+	if !ValidSessionID(sessionID) {
+		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	prepared, err := prepareAppendEventInputs(inputs)
+	if err != nil {
+		return nil, err
+	}
+	if len(prepared) == 0 {
+		return []Event{}, nil
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 
-	return store.appendEventLocked(sessionID, input)
+	return store.appendPreparedEventsLocked(sessionID, prepared)
 }
 
 // AppendEventUnlessExists appends input only when exists(currentEvents) is false,
@@ -572,13 +593,26 @@ func (store *Store) AppendEventUnlessExists(sessionID string, input AppendEventI
 // the single lock they already hold, instead of re-locking (which would deadlock
 // on the non-reentrant in-process mutex).
 func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) (Event, error) {
-	session, err := store.readMetadata(sessionID)
+	prepared, err := prepareAppendEventInputs([]AppendEventInput{input})
 	if err != nil {
 		return Event{}, err
 	}
-	payload, err := rawPayload(input.Payload)
+	events, err := store.appendPreparedEventsLocked(sessionID, prepared)
 	if err != nil {
 		return Event{}, err
+	}
+	return events[0], nil
+}
+
+// appendPreparedEventsLocked appends pre-validated events WITHOUT acquiring the
+// session lock. The caller MUST already hold store.lockSession(sessionID).
+func (store *Store) appendPreparedEventsLocked(sessionID string, inputs []preparedAppendEvent) ([]Event, error) {
+	if len(inputs) == 0 {
+		return []Event{}, nil
+	}
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return nil, err
 	}
 	sequence := session.EventCount + 1
 	// The events log is the source of truth for sequencing. metadata.EventCount is
@@ -590,46 +624,54 @@ func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) 
 	if logSeq, err := store.lastEventSequence(sessionID); err == nil && logSeq >= sequence {
 		sequence = logSeq + 1
 	}
-	timestamp := store.timestamp()
-	event := Event{
-		ID:        fmt.Sprintf("%s:%d", sessionID, sequence),
-		SessionID: sessionID,
-		Sequence:  sequence,
-		Type:      input.Type,
-		CreatedAt: timestamp,
-		Payload:   payload,
-	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return Event{}, fmt.Errorf("encode zero session event: %w", err)
+	events := make([]Event, 0, len(inputs))
+	var batch bytes.Buffer
+	for index, input := range inputs {
+		timestamp := store.timestamp()
+		event := Event{
+			ID:        fmt.Sprintf("%s:%d", sessionID, sequence+index),
+			SessionID: sessionID,
+			Sequence:  sequence + index,
+			Type:      input.Type,
+			CreatedAt: timestamp,
+			Payload:   input.Payload,
+		}
+		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("encode zero session event: %w", err)
+		}
+		batch.Write(data)
+		batch.WriteByte('\n')
+		events = append(events, event)
 	}
 	file, err := os.OpenFile(store.eventsPath(sessionID), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
-		return Event{}, fmt.Errorf("append zero session event: %w", err)
+		return nil, fmt.Errorf("append zero session event: %w", err)
 	}
-	if _, err := file.Write(append(data, '\n')); err != nil {
+	if _, err := file.Write(batch.Bytes()); err != nil {
 		_ = file.Close()
-		return Event{}, fmt.Errorf("append zero session event: %w", err)
+		return nil, fmt.Errorf("append zero session event: %w", err)
 	}
-	// fsync the event before reporting success: the derived metadata.json IS
+	// fsync the events before reporting success: the derived metadata.json IS
 	// fsync'd (writeMetadata), so without this a crash after the metadata flush
 	// but before the events.jsonl page reaches disk leaves EventCount ahead of the
-	// durable log — silently losing the just-appended event (incl. the checkpoint
+	// durable log — silently losing just-appended events (incl. checkpoints
 	// that /rewind targets). Make the log at least as durable as its metadata. (AUDIT-M12)
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		return Event{}, fmt.Errorf("sync zero session event: %w", err)
+		return nil, fmt.Errorf("sync zero session event: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return Event{}, fmt.Errorf("close zero session event file: %w", err)
+		return nil, fmt.Errorf("close zero session event file: %w", err)
 	}
-	session.UpdatedAt = timestamp
-	session.EventCount = sequence
-	session.LastEventType = input.Type
+	last := events[len(events)-1]
+	session.UpdatedAt = last.CreatedAt
+	session.EventCount = last.Sequence
+	session.LastEventType = last.Type
 	if err := store.writeMetadata(session); err != nil {
-		return Event{}, err
+		return nil, err
 	}
-	return event, nil
+	return events, nil
 }
 
 // UpdateTitle replaces a session's Title and returns the updated metadata. It is
@@ -962,6 +1004,24 @@ func rawPayload(payload any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("encode zero session payload: %w", err)
 	}
 	return data, nil
+}
+
+func prepareAppendEventInputs(inputs []AppendEventInput) ([]preparedAppendEvent, error) {
+	prepared := make([]preparedAppendEvent, 0, len(inputs))
+	for _, input := range inputs {
+		if strings.TrimSpace(string(input.Type)) == "" {
+			return nil, fmt.Errorf("zero session event type is required")
+		}
+		payload, err := rawPayload(input.Payload)
+		if err != nil {
+			return nil, err
+		}
+		prepared = append(prepared, preparedAppendEvent{
+			Type:    input.Type,
+			Payload: payload,
+		})
+	}
+	return prepared, nil
 }
 
 func envValue(env map[string]string, key string) string {

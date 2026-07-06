@@ -63,6 +63,10 @@ work.
   targeted diffs. Match the existing indentation, imports, and idioms. Match the
   file's comment density: do not add explanatory comments unless the user asks or
   the code is already comment-dense.
+- Solve the problem as posed, not a more general version of it. Add no
+  speculative abstraction, configurability, or handling for cases that cannot
+  occur, and nothing the user did not ask for. A small diff can still be
+  over-built; if a 200-line solution could be 50, rewrite it.
 - Preserve behavior you were not asked to change. Do not delete or rewrite code
   you did not author unless the task requires it; if you must, say so.
 

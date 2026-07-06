@@ -24,7 +24,7 @@ type Options struct {
 	ModelRegistry *modelregistry.Registry
 	// OAuthResolver, when set, lets the provider authenticate model calls with an
 	// OAuth bearer token (preferred over the API key). nil => API-key auth only.
-	// Applied to the OpenAI and Anthropic providers.
+	// Applied to the OpenAI, Anthropic, and Google (Gemini) providers.
 	OAuthResolver providerio.TokenResolver
 	// OAuthLoginKey is the credential-store key OAuthResolver bound to (empty when
 	// there is no OAuth login). It is the SAME selection the bearer resolver made,
@@ -91,6 +91,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			AuthScheme:      profile.AuthScheme,
 			AuthHeaderValue: profile.AuthHeaderValue,
 			CustomHeaders:   profile.CustomHeaders,
+			OAuthResolver:   options.OAuthResolver,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,

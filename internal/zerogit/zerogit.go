@@ -526,3 +526,159 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+type PushOptions struct {
+	Cwd                    string
+	Remote                 string
+	Branch                 string
+	Force                  bool
+	DryRun                 bool
+	AllowPushDefaultBranch bool
+	RunGit                 Runner
+	RunGitEnv              EnvRunner
+}
+
+type PushResult struct {
+	Remote string `json:"remote"`
+	Branch string `json:"branch"`
+	Output string `json:"output"`
+}
+
+func Push(ctx context.Context, options PushOptions) (PushResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return PushResult{}, err
+	}
+	runGit, _ := resolveRunners(options.RunGit, options.RunGitEnv)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return PushResult{}, fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	branch := strings.TrimSpace(options.Branch)
+	if branch == "" {
+		branch, err = gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return PushResult{}, fmt.Errorf("resolve current branch: %w", err)
+		}
+	}
+	if branch == "HEAD" {
+		return PushResult{}, fmt.Errorf("cannot push: not currently on a branch")
+	}
+
+	remote := strings.TrimSpace(options.Remote)
+	if remote == "" {
+		if upstream, err := gitOutput(ctx, runGit, root, "config", "branch."+branch+".remote"); err == nil && upstream != "" {
+			remote = upstream
+		} else {
+			remote = "origin"
+		}
+	}
+
+	if !options.AllowPushDefaultBranch {
+		if isDefaultBranch(ctx, runGit, root, remote, branch) {
+			return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
+		}
+	}
+
+	args := []string{"push"}
+	if options.DryRun {
+		args = append(args, "--dry-run")
+	}
+	if options.Force {
+		args = append(args, "--force-with-lease")
+	}
+	args = append(args, "-u", "--", remote, branch)
+
+	output, err := gitRawOutput(ctx, runGit, root, args...)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("push: %w", err)
+	}
+
+	return PushResult{
+		Remote: remote,
+		Branch: branch,
+		Output: output,
+	}, nil
+}
+
+func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) bool {
+	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
+				symref := strings.TrimPrefix(line, "ref: refs/heads/")
+				symref = strings.TrimSuffix(symref, "\tHEAD")
+				return branch == symref
+			}
+		}
+	}
+	return branch == "main" || branch == "master"
+}
+
+type PROptions struct {
+	Cwd   string
+	Fill  bool
+	Draft bool
+	Title string
+	Body  string
+	RunGH Runner
+}
+
+type PRResult struct {
+	Output string `json:"output"`
+}
+
+func CreatePR(ctx context.Context, options PROptions) (PRResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return PRResult{}, err
+	}
+
+	runGH := options.RunGH
+	if runGH == nil {
+		runGH = func(ctx context.Context, dir string, args ...string) (CommandResult, error) {
+			cmd := exec.CommandContext(ctx, "gh", args...)
+			cmd.Dir = dir
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+
+			var exitCode int
+			if err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode = exitError.ExitCode()
+				} else {
+					exitCode = -1
+				}
+			}
+			return CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, err
+		}
+	}
+
+	prArgs := []string{"pr", "create"}
+	if options.Fill {
+		prArgs = append(prArgs, "--fill")
+	}
+	if options.Draft {
+		prArgs = append(prArgs, "--draft")
+	}
+	if options.Title != "" {
+		prArgs = append(prArgs, "--title", options.Title)
+	}
+	if options.Body != "" {
+		prArgs = append(prArgs, "--body", options.Body)
+	}
+
+	res, err := runGH(ctx, cwd, prArgs...)
+	if err != nil {
+		return PRResult{}, fmt.Errorf("gh pr create failed: %w\n%s", err, res.Stderr)
+	}
+
+	return PRResult{
+		Output: res.Stdout,
+	}, nil
+}

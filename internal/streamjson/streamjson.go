@@ -21,6 +21,7 @@ type EventType string
 const (
 	EventRunStart           EventType = "run_start"
 	EventText               EventType = "text"
+	EventReasoning          EventType = "reasoning"
 	EventToolCall           EventType = "tool_call"
 	EventPermission         EventType = "permission"
 	EventPermissionRequest  EventType = "permission_request"

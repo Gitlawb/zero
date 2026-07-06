@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1945,6 +1946,11 @@ func TestRunCommandPrefixApprovalBypassesSandboxForMatchingShellCalls(t *testing
 
 func TestRunCommandPrefixApprovalCoversSegmentedShellWithSafeTail(t *testing.T) {
 	root := t.TempDir()
+	segmentedCommand := `ps aux | head -5`
+	if runtime.GOOS == "windows" {
+		// head is MSYS-prone on Windows (#458) and no longer counts as a known-safe tail.
+		segmentedCommand = `ps aux | echo ok`
+	}
 	retryTool := &sandboxDeniedRetryTool{}
 	registry := tools.NewRegistry()
 	registry.Register(retryTool)
@@ -1958,7 +1964,7 @@ func TestRunCommandPrefixApprovalCoversSegmentedShellWithSafeTail(t *testing.T) 
 			},
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "bash"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"command":"ps aux | head -5"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: fmt.Sprintf(`{"command":%q}`, segmentedCommand)},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
 				{Type: zeroruntime.StreamEventDone},
 			},
@@ -2762,11 +2768,11 @@ func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
 		t.Fatalf("expected final answer from finalization turn, got %q", result.FinalAnswer)
 	}
 	if len(provider.requests) != 2 {
-		t.Fatalf("expected final no-tools request after max turns, got %d requests", len(provider.requests))
+		t.Fatalf("expected finalization request after max turns, got %d requests", len(provider.requests))
 	}
 	finalRequest := provider.requests[1]
-	if len(finalRequest.Tools) != 0 {
-		t.Fatalf("finalization request must not advertise tools, got %#v", finalRequest.Tools)
+	if toolDefinitionByName(finalRequest.Tools, "read_file") == nil {
+		t.Fatalf("finalization request must keep prior tools exposed for strict provider replay, got %#v", finalRequest.Tools)
 	}
 	lastMessage := finalRequest.Messages[len(finalRequest.Messages)-1]
 	if lastMessage.Role != zeroruntime.MessageRoleUser || !strings.Contains(lastMessage.Content, "tool-turn limit") {
@@ -2907,8 +2913,10 @@ func TestBuildSystemPromptInjectsHostShellContext(t *testing.T) {
 		t.Fatalf("expected operating system in environment block, got %q", prompt)
 	}
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(prompt, "Windows cmd.exe syntax") || !strings.Contains(prompt, "cwd argument") {
-			t.Fatalf("expected Windows cmd.exe shell guidance in prompt, got %q", prompt)
+		for _, want := range []string{"Windows cmd.exe syntax", "cwd argument", "MSYS binaries", "grep", "require_escalated"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("expected Windows shell guidance to mention %q, got %q", want, prompt)
+			}
 		}
 	} else if !strings.Contains(prompt, "/bin/sh syntax") {
 		t.Fatalf("expected POSIX shell guidance in prompt, got %q", prompt)

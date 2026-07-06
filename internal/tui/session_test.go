@@ -108,6 +108,46 @@ func TestPromptSubmitPersistsTUISessionEvents(t *testing.T) {
 	}
 }
 
+func TestAppendSessionEventsBatchesAndUpdatesActiveSession(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "tui_batch", Title: "batch"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	m := model{
+		sessionStore:  store,
+		activeSession: session,
+	}
+
+	next, rows := m.appendSessionEvents([]pendingSessionEvent{
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "done"}},
+		{Type: sessions.EventUsage, Payload: map[string]any{"totalTokens": 3}},
+	})
+	if len(rows) != 0 {
+		t.Fatalf("appendSessionEvents returned error rows: %#v", rows)
+	}
+	if next.activeSession.EventCount != 2 || next.activeSession.LastEventType != sessions.EventUsage {
+		t.Fatalf("active session metadata not updated from batch: %#v", next.activeSession)
+	}
+	if len(next.sessionEvents) != 2 || next.sessionEvents[0].Sequence != 1 || next.sessionEvents[1].Sequence != 2 {
+		t.Fatalf("in-memory session events not updated from batch: %#v", next.sessionEvents)
+	}
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{sessions.EventMessage, sessions.EventUsage}) {
+		t.Fatalf("unexpected persisted event types: %#v", got)
+	}
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if loaded == nil || loaded.EventCount != next.activeSession.EventCount || loaded.LastEventType != next.activeSession.LastEventType {
+		t.Fatalf("store metadata diverged from active session: store=%#v active=%#v", loaded, next.activeSession)
+	}
+}
+
 func TestPromptWithoutProviderDoesNotCreateSession(t *testing.T) {
 	store := testSessionStore(t)
 	m := newModel(context.Background(), Options{SessionStore: store})

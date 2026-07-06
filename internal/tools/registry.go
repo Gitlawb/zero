@@ -40,6 +40,12 @@ type RunOptions struct {
 	// tool-call progress in the specialist card. nil is a no-op (the default
 	// for every non-Task tool).
 	Progress func(streamjson.Event)
+	// Diagnostics, when set, returns a formatted language-diagnostics block for
+	// a file a mutating tool just wrote ("" when clean or no server available).
+	// edit_file/write_file append it to their output so the model sees an error
+	// it introduced in the same turn instead of waiting for a later verification
+	// pass. nil disables inline diagnostics.
+	Diagnostics func(ctx context.Context, absPath string) string
 }
 
 type sandboxAwareTool interface {
@@ -117,12 +123,23 @@ func (registry *Registry) Run(ctx context.Context, name string, args map[string]
 func (registry *Registry) RunWithOptions(ctx context.Context, name string, args map[string]any, options RunOptions) (result Result) {
 	// Every return path passes through scrubResultSecrets exactly once, so denial,
 	// permission, and unknown-tool error messages (which can echo secret-bearing
-	// args/paths) are redacted at the boundary just like tool output.
-	defer func() { result = scrubResultSecrets(result) }()
+	// args/paths) are redacted at the boundary just like tool output. The output
+	// ceiling runs after the scrub so the transcript and the spill file agree on
+	// what was hidden.
+	ceilingExempt := false
+	defer func() {
+		result = scrubResultSecrets(result)
+		if !ceilingExempt {
+			result = enforceOutputCeiling(name, result)
+		}
+	}()
 
 	tool, ok := registry.Get(name)
 	if !ok {
 		return errorResult(`Error: Unknown tool "` + name + `".`)
+	}
+	if _, ok := tool.(selfBudgeting); ok {
+		ceilingExempt = true
 	}
 	if rejecter, ok := tool.(PrePermissionRejecter); ok {
 		if res, rejected := rejecter.RejectBeforePermission(args); rejected {

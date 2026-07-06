@@ -131,29 +131,45 @@ func doctorSandboxPolicy(cfg config.SandboxConfig) sandbox.Policy {
 // lspServersCheck reports which language servers ZERO would use are present on
 // PATH. Missing servers are not a failure — ZERO degrades to text-only edits for
 // those languages — so the worst status is WARN, and each missing server gets an
-// actionable install command keyed by its binary name.
+// actionable install command keyed by its binary name. Only the tier-1 servers
+// (lsp.CoreServerBinaries) drive the status: the long-tail servers configured
+// for breadth are listed informationally under missingOptional, because warning
+// about a missing zls on a machine with no Zig code would be permanent noise.
 func lspServersCheck(lookup func(string) (string, error)) Check {
 	if lookup == nil {
 		lookup = exec.LookPath
 	}
+	core := map[string]bool{}
+	for _, binary := range lsp.CoreServerBinaries() {
+		core[binary] = true
+	}
 	present := map[string]any{}
 	missing := map[string]any{}
+	missingOptional := map[string]any{}
 	for _, binary := range lsp.ServerBinaries() {
 		if _, err := lookup(binary); err == nil {
 			present[binary] = "on PATH"
 			continue
 		}
-		missing[binary] = lspRemedy(binary)
+		if core[binary] {
+			missing[binary] = lspRemedy(binary)
+		} else {
+			missingOptional[binary] = lspRemedy(binary)
+		}
+	}
+	details := map[string]any{"present": present}
+	if len(missingOptional) > 0 {
+		details["missingOptional"] = missingOptional
 	}
 	if len(missing) == 0 {
-		return check("lsp.servers", "LSP servers", StatusPass, "All known language servers are available on PATH.", map[string]any{
-			"present": present,
-		})
+		message := "All core language servers are available on PATH."
+		if len(missingOptional) > 0 {
+			message = fmt.Sprintf("All core language servers are available on PATH (%d optional server(s) not installed).", len(missingOptional))
+		}
+		return check("lsp.servers", "LSP servers", StatusPass, message, details)
 	}
-	return check("lsp.servers", "LSP servers", StatusWarn, fmt.Sprintf("%d language server(s) missing from PATH; affected files degrade to text-only edits.", len(missing)), map[string]any{
-		"present": present,
-		"missing": missing,
-	})
+	details["missing"] = missing
+	return check("lsp.servers", "LSP servers", StatusWarn, fmt.Sprintf("%d language server(s) missing from PATH; affected files degrade to text-only edits.", len(missing)), details)
 }
 
 // lspRemedy returns an actionable install command for a missing language-server

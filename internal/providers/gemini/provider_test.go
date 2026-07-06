@@ -370,6 +370,57 @@ func TestStreamCompletionClassifiesHTTPAndPromptBlockErrors(t *testing.T) {
 	}
 }
 
+// A 401 with an OAuth resolver is retried once with a force-refreshed token; the
+// replayed request carries the refreshed bearer and succeeds.
+func TestStreamCompletionRetries401WithRefreshedToken(t *testing.T) {
+	var attempts int
+	var secondAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, `{"error":{"message":"token expired"}}`, http.StatusUnauthorized)
+			return
+		}
+		secondAuth = r.Header.Get("Authorization")
+		writeSSE(w, `{}`)
+	}))
+	defer server.Close()
+
+	var forceRefreshOnRetry bool
+	resolver := func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
+		if forceRefresh {
+			forceRefreshOnRetry = true
+			return "Authorization", "Bearer refreshed", true, nil
+		}
+		return "Authorization", "Bearer stale", true, nil
+	}
+
+	provider, err := New(Options{
+		APIKey:        "sk-google",
+		BaseURL:       server.URL,
+		Model:         "gemini-test",
+		OAuthResolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (initial 401 + one refreshed retry)", attempts)
+	}
+	if !forceRefreshOnRetry {
+		t.Fatalf("resolver was not called with forceRefresh on the retry")
+	}
+	if secondAuth != "Bearer refreshed" {
+		t.Fatalf("retry Authorization = %q, want refreshed bearer", secondAuth)
+	}
+}
+
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 	provider := newTestProviderWithKey(t, "sk-google", func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"error":{"code":429,"message":"stream failed sk-google","status":"RESOURCE_EXHAUSTED"}}`)

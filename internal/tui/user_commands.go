@@ -30,8 +30,9 @@ func (m model) handleUserCommand(raw string) (model, tea.Cmd, bool) {
 	if strings.TrimSpace(prompt) == "" {
 		return m, nil, false
 	}
-	next, teaCmd := m.launchPrompt(prompt)
-	return next, teaCmd, true
+	// Same run-state guards as a plain prompt: a user command invoked mid-run is
+	// queued (as its expanded prompt), not raced into a second concurrent turn.
+	return m.launchOrDeferExpandedPrompt(raw, prompt)
 }
 
 // lookupUserCommand returns the loaded user command with the given (lowercased)

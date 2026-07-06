@@ -372,7 +372,7 @@ func (m model) scrollOffsetForTranscriptRow(rowIndex int) (int, bool) {
 		return 0, false
 	}
 	width := m.chatColumnWidth()
-	items := m.transcriptBodyItems(width, "")
+	items := m.transcriptBodyItems(width, "", false)
 	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
 	startY := -1
 	for _, span := range metrics.spans {

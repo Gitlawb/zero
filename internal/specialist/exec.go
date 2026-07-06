@@ -25,6 +25,7 @@ import (
 const (
 	sessionTagSpecialist     = "specialist"
 	promptFileThresholdBytes = 4 * 1024
+	maxSpecialistDepth       = 8 // hard cap to prevent infinite recursion/resource exhaustion via Task
 )
 
 const SessionTagSpecialist = sessionTagSpecialist
@@ -217,6 +218,13 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 	}
 	if options.CurrentDepth < 0 {
 		return ExecResult{}, fmt.Errorf("current depth cannot be negative")
+	}
+	// >= (not >): this Run call spawns a CHILD at options.CurrentDepth+1, so a
+	// parent already AT the cap must still be rejected here rather than being
+	// allowed to launch one more level before the child's own next call trips
+	// the guard.
+	if options.CurrentDepth >= maxSpecialistDepth {
+		return ExecResult{}, fmt.Errorf("spawning a specialist at depth %d would exceed maximum nesting depth %d", options.CurrentDepth+1, maxSpecialistDepth)
 	}
 	if strings.TrimSpace(params.Prompt) == "" {
 		return ExecResult{}, fmt.Errorf("specialist prompt is required")

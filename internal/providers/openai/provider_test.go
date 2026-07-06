@@ -227,6 +227,39 @@ func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEmitsReasoningAliasDeltas(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning":"Thinking. "}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"reasoning":"Answering now."}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 2 {
+		t.Fatalf("reasoning events = %#v, want two reasoning deltas", reasoning)
+	}
+	if reasoning[0].Content != "Thinking. " || reasoning[1].Content != "Answering now." {
+		t.Fatalf("unexpected reasoning events: %#v", reasoning)
+	}
+	if text := eventsOfType(events, zeroruntime.StreamEventText); len(text) != 0 {
+		t.Fatalf("reasoning must not emit text events, got %#v", text)
+	}
+}
+
+func TestStreamCompletionPrefersReasoningContentOverAlias(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"standard","reasoning":"alias"}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 1 || reasoning[0].Content != "standard" {
+		t.Fatalf("reasoning events = %#v, want standard reasoning_content", reasoning)
+	}
+}
+
 func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. ","content":"Answer."}}]}`)
@@ -1224,5 +1257,63 @@ func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
 	}
 	if len(req.Messages[1].ToolCalls) != 1 {
 		t.Fatalf("assistant tool calls dropped: %#v", req.Messages[1])
+	}
+}
+
+// TestOpenAIRequestPromptCacheKey locks in prompt_cache_key forwarding: a
+// session-carrying request serializes the key so the backend can route to a
+// replica holding the cached prefix, a keyless request omits the field
+// entirely (strict servers see byte-identical requests to before), and
+// ZERO_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
+func TestOpenAIRequestPromptCacheKey(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+
+	req := provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "sess_123" {
+		t.Fatalf("PromptCacheKey = %q, want sess_123", req.PromptCacheKey)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"prompt_cache_key":"sess_123"`) {
+		t.Fatalf("prompt_cache_key not serialized: %s", data)
+	}
+
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{Messages: messages})
+	if data, err = json.Marshal(req); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "prompt_cache_key") {
+		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
+	}
+
+	t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", "1")
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "" {
+		t.Fatalf("kill switch ignored; PromptCacheKey = %q", req.PromptCacheKey)
+	}
+
+	// Explicitly-falsy kill switch values must NOT disable forwarding — only
+	// truthy values flip the toggle (same parsing as ZERO_FORMAT_ON_WRITE).
+	for _, value := range []string{"0", "false", "FALSE"} {
+		t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", value)
+		req = provider.openAIRequest(zeroruntime.CompletionRequest{
+			Messages:       messages,
+			PromptCacheKey: "sess_123",
+		})
+		if req.PromptCacheKey != "sess_123" {
+			t.Fatalf("ZERO_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
+		}
 	}
 }

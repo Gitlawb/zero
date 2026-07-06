@@ -517,7 +517,12 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
-	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil {
+	// Resolve the command engine before the MSYS preflight check so an
+	// approved require_escalated call (commandEngine == nil, truly
+	// unsandboxed) can actually bypass the MSYS guard instead of being
+	// hard-blocked by the same check it was meant to escalate past.
+	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
+	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
 	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
@@ -860,6 +865,12 @@ func execToolResult(input execToolResultInput) Result {
 		status = StatusError
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
+	if status == StatusError && input.exited && !input.interrupted {
+		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
+			meta["shell_issue"] = issue.Kind
+			body = appendShellIssueHint(body, *issue)
+		}
+	}
 	if input.outputBufferTruncated {
 		// Appended after truncateExecOutput's own head/tail slicing, not
 		// embedded in the text that goes through it — a marker inside that
@@ -908,6 +919,15 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 }
 
 func truncateExecOutput(output string, maxOutputTokens int) (string, bool) {
+	return truncateExecOutputSpill(output, maxOutputTokens, "exec_command")
+}
+
+// truncateExecOutputSpill keeps a head/tail window of the output within the
+// token budget and, on truncation, spills the full output to disk so the model
+// can grep/read the elided middle instead of re-running the command with a
+// bigger budget. The spill is best-effort: when it fails the notice simply
+// omits the file hint.
+func truncateExecOutputSpill(output string, maxOutputTokens int, toolName string) (string, bool) {
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = defaultMaxOutputTokens
 	}
@@ -915,9 +935,13 @@ func truncateExecOutput(output string, maxOutputTokens int) (string, bool) {
 	if len(output) <= maxBytes {
 		return output, false
 	}
+	notice := "\n[zero] output truncated\n"
+	if spillPath := spillTruncatedOutput(toolName, output); spillPath != "" {
+		notice = "\n[zero] output truncated — full output saved to " + spillPath + " (grep or read_file it instead of re-running)\n"
+	}
 	head := maxBytes / 2
 	tail := maxBytes - head
-	return utf8Prefix(output, head) + "\n[zero] output truncated\n" + utf8Suffix(output, tail), true
+	return utf8Prefix(output, head) + notice + utf8Suffix(output, tail), true
 }
 
 func utf8Prefix(value string, maxBytes int) string {

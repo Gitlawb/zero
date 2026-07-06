@@ -218,6 +218,13 @@ func (m model) statusLine(width int) string {
 	} else if summary := m.backgroundTerminalSummary(); summary != "" {
 		left += separator + zeroTheme.muted.Render(summary)
 	}
+	// Active loops surface a persistent "↻ N loops · next 3:05pm" segment so a
+	// running loop is always visible (hidden during an exit/cancel confirm above).
+	if !m.exitConfirmActive && !m.cancelConfirmActive {
+		if loopSummary := m.loopFooterSummary(); loopSummary != "" {
+			left += separator + zeroTheme.accent.Render("↻ ") + zeroTheme.muted.Render(loopSummary)
+		}
+	}
 
 	rightGroups := []string{}
 	// Context-fill gauge: surface it down to the narrow tier (where it matters

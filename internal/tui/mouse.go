@@ -1,6 +1,36 @@
 package tui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"os"
+	"strings"
+	"sync"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+// parseTracerPid returns true when /proc/self/status contains a non-zero
+// TracerPid. This detects any ptrace tracer (PRoot, gdb, strace, dlv, etc.),
+// not PRoot specifically. That's intentional: under any ptrace tracer the
+// AllMotion (1003) sequence is unreliable, so CellMotion is the safer
+// fallback. The only loss is hover-highlighting, which has no functional
+// impact.
+func parseTracerPid(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "TracerPid:") {
+			pid := strings.TrimSpace(line[10:])
+			return pid != "0"
+		}
+	}
+	return false
+}
+
+var isRunningUnderPRoot = sync.OnceValue(func() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseTracerPid(data)
+})
 
 type mouseOverlayHit struct {
 	x int
@@ -257,7 +287,7 @@ func (m model) syncMouseCapture() (model, tea.Cmd) {
 }
 
 func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
-	if !m.altScreen || m.height <= 0 {
+	if !m.altScreen || m.height <= 0 || m.transcriptDetailed {
 		return false
 	}
 	width := m.chatColumnWidth()

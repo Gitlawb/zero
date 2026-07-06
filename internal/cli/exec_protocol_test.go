@@ -529,6 +529,45 @@ func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
 	}
 }
 
+func TestRunExecStreamJSONEmitsReasoningEvents(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "think then answer"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return reasoningExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	events := decodeJSONLines(t, stdout.String())
+	reasoningIdx, reasoning := findJSONEventIndex(t, events, "reasoning")
+	if reasoning["delta"] != "Thinking. " {
+		t.Fatalf("unexpected reasoning event: %#v", reasoning)
+	}
+	textIdx, text := findJSONEventIndex(t, events, "text")
+	if text["delta"] != "done" {
+		t.Fatalf("unexpected text event: %#v", text)
+	}
+	if reasoningIdx >= textIdx {
+		t.Fatalf("expected reasoning event before text event, got indices %d and %d", reasoningIdx, textIdx)
+	}
+	final := findJSONEvent(t, events, "final")
+	if final["text"] != "done" {
+		t.Fatalf("reasoning must not be folded into final answer: %#v", final)
+	}
+}
+
 func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 	var stdout bytes.Buffer
 	writer := execEventWriter{
@@ -751,6 +790,17 @@ type toolCallingExecProvider struct {
 	answer     string
 }
 
+type reasoningExecProvider struct{}
+
+func (reasoningExecProvider) StreamCompletion(context.Context, zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	ch := make(chan zeroruntime.StreamEvent, 3)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventReasoning, Content: "Thinking. "}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
 func (provider toolCallingExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	for _, message := range request.Messages {
 		if message.Role == zeroruntime.MessageRoleTool {
@@ -777,13 +827,19 @@ func (provider toolCallingExecProvider) StreamCompletion(ctx context.Context, re
 
 func findJSONEvent(t *testing.T, events []map[string]any, eventType string) map[string]any {
 	t.Helper()
-	for _, event := range events {
+	_, event := findJSONEventIndex(t, events, eventType)
+	return event
+}
+
+func findJSONEventIndex(t *testing.T, events []map[string]any, eventType string) (int, map[string]any) {
+	t.Helper()
+	for idx, event := range events {
 		if event["type"] == eventType {
-			return event
+			return idx, event
 		}
 	}
 	t.Fatalf("event %q not found in %#v", eventType, events)
-	return nil
+	return -1, nil
 }
 
 func findSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.EventType) sessions.Event {

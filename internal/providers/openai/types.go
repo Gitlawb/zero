@@ -8,6 +8,11 @@ type chatCompletionRequest struct {
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
 	Stream              bool             `json:"stream"`
 	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
+	// PromptCacheKey asks the backend to route the request to a replica that
+	// already holds this conversation's prefix in its prompt cache (the OpenAI
+	// `prompt_cache_key` parameter). Omitted when the caller carries no session
+	// identity or when ZERO_DISABLE_PROMPT_CACHE_KEY is set.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 // streamOptions requests the final usage chunk on a streaming response. Without
@@ -78,6 +83,7 @@ type streamChoice struct {
 type streamDelta struct {
 	Content          string                `json:"content"`
 	ReasoningContent string                `json:"reasoning_content"`
+	Reasoning        string                `json:"reasoning"`
 	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
 }
 

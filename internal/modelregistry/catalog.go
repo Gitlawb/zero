@@ -63,6 +63,10 @@ func DefaultModelEntries() []ModelEntry {
 		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.1, CachedInputPerMillion: 0.01, OutputPerMillion: 0.4}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
 	}
 	decorateModelDepth(entries)
+	// Overlay volatile facts (context limits, base pricing) from a cached
+	// models.dev snapshot when one is present and fresh — see modelsdev.go.
+	// Identity fields (ids, aliases, patterns, deprecations) stay curated.
+	entries = applyModelsDevOverrides(entries, cachedModelsDevProviders())
 	return cloneModelEntries(entries)
 }
 

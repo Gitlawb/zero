@@ -143,7 +143,7 @@ func TestFileViewSwapsTranscriptBody(t *testing.T) {
 	m := filesPanelTestModel()
 	m = m.openFileView("internal/tui/sidebar.go")
 
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	if len(items) != 1 {
 		t.Fatalf("file view should swap the body to a single block item, got %d items", len(items))
 	}
@@ -261,6 +261,55 @@ func TestFileViewFullBodyTruncatesLongFile(t *testing.T) {
 	}
 	if !strings.Contains(lines[len(lines)-1], "truncated") {
 		t.Fatalf("expected the truncation trailer, got %q", lines[len(lines)-1])
+	}
+}
+
+// TestDetailedTranscriptClosesFileView: entering detailed transcript mode
+// closes an active file drill-in so the full transcript body replaces the file
+// content.
+func TestDetailedTranscriptClosesFileView(t *testing.T) {
+	m := filesPanelTestModel()
+	m.altScreen = true
+	m = m.openFileView("web/app.js")
+
+	if !m.fileView.active {
+		t.Fatal("sanity check: openFileView should activate the file view")
+	}
+
+	updated, _ := m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	if m.fileView.active {
+		t.Fatal("detailed transcript should close the file drill-in")
+	}
+	if !m.transcriptDetailed {
+		t.Fatal("Ctrl+O should enter detailed mode")
+	}
+
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", true)
+	if len(items) <= 1 {
+		t.Fatalf("detailed transcript should show multiple body items, got %d", len(items))
+	}
+}
+
+// TestDetailedTranscriptStaysClosedOnSecondToggle: toggling out and back into
+// detailed mode does not re-open the closed file view.
+func TestDetailedTranscriptStaysClosedOnSecondToggle(t *testing.T) {
+	m := filesPanelTestModel()
+	m.altScreen = true
+	m = m.openFileView("web/app.js")
+
+	updated, _ := m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	updated, _ = m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	if m.fileView.active {
+		t.Fatal("exiting detailed mode must not re-open the file drill-in")
+	}
+	if m.transcriptDetailed {
+		t.Fatal("second Ctrl+O should exit detailed mode")
 	}
 }
 

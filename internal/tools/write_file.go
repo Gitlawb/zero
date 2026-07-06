@@ -44,7 +44,7 @@ func (tool writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
 }
 
-func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
+func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
@@ -110,6 +110,10 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
+	// FileTracker baseline: recording pre-format content would make the very
+	// next edit look like an external modification and trip the conflict guard.
+	content = maybeFormatWrittenFile(ctx, absolutePath, content)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
@@ -126,6 +130,7 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for

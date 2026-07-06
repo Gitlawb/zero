@@ -920,6 +920,30 @@ func TestMouseCaptureOnlyDuringInteractiveSetupStages(t *testing.T) {
 	}
 }
 
+// TestComposerMouseSelectionBlockedInDetailedMode: composer mouse hit-testing
+// is disabled while the detailed transcript view is active, so wheel and click
+// events in the composer area reach the transcript body instead.
+func TestComposerMouseSelectionBlockedInDetailedMode(t *testing.T) {
+	m := mouseTestModel()
+	m.input.SetValue("some text")
+
+	updated, _ := m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	if !m.transcriptDetailed {
+		t.Fatal("sanity check: Ctrl+O should enter detailed mode")
+	}
+	if !m.composerMouseSelectionBlocked() {
+		t.Fatal("composerMouseSelectionBlocked should be true in detailed mode")
+	}
+
+	width := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	if m.mouseOverComposer(testMouseWheel(tea.MouseWheelUp, 0, frame.composerRect.y)) {
+		t.Fatal("mouseOverComposer should return false in detailed mode")
+	}
+}
+
 func firstTranscriptTextMouseY(t *testing.T, m model) int {
 	t.Helper()
 	_, y := firstTranscriptTextMousePoint(t, m)
@@ -984,6 +1008,38 @@ func mouseTestModel() model {
 func withSidebarContent(m model) model {
 	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m
+}
+
+func TestParseTracerPidMissing(t *testing.T) {
+	if got := parseTracerPid([]byte("Pid: 123\nName: foo\n")); got {
+		t.Fatal("missing TracerPid should return false")
+	}
+}
+
+func TestParseTracerPidZero(t *testing.T) {
+	if got := parseTracerPid([]byte("TracerPid: 0\nName: foo\n")); got {
+		t.Fatal("TracerPid: 0 should return false")
+	}
+}
+
+func TestParseTracerPidNonZero(t *testing.T) {
+	if got := parseTracerPid([]byte("Name: foo\nTracerPid: 42\n")); !got {
+		t.Fatal("TracerPid: 42 should return true")
+	}
+}
+
+func TestParseTracerPidMalformed(t *testing.T) {
+	// Non-numeric values are treated as non-zero since any non-"0" string
+	// indicates a tracer is attached, matching the function's semantics.
+	if got := parseTracerPid([]byte("TracerPid: abc\n")); !got {
+		t.Fatal("malformed TracerPid should return true (non-zero string)")
+	}
+}
+
+func TestParseTracerPidEmpty(t *testing.T) {
+	if got := parseTracerPid([]byte{}); got {
+		t.Fatal("empty input should return false")
+	}
 }
 
 func setupMouseTestModel() model {

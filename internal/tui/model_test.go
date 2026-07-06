@@ -2142,7 +2142,7 @@ func TestTranscriptSelectionPaintsHighlightOnceNotTwice(t *testing.T) {
 	width := m.chatColumnWidth()
 
 	findRow := func(mm model) (transcriptBodyItem, bool) {
-		for _, it := range mm.transcriptBodyItems(width, "") {
+		for _, it := range mm.transcriptBodyItems(width, "", false) {
 			if it.kind == transcriptBodyItemRow && it.rowIndex >= 0 {
 				return it, true
 			}
@@ -2198,7 +2198,7 @@ func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 		transcriptRow{kind: rowReasoning, text: "Considering the next step in detail before acting"},
 		transcriptRow{kind: rowToolResult, id: "t2", tool: "read_file", status: tools.StatusOK, detail: "x\ny"},
 	)
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	reasoningIdx := -1
 	for i := range items {
 		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
@@ -2223,7 +2223,7 @@ func TestAssistantNarrationBeforeToolCardGetsBlankSeparator(t *testing.T) {
 		transcriptRow{kind: rowAssistant, text: "I'll inspect the existing file, then run it."},
 		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n  1 | print('x')"},
 	)
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	toolIdx := -1
 	for i := range items {
 		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
@@ -2247,7 +2247,7 @@ func TestUserPromptBeforeToolCardGetsBlankSeparator(t *testing.T) {
 		transcriptRow{kind: rowUser, text: "create the landing page"},
 		transcriptRow{kind: rowToolResult, id: "t1", tool: "write_file", status: tools.StatusOK, detail: "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,1 @@\n+<!DOCTYPE html>"},
 	)
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	toolIdx := -1
 	for i := range items {
 		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
@@ -2273,7 +2273,7 @@ func TestAssistantAfterToolCardGetsRuleSeparator(t *testing.T) {
 		transcriptRow{kind: rowToolResult, id: "t1", tool: "bash", status: tools.StatusOK, detail: "stdout:\nok\nexit_code: 0"},
 		transcriptRow{kind: rowAssistant, text: "Done.", final: true},
 	)
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	finalIdx := -1
 	for i := range items {
 		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
@@ -2301,13 +2301,13 @@ func TestStreamingAssistantAfterToolCardGetsRuleSeparator(t *testing.T) {
 	m.width, m.height = 120, 40
 	m.altScreen = true
 	m.pending = true
-	m.streamingText = "Done."
+	m.streamingText = []byte("Done.")
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowUser, text: "run it"},
 		transcriptRow{kind: rowAssistant, text: "I'll run it first."},
 		transcriptRow{kind: rowToolResult, id: "t1", tool: "bash", status: tools.StatusOK, detail: "stdout:\nok\nexit_code: 0"},
 	)
-	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	pendingIdx := -1
 	for i := range items {
 		if items[i].kind == transcriptBodyItemPendingInterim {
@@ -2357,7 +2357,7 @@ func TestTranscriptBodyRowsUseFullWidthAndAlignSelection(t *testing.T) {
 		t.Fatalf("expected no body gutter at width %d, got %d", width, gutter)
 	}
 
-	items := m.transcriptBodyItems(width, "")
+	items := m.transcriptBodyItems(width, "", false)
 	var row *transcriptBodyItem
 	for i := range items {
 		if items[i].kind == transcriptBodyItemRow && items[i].rowIndex >= 0 {

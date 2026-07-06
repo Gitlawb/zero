@@ -105,6 +105,56 @@ const (
 	WindowsSandboxLevelDisabled   WindowsSandboxLevel = "disabled"
 )
 
+// WindowsShellArgs returns cmd.exe's argv (after the executable name) for
+// running commandText as a shell command on Windows: no wrapping quotes and
+// no /S, so commandText reaches cmd.exe's own /C remainder parsing exactly as
+// written. See WindowsShellCommandLine for why that matters. Used both as
+// CommandSpec.Args for the plain (unwrapped) path and, via
+// windowsShellCommandLineFromArgs, to recognize this same shape once it has
+// round-tripped through the sandboxed runner's CLI argv.
+func WindowsShellArgs(commandText string) []string {
+	return []string{"/d", "/c", commandText}
+}
+
+// WindowsShellCommandLine builds the raw command line a Windows CreateProcess
+// call should receive to run commandText as a shell command: "cmd.exe /d /c "
+// followed by commandText completely unescaped.
+//
+// cmd.exe's own /C remainder parsing is not CommandLineToArgvW-compatible: it
+// applies its own quote-stripping heuristic (documented in `cmd /?`) whenever
+// the remainder starts with a literal quote, and that heuristic does not
+// understand backslash-escaped inner quotes the way a normal argv consumer
+// would. A command like `python -c "print(15 / 3)"` passed through the
+// standard exec.Cmd Args mechanism gets wrapped in an outer pair of quotes
+// (because it contains spaces) with its own quotes escaped as \" — exactly
+// the shape that heuristic corrupts, stripping the outer quotes but leaving
+// the literal backslashes behind. Passing commandText through raw, exactly as
+// the model wrote it, means cmd.exe parses it the same way it would if typed
+// directly at an interactive prompt: a leading quoted executable path like
+// `"C:\Program Files\foo.exe" arg` is preserved correctly by cmd.exe's own
+// quote-preserving special case, and a command with no leading quote at all,
+// like the python example above, is never touched by the stripping heuristic
+// in the first place.
+func WindowsShellCommandLine(commandText string) string {
+	return "cmd.exe /d /c " + commandText
+}
+
+// windowsShellCommandLineFromArgs reports whether args is exactly
+// ["cmd.exe"]+WindowsShellArgs(text) for some text and, if so, returns
+// WindowsShellCommandLine's result for that text. The sandboxed runner path
+// only has the deserialized argv (WindowsSandboxCommandConfig.Command) to
+// work from, not the original commandText, so it recovers the raw command
+// line by recognizing the shape instead.
+func windowsShellCommandLineFromArgs(args []string) (string, bool) {
+	if len(args) != 4 {
+		return "", false
+	}
+	if !strings.EqualFold(args[0], "cmd.exe") || args[1] != "/d" || args[2] != "/c" {
+		return "", false
+	}
+	return WindowsShellCommandLine(args[3]), true
+}
+
 type WindowsSandboxCommandArgsOptions struct {
 	SandboxHome       string
 	CommandCWD        string

@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -21,6 +22,7 @@ import (
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
 	Cwd                         string
+	Version                     string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath              string
 	DoctorUserConfigPath        string
 	ProjectConfigPath           string
@@ -48,7 +50,13 @@ type Options struct {
 	SessionCompactor            SessionCompactor
 	PrService                   *PrService
 
-	AgentOptions    agent.Options
+	AgentOptions agent.Options
+	// LoadSkills returns the installed skills (default skills dir merged with any
+	// plugin skill roots), bodies included, for /skills and direct /<skill-name>
+	// invocation. Called lazily per use so newly installed skills are picked up
+	// without a restart. Nil means the session has no skills wiring (skills stay
+	// model-pulled via the skill tool only).
+	LoadSkills      func() []skills.Skill
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string

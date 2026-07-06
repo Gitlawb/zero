@@ -188,6 +188,7 @@ Common slash commands:
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
 | `/new` | start a fresh session in place (previous session stays on disk) |
+| `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
 | `/permissions`, `/tools` | inspect available tools and policy |
 | `/add-dir` | allow an extra write directory for this session |
@@ -285,6 +286,39 @@ zero cron             scheduled agent jobs
 zero update --check   check for newer releases
 zero upgrade          download, verify, and install the latest release
 ```
+
+## Extending Zero
+
+### Project and personal instructions
+
+Zero appends project-specific guidance to the system prompt from the first
+`AGENTS.md`, `ZERO.md`, or `.zero/AGENTS.md` file found in each directory from
+the git root down to your current working directory (checked in that order
+per directory). Files are injected general-to-specific, capped at 8 KiB per
+file and 32 KiB total.
+
+A personal `ZERO.md` under `config.UserConfigDir()/zero/ZERO.md`
+(`$XDG_CONFIG_HOME/zero/ZERO.md` or `~/.config/zero/ZERO.md` on Linux/macOS,
+`%AppData%\Roaming\zero\ZERO.md` on Windows) applies across every workspace, ahead of any project guidelines.
+
+### Plugins
+
+Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json` (user
+scope — `$XDG_CONFIG_HOME` or `~/.config` on every OS, independent of the
+`config.UserConfigDir()` path used above) and `<cwd>/.zero/plugins/<name>/plugin.json`
+(project scope — resolved from the current working directory, not the repo
+root), and managed with `zero plugins`. A manifest can declare:
+
+- `tools` — custom tools (`command`, `args`, `inputSchema`, and a
+  `permission` of `prompt` or `deny`; `allow` is honored only when manifest tool
+  auto-approval is enabled)
+- `hooks` — commands run on `beforeTool`, `afterTool`, `sessionStart`, or
+  `sessionEnd`
+- `prompts` and `skills` — additional prompt/skill files
+
+MCP servers (`zero mcp`) and standalone markdown skills (`zero skills`) use
+the same extension points and can also be wired up outside of a plugin
+manifest.
 
 ## Appearance And Accessibility
 

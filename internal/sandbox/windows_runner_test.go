@@ -147,3 +147,56 @@ func TestRunWindowsSandboxCommandRunnerRejectsInvalidArgs(t *testing.T) {
 		t.Fatalf("stderr = %q, want runner name", stderr.String())
 	}
 }
+
+func TestWindowsShellArgsHasNoSAndKeepsCommandTextWhole(t *testing.T) {
+	args := WindowsShellArgs(`python -c "print(15 / 3)"`)
+	want := []string{"/d", "/c", `python -c "print(15 / 3)"`}
+	if len(args) != len(want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+	for index := range want {
+		if args[index] != want[index] {
+			t.Fatalf("args = %#v, want %#v", args, want)
+		}
+	}
+}
+
+func TestWindowsShellCommandLineLeavesCommandTextUnescaped(t *testing.T) {
+	// The whole point of this function: commandText's own quotes must reach
+	// cmd.exe exactly as written, not re-quoted or backslash-escaped the way
+	// a normal argv-escaping function (like syscall.EscapeArg) would treat an
+	// argument containing spaces and embedded quotes.
+	commandText := `python -c "print(15 / 3)"`
+	got := WindowsShellCommandLine(commandText)
+	want := `cmd.exe /d /c python -c "print(15 / 3)"`
+	if got != want {
+		t.Fatalf("WindowsShellCommandLine = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsShellCommandLineFromArgsRecognizesTheShellShape(t *testing.T) {
+	commandLine, ok := windowsShellCommandLineFromArgs([]string{"cmd.exe", "/d", "/c", `echo "hi"`})
+	if !ok {
+		t.Fatal("windowsShellCommandLineFromArgs did not recognize the shell shape")
+	}
+	if want := `cmd.exe /d /c echo "hi"`; commandLine != want {
+		t.Fatalf("commandLine = %q, want %q", commandLine, want)
+	}
+}
+
+func TestWindowsShellCommandLineFromArgsRejectsOtherShapes(t *testing.T) {
+	cases := [][]string{
+		nil,
+		{"cmd.exe"},
+		{"cmd.exe", "/d", "/c"},
+		{"cmd.exe", "/d", "/c", "echo hi", "extra"},
+		{"git.exe", "/d", "/c", "echo hi"},
+		{"cmd.exe", "/s", "/c", "echo hi"},
+		{"cmd.exe", "/d", "/k", "echo hi"},
+	}
+	for _, args := range cases {
+		if _, ok := windowsShellCommandLineFromArgs(args); ok {
+			t.Fatalf("windowsShellCommandLineFromArgs(%#v) matched, want no match", args)
+		}
+	}
+}

@@ -190,6 +190,67 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	}
 }
 
+// TestWindowsRestrictedTokenNestedPipeCapture pins the fix in
+// broadenWindowsRestrictedTokenDefaultDacl (windows_token_windows.go): a
+// nested subprocess spawned FROM WITHIN the sandboxed process, with its
+// output captured via a pipe, must succeed. Before the fix, the sandboxed
+// process's own attempt to create a pipe for such a subprocess failed with
+// ERROR_ACCESS_DENIED (Win32 error 5) — the WRITE_RESTRICTED token's extra
+// access check has no restricted-SID match against a freshly created pipe's
+// default security descriptor. This is exactly the pattern any tool that
+// shells out internally and captures output hits (`gh` invoking `git`, for
+// one; cmd.exe's own FOR /F does the identical CreatePipe+CreateProcess
+// dance internally, so it reproduces the bug with no external dependency
+// beyond cmd.exe itself).
+func TestWindowsRestrictedTokenNestedPipeCapture(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	}
+	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+
+	root := t.TempDir()
+	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{root},
+			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	config := WindowsSandboxCommandArgsOptions{
+		SandboxHome:       sandboxHome,
+		CommandCWD:        root,
+		WorkspaceRoots:    []string{root},
+		PermissionProfile: profile,
+		SandboxLevel:      WindowsSandboxLevelUnelevated,
+	}
+
+	marker := filepath.Join(root, "nested-pipe-marker.txt")
+	script := filepath.Join(root, "nested-pipe.cmd")
+	// FOR /F drives cmd.exe's own internal CreatePipe+CreateProcess capture
+	// of the quoted command's output — the exact mechanism this fix targets.
+	// The full path to whoami.exe sidesteps PATH resolution inside the
+	// sandboxed process's minimal environment.
+	scriptBody := "for /F %%i in ('C:\\Windows\\System32\\whoami.exe') do echo %%i> " + marker + "\r\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o644); err != nil {
+		t.Fatalf("write nested-pipe script: %v", err)
+	}
+
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		"cmd.exe", "/d", "/s", "/c", script,
+	}, 0)
+	captured, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read nested-pipe marker: %v", err)
+	}
+	if strings.TrimSpace(string(captured)) == "" {
+		t.Fatalf("nested-pipe marker is empty; FOR /F failed to capture the subprocess's output")
+	}
+}
+
 func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) string {
 	t.Helper()
 	if path := os.Getenv(envKey); path != "" {

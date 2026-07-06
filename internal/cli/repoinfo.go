@@ -88,6 +88,15 @@ func formatRepoInfo(info repoinfo.Info) string {
 	fmt.Fprintf(&b, "Files:        %d\n", info.FileCount)
 	fmt.Fprintf(&b, "Directories:  %d (max depth %d)\n", info.DirectoryCount, info.MaxDepth)
 	fmt.Fprintf(&b, "Est. LOC:     %d\n", info.LOCEstimate)
+	if info.CommitCount != nil {
+		fmt.Fprintf(&b, "Commits:      %d\n", *info.CommitCount)
+	}
+	if info.BranchCount != nil {
+		fmt.Fprintf(&b, "Branches:     %d\n", *info.BranchCount)
+	}
+	if info.TagCount != nil {
+		fmt.Fprintf(&b, "Tags:         %d\n", *info.TagCount)
+	}
 	if info.PrimaryLanguage != "" {
 		fmt.Fprintf(&b, "Primary lang: %s\n", info.PrimaryLanguage)
 	}

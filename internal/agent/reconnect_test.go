@@ -44,6 +44,10 @@ func TestStreamWithReconnectRecoversFromTransientDisconnect(t *testing.T) {
 }
 
 func TestStreamWithReconnectGivesUpAfterMax(t *testing.T) {
+	// Shrink the backoff so exhausting all retries stays fast (real base would
+	// sleep ~7.5s across 4 attempts).
+	defer func(orig time.Duration) { streamReconnectBase = orig }(streamReconnectBase)
+	streamReconnectBase = time.Millisecond
 	// Always fails with a disconnect error → exhausts retries and returns it.
 	p := &flakyProvider{failBefore: 99, failErr: errors.New("connection reset by peer")}
 	_, err := streamWithReconnect(context.Background(), p, zeroruntime.CompletionRequest{}, nil)
@@ -87,7 +91,7 @@ func TestShouldReconnectClassification(t *testing.T) {
 	ctx := context.Background()
 	disconnects := []string{
 		"unexpected EOF", "connection reset by peer", "broken pipe",
-		"i/o timeout", "503 Service Unavailable", "server closed the connection",
+		"i/o timeout", "server closed the connection", "connection refused",
 	}
 	for _, m := range disconnects {
 		if !shouldReconnect(ctx, errors.New(m)) {
@@ -97,6 +101,13 @@ func TestShouldReconnectClassification(t *testing.T) {
 	notDisconnects := []string{
 		"context length exceeded", "invalid api key", "model not found",
 		"400 bad request: unsupported parameter",
+		// HTTP 5xx statuses are handled by providerio.SendWithRetry (503) or are
+		// non-idempotent (500/502/504); the reconnect path must not double-retry
+		// them. "504 Gateway Timeout" must NOT slip through on the generic "timeout"
+		// transport signal — a gateway timeout is non-idempotent, since the upstream
+		// may have already processed the completion POST before giving up.
+		"503 Service Unavailable", "502 Bad Gateway",
+		"504 Gateway Timeout", "500 Internal Server Error",
 	}
 	for _, m := range notDisconnects {
 		if shouldReconnect(ctx, errors.New(m)) {
@@ -111,6 +122,24 @@ func TestBackoffGrows(t *testing.T) {
 	}
 	if backoffFor(2) != 2*streamReconnectBase {
 		t.Fatalf("attempt 2 backoff = %v, want %v", backoffFor(2), 2*streamReconnectBase)
+	}
+	// The exponential base is capped so late attempts don't wait minutes.
+	if got := backoffFor(20); got != streamReconnectMax {
+		t.Fatalf("attempt 20 backoff = %v, want cap %v", got, streamReconnectMax)
+	}
+}
+
+func TestJitteredBackoffStaysInBounds(t *testing.T) {
+	// Jitter never drops below the deterministic base and never exceeds base*1.5,
+	// so backoff still grows attempt over attempt while decorrelating retries.
+	for attempt := 1; attempt <= 5; attempt++ {
+		base := backoffFor(attempt)
+		for i := 0; i < 200; i++ {
+			got := jitteredBackoff(attempt)
+			if got < base || got > base+base/2 {
+				t.Fatalf("attempt %d jittered backoff %v out of [%v, %v]", attempt, got, base, base+base/2)
+			}
+		}
 	}
 }
 

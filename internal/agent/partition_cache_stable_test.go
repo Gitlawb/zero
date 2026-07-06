@@ -34,7 +34,7 @@ func TestPartitionToolsActiveAppendsLoadedToolAfterEagerBlock(t *testing.T) {
 		t.Fatalf("expected read_file, tool_search and loaded alpha all exposed, got %#v", exposed)
 	}
 	// The eager tools must precede the loaded deferred tool (appended, not inserted).
-	if !(readPos < alphaPos && searchPos < alphaPos) {
+	if readPos >= alphaPos || searchPos >= alphaPos {
 		t.Fatalf("loaded deferred tool must be appended after the eager block; got read=%d search=%d alpha=%d", readPos, searchPos, alphaPos)
 	}
 	// beta was never loaded — it stays hidden.

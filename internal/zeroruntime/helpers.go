@@ -21,6 +21,9 @@ type CollectedStream struct {
 	// thinking blocks) that must be replayed on the next turn. Empty for providers
 	// or runs without extended thinking.
 	ReasoningBlocks []ReasoningBlock
+	// HasReasoning records whether the provider streamed reasoning deltas. The
+	// deltas remain non-answer content, but they still prove the turn was live.
+	HasReasoning bool
 }
 
 // Truncated reports whether the response ended for a non-normal reason (the
@@ -132,6 +135,9 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 					options.OnText(event.Content)
 				}
 			case StreamEventReasoning:
+				if strings.TrimSpace(event.Content) != "" {
+					collected.HasReasoning = true
+				}
 				if options.OnReasoning != nil {
 					options.OnReasoning(event.Content)
 				}

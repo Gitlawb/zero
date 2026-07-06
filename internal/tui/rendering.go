@@ -987,6 +987,12 @@ func isDoctorResultHeading(value string) bool {
 
 func renderErrorRow(row transcriptRow, width int) string {
 	note := noteBox(row.text, width, zeroTheme.cardErr, zeroTheme.red)
+	// A recognized failure carries a one-line next step. Render it just below the
+	// red box in the faint metadata style so it reads as guidance, not more error
+	// text (and to avoid nesting ANSI styles inside noteBox's per-line red wrap).
+	if hint := strings.TrimSpace(row.hint); hint != "" {
+		note += "\n" + fitStyledLine(zeroTheme.faint.Render("→ "+hint), width)
+	}
 	return note
 }
 

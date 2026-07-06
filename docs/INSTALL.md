@@ -173,6 +173,61 @@ Linux native sandboxing also requires Bubblewrap to be installed.
 
 macOS uses the system sandbox and does not need an extra helper binary.
 
+### Termux (Android)
+
+Zero can run natively on Android via [Termux](https://termux.dev/). Build with
+`GOOS=android` to avoid the `faccessat2` syscall that is blocked by Samsung's
+seccomp filter on Android:
+
+```bash
+# Install Go in Termux
+pkg install golang
+
+# Build Zero for Android
+git clone https://github.com/Gitlawb/zero.git
+cd zero
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o zero ./cmd/zero
+
+# Move into PATH
+mv zero ~/.local/bin/
+```
+
+> **Why `GOOS=android`?** Go 1.26+ detects `runtime.GOOS == "android"` and skips
+> the `faccessat2` syscall inside `os/exec.findExecutable`, falling back to
+> permission-bit checks. Without this flag, Android's seccomp sends SIGSYS and
+> kills the process whenever Zero looks up a binary on `PATH` (git, sh, etc.).
+
+**DNS.** Android does not expose `/etc/resolv.conf`. Go's pure-Go DNS resolver
+needs one. Use `proot` to bind-mount Termux's resolver config:
+
+```bash
+pkg install proot
+proot -b "$PREFIX/etc/resolv.conf:/etc/resolv.conf" zero
+```
+
+Create a wrapper at `~/.local/bin/zero` to avoid typing proot every time:
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+exec proot -b "$PREFIX/etc/resolv.conf:/etc/resolv.conf" ~/.local/bin/zero.bin "$@"
+```
+
+**Scroll.** On native Termux (not under PRoot), mouse scrolling works out of the
+box. The TUI uses Bubble Tea's `AllMotion` mouse mode by default. If you run Zero
+inside PRoot (e.g. through proot-distro), the scroll fix activates `CellMotion`
+to avoid PRoot's ptrace interference with the 1003 escape sequence.
+
+**Providers.** Zero works with any OpenAI-compatible provider on Termux. For
+example, to use OpenCode Zen's free tier:
+
+```bash
+zero providers add opencode \
+  --name opencode \
+  --model deepseek-v4-flash-free \
+  --base-url https://opencode.ai/zen/v1 \
+  --set-active
+```
+
 Windows source builds can use the main `zero.exe` as the command runner and setup
 helper through Zero's built-in self-dispatch path. If you want a release-style
 layout anyway, build the standalone helper executables next to `zero.exe`:

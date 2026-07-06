@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -283,10 +284,10 @@ func (provider *Provider) emitChunk(
 	events chan<- zeroruntime.StreamEvent,
 ) {
 	for _, choice := range chunk.Choices {
-		if choice.Delta.ReasoningContent != "" {
+		if reasoning := choice.Delta.reasoningText(); reasoning != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventReasoning,
-				Content: choice.Delta.ReasoningContent,
+				Content: reasoning,
 			})
 		}
 		if choice.Delta.Content != "" {
@@ -315,6 +316,13 @@ func (provider *Provider) emitChunk(
 			},
 		})
 	}
+}
+
+func (delta streamDelta) reasoningText() string {
+	if delta.ReasoningContent != "" {
+		return delta.ReasoningContent
+	}
+	return delta.Reasoning
 }
 
 // mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
@@ -414,6 +422,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
 	}
+	// prompt_cache_key is a documented OpenAI parameter; compatible servers
+	// ignore unknown fields, but a strict endpoint that rejects it can be
+	// accommodated with ZERO_DISABLE_PROMPT_CACHE_KEY=1.
+	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !promptCacheKeyDisabled() {
+		mapped.PromptCacheKey = key
+	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))
 		for _, tool := range request.Tools {
@@ -428,6 +442,15 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		}
 	}
 	return mapped
+}
+
+// promptCacheKeyDisabled reports whether the ZERO_DISABLE_PROMPT_CACHE_KEY
+// kill switch is set to a truthy value. "0" and "false" (any case) are
+// no-ops, matching how ZERO_FORMAT_ON_WRITE parses boolean flags, so an
+// explicitly-disabled toggle never flips the behavior it names.
+func promptCacheKeyDisabled() bool {
+	value := strings.TrimSpace(os.Getenv("ZERO_DISABLE_PROMPT_CACHE_KEY"))
+	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
 // openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat

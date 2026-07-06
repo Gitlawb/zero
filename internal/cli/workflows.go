@@ -41,6 +41,13 @@ type changesCommandOptions struct {
 	hasMessage   bool
 	dryRun       bool
 	maxDiffBytes int
+	remote       string
+	force        bool
+	title        string
+	body         string
+	fill         bool
+	draft        bool
+	yes          bool
 	auto         bool
 }
 
@@ -266,6 +273,10 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 			return exitCrash
 		}
 		return exitSuccess
+	case "push":
+		return runChangesPush(args, stdout, stderr, deps)
+	case "pr", "pull-request":
+		return runChangesPR(args, stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown changes command %q", command))
 	}
@@ -465,6 +476,41 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 				return options, false, err
 			}
 			options.maxDiffBytes = maxDiffBytes
+		case arg == "--remote":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.remote = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--remote="):
+			options.remote = strings.TrimSpace(strings.TrimPrefix(arg, "--remote="))
+		case arg == "--force":
+			options.force = true
+		case arg == "--title":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.title = value
+			index = next
+		case strings.HasPrefix(arg, "--title="):
+			options.title = strings.TrimPrefix(arg, "--title=")
+		case arg == "--body":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.body = value
+			index = next
+		case strings.HasPrefix(arg, "--body="):
+			options.body = strings.TrimPrefix(arg, "--body=")
+		case arg == "--fill":
+			options.fill = true
+		case arg == "--draft":
+			options.draft = true
+		case arg == "--yes":
+			options.yes = true
 		case arg == "-a" || arg == "--auto":
 			options.auto = true
 		case strings.HasPrefix(arg, "-"):
@@ -473,14 +519,29 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			return options, false, execUsageError{fmt.Sprintf("unexpected changes argument %q", arg)}
 		}
 	}
+	if command != "commit" && options.message != "" {
+		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
+	}
 	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
 		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
 	}
 	if command == "commit" && options.hasMessage && options.auto {
 		return options, false, execUsageError{"cannot specify both --message and --auto"}
 	}
-	if command == "commit" && options.baseRef != "" {
+	if command != "commit" && command != "push" && options.dryRun {
+		return options, false, execUsageError{"--dry-run is only valid with commit or push"}
+	}
+	if command != "inspect" && options.baseRef != "" {
 		return options, false, execUsageError{"--base is only valid with `zero changes inspect`"}
+	}
+	if command != "push" && command != "pr" && (options.remote != "" || options.force) {
+		return options, false, execUsageError{"--remote and --force are only valid with push or pr"}
+	}
+	if command != "pr" && (options.title != "" || options.body != "" || options.fill || options.draft) {
+		return options, false, execUsageError{"--title, --body, --fill, and --draft are only valid with `zero changes pr`"}
+	}
+	if command != "push" && command != "pr" && options.yes {
+		return options, false, execUsageError{"--yes is only valid with push or pr"}
 	}
 	return options, false, nil
 }
@@ -759,20 +820,152 @@ func writeChangesHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero changes inspect [flags]
   zero changes commit [flags]
+  zero changes push [flags]
+  zero changes pr [flags]
 
-Inspects local git changes and optionally creates a commit.
+Inspects, commits, pushes, and creates pull requests for local git changes.
 
 Flags:
   -C, --cwd <path>        Workspace directory
       --base <ref>        Diff against <ref>...HEAD instead of the working tree
       --diff-bytes <n>    Maximum diff bytes to include
   -m, --message <text>    Commit message for `+"`zero changes commit`"+`
+      --dry-run           Preview commit metadata / push without mutating git state
+      --remote <name>     Remote to push to (defaults to upstream tracked branch or origin)
+      --force             Use force-with-lease when pushing
+      --title <text>      PR title
+      --body <text>       PR body
+      --fill              Automatically populate PR title and body from commits
+      --draft             Create PR as a draft
+      --yes               Confirm pushing to a default/protected branch
   -a, --auto              Auto-generate commit message using LLM (use --dry-run to preview)
       --dry-run           Preview commit metadata without mutating git state
       --json              Print JSON output
   -h, --help              Show this help
 `)
 	return err
+}
+
+func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseChangesArgs(args, "push")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeChangesHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
+		Cwd:                    workspaceRoot,
+		Remote:                 options.remote,
+		Force:                  options.force,
+		DryRun:                 options.dryRun,
+		AllowPushDefaultBranch: options.yes,
+	})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	if options.json {
+		if err := writePrettyJSON(stdout, result); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	dryRunStr := ""
+	if options.dryRun {
+		dryRunStr = " (dry run)"
+	}
+	if _, err := fmt.Fprintf(stdout, "Pushed branch %s to remote %s%s\n", result.Branch, result.Remote, dryRunStr); err != nil {
+		return exitCrash
+	}
+	if result.Output != "" {
+		if _, err := fmt.Fprintln(stdout, result.Output); err != nil {
+			return exitCrash
+		}
+	}
+	return exitSuccess
+}
+
+func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseChangesArgs(args, "pr")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeChangesHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if !options.fill && options.title == "" {
+		return writeExecUsageError(stderr, "must provide either --fill or --title to run non-interactively")
+	}
+	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	if !options.json {
+		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
+			return exitCrash
+		}
+	}
+	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
+		Cwd:                    workspaceRoot,
+		Remote:                 options.remote,
+		Force:                  options.force,
+		AllowPushDefaultBranch: options.yes,
+	})
+	if err != nil {
+		return writeExecUsageError(stderr, fmt.Sprintf("auto-push failed: %v", err))
+	}
+	if !options.json {
+		if _, err := fmt.Fprintf(stdout, "Pushed branch %s to remote %s\n", pushResult.Branch, pushResult.Remote); err != nil {
+			return exitCrash
+		}
+	}
+
+	prResult, err := deps.createPR(context.Background(), zerogit.PROptions{
+		Cwd:   workspaceRoot,
+		Fill:  options.fill,
+		Draft: options.draft,
+		Title: options.title,
+		Body:  options.body,
+	})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	if options.json {
+		type prJSONResult struct {
+			Branch string `json:"branch"`
+			Remote string `json:"remote"`
+			Output string `json:"output"`
+		}
+		res := prJSONResult{
+			Branch: pushResult.Branch,
+			Remote: pushResult.Remote,
+			Output: strings.TrimSpace(prResult.Output),
+		}
+		if err := writePrettyJSON(stdout, res); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	if _, err := fmt.Fprintln(stdout, strings.TrimSpace(prResult.Output)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
 }
 
 func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provider, model string, summary zerogit.ChangeSummary) (string, error) {

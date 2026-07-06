@@ -191,7 +191,7 @@ func TestInterimBlockShowsWorkingLineWithStreamedText(t *testing.T) {
 	base := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(12 * time.Second) }
 	m.turnStartedAt = base
-	m.streamingText = "partial answer so far"
+	m.streamingText = []byte("partial answer so far")
 
 	got := plainRender(t, m.interimBlock(96))
 	if !strings.Contains(got, "partial answer so far") {
@@ -241,7 +241,7 @@ func TestWorkingTokenIndicatorAccumulatesAcrossSegmentClears(t *testing.T) {
 	// Simulate the segment boundary that clears the live buffers, then stream
 	// answer text in the next segment.
 	m.streamingReasoning = ""
-	m.streamingText = ""
+	m.streamingText = nil
 	updated, _ = m.Update(agentTextMsg{runID: rid, delta: strings.Repeat("b", 40)})
 	m = updated.(model)
 
@@ -288,7 +288,7 @@ func TestInterimBlockShowsReasoningPreviewWhileThinking(t *testing.T) {
 	m.now = func() time.Time { return base.Add(90 * time.Second) }
 	m.turnStartedAt = base
 	m.streamingReasoning = "analyzing the layout\nthe patch was corrupt so re-planning the css edits"
-	m.streamingText = "" // thinking phase: no answer yet
+	m.streamingText = nil // thinking phase: no answer yet
 
 	got := plainRender(t, m.interimBlock(96))
 	if !strings.Contains(got, "re-planning the css edits") {
@@ -307,7 +307,7 @@ func TestInterimBlockNoPreviewWhenReasoningExpanded(t *testing.T) {
 	m.now = func() time.Time { return time.Date(2026, 6, 18, 23, 0, 0, 0, time.UTC) }
 	m.streamingReasoningExpanded = true
 	m.streamingReasoning = "only line of reasoning here"
-	m.streamingText = ""
+	m.streamingText = nil
 	got := plainRender(t, m.interimBlock(96))
 	if strings.Count(got, "only line of reasoning here") != 1 {
 		t.Fatalf("reasoning should appear exactly once when expanded (no preview dup):\n%s", got)

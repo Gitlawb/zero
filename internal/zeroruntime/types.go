@@ -203,6 +203,13 @@ type CompletionRequest struct {
 	// Anthropic/Gemini thinking budgets) and ignores it for models that do not
 	// support reasoning. Empty means "let the provider decide".
 	ReasoningEffort string
+	// PromptCacheKey, when non-empty, is an opaque stable identifier for the
+	// conversation (the session ID). Providers with server-side prefix-cache
+	// routing forward it — OpenAI `prompt_cache_key` — so consecutive requests
+	// land on a replica that already holds the cached prompt prefix instead of
+	// re-billing the full prefix each turn. Providers without an equivalent
+	// ignore it.
+	PromptCacheKey string
 }
 
 // Provider streams normalized completion events for one request.

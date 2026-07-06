@@ -124,6 +124,78 @@ func transcriptViewTestModel() model {
 	return m
 }
 
+func TestPgUpDownScrollsDetailedTranscript(t *testing.T) {
+	m := transcriptViewTestModel()
+	m.altScreen = true
+	// Fill the transcript enough to overflow the 30-row viewport.
+	for i := 0; i < 60; i++ {
+		m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "line content", final: true})
+	}
+	m.flushed = len(m.transcript)
+
+	// Enter detailed mode.
+	updated, _ := m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	if !m.transcriptDetailed {
+		t.Fatal("sanity check failed: Ctrl+O should enter detailed mode")
+	}
+	if m.chatScrollOffset != 0 {
+		t.Fatal("sanity check failed: detailed transcript should start at bottom")
+	}
+
+	// PgUp reveals older content = positive scroll offset.
+	updated, _ = m.Update(testKey(tea.KeyPgUp))
+	m = updated.(model)
+	if m.chatScrollOffset <= 0 {
+		t.Fatalf("PgUp in detailed mode should scroll toward older content, got chatScrollOffset=%d", m.chatScrollOffset)
+	}
+
+	// PgDown scrolls back toward bottom.
+	updated, _ = m.Update(testKey(tea.KeyPgDown))
+	m = updated.(model)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("PgDown after PgUp should return to bottom in detailed mode, got chatScrollOffset=%d", m.chatScrollOffset)
+	}
+}
+
+func TestUpDownArrowsScrollDetailedTranscript(t *testing.T) {
+	m := transcriptViewTestModel()
+	m.altScreen = true
+	for i := 0; i < 60; i++ {
+		m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "line content", final: true})
+	}
+	m.flushed = len(m.transcript)
+
+	updated, _ := m.Update(testKeyCtrl('o'))
+	m = updated.(model)
+
+	if !m.transcriptDetailed {
+		t.Fatal("sanity check failed: Ctrl+O should enter detailed mode")
+	}
+
+	// Arrow down scrolls one line toward newer content; at bottom it stays at 0.
+	updated, _ = m.Update(testKey(tea.KeyDown))
+	m = updated.(model)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("KeyDown at bottom should stay at 0, got %d", m.chatScrollOffset)
+	}
+
+	// Arrow up scrolls one line toward older content.
+	updated, _ = m.Update(testKey(tea.KeyUp))
+	m = updated.(model)
+	if m.chatScrollOffset != 1 {
+		t.Fatalf("KeyUp should scroll one line up, got chatScrollOffset=%d", m.chatScrollOffset)
+	}
+
+	// Arrow down scrolls back toward bottom.
+	updated, _ = m.Update(testKey(tea.KeyDown))
+	m = updated.(model)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("KeyDown after KeyUp should return to bottom, got chatScrollOffset=%d", m.chatScrollOffset)
+	}
+}
+
 func numberedLines(count int) string {
 	lines := make([]string, 0, count)
 	for i := 1; i <= count; i++ {

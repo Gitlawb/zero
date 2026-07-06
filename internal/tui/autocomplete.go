@@ -188,7 +188,54 @@ func (m model) matchCommandSuggestions(token string) []commandSuggestion {
 	out := matchCommandSuggestionsWithFilter(token, func(command commandDefinition) bool {
 		return command.kind != commandSandboxSetup || m.sandboxSetupCommand != nil
 	})
-	return append(out, m.matchUserCommandSuggestions(token)...)
+	out = append(out, m.matchUserCommandSuggestions(token)...)
+	out = append(out, m.matchSkillSuggestions(token)...)
+	// Each source caps itself, but the merged list must honor the shared cap too
+	// (three sources could otherwise stack up to ~3x the palette bound).
+	if len(out) > maxCommandSuggestions {
+		out = out[:maxCommandSuggestions]
+	}
+	return out
+}
+
+// matchSkillSuggestions returns installed skills whose slash name has the typed
+// prefix, so skills are discoverable and invocable from the palette like user
+// commands. Precedence (builtin > user command > skill) is enforced here by
+// skipping any skill whose name is claimed by a builtin (or alias) or a user
+// command — unlike the builtin/user pair, a shadowed skill row would be dead at
+// dispatch time, so it must not be advertised at all.
+func (m model) matchSkillSuggestions(token string) []commandSuggestion {
+	prefix := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, "/")))
+	if prefix == "" || m.loadSkills == nil {
+		return nil
+	}
+	taken := m.takenSlashNames()
+	var out []commandSuggestion
+	// Read through the loader (not the startup snapshot in agentOptions) so the
+	// palette matches what dispatch will actually resolve — a skill installed or
+	// removed mid-session appears/disappears without a restart.
+	for _, skill := range m.installedSkills() {
+		name := skillSlashName(skill.Name)
+		if name == "" || taken[name] || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		// Two skills whose names collide after lowercasing (e.g. "Deploy" and
+		// "deploy") map to one slash name; only the first — the one dispatch will
+		// run — may be advertised, or the row's description and the executed
+		// instructions silently diverge.
+		taken[name] = true
+		desc := strings.TrimSpace(skill.Description)
+		if desc == "" {
+			desc = "Skill: /" + name
+		} else {
+			desc += " (skill)"
+		}
+		out = append(out, commandSuggestion{Name: "/" + name, Desc: desc})
+		if len(out) >= maxCommandSuggestions {
+			break
+		}
+	}
+	return out
 }
 
 // matchUserCommandSuggestions returns file-sourced /commands whose name has the

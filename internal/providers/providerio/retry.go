@@ -23,11 +23,17 @@ import (
 // (billable) work. Only the INITIAL request is ever in scope; once the response
 // body starts streaming it is never re-issued.
 
-const defaultMaxRetryAttempts = 3
+const defaultMaxRetryAttempts = 6
 
 // maxBackoff caps a single backoff wait so a hostile or buggy Retry-After can't
 // stall the agent for minutes.
 const maxBackoff = 30 * time.Second
+
+// retryBackoffBase is the first wait when the server supplied no Retry-After.
+// Rate-limit windows are measured in seconds, not milliseconds: retrying a 429
+// after 400ms almost always burns the attempt while still limited, so the
+// schedule is 2s, 4s, 8s, 16s, then maxBackoff. A var so tests can shrink it.
+var retryBackoffBase = 2 * time.Second
 
 // SendWithRetry issues an HTTP request, retrying ONLY the safe-to-replay server
 // responses (429 and 503, see ShouldRetryStatus) up to maxAttempts — backing off
@@ -110,17 +116,11 @@ func ShouldRetryStatus(code int) bool {
 }
 
 // Backoff waits before retry attempt N (1-based), returning false if the context
-// is cancelled during the wait. The wait is attempt*400ms unless the server
-// supplied a (positive) Retry-After, and is capped at maxBackoff.
+// is cancelled during the wait. A server-supplied (positive) Retry-After wins;
+// otherwise the wait doubles from retryBackoffBase per attempt. Either way the
+// wait is capped at maxBackoff.
 func Backoff(ctx context.Context, attempt int, retryAfter time.Duration) bool {
-	wait := time.Duration(attempt) * 400 * time.Millisecond
-	if retryAfter > 0 {
-		wait = retryAfter
-	}
-	if wait > maxBackoff {
-		wait = maxBackoff
-	}
-	timer := time.NewTimer(wait)
+	timer := time.NewTimer(backoffWait(attempt, retryAfter))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -128,6 +128,27 @@ func Backoff(ctx context.Context, attempt int, retryAfter time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// backoffWait computes the wait before retry attempt N (1-based): Retry-After
+// when supplied, else exponential from retryBackoffBase, both capped at
+// maxBackoff. The exponent is clamped so a large attempt count cannot overflow.
+func backoffWait(attempt int, retryAfter time.Duration) time.Duration {
+	wait := retryAfter
+	if wait <= 0 {
+		exponent := attempt - 1
+		if exponent > 5 {
+			exponent = 5
+		}
+		if exponent < 0 {
+			exponent = 0
+		}
+		wait = retryBackoffBase * time.Duration(1<<exponent)
+	}
+	if wait > maxBackoff {
+		wait = maxBackoff
+	}
+	return wait
 }
 
 // RetryAfter parses a response's Retry-After header (delay-seconds or an HTTP

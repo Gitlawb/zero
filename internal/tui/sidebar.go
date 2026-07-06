@@ -82,7 +82,7 @@ func (m model) sidebarToggleAllowed() bool {
 // would have any visible effect. The subchat drill-in keeps its own single-column
 // view, so the sidebar is suppressed there.
 func (m model) sidebarAvailable() bool {
-	if !m.altScreen || m.height <= 0 || m.subchat.active {
+	if !m.altScreen || m.height <= 0 || m.subchat.active || m.transcriptDetailed {
 		return false
 	}
 	if sidebarWidth(m.width) <= 0 {

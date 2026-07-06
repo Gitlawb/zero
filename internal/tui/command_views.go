@@ -698,3 +698,19 @@ func (m model) debugText() string {
 		}},
 	})
 }
+
+// skillsText is the /skills fallback when NO skills are installed — an install
+// hint. With skills present /skills opens the searchable skill picker instead
+// (see newSkillPicker), matching how /model works.
+func (m model) skillsText() string {
+	return renderCommandOutput(commandOutput{
+		Title:  "Skills",
+		Status: commandStatusInfo,
+		Sections: []commandSection{{
+			Lines: []string{"No skills installed."},
+		}},
+		Hints: []string{
+			"install one: create <skills-dir>/<name>/SKILL.md (see `zero skills`)",
+		},
+	})
+}

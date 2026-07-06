@@ -426,7 +426,6 @@ func stringListArgWebSearch(args map[string]any, key string) (domains []string, 
 	if !ok || value == nil {
 		return nil, false, nil
 	}
-	provided = true
 	raw, ok := value.([]any)
 	if !ok {
 		if asString, ok2 := value.([]string); ok2 {

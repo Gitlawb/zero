@@ -18,12 +18,17 @@ import (
 )
 
 const (
-	defaultWebFetchMaxBytes = 64 * 1024
-	maxWebFetchMaxBytes     = 512 * 1024
-	webFetchTimeout         = 10 * time.Second
+	// Raw-body budgets. HTML responses are converted to markdown before they
+	// reach the model (see web_fetch_markdown.go), so a generous raw budget
+	// does not translate into a generous context cost — conversion typically
+	// shrinks a page by an order of magnitude. 64KiB of raw HTML often held
+	// nothing but a page's <head>, which starved research tasks.
+	defaultWebFetchMaxBytes = 256 * 1024
+	maxWebFetchMaxBytes     = 2 * 1024 * 1024
+	webFetchTimeout         = 30 * time.Second
 	webFetchRedirectLimit   = 5
 	webFetchErrorBodyLimit  = 4 * 1024
-	webFetchPublicOnlyHint  = "web_fetch only supports public remote HTTP/HTTPS URLs. For localhost or private network URLs, use bash with curl so sandbox network permission can apply."
+	webFetchPublicOnlyHint  = "web_fetch only supports public remote HTTP/HTTPS URLs. For localhost or private network URLs, use bash with curl so sandbox network permission can apply"
 )
 
 type webFetchTool struct {
@@ -115,10 +120,16 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 					},
 					"max_bytes": {
 						Type:        "integer",
-						Description: "Maximum response body bytes to return.",
+						Description: "Maximum raw response body bytes to download before conversion.",
 						Default:     defaultWebFetchMaxBytes,
 						Minimum:     intPtr(1),
 						Maximum:     intPtr(maxWebFetchMaxBytes),
+					},
+					"format": {
+						Type:        "string",
+						Description: "auto (default): HTML responses are converted to compact markdown, everything else is returned as-is. raw: never convert. markdown: force conversion.",
+						Enum:        []string{"auto", "raw", "markdown"},
+						Default:     "auto",
 					},
 				},
 				Required:             []string{"url"},
@@ -169,6 +180,18 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	maxBytes, err := intArg(args, "max_bytes", defaultWebFetchMaxBytes, 1, maxWebFetchMaxBytes)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error())
+	}
+	format, err := stringArg(args, "format", "auto", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error())
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	switch format {
+	case "", "auto":
+		format = "auto"
+	case "raw", "markdown":
+	default:
+		return errorResult(`Error: Invalid arguments for web_fetch: format must be "auto", "raw", or "markdown".`)
 	}
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
@@ -224,14 +247,28 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	}
 	body = redactWebFetchText(body)
 
-	output := strings.Join([]string{
+	// HTML responses are converted to compact markdown by default: raw HTML is
+	// mostly markup, so conversion typically shrinks the page by an order of
+	// magnitude and the model reads content instead of boilerplate. format=raw
+	// is the escape hatch for pages the converter mangles.
+	converted := false
+	if format == "markdown" || (format == "auto" && looksLikeHTML(contentType, body)) {
+		if markdown := htmlToMarkdown(body); markdown != "" {
+			body = markdown
+			converted = true
+		}
+	}
+
+	headers := []string{
 		"URL: " + finalURL,
 		"Status: " + webFetchStatusLine(response),
 		"Content-Type: " + firstNonEmptyString(contentType, "unknown"),
 		"Bytes: " + strconv.Itoa(len(body)),
-		"",
-		body,
-	}, "\n")
+	}
+	if converted {
+		headers = append(headers, "Converted: html -> markdown (pass format: \"raw\" for the original HTML)")
+	}
+	output := strings.Join(append(headers, "", body), "\n")
 
 	return Result{
 		Status:    StatusOK,
@@ -243,6 +280,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 			"content_type": contentType,
 			"bytes":        strconv.Itoa(len(body)),
 			"truncated":    strconv.FormatBool(truncated),
+			"converted":    strconv.FormatBool(converted),
 		},
 	}
 }
@@ -310,7 +348,7 @@ func webFetchRedirectPolicy(previous func(*http.Request, []*http.Request) error,
 			return fmt.Errorf("too many redirects: maximum is %d", webFetchRedirectLimit)
 		}
 		if err := validateParsedWebFetchURL(request.Context(), request.URL, resolver); err != nil {
-			return fmt.Errorf("Unsafe redirect URL: %w", err)
+			return fmt.Errorf("unsafe redirect URL: %w", err)
 		}
 		if previous != nil {
 			return previous(request, via)

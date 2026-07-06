@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -84,7 +83,12 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
 	}
-	if issue := detectShellCommandIssue(commandText, runtime.GOOS); issue != nil {
+	// Resolve the command engine before the MSYS preflight check so an
+	// approved require_escalated call (commandEngine == nil, truly
+	// unsandboxed) can actually bypass the MSYS guard instead of being
+	// hard-blocked by the same check it was meant to escalate past.
+	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
+	if issue := detectShellCommandIssue(commandText, runtime.GOOS); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
 
@@ -107,7 +111,6 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		"cwd":        relativeCwd,
 		"timeout_ms": strconv.Itoa(timeoutMS),
 	}
-	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
 	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
 		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
 	}
@@ -120,14 +123,17 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			Meta:   meta,
 		}
 	}
-	// Release any plan-scoped resources once the command has finished running.
 	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	// Bound the capture so a command with runaway output (`cat huge.log`, `yes`)
+	// can't grow Zero's memory before truncation: only the head+tail each stream
+	// will ever surface to the model are retained, the middle is discarded as it
+	// streams, and the true size is counted for the truncation marker.
+	stdout := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
+	stderr := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
+	command.Stdout = stdout
+	command.Stderr = stderr
 
 	// Kill the shell as a process group on timeout and bound the post-kill I/O
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
@@ -139,7 +145,12 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)
-	stderrText := appendSandboxBlocks(stderr.String(), monitor.Stop())
+	stdoutText := stdout.retained()
+	stderrRetained := stderr.retained()
+	stderrText := appendSandboxBlocks(stderrRetained, monitor.Stop())
+	// Sandbox blocks are extra model-visible stderr bytes appended after capture;
+	// count them toward the true total so the budget/marker stay accurate.
+	stderrTotal := stderr.total + (len(stderrText) - len(stderrRetained))
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 		return Result{
@@ -156,26 +167,31 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 				Meta:   meta,
 			}
 		}
-		markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
+		markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
+		outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
 		return Result{
-			Status: StatusError,
-			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
-			Meta:   meta,
+			Status:    StatusError,
+			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
+			Truncated: truncated,
+			Meta:      meta,
 		}
 	}
 
-	markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
+	markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
+	outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
 	if meta[SandboxLikelyDeniedMeta] == "true" {
 		return Result{
-			Status: StatusError,
-			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
-			Meta:   meta,
+			Status:    StatusError,
+			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
+			Truncated: truncated,
+			Meta:      meta,
 		}
 	}
 	return Result{
-		Status: StatusOK,
-		Output: formatBashOutput(stdout.String(), stderrText, exitCode),
-		Meta:   meta,
+		Status:    StatusOK,
+		Output:    formatBashOutput(outText, errText, exitCode),
+		Truncated: truncated,
+		Meta:      meta,
 	}
 }
 
@@ -184,6 +200,18 @@ func commandEngineForSandboxPermissions(engine *zeroSandbox.Engine, sandboxPermi
 		return nil
 	}
 	return engine
+}
+
+// msysGuardBypassed reports whether a windows_msys_sandbox preflight issue no
+// longer applies because sandbox_permissions: require_escalated actually
+// resolved to unsandboxed, host-level execution (commandEngine is nil only
+// then, per commandEngineForSandboxPermissions). MSYS coreutils fail because
+// of the sandbox's restricted token/handles, so running outside it removes
+// the failure mode this guard exists for. Any other issue kind (e.g. a real
+// cmd.exe syntax problem) still blocks regardless of escalation, since
+// running outside the sandbox does not fix a syntax error.
+func msysGuardBypassed(issue *shellIssue, commandEngine *zeroSandbox.Engine) bool {
+	return issue.Kind == windowsMsysSandboxKind && commandEngine == nil
 }
 
 // appendSandboxBlocks appends a <sandbox_blocks> block listing the denials
@@ -221,6 +249,14 @@ func shellIssueBlockResult(issue shellIssue) Result {
 	}
 }
 
+// buildBashCommand returns the exec.Cmd and the sandbox plan for running
+// commandText. On Windows, when the command is not wrapped by the sandbox
+// engine (plan.Wrapped == false), it also overrides the child's raw command
+// line so commandText reaches cmd.exe unescaped; see
+// zeroSandbox.WindowsShellCommandLine for why that matters. The wrapped case
+// gets the same treatment inside the sandboxed runner process itself
+// (internal/sandbox/windows_process_windows.go), since that command line is
+// built there, not here.
 func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	spec := zeroSandbox.CommandSpec{
 		Name: shellExecutable(),
@@ -228,7 +264,11 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 		Dir:  absoluteCwd,
 	}
 	if engine != nil {
-		return engine.CommandContext(ctx, spec)
+		command, plan, err := engine.CommandContext(ctx, spec)
+		if err == nil {
+			applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
+		}
+		return command, plan, err
 	}
 	plan := zeroSandbox.CommandPlan{
 		Backend: zeroSandbox.Backend{
@@ -242,6 +282,7 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	}
 	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	command.Dir = spec.Dir
+	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
 	return command, plan, nil
 }
 
@@ -302,7 +343,7 @@ func shellExecutable() string {
 
 func shellArguments(command string) []string {
 	if runtime.GOOS == "windows" {
-		return []string{"/d", "/s", "/c", command}
+		return zeroSandbox.WindowsShellArgs(command)
 	}
 	return []string{"-c", command}
 }
@@ -345,9 +386,178 @@ func formatBashOutput(stdout string, stderr string, exitCode int) string {
 	return strings.Join(parts, "\n")
 }
 
-func formatBashOutputWithShellHint(command string, stdout string, stderr string, exitCode int, meta map[string]string) string {
+// bashOutputBudgetBytes caps each of stdout/stderr shown to the model (32 KiB
+// ≈ 8k tokens per stream). bash is the one tool that can emit unbounded output
+// (`cat large.log`, `find /`, verbose test runs); a chatty build log at the old
+// 96 KiB budget injected ~24k tokens per call and was then re-billed on every
+// following turn. Head+tail truncation keeps both the start and the end of an
+// oversized stream, since build/test failures usually surface at the tail, and
+// the full captured text is spilled to disk so nothing is lost — the model
+// greps/reads the spill instead of re-running the command.
+const bashOutputBudgetBytes = 32 * 1024
+
+// bashCaptureBudgetBytes bounds the head and tail retained IN MEMORY per
+// stream during capture. Deliberately larger than the emit budget: the extra
+// retained bytes never reach the transcript, but they make the spill file —
+// the model's recovery path — cover 6× more of the output.
+const bashCaptureBudgetBytes = 96 * 1024
+
+// budgetBashOutput truncates stdout and stderr to bashOutputBudgetBytes each,
+// keeping the head and tail of anything larger, and records raw/emitted byte
+// counts plus a truncated flag in meta (mirroring outputBudgetMeta's shape for
+// the read/search tools). Detection that needs the full output (sandbox-denial
+// scanning) must run on the raw strings before this is applied.
+func budgetBashOutput(stdout string, stderr string, meta map[string]string) (string, string, bool) {
+	return budgetBashCapture(stdout, len(stdout), stderr, len(stderr), meta)
+}
+
+// budgetBashCapture is budgetBashOutput for the streaming-capture path: outTotal
+// and errTotal are the true byte counts (from boundedBuffer.total), which may
+// exceed the retained strings when the middle was dropped during capture. Meta's
+// raw_bytes therefore reflects everything the command produced, not just what was
+// kept in memory.
+func budgetBashCapture(out string, outTotal int, errStr string, errTotal int, meta map[string]string) (string, string, bool) {
+	outText, outRaw, outTrunc := truncateHeadTailWithTotal(out, outTotal, bashOutputBudgetBytes)
+	errText, errRaw, errTrunc := truncateHeadTailWithTotal(errStr, errTotal, bashOutputBudgetBytes)
+	truncated := outTrunc || errTrunc
+	if truncated {
+		if spillPath := spillBashStreams(out, outTotal, errStr, errTotal); spillPath != "" {
+			hint := "\n[zero] captured output saved to " + spillPath + " (grep or read_file it instead of re-running)"
+			if errTrunc {
+				errText += hint
+			} else {
+				outText += hint
+			}
+			if meta != nil {
+				meta["spill_path"] = spillPath
+			}
+		}
+	}
+	if meta != nil {
+		emitted := len(outText) + len(errText)
+		meta["raw_bytes"] = strconv.Itoa(outRaw + errRaw)
+		meta["emitted_bytes"] = strconv.Itoa(emitted)
+		meta["estimated_tokens"] = strconv.Itoa(estimatedTokensFromBytes(emitted))
+		if truncated {
+			meta["truncated"] = "true"
+		}
+	}
+	return outText, errText, truncated
+}
+
+// spillBashStreams writes the retained (capture-bounded) stdout and stderr to
+// the spill directory as one sectioned file and returns its path, or "" when
+// spilling fails. The spill holds up to bashCaptureBudgetBytes of head and
+// tail per stream — everything zero kept in memory, which is more than the
+// emit budget shows the model but not necessarily the whole output. When the
+// capture itself dropped the middle of a stream (total exceeds the retained
+// bytes), a gap marker is inserted at the head/tail junction so the spilled
+// log never reads as contiguous when it is not.
+func spillBashStreams(stdout string, stdoutTotal int, stderr string, stderrTotal int) string {
+	stdout = sectionWithCaptureGap(stdout, stdoutTotal)
+	stderr = sectionWithCaptureGap(stderr, stderrTotal)
+	var combined strings.Builder
+	combined.Grow(len(stdout) + len(stderr) + 64)
+	combined.WriteString("### stdout\n")
+	combined.WriteString(stdout)
+	if !strings.HasSuffix(stdout, "\n") {
+		combined.WriteString("\n")
+	}
+	combined.WriteString("### stderr\n")
+	combined.WriteString(stderr)
+	return spillTruncatedOutput("bash", combined.String())
+}
+
+// sectionWithCaptureGap marks the point where boundedBuffer dropped the middle
+// of a stream. When total exceeds the retained bytes, the retained text is the
+// frozen head (bashCaptureBudgetBytes, always full once overflow happened)
+// followed immediately by the rolling tail — the junction sits at the head cap,
+// snapped back to a rune boundary.
+func sectionWithCaptureGap(text string, total int) string {
+	if total <= len(text) || len(text) <= bashCaptureBudgetBytes {
+		return text
+	}
+	head := utf8Prefix(text, bashCaptureBudgetBytes)
+	marker := fmt.Sprintf("\n[zero] capture gap: %d bytes omitted from the middle of this stream\n", total-len(text))
+	return head + marker + text[len(head):]
+}
+
+// boundedBuffer is an io.Writer that retains at most headCap bytes from the start
+// and tailCap bytes from the end of a stream while counting the total written, so
+// a command emitting unbounded output (`cat huge.log`, `yes`) cannot grow Zero's
+// memory: the middle is discarded as it arrives instead of buffered whole and then
+// truncated. total records the full size for the truncation marker even though the
+// middle is never held. Not safe for concurrent writes; exec drives Stdout and
+// Stderr from separate goroutines, so each stream gets its own buffer.
+type boundedBuffer struct {
+	head    []byte
+	headCap int
+	tail    []byte
+	tailCap int
+	total   int
+}
+
+func newBoundedBuffer(headCap, tailCap int) *boundedBuffer {
+	return &boundedBuffer{headCap: headCap, tailCap: tailCap}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	b.total += n
+	// Fill the head until it reaches headCap; the head is written once and frozen.
+	if len(b.head) < b.headCap {
+		take := b.headCap - len(b.head)
+		if take > len(p) {
+			take = len(p)
+		}
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	// Anything past the head feeds a rolling tail that keeps only the last tailCap
+	// bytes. Compact once it grows past 2×tailCap so the append stays amortized O(1)
+	// while memory never exceeds ~2×tailCap.
+	if len(p) > 0 && b.tailCap > 0 {
+		b.tail = append(b.tail, p...)
+		if len(b.tail) > 2*b.tailCap {
+			b.tail = append(b.tail[:0], b.tail[len(b.tail)-b.tailCap:]...)
+		}
+	}
+	return n, nil
+}
+
+// retained returns the kept head+tail bytes (marker-less) as a string. The junction
+// between head and tail lands in the middle, which the display budget trims away;
+// callers that need the true size read total separately.
+func (b *boundedBuffer) retained() string {
+	if len(b.tail) > b.tailCap {
+		// Not yet compacted since the last overflow; expose only the last tailCap.
+		return string(b.head) + string(b.tail[len(b.tail)-b.tailCap:])
+	}
+	return string(b.head) + string(b.tail)
+}
+
+// truncateHeadTailWithTotal head+tail-truncates value to maxBytes, using total —
+// the full original byte count — for the "N bytes omitted" marker and the raw
+// count. total may exceed len(value) when the middle was already discarded during
+// bounded capture (boundedBuffer): value then holds only the retained head+tail,
+// and this trims it to the display budget while still reporting the true total.
+func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, bool) {
+	if maxBytes <= 0 || total <= maxBytes {
+		return value, total, false
+	}
+	marker := fmt.Sprintf("\n[zero] output truncated: %d bytes omitted from the middle — redirect to a file and read_file a range for the full text\n", total-maxBytes)
+	budget := maxBytes - len(marker)
+	if budget < 0 {
+		budget = 0
+	}
+	head := budget / 2
+	tail := budget - head
+	return utf8Prefix(value, head) + marker + utf8Suffix(value, tail), total, true
+}
+
+func formatBashOutputWithShellHint(stdout string, stderr string, exitCode int, meta map[string]string) string {
 	output := formatBashOutput(stdout, stderr, exitCode)
-	if issue := detectShellOutputIssue(command, stdout+"\n"+stderr, runtime.GOOS); issue != nil {
+	if issue := detectShellOutputIssue(stdout+"\n"+stderr, runtime.GOOS); issue != nil {
 		meta["shell_issue"] = issue.Kind
 		output = appendShellIssueHint(output, *issue)
 	}

@@ -6,7 +6,7 @@ func TestTranscriptBodyItemsRepresentEmptyState(t *testing.T) {
 	m := mouseTestModel()
 	width := m.chatColumnWidth()
 
-	items := m.transcriptBodyItems(width, "")
+	items := m.transcriptBodyItems(width, "", false)
 	layout := layoutTranscriptBodyItems(items)
 
 	if len(layout.spans) != 1 || layout.spans[0].kind != transcriptBodyItemEmpty {
@@ -25,7 +25,7 @@ func TestTranscriptBodyItemsShiftSelectableLinesByItemStart(t *testing.T) {
 	m.transcript = appendRow(m.transcript, rowUser, "hello")
 	width := m.chatColumnWidth()
 
-	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, ""))
+	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, "", false))
 
 	if len(layout.spans) != 1 || layout.spans[0].kind != transcriptBodyItemRow {
 		t.Fatalf("spans = %#v, want one transcript row item", layout.spans)
@@ -51,7 +51,7 @@ func TestTranscriptBodyItemsKeepPendingInterimSelectableLocal(t *testing.T) {
 	m.streamingReasoning = "private thought"
 	width := m.chatColumnWidth()
 
-	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, ""))
+	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, "", false))
 
 	if len(layout.spans) != 2 {
 		t.Fatalf("spans = %#v, want separator plus pending interim", layout.spans)
@@ -181,7 +181,7 @@ func TestScrollableTranscriptItemsViewMatchesFullLayout(t *testing.T) {
 	width := m.chatColumnWidth()
 	header := m.pinnedTitleBar(width)
 	footer := m.footerView(width)
-	items := m.transcriptBodyItems(width, "")
+	items := m.transcriptBodyItems(width, "", false)
 	full := layoutTranscriptBodyItems(items)
 
 	got := m.scrollableTranscriptItemsView(header, items, footer, width, "")

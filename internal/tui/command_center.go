@@ -482,6 +482,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 		lines = append(lines, target.notice)
 	}
 	lines = append(lines, summary)
+	if warn := m.visionDropWarning(); warn != "" {
+		lines = append(lines, warn)
+	}
 	return m, strings.Join(lines, "\n")
 }
 
@@ -536,7 +539,11 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 			cmds = append(cmds, cmd)
 		}
 	}
-	return m, fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model), tea.Batch(cmds...)
+	status := fmt.Sprintf("Model\nSwitched to %s · %s", target.Name, target.Model)
+	if warn := m.visionDropWarning(); warn != "" {
+		status += "\n" + warn
+	}
+	return m, status, tea.Batch(cmds...)
 }
 
 // profileWithCredential fills a profile's APIKey for provider construction the same

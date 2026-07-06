@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -27,15 +28,39 @@ func proposedCommandPrefix(toolName string, args map[string]any) []string {
 		}
 		return nil
 	}
-	for _, tokens := range segments {
-		if !knownSafeCommandSegment(tokens) && sandbox.ValidCommandPrefix(tokens) {
-			return append([]string(nil), tokens...)
+	// Only propose approving a prefix of one segment when every other segment
+	// in the command is independently known-safe. Once a prefix is approved,
+	// shellExecutionArgsForApproval escalates the whole command (every
+	// segment, not just the approved one) to bypass the sandbox, so offering a
+	// prefix that leaves an MSYS-prone (or otherwise unsafe) segment uncovered
+	// would let that segment run unsandboxed without ever being reviewed.
+	for index, tokens := range segments {
+		if knownSafeCommandSegment(tokens) {
+			continue
 		}
+		if !sandbox.ValidCommandPrefix(tokens) || !otherSegmentsKnownSafe(segments, index) {
+			return nil
+		}
+		return append([]string(nil), tokens...)
 	}
 	if len(segments) == 0 || !sandbox.ValidCommandPrefix(segments[0]) {
 		return nil
 	}
 	return append([]string(nil), segments[0]...)
+}
+
+// otherSegmentsKnownSafe reports whether every segment other than the one at
+// skip is known-safe on its own.
+func otherSegmentsKnownSafe(segments [][]string, skip int) bool {
+	for index, tokens := range segments {
+		if index == skip {
+			continue
+		}
+		if !knownSafeCommandSegment(tokens) {
+			return false
+		}
+	}
+	return true
 }
 
 func matchCommandPrefix(toolName string, args map[string]any, options Options) (sandbox.CommandPrefixGrant, bool, bool) {
@@ -168,10 +193,6 @@ func cleanPrefixRule(prefix []string) []string {
 	return cleaned
 }
 
-func safeRequestedPrefix(prefix []string, command []string) bool {
-	return safeRequestedPrefixForSegments(prefix, [][]string{command})
-}
-
 func safeRequestedPrefixForSegments(prefix []string, segments [][]string) bool {
 	if len(prefix) == 0 || !sandbox.ValidCommandPrefix(prefix) {
 		return false
@@ -194,14 +215,6 @@ func safeRequestedPrefixForSegments(prefix []string, segments [][]string) bool {
 		return false
 	}
 	return matched
-}
-
-func safeShellCommandTokens(command string) ([]string, bool) {
-	segments, ok := safeShellCommandSegments(command)
-	if !ok || len(segments) != 1 {
-		return nil, false
-	}
-	return segments[0], true
 }
 
 func safeShellCommandSegments(command string) ([][]string, bool) {
@@ -275,7 +288,11 @@ func knownSafeCommandSegment(command []string) bool {
 	if len(command) == 0 {
 		return false
 	}
-	switch commandName(command[0]) {
+	name := commandName(command[0])
+	if runtime.GOOS == "windows" && tools.MsysProneCommandName(name) {
+		return false
+	}
+	switch name {
 	case "cat", "cd", "cut", "echo", "expr", "false", "grep", "head", "id",
 		"ls", "nl", "paste", "pwd", "rev", "seq", "stat", "tail", "tr",
 		"true", "uname", "uniq", "wc", "which", "whoami":

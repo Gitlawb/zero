@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -262,4 +263,97 @@ func (m model) keyMatch(b parsedBinding, msg tea.KeyMsg, defaultFn func(tea.KeyM
 		return b.Matcher()(msg)
 	}
 	return defaultFn(msg)
+}
+
+// reservedBindings lists hardcoded (non-configurable) chords handled directly in
+// model.go's key dispatch. If a configurable binding uses one of these chords,
+// one of the actions becomes unreachable (depending on switch order), so
+// sanitizeKeyBindings reverts the configurable binding back to its default.
+var reservedBindings = []struct {
+	binding     parsedBinding
+	description string
+}{
+	{parseBinding("ctrl+c"), "cancel / exit"},
+	{parseBinding("esc"), "cancel / close"},
+	{parseBinding("enter"), "submit"},
+	{parseBinding("shift+tab"), "cycle permission mode"},
+	{parseBinding("tab"), "navigation / completion"},
+	{parseBinding("backspace"), "composer edit / attachment removal"},
+	{parseBinding("up"), "history/navigation"},
+	{parseBinding("down"), "history/navigation"},
+	{parseBinding("pgup"), "transcript scroll"},
+	{parseBinding("pgdown"), "transcript scroll"},
+	{parseBinding("ctrl+f"), "favorite model (in the /model picker)"},
+	{parseBinding("?"), "help overlay"},
+}
+
+// sanitizeKeyBindings drops (reverts to default) any configured binding that
+// collides with a reserved hardcoded chord above, or with another
+// configured binding, since either collision would silently make one of the
+// two actions permanently unreachable. Returns the sanitized bindings plus a
+// human-readable warning for each dropped binding, for the caller to surface
+// as a startup notice.
+func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
+	entries := []struct {
+		name           string
+		binding        *parsedBinding
+		defaultBinding parsedBinding
+	}{
+		{"toggleDetailed", &b.toggleDetailed, parseBinding("ctrl+o")},
+		{"toggleMouse", &b.toggleMouse, parseBinding("ctrl+e")},
+		{"cycleReasoning", &b.cycleReasoning, parseBinding("ctrl+t")},
+		{"togglePlan", &b.togglePlan, parseBinding("ctrl+p")},
+		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
+	}
+
+	var warnings []string
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		for _, other := range entries {
+			if other.name == e.name || !other.binding.isZero() {
+				continue
+			}
+			if *e.binding == other.defaultBinding {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with keybindings.%s default (%s); using the default instead.",
+					e.name, e.binding.Label(), other.name, other.defaultBinding.Label()))
+				*e.binding = parsedBinding{}
+				break
+			}
+		}
+	}
+
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		for _, reserved := range reservedBindings {
+			if *e.binding == reserved.binding {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with the built-in %s shortcut; using the default instead.",
+					e.name, e.binding.Label(), reserved.description))
+				*e.binding = parsedBinding{}
+				break
+			}
+		}
+	}
+
+	claimedBy := map[parsedBinding]string{}
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		if other, ok := claimedBy[*e.binding]; ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"keybindings.%s (%s) conflicts with keybindings.%s; using the default instead.",
+				e.name, e.binding.Label(), other))
+			*e.binding = parsedBinding{}
+			continue
+		}
+		claimedBy[*e.binding] = e.name
+	}
+
+	return b, warnings
 }

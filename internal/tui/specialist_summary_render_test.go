@@ -22,7 +22,7 @@ func TestTranscriptBodyItemsIncludesSummaryBeforeCards(t *testing.T) {
 		specialistInfo: &specialistInfo{name: "explorer", description: "map code", childSessionID: "s2", status: specialistCompleted, startedAt: now, completedAt: now, tokenCount: 2000},
 	})
 
-	items := m.transcriptBodyItems(80, "")
+	items := m.transcriptBodyItems(80, "", false)
 	body := bodyItemsString(m, items, 80)
 	if !strings.Contains(body, "specialists") {
 		t.Errorf("transcript body should contain summary line with 'specialists', got:\n%s", body)

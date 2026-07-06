@@ -33,7 +33,7 @@ func TestFormatRepoInfoText(t *testing.T) {
 	contrib := 3
 	info := repoInfoTestData(age, contrib)
 	out := formatRepoInfo(info)
-	for _, want := range []string{"Files", "TypeScript", "main", "GitHub Actions", "42", "3"} {
+	for _, want := range []string{"Files", "TypeScript", "main", "GitHub Actions", "42", "3", "Commits:      100", "Branches:     5", "Tags:         10"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("text output missing %q:\n%s", want, out)
 		}
@@ -113,12 +113,16 @@ func initTempGitRepo(t *testing.T) string {
 }
 
 func repoInfoTestData(age, contrib int) repoinfo.Info {
+	commits := 100
+	branches := 5
+	tags := 10
 	return repoinfo.Info{
 		FileCount: 10, DirectoryCount: 3, MaxDepth: 2, LOCEstimate: 500,
 		Languages:       []repoinfo.LangStat{{Name: "TypeScript", LOCEstimate: 400, FileCount: 4}},
 		PrimaryLanguage: "TypeScript", LanguageCount: 1,
 		WorkspaceType: "none", CICD: []string{"GitHub Actions"},
 		HasGit: true, Branch: "main", AgeDays: &age, Contributors90d: &contrib,
+		CommitCount: &commits, BranchCount: &branches, TagCount: &tags,
 	}
 }
 

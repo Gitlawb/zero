@@ -66,10 +66,8 @@ func (m model) modelContextWindow(modelName string) int {
 	if trimmed == "" {
 		return 0
 	}
-	if registry, err := modelregistry.DefaultRegistry(); err == nil {
-		if entry, ok := registry.Resolve(trimmed); ok && entry.ContextLimits.ContextWindow > 0 {
-			return entry.ContextLimits.ContextWindow
-		}
+	if entry, ok := m.modelCatalog.Resolve(trimmed); ok && entry.ContextLimits.ContextWindow > 0 {
+		return entry.ContextLimits.ContextWindow
 	}
 	// Live-discovered window, preferring the ACTIVE provider's models so a model ID
 	// shared across providers resolves to the provider actually in use; only then

@@ -280,7 +280,7 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 }
 
 func (m model) composerMouseSelectionBlocked() bool {
-	return m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+	return m.transcriptDetailed || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
 		m.mcpManager != nil || m.picker != nil || m.suggestionsActive()
 }
 
@@ -306,7 +306,7 @@ func (m model) composerPositionAtVisualCell(x int, y int, width int) (int, bool)
 func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	state := m.currentComposerState()
 	switch {
-	case keyIs(msg, tea.KeyEnter) && keyAlt(msg):
+	case keyIs(msg, tea.KeyEnter) && (keyAlt(msg) || keyShift(msg)):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
 	case keyCtrl(msg, 'j'):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")

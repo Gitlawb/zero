@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/repomap"
 	"github.com/Gitlawb/zero/internal/workspaceseed"
 )
@@ -37,6 +38,14 @@ const fallbackSystemPrompt = "You are Zero, a terminal coding agent. Help with t
 // from the git root down to the cwd and injects the matches in
 // general-to-specific order.
 var projectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
+
+// userContextFile is the per-user instruction file, resolved under
+// config.UserConfigDir()/zero/ alongside the rest of Zero's per-user config
+// (config.json, commands, specialists) so users can keep personal guidance out
+// of individual repositories.
+const userContextFile = "ZERO.md"
+
+var userConfigDirForPrompt = config.UserConfigDir
 
 // maxProjectContextBytes caps how much of a single project doc is injected so
 // a large guidelines file can't blow the context budget.
@@ -80,6 +89,13 @@ func buildSystemPrompt(options Options) string {
 	}
 	if seed := workspaceSeedContext(options.Cwd); seed != "" {
 		sections = append(sections, seed)
+	}
+	// User guidelines are injected before workspace/project guidelines so the
+	// project's AGENTS.md/ZERO.md is the later, more specific instruction
+	// block. See userGuidelines for the explicit precedence note carried in
+	// the section text itself.
+	if user := userGuidelines(); user != "" {
+		sections = append(sections, user)
 	}
 	if ws := workspaceContext(options.Cwd); ws != "" {
 		sections = append(sections, ws)
@@ -175,10 +191,19 @@ func specialistDelegationContext(options Options) string {
 // when no skills are installed, so a skill-less run reproduces the previous prompt
 // byte-for-byte.
 // skillsContextListBudget bounds the bytes spent listing individual skills so a
-// workspace with dozens of them can't bloat every turn's prompt. Skills past the
-// budget are summarized as a count rather than dropped — the model can still load
-// any of them by name (an unknown name returns the full list from the skill tool).
-const skillsContextListBudget = 640
+// workspace with an extreme number of them can't bloat every turn's prompt.
+// Skills past the budget are summarized as a count rather than dropped — the
+// model can still load any of them by name (an unknown name returns the full
+// list from the skill tool).
+//
+// The budget is deliberately generous — roughly 18 skills with maximally long
+// (200-rune, ASCII) descriptions, or 40+ with typical terser ones; non-ASCII
+// descriptions consume it faster since the budget counts bytes. This list is
+// the model's ONLY discovery surface, so a skill squeezed out of it effectively
+// never triggers. The previous 640-byte cap silently broke invocation for
+// anyone with more than ~6 skills — the model cannot match a request against a
+// skill it cannot see.
+const skillsContextListBudget = 4096
 
 func skillsContext(options Options) string {
 	if len(options.Skills) == 0 {
@@ -186,7 +211,7 @@ func skillsContext(options Options) string {
 	}
 	var b strings.Builder
 	b.WriteString("<available_skills>\n")
-	b.WriteString("Reusable, on-demand instruction sets you can load with the skill tool. When a request matches one, call skill with its exact name to pull in its guidance before acting — do not guess names or skip a relevant skill.\n")
+	b.WriteString("Reusable, on-demand instruction sets you can load with the skill tool. Before acting on a request, scan this list; when the request matches a skill's name or description, call skill with its exact name FIRST and follow the loaded guidance — do not guess names, do not skip a matching skill, and do not substitute your own approach for its instructions.\n")
 	listed, spent, omitted := 0, 0, 0
 	for _, info := range options.Skills {
 		name := strings.TrimSpace(info.Name)
@@ -216,9 +241,11 @@ func skillsContext(options Options) string {
 }
 
 // truncateForSkillLine keeps a skill's one-line description short so a single
-// verbose description can't dominate the skills-list budget.
+// verbose description can't dominate the skills-list budget. The cap is roomy on
+// purpose: the description carries the skill's trigger conditions ("use when…"),
+// and truncating those is what stops the model from ever invoking the skill.
 func truncateForSkillLine(desc string) string {
-	const maxDescRunes = 100
+	const maxDescRunes = 200
 	runes := []rune(desc)
 	if len(runes) <= maxDescRunes {
 		return desc
@@ -259,7 +286,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
 	if runtime.GOOS == "windows" {
-		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
+		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories. Do not pipe to or invoke POSIX coreutils from Git for Windows (usr\\bin head/grep/tail/cat/...): they are MSYS binaries and fail under the write-restricted sandbox; use native Zero tools (grep, read_file, list_directory, glob) or cmd.exe findstr/more instead, or sandbox_permissions require_escalated only when host-level execution is truly required.\n")
 	} else {
 		b.WriteString("Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
 	}
@@ -312,18 +339,98 @@ func projectGuidelines(cwd, gitRoot string) string {
 		if remaining := maxProjectContextTotalBytes - totalUsed; remaining < limit {
 			limit = remaining
 		}
-		if len(content) > limit {
-			cut := limit
-			for cut > 0 && !utf8.RuneStart(content[cut]) {
-				cut--
-			}
-			content = content[:cut] + "\n… (truncated)"
-		}
+		content = truncateGuidelineContent(content, limit)
 		label := projectGuidelineLabel(match, gitRoot)
 		b.WriteString("\n\n## Project guidelines (" + label + ")\n\n" + content)
 		totalUsed += len(content)
 	}
 	return b.String()
+}
+
+// userGuidelines returns the per-user ZERO.md instructions block, if present.
+// The file lives in config.UserConfigDir()/zero/ next to Zero's other
+// per-user config; the basename match is case-insensitive so a file saved as
+// zero.md still resolves on case-sensitive filesystems, mirroring the project
+// guideline loader. The section carries an explicit precedence note because
+// this is a global, personal preferences file: it is injected earlier in the
+// prompt than the project's AGENTS.md/ZERO.md (see buildSystemPrompt), and
+// the note keeps that precedence unambiguous even if a model weighs later
+// context more heavily than section order alone implies.
+func userGuidelines() string {
+	configDir, err := userConfigDirForPrompt()
+	if err != nil {
+		return ""
+	}
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return ""
+	}
+	match := findCaseInsensitiveFile(filepath.Join(configDir, "zero"), userContextFile)
+	if match == "" {
+		return ""
+	}
+	data, err := os.ReadFile(match)
+	if err != nil {
+		return ""
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return ""
+	}
+	content = truncateGuidelineContent(content, maxProjectContextBytes)
+	return "## User guidelines (" + filepath.Base(match) + ")\n\n" +
+		"These are the operator's personal preferences, not project policy. " +
+		"Where they conflict with a repository's project guidelines below (AGENTS.md/ZERO.md), the project guidelines take precedence.\n\n" +
+		content
+}
+
+// truncationMarker is appended to guideline content that was cut short.
+const truncationMarker = "\n… (truncated)"
+
+// truncateGuidelineContent caps content at limit bytes without splitting a
+// UTF-8 rune, appending a truncation marker when anything was cut. Space for
+// the marker is reserved before choosing the cut point. When limit is too
+// small to fit the marker itself, the marker is dropped instead, so the
+// returned string never exceeds limit for any non-negative limit.
+func truncateGuidelineContent(content string, limit int) string {
+	if len(content) <= limit {
+		return content
+	}
+	if limit <= 0 {
+		return ""
+	}
+	cut := limit - len(truncationMarker)
+	if cut < 0 {
+		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(content[cut]) {
+		cut--
+	}
+	if truncated := content[:cut] + truncationMarker; len(truncated) <= limit {
+		return truncated
+	}
+	// limit is smaller than the marker itself: fall back to a hard,
+	// rune-safe cut at limit bytes with no marker rather than exceeding it.
+	end := limit
+	for end > 0 && !utf8.RuneStart(content[end]) {
+		end--
+	}
+	return content[:end]
+}
+
+// findCaseInsensitiveFile returns the on-disk path of the regular file in dir
+// whose name matches basename case-insensitively, or "" when absent.
+func findCaseInsensitiveFile(dir, basename string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(e.Name(), basename) {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // projectGuidelineDirs returns the directory chain from gitRoot to cwd
@@ -378,23 +485,16 @@ func projectGuidelineLabel(match, gitRoot string) string {
 // Returns "" when nothing matches.
 func findProjectContextFile(dir string) string {
 	for _, name := range projectContextFiles {
-		baseLower := strings.ToLower(filepath.Base(name))
 		// Walk to the file's parent through dir with case-insensitive segment
-		// matching, then find a regular file with the same lowercased
-		// basename. This works on both case-sensitive and case-insensitive
-		// filesystems and always returns the on-disk filename.
+		// matching, then find a regular file with the same basename. This works
+		// on both case-sensitive and case-insensitive filesystems and always
+		// returns the on-disk filename.
 		parent, ok := resolveDirCaseInsensitive(filepath.Dir(filepath.Join(dir, name)), dir)
 		if !ok {
 			continue
 		}
-		entries, err := os.ReadDir(parent)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.ToLower(e.Name()) == baseLower {
-				return filepath.Join(parent, e.Name())
-			}
+		if match := findCaseInsensitiveFile(parent, filepath.Base(name)); match != "" {
+			return match
 		}
 	}
 	return ""

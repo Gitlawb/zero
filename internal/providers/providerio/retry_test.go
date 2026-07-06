@@ -94,7 +94,40 @@ func TestBackoffWaitsThenReturnsTrue(t *testing.T) {
 	}
 }
 
+// shrinkBackoff makes retry waits negligible for the duration of a test.
+func shrinkBackoff(t *testing.T) {
+	t.Helper()
+	saved := retryBackoffBase
+	retryBackoffBase = time.Millisecond
+	t.Cleanup(func() { retryBackoffBase = saved })
+}
+
+func TestBackoffWaitSchedule(t *testing.T) {
+	// Without Retry-After the wait doubles per attempt from 2s and caps at 30s;
+	// a supplied Retry-After wins but is capped too.
+	cases := []struct {
+		attempt    int
+		retryAfter time.Duration
+		want       time.Duration
+	}{
+		{1, 0, 2 * time.Second},
+		{2, 0, 4 * time.Second},
+		{3, 0, 8 * time.Second},
+		{4, 0, 16 * time.Second},
+		{5, 0, 30 * time.Second},  // 32s capped
+		{50, 0, 30 * time.Second}, // clamped exponent, no overflow
+		{1, 7 * time.Second, 7 * time.Second},
+		{1, 5 * time.Minute, 30 * time.Second}, // hostile Retry-After capped
+	}
+	for _, c := range cases {
+		if got := backoffWait(c.attempt, c.retryAfter); got != c.want {
+			t.Errorf("backoffWait(%d, %v) = %v, want %v", c.attempt, c.retryAfter, got, c.want)
+		}
+	}
+}
+
 func TestSendWithRetryRetriesThenSucceeds(t *testing.T) {
+	shrinkBackoff(t)
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&hits, 1) == 1 {
@@ -140,6 +173,7 @@ func TestSendWithRetryReturnsNonRetryableImmediately(t *testing.T) {
 }
 
 func TestSendWithRetryReturnsLastResponseAfterMaxAttempts(t *testing.T) {
+	shrinkBackoff(t)
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)

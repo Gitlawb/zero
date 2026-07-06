@@ -590,8 +590,16 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	if profile.Name == "" {
 		profile.Name = string(providerKind)
 	}
+	// A non-official baseURL from the environment signals a proxy/gateway, so promote
+	// the first-party kind to its -compatible transport (which accepts a custom URL).
+	// Env-only by design: a custom baseURL in a project config.json is left as-is and
+	// rejected by Resolve, so an untrusted project can't redirect a first-party key to
+	// another host.
 	if providerKind == ProviderKindOpenAI && baseURL != "" && !isOfficialOpenAIBaseURL(baseURL) {
 		profile.ProviderKind = ProviderKindOpenAICompatible
+	}
+	if providerKind == ProviderKindAnthropic && baseURL != "" && !isOfficialAnthropicBaseURL(baseURL) {
+		profile.ProviderKind = ProviderKindAnthropicCompat
 	}
 	// When the env supplies only credentials (no baseURL) for a provider name that
 	// already exists, don't force the standard transport kind — a same-named

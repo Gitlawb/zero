@@ -254,6 +254,14 @@ func scopedReadRoots(workspaceRoot string, scope PathScope) ([]string, error) {
 }
 
 func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	// Spill files (truncated tool output saved under the per-uid temp dir) are
+	// readable regardless of scope: the truncation notice tells the model to
+	// read_file/grep them, which must actually work. resolveSpillReadPath
+	// verifies containment after symlink resolution, so this cannot be used to
+	// reach anything outside the spill dir.
+	if spillPath, ok := resolveSpillReadPath(requestedPath); ok {
+		return spillPath, spillPath, nil
+	}
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspacePath(workspaceRoot, requestedPath)
 	}

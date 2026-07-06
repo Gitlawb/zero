@@ -22,6 +22,12 @@ const (
 	// calls have executed since the last update_plan call.
 	staleToolCallThreshold = 10
 
+	// stalePlanTurnThreshold injects the same one-shot reminder once this many
+	// turns have passed since the last update_plan while plan items are still
+	// pending — the turn-based complement to staleToolCallThreshold, catching a
+	// plan that drifts stale across many turns that each make few tool calls.
+	stalePlanTurnThreshold = 8
+
 	// toolOnlyProgressReminderAt injects a one-shot progress nudge after this
 	// many consecutive turns contain tool calls but no visible assistant text.
 	// It does not stop the run; it tells the model to synthesize what it already
@@ -43,8 +49,12 @@ const (
 	toolFailureHintAt = 2
 	// toolFailureStopAt halts the run after a tool fails this many times in a row
 	// with the same error, so NO model (weak or strong) burns turns looping on a
-	// bad call.
-	toolFailureStopAt = 4
+	// bad call. Set to 6 (not 4): a corrective hint fires at toolFailureHintAt (2),
+	// and a model iterating on a genuinely tricky edit can legitimately fail a few
+	// times after the hint while converging — stopping at 4 cut those runs short.
+	// The streak still resets the moment the tool succeeds or hits a different
+	// error, so this only affects true same-error loops.
+	toolFailureStopAt = 6
 
 	// maxContinueNudges bounds how many times the headless completion gate
 	// (Options.RequireCompletionSignal) re-prompts a model that stopped without a
@@ -354,8 +364,13 @@ type guardState struct {
 	emptyTurns               int
 	totalToolCalls           int
 	toolCallsSincePlanUpdate int
-	planEverCalled           bool
-	notCalledReminderSent    bool
+	// turnsSincePlanUpdate counts turns (not individual tool calls) since the last
+	// update_plan, so a plan that goes stale across many low-tool-call turns is
+	// still caught — the tool-call counter alone can take many turns to trip when
+	// the model makes only one call per turn.
+	turnsSincePlanUpdate  int
+	planEverCalled        bool
+	notCalledReminderSent bool
 	// staleReminderSent records whether the stale reminder has already fired for
 	// the current stale interval. It is cleared when a plan update opens a new
 	// interval, making the reminder one-shot per interval rather than per turn.
@@ -414,8 +429,9 @@ func (state *guardState) observeToolResult(name string, failed bool, output stri
 func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (stop bool) {
 	hasToolCalls := len(collected.ToolCalls) > 0
 	hasVisibleText := strings.TrimSpace(collected.Text) != ""
+	hasReasoning := collected.HasReasoning || len(collected.ReasoningBlocks) > 0
 
-	if hasToolCalls || hasVisibleText {
+	if hasToolCalls || hasVisibleText || hasReasoning {
 		state.emptyTurns = 0
 	} else {
 		state.emptyTurns++
@@ -427,11 +443,16 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 		state.toolOnlyReminderSent = false
 	}
 
+	// One turn has passed; the plan-update below resets this to 0 when the model
+	// refreshes the plan this turn.
+	state.turnsSincePlanUpdate++
+
 	for _, call := range collected.ToolCalls {
 		state.totalToolCalls++
 		if call.Name == planToolName {
 			state.planEverCalled = true
 			state.toolCallsSincePlanUpdate = 0
+			state.turnsSincePlanUpdate = 0
 			// A fresh plan update opens a new stale interval.
 			state.staleReminderSent = false
 			// Record how many items remain so the completion gate knows whether
@@ -485,10 +506,12 @@ func (state *guardState) progressReminder() string {
 // number of turns completed so far).
 func (state *guardState) planReminder(turn int) string {
 	// STALE reminder takes priority: a long run without a plan update is the
-	// stronger signal. One-shot per stale interval.
-	if state.planEverCalled &&
-		!state.staleReminderSent &&
-		state.toolCallsSincePlanUpdate >= staleToolCallThreshold {
+	// stronger signal. Fires on either the tool-call streak OR a turn streak with
+	// pending items (so a plan drifting stale across many low-call turns is caught,
+	// while a fully-completed plan is left alone). One-shot per stale interval.
+	if state.planEverCalled && !state.staleReminderSent &&
+		(state.toolCallsSincePlanUpdate >= staleToolCallThreshold ||
+			(state.turnsSincePlanUpdate >= stalePlanTurnThreshold && state.planItemsPending > 0)) {
 		state.staleReminderSent = true
 		return planStaleReminder(state.toolCallsSincePlanUpdate)
 	}

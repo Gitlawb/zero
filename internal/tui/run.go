@@ -25,7 +25,7 @@ func Run(ctx context.Context, options Options) int {
 
 	externalSink := options.RuntimeMessageSink
 	var program *tea.Program
-	options.RuntimeMessageSink = func(msg tea.Msg) {
+	forward := func(msg tea.Msg) {
 		if externalSink != nil {
 			externalSink(msg)
 		}
@@ -33,6 +33,10 @@ func Run(ctx context.Context, options Options) int {
 			program.Send(msg)
 		}
 	}
+	// Coalesce streamed assistant-text deltas to ~one frame each so a fast provider
+	// can't drive a full Update→View per token; every other message flushes pending
+	// text first, keeping order intact.
+	options.RuntimeMessageSink = newTextCoalescer(forward).send
 	options.AltScreen = useAltScreen(options)
 
 	programOpts := []tea.ProgramOption{

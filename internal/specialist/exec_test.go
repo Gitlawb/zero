@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -331,6 +332,39 @@ func TestBuildArgsRejectsInvalidInputs(t *testing.T) {
 			_, err := (Executor{}).BuildArgs(tc.input)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("BuildArgs error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsDepthExceedingMax(t *testing.T) {
+	_, err := (Executor{}).Run(context.Background(), TaskParameters{
+		Prompt: "hi",
+	}, TaskRunOptions{CurrentDepth: maxSpecialistDepth + 1})
+	if err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("Run error = %v, want depth error", err)
+	}
+}
+
+// TestRunRejectsDepthAtMax covers the boundary: a parent already AT the cap
+// must be rejected too, since this Run call would launch a child one level
+// past it (--depth CurrentDepth+1). Only checking ">" here would let that
+// child start before the guard ever caught it. The guard sits before the
+// fresh/resume branch in Run, so both call shapes must be proven to reject
+// here rather than falling through to runFresh/runResume.
+func TestRunRejectsDepthAtMax(t *testing.T) {
+	tests := []struct {
+		name   string
+		params TaskParameters
+	}{
+		{name: "fresh", params: TaskParameters{Prompt: "hi"}},
+		{name: "resume", params: TaskParameters{Prompt: "hi", Resume: "child_session"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (Executor{}).Run(context.Background(), tc.params, TaskRunOptions{CurrentDepth: maxSpecialistDepth})
+			if err == nil || !strings.Contains(err.Error(), "depth") {
+				t.Fatalf("Run error = %v, want depth error", err)
 			}
 		})
 	}

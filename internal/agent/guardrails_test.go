@@ -22,6 +22,14 @@ func textTurn(content string) []zeroruntime.StreamEvent {
 	}
 }
 
+// reasoningTurn produces live reasoning without visible assistant text.
+func reasoningTurn(content string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventReasoning, Content: content},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
 // toolTurn produces a turn that calls a named tool with the given args JSON.
 func toolTurn(callID string, toolName string, args string) []zeroruntime.StreamEvent {
 	return []zeroruntime.StreamEvent{
@@ -98,6 +106,31 @@ func TestRunResetsEmptyTurnCounterOnVisibleOutput(t *testing.T) {
 	}
 	if result.FinalAnswer != "here is real progress" {
 		t.Fatalf("expected the visible text as final answer, got %q", result.FinalAnswer)
+	}
+}
+
+func TestRunResetsEmptyTurnCounterOnReasoning(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			reasoningTurn("thinking 1"),
+			reasoningTurn("thinking 2"),
+			reasoningTurn("thinking 3"),
+			textTurn("done"),
+		},
+	}
+
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry: tools.NewRegistry(),
+		MaxTurns: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected reasoning-only turns to keep the run live until final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 4 {
+		t.Fatalf("expected 4 turns, got %d", len(provider.requests))
 	}
 }
 

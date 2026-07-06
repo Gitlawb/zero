@@ -49,6 +49,10 @@ type Options struct {
 	CustomHeaders   map[string]string
 	HTTPClient      *http.Client
 	UserAgent       string
+	// OAuthResolver, when set, supplies an OAuth bearer credential per request and
+	// is retried once with a forced token refresh after an upstream 401 (matching
+	// the OpenAI and Anthropic providers). Nil falls back to plain API-key auth.
+	OAuthResolver providerio.TokenResolver
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
 	// When unset, Zero uses providerio.ResolveStreamIdleTimeout — the
 	// ZERO_STREAM_IDLE_TIMEOUT override or providerio.DefaultStreamIdleTimeout.
@@ -67,6 +71,7 @@ type Provider struct {
 	customHeaders     map[string]string
 	httpClient        *http.Client
 	userAgent         string
+	oauthResolver     providerio.TokenResolver
 	streamIdleTimeout time.Duration
 }
 
@@ -95,6 +100,7 @@ func New(options Options) (*Provider, error) {
 		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
+		oauthResolver:     options.OAuthResolver,
 		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
 	}, nil
 }
@@ -127,20 +133,22 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
-	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, provider.streamURL(), body, func(request *http.Request) {
-		request.Header.Set("Content-Type", "application/json")
-		if provider.userAgent != "" {
-			request.Header.Set("User-Agent", provider.userAgent)
-		}
-		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+	response, err := providerio.SendWithAuthRetry(streamCtx, provider.httpClient, http.MethodPost, provider.streamURL(), body,
+		providerio.AuthHeaders{
 			APIKey:            provider.apiKey,
 			DefaultAuthHeader: "x-goog-api-key",
 			AuthHeader:        provider.authHeader,
 			AuthScheme:        provider.authScheme,
 			AuthHeaderValue:   provider.authHeaderValue,
 			CustomHeaders:     provider.customHeaders,
-		})
-	}, 0)
+		},
+		provider.oauthResolver,
+		func(request *http.Request) {
+			request.Header.Set("Content-Type", "application/json")
+			if provider.userAgent != "" {
+				request.Header.Set("User-Agent", provider.userAgent)
+			}
+		}, 0)
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
