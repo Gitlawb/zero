@@ -48,7 +48,14 @@ func (m model) startStreamingDictation() (model, tea.Cmd) {
 			if sink != nil {
 				sink(sttLevelMsg{level: dictation.ChunkLevel(chunk)})
 			}
-			tapped <- chunk
+			// Also select on ctx.Done so this goroutine can't block forever on the
+			// send if StreamTranscribe exits early (e.g. a sherpa startup failure) and
+			// stops draining `tapped` — the session's cancel unblocks and drains it.
+			select {
+			case tapped <- chunk:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

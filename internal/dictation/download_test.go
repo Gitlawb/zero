@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -121,9 +122,12 @@ func TestEnsureLocalEngineDownloadsAndExtracts(t *testing.T) {
 	if !fileExists(filepath.Join(comp.ModelPath, "tokens.txt")) {
 		t.Errorf("model tokens.txt missing under %q", comp.ModelPath)
 	}
-	// The extracted binary keeps its exec bit.
-	if info, err := os.Stat(comp.BinaryPath); err == nil && info.Mode()&0o100 == 0 {
-		t.Error("engine binary should be executable")
+	// The extracted binary keeps its exec bit — Unix only; Windows has no
+	// executable permission bit, so os.FileMode never reports 0o100 there.
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(comp.BinaryPath); err == nil && info.Mode()&0o100 == 0 {
+			t.Error("engine binary should be executable")
+		}
 	}
 	if len(stages) == 0 {
 		t.Error("expected progress stages")

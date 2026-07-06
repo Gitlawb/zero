@@ -26,7 +26,7 @@ func TestLocalTranscribeMoonshineArgs(t *testing.T) {
 		"preprocess.onnx", "encode.onnx", "uncached_decode.onnx", "cached_decode.onnx", "tokens.txt")
 	var gotBin string
 	var gotArgs []string
-	runOutput := func(name string, args ...string) ([]byte, error) {
+	runOutput := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		gotBin, gotArgs = name, args
 		return []byte("Started\nDone!\n\n/tmp/a.wav\n{\"text\":\" transcribed speech \"}\n----"), nil
 	}
@@ -55,7 +55,7 @@ func TestLocalTranscribeMoonshineArgs(t *testing.T) {
 func TestLocalTranscribeTransducerArgs(t *testing.T) {
 	dir := writeModelDir(t, "encoder-epoch-99.onnx", "decoder-epoch-99.onnx", "joiner-epoch-99.onnx", "tokens.txt")
 	var gotArgs []string
-	runOutput := func(name string, args ...string) ([]byte, error) {
+	runOutput := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		gotArgs = args
 		return []byte(`{"text":"hi"}`), nil
 	}
@@ -231,7 +231,7 @@ func TestDetectUnknownFamilyFailsCleanly(t *testing.T) {
 
 func TestLocalTranscribeMissingTokens(t *testing.T) {
 	dir := writeModelDir(t, "encoder.onnx", "decoder.onnx", "joiner.onnx") // no tokens.txt
-	tr, _ := NewLocalTranscriber(LocalConfig{ModelPath: dir, runOutput: func(string, ...string) ([]byte, error) { return nil, nil }, tempDir: func() (string, error) { return t.TempDir(), nil }})
+	tr, _ := NewLocalTranscriber(LocalConfig{ModelPath: dir, runOutput: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }, tempDir: func() (string, error) { return t.TempDir(), nil }})
 	_, err := tr.Transcribe(context.Background(), wavFixture())
 	var setupErr *SetupError
 	if !errors.As(err, &setupErr) {
@@ -241,7 +241,7 @@ func TestLocalTranscribeMissingTokens(t *testing.T) {
 
 func TestLocalTranscribeMissingBinary(t *testing.T) {
 	dir := writeModelDir(t, "preprocess.onnx", "encode.onnx", "uncached_decode.onnx", "cached_decode.onnx", "tokens.txt")
-	runOutput := func(string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
+	runOutput := func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
 	tr, _ := NewLocalTranscriber(LocalConfig{ModelPath: dir, runOutput: runOutput, tempDir: func() (string, error) { return t.TempDir(), nil }})
 	_, err := tr.Transcribe(context.Background(), wavFixture())
 	var setupErr *SetupError

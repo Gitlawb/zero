@@ -554,41 +554,6 @@ func EnsureLocalEngine(ctx context.Context, opts DownloadOptions) (EngineCompone
 	return EngineComponents{BinaryPath: binPath, ServerPath: serverPath, ModelPath: resolvedModel}, nil
 }
 
-// EstimatedDownloadBytes resolves the total download size for the confirm prompt
-// (engine + model) via the API, or a rough fallback on any resolution error.
-func EstimatedDownloadBytes(ctx context.Context, opts DownloadOptions) int64 {
-	key := opts.platformKey
-	if key == "" {
-		key = platformKey()
-	}
-	suffix, ok := engineAssetSuffix[key]
-	if !ok {
-		return 0
-	}
-	version := strings.TrimSpace(opts.EngineVersion)
-	if version == "" {
-		version = DefaultSherpaVersion
-	}
-	client := opts.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	apiBase := opts.APIBase
-	if apiBase == "" {
-		apiBase = defaultAPIBase
-	}
-	const fallback = 126 << 20 // ~engine + model, if the API can't be reached
-	engine, err := resolveAsset(ctx, client, apiBase, version, "sherpa-onnx-", suffix)
-	if err != nil {
-		return fallback
-	}
-	model, err := resolveAsset(ctx, client, apiBase, modelReleaseTag, modelAssetName, "")
-	if err != nil {
-		return fallback
-	}
-	return engine.size + model.size
-}
-
 type resolvedAsset struct {
 	url    string
 	sha256 string

@@ -373,6 +373,19 @@ func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) 
 func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Model, tea.Cmd) {
 	streaming := m.dictation.streaming || msg.streaming
 	m = m.commitDictationRegion()
+	// A streaming session can end via a transcriber error (not just a user stop), so
+	// tear the capture down here BEFORE reset() drops the handles: stop the recorder
+	// (kills the mic subprocess) and cancel the context (unblocks the audio tap).
+	// Without this, an error path leaves the mic running and the next attempt hits
+	// "already recording". Both are idempotent, so this is safe on the happy path.
+	if streaming {
+		if m.dictation.streamStop != nil {
+			_ = m.dictation.streamStop()
+		}
+		if m.dictation.cancel != nil {
+			m.dictation.cancel()
+		}
+	}
 	m.dictation.reset()
 
 	if msg.err != nil && !errors.Is(msg.err, context.Canceled) {

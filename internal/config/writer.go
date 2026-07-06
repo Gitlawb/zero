@@ -230,6 +230,11 @@ func SetSTTLocalEngine(path, binary, serverBinary, modelPath string, streaming b
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	cfg.STT.Provider = STTProviderLocal
+	// Point BOTH pipelines at the local engine. Without resetting StreamProvider, a
+	// previously-chosen cloud value (deepgram/openai) would still win in
+	// buildStreamingTranscriber, so the live transcript would keep hitting the cloud
+	// after the user switched to a downloaded local model.
+	cfg.STT.StreamProvider = STTProviderLocal
 	cfg.STT.LocalBinary = strings.TrimSpace(binary)
 	cfg.STT.LocalServerBinary = strings.TrimSpace(serverBinary)
 	cfg.STT.LocalModelPath = strings.TrimSpace(modelPath)

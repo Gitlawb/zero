@@ -2,6 +2,7 @@ package dictation
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -39,9 +40,10 @@ type processHandle interface {
 type processStarter func(spec commandSpec) (processHandle, io.ReadCloser, error)
 
 // commandOutputRunner runs a short one-shot command to completion and returns
-// its combined output. Used for helper invocations that aren't recordings:
-// Termux's stop command and Windows ffmpeg device listing.
-type commandOutputRunner func(name string, args ...string) ([]byte, error)
+// its combined output. Used for helper invocations that aren't recordings
+// (Termux start/stop, Windows ffmpeg device listing) and the offline
+// transcription exec — ctx lets a caller cancel/timeout a wedged process.
+type commandOutputRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 func startProcess(spec commandSpec) (processHandle, io.ReadCloser, error) {
 	cmd := exec.Command(spec.name, spec.args...)
@@ -91,8 +93,8 @@ func (p *realProcess) Wait() error { return p.cmd.Wait() }
 
 func (p *realProcess) Kill() error { return p.cmd.Process.Kill() }
 
-func runCommandOutput(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

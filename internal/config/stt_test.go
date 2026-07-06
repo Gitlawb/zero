@@ -1,9 +1,28 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestSetSTTLocalEngineResetsStreamProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+	// Pre-seed a cloud streaming provider — the situation the fix guards against.
+	if err := os.WriteFile(path, []byte(`{"stt":{"streamProvider":"deepgram"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := SetSTTLocalEngine(path, "sherpa-onnx-offline", "sherpa-onnx-online-websocket-server", "/models/kroko", true)
+	if err != nil {
+		t.Fatalf("SetSTTLocalEngine: %v", err)
+	}
+	// Switching to a local model must point BOTH pipelines at the local engine, or
+	// the leftover cloud streamProvider keeps the live transcript on the cloud.
+	if cfg.STT.Provider != STTProviderLocal || cfg.STT.StreamProvider != STTProviderLocal {
+		t.Errorf("both providers should be local, got provider=%q streamProvider=%q", cfg.STT.Provider, cfg.STT.StreamProvider)
+	}
+}
 
 func TestValidateSTTConfigRejectsUnknownProvider(t *testing.T) {
 	_, issues := ValidateBytes([]byte(`{"stt":{"provider":"assemblyai"}}`))

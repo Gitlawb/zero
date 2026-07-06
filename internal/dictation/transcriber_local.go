@@ -94,11 +94,12 @@ func (l *localTranscriber) Transcribe(ctx context.Context, audio []byte) (string
 	}
 	args = append(args, path)
 
-	// runOutput ignores ctx today (short-lived exec); guard cancellation here.
+	// Fail fast if already cancelled; ctx also propagates into the exec below so a
+	// wedged sherpa-onnx-offline is killed on cancel/timeout rather than hanging.
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	out, err := l.cfg.runOutput(l.cfg.Binary, args...)
+	out, err := l.cfg.runOutput(ctx, l.cfg.Binary, args...)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return "", &SetupError{

@@ -1,6 +1,7 @@
 package dictation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -178,7 +179,7 @@ func (r *recorder) Start() error {
 		// termux-microphone-record starts the recording in the Termux:API
 		// companion app and exits immediately; there is no long-lived process
 		// to hold. Stop is a separate `-q` invocation.
-		out, err := r.opts.runOutput("termux-microphone-record",
+		out, err := r.opts.runOutput(context.Background(), "termux-microphone-record",
 			"-l", strconv.Itoa(maxSeconds(r.opts.MaxDuration)), "-f", path)
 		if err != nil {
 			_ = os.Remove(path)
@@ -218,7 +219,7 @@ func (r *recorder) Stop() ([]byte, error) {
 	defer os.Remove(path)
 
 	if r.opts.Platform == PlatformTermux {
-		if out, err := r.opts.runOutput("termux-microphone-record", "-q"); err != nil {
+		if out, err := r.opts.runOutput(context.Background(), "termux-microphone-record", "-q"); err != nil {
 			return nil, fmt.Errorf("stopping termux recording: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
 		return readRecordingWithRetry(path, r.opts.now)
@@ -386,6 +387,12 @@ func (r *recorder) StartStreaming() (<-chan []byte, func() error, error) {
 	go func() {
 		defer close(chunks)
 		defer capTimer.Stop()
+		// Tear down on ANY exit — including the capture process ending on its own
+		// (EOF/crash), which the loop below returns on without going through an
+		// explicit stop(). stop() is idempotent (sync.Once), so this is safe even
+		// when the session was already stopped externally; it clears r.recording and
+		// closes proc/stdout so a self-terminating device doesn't wedge the recorder.
+		defer func() { _ = stop() }()
 		threshold := int16(32767 * silenceThresholdPct / 100)
 		silentChunks, speechSeen := 0, false
 		silenceLimit := int(silenceHold / chunkInterval)
@@ -508,7 +515,7 @@ func maxSeconds(d time.Duration) int {
 // `ffmpeg -list_devices`. dshow has no "default" alias, so a concrete device
 // name is required; stt.windowsAudioDevice overrides the auto-pick.
 func detectWindowsAudioDevice(runOutput commandOutputRunner) (string, error) {
-	out, _ := runOutput("ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy")
+	out, _ := runOutput(context.Background(), "ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy")
 	// Listing always "fails" (dummy isn't a real input); the device table is
 	// in the output regardless. Lines look like: [dshow @ ...] "Mic name" (audio)
 	for _, line := range strings.Split(string(out), "\n") {

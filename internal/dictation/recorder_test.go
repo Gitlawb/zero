@@ -2,6 +2,7 @@ package dictation
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -180,7 +181,7 @@ func TestBatchRecordWindowsArgv(t *testing.T) {
 func TestBatchRecordTermuxUsesCommandRunner(t *testing.T) {
 	dir := t.TempDir()
 	var calls [][]string
-	runOutput := func(name string, args ...string) ([]byte, error) {
+	runOutput := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		if len(args) > 0 && args[0] == "-l" {
 			// The -f target is the last arg; write the fixture there.
@@ -406,7 +407,7 @@ func TestDetectWindowsAudioDevice(t *testing.T) {
 	listing := `[dshow @ 0000] DirectShow audio devices
 [dshow @ 0000]  "Microphone (USB Audio)" (audio)
 [dshow @ 0000]     Alternative name "@device_cm_..."`
-	runOutput := func(string, ...string) ([]byte, error) { return []byte(listing), nil }
+	runOutput := func(context.Context, string, ...string) ([]byte, error) { return []byte(listing), nil }
 	got, err := detectWindowsAudioDevice(runOutput)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
