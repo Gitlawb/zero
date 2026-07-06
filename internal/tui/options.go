@@ -21,16 +21,20 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
-	Cwd                         string
-	UserConfigPath              string
-	DoctorUserConfigPath        string
-	ProjectConfigPath           string
-	ProviderName                string
-	ModelName                   string
-	ProviderProfile             config.ProviderProfile
-	SavedProviders              []config.ProviderProfile // all configured providers, for the /model multi-provider list
-	FavoriteModels              []string
-	RecapsEnabled               bool
+	Cwd                  string
+	UserConfigPath       string
+	DoctorUserConfigPath string
+	ProjectConfigPath    string
+	ProviderName         string
+	ModelName            string
+	ProviderProfile      config.ProviderProfile
+	SavedProviders       []config.ProviderProfile // all configured providers, for the /model multi-provider list
+	FavoriteModels       []string
+	RecapsEnabled        bool
+	// CompactionModel is the resolved preferences.compactionModel value; see
+	// providers.CompactionModelID for how it combines with the env override
+	// and the curated cheap defaults.
+	CompactionModel             string
 	Provider                    zeroruntime.Provider
 	NewProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
