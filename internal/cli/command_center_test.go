@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -834,4 +835,58 @@ func (commandCenterProvider) StreamCompletion(context.Context, zeroruntime.Compl
 	ch := make(chan zeroruntime.StreamEvent)
 	close(ch)
 	return ch, nil
+}
+
+func TestProviderCredentialStateShowsOAuthLogin(t *testing.T) {
+	if got := providerCredentialState(providerSummary{APIKeySet: true}); got != "set" {
+		t.Fatalf("keyed provider = %q, want set", got)
+	}
+	if got := providerCredentialState(providerSummary{OAuthLogin: true}); got != "oauth login" {
+		t.Fatalf("token-login provider = %q, want oauth login", got)
+	}
+	if got := providerCredentialState(providerSummary{}); got != "not set" {
+		t.Fatalf("credential-less provider = %q, want not set", got)
+	}
+}
+
+// TestProvidersListMarksOAuthLoginProviders: a keyless profile whose credential
+// is a stored OAuth login (the shape `zero auth chatgpt` now writes) must render
+// as "oauth login", not as a broken "api key: not set" entry.
+func TestProvidersListMarksOAuthLoginProviders(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "bearer-123"}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	resolved := config.ResolvedConfig{
+		ActiveProvider: "opengateway",
+		Providers: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", APIKeyStored: true, Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+	}
+	summary := summarizeConfig(resolved)
+	byName := map[string]providerSummary{}
+	for _, provider := range summary.Providers {
+		byName[provider.Name] = provider
+	}
+	if !byName["opengateway"].APIKeySet {
+		t.Fatalf("stored-key provider must report a credential: %+v", byName["opengateway"])
+	}
+	if byName["opengateway"].OAuthLogin {
+		t.Fatalf("key-authed provider must not claim the OAuth login: %+v", byName["opengateway"])
+	}
+	if !byName["chatgpt"].OAuthLogin || byName["chatgpt"].APIKeySet {
+		t.Fatalf("chatgpt must be marked oauth-login and keyless: %+v", byName["chatgpt"])
+	}
+
+	rendered := formatProviderSummaries("list", summary.Providers)
+	if !strings.Contains(rendered, "oauth login") {
+		t.Fatalf("list should render the oauth login state, got:\n%s", rendered)
+	}
 }

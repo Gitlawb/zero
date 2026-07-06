@@ -457,7 +457,11 @@ func selectProviderForCheck(resolved config.ResolvedConfig, name string) (config
 }
 
 func validateProviderRuntimeReady(profile config.ProviderProfile) error {
-	hasCredential := providerProfileHasCredential(profile)
+	// A stored OAuth login (e.g. `zero auth chatgpt`) is a credential too: a
+	// keyless token-login profile must pass the readiness check instead of being
+	// told to set an API key it will never have.
+	hasCredential := providerProfileHasCredential(profile) ||
+		providerHasOAuthLogin(profile, oauthLoggedInProviders())
 	if profile.CatalogID != "" {
 		descriptor, err := providercatalog.Require(profile.CatalogID)
 		if err != nil {

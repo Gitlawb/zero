@@ -49,8 +49,12 @@ type ProviderSnapshot struct {
 	APIModel     string `json:"apiModel,omitempty"`
 	Active       bool   `json:"active"`
 	APIKeySet    bool   `json:"apiKeySet"`
-	Status       string `json:"status,omitempty"`
-	Message      string `json:"message,omitempty"`
+	// OAuthLogin marks a keyless profile whose credential is a stored OAuth login
+	// (e.g. ChatGPT). Filled by callers with access to the oauth store — the
+	// snapshot builder itself does no secret I/O.
+	OAuthLogin bool   `json:"oauthLogin,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 type ModelSnapshotOptions struct {
@@ -164,10 +168,13 @@ func ProviderSnapshotFromProfile(profile config.ProviderProfile, active bool) Pr
 		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey, profile.AuthHeaderValue),
 		Model:        profile.Model,
 		Active:       active,
-		// A profile can authenticate via a raw auth-header value instead of APIKey;
-		// treat either as a configured credential so auth-header-only profiles don't
-		// render as "not set".
-		APIKeySet: strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "",
+		// HasConfiguredCredential is the shared definition of "this profile is
+		// key-authed": inline key, raw auth-header value, or a key in the encrypted
+		// credential store (APIKeyStored). The resolver is pure and never loads
+		// stored keys into APIKey, so checking only the inline key rendered every
+		// stored-key profile as "api key: not set" — a healthy provider that read
+		// as broken.
+		APIKeySet: profile.HasConfiguredCredential(),
 		Status:    "ok",
 	}
 	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})

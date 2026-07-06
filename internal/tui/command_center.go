@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -509,8 +510,11 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	descriptor, hasDescriptor := m.descriptorForProfile(target)
 	// Gate on the resolved credential, not the APIKeyStored marker: if the stored key
 	// was deleted/unreadable the marker can still be set, and building a keyless
-	// provider would only fail later with a 401. Local/no-auth providers need no key.
-	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" && !(hasDescriptor && descriptor.Local) {
+	// provider would only fail later with a 401. Local/no-auth providers need no key,
+	// and a stored OAuth login (e.g. ChatGPT) is a credential too — the profile stays
+	// keyless on purpose so newProvider attaches the bearer resolver + login key.
+	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" &&
+		!(hasDescriptor && descriptor.Local) && !oauthLoginAvailable(target) {
 		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", nil
 	}
 	next, err := m.newProvider(target)
@@ -547,11 +551,17 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 }
 
 // profileWithCredential fills a profile's APIKey for provider construction the same
-// way the runtime resolves it: a stored key (encrypted credstore), then an env var,
-// then a stored OAuth bearer for token-login providers. The config resolver is pure
-// (no secret I/O), so a stored-key profile carries an empty APIKey until this runs —
-// every place that rebuilds the provider (model switch, provider switch) must call
-// this or the request goes out with no key.
+// way the runtime resolves it: a stored key (encrypted credstore), then an env var.
+// The config resolver is pure (no secret I/O), so a stored-key profile carries an
+// empty APIKey until this runs — every place that rebuilds the provider (model
+// switch, provider switch) must call this or the request goes out with no key.
+//
+// A stored OAuth bearer is deliberately NOT copied into APIKey: an inline key makes
+// HasConfiguredCredential true, which strips the OAuth login candidates at build
+// time, so newProvider would construct the client without the bearer resolver and
+// login key — for ChatGPT (Codex) that drops the `chatgpt-account-id` header and
+// token refresh, 401-ing every call. Keyless is the correct shape for a token-login
+// profile; newProvider resolves the login itself.
 func (m model) profileWithCredential(profile config.ProviderProfile) config.ProviderProfile {
 	if strings.TrimSpace(profile.APIKey) == "" {
 		if store, err := config.ProviderKeyStore(); err == nil {
@@ -561,12 +571,24 @@ func (m model) profileWithCredential(profile config.ProviderProfile) config.Prov
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}
-	if descriptor, ok := m.descriptorForProfile(profile); ok && strings.TrimSpace(profile.APIKey) == "" && descriptor.OAuth && !descriptor.OAuthMintsKey {
-		if token := oauthStoredToken(m.ctx, descriptor.ID); token != "" {
-			profile.APIKey = token
-		}
-	}
 	return profile
+}
+
+// oauthLoginAvailable reports whether a stored OAuth login exists for any of the
+// profile's login candidates — the SAME candidate set the runtime bearer resolver
+// uses (profile name, then catalog id, only for keyless profiles), so the switch
+// gate and the runtime can never disagree about whether a login counts.
+func oauthLoginAvailable(profile config.ProviderProfile) bool {
+	candidates := profile.OAuthLoginCandidates()
+	if len(candidates) == 0 {
+		return false
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return false
+	}
+	_, _, ok := oauth.FirstStored(store, candidates)
+	return ok
 }
 
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {

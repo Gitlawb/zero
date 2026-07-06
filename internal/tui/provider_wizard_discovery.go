@@ -38,7 +38,7 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 			return m.startProviderDeviceLogin()
 		}
 		attemptID := m.providerWizard.beginOAuthAttempt(false)
-		return m, providerWizardOAuthCmdFor(provider, attemptID)
+		return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
 	}
 	// A non-OAuth provider that already has a key in the credential store: offer
 	// keep/replace/remove before re-entering credentials.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -1020,5 +1021,78 @@ func TestNormalizeProfileForProviderCanonicalizesPlaceholderName(t *testing.T) {
 		if got.Name != "openai" {
 			t.Fatalf("Name = %q for placeholder %q, want canonicalized to %q", got.Name, name, "openai")
 		}
+	}
+}
+
+// TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer: switching to a
+// token-login provider (ChatGPT) must pass the credential gate on the stored
+// OAuth login and hand newProvider a KEYLESS profile. Inlining the bearer as
+// APIKey makes HasConfiguredCredential true, which strips the OAuth login
+// candidates at build time — the client is then constructed without the bearer
+// resolver and login key, dropping token refresh and the Codex
+// `chatgpt-account-id` header, so every call 401s.
+func TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "bearer-123", TokenType: "Bearer"}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	var built config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName:    "opengateway",
+		ModelName:       "some-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			built = profile
+			return &fakeProvider{}, nil
+		},
+	})
+
+	next, text, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if !strings.Contains(text, "Switched to chatgpt") {
+		t.Fatalf("switch should succeed on the stored OAuth login, got %q", text)
+	}
+	if next.providerName != "chatgpt" || next.modelName != "gpt-5.5" {
+		t.Fatalf("switch did not commit: provider=%q model=%q", next.providerName, next.modelName)
+	}
+	if built.APIKey != "" {
+		t.Fatalf("OAuth bearer must not be inlined as APIKey (suppresses the runtime resolver), got %q", built.APIKey)
+	}
+}
+
+// TestSwitchProviderModelStillRejectsProviderWithNoCredential: with no key, no
+// header, no local runtime, and no OAuth login, the gate must keep refusing.
+func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "opengateway",
+		ModelName:       "some-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("newProvider must not run for a credential-less provider")
+			return nil, nil
+		},
+	})
+
+	_, text, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if !strings.Contains(text, "no usable credential") {
+		t.Fatalf("expected the credential gate to refuse, got %q", text)
 	}
 }

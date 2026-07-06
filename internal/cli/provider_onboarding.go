@@ -306,3 +306,120 @@ func providerCommandArg(value string) string {
 	}
 	return value
 }
+
+type providerNamesOptions struct {
+	names []string
+	json  bool
+}
+
+func parseProviderNamesArgs(args []string, want int, usage string) (providerNamesOptions, bool, error) {
+	options := providerNamesOptions{}
+	for _, arg := range args {
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case arg == "--json":
+			options.json = true
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
+		default:
+			options.names = append(options.names, arg)
+		}
+	}
+	if len(options.names) != want {
+		return options, false, execUsageError{usage}
+	}
+	return options, false, nil
+}
+
+// runProvidersRemove deletes a saved provider profile and its stored API key.
+// The OAuth token (if any) is kept — logins outlive profiles so re-adding the
+// provider needs no new browser round-trip; `zero auth logout <name>` removes it.
+func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseProviderNamesArgs(args, 1, "usage: zero providers remove <name>")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	name := options.names[0]
+	cfg, err := config.RemoveProvider(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	keyRemoved, keyErr := config.ForgetProviderKey(name)
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{
+			"removed":        name,
+			"keyRemoved":     keyRemoved,
+			"activeProvider": cfg.ActiveProvider,
+			"configPath":     configPath,
+		}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Removed provider %s\n", name); err != nil {
+		return exitCrash
+	}
+	if keyErr == nil && keyRemoved {
+		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
+			return exitCrash
+		}
+	}
+	if active := strings.TrimSpace(cfg.ActiveProvider); active != "" {
+		if _, err := fmt.Fprintf(stdout, "Active provider: %s\n", active); err != nil {
+			return exitCrash
+		}
+	} else {
+		if _, err := fmt.Fprintln(stdout, "No providers remain — run zero setup to add one."); err != nil {
+			return exitCrash
+		}
+	}
+	return exitSuccess
+}
+
+// runProvidersRename renames a saved provider profile, migrating its stored
+// API key and the activeProvider pointer along with it (config.RenameProvider).
+func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseProviderNamesArgs(args, 2, "usage: zero providers rename <old> <new>")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{
+			"renamed":        map[string]string{"from": options.names[0], "to": options.names[1]},
+			"activeProvider": cfg.ActiveProvider,
+			"configPath":     configPath,
+		}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", options.names[0], options.names[1]); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}

@@ -385,3 +385,250 @@ func readConfigFixture(t *testing.T, path string) FileConfig {
 	}
 	return cfg
 }
+
+func TestEnsureCatalogProviderCreatesProfileWithoutStealingActive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "opengateway",
+		Providers: []ProviderProfile{
+			{
+				Name:         "opengateway",
+				ProviderKind: ProviderKindOpenAICompatible,
+				BaseURL:      "https://gateway.example.com/v1",
+				APIKeyStored: true,
+				Model:        "some-model",
+			},
+		},
+	}, 0o600)
+
+	ensured, err := EnsureCatalogProvider(path, "chatgpt")
+	if err != nil {
+		t.Fatalf("EnsureCatalogProvider: %v", err)
+	}
+	if !ensured.Created {
+		t.Fatalf("expected profile to be created")
+	}
+	if ensured.Name != "chatgpt" {
+		t.Fatalf("expected profile name chatgpt, got %q", ensured.Name)
+	}
+	if ensured.Active != "opengateway" {
+		t.Fatalf("active provider must stay opengateway, got %q", ensured.Active)
+	}
+
+	cfg := readConfigFixture(t, path)
+	if cfg.ActiveProvider != "opengateway" {
+		t.Fatalf("persisted active provider changed to %q", cfg.ActiveProvider)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(cfg.Providers))
+	}
+	chatgpt := cfg.Providers[1]
+	if chatgpt.Name != "chatgpt" || chatgpt.CatalogID != "chatgpt" {
+		t.Fatalf("unexpected created profile: %+v", chatgpt)
+	}
+	if chatgpt.Model == "" || chatgpt.BaseURL == "" {
+		t.Fatalf("created profile must carry catalog defaults, got %+v", chatgpt)
+	}
+	if chatgpt.APIKey != "" || chatgpt.APIKeyStored {
+		t.Fatalf("OAuth-created profile must stay keyless, got %+v", chatgpt)
+	}
+}
+
+func TestEnsureCatalogProviderLeavesExistingProfileUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	original := FileConfig{
+		ActiveProvider: "opengateway",
+		Providers: []ProviderProfile{
+			{Name: "opengateway", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+			// Renamed profile that already serves the chatgpt catalog entry.
+			{Name: "codex", CatalogID: "chatgpt", Model: "gpt-5.5"},
+		},
+	}
+	data := writeConfigFixture(t, path, original, 0o600)
+
+	ensured, err := EnsureCatalogProvider(path, "chatgpt")
+	if err != nil {
+		t.Fatalf("EnsureCatalogProvider: %v", err)
+	}
+	if ensured.Created {
+		t.Fatalf("existing profile must not be recreated")
+	}
+	if ensured.Name != "codex" {
+		t.Fatalf("expected existing profile name codex, got %q", ensured.Name)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(data) {
+		t.Fatalf("config rewritten for a no-op ensure:\nbefore: %s\nafter: %s", data, after)
+	}
+}
+
+func TestEnsureCatalogProviderActivatesOnEmptyConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+
+	ensured, err := EnsureCatalogProvider(path, "chatgpt")
+	if err != nil {
+		t.Fatalf("EnsureCatalogProvider: %v", err)
+	}
+	if !ensured.Created {
+		t.Fatalf("expected profile to be created")
+	}
+	if ensured.Active != "chatgpt" {
+		t.Fatalf("blank active must adopt the new provider, got %q", ensured.Active)
+	}
+}
+
+func TestEnsureCatalogProviderRejectsUnknownCatalogID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if _, err := EnsureCatalogProvider(path, "no-such-provider"); err == nil {
+		t.Fatalf("expected unknown catalog id to error")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("config must not be written for an unknown catalog id")
+	}
+}
+
+func TestRemoveProviderDeletesAndHandsOffActive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "beta",
+		Providers: []ProviderProfile{
+			{Name: "alpha", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "beta", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, " BETA ")
+	if err != nil {
+		t.Fatalf("RemoveProvider() error = %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "alpha" {
+		t.Fatalf("expected only alpha to remain, got %+v", cfg.Providers)
+	}
+	if cfg.ActiveProvider != "alpha" {
+		t.Fatalf("active must hand off to the first remaining provider, got %q", cfg.ActiveProvider)
+	}
+
+	persisted := readConfigFixture(t, path)
+	if len(persisted.Providers) != 1 || persisted.ActiveProvider != "alpha" {
+		t.Fatalf("persisted config wrong: %+v", persisted)
+	}
+
+	// Removing the last provider clears the active pointer entirely.
+	cfg, err = RemoveProvider(path, "alpha")
+	if err != nil {
+		t.Fatalf("RemoveProvider(last) error = %v", err)
+	}
+	if len(cfg.Providers) != 0 || cfg.ActiveProvider != "" {
+		t.Fatalf("expected empty providers and no active, got %+v", cfg)
+	}
+}
+
+func TestRemoveProviderKeepsActiveWhenOtherRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "alpha",
+		Providers: []ProviderProfile{
+			{Name: "alpha", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "beta", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "beta")
+	if err != nil {
+		t.Fatalf("RemoveProvider() error = %v", err)
+	}
+	if cfg.ActiveProvider != "alpha" {
+		t.Fatalf("active provider must be untouched, got %q", cfg.ActiveProvider)
+	}
+}
+
+func TestRemoveProviderRejectsUnknownWithoutRewriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "alpha",
+		Providers:      []ProviderProfile{{Name: "alpha", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"}},
+	}, 0o600)
+
+	if _, err := RemoveProvider(path, "ghost"); err == nil {
+		t.Fatal("RemoveProvider() error = nil, want not-found error")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for unknown provider")
+	}
+}
+
+func TestRenameProviderFollowsActiveAndMigratesStoredKey(t *testing.T) {
+	dir := t.TempDir()
+	// Force the file credential backend so the test never touches the real OS
+	// keyring regardless of platform.
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "oldname",
+		Providers: []ProviderProfile{
+			{Name: "oldname", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", APIKeyStored: true, Model: "m1"},
+			{Name: "other", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.Set("oldname", "sk-secret"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	cfg, err := RenameProvider(path, "oldname", "newname")
+	if err != nil {
+		t.Fatalf("RenameProvider() error = %v", err)
+	}
+	if cfg.ActiveProvider != "newname" {
+		t.Fatalf("active must follow the rename, got %q", cfg.ActiveProvider)
+	}
+	if cfg.Providers[0].Name != "newname" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("renamed profile wrong: %+v", cfg.Providers[0])
+	}
+	if cfg.Providers[1].Name != "other" {
+		t.Fatalf("unrelated profile changed: %+v", cfg.Providers[1])
+	}
+
+	key, ok, err := store.Get("newname")
+	if err != nil || !ok || key != "sk-secret" {
+		t.Fatalf("stored key must migrate to the new name, got key=%q ok=%v err=%v", key, ok, err)
+	}
+	if _, ok, _ := store.Get("oldname"); ok {
+		t.Fatalf("old credential entry must be deleted after migration")
+	}
+}
+
+func TestRenameProviderRejectsCollisionAndUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "alpha",
+		Providers: []ProviderProfile{
+			{Name: "alpha", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "beta", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	if _, err := RenameProvider(path, "alpha", "BETA"); err == nil {
+		t.Fatal("rename onto an existing name must fail")
+	}
+	if _, err := RenameProvider(path, "ghost", "gamma"); err == nil {
+		t.Fatal("renaming an unknown provider must fail")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten by a rejected rename")
+	}
+}

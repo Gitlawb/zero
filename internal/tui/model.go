@@ -1104,6 +1104,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
+	case providerManagerCredsMsg:
+		return m.applyProviderManagerCreds(msg)
 	case clipboardReadMsg:
 		// Result of a right-click paste. Insert on success; surface a brief
 		// status if the clipboard couldn't be read (e.g. no clipboard utility on
@@ -1230,8 +1232,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.resolvePermission(permissionDecisionDeny)
 			}
 			if m.providerWizard != nil {
-				m.providerWizard = nil
-				return m, nil
+				// Delegate so multi-level surfaces (provider manager list → edit →
+				// field, manage-key step) can walk BACK one level; the wizard's own
+				// handler closes the overlay for the single-level steps.
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.mcpAddWizard != nil {
 				m.mcpAddWizard = nil
@@ -3955,14 +3959,20 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
-		if strings.TrimSpace(command.text) == "" {
+		arg := strings.ToLower(strings.TrimSpace(command.text))
+		if arg == "" || arg == "add" {
 			if m.pending {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
-			m.providerWizard = m.newProviderWizard()
-			m.clearSuggestions()
-			return m, nil
+			// Bare /provider opens the list-first manager over the saved
+			// providers; /provider add jumps straight into the add wizard.
+			if arg == "add" {
+				m.providerWizard = m.newProviderWizard()
+				m.clearSuggestions()
+				return m, nil
+			}
+			return m.openProviderManager()
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
