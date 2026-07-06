@@ -54,5 +54,8 @@ func validateSemantics(cfg FileConfig) []Issue {
 		// normalizeProviders already redacts secrets via providerError.
 		return []Issue{{FieldPath: "providers", Message: err.Error()}}
 	}
+	if err := validateSTTConfig(cfg.STT); err != nil {
+		return []Issue{{FieldPath: "stt", Message: err.Error()}}
+	}
 	return nil
 }
