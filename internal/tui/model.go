@@ -157,6 +157,8 @@ type model struct {
 	composerCursorVisible bool
 	composerPastePreviews []composerPastePreview
 	composerSelection     composerSelectionState
+	dictation             dictationController
+	sttKeyPrompt          *sttKeyPromptState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -803,6 +805,7 @@ func newModel(ctx context.Context, options Options) model {
 		swarmSessionMap:             map[string]string{},
 		setup:                       newSetupState(options.Setup),
 		setupSave:                   options.Setup.Save,
+		dictation:                   newDictationController(options),
 	}
 	// Apply an explicit theme immediately; auto stays on the dark default until
 	// Init's terminal background probe resolves it (see Init / BackgroundColorMsg).
@@ -946,7 +949,8 @@ func (m *model) stopPRWatcher() {
 // by every shortcut that should defer to whichever modal is focused.
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
-		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
+		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
+		m.sttKeyPrompt == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -960,12 +964,16 @@ func (m model) quit() (tea.Model, tea.Cmd) {
 // Best-effort with a short deadline so a slow server can't hang the quit; the
 // servers are our child processes and would be reaped on exit regardless.
 func (m model) shutdownLSPManager() {
-	if m.lspManager == nil {
-		return
-	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = m.lspManager.Shutdown(shutdownCtx)
+	if m.lspManager != nil {
+		_ = m.lspManager.Shutdown(shutdownCtx)
+	}
+	// The warm sherpa-onnx streaming server is a session-long child process too;
+	// tear it down alongside the language servers (§6a).
+	if m.dictation.shutdownServer != nil {
+		_ = m.dictation.shutdownServer(shutdownCtx)
+	}
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
@@ -1130,10 +1138,46 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// A paste into the cloud-STT key prompt fills the key (the common way to
+		// enter an API key), not the composer.
+		if m.sttKeyPrompt != nil {
+			m.sttKeyPrompt.input += strings.TrimSpace(msg.Content)
+			return m, nil
+		}
 		return m.routePaste(msg.Content)
+	case dictationStartedMsg:
+		return m.handleDictationStarted(msg)
+	case dictationTranscribedMsg:
+		return m.handleDictationTranscribed(msg)
+	case sttPartialMsg:
+		return m.handleDictationPartial(msg), nil
+	case sttDownloadProgressMsg:
+		return m.handleDictationDownloadProgress(msg), nil
+	case dictationDownloadedMsg:
+		return m.handleDictationDownloaded(msg)
+	case sttModelsFetchedMsg:
+		return m.handleSTTModelsFetched(msg), nil
+	case recTickMsg:
+		return m.handleRecTick()
+	case sttLevelMsg:
+		return m.handleDictationLevel(msg), nil
+	case tea.KeyboardEnhancementsMsg:
+		return m.handleKeyboardEnhancements(msg), nil
+	case tea.KeyReleaseMsg:
+		// Voice mode's hold-to-record ends on Space release; every other release
+		// event is ignored (dispatch elsewhere is press-based).
+		if m.dictation.voiceModeEnabled && keyIs(msg, tea.KeySpace) {
+			return m.handleVoiceSpaceRelease()
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
+		}
+		// The cloud-STT API-key prompt is modal: it owns every keystroke (masked
+		// input) until Enter saves or Esc cancels.
+		if m.sttKeyPrompt != nil {
+			return m.handleSTTKeyPromptKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
@@ -1178,6 +1222,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
+		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
+			// Voice mode (/voice) repurposes Space into the record gesture — the only
+			// dictation trigger — so it must not also type a space. Turn voice mode
+			// off (/voice) to type normally.
+			return m.handleVoiceSpacePress(msg)
 		case keyIs(msg, tea.KeyEsc):
 			// Esc is heavily overloaded below (subchat exit, MCP cancel, ask-user,
 			// permission deny, wizard/picker/suggestions dismiss, ...) before ever
@@ -1188,6 +1237,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// armed for some later, unrelated Esc to silently act on.
 			wasConfirmingCancel := m.pending && m.cancelConfirmActive
 			m = m.disarmCancelConfirmation()
+			// An active dictation recording cancels on Esc (releases the mic, drops
+			// the audio) before any other Esc consumer — a recording in progress is
+			// the most immediate thing the user would want Esc to stop.
+			if m.dictation.active() {
+				return m.cancelDictation()
+			}
 			// Subchat view exits on Esc (returns to main chat).
 			if m.subchat.active {
 				m.chatScrollOffset = m.subchat.exit()
@@ -2369,6 +2424,10 @@ func (m model) View() tea.View {
 		view.BackgroundColor = zeroTheme.bgPanel
 	}
 	view.ReportFocus = m.notifier != nil
+	// Voice mode's Space-hold gesture needs key-release events (Kitty protocol).
+	// Request them only while voice mode is on — the renderer re-sends the request
+	// only when the value changes, so gating this costs nothing (§10).
+	view.KeyboardEnhancements.ReportEventTypes = m.dictation.voiceModeEnabled
 	if m.wantsMouseCapture() {
 		if isRunningUnderPRoot() {
 			// Under PRoot the AllMotion (1003) sequence doesn't work
@@ -2442,8 +2501,11 @@ func (m model) transcriptView() string {
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
+	sttKeyOverlay := m.sttKeyPromptOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case sttKeyOverlay != "":
+		viewportOverlay = sttKeyOverlay
 	case helpOverlayContent != "":
 		viewportOverlay = helpOverlayContent
 	case providerOverlay != "":
@@ -3784,6 +3846,19 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// submitting (a bare second Enter runs it without one); names the slash
 		// path cannot reach run immediately instead.
 		m, cmd = m.chooseSkillFromPicker(item)
+	case pickerSTTModel:
+		// Selecting the local engine with no model (and auto-download available)
+		// chains into the variant-download picker instead of finalizing.
+		if next, fetchCmd, opened := m.maybeOpenSTTDownloadPicker(item.Value); opened {
+			return next, fetchCmd
+		}
+		text := ""
+		m, text = m.handleSTTModelSelection(item.Value)
+		if text != "" { // empty when a key prompt opened instead of finalizing
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
+	case pickerSTTDownload:
+		return m.handleSTTDownloadSelection(item.Value)
 	case pickerTheme:
 		// The hovered palette is already live from the preview; handleThemeCommand
 		// records the choice (m.themeMode) and re-applies it, and reports the switch.
@@ -3981,6 +4056,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleModelCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandSTTModel:
+		if m.pending {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+			return m, nil
+		}
+		return m.openSTTModelPicker()
+	case commandVoice:
+		return m.toggleVoiceMode()
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil

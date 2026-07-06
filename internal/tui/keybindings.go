@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -78,6 +79,9 @@ func (p parsedBinding) Label() string {
 			b.WriteString("PgUp")
 		case tea.KeyPgDown:
 			b.WriteString("PgDn")
+		case tea.KeyF1, tea.KeyF2, tea.KeyF3, tea.KeyF4, tea.KeyF5, tea.KeyF6,
+			tea.KeyF7, tea.KeyF8, tea.KeyF9, tea.KeyF10, tea.KeyF11, tea.KeyF12:
+			b.WriteString(fKeyLabel(p.code))
 		default:
 			// Printable character — uppercase for display
 			if p.code >= 'a' && p.code <= 'z' {
@@ -207,6 +211,30 @@ func parseBinding(s string) parsedBinding {
 		p.code = tea.KeyPgUp
 	case "pgdown", "pagedown":
 		p.code = tea.KeyPgDown
+	case "f1":
+		p.code = tea.KeyF1
+	case "f2":
+		p.code = tea.KeyF2
+	case "f3":
+		p.code = tea.KeyF3
+	case "f4":
+		p.code = tea.KeyF4
+	case "f5":
+		p.code = tea.KeyF5
+	case "f6":
+		p.code = tea.KeyF6
+	case "f7":
+		p.code = tea.KeyF7
+	case "f8":
+		p.code = tea.KeyF8
+	case "f9":
+		p.code = tea.KeyF9
+	case "f10":
+		p.code = tea.KeyF10
+	case "f11":
+		p.code = tea.KeyF11
+	case "f12":
+		p.code = tea.KeyF12
 	case "?":
 		p.text = "?"
 		p.code = 0
@@ -241,6 +269,13 @@ type keyBindings struct {
 	cycleReasoning parsedBinding
 	togglePlan     parsedBinding
 	toggleSidebar  parsedBinding
+}
+
+// fKeyLabel renders a function-key code as "F9" etc. tea.KeyF1..KeyF12 are
+// sequential, so the offset from KeyF1 gives the number.
+func fKeyLabel(code rune) string {
+	n := int(code-tea.KeyF1) + 1
+	return "F" + strconv.Itoa(n)
 }
 
 // resolveKeyBindings converts a user-facing KeyBindingsConfig into the
