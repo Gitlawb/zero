@@ -55,7 +55,7 @@ func detectShellRuntime(goos string) shellRuntime {
 func shellGuidanceForGOOS(goos string) string {
 	runtime := detectShellRuntime(goos)
 	if goos == "windows" {
-		return "Uses " + runtime.Syntax + " syntax on Windows; prefer cwd over cd when changing directories. MSYS/Cygwin coreutils on PATH (Git for Windows usr\\bin) are not sandbox-compatible; prefer native Zero file tools."
+		return "Uses " + runtime.Syntax + " syntax on Windows; prefer cwd over cd when changing directories. To include | & > < or other metacharacters in an argument value, wrap the value in double quotes (e.g. --jq \".a | b\"); single quotes do not protect metacharacters in cmd.exe. MSYS/Cygwin coreutils on PATH (Git for Windows usr\\bin) are not sandbox-compatible; prefer native Zero file tools."
 	}
 	guidance := "Uses " + runtime.Syntax + " syntax."
 	if goos == "darwin" {

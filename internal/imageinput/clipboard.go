@@ -75,7 +75,13 @@ func readClipboardImageWindows() ([]byte, error) {
 	tmpPath := tmpFile.Name()
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
-	script := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -ne $null) { $img.Save('` + tmpPath + `', [System.Drawing.Imaging.ImageFormat]::Png) }`
+
+	// Stay on -Command: -File is subject to script execution policy (default
+	// Restricted on Windows clients) and Windows PowerShell decodes BOM-less
+	// UTF-8 .ps1 files as ANSI. Doubling single quotes is all the escaping the
+	// single-quoted PowerShell literal needs.
+	escapedTmpPath := strings.ReplaceAll(tmpPath, "'", "''")
+	script := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -ne $null) { $img.Save('` + escapedTmpPath + `', [System.Drawing.Imaging.ImageFormat]::Png) }`
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
 	if err := cmd.Run(); err != nil {
 		return nil, nil

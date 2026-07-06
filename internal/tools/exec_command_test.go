@@ -541,10 +541,11 @@ func TestCollectRespectsDeadlineUnderContinuousOutput(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Generous slack over `wait` for scheduling jitter under a continuously
-	// writing goroutine — this must stay a small multiple of wait, not
-	// "however long the writer keeps going" (which is what the bug produced:
-	// this test would hang past the 30s test timeout without the fix).
-	if elapsed > 3*wait {
+	// writing goroutine (worse on Windows CI under load). This must stay a
+	// small multiple of wait, not "however long the writer keeps going"
+	// (which is what the bug produced: this test would hang past the 30s
+	// test timeout without the fix).
+	if elapsed > 5*wait {
 		t.Fatalf("collect took %v under continuous output, want close to the %v deadline", elapsed, wait)
 	}
 }

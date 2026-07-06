@@ -126,6 +126,9 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
 			t.Fatalf("expected Windows cmd.exe and cwd guidance in bash description, got %q", description)
 		}
+		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
+			t.Fatalf("expected the double-quote metacharacter rule in bash description, got %q", description)
+		}
 		return
 	}
 	if !strings.Contains(description, "/bin/sh") {
