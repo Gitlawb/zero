@@ -157,12 +157,6 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
-	"opencode-go-anthropic": {
-		{ID: "MiniMax-M3", Description: "catalog default"},
-		{ID: "MiniMax-M2.7", Description: "coding model"},
-		{ID: "qwen-plus", Description: "Qwen balanced model"},
-		{ID: "qwen-max", Description: "Qwen strong model"},
-	},
 	"custom-openai-compatible": {
 		{ID: "custom-model", Description: "custom endpoint model"},
 	},
@@ -173,13 +167,13 @@ var curatedModels = map[string][]Model{
 
 func Models(provider providercatalog.Descriptor) []Model {
 	if models, ok := curatedModels[provider.ID]; ok {
-		return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, models))
+		return dedupeModels(provider.DefaultModel, models)
 	}
 	models := registryModels(provider)
 	if len(models) > 0 {
-		return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, models))
+		return dedupeModels(provider.DefaultModel, models)
 	}
-	return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, nil))
+	return dedupeModels(provider.DefaultModel, nil)
 }
 
 func registryModels(provider providercatalog.Descriptor) []Model {
