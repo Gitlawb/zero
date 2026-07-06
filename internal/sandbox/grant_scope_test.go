@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -232,5 +234,27 @@ func TestGrantCovers(t *testing.T) {
 				t.Fatalf("grantCovers(%+v, %q) = %v, want %v", tc.grant, tc.req, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestGrantCoversCaseInsensitiveOnWindows guards against a persisted grant
+// (including a deny) being silently bypassed by spelling the same path with
+// different case, since Windows path components are case-insensitive.
+func TestGrantCoversCaseInsensitiveOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("path case-insensitivity is a Windows-specific filesystem property")
+	}
+	dir := filepath.Join(string(filepath.Separator)+"proj", "src")
+	file := filepath.Join(dir, "main.go")
+	descendant := filepath.Join(dir, "api", "z.go")
+
+	fileGrant := Grant{Scope: file, ScopeKind: ScopeFile}
+	dirGrant := Grant{Scope: dir, ScopeKind: ScopeDir}
+
+	if !grantCovers(fileGrant, strings.ToUpper(file)) {
+		t.Fatalf("file grant %q should cover differently-cased request %q on Windows", file, strings.ToUpper(file))
+	}
+	if !grantCovers(dirGrant, strings.ToUpper(descendant)) {
+		t.Fatalf("dir grant %q should cover differently-cased descendant %q on Windows", dir, strings.ToUpper(descendant))
 	}
 }

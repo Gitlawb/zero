@@ -148,6 +148,46 @@ func TestExtractZipRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// A zip entry with the Unix symlink mode bit set must be rejected, not
+// silently written out as an ordinary file containing the link-target
+// string — mirroring extractTarGz's rejection of non-regular tar entries.
+func TestExtractZipRejectsSymlinkEntry(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "archive.zip")
+
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("Create archive: %v", err)
+	}
+	zipWriter := zip.NewWriter(file)
+	header := &zip.FileHeader{Name: "zero"}
+	header.SetMode(os.ModeSymlink | 0o777)
+	writer, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	if _, err := writer.Write([]byte("/some/other/path")); err != nil {
+		t.Fatalf("Write symlink target: %v", err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close archive file: %v", err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := extractArchive(archivePath, destDir); err == nil {
+		t.Fatal("expected extractArchive to reject a symlink entry")
+	}
+	if _, err := os.Lstat(filepath.Join(destDir, "zero")); err == nil {
+		t.Fatal("symlink entry should not have been written to the destination")
+	}
+}
+
 func TestFindByBasenameSearchesRecursively(t *testing.T) {
 	dir := t.TempDir()
 	nested := filepath.Join(dir, "helpers")

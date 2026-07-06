@@ -87,6 +87,14 @@ func extractZip(archivePath string, destDir string) error {
 			}
 			continue
 		}
+		// Release archives only ever contain regular files and directories;
+		// reject anything else (symlinks, devices) rather than silently write
+		// the link-target string (or other special content) out as an
+		// ordinary file — mirrors extractTarGz's rejection of non-regular tar
+		// entries.
+		if !entry.Mode().IsRegular() {
+			return fmt.Errorf("unsupported archive entry type for %s", entry.Name)
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
