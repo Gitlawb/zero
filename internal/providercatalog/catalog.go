@@ -48,6 +48,14 @@ type Descriptor struct {
 	SupportedAPIFormats []APIFormat
 	Aliases             []string
 
+	// Custom marks the "bring your own endpoint" catalog entries
+	// (custom-openai-compatible, custom-anthropic-compatible). Unlike every other
+	// descriptor, RequiresAuth here is just a template default for the credential
+	// wizard step, not a fact about the user's actual endpoint — a custom target may
+	// or may not need auth, so callers deciding whether a *saved profile* is missing
+	// a credential must not treat RequiresAuth as authoritative for these entries.
+	Custom bool
+
 	// OAuth reports that this provider offers an in-app OAuth login that yields a
 	// credential usable for model calls (browser PKCE and/or device code). Only
 	// set for providers where this actually works (not subscription-via-proxy).
@@ -149,8 +157,16 @@ var descriptors = []Descriptor{
 	// endpoint. Local (no API key — the proxy authenticates); override the base URL
 	// for your proxy's port. See docs/oauth-subscriptions.md.
 	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
-	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
-	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),
+	func() Descriptor {
+		d := openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible")
+		d.Custom = true
+		return d
+	}(),
+	func() Descriptor {
+		d := anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible")
+		d.Custom = true
+		return d
+	}(),
 }
 
 func All() []Descriptor {

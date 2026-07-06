@@ -509,7 +509,23 @@ func setupMissingCredentialEnv(profile config.ProviderProfile) (string, bool) {
 	}
 	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
 		descriptor, err := providercatalog.Require(catalogID)
-		if err != nil || !descriptor.RequiresAuth {
+		if err != nil {
+			return "", false
+		}
+		if descriptor.Custom {
+			// A custom endpoint's RequiresAuth is just the wizard's template
+			// default, not a fact about this profile's actual endpoint — only
+			// this profile's own explicit APIKeyEnv (set when the user typed
+			// one) means a credential is expected. No APIKeyEnv means the user
+			// deliberately left auth unconfigured (e.g. a local, no-auth
+			// server), so treat it as usable rather than missing.
+			envVar := strings.TrimSpace(profile.APIKeyEnv)
+			if envVar == "" {
+				return "", false
+			}
+			return envVar, true
+		}
+		if !descriptor.RequiresAuth {
 			return "", false
 		}
 		return firstNonEmptyCLI(profile.APIKeyEnv, setupProviderEnvVar(descriptor)), true

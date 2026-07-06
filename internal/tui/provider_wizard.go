@@ -1831,7 +1831,12 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		profile.APIKey = apiKey
-	} else if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+	} else if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" && !provider.Custom {
+		// Custom endpoints don't get a guessed env var default: RequiresAuth on
+		// these two catalog entries is just the wizard's template default (it
+		// doesn't know whether the user's own endpoint needs auth), so a blank
+		// credential step here means "this endpoint needs no auth," not "read
+		// OPENAI_API_KEY/ANTHROPIC_API_KEY at runtime."
 		profile.APIKeyEnv = env
 	}
 	return profile
