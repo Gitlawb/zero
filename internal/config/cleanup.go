@@ -16,15 +16,6 @@ func CleanupStaleFavorites(userConfigPath, projectConfigPath string) (int, error
 	return cleanupFavoritesForConfigPaths(userConfigPath, projectConfigPath)
 }
 
-// CleanupInvalidFavorites removes favorite model entries from the user and
-// project configs that are not in <provider>/<model> format.
-//
-// The project config path is optional (empty = no project config). Returns the
-// number of entries removed; safe to run repeatedly (idempotent).
-func CleanupInvalidFavorites(userConfigPath, projectConfigPath string) (int, error) {
-	return cleanupFavoritesForConfigPaths(userConfigPath, projectConfigPath)
-}
-
 func cleanupFavoritesForConfigPaths(paths ...string) (int, error) {
 	totalRemoved := 0
 	seen := map[string]bool{}
