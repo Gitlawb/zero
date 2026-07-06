@@ -460,8 +460,6 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 	// A stored OAuth login (e.g. `zero auth chatgpt`) is a credential too: a
 	// keyless token-login profile must pass the readiness check instead of being
 	// told to set an API key it will never have.
-	hasCredential := providerProfileHasCredential(profile) ||
-		providerHasOAuthLogin(profile, oauthLoggedInProviders())
 	if profile.CatalogID != "" {
 		descriptor, err := providercatalog.Require(profile.CatalogID)
 		if err != nil {
@@ -470,29 +468,21 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 		if !providercatalog.RuntimeSupported(descriptor) {
 			return fmt.Errorf("provider %q uses transport %q: %s", descriptor.ID, descriptor.Transport, providercatalog.RuntimeUnsupportedReason(descriptor))
 		}
-		if descriptor.RequiresAuth && !hasCredential {
-			apiKeyEnv := strings.TrimSpace(profile.APIKeyEnv)
-			if apiKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
-				apiKeyEnv = descriptor.AuthEnvVars[0]
-			}
-			if apiKeyEnv != "" {
-				return fmt.Errorf("provider %s requires API key; set %s", profile.Name, apiKeyEnv)
-			}
-			return fmt.Errorf("provider %s requires API key", profile.Name)
-		}
+	}
+	if providerHasOAuthLogin(profile, oauthLoggedInProviders()) {
 		return nil
 	}
-	switch profile.ProviderKind {
-	case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
-		if !hasCredential {
-			return fmt.Errorf("provider %s requires API key", profile.Name)
+	// Delegates to the single source of truth shared with the TUI and the
+	// setup wizard, so `providers check` never disagrees with them about
+	// whether a saved provider (including a no-auth custom endpoint) is
+	// actually missing a credential.
+	if envVar, missing := profile.MissingCredentialEnv(); missing {
+		if envVar != "" {
+			return fmt.Errorf("provider %s requires API key; set %s", profile.Name, envVar)
 		}
+		return fmt.Errorf("provider %s requires API key", profile.Name)
 	}
 	return nil
-}
-
-func providerProfileHasCredential(profile config.ProviderProfile) bool {
-	return profile.HasConfiguredCredential()
 }
 
 func providerKindForDescriptor(descriptor providercatalog.Descriptor) config.ProviderKind {

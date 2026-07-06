@@ -483,6 +483,14 @@ func providerProfileHasCredential(profile config.ProviderProfile) bool {
 
 func providerCredentialRequired(profile config.ProviderProfile, providerKind string) bool {
 	if descriptor, ok := providerCatalogDescriptor(profile); ok {
+		// A custom endpoint's RequiresAuth is just the wizard's template
+		// default, not a fact about this profile's actual endpoint (issue
+		// #555 follow-up) — only an explicit, non-default APIKeyEnv means
+		// this saved profile itself expects a credential.
+		if descriptor.Custom {
+			envVar := strings.TrimSpace(profile.APIKeyEnv)
+			return envVar != "" && envVar != firstProviderDisplayValue(descriptor.AuthEnvVars...)
+		}
 		return descriptor.RequiresAuth
 	}
 	switch config.ProviderKind(strings.TrimSpace(providerKind)) {

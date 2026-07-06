@@ -1803,7 +1803,10 @@ func providerWizardCredentialLabel(provider providercatalog.Descriptor, apiKey s
 	if strings.TrimSpace(apiKey) != "" {
 		return "pasted key"
 	}
-	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+	// Mirror providerWizardProfile: a custom endpoint left blank is saved with
+	// no APIKeyEnv, so the summary must not claim it will read one — that
+	// would misdescribe the profile actually being saved (issue #555 follow-up).
+	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" && !provider.Custom {
 		return env + " env var"
 	}
 	return "not required"

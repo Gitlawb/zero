@@ -503,64 +503,14 @@ func setupTryThisExample(profile config.ProviderProfile) string {
 	return example
 }
 
+// setupMissingCredentialEnv reports the environment variable a saved profile
+// is expected to read an API key from, and whether that expectation is
+// unmet. It delegates to config.ProviderProfile.MissingCredentialEnv, the
+// single source of truth shared with the TUI's provider status/wizard
+// surfaces and the CLI's `providers check` readiness gate, so all three never
+// disagree about whether a saved provider is missing a credential.
 func setupMissingCredentialEnv(profile config.ProviderProfile) (string, bool) {
-	if providerProfileHasCredential(profile) {
-		return "", false
-	}
-	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
-		descriptor, err := providercatalog.Require(catalogID)
-		if err != nil {
-			return "", false
-		}
-		if descriptor.Custom {
-			// A custom endpoint's RequiresAuth is just the wizard's template
-			// default, not a fact about this profile's actual endpoint — only
-			// this profile's own explicit APIKeyEnv (set when the user typed
-			// one) means a credential is expected. No APIKeyEnv means the user
-			// deliberately left auth unconfigured (e.g. a local, no-auth
-			// server), so treat it as usable rather than missing.
-			envVar := strings.TrimSpace(profile.APIKeyEnv)
-			// Self-heal profiles saved by the pre-fix wizard, which stamped this
-			// same catalog default onto every custom profile regardless of
-			// whether the endpoint actually needed it (issue #555): a value
-			// indistinguishable from that stale default is treated the same as
-			// unset, so already-broken saved profiles start working again
-			// without a config rewrite. A deliberately different env var name
-			// (e.g. via `--api-key-env`) still means auth is required.
-			if envVar == "" || envVar == setupProviderEnvVar(descriptor) {
-				return "", false
-			}
-			return envVar, true
-		}
-		if !descriptor.RequiresAuth {
-			return "", false
-		}
-		return firstNonEmptyCLI(profile.APIKeyEnv, setupProviderEnvVar(descriptor)), true
-	}
-
-	switch normalizedSetupProviderKind(profile) {
-	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
-		return firstNonEmptyCLI(profile.APIKeyEnv, "OPENAI_API_KEY"), true
-	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
-		return firstNonEmptyCLI(profile.APIKeyEnv, "ANTHROPIC_API_KEY"), true
-	case config.ProviderKindGoogle:
-		return firstNonEmptyCLI(profile.APIKeyEnv, "GEMINI_API_KEY"), true
-	default:
-		if strings.TrimSpace(profile.APIKeyEnv) != "" {
-			return strings.TrimSpace(profile.APIKeyEnv), true
-		}
-		return "", false
-	}
-}
-
-func normalizedSetupProviderKind(profile config.ProviderProfile) config.ProviderKind {
-	if kind := strings.TrimSpace(string(profile.ProviderKind)); kind != "" {
-		return config.ProviderKind(strings.ToLower(kind))
-	}
-	if provider := strings.TrimSpace(profile.Provider); provider != "" {
-		return config.ProviderKind(strings.ToLower(provider))
-	}
-	return ""
+	return profile.MissingCredentialEnv()
 }
 
 func setupCheckCommand(name string) string {

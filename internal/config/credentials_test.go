@@ -238,3 +238,82 @@ func TestOAuthLoginCandidates(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderProfileMissingCredentialEnv(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile ProviderProfile
+		wantEnv string
+		want    bool
+	}{
+		{
+			name:    "catalog provider requiring auth",
+			profile: ProviderProfile{Name: "groq", CatalogID: "groq"},
+			wantEnv: "GROQ_API_KEY",
+			want:    true,
+		},
+		{
+			name:    "local catalog provider",
+			profile: ProviderProfile{Name: "local", CatalogID: "ollama"},
+			want:    false,
+		},
+		{
+			name:    "credential resolved via inline key",
+			profile: ProviderProfile{Name: "openai", ProviderKind: ProviderKindOpenAI, APIKey: "sk-test"},
+			want:    false,
+		},
+		{
+			// issue #555: a custom endpoint left with no credential means "no
+			// auth needed" (e.g. a local llama.cpp server), not "missing".
+			name: "custom openai compatible with no credential configured",
+			profile: ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				BaseURL:   "http://192.168.1.50:8080/v1",
+			},
+			want: false,
+		},
+		{
+			name: "custom openai compatible with explicit non-default api key env",
+			profile: ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				APIKeyEnv: "LLAMA_CPP_API_KEY",
+			},
+			wantEnv: "LLAMA_CPP_API_KEY",
+			want:    true,
+		},
+		{
+			// Self-heal: a profile stamped by the pre-fix wizard with the
+			// catalog's own guessed default is indistinguishable from that bug
+			// and must not stay filtered out after upgrading.
+			name: "custom openai compatible with stale legacy default env",
+			profile: ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				APIKeyEnv: "OPENAI_API_KEY",
+			},
+			want: false,
+		},
+		{
+			name:    "openai compatible without catalog falls back to provider kind",
+			profile: ProviderProfile{Name: "custom", ProviderKind: ProviderKindOpenAICompatible},
+			wantEnv: "OPENAI_API_KEY",
+			want:    true,
+		},
+		{
+			name:    "legacy Provider string field fallback",
+			profile: ProviderProfile{Name: "legacy", Provider: "anthropic"},
+			wantEnv: "ANTHROPIC_API_KEY",
+			want:    true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotEnv, got := c.profile.MissingCredentialEnv()
+			if got != c.want || gotEnv != c.wantEnv {
+				t.Fatalf("MissingCredentialEnv() = (%q, %v), want (%q, %v)", gotEnv, got, c.wantEnv, c.want)
+			}
+		})
+	}
+}
