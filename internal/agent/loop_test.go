@@ -2768,11 +2768,11 @@ func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
 		t.Fatalf("expected final answer from finalization turn, got %q", result.FinalAnswer)
 	}
 	if len(provider.requests) != 2 {
-		t.Fatalf("expected final no-tools request after max turns, got %d requests", len(provider.requests))
+		t.Fatalf("expected finalization request after max turns, got %d requests", len(provider.requests))
 	}
 	finalRequest := provider.requests[1]
-	if len(finalRequest.Tools) != 0 {
-		t.Fatalf("finalization request must not advertise tools, got %#v", finalRequest.Tools)
+	if toolDefinitionByName(finalRequest.Tools, "read_file") == nil {
+		t.Fatalf("finalization request must keep prior tools exposed for strict provider replay, got %#v", finalRequest.Tools)
 	}
 	lastMessage := finalRequest.Messages[len(finalRequest.Messages)-1]
 	if lastMessage.Role != zeroruntime.MessageRoleUser || !strings.Contains(lastMessage.Content, "tool-turn limit") {

@@ -721,7 +721,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Content: nudge,
 		})
 	}
-	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
+	finalExposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
 		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
@@ -741,7 +742,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	return result, nil
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message, string) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, tools []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
@@ -752,6 +753,7 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 	// transient hiccup doesn't drop the final summary (AUDIT-L1).
 	stream, err := streamWithReconnect(ctx, provider, zeroruntime.CompletionRequest{
 		Messages:        copyMessages(finalMessages),
+		Tools:           tools,
 		ReasoningEffort: options.ReasoningEffort,
 		PromptCacheKey:  options.SessionID,
 	}, reconnectNoticeFor(options))
