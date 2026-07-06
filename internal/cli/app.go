@@ -267,7 +267,11 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	addDirs = append(addDirs, moreDirs...)
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+		// Empty mode means "unspecified": runInteractiveTUIWithSetup resolves it
+		// from the persisted defaultPermissionMode preference (falling back to ask).
+		// An explicit --skip-permissions-unsafe launch below passes unsafe, which
+		// is non-empty and therefore always wins over the config default.
+		return runInteractiveTUI(stderr, deps, "", addDirs, theme)
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -579,6 +583,28 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
 }
 
+// resolveDefaultPermissionMode maps the persisted defaultPermissionMode
+// preference to the launch permission mode for the interactive TUI. Only the
+// three user-facing modes are accepted — "ask" (the safe default), "auto"
+// (auto-approve read-only, prompt on writes), and "unsafe" (yolo: auto-approve
+// everything and unlock the "!" shell escape). An unset or unrecognized value
+// falls back to ask; an unrecognized non-empty value also warns so a typo like
+// "yolo" is visible rather than silently ignored. The internal spec-draft and
+// member-auto modes are deliberately not settable here.
+func resolveDefaultPermissionMode(preference string, stderr io.Writer) agent.PermissionMode {
+	switch strings.ToLower(strings.TrimSpace(preference)) {
+	case "", "ask":
+		return agent.PermissionModeAsk
+	case "auto":
+		return agent.PermissionModeAuto
+	case "unsafe":
+		return agent.PermissionModeUnsafe
+	default:
+		fmt.Fprintf(stderr, "zero: ignoring unknown preferences.defaultPermissionMode %q (use ask, auto, or unsafe); defaulting to ask\n", preference)
+		return agent.PermissionModeAsk
+	}
+}
+
 func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
@@ -744,7 +770,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// count uses the SAME permission mode the agent loop's partition will use; an
 	// empty mode here would mis-gate prompt-advertised deferred tools.
 	if permissionMode == "" {
-		permissionMode = agent.PermissionModeAsk
+		permissionMode = resolveDefaultPermissionMode(resolved.Preferences.DefaultPermissionMode, stderr)
 	}
 	// Activate deferred MCP-tool loading for the interactive run only when the
 	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
