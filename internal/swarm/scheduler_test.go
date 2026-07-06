@@ -85,6 +85,10 @@ func TestSchedulerSkipsWhilePreviousRuns(t *testing.T) {
 	waitFor(t, "first done", func() bool { return sw.Coordinator().Summarize().Done == 1 })
 	ticks <- time.Time{}
 	waitFor(t, "second spawn", func() bool { return len(l.recorded()) == 2 })
+	waitFor(t, "second run counted", func() bool {
+		j, ok := findJob(sched.List(), id)
+		return ok && j.Runs == 2
+	})
 
 	j, ok := findJob(sched.List(), id)
 	if !ok {
