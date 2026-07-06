@@ -675,7 +675,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// The TUI has no --worktree reassignment, so trustRoot == workspaceRoot here.
 	// Gate the project MCP layer behind the workspace-trust check (fail-closed): an
 	// untrusted workspace must not spawn its ./.zero/config.json stdio MCP servers.
-	mcpExcludeProject, _ := resolveTrust(workspaceRoot)
+	// Keep the store-read error so the notice below can distinguish a fail-closed
+	// store error from a clean untrusted verdict.
+	mcpExcludeProject, mcpTrustErrored := resolveTrust(workspaceRoot)
+	mcpSkip := trustSkip{
+		excludedProjectConfig: mcpExcludeProject && projectMCPConfigExists(workspaceRoot),
+		trustCheckErrored:     mcpTrustErrored,
+	}
 	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -772,7 +778,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// report can be combined with the plugin activation's, and emit at most one
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
-	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip)
+	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,

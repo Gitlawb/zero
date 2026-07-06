@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -183,6 +184,90 @@ func TestTrustGateFiresInDefaultAutoMode(t *testing.T) {
 	runOnce(agent.PermissionModeAsk)
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("TRUSTED ask mode: project beforeTool hook did NOT fire (marker absent): %v", err)
+	}
+}
+
+// TestExecSurfacesMCPTrustNotice proves the exec path actually threads the MCP trust
+// skip into the one-line notice (the CodeRabbit finding), not just that the unit
+// pieces work in isolation: an untrusted repo whose only project config is MCP prints
+// the notice through the real runExec wiring; trusting it silences it. resolveMCPConfig
+// is stubbed to return no servers so nothing spawns -- the notice depends only on the
+// trust verdict and the real ./.zero/config.json that projectMCPConfigExists reads.
+func TestExecSurfacesMCPTrustNotice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec fake-provider harness assumes a POSIX process environment")
+	}
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() string {
+		var out, errBuf bytes.Buffer
+		code := runWithDeps([]string{"exec", "--skip-permissions-unsafe", "--max-turns", "3", "go"}, &out, &errBuf, appDeps{
+			getwd:         func() (string, error) { return repo, nil },
+			resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) { return execResolvedConfig(), nil },
+			newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return toolThenTextProvider{toolName: "glob"}, nil
+			},
+			resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+		})
+		if code != exitSuccess {
+			t.Fatalf("exec exit = %d, stderr=%q", code, errBuf.String())
+		}
+		return errBuf.String()
+	}
+
+	// Untrusted: the project MCP layer is dropped, so the notice must name it. The repo
+	// has no project hooks/plugins, so the MCP skip is the ONLY thing that can fire it.
+	untrusted := run()
+	if !strings.Contains(untrusted, "MCP servers") || !strings.Contains(untrusted, "zero trust") {
+		t.Fatalf("untrusted exec must surface the MCP trust notice, stderr=%q", untrusted)
+	}
+
+	// Trusted: nothing is skipped, so no notice at all.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	if trusted := run(); strings.Contains(trusted, "ignoring project") {
+		t.Fatalf("trusted exec must not emit a trust notice, stderr=%q", trusted)
+	}
+}
+
+// TestExecSpecSurfacesMCPTrustNotice is the --use-spec analogue of the test above:
+// the spec-draft path (exec_spec.go) must also thread the MCP skip into its notice.
+// The fake provider never submits a spec, so the run exits non-zero; that is
+// orthogonal to trust, so we assert only the notice, not the exit code.
+func TestExecSpecSurfacesMCPTrustNotice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec fake-provider harness assumes a POSIX process environment")
+	}
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	_ = runWithDeps([]string{"exec", "--use-spec", "--skip-permissions-unsafe", "--max-turns", "3", "go"}, &out, &errBuf, appDeps{
+		getwd:         func() (string, error) { return repo, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) { return execResolvedConfig(), nil },
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return toolThenTextProvider{toolName: "glob"}, nil
+		},
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+	})
+	if !strings.Contains(errBuf.String(), "MCP servers") || !strings.Contains(errBuf.String(), "zero trust") {
+		t.Fatalf("untrusted --use-spec exec must surface the MCP trust notice, stderr=%q", errBuf.String())
 	}
 }
 

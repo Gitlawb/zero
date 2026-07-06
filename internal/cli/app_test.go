@@ -20,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
+	"github.com/Gitlawb/zero/internal/workspacetrust"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -737,6 +738,52 @@ func TestRunNoArgsLaunchesTUIInAskPermissionMode(t *testing.T) {
 	}
 	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeAsk {
 		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeAsk)
+	}
+}
+
+// TestRunInteractiveSurfacesMCPTrustNotice executes the interactive (TUI) path's MCP
+// trust notice (app.go), the third notice site alongside exec and spec-draft. An
+// untrusted repo whose only project config is MCP must print the notice before runTUI;
+// trusting it silences it. runTUI is stubbed so nothing renders; resolveMCPConfig
+// returns no servers so nothing spawns -- the notice depends only on the trust verdict
+// and the real ./.zero/config.json.
+func TestRunInteractiveSurfacesMCPTrustNotice(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() string {
+		var stdout, stderr bytes.Buffer
+		code := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return repo, nil },
+			resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+				return config.ResolvedConfig{MaxTurns: 3}, nil
+			},
+			resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+			runTUI:           func(context.Context, tui.Options) int { return 0 },
+		})
+		if code != 0 {
+			t.Fatalf("interactive launch exit = %d, stderr=%q", code, stderr.String())
+		}
+		return stderr.String()
+	}
+
+	untrusted := run()
+	if !strings.Contains(untrusted, "MCP servers") || !strings.Contains(untrusted, "zero trust") {
+		t.Fatalf("untrusted interactive launch must surface the MCP trust notice, stderr=%q", untrusted)
+	}
+
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	if trusted := run(); strings.Contains(trusted, "ignoring project") {
+		t.Fatalf("trusted interactive launch must not emit a trust notice, stderr=%q", trusted)
 	}
 }
 

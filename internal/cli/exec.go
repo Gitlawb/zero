@@ -205,7 +205,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
 	}
-	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot)
+	mcpRuntime, mcpSkip, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 	}
@@ -420,6 +420,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			deps:               deps,
 			workspaceRoot:      workspaceRoot,
 			trustRoot:          trustRoot,
+			mcpSkip:            mcpSkip,
 			registry:           registry,
 			modelRegistry:      modelRegistry,
 			resolved:           resolved,
@@ -528,7 +529,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// can be combined with the plugin activation's, and emit at most one notice when
 	// project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
-	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip)
+	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),

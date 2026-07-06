@@ -124,20 +124,28 @@ func projectHooksFileExists(workspaceRoot string) bool {
 }
 
 // emitTrustNotice writes at most one stderr line summarizing that project-scoped
-// hooks and/or plugins were skipped in an untrusted workspace. It is computed once
-// per session by the caller (each session-setup site runs once), so it is
-// naturally once-per-process. When either surface's skip was a trust-store read
+// hooks, plugins, and/or MCP servers were skipped in an untrusted workspace. It
+// takes the skip report from each trust-gated surface (hooks, plugins, MCP) and ORs
+// them, so a workspace that only drops one surface still gets the notice. It is
+// computed once per session by the caller (each session-setup site runs once), so it
+// is naturally once-per-process. When any surface's skip was a trust-store read
 // error, the notice names that so a transient config-dir problem is diagnosable.
-func emitTrustNotice(stderr io.Writer, hookSkip trustSkip, pluginSkip trustSkip) {
+func emitTrustNotice(stderr io.Writer, skips ...trustSkip) {
 	if stderr == nil {
 		return
 	}
-	if !hookSkip.excludedProjectConfig && !pluginSkip.excludedProjectConfig {
+	excluded := false
+	storeErrored := false
+	for _, skip := range skips {
+		excluded = excluded || skip.excludedProjectConfig
+		storeErrored = storeErrored || skip.trustCheckErrored
+	}
+	if !excluded {
 		return
 	}
-	if hookSkip.trustCheckErrored || pluginSkip.trustCheckErrored {
-		_, _ = fmt.Fprintln(stderr, "zero: the workspace-trust store could not be read; ignoring project hooks/plugins (fail-closed). Run 'zero trust' to enable.")
+	if storeErrored {
+		_, _ = fmt.Fprintln(stderr, "zero: the workspace-trust store could not be read; ignoring project hooks/plugins/MCP servers (fail-closed). Run 'zero trust' to enable.")
 		return
 	}
-	_, _ = fmt.Fprintln(stderr, "zero: ignoring project hooks/plugins in an untrusted workspace. Run 'zero trust' to enable.")
+	_, _ = fmt.Fprintln(stderr, "zero: ignoring project hooks/plugins/MCP servers in an untrusted workspace. Run 'zero trust' to enable.")
 }

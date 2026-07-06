@@ -430,6 +430,29 @@ func TestEmitTrustNoticeOneLineWhenSkipped(t *testing.T) {
 			t.Fatalf("expected exactly one notice line, got %d: %q", len(lines), buf.String())
 		}
 	})
+
+	t.Run("mcp skip alone yields one line naming mcp", func(t *testing.T) {
+		var buf bytes.Buffer
+		// Hooks and plugins clean; only the MCP surface (third arg) dropped project config.
+		emitTrustNotice(&buf, trustSkip{}, trustSkip{}, trustSkip{excludedProjectConfig: true})
+		lines := nonEmptyLines(buf.String())
+		if len(lines) != 1 {
+			t.Fatalf("expected exactly one notice line, got %d: %q", len(lines), buf.String())
+		}
+		if !bytes.Contains(buf.Bytes(), []byte("MCP")) {
+			t.Fatalf("notice should name MCP when the MCP surface is skipped, got %q", buf.String())
+		}
+	})
+
+	t.Run("store error with nothing excluded yields no notice", func(t *testing.T) {
+		// trustCheckErrored but no surface had project config to skip (excludedProjectConfig
+		// false): there is nothing to warn about, so the excluded-gate wins over the error.
+		var buf bytes.Buffer
+		emitTrustNotice(&buf, trustSkip{trustCheckErrored: true}, trustSkip{trustCheckErrored: true})
+		if buf.Len() != 0 {
+			t.Fatalf("a store error with no skipped project config must emit nothing, got %q", buf.String())
+		}
+	})
 }
 
 func nonEmptyLines(s string) []string {

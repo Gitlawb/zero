@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -46,7 +50,7 @@ func TestMCPGateUntrustedExcludesProjectServer(t *testing.T) {
 	deps := mcpTrustDeps(&gotExclude, &spawned)
 	registry := tools.NewRegistry()
 
-	runtime, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, repo)
+	runtime, skip, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, repo)
 	if err != nil {
 		t.Fatalf("registerMCPToolsForWorkspace: %v", err)
 	}
@@ -60,6 +64,14 @@ func TestMCPGateUntrustedExcludesProjectServer(t *testing.T) {
 	}
 	if _, ok := runtime.(noopMCPRuntime); !ok {
 		t.Fatalf("with the project server dropped, the runtime should be the noop runtime, got %T", runtime)
+	}
+	// This repo has no ./.zero/config.json, so there is no project MCP config to
+	// notice about even though it is untrusted; the skip must stay clean.
+	if skip.excludedProjectConfig {
+		t.Fatalf("no project MCP config on disk, so the skip must not flag an excluded config")
+	}
+	if skip.trustCheckErrored {
+		t.Fatalf("a clean untrusted verdict is not a store-read error")
 	}
 }
 
@@ -77,7 +89,7 @@ func TestMCPGateEmptyTrustRootFailsClosed(t *testing.T) {
 	deps := mcpTrustDeps(&gotExclude, &spawned)
 	registry := tools.NewRegistry()
 
-	runtime, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, "")
+	runtime, skip, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, "")
 	if err != nil {
 		t.Fatalf("registerMCPToolsForWorkspace: %v", err)
 	}
@@ -88,6 +100,10 @@ func TestMCPGateEmptyTrustRootFailsClosed(t *testing.T) {
 	}
 	if spawned {
 		t.Fatalf("empty trustRoot must not spawn the project MCP server")
+	}
+	// Empty trustRoot is a clean fail-closed verdict, not a store-read error.
+	if skip.trustCheckErrored {
+		t.Fatalf("empty trustRoot is not a store-read error")
 	}
 }
 
@@ -104,7 +120,7 @@ func TestMCPGateTrustedSpawnsProjectServer(t *testing.T) {
 	deps := mcpTrustDeps(&gotExclude, &spawned)
 	registry := tools.NewRegistry()
 
-	runtime, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, repo)
+	runtime, skip, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, repo)
 	if err != nil {
 		t.Fatalf("registerMCPToolsForWorkspace: %v", err)
 	}
@@ -115,5 +131,174 @@ func TestMCPGateTrustedSpawnsProjectServer(t *testing.T) {
 	}
 	if !spawned {
 		t.Fatalf("trusted workspace must spawn the project MCP server")
+	}
+	if skip.excludedProjectConfig {
+		t.Fatalf("trusted workspace must not report the project MCP layer excluded")
+	}
+}
+
+// TestMCPToolsListSurfacesTrustNotice proves `zero mcp tools list` no longer drops the
+// project MCP layer silently in an untrusted workspace: the gated skip is surfaced on
+// stderr (the list stays on stdout), so an empty list is explained rather than read as
+// "nothing configured". Trusting the repo silences it.
+func TestMCPToolsListSurfacesTrustNotice(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() string {
+		var out, errBuf bytes.Buffer
+		deps := appDeps{
+			getwd:            func() (string, error) { return repo, nil },
+			resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+		}
+		if code := runWithDeps([]string{"mcp", "tools", "list"}, &out, &errBuf, deps); code != exitSuccess {
+			t.Fatalf("mcp tools list exit = %d, stderr=%q", code, errBuf.String())
+		}
+		return errBuf.String()
+	}
+
+	// Untrusted: the gated project MCP layer must be explained on stderr.
+	if errUntrusted := run(); !strings.Contains(errUntrusted, "MCP servers") || !strings.Contains(errUntrusted, "zero trust") {
+		t.Fatalf("untrusted `mcp tools list` must surface the trust notice on stderr, got %q", errUntrusted)
+	}
+
+	// Trusted: nothing is skipped, so no notice.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	if errTrusted := run(); strings.Contains(errTrusted, "ignoring project") {
+		t.Fatalf("trusted `mcp tools list` must not emit a trust notice, got %q", errTrusted)
+	}
+}
+
+// TestProjectMCPConfigExists exercises every branch of the notice-gating detector:
+// only a ./.zero/config.json that parses AND declares at least one server is true.
+func TestProjectMCPConfigExists(t *testing.T) {
+	writeCfg := func(t *testing.T, dir, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, ".zero"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if projectMCPConfigExists("") {
+		t.Fatal("empty workspace root must be false")
+	}
+	cases := []struct {
+		name string
+		body string // "" means write no config.json at all
+		want bool
+	}{
+		{"no file", "", false},
+		{"declares a server", `{"mcp":{"servers":{"a":{"type":"stdio","command":"x"}}}}`, true},
+		{"empty servers map", `{"mcp":{"servers":{}}}`, false},
+		{"config without mcp key", `{"model":"x"}`, false},
+		{"unparseable json", `{not valid`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.body != "" {
+				writeCfg(t, dir, tc.body)
+			}
+			if got := projectMCPConfigExists(dir); got != tc.want {
+				t.Fatalf("projectMCPConfigExists = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMCPGateFailClosedOnStoreError proves the MCP surface reports a store-read error
+// (trust.json created as a directory) as trustCheckErrored, so the caller's notice can
+// name the fail-closed reason -- the same error path the hook and plugin gates cover.
+func TestMCPGateFailClosedOnStoreError(t *testing.T) {
+	configRoot := setTrustConfigRoot(t)
+	trustPath := filepath.Join(configRoot, "zero", "trust.json")
+	if err := os.MkdirAll(trustPath, 0o700); err != nil {
+		t.Fatalf("create trust.json as a directory: %v", err)
+	}
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatalf("mkdir project .zero: %v", err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write project config.json: %v", err)
+	}
+
+	var gotExclude, spawned bool
+	deps := mcpTrustDeps(&gotExclude, &spawned)
+	runtime, skip, err := registerMCPToolsForWorkspace(context.Background(), repo, tools.NewRegistry(), deps, mcp.AutonomyLow, repo)
+	if err != nil {
+		t.Fatalf("registerMCPToolsForWorkspace: %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+	if !gotExclude {
+		t.Fatalf("a store-read error must fail closed (excludeProject=true)")
+	}
+	if spawned {
+		t.Fatalf("a store-read error must not spawn the project MCP server")
+	}
+	if !skip.trustCheckErrored {
+		t.Fatalf("skip must mark the store-read error so the notice can name it")
+	}
+	if !skip.excludedProjectConfig {
+		t.Fatalf("the project MCP layer must be reported excluded on the error path")
+	}
+}
+
+// TestMCPGateUntrustedNoticesProjectMCPConfig proves the notice-surfacing fix: when an
+// untrusted workspace actually declares project MCP servers in ./.zero/config.json,
+// registerMCPToolsForWorkspace reports excludedProjectConfig=true so the caller can
+// warn (the CodeRabbit finding: project MCP was gated silently). Trusting the repo
+// clears the skip.
+func TestMCPGateUntrustedNoticesProjectMCPConfig(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	// A real project MCP config on disk: projectMCPConfigExists reads this file.
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatalf("mkdir project .zero: %v", err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write project config.json: %v", err)
+	}
+
+	var gotExclude, spawned bool
+	deps := mcpTrustDeps(&gotExclude, &spawned)
+	registry := tools.NewRegistry()
+
+	// Untrusted: the project MCP layer is dropped AND flagged for the notice.
+	runtime, skip, err := registerMCPToolsForWorkspace(context.Background(), repo, registry, deps, mcp.AutonomyLow, repo)
+	if err != nil {
+		t.Fatalf("registerMCPToolsForWorkspace (untrusted): %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+	if !skip.excludedProjectConfig {
+		t.Fatalf("untrusted workspace with project MCP config must flag excludedProjectConfig for the notice")
+	}
+	if skip.trustCheckErrored {
+		t.Fatalf("a clean untrusted verdict is not a store-read error")
+	}
+
+	// Trusted: nothing is skipped, so no notice.
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatalf("Trust(repo): %v", err)
+	}
+	_, trustedSkip, err := registerMCPToolsForWorkspace(context.Background(), repo, tools.NewRegistry(), deps, mcp.AutonomyLow, repo)
+	if err != nil {
+		t.Fatalf("registerMCPToolsForWorkspace (trusted): %v", err)
+	}
+	if trustedSkip.excludedProjectConfig {
+		t.Fatalf("trusted workspace must not flag an excluded project MCP layer")
 	}
 }

@@ -29,6 +29,27 @@ type mcpWritableConfig struct {
 	serverRaw map[string]json.RawMessage
 }
 
+// projectMCPConfigExists reports whether the workspace's project ./.zero/config.json
+// declares any MCP servers, so the trust notice fires only when project MCP config was
+// actually skipped (mirroring projectHooksFileExists / projectPluginsDirExists). A
+// missing or unparseable file, or one that declares no servers, returns false: there
+// is nothing to notice about. This only reads the file; it never spawns a server, so
+// it is safe to call on an untrusted workspace.
+func projectMCPConfigExists(workspaceRoot string) bool {
+	if workspaceRoot == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(workspaceRoot, ".zero", "config.json"))
+	if err != nil {
+		return false
+	}
+	var fc config.FileConfig
+	if err := json.Unmarshal(data, &fc); err != nil {
+		return false
+	}
+	return len(fc.MCP.Servers) > 0
+}
+
 func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseMCPAddArgs(args)
 	if err != nil {
