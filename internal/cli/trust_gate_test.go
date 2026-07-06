@@ -16,18 +16,23 @@ import (
 
 // setTrustConfigRoot redirects both the workspace-trust store and the user-level
 // hooks/plugins config to a fresh temp dir with a GOOS-aware env switch, mirroring
-// setUserConfigRoot in internal/config/paths_test.go. A single-var switch would
-// leave the store pointed at the real config dir on some platforms, so it sets the
-// same variable the platform's os.UserConfigDir consults. XDG_DATA_HOME is also
-// redirected so the hook audit store never touches the user's real data dir.
+// setUserConfigRoot in internal/config/paths_test.go, and returns that dir so tests
+// can build the exact paths the code resolves to.
+//
+// XDG_CONFIG_HOME is the lever on macOS as well as Linux: config.UserConfigDir is
+// XDG-first there (it only falls back to $HOME/.config when XDG_CONFIG_HOME is
+// unset), and the hooks loader resolves its user layer from XDG_CONFIG_HOME too. An
+// earlier version set HOME on darwin and returned the raw root; that left the store
+// at <root>/.config/zero while the tests wrote to <root>/zero, so the store-error
+// and user-hook cases silently missed. Only Windows needs its own variable (APPDATA,
+// what os.UserConfigDir consults). XDG_DATA_HOME is redirected so the hook audit
+// store never touches the user's real data dir.
 func setTrustConfigRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	switch runtime.GOOS {
 	case "windows":
 		t.Setenv("APPDATA", root)
-	case "darwin":
-		t.Setenv("HOME", root)
 	default:
 		t.Setenv("XDG_CONFIG_HOME", root)
 	}

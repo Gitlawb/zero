@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -67,9 +68,14 @@ func (p toolThenTextProvider) StreamCompletion(_ context.Context, req zeroruntim
 }
 
 // writeMarkerHook writes a ./.zero/hooks.json under dir whose enabled beforeTool
-// hook touches markerPath when it fires.
+// hook touches markerPath when it fires. The hook shells out to /bin/sh, so the
+// trusted-case assertion (the marker must appear) is meaningless on Windows, where
+// that interpreter does not exist; skip there, matching writeMarkerHookScript.
 func writeMarkerHook(t *testing.T, dir, markerPath string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("marker hook is POSIX-shell based (/bin/sh)")
+	}
 	if err := os.MkdirAll(filepath.Join(dir, ".zero"), 0o755); err != nil {
 		t.Fatal(err)
 	}

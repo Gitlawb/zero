@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,13 +38,59 @@ func TestRunTrustAddThenList(t *testing.T) {
 		t.Fatalf("cwd should be trusted after `trust`")
 	}
 
+	// The store canonicalizes with filepath.EvalSymlinks, so `list` prints the
+	// resolved path. On platforms where the temp dir is a symlink (macOS /var) or a
+	// Windows 8.3 short name (RUNNER~1 -> runneradmin), that differs from the raw
+	// cwd; compare against the same canonical form the store records.
+	wantListed := cwd
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		wantListed = resolved
+	}
+
 	out.Reset()
 	errBuf.Reset()
 	if code := runTrust([]string{"list"}, &out, &errBuf, deps); code != exitSuccess {
 		t.Fatalf("trust list returned %d, want %d; stderr=%q", code, exitSuccess, errBuf.String())
 	}
-	if !strings.Contains(out.String(), cwd) {
-		t.Fatalf("trust list stdout = %q, want it to contain the cwd %q", out.String(), cwd)
+	if !strings.Contains(out.String(), wantListed) {
+		t.Fatalf("trust list stdout = %q, want it to contain the trusted root %q", out.String(), wantListed)
+	}
+}
+
+// TestRunTrustListShowsCanonicalPath executes the canonical-path behavior that broke
+// TestRunTrustAddThenList on the Windows runner (an 8.3 short name expanded by
+// EvalSymlinks). It uses a symlinked cwd -- the portable, Linux-runnable analogue of
+// that divergence -- and proves `trust list` prints the resolved path the store
+// records, never the raw pre-resolution path.
+func TestRunTrustListShowsCanonicalPath(t *testing.T) {
+	setTrustConfigRoot(t)
+	realDir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(link): %v", err)
+	}
+	if resolved == link {
+		t.Skip("symlink did not change the path on this platform")
+	}
+
+	deps := trustDeps(link)
+	if code := runTrust(nil, &bytes.Buffer{}, &bytes.Buffer{}, deps); code != exitSuccess {
+		t.Fatalf("trust returned %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	if code := runTrust([]string{"list"}, &out, &errBuf, deps); code != exitSuccess {
+		t.Fatalf("trust list returned %d; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), resolved) {
+		t.Fatalf("trust list = %q, want the canonical path %q", out.String(), resolved)
+	}
+	if strings.Contains(out.String(), link) {
+		t.Fatalf("trust list = %q, must not contain the raw pre-resolution path %q", out.String(), link)
 	}
 }
 
