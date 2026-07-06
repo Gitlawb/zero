@@ -30,6 +30,7 @@ import (
 	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -541,6 +542,7 @@ type model struct {
 	recapIdleArmed               bool
 	recapIdleRunID               int
 	idleRecap                    string
+	compactionModel              string // preferences.compactionModel (see providers.CompactionModelID)
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -963,6 +965,7 @@ func newModel(ctx context.Context, options Options) model {
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recentModels:                normalizeRecentModelEntries(options.RecentModels),
+		compactionModel:             options.CompactionModel,
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
@@ -5422,6 +5425,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// compaction (proactive + reactive) is enabled for every model, not just
 		// catalogued ones.
 		options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+		// Route compaction summarization to a cheap model when one applies
+		// (env > config > curated default). The factory is lazy, re-evaluated
+		// against the model in force when the compactor asks (so an escalation
+		// away from the cheap model gains a summarizer), and the agent falls
+		// back to the main provider on any summarizer failure. Resolved against
+		// the ACTIVE profile so it tracks mid-session model switches.
+		options.Summarizer = providers.CompactionSummarizerFactory(m.providerProfile, m.compactionModel, m.newProvider)
+		// Let compaction re-derive its threshold after a mid-run escalate_model
+		// switch instead of keeping the original model's window.
+		options.ContextWindowFor = func(modelID string) int {
+			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
+		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,

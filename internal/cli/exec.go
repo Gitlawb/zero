@@ -682,16 +682,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ModelSwitcher:        modelSwitcher,
 		TurnSessionProvider:  turnSessions,
 		ModelSessionSwitcher: modelSessionSwitcher,
-		ReasoningEffort:      forwardEffort,
-		Trace:                traceRecorder,
-		Cwd:                  workspaceRoot,
-		Images:               images,
-		Registry:             registry,
-		PermissionMode:       permissionMode,
-		Autonomy:             options.autonomy,
-		SelfCorrect:          selfCorrector,
-		FileDiagnostics:      fileDiagnostics,
-		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
+		Summarizer:           summarizerFactory(resolved, deps.newProvider),
+		ContextWindowFor: func(modelID string) int {
+			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		ReasoningEffort: forwardEffort,
+		Trace:           traceRecorder,
+		Cwd:             workspaceRoot,
+		Images:          images,
+		Registry:        registry,
+		PermissionMode:  permissionMode,
+		Autonomy:        options.autonomy,
+		SelfCorrect:     selfCorrector,
+		FileDiagnostics: fileDiagnostics,
+		Profile:         execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
