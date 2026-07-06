@@ -65,9 +65,7 @@ func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T
 	var stderr bytes.Buffer
 
 	workspace := t.TempDir()
-	xdgConfigHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
-	userConfigPath := filepath.Join(xdgConfigHome, "zero", "config.json")
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
 		t.Fatalf("mkdir user config dir: %v", err)
 	}
@@ -96,7 +94,8 @@ func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T
 	})
 
 	exitCode := runWithDeps([]string{"config", "cleanup"}, &stdout, &stderr, appDeps{
-		getwd: func() (string, error) { return workspace, nil },
+		getwd:          func() (string, error) { return workspace, nil },
+		userConfigPath: func() (string, error) { return userConfigPath, nil },
 	})
 
 	if exitCode != exitSuccess {
@@ -121,9 +120,7 @@ func TestRunConfigCleanupJSON(t *testing.T) {
 	var stderr bytes.Buffer
 
 	workspace := t.TempDir()
-	xdgConfigHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
-	userConfigPath := filepath.Join(xdgConfigHome, "zero", "config.json")
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
 		t.Fatalf("mkdir user config dir: %v", err)
 	}
@@ -134,7 +131,8 @@ func TestRunConfigCleanupJSON(t *testing.T) {
 	})
 
 	exitCode := runWithDeps([]string{"config", "cleanup", "--json"}, &stdout, &stderr, appDeps{
-		getwd: func() (string, error) { return workspace, nil },
+		getwd:          func() (string, error) { return workspace, nil },
+		userConfigPath: func() (string, error) { return userConfigPath, nil },
 	})
 
 	if exitCode != exitSuccess {

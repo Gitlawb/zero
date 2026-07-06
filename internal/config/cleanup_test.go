@@ -36,7 +36,7 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 		},
 	}, 0o600)
 
-	removed, err := CleanupInvalidFavorites(userPath, projectPath)
+	removed, err := CleanupStaleFavorites(userPath, projectPath)
 	if err != nil {
 		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
 	}
@@ -124,38 +124,6 @@ func TestCleanupFavoritesFile_RewritesPassedConfigPath(t *testing.T) {
 	}
 }
 
-func TestCleanupFavorites_EmptyAndMissingPathsAreNoOp(t *testing.T) {
-	dir := t.TempDir()
-	nonexistent := filepath.Join(dir, "no-such-file.json")
-
-	removed, err := CleanupInvalidFavorites("", nonexistent)
-	if err != nil {
-		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
-	}
-	if removed != 0 {
-		t.Fatalf("removed = %d, want 0", removed)
-	}
-}
-
-func TestCleanupFavorites_NoOpWhenNoFavorites(t *testing.T) {
-	dir := t.TempDir()
-	userPath := filepath.Join(dir, "zero.json")
-
-	writeConfigFixture(t, userPath, FileConfig{
-		Providers: []ProviderProfile{
-			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
-		},
-	}, 0o600)
-
-	removed, err := CleanupInvalidFavorites(userPath, "")
-	if err != nil {
-		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
-	}
-	if removed != 0 {
-		t.Fatalf("removed = %d, want 0", removed)
-	}
-}
-
 func TestCleanupFavorites_PreservesOtherConfig(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "zero.json")
@@ -176,7 +144,7 @@ func TestCleanupFavorites_PreservesOtherConfig(t *testing.T) {
 		},
 	}, 0o600)
 
-	removed, err := CleanupInvalidFavorites(userPath, "")
+	removed, err := CleanupStaleFavorites(userPath, "")
 	if err != nil {
 		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
 	}

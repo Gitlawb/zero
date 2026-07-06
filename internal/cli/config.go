@@ -32,23 +32,18 @@ func runConfigCleanup(opt commandCenterOptions, stdout io.Writer, stderr io.Writ
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	userConfigPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), exitCrash)
+	}
+
 	resolveOptions, err := config.DefaultResolveOptions(workspaceRoot)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	userConfigPath := resolveOptions.UserConfigPath
 	projectConfigPath := resolveOptions.ProjectConfigPath
 
-	if userConfigPath == "" {
-		// When the file is absent, keep behavior tolerant by falling back to the
-		// default writable user-config location; cleanup then remains a no-op.
-		userConfigPath, err = deps.userConfigPath()
-		if err != nil {
-			return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), exitCrash)
-		}
-	}
-
-	removed, err := config.CleanupInvalidFavorites(userConfigPath, projectConfigPath)
+	removed, err := config.CleanupStaleFavorites(userConfigPath, projectConfigPath)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
