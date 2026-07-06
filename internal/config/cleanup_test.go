@@ -11,6 +11,11 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 	projectPath := filepath.Join(dir, "project.json")
 
 	writeConfigFixture(t, userPath, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "openai"},
+			{Name: "anthropic"},
+			{Name: "unknown"},
+		},
 		Preferences: PreferencesConfig{
 			FavoriteModels: []string{
 				"openai/gpt-4.1",
@@ -28,9 +33,9 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 	writeConfigFixture(t, projectPath, FileConfig{
 		Preferences: PreferencesConfig{
 			FavoriteModels: []string{
-				"project/sonnet",
+				"openai/project-sonnet",
 				"",
-				"project /sonnet",
+				"openai /sonnet",
 				"local/qwen3",
 			},
 		},
@@ -40,8 +45,8 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 	if err != nil {
 		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
 	}
-	if removed != 7 {
-		t.Fatalf("removed = %d, want 7", removed)
+	if removed != 8 {
+		t.Fatalf("removed = %d, want 8", removed)
 	}
 
 	userCfg := readConfigFixture(t, userPath)
@@ -51,41 +56,69 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 	}
 
 	projectCfg := readConfigFixture(t, projectPath)
-	wantProject := []string{"local/qwen3", "project/sonnet"}
+	wantProject := []string{"openai/project-sonnet"}
 	if !sameStrings(projectCfg.Preferences.FavoriteModels, wantProject) {
 		t.Fatalf("project FavoriteModels = %#v, want %#v", projectCfg.Preferences.FavoriteModels, wantProject)
 	}
 }
 
-func TestCleanupStaleFavorites_UsesFormatOnly(t *testing.T) {
+func TestCleanupStaleFavorites_RemovesUnknownProvidersAndUnavailableModels(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "zero.json")
+	projectPath := filepath.Join(dir, "project.json")
 
 	writeConfigFixture(t, userPath, FileConfig{
 		Providers: []ProviderProfile{
-			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{
+				Name:         "openai",
+				ProviderKind: ProviderKindOpenAI,
+				Model:        "gpt-4.1",
+				Models:       []DiscoveredModel{{ID: "gpt-4.1"}, {ID: "gpt-4o"}},
+			},
+			{
+				Name:         "local",
+				ProviderKind: ProviderKindOpenAICompatible,
+				Model:        "qwen3",
+			},
 		},
 		Preferences: PreferencesConfig{
 			FavoriteModels: []string{
 				"openai/gpt-4.1",
+				"openai/stale-model",
+				"local/new-model-before-discovery",
 				"stale-provider/qwen3-70b",
 				"bare-model",
 			},
 		},
 	}, 0o600)
+	writeConfigFixture(t, projectPath, FileConfig{
+		Preferences: PreferencesConfig{
+			FavoriteModels: []string{
+				"openai/gpt-4o",
+				"openai/not-served",
+				"local/project-model",
+				"project/sonnet",
+			},
+		},
+	}, 0o600)
 
-	removed, err := CleanupStaleFavorites(userPath, "")
+	removed, err := CleanupStaleFavorites(userPath, projectPath)
 	if err != nil {
 		t.Fatalf("CleanupStaleFavorites() error = %v", err)
 	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if removed != 5 {
+		t.Fatalf("removed = %d, want 5", removed)
 	}
 
 	cfg := readConfigFixture(t, userPath)
-	want := []string{"openai/gpt-4.1", "stale-provider/qwen3-70b"}
+	want := []string{"openai/gpt-4.1", "local/new-model-before-discovery"}
 	if !sameStrings(cfg.Preferences.FavoriteModels, want) {
 		t.Fatalf("FavoriteModels = %#v, want %#v", cfg.Preferences.FavoriteModels, want)
+	}
+	projectCfg := readConfigFixture(t, projectPath)
+	wantProject := []string{"openai/gpt-4o", "local/project-model"}
+	if !sameStrings(projectCfg.Preferences.FavoriteModels, wantProject) {
+		t.Fatalf("project FavoriteModels = %#v, want %#v", projectCfg.Preferences.FavoriteModels, wantProject)
 	}
 }
 
@@ -105,7 +138,7 @@ func TestCleanupFavoritesFile_RewritesPassedConfigPath(t *testing.T) {
 		},
 	}, 0o600)
 
-	removed, err := cleanupFavoritesFile(secondPath)
+	removed, err := cleanupFavoritesFile(secondPath, favoriteModelInventory{})
 	if err != nil {
 		t.Fatalf("cleanupFavoritesFile() error = %v", err)
 	}

@@ -38,6 +38,9 @@ type Options struct {
 	HTTPClient     *http.Client
 	ModelsDevURL   string
 	OpenGatewayURL string
+	// OnLiveModels is called with the raw deduplicated /models response before
+	// DiscoverCatalog merges or filters it against the curated catalog.
+	OnLiveModels func([]Model) error
 }
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
@@ -46,6 +49,11 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
+			if options.OnLiveModels != nil {
+				if err := options.OnLiveModels(liveModels); err != nil {
+					return nil, err
+				}
+			}
 			if merged := mergeLiveModels(provider, liveModels, catalogModels); len(merged) > 0 {
 				return merged, nil
 			}
@@ -64,6 +72,17 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 		return nil, catalogErr
 	}
 	return nil, fmt.Errorf("no provider models discovered")
+}
+
+// ToDiscoveredModels converts discovery results into the config file's compact
+// model list. The config writer performs final trimming, deduplication, and
+// sorting so all persistence paths share one normalization policy.
+func ToDiscoveredModels(models []Model) []config.DiscoveredModel {
+	discovered := make([]config.DiscoveredModel, 0, len(models))
+	for _, model := range models {
+		discovered = append(discovered, config.DiscoveredModel{ID: model.ID})
+	}
+	return discovered
 }
 
 // discoveryHasCredential reports whether the profile carries a usable credential

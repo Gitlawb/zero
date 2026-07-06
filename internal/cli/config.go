@@ -55,7 +55,7 @@ func runConfigCleanup(opt commandCenterOptions, stdout io.Writer, stderr io.Writ
 		return exitSuccess
 	}
 
-	if _, err := fmt.Fprintf(stdout, "Config cleaned: removed %d favorite model entries that do not match <provider>/<model>.\n", removed); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Config cleaned: removed %d favorite model entries that do not match an available provider/model.\n", removed); err != nil {
 		return exitCrash
 	}
 	return exitSuccess

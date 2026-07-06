@@ -8,15 +8,20 @@ import (
 )
 
 // CleanupStaleFavorites removes favorite model entries from the user and
-// project configs that are not in <provider>/<model> format.
+// project configs that do not reference a provider/model available from the
+// global user config.
 //
 // The project config path is optional (empty = no project config). Returns the
 // number of entries removed; safe to run on every startup (idempotent).
 func CleanupStaleFavorites(userConfigPath, projectConfigPath string) (int, error) {
-	return cleanupFavoritesForConfigPaths(userConfigPath, projectConfigPath)
+	inventory, err := favoriteModelInventoryFromUserConfig(userConfigPath)
+	if err != nil {
+		return 0, err
+	}
+	return cleanupFavoritesForConfigPaths(inventory, userConfigPath, projectConfigPath)
 }
 
-func cleanupFavoritesForConfigPaths(paths ...string) (int, error) {
+func cleanupFavoritesForConfigPaths(inventory favoriteModelInventory, paths ...string) (int, error) {
 	totalRemoved := 0
 	seen := map[string]bool{}
 	for _, path := range paths {
@@ -25,7 +30,7 @@ func cleanupFavoritesForConfigPaths(paths ...string) (int, error) {
 			continue
 		}
 		seen[path] = true
-		removed, err := cleanupFavoritesFile(path)
+		removed, err := cleanupFavoritesFile(path, inventory)
 		totalRemoved += removed
 		if err != nil {
 			return totalRemoved, err
@@ -34,7 +39,7 @@ func cleanupFavoritesForConfigPaths(paths ...string) (int, error) {
 	return totalRemoved, nil
 }
 
-func cleanupFavoritesFile(configPath string) (int, error) {
+func cleanupFavoritesFile(configPath string, inventory favoriteModelInventory) (int, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return 0, nil
@@ -60,7 +65,7 @@ func cleanupFavoritesFile(configPath string) (int, error) {
 	removed := 0
 	for _, entry := range cfg.Preferences.FavoriteModels {
 		entry = strings.TrimSpace(entry)
-		if !validFavoriteModelRef(entry) {
+		if !inventory.validFavoriteModelRef(entry) {
 			removed++
 			continue
 		}
@@ -79,7 +84,55 @@ func cleanupFavoritesFile(configPath string) (int, error) {
 	return removed, nil
 }
 
-func validFavoriteModelRef(entry string) bool {
+type favoriteModelInventory struct {
+	enforce   bool
+	providers map[string]map[string]bool
+}
+
+func favoriteModelInventoryFromUserConfig(userConfigPath string) (favoriteModelInventory, error) {
+	userConfigPath = strings.TrimSpace(userConfigPath)
+	if userConfigPath == "" {
+		return favoriteModelInventory{}, nil
+	}
+	data, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return favoriteModelInventory{}, nil
+		}
+		return favoriteModelInventory{}, fmt.Errorf("read config %s: %w", userConfigPath, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return favoriteModelInventory{}, fmt.Errorf("invalid config JSON %s: %w", userConfigPath, err)
+	}
+	return newFavoriteModelInventory(cfg), nil
+}
+
+func newFavoriteModelInventory(cfg FileConfig) favoriteModelInventory {
+	inventory := favoriteModelInventory{
+		enforce:   true,
+		providers: map[string]map[string]bool{},
+	}
+	for _, provider := range cfg.Providers {
+		name := strings.TrimSpace(provider.Name)
+		if name == "" {
+			continue
+		}
+		var models map[string]bool
+		if len(provider.Models) > 0 {
+			models = map[string]bool{}
+			for _, model := range provider.Models {
+				if id := strings.TrimSpace(model.ID); id != "" {
+					models[strings.ToLower(id)] = true
+				}
+			}
+		}
+		inventory.providers[strings.ToLower(name)] = models
+	}
+	return inventory
+}
+
+func (inventory favoriteModelInventory) validFavoriteModelRef(entry string) bool {
 	if strings.ContainsAny(entry, " \t\r\n") {
 		return false
 	}
@@ -87,5 +140,18 @@ func validFavoriteModelRef(entry string) bool {
 	if !ok || provider == "" || model == "" {
 		return false
 	}
-	return !strings.Contains(model, "/")
+	if strings.Contains(model, "/") {
+		return false
+	}
+	if !inventory.enforce {
+		return true
+	}
+	models, ok := inventory.providers[strings.ToLower(provider)]
+	if !ok {
+		return false
+	}
+	if models == nil {
+		return true
+	}
+	return models[strings.ToLower(model)]
 }

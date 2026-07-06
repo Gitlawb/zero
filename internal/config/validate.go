@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Issue is a single structured problem found while validating a config file.
@@ -50,12 +51,65 @@ func ValidateBytes(data []byte) (FileConfig, []Issue) {
 }
 
 func validateSemantics(cfg FileConfig) []Issue {
+	issues := []Issue{}
 	if _, _, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider); err != nil {
 		// normalizeProviders already redacts secrets via providerError.
-		return []Issue{{FieldPath: "providers", Message: err.Error()}}
+		issues = append(issues, Issue{FieldPath: "providers", Message: err.Error()})
 	}
 	if err := validateSTTConfig(cfg.STT); err != nil {
-		return []Issue{{FieldPath: "stt", Message: err.Error()}}
+		issues = append(issues, Issue{FieldPath: "stt", Message: err.Error()})
 	}
-	return nil
+	for _, issue := range invalidProviderModelIssues(cfg) {
+		issues = append(issues, issue)
+	}
+	for _, entry := range invalidFavoriteModelRefs(cfg) {
+		issues = append(issues, Issue{
+			FieldPath: "preferences.favoriteModels",
+			Message:   fmt.Sprintf("favorite model %q does not reference an available provider/model in config.json", entry),
+		})
+	}
+	return issues
+}
+
+func invalidProviderModelIssues(cfg FileConfig) []Issue {
+	issues := []Issue{}
+	for _, provider := range cfg.Providers {
+		model := strings.TrimSpace(provider.Model)
+		if model == "" || len(provider.Models) == 0 {
+			continue
+		}
+		available := map[string]bool{}
+		for _, discovered := range provider.Models {
+			if id := strings.TrimSpace(discovered.ID); id != "" {
+				available[strings.ToLower(id)] = true
+			}
+		}
+		if len(available) == 0 || available[strings.ToLower(model)] {
+			continue
+		}
+		name := strings.TrimSpace(provider.Name)
+		if name == "" {
+			name = "provider"
+		}
+		issues = append(issues, Issue{
+			FieldPath: "providers." + name + ".model",
+			Message:   fmt.Sprintf("provider %q model %q is not in its discovered models list", name, model),
+		})
+	}
+	return issues
+}
+
+func invalidFavoriteModelRefs(cfg FileConfig) []string {
+	if len(cfg.Preferences.FavoriteModels) == 0 {
+		return nil
+	}
+	inventory := newFavoriteModelInventory(cfg)
+	invalid := make([]string, 0)
+	for _, entry := range cfg.Preferences.FavoriteModels {
+		entry = strings.TrimSpace(entry)
+		if !inventory.validFavoriteModelRef(entry) {
+			invalid = append(invalid, entry)
+		}
+	}
+	return invalid
 }

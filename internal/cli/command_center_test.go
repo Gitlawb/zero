@@ -60,7 +60,7 @@ func TestRunConfigPrintsJSONSummary(t *testing.T) {
 	}
 }
 
-func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T) {
+func TestRunConfigCleanupRemovesFavoritesOutsideAvailableProviderModels(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -101,7 +101,7 @@ func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "removed 2 favorite model entries") {
+	if !strings.Contains(stdout.String(), "removed 4 favorite model entries") {
 		t.Fatalf("unexpected cleanup output: %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -109,7 +109,7 @@ func TestRunConfigCleanupRemovesFavoritesOutsideProviderModelFormat(t *testing.T
 	}
 
 	cfg := readFileConfig(t, userConfigPath)
-	want := []string{"openai/gpt-4.1", "project/sonnet", "stale/model"}
+	want := []string{"openai/gpt-4.1"}
 	if !sameStringSet(cfg.Preferences.FavoriteModels, want) {
 		t.Fatalf("FavoriteModels = %#v, want %#v", cfg.Preferences.FavoriteModels, want)
 	}
@@ -815,20 +815,27 @@ func commandCenterDeps(t *testing.T) appDeps {
 	t.Helper()
 
 	cwd := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	profile := config.ProviderProfile{
+		Name:         "work",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-4.1",
+	}
+	if _, err := config.UpsertProvider(configPath, profile, true); err != nil {
+		t.Fatalf("seed user config: %v", err)
+	}
 	return appDeps{
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
-			}
-			profile := config.ProviderProfile{
-				Name:         "work",
-				ProviderKind: config.ProviderKindOpenAI,
-				BaseURL:      config.OpenAIBaseURL,
-				APIKey:       "sk-test",
-				Model:        "gpt-4.1",
 			}
 			return config.ResolvedConfig{
 				ActiveProvider: "work",

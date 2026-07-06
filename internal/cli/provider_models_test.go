@@ -42,6 +42,38 @@ func TestRunProvidersModelsListsDiscoveredModels(t *testing.T) {
 	}
 }
 
+func TestRunProvidersModelsPersistsDiscoveredModels(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		t.Fatalf("userConfigPath: %v", err)
+	}
+	deps.discoverProviderModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "team/model-b"},
+			{ID: " team/model-a "},
+			{ID: "team/model-a"},
+			{ID: ""},
+		}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "models"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	persisted := readFileConfig(t, configPath)
+	if len(persisted.Providers) != 1 {
+		t.Fatalf("providers = %#v", persisted.Providers)
+	}
+	got := persisted.Providers[0].Models
+	if len(got) != 2 || got[0].ID != "team/model-a" || got[1].ID != "team/model-b" {
+		t.Fatalf("persisted models = %#v, want sorted deduped team/model-a,b", got)
+	}
+}
+
 func TestRunProvidersModelsJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -88,6 +120,13 @@ func TestRunProvidersModelsSelectsNamedProvider(t *testing.T) {
 		BaseURL:      "https://models.internal/v1",
 		APIKey:       "sk-internal",
 		Model:        "house-model",
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		t.Fatalf("userConfigPath: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, custom, false); err != nil {
+		t.Fatalf("seed named provider: %v", err)
 	}
 	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
 		work := config.ProviderProfile{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, APIKey: "sk", Model: "gpt-4.1"}

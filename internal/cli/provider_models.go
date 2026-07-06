@@ -50,6 +50,9 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
+	if err := persistDiscoveredProviderModels(deps, profile.Name, models); err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
+	}
 
 	if options.json {
 		items := make([]map[string]any, 0, len(models))
@@ -124,6 +127,15 @@ func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderP
 // coding-model filtering, so a custom provider's full model list is returned.
 func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
 	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{})
+}
+
+func persistDiscoveredProviderModels(deps appDeps, providerName string, models []providermodeldiscovery.Model) error {
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return err
+	}
+	_, err = config.SetProviderDiscoveredModels(configPath, providerName, providermodeldiscovery.ToDiscoveredModels(models))
+	return err
 }
 
 func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error) {

@@ -122,3 +122,89 @@ func TestValidateFileValidConfigHasNoIssues(t *testing.T) {
 		t.Fatalf("expected no issues for valid config, got %#v", issues)
 	}
 }
+
+func TestValidateFileRejectsFavoriteModelsOutsideProviderInventory(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "openai",
+		"providers": [
+			{
+				"name": "openai",
+				"provider_kind": "openai",
+				"model": "gpt-4.1",
+				"models": [{"id": "gpt-4.1"}]
+			},
+			{
+				"name": "local",
+				"provider_kind": "openai-compatible",
+				"baseURL": "http://localhost:11434/v1",
+				"model": "qwen3"
+			}
+		],
+		"preferences": {
+			"favoriteModels": [
+				"openai/gpt-4.1",
+				"openai/not-served",
+				"local/not-discovered-yet",
+				"missing/model",
+				"bare-model"
+			]
+		}
+	}`)
+
+	_, issues := ValidateFile(path)
+	var favoriteIssues []Issue
+	for _, issue := range issues {
+		if issue.FieldPath == "preferences.favoriteModels" {
+			favoriteIssues = append(favoriteIssues, issue)
+		}
+	}
+	if len(favoriteIssues) != 3 {
+		t.Fatalf("favorite issues = %#v, want not-served, missing/model, and bare-model", favoriteIssues)
+	}
+	for _, want := range []string{"openai/not-served", "missing/model", "bare-model"} {
+		found := false
+		for _, issue := range favoriteIssues {
+			if strings.Contains(issue.Message, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("favorite issues = %#v, missing %q", favoriteIssues, want)
+		}
+	}
+}
+
+func TestValidateFileRejectsProviderModelOutsideDiscoveredModels(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "openai",
+		"providers": [
+			{
+				"name": "openai",
+				"provider_kind": "openai",
+				"model": "gpt-missing",
+				"models": [{"id": "gpt-4.1"}]
+			},
+			{
+				"name": "local",
+				"provider_kind": "openai-compatible",
+				"baseURL": "http://localhost:11434/v1",
+				"model": "not-discovered-yet"
+			}
+		]
+	}`)
+
+	_, issues := ValidateFile(path)
+	found := false
+	for _, issue := range issues {
+		if issue.FieldPath == "providers.openai.model" && strings.Contains(issue.Message, "gpt-missing") {
+			found = true
+		}
+		if strings.Contains(issue.Message, "not-discovered-yet") {
+			t.Fatalf("provider without discovered models should not be rejected, got %#v", issues)
+		}
+	}
+	if !found {
+		t.Fatalf("issues = %#v, want stale provider model issue", issues)
+	}
+}

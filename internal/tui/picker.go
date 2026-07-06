@@ -404,7 +404,11 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	discover := m.discoverProviderModels
 	if discover == nil {
 		discover = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.DiscoverCatalog(ctx, descriptor, p, providermodeldiscovery.Options{})
+			return providermodeldiscovery.DiscoverCatalog(ctx, descriptor, p, providermodeldiscovery.Options{
+				OnLiveModels: func(models []providermodeldiscovery.Model) error {
+					return m.persistLiveDiscoveredModels(profile.Name, models)
+				},
+			})
 		}
 	}
 	providerID := descriptor.ID
@@ -420,6 +424,14 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
 	}
+}
+
+func (m model) persistLiveDiscoveredModels(providerName string, models []providermodeldiscovery.Model) error {
+	if strings.TrimSpace(m.userConfigPath) == "" || strings.TrimSpace(providerName) == "" {
+		return nil
+	}
+	_, err := config.SetProviderDiscoveredModels(m.userConfigPath, providerName, providermodeldiscovery.ToDiscoveredModels(models))
+	return err
 }
 
 func (m model) modelPickerIsLoading() bool {
