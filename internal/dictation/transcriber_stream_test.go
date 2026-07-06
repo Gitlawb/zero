@@ -102,7 +102,7 @@ func TestOpenAIRealtimeStreamTranscribe(t *testing.T) {
 			}
 			_ = json.Unmarshal(data, &msg)
 			switch msg.Type {
-			case "transcription_session.update":
+			case "session.update":
 				// Emit incremental deltas as if audio were flowing.
 				_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"conversation.item.input_audio_transcription.delta","delta":"the "}`))
 				_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"conversation.item.input_audio_transcription.delta","delta":"answer"}`))

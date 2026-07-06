@@ -19,7 +19,7 @@ const openAIRealtimeSampleRate = 24000
 // (§6b, the credential-reuse streaming alternative). Reuses the OpenAI key.
 type OpenAIRealtimeConfig struct {
 	APIKey string
-	Model  string // default "gpt-4o-transcribe"
+	Model  string // default "gpt-realtime-whisper"
 	// BaseURL overrides the wss endpoint (tests point it at a fake server).
 	BaseURL string
 }
@@ -37,7 +37,7 @@ func NewOpenAIRealtimeTranscriber(cfg OpenAIRealtimeConfig) (Transcriber, error)
 		}
 	}
 	if cfg.Model == "" {
-		cfg.Model = "gpt-4o-transcribe"
+		cfg.Model = "gpt-realtime-whisper"
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "wss://api.openai.com/v1/realtime?intent=transcription"
@@ -55,7 +55,6 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 	conn, _, err := websocket.Dial(ctx, o.cfg.BaseURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization": {"Bearer " + o.cfg.APIKey},
-			"OpenAI-Beta":   {"realtime=v1"},
 		},
 	})
 	if err != nil {
@@ -63,13 +62,21 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 	}
 	defer conn.CloseNow()
 
-	// Configure a transcription-only session (pcm16 in, gpt-4o-transcribe).
+	// Configure a transcription-only session (pcm16 in, gpt-realtime-whisper).
 	sessionUpdate := map[string]any{
-		"type": "transcription_session.update",
+		"type": "session.update",
 		"session": map[string]any{
-			"input_audio_format": "pcm16",
-			"input_audio_transcription": map[string]any{
-				"model": o.cfg.Model,
+			"type": "transcription",
+			"audio": map[string]any{
+				"input": map[string]any{
+					"format": map[string]any{
+						"type": "audio/pcm",
+						"rate": openAIRealtimeSampleRate,
+					},
+					"transcription": map[string]any{
+						"model": o.cfg.Model,
+					},
+				},
 			},
 		},
 	}
