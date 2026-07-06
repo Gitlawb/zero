@@ -618,10 +618,6 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		doctorUserConfigPath = resolveOptions.UserConfigPath
 		projectConfigPath = resolveOptions.ProjectConfigPath
 	}
-	// Fail-soft, one-time: prune favorite model entries whose owning provider
-	// no longer exists in either the user or project config. Safe on every
-	// startup (idempotent) — non-fatal and best-effort.
-	_, _ = config.CleanupStaleFavorites(userConfigPath, projectConfigPath)
 
 	needsSetup := setupRequired(resolved)
 	if needsSetup && !forceSetup {

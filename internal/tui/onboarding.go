@@ -743,8 +743,7 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 		name = option.ID
 		apiKey = ""
 	}
-	// Include the full discovered models list so it gets persisted alongside the
-	// provider, preserving per-model apiModel overrides across sessions.
+	// Include the full discovered models list so it gets persisted alongside the provider
 	discovered := make([]config.DiscoveredModel, 0, len(m.setup.models))
 	for _, wm := range m.setup.models {
 		if id := strings.TrimSpace(wm.ID); id != "" {

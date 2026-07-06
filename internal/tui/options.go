@@ -158,7 +158,6 @@ type SetupSelection struct {
 	Model     string
 	APIKey    string
 	// Models is the full list of live-discovered models, persisted alongside the
-	// provider so per-model apiModel overrides survive across sessions.
 	Models []config.DiscoveredModel
 }
 

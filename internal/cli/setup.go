@@ -271,7 +271,6 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 		return tui.SetupResult{}, err
 	}
 
-	// Persist live-discovered models so per-model apiModel overrides survive.
 	if len(selection.Models) > 0 {
 		if _, err := config.SetProviderDiscoveredModels(configPath, profile.Name, selection.Models); err != nil {
 			// Non-fatal: the provider was already saved — log but don't block setup.

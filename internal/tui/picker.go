@@ -485,8 +485,7 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 }
 
 // modelFavoriteKey returns the provider-qualified key used for favorite lookups.
-// Format: "provider/modelID". When the item has no owner the bare model ID is
-// used so legacy favorites (stored without a prefix) still match.
+// Format: "provider/modelID".
 func modelFavoriteKey(item pickerItem) string {
 	id := strings.TrimSpace(item.Value)
 	if id == "" {

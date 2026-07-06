@@ -426,6 +426,86 @@ func TestModelPickerLoadsFavoriteModelsFromOptions(t *testing.T) {
 	}
 }
 
+func TestModelPickerLoadsFavoriteModelsWithSlashesFromOptions(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		modelID string
+	}{
+		{name: "one slash", modelID: "openai/gpt-4.1"},
+		{name: "two slashes", modelID: "vendor/family/model"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{
+				ProviderName:    "openrouter",
+				ModelName:       "anthropic/claude-sonnet-4.5",
+				FavoriteModels:  []string{"openrouter/" + testCase.modelID},
+				ProviderProfile: config.ProviderProfile{Name: "openrouter", CatalogID: "openrouter", Model: "anthropic/claude-sonnet-4.5"},
+			})
+			m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+				"openrouter": {{ID: testCase.modelID}},
+			}
+
+			picker := m.newModelPicker()
+			if picker == nil {
+				t.Fatal("expected model picker")
+			}
+			if picker.items[0].Group != "Favorites" || picker.items[0].Value != testCase.modelID {
+				t.Fatalf("first picker item = %#v, want favorite %q", picker.items[0], testCase.modelID)
+			}
+			if !picker.items[0].Favorite {
+				t.Fatalf("first picker item = %#v, want favorite marker", picker.items[0])
+			}
+		})
+	}
+}
+
+func TestModelPickerFavoriteShortcutPersistsModelsWithSlashes(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		modelID string
+	}{
+		{name: "one slash", modelID: "openai/gpt-4.1"},
+		{name: "two slashes", modelID: "vendor/family/model"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+			m := newModel(context.Background(), Options{
+				UserConfigPath: configPath,
+				ProviderName:   "openrouter",
+				ModelName:      "anthropic/claude-sonnet-4.5",
+				ProviderProfile: config.ProviderProfile{
+					Name:      "openrouter",
+					CatalogID: "openrouter",
+					Model:     "anthropic/claude-sonnet-4.5",
+				},
+			})
+			m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+				"openrouter": {{ID: testCase.modelID}},
+			}
+			m.picker = m.newModelPicker()
+			if m.picker == nil {
+				t.Fatal("expected model picker")
+			}
+			target := pickerIndex(m.picker.items, testCase.modelID)
+			if target < 0 {
+				t.Fatalf("expected %q in picker, got %#v", testCase.modelID, pickerValues(m.picker.items))
+			}
+			m.picker.selected = target
+
+			updated, _ := m.Update(testKeyCtrl('f'))
+			next := updated.(model)
+			want := "openrouter/" + testCase.modelID
+			if !next.favoriteModels[want] {
+				t.Fatalf("favorite map = %#v, want %q favorited", next.favoriteModels, want)
+			}
+			persisted := readTUIConfigFixture(t, configPath)
+			if len(persisted.Preferences.FavoriteModels) != 1 || persisted.Preferences.FavoriteModels[0] != want {
+				t.Fatalf("persisted FavoriteModels = %#v, want %q", persisted.Preferences.FavoriteModels, want)
+			}
+		})
+	}
+}
+
 func TestModelPickerShowsRecentThenActiveProviderCatalog(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "openrouter",
