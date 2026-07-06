@@ -45,12 +45,12 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 	if err != nil {
 		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
 	}
-	if removed != 8 {
-		t.Fatalf("removed = %d, want 8", removed)
+	if removed != 7 {
+		t.Fatalf("removed = %d, want 7", removed)
 	}
 
 	userCfg := readConfigFixture(t, userPath)
-	wantUser := []string{"anthropic/claude-sonnet-4", "openai/gpt-4.1", "unknown/model"}
+	wantUser := []string{"anthropic/claude-sonnet-4", "openai/gpt-4.1", "openai/gpt-4.1/extra", "unknown/model"}
 	if !sameStrings(userCfg.Preferences.FavoriteModels, wantUser) {
 		t.Fatalf("user FavoriteModels = %#v, want %#v", userCfg.Preferences.FavoriteModels, wantUser)
 	}
@@ -80,12 +80,23 @@ func TestCleanupStaleFavorites_RemovesUnknownProvidersAndUnavailableModels(t *te
 				ProviderKind: ProviderKindOpenAICompatible,
 				Model:        "qwen3",
 			},
+			{
+				Name:         "openrouter",
+				ProviderKind: ProviderKindOpenAICompatible,
+				Model:        "anthropic/claude-sonnet-4.5",
+				Models: []DiscoveredModel{
+					{ID: "anthropic/claude-sonnet-4.5"},
+					{ID: "meta-llama/llama-3.1/405b-instruct"},
+				},
+			},
 		},
 		Preferences: PreferencesConfig{
 			FavoriteModels: []string{
 				"openai/gpt-4.1",
 				"openai/stale-model",
 				"local/new-model-before-discovery",
+				"openrouter/anthropic/claude-sonnet-4.5",
+				"openrouter/meta-llama/llama-3.1/405b-instruct",
 				"stale-provider/qwen3-70b",
 				"bare-model",
 			},
@@ -111,7 +122,12 @@ func TestCleanupStaleFavorites_RemovesUnknownProvidersAndUnavailableModels(t *te
 	}
 
 	cfg := readConfigFixture(t, userPath)
-	want := []string{"openai/gpt-4.1", "local/new-model-before-discovery"}
+	want := []string{
+		"openai/gpt-4.1",
+		"local/new-model-before-discovery",
+		"openrouter/anthropic/claude-sonnet-4.5",
+		"openrouter/meta-llama/llama-3.1/405b-instruct",
+	}
 	if !sameStrings(cfg.Preferences.FavoriteModels, want) {
 		t.Fatalf("FavoriteModels = %#v, want %#v", cfg.Preferences.FavoriteModels, want)
 	}
@@ -157,7 +173,7 @@ func TestCleanupFavoritesFile_RewritesPassedConfigPath(t *testing.T) {
 	}
 }
 
-func TestCleanupFavorites_PreservesOtherConfig(t *testing.T) {
+func TestCleanupFAavorites_PreservesOtherConfig(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "zero.json")
 

@@ -140,9 +140,6 @@ func (inventory favoriteModelInventory) validFavoriteModelRef(entry string) bool
 	if !ok || provider == "" || model == "" {
 		return false
 	}
-	if strings.Contains(model, "/") {
-		return false
-	}
 	if !inventory.enforce {
 		return true
 	}

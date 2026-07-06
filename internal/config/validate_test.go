@@ -138,6 +138,16 @@ func TestValidateFileRejectsFavoriteModelsOutsideProviderInventory(t *testing.T)
 				"provider_kind": "openai-compatible",
 				"baseURL": "http://localhost:11434/v1",
 				"model": "qwen3"
+			},
+			{
+				"name": "openrouter",
+				"provider_kind": "openai-compatible",
+				"baseURL": "https://openrouter.ai/api/v1",
+				"model": "anthropic/claude-sonnet-4.5",
+				"models": [
+					{"id": "anthropic/claude-sonnet-4.5"},
+					{"id": "meta-llama/llama-3.1/405b-instruct"}
+				]
 			}
 		],
 		"preferences": {
@@ -145,6 +155,8 @@ func TestValidateFileRejectsFavoriteModelsOutsideProviderInventory(t *testing.T)
 				"openai/gpt-4.1",
 				"openai/not-served",
 				"local/not-discovered-yet",
+				"openrouter/anthropic/claude-sonnet-4.5",
+				"openrouter/meta-llama/llama-3.1/405b-instruct",
 				"missing/model",
 				"bare-model"
 			]
