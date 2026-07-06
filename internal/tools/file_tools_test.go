@@ -76,6 +76,45 @@ func TestReadFileToolAppliesByteBudget(t *testing.T) {
 	}
 }
 
+func TestReadFileToolTracksWholeFileHashWhenReadingSmallRange(t *testing.T) {
+	root := t.TempDir()
+	var builder strings.Builder
+	for i := 1; i <= 2000; i++ {
+		builder.WriteString("line ")
+		builder.WriteString(strings.Repeat("x", 16))
+		builder.WriteString("\n")
+	}
+	content := builder.String()
+	path := filepath.Join(root, "large.txt")
+	writeTestFile(t, path, content)
+
+	tracker := NewFileTracker()
+	tool := NewReadFileTool(root).(optionsAwareTool)
+	result := tool.RunWithOptions(context.Background(), map[string]any{
+		"path":       "large.txt",
+		"start_line": 1000,
+		"max_lines":  2,
+	}, RunOptions{FileTracker: tracker})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, ok := tracker.Version(resolved)
+	if !ok {
+		t.Fatal("expected read_file to record a file version")
+	}
+	if version.Hash != HashContent([]byte(content)) {
+		t.Fatalf("hash = %q, want %q", version.Hash, HashContent([]byte(content)))
+	}
+	if err := tracker.CheckConflict(resolved, []byte(content+"changed")); err != ErrFileChangedOnDisk {
+		t.Fatalf("changed content should conflict, got %v", err)
+	}
+}
+
 func TestReadFileToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -205,6 +244,33 @@ func TestGrepToolMakesHeadLimitTruncationVisible(t *testing.T) {
 	}
 }
 
+func TestGrepToolCountsAllLinesWhileKeepingHeadLimitSmall(t *testing.T) {
+	root := t.TempDir()
+	var builder strings.Builder
+	for i := 0; i < 100; i++ {
+		builder.WriteString("needle ")
+		builder.WriteString(strings.Repeat("x", 8))
+		builder.WriteString("\n")
+	}
+	writeTestFile(t, filepath.Join(root, "notes.txt"), builder.String())
+
+	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":    "needle",
+		"path":       ".",
+		"head_limit": 3,
+	})
+
+	if result.Status != StatusOK || !result.Truncated {
+		t.Fatalf("expected ok+truncated, got status=%s truncated=%v output=%q", result.Status, result.Truncated, result.Output)
+	}
+	if !strings.Contains(result.Output, "[truncated: showing first 3 of 100 matches") {
+		t.Fatalf("expected exact total match count, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "notes.txt:4:") {
+		t.Fatalf("head_limit leaked fourth result: %q", result.Output)
+	}
+}
+
 // A glob is matched relative to the search directory, not the workspace root, so
 // `path=subdir glob=*.go` finds subdir/a.go (as "a.go"). Previously the glob was
 // matched against the workspace-relative "subdir/a.go", so a non-recursive "*.go"
@@ -242,6 +308,22 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 	if !strings.Contains(files.Output, "a.txt") || !strings.Contains(files.Output, "b.txt") {
 		t.Fatalf("expected both files, got %q", files.Output)
 	}
+
+	count := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "count",
+	})
+	if count.Status != StatusOK {
+		t.Fatalf("expected count result, got %s: %s", count.Status, count.Output)
+	}
+	if count.Output != "3 matches found" {
+		t.Fatalf("expected count output, got %q", count.Output)
+	}
+}
+
+func TestGrepCountModeCountsMultipleHitsPerLine(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle needle\nneedle\n")
 
 	count := NewGrepTool(root).Run(context.Background(), map[string]any{
 		"pattern":     "needle",

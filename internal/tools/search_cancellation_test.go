@@ -96,14 +96,12 @@ func TestGrepStillMatchesWithLiveContext(t *testing.T) {
 	}
 }
 
-// Before this fix, only grepFiles' walk checked ctx: once the walk had
-// finished discovering candidate files, collectGrepMatches read and
-// regex-scanned every one of them to completion regardless of cancellation.
-// This proves the match-collection phase itself stops partway through,
-// not only when the context was already cancelled before the walk started.
-// grepFiles must stop mid-walk once ctx is cancelled, not only when the
+// Before this fix, only grep's walk checked ctx: once the walk had discovered
+// candidate files, match scanning could run to completion regardless of
+// cancellation. These tests cover both phases directly.
+// The walker must stop mid-walk once ctx is cancelled, not only when the
 // context was already cancelled before WalkDir starts.
-func TestGrepFilesStopsMidWalkOnCancelledContext(t *testing.T) {
+func TestGrepWalkStopsMidWalkOnCancelledContext(t *testing.T) {
 	root := buildLargeSearchTree(t, 50)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -112,21 +110,27 @@ func TestGrepFilesStopsMidWalkOnCancelledContext(t *testing.T) {
 
 	const allowed = 5
 	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
-	files, err := grepFiles(ctx, resolvedRoot, root, nil, readExcluder{})
+	files := 0
+	err = walkGrepFiles(ctx, resolvedRoot, root, nil, readExcluder{}, func(string) error {
+		files++
+		return nil
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if len(files) >= 50 {
-		t.Fatalf("files = %d; walk should stop mid-traversal instead of visiting every entry", len(files))
+	if files >= 50 {
+		t.Fatalf("files = %d; walk should stop mid-traversal instead of visiting every entry", files)
 	}
 }
 
-func TestGrepCollectMatchesStopsMidCollectionOnCancelledContext(t *testing.T) {
-	root := buildLargeSearchTree(t, 50)
-	files := make([]string, 50)
-	for i := range files {
-		files[i] = filepath.Join(root, "file"+strconv.Itoa(i)+".txt")
+func TestGrepScanStopsMidFileOnCancelledContext(t *testing.T) {
+	root := t.TempDir()
+	var body string
+	for i := 0; i < 50; i++ {
+		body += "needle\n"
 	}
+	file := filepath.Join(root, "file.txt")
+	writeTestFile(t, file, body)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
@@ -135,12 +139,15 @@ func TestGrepCollectMatchesStopsMidCollectionOnCancelledContext(t *testing.T) {
 
 	const allowed = 5
 	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
-	matches, err := collectGrepMatches(ctx, resolvedRoot, false, files, compiled)
+	matches := 0
+	err = scanGrepFile(ctx, resolvedRoot, false, file, presenceGrepLineMatcher(compiled), func(grepMatch) {
+		matches++
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if len(matches) != allowed {
-		t.Fatalf("matches = %d, want exactly %d collected before cancellation stopped the loop", len(matches), allowed)
+	if matches != allowed {
+		t.Fatalf("matches = %d, want exactly %d collected before cancellation stopped the loop", matches, allowed)
 	}
 }
 
