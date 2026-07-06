@@ -108,3 +108,36 @@ func TestHashContentIsStableAndDistinguishing(t *testing.T) {
 		t.Fatal("hash must differ for different content")
 	}
 }
+
+func TestRecordCreatedTracksNewFilesInOrder(t *testing.T) {
+	tracker := NewFileTracker()
+	tracker.RecordCreated("/repo/b.txt")
+	tracker.RecordCreated("/repo/a.txt")
+	got := tracker.CreatedFiles()
+	want := []string{"/repo/b.txt", "/repo/a.txt"}
+	if len(got) != len(want) {
+		t.Fatalf("CreatedFiles() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CreatedFiles() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRecordCreatedDeduplicates(t *testing.T) {
+	tracker := NewFileTracker()
+	tracker.RecordCreated("/repo/a.txt")
+	tracker.RecordCreated("/repo/a.txt")
+	if got := tracker.CreatedFiles(); len(got) != 1 {
+		t.Fatalf("CreatedFiles() = %v, want a single entry", got)
+	}
+}
+
+func TestNilFileTrackerCreatedFilesIsANoop(t *testing.T) {
+	var tracker *FileTracker
+	tracker.RecordCreated("/repo/a.txt") // must not panic
+	if got := tracker.CreatedFiles(); got != nil {
+		t.Fatalf("CreatedFiles() on nil tracker = %v, want nil", got)
+	}
+}

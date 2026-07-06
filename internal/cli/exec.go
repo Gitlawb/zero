@@ -510,6 +510,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// lspShutdown tears down any language-server sessions either half spawned.
 	selfCorrector, fileDiagnostics, lspShutdown := newExecSelfCorrector(options.selfCorrect, workspaceRoot, options.autonomy)
 	defer lspShutdown()
+	// Kept as a named variable (rather than inlined into Options below) so its
+	// CreatedFiles() can be inspected after the run for the scratch-file
+	// completion warning (issue #551).
+	fileTracker := tools.NewFileTracker()
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
@@ -539,7 +543,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// if the model keeps stalling. The interactive TUI leaves this off.
 		RequireCompletionSignal: true,
 		Sandbox:                 sandboxEngine,
-		FileTracker:             tools.NewFileTracker(),
+		FileTracker:             fileTracker,
 		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 		EnabledTools:            options.enabledTools,
 		DisabledTools:           options.disabledTools,
@@ -646,6 +650,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	})
 
 	if notice := result.TruncationNotice(); notice != "" {
+		writer.warning(notice)
+	}
+	// Surface any brand-new files the model wrote this run that are still
+	// untracked in git when we finish — a debug/scratch file left in the
+	// working tree is otherwise invisible until `git status` is checked by
+	// hand (issue #551).
+	if notice := scratchFileWarning(workspaceRoot, fileTracker.CreatedFiles()); notice != "" {
 		writer.warning(notice)
 	}
 	// A headless run the completion gate marked INCOMPLETE (no-tool-call stall,

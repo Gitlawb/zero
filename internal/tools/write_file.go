@@ -118,6 +118,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	if !existed {
+		options.FileTracker.RecordCreated(absolutePath)
+	}
 
 	verb := "Created"
 	if existed {

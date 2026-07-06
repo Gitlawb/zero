@@ -34,6 +34,12 @@ type FileVersion struct {
 type FileTracker struct {
 	mu       sync.Mutex
 	versions map[string]FileVersion
+	// created preserves the order in which brand-new files (paths that did not
+	// exist before a write tool created them) were first written this session.
+	// A map would lose that order and complicates de-duplication, so a slice
+	// plus a seen-set is used instead.
+	created     []string
+	createdSeen map[string]bool
 }
 
 func NewFileTracker() *FileTracker {
@@ -64,6 +70,41 @@ func (tracker *FileTracker) Version(absPath string) (FileVersion, bool) {
 	defer tracker.mu.Unlock()
 	version, ok := tracker.versions[absPath]
 	return version, ok
+}
+
+// RecordCreated notes that absPath is a brand-new file a tool just created in
+// this session (as opposed to an overwrite of something that already existed).
+// Zero surfaces this list at the end of a headless run so a scratch/debug file
+// left behind by the model (e.g. `_fix_test.py`) is caught before it can be
+// committed by accident — see the completion summary in cli.scratchFileWarning.
+func (tracker *FileTracker) RecordCreated(absPath string) {
+	if tracker == nil {
+		return
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if tracker.createdSeen == nil {
+		tracker.createdSeen = make(map[string]bool)
+	}
+	if tracker.createdSeen[absPath] {
+		return
+	}
+	tracker.createdSeen[absPath] = true
+	tracker.created = append(tracker.created, absPath)
+}
+
+// CreatedFiles returns the absolute paths of every brand-new file recorded via
+// RecordCreated during this session, in first-created order. The caller owns
+// the returned slice.
+func (tracker *FileTracker) CreatedFiles() []string {
+	if tracker == nil {
+		return nil
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	out := make([]string, len(tracker.created))
+	copy(out, tracker.created)
+	return out
 }
 
 // Forget drops any recorded version for absPath, so the next read re-establishes

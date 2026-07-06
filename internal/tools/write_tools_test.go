@@ -128,6 +128,39 @@ func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolRecordsCreatedFileButNotOverwrite(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewWriteFileTool(root))
+	tracker := NewFileTracker()
+
+	created := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":    "scratch.txt",
+		"content": "first",
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if created.Status != StatusOK {
+		t.Fatalf("expected create ok, got %s: %s", created.Status, created.Output)
+	}
+	absPath := filepath.Join(root, "scratch.txt")
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() = %v, want [%s]", got, absPath)
+	}
+
+	overwrote := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":      "scratch.txt",
+		"content":   "second",
+		"overwrite": true,
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if overwrote.Status != StatusOK {
+		t.Fatalf("expected overwrite ok, got %s: %s", overwrote.Status, overwrote.Output)
+	}
+	// Overwriting an existing file is not a "new" creation, so CreatedFiles
+	// must not gain a second (duplicate) entry for it.
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() after overwrite = %v, want unchanged [%s]", got, absPath)
+	}
+}
+
 func TestWriteFileSummaryReportsLineCount(t *testing.T) {
 	root := t.TempDir()
 	tool := NewWriteFileTool(root)
