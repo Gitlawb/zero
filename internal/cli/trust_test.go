@@ -205,22 +205,23 @@ func TestRunTrustRemoveTooManyArgs(t *testing.T) {
 	}
 }
 
-// TestRunTrustHelp proves the -h / --help / help subcommands print usage to stderr,
-// nothing to stdout, and return the usage exit code.
+// TestRunTrustHelp proves the -h / --help / help subcommands print usage to stdout,
+// nothing to stderr, and return success, matching the other CLI help entrypoints
+// (unknown subcommands, by contrast, write to stderr with the usage exit code).
 func TestRunTrustHelp(t *testing.T) {
 	setTrustConfigRoot(t)
 	deps := trustDeps(t.TempDir())
 
 	for _, flag := range []string{"-h", "--help", "help"} {
 		var out, errBuf bytes.Buffer
-		if code := runTrust([]string{flag}, &out, &errBuf, deps); code != exitUsage {
-			t.Fatalf("trust %s returned %d, want %d", flag, code, exitUsage)
+		if code := runTrust([]string{flag}, &out, &errBuf, deps); code != exitSuccess {
+			t.Fatalf("trust %s returned %d, want %d", flag, code, exitSuccess)
 		}
-		if !strings.Contains(errBuf.String(), "Usage") {
-			t.Fatalf("trust %s stderr = %q, want it to contain usage text", flag, errBuf.String())
+		if !strings.Contains(out.String(), "Usage") {
+			t.Fatalf("trust %s stdout = %q, want it to contain usage text", flag, out.String())
 		}
-		if out.Len() != 0 {
-			t.Fatalf("trust %s should not write to stdout, got %q", flag, out.String())
+		if errBuf.Len() != 0 {
+			t.Fatalf("trust %s should not write to stderr, got %q", flag, errBuf.String())
 		}
 	}
 }

@@ -26,8 +26,11 @@ func runTrust(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	case "remove", "rm", "untrust":
 		return trustRemove(args[1:], stdout, stderr, deps)
 	case "-h", "--help", "help":
-		writeTrustUsage(stderr)
-		return exitUsage
+		// Explicit help is a success path: write usage to stdout and exit 0, matching
+		// the other subcommands (mcp, sandbox, skills, cron, ...). Only the unknown-
+		// subcommand error path below writes usage to stderr with a usage exit code.
+		writeTrustUsage(stdout)
+		return exitSuccess
 	default:
 		if _, err := fmt.Fprintf(stderr, "zero trust: unknown subcommand %q\n\n", args[0]); err != nil {
 			return exitCrash
