@@ -731,6 +731,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
+		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
 		UserConfigPath:       userConfigPath,

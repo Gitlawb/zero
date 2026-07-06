@@ -62,6 +62,7 @@ const dragEdgeScrollStep = 1
 type model struct {
 	ctx                         context.Context
 	cwd                         string
+	appVersion                  string
 	userCommands                []usercommands.Command // file-sourced /commands (.zero/commands)
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath              string
@@ -747,6 +748,7 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
+		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,

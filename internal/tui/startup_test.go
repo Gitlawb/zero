@@ -21,6 +21,29 @@ func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
 	assertNotContains(t, view, "fix the failing test in internal/tools")
 }
 
+func TestEmptyStateShowsVersion(t *testing.T) {
+	m := newModel(context.Background(), Options{Version: "0.2.0"})
+	m.width, m.height = 100, 30
+
+	view := plainRender(t, m.View())
+	assertContains(t, view, "v0.2.0")
+}
+
+func TestDisplayVersion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0.2.0", "v0.2.0"},
+		{"v0.2.0", "v0.2.0"},
+		{"dev", "dev"},
+		{"  ", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := displayVersion(tc.in); got != tc.want {
+			t.Fatalf("displayVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestEmptyStateDisappearsAfterFirstRow(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 100, 30
