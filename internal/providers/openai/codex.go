@@ -86,6 +86,14 @@ type CodexProvider struct {
 	userAgent      string
 	accountID      string
 	accountResolve CodexAccountResolver
+	// setExtra injects the per-request headers the backend requires on the
+	// Responses transport. It defaults to injectCodexHeaders (originator +
+	// chatgpt-account-id + branded User-Agent) for the ChatGPT Codex backend,
+	// but NewCopilotResponsesProvider swaps in the GitHub Copilot editor headers
+	// so the same Responses request/stream code serves both backends. Always
+	// non-nil after construction; streamResponses guards a nil for hand-built
+	// test values.
+	setExtra func(*http.Request)
 }
 
 // NewCodexProvider builds a CodexProvider. It is a thin wrapper over the
@@ -132,6 +140,7 @@ func NewCodexProvider(options CodexOptions) (*CodexProvider, error) {
 		accountID:      strings.TrimSpace(options.AccountID),
 		accountResolve: options.AccountResolver,
 	}
+	provider.setExtra = provider.injectCodexHeaders
 	openaiOpts.SetRequestExtra = provider.injectCodexHeaders
 	inner, err := New(openaiOpts)
 	if err != nil {
@@ -206,4 +215,38 @@ func ValidateAccount(account string) error {
 		return errors.New("openai codex: account id is empty")
 	}
 	return nil
+}
+
+// NewCopilotResponsesProvider builds a Responses-API provider for GitHub
+// Copilot models that are only reachable via the /responses endpoint (e.g.
+// gpt-5.4-mini, gpt-5.3-codex, mai-code-1-flash-picker — their /models entry
+// lists supported_endpoints without /chat/completions). It reuses the exact
+// same Responses request builder and SSE stream parser as the Codex backend
+// (Copilot proxies the OpenAI Responses API verbatim); only the endpoint and
+// the per-request headers differ:
+//
+//   - Endpoint: {baseURL}/responses (baseURL is api.githubcopilot.com).
+//   - Headers: the caller supplies the Copilot editor identity headers via
+//     Options.SetRequestExtra (provideroauth.SetCopilotChatHeaders). Unlike the
+//     Codex provider there is no `originator` / `chatgpt-account-id` — the
+//     minted Copilot bearer plus editor headers are the whole auth story.
+//
+// The bearer (the short-lived minted Copilot token) is applied by the inner
+// provider's OAuth resolver, exactly like the Copilot chat-completions path.
+func NewCopilotResponsesProvider(options Options) (*CodexProvider, error) {
+	openaiOpts := options
+	if baseURL := strings.TrimRight(strings.TrimSpace(openaiOpts.BaseURL), "/"); baseURL != "" {
+		openaiOpts.Endpoint = baseURL + "/responses"
+	}
+	setExtra := openaiOpts.SetRequestExtra
+	inner, err := New(openaiOpts)
+	if err != nil {
+		return nil, fmt.Errorf("openai copilot responses provider: %w", err)
+	}
+	provider := &CodexProvider{
+		inner:     inner,
+		userAgent: strings.TrimSpace(openaiOpts.UserAgent),
+		setExtra:  setExtra,
+	}
+	return provider, nil
 }

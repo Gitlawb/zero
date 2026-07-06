@@ -326,7 +326,7 @@ func providerWizardMethodOptions() []providerWizardMethodOption {
 		options = append(options, providerWizardMethodOption{
 			oauth:    true,
 			label:    "Sign in with OAuth",
-			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI, ChatGPT, Hugging Face).",
+			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI, ChatGPT, GitHub Copilot, Hugging Face).",
 		})
 	}
 	options = append(options, providerWizardMethodOption{

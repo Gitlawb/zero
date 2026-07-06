@@ -3931,6 +3931,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if picker.kind == pickerModel && item.Toggle {
+		// The expander row flips the curated/expanded view; keep the picker open
+		// instead of applying a model.
+		picker.expanded = !picker.expanded
+		picker.applyQuery()
+		m.picker = picker
+		return m, nil
+	}
 	var cmd tea.Cmd
 	switch picker.kind {
 	case pickerModel:

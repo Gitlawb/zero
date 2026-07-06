@@ -25,8 +25,8 @@ zero exec --output-format stream-json < turns.jsonl
 ## Why Zero
 
 - **Use the model you want.** Bring OpenAI, Anthropic, Gemini, Groq, OpenRouter,
-  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, or any
-  OpenAI-/Anthropic-compatible endpoint.
+  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, GitHub Copilot, Ollama, LM
+  Studio, or any OpenAI-/Anthropic-compatible endpoint.
 - **Stay in control.** File writes, shell commands, network access, and
   out-of-workspace writes go through Zero's permission and sandbox policy.
 - **Works in the terminal.** The TUI has model/provider pickers, image input,
@@ -159,6 +159,19 @@ zero providers setup longcat --set-active
 
 For local models, run Ollama or LM Studio and then use `zero setup` or
 `zero providers detect`.
+
+For GitHub Copilot (requires an active Copilot subscription), log in with the
+device-code flow and select the provider:
+
+```bash
+zero auth login copilot        # opens github.com/login/device, enter the code
+zero --provider copilot --model gpt-4.1
+```
+
+Zero exchanges the GitHub login for a short-lived Copilot token per request.
+This uses GitHub's undocumented Copilot API (the same one the editor plugins
+use); it is not an officially supported developer API and may change or break
+without notice, and heavy automated use can trip GitHub's abuse detection.
 
 ## Daily Use
 

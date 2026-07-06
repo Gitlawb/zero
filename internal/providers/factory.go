@@ -11,6 +11,7 @@ import (
 	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/providers/anthropic"
 	"github.com/Gitlawb/zero/internal/providers/gemini"
 	"github.com/Gitlawb/zero/internal/providers/openai"
@@ -60,7 +61,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 		// instead of ignoring unknown parameters — so omit it for every
 		// openai-compatible profile. Official OpenAI keeps the field so
 		// multi-turn sessions still route to a cached-prefix replica.
-		return openai.New(openai.Options{
+		openaiOpts := openai.Options{
 			APIKey:                profile.APIKey,
 			BaseURL:               resolved.baseURL,
 			Model:                 resolved.apiModel,
@@ -74,7 +75,23 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			UserAgent:             options.UserAgent,
 			ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
 			DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
-		})
+		}
+		// GitHub Copilot's backend speaks the OpenAI chat-completions API but
+		// requires editor identity headers on every request (Copilot-Integration-Id,
+		// Editor-Version, ...) plus per-request signals (X-Initiator, Openai-Intent,
+		// Copilot-Vision-Request). Inject them via SetRequestExtra; the bearer (the
+		// minted Copilot token) is applied by the OAuth resolver. Some Copilot
+		// models are only reachable via the Responses API (/responses) — their
+		// profile carries APIFormat "responses" (set by the caller from the live
+		// /models capability map), so route those to the Copilot Responses
+		// provider, which reuses the Codex Responses transport with Copilot headers.
+		if isCopilotCatalog(profile) {
+			openaiOpts.SetRequestExtra = provideroauth.SetCopilotDynamicHeaders
+			if copilotUsesResponsesAPI(profile) {
+				return openai.NewCopilotResponsesProvider(openaiOpts)
+			}
+		}
+		return openai.New(openaiOpts)
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
 			APIKey:          profile.APIKey,
@@ -291,6 +308,25 @@ func defaultRegistry(registry *modelregistry.Registry) (modelregistry.Registry, 
 // provider's standard error path surfaces it.
 func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 	return providercatalog.NormalizeID(profile.CatalogID) == "chatgpt"
+}
+
+// isCopilotCatalog reports whether the profile targets the GitHub Copilot
+// backend, which speaks the OpenAI chat-completions API but requires the editor
+// identity headers injected via SetRequestExtra (see
+// provideroauth.SetCopilotChatHeaders). Keyed on the catalog id (not the
+// provider kind) so other openai-compatible providers are unaffected.
+func isCopilotCatalog(profile config.ProviderProfile) bool {
+	return providercatalog.NormalizeID(profile.CatalogID) == "copilot"
+}
+
+// copilotUsesResponsesAPI reports whether a Copilot profile's model must be
+// driven via the Responses API rather than chat-completions. The decision is
+// carried on profile.APIFormat, which the caller (cli/app.go newProvider) sets
+// from the live /models capability map before construction. Keyed on the
+// profile field — not a network call here — so the factory stays pure and
+// testable.
+func copilotUsesResponsesAPI(profile config.ProviderProfile) bool {
+	return strings.EqualFold(strings.TrimSpace(profile.APIFormat), "responses")
 }
 
 // newCodexProvider builds a Codex-flavored openai provider for the chatgpt

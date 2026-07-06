@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -33,8 +34,10 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode && m.providerWizard.currentProvider().OAuth {
 		provider := m.providerWizard.currentProvider()
 		// Headless/SSH boxes can't open a browser — use device code there by
-		// default (the user can also force it with "d" from the list).
-		if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+		// default. Providers whose OAuth preset only offers the device flow (e.g.
+		// GitHub Copilot, which has no loopback redirect) always use device code,
+		// even on a desktop. The user can also force it with "d" from the list.
+		if provider.OAuthDeviceFlow && (oauthPreferDeviceFlow() || oauth.PresetPrefersDeviceFlow(provider.ID)) {
 			return m.startProviderDeviceLogin()
 		}
 		attemptID := m.providerWizard.beginOAuthAttempt(false)
@@ -100,12 +103,22 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
 		apiKey := pastedKey
+		var extraHeaders map[string]string
+		var oauthBaseURL string
 		if needOAuthToken {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
+			if resolved, headers, baseURL := oauthDiscoveryCredential(ctx, providerID); resolved != "" {
 				apiKey = resolved
+				extraHeaders = headers
+				oauthBaseURL = baseURL
 			}
 		}
 		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		if len(extraHeaders) > 0 {
+			profile.CustomHeaders = extraHeaders
+		}
+		if oauthBaseURL != "" {
+			profile.BaseURL = oauthBaseURL
+		}
 		models, err := discover(ctx, profile)
 		return providerModelsDiscoveredMsg{providerID: providerID, token: token, models: models, err: err, secrets: []string{apiKey, profile.APIKey}}
 	}

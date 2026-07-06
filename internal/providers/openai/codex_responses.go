@@ -185,11 +185,32 @@ type errorPayload struct {
 // response.output_item.added, the argument deltas, and the final
 // response.output_item.done.
 type toolCallBuilder struct {
-	ID        string
-	Name      string
-	Arguments strings.Builder
-	started   bool
-	ended     bool
+	// ID is the internal correlation key (the Responses `item_id`, e.g. the
+	// long `fc_...` id). It ties output_item.added, the argument deltas, and
+	// output_item.done together — deltas carry only item_id, never call_id.
+	ID string
+	// ExternalID is the id surfaced to the runtime as ToolCallID and echoed
+	// back as `call_id` on replay. It is the stable Responses call_id (Copilot
+	// keeps this constant and under 64 chars even though it rotates the
+	// per-event item_id). Falls back to the correlation key when absent. Set
+	// once so every Start/Delta/End event carries a consistent id.
+	ExternalID string
+	Name       string
+	Arguments  strings.Builder
+	started    bool
+	ended      bool
+}
+
+// externalToolCallID picks the id surfaced to the runtime for a tool call.
+// Copilot's /responses rotates the per-event item_id but keeps call_id stable
+// and short (<=64 chars); the runtime tracks that call_id and echoes it as
+// `call_id` on replay. Falls back to the internal correlation key (an
+// output-index token) when the backend omits call_id.
+func externalToolCallID(key, callID string) string {
+	if callID != "" {
+		return callID
+	}
+	return key
 }
 
 // responsesState tracks in-flight tool calls and whether the terminal
@@ -289,8 +310,12 @@ func (p *CodexProvider) userInputItem(msg zeroruntime.Message) inputItem {
 
 // assistantInputItems renders an assistant turn as either a single
 // `message` (text-only) or a `message` followed by one `function_call`
-// per tool call. Tool-call IDs use ToolCall.ID directly — Responses
-// accepts `id` and `call_id` interchangeably, and the runtime already
+// per tool call. ToolCall.ID is the stable Responses call_id captured
+// during streaming; it is echoed as `call_id` only. The `id` field is
+// intentionally omitted — Copilot's /responses rotates a fresh item_id
+// per event (so no single value is round-trippable) and rejects an
+// arbitrary id with "Expected an ID that begins with 'fc'"; call_id
+// alone is sufficient to pair the call with its output. The runtime
 // guarantees non-empty IDs at construction time.
 func (p *CodexProvider) assistantInputItems(msg zeroruntime.Message) ([]inputItem, error) {
 	items := []inputItem{}
@@ -310,7 +335,6 @@ func (p *CodexProvider) assistantInputItems(msg zeroruntime.Message) ([]inputIte
 		}
 		items = append(items, inputItem{
 			Type:      "function_call",
-			ID:        tc.ID,
 			CallID:    tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments,
@@ -347,10 +371,14 @@ func (p *CodexProvider) streamResponses(
 		inner.oauthResolver,
 		func(request *http.Request) {
 			request.Header.Set("Content-Type", "application/json")
-			// injectCodexHeaders sets originator, chatgpt-account-id, and a
-			// branded User-Agent. It also runs on the 401-refresh retry, so
-			// per-request state (account id, fresh token) is re-derivable.
-			p.injectCodexHeaders(request)
+			// setExtra injects the backend-specific per-request headers: the
+			// Codex originator + chatgpt-account-id + branded User-Agent, or the
+			// GitHub Copilot editor identity headers. It also runs on the
+			// 401-refresh retry, so per-request state (account id, fresh token)
+			// is re-derivable.
+			if p.setExtra != nil {
+				p.setExtra(request)
+			}
 		}, 0)
 	if err != nil {
 		// Surface ctx errors verbatim so caller-driven cancels are not
@@ -572,13 +600,14 @@ func (p *CodexProvider) handleOutputItemAdded(
 			return
 		}
 		builder := &toolCallBuilder{
-			ID:   key,
-			Name: event.Item.Name,
+			ID:         key,
+			ExternalID: externalToolCallID(key, event.Item.CallID),
+			Name:       event.Item.Name,
 		}
 		state.toolCalls[key] = builder
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:       zeroruntime.StreamEventToolCallStart,
-			ToolCallID: key,
+			ToolCallID: builder.ExternalID,
 			ToolName:   event.Item.Name,
 		})
 		builder.started = true
@@ -606,13 +635,13 @@ func (p *CodexProvider) handleFunctionArgsDelta(
 		// an intermediate proxy). Treat the delta as the start of a new
 		// tool call with no known name yet — the eventual
 		// response.output_item.done carries the final name.
-		builder = &toolCallBuilder{ID: key}
+		builder = &toolCallBuilder{ID: key, ExternalID: key}
 		state.toolCalls[key] = builder
 	}
 	builder.Arguments.WriteString(event.Delta)
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 		Type:              zeroruntime.StreamEventToolCallDelta,
-		ToolCallID:        key,
+		ToolCallID:        builder.ExternalID,
 		ArgumentsFragment: event.Delta,
 	})
 }
@@ -637,7 +666,7 @@ func (p *CodexProvider) handleOutputItemDone(
 	}
 	builder, ok := state.toolCalls[key]
 	if !ok {
-		builder = &toolCallBuilder{ID: key}
+		builder = &toolCallBuilder{ID: key, ExternalID: externalToolCallID(key, event.Item.CallID)}
 		state.toolCalls[key] = builder
 	}
 	if event.Item.Name != "" {
@@ -649,14 +678,14 @@ func (p *CodexProvider) handleOutputItemDone(
 	if !builder.started {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:       zeroruntime.StreamEventToolCallStart,
-			ToolCallID: key,
+			ToolCallID: builder.ExternalID,
 			ToolName:   builder.Name,
 		})
 		builder.started = true
 	}
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 		Type:       zeroruntime.StreamEventToolCallEnd,
-		ToolCallID: key,
+		ToolCallID: builder.ExternalID,
 		ToolName:   builder.Name,
 	})
 	builder.ended = true
@@ -736,11 +765,21 @@ func (p *CodexProvider) handleTerminalResponse(
 	return false
 }
 
-// toolCallKey returns the canonical id used to track an in-flight
-// function call across multiple SSE events. The Codex backend may emit
-// `item_id` (the call id) or rely on `output_index` (the position in
-// the response.output array); we accept both for robustness.
+// toolCallKey returns the canonical id used to correlate an in-flight
+// function call across its output_item.added, argument deltas, and
+// output_item.done events. output_index is preferred because it is the only
+// identifier that stays stable across all three on every backend — Copilot's
+// /responses rotates a fresh (encrypted) item_id on each event, so keying on
+// item_id there would split one call across several builders and drop its
+// arguments. item_id / item.id / item.call_id remain as fallbacks for
+// backends that omit output_index.
 func (p *CodexProvider) toolCallKey(event *responsesEvent) string {
+	if event.OutputIndex != nil {
+		// output_index is present (a *int distinguishes a real 0 — the first output
+		// in the response — from "absent"), so key on it even when 0 instead of
+		// dropping the call's args when no item_id is present (M1).
+		return fmt.Sprintf("output-%d", *event.OutputIndex)
+	}
 	if event.ItemID != "" {
 		return event.ItemID
 	}
@@ -749,12 +788,6 @@ func (p *CodexProvider) toolCallKey(event *responsesEvent) string {
 	}
 	if event.Item != nil && event.Item.CallID != "" {
 		return event.Item.CallID
-	}
-	if event.OutputIndex != nil {
-		// output_index is present (a *int distinguishes a real 0 — the first output
-		// in the response — from "absent"), so key on it even when 0 instead of
-		// dropping the call's args when no item_id is present (M1).
-		return fmt.Sprintf("output-%d", *event.OutputIndex)
 	}
 	return ""
 }

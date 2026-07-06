@@ -10,7 +10,37 @@ import (
 
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 )
+
+// oauthDiscoveryCredential resolves the bearer token and any extra request
+// headers needed to authenticate a /models discovery probe for an OAuth
+// provider. For GitHub Copilot the stored login is a durable GitHub user token
+// that api.githubcopilot.com does NOT accept directly — and even when it did,
+// GitHub only exposes a limited (GPT-only) model set to it. Exchange it for the
+// short-lived Copilot token and attach the editor headers so discovery sees the
+// full Copilot catalog (Claude, Gemini, GPT-5.x, …), matching the chat request
+// path. If the exchange fails, fall back to the raw stored token so discovery
+// can still surface the limited set rather than nothing. Other providers use
+// their stored bearer as-is with no extra headers.
+//
+// The returned baseURL is the account-specific Copilot API host derived from the
+// minted token; callers set it on the discovery profile so probes hit the same
+// host the model calls will. It is empty for non-Copilot providers and when only
+// the raw stored token is available.
+func oauthDiscoveryCredential(ctx context.Context, providerID string) (string, map[string]string, string) {
+	stored := oauthStoredToken(ctx, providerID)
+	if stored == "" {
+		return "", nil, ""
+	}
+	if strings.EqualFold(strings.TrimSpace(providerID), "copilot") {
+		if token, _, err := provideroauth.MintCopilotToken(ctx, nil, stored); err == nil && token != "" {
+			return token, provideroauth.CopilotChatHeaderMap(), provideroauth.CopilotBaseURLFromToken(token)
+		}
+		return stored, nil, ""
+	}
+	return stored, nil, ""
+}
 
 // oauthPreferDeviceFlow reports whether the device-code flow should be the
 // default for a device-capable provider because no usable browser is likely

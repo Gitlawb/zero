@@ -32,6 +32,12 @@ type Model struct {
 	OutputCost       float64
 	Tags             []string
 	Source           string
+	// Recommended mirrors a provider's own "show in picker" curation flag (GitHub
+	// Copilot's model_picker_enabled): true for the latest, user-facing models and
+	// false for snapshots, embeddings, and legacy models. Providers that don't
+	// expose such a flag leave it false for every model, which the picker treats as
+	// "no curation available" and shows the full list unchanged.
+	Recommended bool
 }
 
 type Options struct {
@@ -310,10 +316,37 @@ func anthropicModelsEndpoint(baseURL string) (string, error) {
 
 type modelsResponse struct {
 	Data []struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-		Name        string `json:"name"`
+		ID                 string   `json:"id"`
+		DisplayName        string   `json:"display_name"`
+		Name               string   `json:"name"`
+		SupportedEndpoints []string `json:"supported_endpoints"`
+		// ModelPickerEnabled is GitHub Copilot's own curation flag. It is a pointer
+		// so an absent field (every non-Copilot provider) stays nil and never marks
+		// a model as recommended, leaving those pickers unfiltered.
+		ModelPickerEnabled *bool `json:"model_picker_enabled"`
 	} `json:"data"`
+}
+
+// modelUsableEndpoint reports whether a discovered model can be driven by one
+// of the transports Zero speaks: the chat-completions API or the Responses API.
+// Some providers (notably GitHub Copilot) list models reachable only via other
+// endpoints — e.g. "/embeddings" — which Zero cannot use for a chat turn; those
+// are filtered out. Models exposing "/responses" ARE kept: Zero serves them via
+// the Responses transport (see openai.NewCopilotResponsesProvider). When a
+// listing declares no supported_endpoints (the common case for plain
+// OpenAI-compatible servers) it is assumed chat-completions capable so
+// discovery stays backward compatible.
+func modelUsableEndpoint(endpoints []string) bool {
+	if len(endpoints) == 0 {
+		return true
+	}
+	for _, endpoint := range endpoints {
+		switch strings.ToLower(strings.TrimSpace(endpoint)) {
+		case "/chat/completions", "/responses", "ws:/responses":
+			return true
+		}
+	}
+	return false
 }
 
 func parseModelsResponse(body []byte) ([]Model, error) {
@@ -328,12 +361,19 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 		if id == "" || seen[id] {
 			continue
 		}
+		if !modelUsableEndpoint(item.SupportedEndpoints) {
+			continue
+		}
 		seen[id] = true
 		description := strings.TrimSpace(item.DisplayName)
 		if description == "" {
 			description = strings.TrimSpace(item.Name)
 		}
-		models = append(models, Model{ID: id, Description: description})
+		models = append(models, Model{
+			ID:          id,
+			Description: description,
+			Recommended: item.ModelPickerEnabled != nil && *item.ModelPickerEnabled,
+		})
 	}
 	sort.SliceStable(models, func(i, j int) bool {
 		return models[i].ID < models[j].ID
@@ -389,6 +429,9 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 				continue
 			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")
+			// The models.dev catalog carries no curation flag; keep the live
+			// provider's recommendation so the picker's curated default is correct.
+			catalog.Recommended = catalog.Recommended || live.Recommended
 			result = append(result, catalog)
 			continue
 		}
