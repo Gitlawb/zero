@@ -20,7 +20,7 @@ type shellIssue struct {
 
 const windowsMsysSandboxKind = "windows_msys_sandbox"
 
-const windowsMsysSandboxSuggestion = "MSYS/Cygwin coreutils from Git for Windows cannot run under Zero's write-restricted Windows sandbox. Prefer Zero native tools (grep, read_file with offset/limit, list_directory, glob), cmd.exe findstr/more, or PowerShell Select-Object -First/-Last. If host-level execution is truly required, rerun with sandbox_permissions: \"require_escalated\" and a narrow justification."
+const windowsMsysSandboxSuggestion = "MSYS/Cygwin coreutils from Git for Windows cannot run under Zero's write-restricted Windows sandbox. Prefer Zero native tools (grep, read_file with offset/limit, list_directory, glob), cmd.exe findstr, or PowerShell Select-Object -First/-Last. If host-level execution is truly required, rerun with sandbox_permissions: \"require_escalated\" and a narrow justification."
 
 // windowsMsysProneNames is the single source of truth for POSIX coreutil names
 // that commonly resolve to a Git-for-Windows MSYS/Cygwin binary rather than a
@@ -168,7 +168,15 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 		return nil
 	}
 	trimmed := strings.TrimSpace(command)
-	if windowsBashStyleCDPattern.MatchString(trimmed) {
+	// Blank out double-quoted spans before matching, so a `cd /foo`-shaped
+	// string that only appears inside a quoted argument value (e.g. a `gh`
+	// or `git commit` message) is not mistaken for an actual command cmd.exe
+	// would interpret. Then neutralize cmd.exe caret escapes of its own
+	// metacharacters (foo^|cat is the literal token foo|cat, not a pipe into
+	// cat), so an escaped metachar can't stand in as a fake segment boundary
+	// either.
+	unquoted := stripCmdCaretEscapes(stripDoubleQuotedSpans(trimmed))
+	if windowsBashStyleCDPattern.MatchString(unquoted) {
 		return &shellIssue{
 			Kind:       "windows_shell_syntax",
 			Message:    "Command looks like POSIX/Bash syntax, but Zero runs bash tool commands through Windows cmd.exe on this host.",
@@ -194,6 +202,44 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 	return nil
 }
 
+// stripDoubleQuotedSpans replaces the contents of every double-quoted span
+// (quotes included) with spaces, preserving the string's length and the
+// position of unquoted text. cmd.exe treats a double-quoted span as a single
+// literal token, so operators/utility names inside one are not real command
+// syntax; blanking them out keeps the Windows command-issue regexes anchored
+// to text cmd.exe would actually interpret.
+func stripDoubleQuotedSpans(command string) string {
+	var b strings.Builder
+	b.Grow(len(command))
+	inQuotes := false
+	for _, c := range command {
+		if c == '"' {
+			inQuotes = !inQuotes
+			b.WriteByte(' ')
+			continue
+		}
+		if inQuotes {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// cmdEscapedMetacharPattern matches a cmd.exe caret escape of one of its own
+// metacharacters. cmd.exe treats the escaped character as a literal, not an
+// operator, so e.g. `foo^|cat` is the single literal token foo|cat, not a
+// pipe into cat.
+var cmdEscapedMetacharPattern = regexp.MustCompile(`\^[&|;^<>]`)
+
+// stripCmdCaretEscapes blanks out cmd.exe caret-escape sequences (both
+// characters), so an escaped metacharacter cannot be mistaken by the Windows
+// command-issue regexes for a real operator/segment boundary.
+func stripCmdCaretEscapes(command string) string {
+	return cmdEscapedMetacharPattern.ReplaceAllString(command, "  ")
+}
+
 // detectShellOutputIssue looks for MSYS runtime crash markers and cmd.exe
 // syntax-error text in output only, never in the command that was run. The
 // command line is attacker/user-controlled argument text (e.g. a `gh pr
@@ -214,7 +260,7 @@ func detectShellOutputIssue(output string, goos string) *shellIssue {
 		return &shellIssue{
 			Kind:       "windows_shell_syntax",
 			Message:    "Windows cmd.exe rejected the command syntax.",
-			Suggestion: "Translate the command to Windows cmd.exe syntax, set the bash tool cwd argument instead of running cd, or prefer native Zero tools for file inspection.",
+			Suggestion: "Use Windows cmd.exe syntax. Quote args with | using double quotes (e.g. --jq \".a | b\"). Avoid | head; use --jq or PowerShell Select-Object -First N instead. Prefer native tools.",
 		}
 	}
 	return nil
