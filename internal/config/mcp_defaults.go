@@ -37,7 +37,10 @@ func IsDefaultMCPServer(name string) bool {
 // for name — i.e. the user never wrote anything for this server into their
 // config, so it is running with whatever Zero ships (e.g. keyless Firecrawl,
 // no credentials). mergeMCPServer only overwrites fields the user actually set,
-// so an untouched default survives merge byte-identical to DefaultMCPServers().
+// so an untouched default survives merge byte-identical to DefaultMCPServers();
+// even a disabled/enabled toggle (e.g. `zero mcp enable firecrawl`) marks the
+// merged disabledSet field, which breaks the equality below, so an explicit
+// toggle counts as "configured" even though the resolved value is unchanged.
 // Callers use this to tell "server we turned on for the user" apart from
 // "server the user configured themselves," e.g. to avoid warning loudly when
 // an out-of-the-box default that was never given credentials fails to connect.

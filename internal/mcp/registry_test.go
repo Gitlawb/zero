@@ -178,11 +178,19 @@ func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
 	for _, skipped := range runtime.Skipped() {
 		byName[skipped.Name] = skipped
 	}
-	if !byName["firecrawl"].UnconfiguredDefault {
-		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", byName["firecrawl"])
+	firecrawl, ok := byName["firecrawl"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
 	}
-	if byName["custom"].UnconfiguredDefault {
-		t.Fatalf("Skipped()[custom] = %#v, want a user-configured server not flagged", byName["custom"])
+	if !firecrawl.UnconfiguredDefault {
+		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	}
+	custom, ok := byName["custom"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for custom", runtime.Skipped())
+	}
+	if custom.UnconfiguredDefault {
+		t.Fatalf("Skipped()[custom] = %#v, want a user-configured server not flagged", custom)
 	}
 }
 

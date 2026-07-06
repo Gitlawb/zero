@@ -773,6 +773,12 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 	}
 	if next.disabledSet || next.Disabled {
 		base.Disabled = next.Disabled
+		// Mark the merged result itself as explicitly touched (not just Disabled),
+		// so a user who writes {"disabled": false} to re-enable a built-in default
+		// (e.g. `zero mcp enable firecrawl`) produces a config that IsUnconfiguredDefault
+		// can tell apart from the untouched default it started from, even though the
+		// resolved value ends up identical — the toggle itself is the "configured" signal.
+		base.disabledSet = true
 	}
 	return base
 }

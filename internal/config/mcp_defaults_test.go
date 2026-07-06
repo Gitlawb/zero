@@ -64,6 +64,28 @@ func TestIsUnconfiguredDefault(t *testing.T) {
 	}
 }
 
+func TestResolveMCPExplicitReenableIsNotUnconfiguredDefault(t *testing.T) {
+	// `zero mcp enable firecrawl` after a prior disable writes {"disabled":false}
+	// explicitly. The resolved value is identical to the untouched default (both
+	// enabled, no credentials), but the user DID take an explicit action here, so
+	// IsUnconfiguredDefault must not treat it as untouched (issue #563 review).
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":false}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	firecrawl := cfg.Servers["firecrawl"]
+	if firecrawl.Disabled {
+		t.Fatalf("explicit re-enable should leave the server enabled: %#v", firecrawl)
+	}
+	if IsUnconfiguredDefault("firecrawl", firecrawl) {
+		t.Fatal("an explicit enable/disable toggle must count as user-configured, even though the resolved value matches the default")
+	}
+}
+
 func TestResolveMCPUserCanOverrideDefaultURLKeepingOtherFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	// Point firecrawl at a self-hosted instance; the default's Type must survive.
