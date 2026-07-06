@@ -26,6 +26,7 @@ import (
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -390,6 +391,7 @@ type model struct {
 	mcpManager                   *mcpManagerState
 	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
+	compactionModel              string       // preferences.compactionModel (see providers.CompactionModelID)
 	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
 	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
@@ -749,6 +751,7 @@ func newModel(ctx context.Context, options Options) model {
 		modelCatalog:                modelCatalog,
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
+		compactionModel:             options.CompactionModel,
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
@@ -4439,6 +4442,25 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// compaction (proactive + reactive) is enabled for every model, not just
 		// catalogued ones.
 		options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+		// Route compaction summarization to a cheap model when one applies
+		// (env > config > curated default; providers.CompactionModelID). Lazy:
+		// no provider is built unless a paid compaction actually happens, and
+		// the agent falls back to the main provider on any summarizer failure.
+		if m.newProvider != nil {
+			if summarizerModel := providers.CompactionModelID(m.providerProfile, m.compactionModel); summarizerModel != "" {
+				summarizerProfile := m.providerProfile
+				summarizerProfile.Model = summarizerModel
+				newProvider := m.newProvider
+				options.Summarizer = func(context.Context) (agent.Provider, error) {
+					return newProvider(summarizerProfile)
+				}
+			}
+		}
+		// Let compaction re-derive its threshold after a mid-run escalate_model
+		// switch instead of keeping the original model's window.
+		options.ContextWindowFor = func(modelID string) int {
+			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
+		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,

@@ -662,11 +662,17 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// context-window sizing, and usage attribution follow the new model.
 				provider = newProvider
 				options.Model = turnRequestedModel
-				// KNOWN LIMITATION (deferred): the compactor's context-window budget
-				// is fixed at run start from options.ContextWindow and is NOT updated
-				// here, so a switch to a model with a different window keeps compacting
-				// against the original budget. Fixing it needs a ModelSwitcher contract
-				// change (return the new window) — out of scope for this change.
+				// Re-derive the context window for the new model so compaction and
+				// the OnContext budget report track the model actually in force —
+				// without this a switch to a smaller-window model can overflow the
+				// target, and a switch to a larger one over-compacts. An unknown
+				// model (<= 0) keeps the original window.
+				if options.ContextWindowFor != nil {
+					if window := options.ContextWindowFor(turnRequestedModel); window > 0 {
+						options.ContextWindow = window
+						compactor.updateWindow(window)
+					}
+				}
 			}
 		}
 

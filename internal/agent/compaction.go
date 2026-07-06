@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -332,6 +334,15 @@ type compactionState struct {
 	// starts at 1.0 and converges via an EMA as each turn reports actual usage, so
 	// later turns compact nearer to real capacity. Zero is treated as 1.0.
 	calibrationRatio float64
+
+	// summarizerFactory lazily builds the dedicated (cheap) summarizer provider
+	// (Options.Summarizer). summarizerProvider memoizes the built provider;
+	// summarizerBroken is the sticky per-run fallback: once a build or call
+	// fails, the run stays on the main provider — a misconfigured cheap model
+	// must never break (or repeatedly delay) compaction.
+	summarizerFactory  func(ctx context.Context) (Provider, error)
+	summarizerProvider Provider
+	summarizerBroken   bool
 }
 
 // calibrate folds one turn's (rawEstimate, actualPromptTokens) sample into the
@@ -366,10 +377,57 @@ func (state *compactionState) calibratedTokens(raw int) int {
 
 func newCompactionState(options Options) *compactionState {
 	return &compactionState{
-		enabled:      options.ContextWindow > 0,
-		threshold:    compactionThreshold(options.ContextWindow),
-		preserveLast: options.CompactionPreserveLast,
-		onUsage:      options.OnUsage,
+		enabled:           options.ContextWindow > 0,
+		threshold:         compactionThreshold(options.ContextWindow),
+		preserveLast:      options.CompactionPreserveLast,
+		onUsage:           options.OnUsage,
+		summarizerFactory: options.Summarizer,
+	}
+}
+
+// updateWindow re-derives the compaction threshold after a mid-run model
+// switch. The low-water mark is reset: it was measured against the old
+// threshold, and keeping it could suppress a compaction the smaller window
+// now requires. <= 0 (unknown model) leaves everything unchanged.
+func (state *compactionState) updateWindow(window int) {
+	if window <= 0 {
+		return
+	}
+	state.enabled = true
+	state.threshold = compactionThreshold(window)
+	state.lowWaterMark = 0
+}
+
+// summarizeProvider returns the provider summarization calls should use: the
+// dedicated summarizer when configured and healthy, else the main provider.
+func (state *compactionState) summarizeProvider(ctx context.Context, main Provider) Provider {
+	if state.summarizerFactory == nil || state.summarizerBroken {
+		return main
+	}
+	if state.summarizerProvider == nil {
+		built, err := state.summarizerFactory(ctx)
+		if err != nil || built == nil {
+			state.summarizerBroken = true
+			return main
+		}
+		state.summarizerProvider = built
+	}
+	return state.summarizerProvider
+}
+
+// summarizeClosureFor builds the Summarize function for one compaction, with
+// the cheap-summarizer-then-main fallback: a failure on the dedicated
+// summarizer marks it broken for the run and retries the same slice on the
+// main provider, so the caller sees at most one (main-provider-quality) error.
+func (state *compactionState) summarizeClosureFor(ctx context.Context, main Provider) func([]zeroruntime.Message) (string, error) {
+	return func(toSummarize []zeroruntime.Message) (string, error) {
+		chosen := state.summarizeProvider(ctx, main)
+		summary, err := summarizeWithFallback(ctx, chosen, toSummarize, state.onUsage)
+		if err == nil || chosen == main {
+			return summary, err
+		}
+		state.summarizerBroken = true
+		return summarizeWithFallback(ctx, main, toSummarize, state.onUsage)
 	}
 }
 
@@ -416,7 +474,7 @@ func (state *compactionState) maybeCompact(
 
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:    state.summarizeClosureFor(ctx, provider),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -458,9 +516,19 @@ func (state *compactionState) recover(
 		return messages, false, nil
 	}
 
+	// CHEAP FIRST STAGE (mirrors maybeCompact): a context-limit failure can
+	// often be fixed for free by pruning old tool-result bodies. A free retry
+	// does NOT consume the one-shot reactive budget — if the pruned request
+	// still overflows, the next recover finds nothing left to prune and pays
+	// for summarization then.
+	if pruned, reclaimed := pruneStaleToolOutput(messages, state.preserveLast); reclaimed > 0 {
+		state.lowWaterMark = state.calibratedTokens(estimateTokens(pruned) + estimateToolDefTokens(tools))
+		return pruned, true, nil
+	}
+
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:    state.summarizeClosureFor(ctx, provider),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent
@@ -483,16 +551,6 @@ func (state *compactionState) recover(
 	state.reactiveAttempted = true
 	state.lowWaterMark = state.calibratedTokens(estimateTokens(result) + estimateToolDefTokens(tools))
 	return result, true, nil
-}
-
-// summarizeClosure builds a Summarize function backed by a focused, tool-less
-// provider call. The summary stream intentionally does NOT forward OnText (so
-// compaction stays invisible on the user-facing surface), but it DOES forward
-// OnUsage so the summarizer's token cost is still counted by usage/budgeting.
-func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage)) func([]zeroruntime.Message) (string, error) {
-	return func(toSummarize []zeroruntime.Message) (string, error) {
-		return summarizeWithFallback(ctx, provider, toSummarize, onUsage)
-	}
 }
 
 // summarizeWithFallback summarizes messages in a single provider call. If that
@@ -570,8 +628,41 @@ func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []ze
 	return summary, nil
 }
 
+// summaryToolResultClamp bounds each tool-result body in the summarizer input.
+// Tool outputs dominate the elided middle's bulk (build logs, file reads,
+// search results), yet the summary instructions only need their gist — the
+// model that ACTED on the full output already turned it into decisions the
+// surrounding messages record. 2,000 chars (~500 tokens) keeps the useful
+// head+tail of a result while cutting the summarizer input by 5-10x on
+// tool-heavy sessions; the summarizer's own cost is the price being cut.
+const summaryToolResultClamp = 2000
+
+// summaryToolArgsClamp bounds each tool-call argument blob in the transcript:
+// a write_file call carries the whole file body in its arguments.
+const summaryToolArgsClamp = 500
+
+// clampForSummary head+tail-truncates text for the summarizer transcript,
+// snapping to rune boundaries so the clamp never splits a UTF-8 sequence.
+func clampForSummary(text string, max int) string {
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	head := max * 3 / 4
+	tail := max - head
+	for head > 0 && !utf8.RuneStart(text[head]) {
+		head--
+	}
+	start := len(text) - tail
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[:head] + "\n…[" + strconv.Itoa(len(text)-head-(len(text)-start)) + " chars omitted for summarization]…\n" + text[start:]
+}
+
 // renderTranscript flattens messages into a plain-text transcript for the
 // summarizer. Secret scrubbing already happened upstream at the tool boundary.
+// Tool-result bodies and tool-call arguments are clamped (see the constants
+// above): the summary needs what was done and decided, not the raw payloads.
 func renderTranscript(messages []zeroruntime.Message) string {
 	lines := make([]string, 0, len(messages))
 	for _, message := range messages {
@@ -581,13 +672,13 @@ func renderTranscript(messages []zeroruntime.Message) string {
 			if len(message.ToolCalls) > 0 {
 				calls := make([]string, 0, len(message.ToolCalls))
 				for _, call := range message.ToolCalls {
-					calls = append(calls, call.Name+"("+call.Arguments+")")
+					calls = append(calls, call.Name+"("+clampForSummary(call.Arguments, summaryToolArgsClamp)+")")
 				}
 				line += "\n[tool calls: " + strings.Join(calls, "; ") + "]"
 			}
 			lines = append(lines, line)
 		case zeroruntime.MessageRoleTool:
-			lines = append(lines, "tool result: "+message.Content)
+			lines = append(lines, "tool result: "+clampForSummary(message.Content, summaryToolResultClamp))
 		default:
 			lines = append(lines, string(message.Role)+": "+message.Content)
 		}

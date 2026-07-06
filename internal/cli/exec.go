@@ -525,14 +525,18 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
 		ModelSwitcher:    modelSwitcher,
-		ReasoningEffort:  forwardEffort,
-		Cwd:              workspaceRoot,
-		Images:           images,
-		Registry:         registry,
-		PermissionMode:   permissionMode,
-		Autonomy:         options.autonomy,
-		SelfCorrect:      selfCorrector,
-		FileDiagnostics:  fileDiagnostics,
+		Summarizer:       summarizerFactory(resolved, deps.newProvider),
+		ContextWindowFor: func(modelID string) int {
+			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		ReasoningEffort: forwardEffort,
+		Cwd:             workspaceRoot,
+		Images:          images,
+		Registry:        registry,
+		PermissionMode:  permissionMode,
+		Autonomy:        options.autonomy,
+		SelfCorrect:     selfCorrector,
+		FileDiagnostics: fileDiagnostics,
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
