@@ -1773,19 +1773,18 @@ func (wizard *providerWizardState) filteredModels() []providerWizardModel {
 }
 
 func (model providerWizardModel) displayLabel() string {
-	id := strings.TrimSpace(model.ID)
-	if id != "" {
-		return id
-	}
-	return strings.TrimSpace(model.Description)
-}
-
-func (model providerWizardModel) secondaryText() string {
 	description := strings.TrimSpace(model.Description)
 	if description != "" && !providerWizardGenericModelDescription(description) {
 		return description
 	}
-	return ""
+	return model.ID
+}
+
+func (model providerWizardModel) secondaryText() string {
+	if model.displayLabel() != model.ID {
+		return model.ID
+	}
+	return model.Description
 }
 
 func (model providerWizardModel) matches(query string) bool {
