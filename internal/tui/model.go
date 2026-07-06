@@ -1238,9 +1238,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wasConfirmingCancel := m.pending && m.cancelConfirmActive
 			m = m.disarmCancelConfirmation()
 			// An active dictation recording cancels on Esc (releases the mic, drops
-			// the audio) before any other Esc consumer — a recording in progress is
-			// the most immediate thing the user would want Esc to stop.
-			if m.dictation.active() {
+			// the audio) — but only if this Esc isn't a confirming run-cancel
+			// press. Without this guard, a user mid-recording who double-Esc's
+			// to kill the run finds the first Esc swallowed by dictation and
+			// the run still going. The pending run cancel happens further
+			// down at the bottom of the Esc branch.
+			if m.dictation.active() && !wasConfirmingCancel {
 				return m.cancelDictation()
 			}
 			// Subchat view exits on Esc (returns to main chat).

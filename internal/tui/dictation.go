@@ -76,6 +76,10 @@ type dictationController struct {
 	regionStart  int
 	regionEnd    int
 	regionPrefix string
+	// regionAnchor snapshots the text BEFORE the live region, so the next
+	// partial can detect external edits (typing, paste) and shift [start,end)
+	// to stay aligned. Updated alongside regionStart on each render.
+	regionAnchor string
 
 	// waveBars is the recording waveform's recent bar heights (a scrolling ring):
 	// audio-reactive from live mic levels on the streaming path, synthetic on the

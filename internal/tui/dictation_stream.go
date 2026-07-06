@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -84,9 +85,6 @@ func (m model) handleDictationPartial(msg sttPartialMsg) model {
 	return m
 }
 
-// applyStreamingText replaces the current live region with text, tracking the
-// region's rune bounds so the next partial can overwrite it. The first partial
-// records the region start at the cursor and (if needed) a separating space.
 func (m *model) applyStreamingText(text string) {
 	state := m.currentComposerState()
 	if !m.dictation.regionActive {
@@ -94,15 +92,60 @@ func (m *model) applyStreamingText(text string) {
 		m.dictation.regionStart = state.cursor
 		m.dictation.regionEnd = state.cursor
 		m.dictation.regionPrefix = ""
+		// Anchor the prefix text BEFORE the live region. If the user types or
+		// pastes outside the region, the next partial can detect the change in
+		// this prefix and shift [start,end) to stay aligned.
+		m.dictation.regionAnchor = state.text
 		if needsLeadingSpace(state) {
 			// Fold the separator into the region so a cancel removes it too.
 			m.dictation.regionPrefix = " "
+		}
+	} else {
+		// Compare the prefix before the live region. If it changed (the user
+		// typed/pasted there) shift [start,end) by the length delta so the
+		// next partial's slice targets the right span. If the user edited
+		// INSIDE the region, drop the live region and re-anchor at the
+		// current cursor — we can't tell the partial from the user's text
+		// after that point.
+		prefix := string([]rune(state.text)[:m.dictation.regionStart])
+		anchor := m.dictation.regionAnchor
+		switch {
+		case prefix == anchor:
+			// External edit at or after the region — no shift needed.
+		case len(prefix) > len(anchor) && strings.HasPrefix(prefix, anchor):
+			// External edit inserted text just before the region (i.e. at
+			// position regionStart, pushing the region right).
+			delta := len([]rune(prefix)) - len([]rune(anchor))
+			m.dictation.regionStart += delta
+			m.dictation.regionEnd += delta
+			m.dictation.regionAnchor = prefix
+		case len(anchor) > len(prefix) && strings.HasPrefix(anchor, prefix):
+			// External delete just before the region.
+			delta := len([]rune(anchor)) - len([]rune(prefix))
+			m.dictation.regionStart -= delta
+			m.dictation.regionEnd -= delta
+			m.dictation.regionAnchor = prefix
+		default:
+			// User edited inside or across the region — can't safely
+			// overwrite. Drop the live region and re-anchor at the cursor
+			// so the next partial inserts as a fresh span.
+			m.dictation.regionStart = state.cursor
+			m.dictation.regionEnd = state.cursor
+			m.dictation.regionPrefix = ""
+			m.dictation.regionAnchor = string([]rune(state.text)[:state.cursor])
 		}
 	}
 	// Replace [regionStart, regionEnd) with prefix + the new cumulative text.
 	rendered := m.dictation.regionPrefix + text
 	cleared := deleteComposerRange(state, m.dictation.regionStart, m.dictation.regionEnd)
-	cleared.cursor = m.dictation.regionStart
+	// Preserve the user's cursor if they moved it outside the live region
+	// (e.g. to edit elsewhere in the composer) — yanking it to regionStart on
+	// every partial would steal their focus mid-edit.
+	if cleared.cursor < m.dictation.regionStart || cleared.cursor > m.dictation.regionEnd {
+		// keep cleared.cursor
+	} else {
+		cleared.cursor = m.dictation.regionStart
+	}
 	updated := insertComposerText(cleared, rendered)
 	m.dictation.regionEnd = m.dictation.regionStart + len([]rune(rendered))
 	m.setComposerState(updated)

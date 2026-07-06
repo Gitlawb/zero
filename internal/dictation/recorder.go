@@ -217,6 +217,14 @@ func (r *recorder) Stop() ([]byte, error) {
 		return nil, errors.New("no recording in progress")
 	}
 	proc, path := r.proc, r.filePath
+	// Termux: Start's termux-microphone-record branch leaves r.proc nil because
+	// there's no long-lived process to hold (Stop is a separate `-q` invocation
+	// via runOutput). Treat that as legitimate; only reject a nil proc that
+	// came from StartStreaming (which owns its process via the returned
+	// closure).
+	if proc == nil && r.opts.Platform != PlatformTermux {
+		return nil, errors.New("recording was started with StartStreaming; call the stop closure returned from StartStreaming instead of Stop()")
+	}
 	r.proc, r.filePath, r.recording = nil, "", false
 	defer os.Remove(path)
 
