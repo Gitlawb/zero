@@ -224,13 +224,11 @@ func TestDetectShellCommandIssueIgnoresQuotedContent(t *testing.T) {
 	}
 
 	// Sanity: the same utility names still get flagged when they're NOT quoted.
-	for _, command := range []string{
-		`echo "foo" ; ls -la`,
-		`git log | head`,
-	} {
-		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
-			t.Fatalf("expected unquoted shell syntax to still be flagged for %q", command)
-		}
+	// cmd.exe (unlike bash) does not treat ; as a statement separator, so
+	// `echo "foo" ; ls -la` is a single echo invocation with literal
+	// arguments, not a real ls invocation, and must not be flagged.
+	if issue := detectShellCommandIssue(`git log | head`, "windows"); issue == nil {
+		t.Fatalf("expected unquoted shell syntax to still be flagged for %q", `git log | head`)
 	}
 }
 
