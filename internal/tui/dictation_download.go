@@ -41,6 +41,9 @@ func (d dictationController) canOfferDownload(err error) bool {
 // startVariantDownload fetches the sherpa-onnx engine + the chosen model
 // variant, reporting progress live, then persists and applies the resolved paths.
 func (m model) startVariantDownload(v dictation.ModelVariant) (model, tea.Cmd) {
+	if m.dictation.downloading {
+		return m.appendSystemNotice("A dictation download is already in progress — please wait for it to finish."), nil
+	}
 	m.dictation.downloading = true
 	sink := m.runtimeMessageSink
 	root := m.dictation.downloadRoot

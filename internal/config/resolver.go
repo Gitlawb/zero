@@ -816,6 +816,9 @@ func validateSTTConfig(cfg STTConfig) error {
 	if cfg.MaxDurationSeconds < 0 {
 		return fmt.Errorf("invalid stt.maxDurationSeconds %d: must be >= 0 (0 uses the default)", cfg.MaxDurationSeconds)
 	}
+	if cfg.NumThreads < 0 {
+		return fmt.Errorf("invalid stt.numThreads %d: must be >= 0 (0 uses the engine default)", cfg.NumThreads)
+	}
 	if cfg.LocalServerPort < 0 || cfg.LocalServerPort > 65535 {
 		return fmt.Errorf("invalid stt.localServerPort %d: must be between 1 and 65535 (0 uses the default)", cfg.LocalServerPort)
 	}

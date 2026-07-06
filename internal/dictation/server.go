@@ -145,7 +145,15 @@ func (m *ServerManager) Shutdown(ctx context.Context) error {
 	if err := proc.StopGracefully(); err != nil {
 		_ = proc.Kill()
 	}
-	return waitWithTimeout(proc, stopGrace)
+	done := make(chan error, 1)
+	go func() { done <- waitWithTimeout(proc, stopGrace) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		_ = proc.Kill()
+		return ctx.Err()
+	}
 }
 
 // URL returns the current server URL without starting one ("" when not running).

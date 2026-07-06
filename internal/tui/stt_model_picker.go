@@ -3,8 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -124,10 +127,11 @@ func (m model) maybeOpenSTTDownloadPicker(value string) (model, tea.Cmd, bool) {
 	}
 	// Always open the chooser when Local is picked — so you can select a model the
 	// first time AND switch models later (even with one already configured).
-	m.dictation.cfg.Provider = config.STTProviderLocal
-	if m.userConfigPath != "" {
-		_, _ = config.SetSTTProvider(m.userConfigPath, config.STTProviderLocal)
-	}
+	// Don't persist Provider=local here — applyEngineComponents (called on both
+	// the download-completion and the already-installed fast path) is the sole
+	// place that commits the provider/model. Persisting now would silently
+	// strand the user on an unconfigured local provider if they press Esc
+	// out of the picker.
 	m.clearSuggestions()
 	if len(m.dictation.browseVariants) > 0 {
 		// Full list already fetched this session — show it straight away.
@@ -163,7 +167,13 @@ type sttModelsFetchedMsg struct {
 // off the UI goroutine (a GitHub API round-trip).
 func fetchSTTModelsCmd() tea.Cmd {
 	return func() tea.Msg {
-		variants, err := dictation.ListModels(context.Background(), nil, "")
+		// A stalled GitHub response would otherwise hang the picker loading
+		// state forever (http.DefaultClient has no timeout). 30s is enough
+		// headroom for the release + assets round-trips on a slow link.
+		client := &http.Client{Timeout: 30 * time.Second}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		variants, err := dictation.ListModels(ctx, client, "")
 		return sttModelsFetchedMsg{variants: variants, err: err}
 	}
 }
@@ -261,7 +271,10 @@ func (m model) engineDownloaded() bool {
 // the per-model total once it is on disk.
 func newSTTDownloadPickerFrom(variants []dictation.ModelVariant, loading bool, downloadRoot string, engineHave bool, currentPath string) *commandPicker {
 	isCurrent := func(v dictation.ModelVariant) bool {
-		return currentPath != "" && v.DirName != "" && strings.Contains(currentPath, v.DirName)
+		// Substring match false-positives when one variant's DirName is a
+		// substring of another's ("tiny" inside "tiny-en"). Compare the
+		// last path segment only.
+		return currentPath != "" && v.DirName != "" && filepath.Base(currentPath) == v.DirName
 	}
 	sorted := append([]dictation.ModelVariant(nil), variants...)
 	installed := func(v dictation.ModelVariant) bool {

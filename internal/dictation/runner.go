@@ -64,6 +64,15 @@ func startProcess(spec commandSpec) (processHandle, io.ReadCloser, error) {
 		stdin = pipe
 	}
 	if err := cmd.Start(); err != nil {
+		// StdoutPipe/StdinPipe allocate fds the runtime only reclaims via
+		// Wait; on Start failure the process is never established, so close
+		// any pipes we already opened to avoid leaking them.
+		if stdout != nil {
+			_ = stdout.Close()
+		}
+		if stdin != nil {
+			_ = stdin.Close()
+		}
 		return nil, nil, err
 	}
 	return &realProcess{cmd: cmd, stdin: stdin, stopText: spec.stopViaStdin}, stdout, nil

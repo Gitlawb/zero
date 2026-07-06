@@ -630,9 +630,26 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resol
 	if expected == "" && !allowUnverified {
 		return fmt.Errorf("dictation download: no SHA256 available for %s (neither the GitHub API nor a pinned value) — refusing an unverifiable download", asset.name)
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// Ensure the parent of destDir exists; the final destDir is created by
+	// the atomic rename at the end of the function.
+	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
 		return err
 	}
+	// Stage the extraction into a sibling temp dir and only swap it into
+	// destDir on success. An interrupted run that left a truncated engine
+	// binary in destDir would otherwise pass fileExists() on the next start
+	// and break the local recorder silently.
+	stageDir, err := os.MkdirTemp(filepath.Dir(destDir), filepath.Base(destDir)+".stage-*")
+	if err != nil {
+		return err
+	}
+	cleanupStage := true
+	defer func() {
+		if cleanupStage {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+
 	tmp, err := os.CreateTemp(filepath.Dir(destDir), "stt-dl-*.tar.bz2")
 	if err != nil {
 		return err
@@ -675,7 +692,19 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, asset resol
 	if expected != "" && !strings.EqualFold(got, expected) {
 		return fmt.Errorf("dictation download: checksum mismatch for %s (want %s, got %s) — refusing to extract", asset.name, expected, got)
 	}
-	return extractTarBz2(tmpPath, destDir, "Extracting "+label, progress)
+	if err := extractTarBz2(tmpPath, stageDir, "Extracting "+label, progress); err != nil {
+		return err
+	}
+	// Remove any pre-existing destDir so Rename is atomic on the same
+	// filesystem (os.Rename refuses to overwrite a non-empty dir).
+	if err := os.RemoveAll(destDir); err != nil {
+		return fmt.Errorf("clearing previous %s install: %w", label, err)
+	}
+	if err := os.Rename(stageDir, destDir); err != nil {
+		return fmt.Errorf("promoting staged %s: %w", label, err)
+	}
+	cleanupStage = false
+	return nil
 }
 
 // progressReader reports download progress as a percentage on each whole-percent

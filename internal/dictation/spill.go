@@ -35,6 +35,15 @@ func audioSpillDir() (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("dictation temp path %s is not a directory", dir)
 	}
+	// MkdirAll only applies 0o700 to dirs it creates; an existing directory
+	// (e.g. one created under a loose umask in a prior run) can be group- or
+	// world-readable. Tighten it so staged audio (PII) is never visible to
+	// other users on a shared /tmp.
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", fmt.Errorf("tightening dictation temp dir permissions: %w", err)
+		}
+	}
 	if err := checkAudioDirOwner(info); err != nil {
 		return "", err
 	}
