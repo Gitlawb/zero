@@ -25,6 +25,8 @@ const (
 	pickerSession
 	pickerTheme
 	pickerSkill
+	pickerSTTModel
+	pickerSTTDownload
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -56,6 +58,9 @@ type commandPicker struct {
 	allItems []pickerItem
 	query    string
 	selected int
+	// loading marks a picker still fetching its rows (e.g. the STT model list from
+	// GitHub): the overlay shows a "fetching…" line instead of "no matching items".
+	loading bool
 }
 
 func (p *commandPicker) move(delta int) {

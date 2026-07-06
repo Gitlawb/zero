@@ -1,0 +1,304 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/dictation"
+)
+
+func TestDictationTranscribedInsertsIntoComposer(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello", cursor: 5})
+	m.dictation.phase = dictTranscribing
+
+	next, _ := m.handleDictationTranscribed(dictationTranscribedMsg{text: "world"})
+	got := next.(model)
+	if got.composer.text != "hello world" {
+		t.Errorf("composer = %q, want 'hello world'", got.composer.text)
+	}
+	if got.dictation.active() {
+		t.Error("dictation should be idle after transcription")
+	}
+}
+
+func TestDictationTranscribedEmptyIsNoticed(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictTranscribing
+	next, _ := m.handleDictationTranscribed(dictationTranscribedMsg{text: "   "})
+	got := next.(model)
+	if got.composer.text != "" {
+		t.Errorf("composer should stay empty, got %q", got.composer.text)
+	}
+	if !transcriptHasText(got, "No speech detected") {
+		t.Error("expected a 'no speech' notice")
+	}
+}
+
+func TestDictationTranscribedSetupErrorGuides(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictTranscribing
+	err := &dictation.SetupError{Tool: "arecord", Hint: "install alsa-utils"}
+	next, _ := m.handleDictationTranscribed(dictationTranscribedMsg{err: err})
+	got := next.(model)
+	if !transcriptHasText(got, "install alsa-utils") {
+		t.Error("expected setup guidance in the transcript")
+	}
+}
+
+func TestDictationAuthErrorReopensKeyPrompt(t *testing.T) {
+	// A cloud auth failure should offer an inline key prompt for the current
+	// provider (preserving its model), not dead-end on "run zero auth".
+	m := model{}
+	m.dictation.cfg = config.STTConfig{Provider: config.STTProviderGroq, Model: "whisper-large-v3-turbo"}
+	m.dictation.saveKey = func(string, string) error { return nil }
+	m.dictation.phase = dictTranscribing
+
+	err := &dictation.AuthError{Provider: "groq", Message: "auth error: your API key is missing or invalid"}
+	next, _ := m.handleDictationTranscribed(dictationTranscribedMsg{err: err})
+	got := next.(model)
+	if got.sttKeyPrompt == nil {
+		t.Fatal("an auth failure should reopen the API-key prompt")
+	}
+	if got.sttKeyPrompt.provider != "groq" || got.sttKeyPrompt.modelValue != "groq:whisper-large-v3-turbo" {
+		t.Errorf("key prompt = %+v, want groq / groq:whisper-large-v3-turbo", got.sttKeyPrompt)
+	}
+}
+
+func TestDictationNonAuthErrorDoesNotPrompt(t *testing.T) {
+	m := model{}
+	m.dictation.cfg = config.STTConfig{Provider: config.STTProviderGroq}
+	m.dictation.saveKey = func(string, string) error { return nil }
+	m.dictation.phase = dictTranscribing
+
+	next, _ := m.handleDictationTranscribed(dictationTranscribedMsg{err: errors.New("network unreachable")})
+	got := next.(model)
+	if got.sttKeyPrompt != nil {
+		t.Error("a non-auth error must not open the key prompt")
+	}
+	if !transcriptHasText(got, "network unreachable") {
+		t.Error("expected the raw error in the transcript")
+	}
+}
+
+func TestDictationStartedFailureResets(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictStarting
+	m.dictation.streaming = false
+	got, _ := m.handleDictationStarted(dictationStartedMsg{err: errors.New("mic busy")})
+	if got.dictation.active() {
+		t.Error("a start failure should reset to idle")
+	}
+	if !transcriptHasText(got, "mic busy") {
+		t.Error("expected the start error in the transcript")
+	}
+}
+
+func TestDictationStartedArmsRecording(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictStarting
+	got, _ := m.handleDictationStarted(dictationStartedMsg{})
+	if got.dictation.phase != dictRecording {
+		t.Error("a successful start should advance to recording")
+	}
+}
+
+func TestDictationUnavailableShowsHint(t *testing.T) {
+	m := model{} // no build factory
+	next, _ := m.toggleDictation()
+	if !transcriptHasText(next, "not configured") {
+		t.Error("expected a 'not configured' hint when dictation is unavailable")
+	}
+}
+
+func TestDictationStreamingPartialReplacesRegion(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "note:", cursor: 5})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+
+	m = m.handleDictationPartial(sttPartialMsg{text: "the quick"})
+	if m.composer.text != "note: the quick" {
+		t.Fatalf("after first partial: %q", m.composer.text)
+	}
+	// A longer cumulative partial replaces the previous region wholesale.
+	m = m.handleDictationPartial(sttPartialMsg{text: "the quick brown fox"})
+	if m.composer.text != "note: the quick brown fox" {
+		t.Fatalf("after second partial: %q", m.composer.text)
+	}
+	// Cancel discards the streamed region.
+	m2 := m.discardDictationRegion()
+	if m2.composer.text != "note:" {
+		t.Errorf("discard should restore original text, got %q", m2.composer.text)
+	}
+}
+
+func TestDictationCommitKeepsStreamedText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "", cursor: 0})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "final words"})
+	got, _ := m.handleDictationTranscribed(dictationTranscribedMsg{text: "final words", streaming: true})
+	if got.(model).composer.text != "final words" {
+		t.Errorf("committed streamed text lost: %q", got.(model).composer.text)
+	}
+}
+
+func TestVoiceOffReleasesWarmServer(t *testing.T) {
+	shutdownCalls := 0
+	m := model{}
+	m.dictation.build = func(config.STTConfig, bool) (Transcriber, bool, error) { return nil, false, nil } // makes available()
+	m.dictation.shutdownServer = func(context.Context) error { shutdownCalls++; return nil }
+
+	on, _ := m.toggleVoiceMode()
+	if !on.dictation.voiceModeEnabled {
+		t.Fatal("voice should be on after first toggle")
+	}
+	off, cmd := on.toggleVoiceMode()
+	if off.dictation.voiceModeEnabled {
+		t.Fatal("voice should be off after second toggle")
+	}
+	if cmd == nil {
+		t.Fatal("turning voice off should return a server-release command")
+	}
+	cmd() // run it
+	if shutdownCalls != 1 {
+		t.Errorf("shutdown called %d times, want 1", shutdownCalls)
+	}
+}
+
+func TestVoiceOffMidRecordingKeepsServer(t *testing.T) {
+	m := model{}
+	m.dictation.build = func(config.STTConfig, bool) (Transcriber, bool, error) { return nil, false, nil }
+	m.dictation.shutdownServer = func(context.Context) error {
+		t.Error("must not tear down the server while a recording is in flight")
+		return nil
+	}
+	m.dictation.voiceModeEnabled = true
+	m.dictation.phase = dictRecording
+	if _, cmd := m.toggleVoiceMode(); cmd != nil {
+		t.Error("no server-release command should be issued mid-recording")
+	}
+}
+
+func TestWantStreamingGatedByConfigAndPlatform(t *testing.T) {
+	streamOff := false
+	d := dictationController{cfg: config.STTConfig{Streaming: &streamOff}, platform: dictation.PlatformLinux}
+	if d.wantStreaming() {
+		t.Error("streaming:false in config should disable streaming")
+	}
+	d = dictationController{platform: dictation.PlatformTermux}
+	if d.wantStreaming() {
+		t.Error("Termux has no streaming capture, wantStreaming must be false")
+	}
+	d = dictationController{platform: dictation.PlatformLinux}
+	if !d.wantStreaming() {
+		t.Error("desktop default should want streaming")
+	}
+}
+
+func TestNeedsLeadingSpace(t *testing.T) {
+	if needsLeadingSpace(composerState{text: "hi", cursor: 2}) != true {
+		t.Error("cursor after non-space should need a leading space")
+	}
+	if needsLeadingSpace(composerState{text: "hi ", cursor: 3}) != false {
+		t.Error("cursor after a space should not need one")
+	}
+	if needsLeadingSpace(composerState{text: "", cursor: 0}) != false {
+		t.Error("empty composer should not need a leading space")
+	}
+}
+
+func TestDictationBatchCtxNonNil(t *testing.T) {
+	d := dictationController{}
+	if got := transcribeBatchCtx(d.ctx); got == nil {
+		t.Error("batch ctx should never be nil")
+	}
+}
+
+// transcribeBatchCtx mirrors the nil-guard in transcribeBatchCmd for testing.
+func transcribeBatchCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func transcriptHasText(m model, substr string) bool {
+	for _, row := range m.transcript {
+		if strings.Contains(row.text, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWaveformRendersLevels(t *testing.T) {
+	// Higher levels render taller bars; the ring scrolls left as levels arrive.
+	var d dictationController
+	d.pushLevel(levelHeight(1.0)) // loud → tall
+	d.pushLevel(levelHeight(0.0)) // silent → short
+	bars := renderWaveBars(d.waveBars)
+	if len([]rune(bars)) != waveBarCount {
+		t.Errorf("waveform width = %d, want %d", len([]rune(bars)), waveBarCount)
+	}
+	// The newest (rightmost) bar reflects the last pushed level (silent → space/low).
+	runes := []rune(bars)
+	if runes[waveBarCount-1] != waveRunes[0] {
+		t.Errorf("last bar should be the silent level, got %q", string(runes[waveBarCount-1]))
+	}
+}
+
+func TestDictationLevelDrivesWave(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictRecording
+	m = m.handleDictationLevel(sttLevelMsg{level: 0.9})
+	if len(m.dictation.waveBars) != waveBarCount {
+		t.Fatalf("a mic level should populate the waveform ring")
+	}
+	if m.dictation.waveBars[waveBarCount-1] != levelHeight(0.9) {
+		t.Error("the newest bar should match the received mic level")
+	}
+}
+
+func TestHandleRecTickOnlyAnimatesWhileRecording(t *testing.T) {
+	m := model{}
+	m.dictation.phase = dictRecording
+	next, cmd := m.handleRecTick()
+	if next.dictation.waveTick != 1 || cmd == nil {
+		t.Error("recording should advance the batch synthetic wave and reschedule")
+	}
+	m.dictation.phase = dictIdle
+	_, cmd = m.handleRecTick()
+	if cmd != nil {
+		t.Error("idle should stop ticking")
+	}
+}
+
+func TestCurrentModelLabel(t *testing.T) {
+	// Cloud provider + model.
+	d := dictationController{cfg: config.STTConfig{Provider: config.STTProviderGroq, Model: "whisper-large-v3-turbo"}}
+	if got := d.currentModelLabel(); got != "Groq whisper-large-v3-turbo" {
+		t.Errorf("groq label = %q", got)
+	}
+	// Cloud provider with default model.
+	d = dictationController{cfg: config.STTConfig{Provider: config.STTProviderOpenAI}}
+	if got := d.currentModelLabel(); got != "OpenAI whisper-1" {
+		t.Errorf("openai default label = %q", got)
+	}
+	// Local with a downloaded curated variant → "Local · <friendly name>".
+	kroko := dictation.ModelVariants()[0] // Kroko streaming
+	d = dictationController{cfg: config.STTConfig{Provider: config.STTProviderLocal, LocalModelPath: "/home/x/.config/zero/stt/" + kroko.DirName + "/sherpa-onnx-...-kroko"}}
+	if got := d.currentModelLabel(); got != "Local · "+kroko.Label {
+		t.Errorf("local kroko label = %q, want %q", got, "Local · "+kroko.Label)
+	}
+	// Local with no model.
+	d = dictationController{cfg: config.STTConfig{Provider: config.STTProviderLocal}}
+	if got := d.currentModelLabel(); got != "Local (no model set)" {
+		t.Errorf("no-model label = %q", got)
+	}
+}
