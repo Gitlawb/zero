@@ -49,6 +49,21 @@ func TestResolveMCPUserCanDisableDefault(t *testing.T) {
 	}
 }
 
+func TestIsUnconfiguredDefault(t *testing.T) {
+	if !IsUnconfiguredDefault("firecrawl", DefaultMCPServers()["firecrawl"]) {
+		t.Fatal("an untouched firecrawl default should be reported as unconfigured")
+	}
+	if IsUnconfiguredDefault("firecrawl", MCPServerConfig{Type: "http", URL: "http://localhost:3002/mcp"}) {
+		t.Fatal("a server overriding the default URL is no longer unconfigured")
+	}
+	if IsUnconfiguredDefault("firecrawl", MCPServerConfig{Type: "http", URL: "https://mcp.firecrawl.dev/v2/mcp", Auth: "bearer"}) {
+		t.Fatal("a server with credentials added is no longer unconfigured")
+	}
+	if IsUnconfiguredDefault("not-a-default", MCPServerConfig{}) {
+		t.Fatal("a server with no matching default can never be unconfigured-default")
+	}
+}
+
 func TestResolveMCPUserCanOverrideDefaultURLKeepingOtherFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	// Point firecrawl at a self-hosted instance; the default's Type must survive.

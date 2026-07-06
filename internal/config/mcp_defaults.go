@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"reflect"
+	"strings"
+)
 
 // DefaultMCPServers returns the MCP servers Zero ships ENABLED by default so web
 // search and scraping work out of the box with no setup and no API key. They are
@@ -28,4 +31,17 @@ func DefaultMCPServers() map[string]MCPServerConfig {
 func IsDefaultMCPServer(name string) bool {
 	_, ok := DefaultMCPServers()[strings.TrimSpace(name)]
 	return ok
+}
+
+// IsUnconfiguredDefault reports whether server is exactly the built-in default
+// for name — i.e. the user never wrote anything for this server into their
+// config, so it is running with whatever Zero ships (e.g. keyless Firecrawl,
+// no credentials). mergeMCPServer only overwrites fields the user actually set,
+// so an untouched default survives merge byte-identical to DefaultMCPServers().
+// Callers use this to tell "server we turned on for the user" apart from
+// "server the user configured themselves," e.g. to avoid warning loudly when
+// an out-of-the-box default that was never given credentials fails to connect.
+func IsUnconfiguredDefault(name string, server MCPServerConfig) bool {
+	def, ok := DefaultMCPServers()[strings.TrimSpace(name)]
+	return ok && reflect.DeepEqual(def, server)
 }

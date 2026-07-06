@@ -686,8 +686,14 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one
 	// bad MCP server must not abort startup) — surface each so a missing tool set is
-	// explained rather than silently absent.
+	// explained rather than silently absent. A built-in default the user never
+	// configured (e.g. keyless Firecrawl with no credentials) is the exception: it
+	// was never asked for, so its failure is not worth a startup warning — only
+	// servers the user actually configured warn on failure (issue #552).
 	for _, skipped := range mcpRuntime.Skipped() {
+		if skipped.UnconfiguredDefault {
+			continue
+		}
 		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
 	}
 	// Make local plugins live: register their declared tools into the registry and

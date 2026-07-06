@@ -158,6 +158,86 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAsk)
 }
 
+type fakeMCPRuntimeWithSkips struct {
+	skipped []mcp.SkippedServer
+}
+
+func (r fakeMCPRuntimeWithSkips) Close() error { return nil }
+
+func (r fakeMCPRuntimeWithSkips) Skipped() []mcp.SkippedServer { return r.skipped }
+
+func TestTUIStartupSuppressesWarningForUnconfiguredDefaultServer(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"firecrawl": config.DefaultMCPServers()["firecrawl"],
+			}}, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{
+				{Name: "firecrawl", Err: errors.New("returned HTTP 401"), UnconfiguredDefault: true},
+			}}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "firecrawl") {
+		t.Fatalf("stderr = %q, want no warning for an unconfigured default server", stderr.String())
+	}
+}
+
+func TestTUIStartupWarnsForUserConfiguredServerSkip(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"custom": {Type: "stdio", Command: "custom-mcp"},
+			}}, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{
+				{Name: "custom", Err: errors.New("connect failed"), UnconfiguredDefault: false},
+			}}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: MCP server custom unavailable") {
+		t.Fatalf("stderr = %q, want a warning for a user-configured server that failed", stderr.String())
+	}
+}
+
 func TestRunNoArgsEntersSetupWhenResolveReportsNoActiveProvider(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -35,6 +35,10 @@ type RegisterOptions struct {
 type SkippedServer struct {
 	Name string
 	Err  error
+	// UnconfiguredDefault mirrors Server.UnconfiguredDefault: true when this
+	// server is an out-of-the-box default the user never configured, so a
+	// caller can skip warning loudly about it.
+	UnconfiguredDefault bool
 }
 
 type Runtime struct {
@@ -148,7 +152,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	for index, server := range servers {
 		res := results[index]
 		if res.err != nil {
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
 		}
 		serverTools, validateErr := buildServerTools(registry, server, res.remote, res.client, options, stagedNames)
@@ -157,7 +161,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				res.cancel()
 			}
 			_ = res.client.Close()
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
 		}
 		runtime.clients = append(runtime.clients, res.client)
