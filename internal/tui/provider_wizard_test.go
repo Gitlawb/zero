@@ -979,7 +979,8 @@ func TestProviderWizardModelSearchFiltersAndAppliesRawModelID(t *testing.T) {
 	}
 	view := plainRender(t, next.View())
 	assertContains(t, view, "DeepSeek Chat")
-	assertContains(t, view, "deepseek/deepseek-v3.2")
+	assertContains(t, view, "DeepSeek V3.2")
+	assertContains(t, view, "deepseek/deepseek-chat")
 	assertNotContains(t, view, "GPT-4.1")
 }
 
