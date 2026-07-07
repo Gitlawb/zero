@@ -191,7 +191,7 @@ func TestCtrlBCtrlECursorNavigationBypass(t *testing.T) {
 	m2.width = 120
 	m2.height = 40
 	m2.transcript = append(m2.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
-	
+
 	m2 = typeRunes(t, m2, "hello")
 	if m2.composerValue() != "hello" {
 		t.Fatalf("composerValue = %q, want 'hello'", m2.composerValue())
@@ -209,5 +209,48 @@ func TestCtrlBCtrlECursorNavigationBypass(t *testing.T) {
 	next2 = updated.(model)
 	if next2.mouseReleased != initialMouse2 {
 		t.Fatal("Ctrl+E on non-empty composer should NOT toggle mouseReleased")
+	}
+}
+
+// TestRemappedToggleBindingsIgnoreComposerGuard guards against the
+// composer-empty bypass over-applying to a user-remapped, non-conflicting
+// binding: it exists so the default Ctrl+E/Ctrl+B chords (which readline
+// navigation also claims while typing) don't hijack keystrokes mid-sentence,
+// not to block every toggleMouse/toggleSidebar binding while composing.
+func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m.altScreen = true
+	m.width = 120
+	m.height = 40
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	m.keyBindings.toggleMouse = parseBinding("ctrl+m")
+	m.keyBindings.toggleSidebar = parseBinding("ctrl+n")
+	if !m.sidebarToggleAllowed() {
+		t.Fatal("sidebar toggle should be allowed")
+	}
+
+	m = typeRunes(t, m, "hello")
+	if m.composerValue() != "hello" {
+		t.Fatalf("composerValue = %q, want 'hello'", m.composerValue())
+	}
+
+	initialMouse := m.mouseReleased
+	updated, _ := m.Update(testKeyCtrl('m'))
+	next := updated.(model)
+	if next.mouseReleased == initialMouse {
+		t.Fatal("remapped Ctrl+M toggleMouse binding should still fire with a non-empty composer")
+	}
+	if next.composerValue() != "hello" {
+		t.Fatalf("remapped toggleMouse binding should not fall through to composer input, got %q", next.composerValue())
+	}
+
+	initialSidebar := next.sidebarHidden
+	updated, _ = next.Update(testKeyCtrl('n'))
+	next = updated.(model)
+	if next.sidebarHidden == initialSidebar {
+		t.Fatal("remapped Ctrl+N toggleSidebar binding should still fire with a non-empty composer")
+	}
+	if next.composerValue() != "hello" {
+		t.Fatalf("remapped toggleSidebar binding should not fall through to composer input, got %q", next.composerValue())
 	}
 }
