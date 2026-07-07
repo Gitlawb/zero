@@ -49,8 +49,12 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "gitlawb-opengateway",
-			want:     []string{"mimo-v2.5-pro", "tencent/hy3"},
-			notWant:  []string{"openai/gpt-4.1", "claude-sonnet-4.5"},
+			want: []string{
+				"mimo-v2.5-pro", "tencent/hy3",
+				"xiaomi/mimo-v2.5-pro", "minimax/minimax-m3", "qwen/qwen3.7-max",
+				"google/gemini-3.1-flash-lite", "z-ai/glm-5.2", "nvidia/nemotron-3-ultra-550b-a55b:free",
+			},
+			notWant: []string{"openai/gpt-4.1", "claude-sonnet-4.5"},
 		},
 	}
 
