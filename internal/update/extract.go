@@ -53,6 +53,23 @@ func extractTarGz(archivePath string, destDir string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if filepath.IsAbs(header.Linkname) {
+				return fmt.Errorf("absolute symlink targets are not supported: %s -> %s", header.Name, header.Linkname)
+			}
+			// Verify that the symlink target, when resolved, does not escape destDir.
+			resolvedTarget := filepath.Join(filepath.Dir(target), header.Linkname)
+			destDirClean := filepath.Clean(destDir)
+			if !strings.HasPrefix(resolvedTarget, destDirClean+string(os.PathSeparator)) && resolvedTarget != destDirClean {
+				return fmt.Errorf("archive symlink target escapes destination: %s -> %s", header.Name, header.Linkname)
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(header.Linkname, target); err != nil {
+				return err
+			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
@@ -83,6 +100,37 @@ func extractZip(archivePath string, destDir string) error {
 		}
 		if entry.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.Mode()&fs.ModeSymlink != 0 {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			linknameBytes, err := func() ([]byte, error) {
+				entryReader, err := entry.Open()
+				if err != nil {
+					return nil, err
+				}
+				defer entryReader.Close()
+				return io.ReadAll(entryReader)
+			}()
+			if err != nil {
+				return err
+			}
+			linkname := string(linknameBytes)
+			if filepath.IsAbs(linkname) {
+				return fmt.Errorf("absolute symlink targets are not supported: %s -> %s", entry.Name, linkname)
+			}
+			// Verify that the symlink target, when resolved, does not escape destDir.
+			resolvedTarget := filepath.Join(filepath.Dir(target), linkname)
+			destDirClean := filepath.Clean(destDir)
+			if !strings.HasPrefix(resolvedTarget, destDirClean+string(os.PathSeparator)) && resolvedTarget != destDirClean {
+				return fmt.Errorf("archive symlink target escapes destination: %s -> %s", entry.Name, linkname)
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(linkname, target); err != nil {
 				return err
 			}
 			continue
