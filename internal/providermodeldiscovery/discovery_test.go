@@ -2,6 +2,7 @@ package providermodeldiscovery
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -259,6 +260,64 @@ func TestDiscoverCatalogMergesLiveModelsWithModelsDevMetadata(t *testing.T) {
 		}
 	}
 	t.Fatal("missing gpt-4.1")
+}
+
+func TestDiscoverCatalogIgnoresOnLiveModelsError(t *testing.T) {
+	client := &http.Client{Transport: discoveryTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		switch r.URL.Path {
+		case "/api.json":
+			body = `{
+				"openai": {
+					"models": {
+						"gpt-4.1": {"id": "gpt-4.1", "name": "GPT-4.1"}
+					}
+				}
+			}`
+		case "/v1/models":
+			body = `{"data":[{"id":"gpt-4.1"}]}`
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	provider := providercatalog.Descriptor{
+		ID:             "openai",
+		Transport:      providercatalog.TransportOpenAI,
+		DefaultBaseURL: "https://example.test/v1",
+		RequiresAuth:   true,
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID:    "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      "https://example.test/v1",
+		APIKey:       "sk-live",
+	}, Options{
+		HTTPClient:   client,
+		ModelsDevURL: "https://example.test/api.json",
+		OnLiveModels: func([]Model) error {
+			return errors.New("cache write failed")
+		},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog returned error: %v", err)
+	}
+	if got := strings.Join(modelIDs(models), ","); got != "gpt-4.1" {
+		t.Fatalf("models = %s, want live model despite persistence failure", got)
+	}
+}
+
+type discoveryTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn discoveryTestRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }
 
 func modelIDs(models []Model) []string {

@@ -475,11 +475,13 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 	// still appear — modelFavoriteKey includes the provider name, so a different
 	// OwnerProvider produces a different key and is not skipped.
 	for _, item := range catalog {
-		if item.Value == "" || seen[modelFavoriteKey(item)] {
+		fk := modelFavoriteKey(item)
+		if item.Value == "" || seen[fk] {
 			continue
 		}
-		item.Favorite = m.favoriteModels[modelFavoriteKey(item)]
+		item.Favorite = m.favoriteModels[fk]
 		result = append(result, item)
+		seen[fk] = true
 	}
 	return result
 }

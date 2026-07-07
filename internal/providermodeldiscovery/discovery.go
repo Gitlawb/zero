@@ -50,9 +50,7 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
 			if options.OnLiveModels != nil {
-				if err := options.OnLiveModels(liveModels); err != nil {
-					return nil, err
-				}
+				_ = options.OnLiveModels(liveModels)
 			}
 			if merged := mergeLiveModels(provider, liveModels, catalogModels); len(merged) > 0 {
 				return merged, nil

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testing.T) {
+func TestCleanupStaleFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "user.json")
 	projectPath := filepath.Join(dir, "project.json")
@@ -43,7 +43,7 @@ func TestCleanupInvalidFavorites_RemovesInvalidFormatFromAllConfigPaths(t *testi
 
 	removed, err := CleanupStaleFavorites(userPath, projectPath)
 	if err != nil {
-		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
+		t.Fatalf("CleanupStaleFavorites() error = %v", err)
 	}
 	if removed != 7 {
 		t.Fatalf("removed = %d, want 7", removed)
@@ -173,7 +173,7 @@ func TestCleanupFavoritesFile_RewritesPassedConfigPath(t *testing.T) {
 	}
 }
 
-func TestCleanupFAavorites_PreservesOtherConfig(t *testing.T) {
+func TestCleanupStaleFavorites_PreservesOtherConfig(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "zero.json")
 
@@ -195,7 +195,7 @@ func TestCleanupFAavorites_PreservesOtherConfig(t *testing.T) {
 
 	removed, err := CleanupStaleFavorites(userPath, "")
 	if err != nil {
-		t.Fatalf("CleanupInvalidFavorites() error = %v", err)
+		t.Fatalf("CleanupStaleFavorites() error = %v", err)
 	}
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)

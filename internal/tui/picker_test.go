@@ -228,6 +228,22 @@ func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
 	}
 }
 
+func TestAssembleModelPickerItemsDeduplicatesCatalogProviderModels(t *testing.T) {
+	m := model{}
+	items := m.assembleModelPickerItems(nil, []pickerItem{
+		{Group: "OpenAI", OwnerProvider: "openai", Label: "GPT-4.1", Value: "gpt-4.1"},
+		{Group: "OpenAI", OwnerProvider: "openai", Label: "GPT-4.1 duplicate", Value: "gpt-4.1"},
+		{Group: "Custom", OwnerProvider: "custom", Label: "GPT-4.1", Value: "gpt-4.1"},
+	})
+
+	if got, want := len(items), 2; got != want {
+		t.Fatalf("len(items) = %d, want %d: %#v", got, want, items)
+	}
+	if items[0].OwnerProvider != "openai" || items[1].OwnerProvider != "custom" {
+		t.Fatalf("owners = %q, %q; want openai and custom", items[0].OwnerProvider, items[1].OwnerProvider)
+	}
+}
+
 func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "ollama-cloud",
