@@ -164,6 +164,40 @@ func TestKeyringRoundTripDarwinUsesStdin(t *testing.T) {
 	}
 }
 
+// TestKeyringSetRejectsMultilineSecretOnDarwin guards against silently
+// truncating a secret containing a newline: security's -w password+retype
+// prompt is line-based, so writing "secret\nsecret\n" to stdin reads only the
+// text up to the first newline as the password. Set must reject this before
+// ever invoking security, not store a corrupted value.
+func TestKeyringSetRejectsMultilineSecretOnDarwin(t *testing.T) {
+	for _, secret := range []string{"line1\nline2", "line1\r\nline2", "trailing\n"} {
+		f := newFake("darwin")
+		k := f.keyring()
+		if err := k.Set("zero", "tokens", secret); err == nil {
+			t.Fatalf("Set(%q) = nil error, want rejection of the embedded newline", secret)
+		}
+		if f.lastArgs != nil {
+			t.Fatalf("Set(%q) should be rejected before invoking security, got args=%v", secret, f.lastArgs)
+		}
+	}
+}
+
+// TestKeyringSetAllowsMultilineSecretOnLinux confirms the newline restriction
+// is macOS-specific: secret-tool reads the whole stdin payload as the secret,
+// with no line-based prompt to corrupt an embedded newline.
+func TestKeyringSetAllowsMultilineSecretOnLinux(t *testing.T) {
+	f := newFake("linux")
+	k := f.keyring()
+	secret := "line1\nline2"
+	if err := k.Set("zero", "tokens", secret); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, ok, err := k.Get("zero", "tokens")
+	if err != nil || !ok || got != secret {
+		t.Fatalf("Get = %q ok=%v err=%v, want %q", got, ok, err, secret)
+	}
+}
+
 func TestKeyringRoundTripLinuxUsesStdin(t *testing.T) {
 	f := newFake("linux")
 	k := f.keyring()

@@ -3,11 +3,12 @@
 // macOS and `secret-tool` (libsecret) on Linux. It stores a single secret string
 // per (service, account). Windows and other platforms report unsupported.
 //
-// It shells out to the OS tools rather than taking a third-party dependency. On
-// macOS the secret is passed to `security` as an argument, so it is briefly
-// visible to other processes via the process list; on Linux the secret is passed
-// over stdin and is not exposed in the argument vector. Callers that need to keep
-// a secret out of the process list on macOS should prefer the file backend.
+// It shells out to the OS tools rather than taking a third-party dependency.
+// On both macOS and Linux the secret is passed over stdin, never the argument
+// vector, so it is not exposed via the process list. On macOS this relies on
+// `security`'s interactive password+retype prompt, which is line-based, so a
+// secret containing a newline is rejected by Set rather than silently
+// truncated; Linux's secret-tool has no such restriction.
 package keyring
 
 import (
@@ -67,6 +68,13 @@ func (k *Keyring) Set(service, account, secret string) error {
 		// Pass the secret via stdin to prevent leaking it in the process list.
 		// A trailing -w without a value makes security prompt for password + retype,
 		// reading both from stdin, so we write the secret twice separated by a newline.
+		// That prompt is line-based (getpass-style), so a secret containing its own
+		// newline cannot be told apart from the password/retype separator: the first
+		// line read back would silently truncate the stored value. Reject it instead
+		// of storing a corrupted secret.
+		if strings.ContainsAny(secret, "\r\n") {
+			return wrap("set", errors.New("secret must not contain newlines on macOS (security's password+retype prompt is line-based)"))
+		}
 		stdinPayload := []byte(secret + "\n" + secret + "\n")
 		_, err := k.exec(stdinPayload, "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w")
 		return wrap("set", err)
