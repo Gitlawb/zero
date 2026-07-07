@@ -1169,12 +1169,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.setFileViewMode(fileViewFull), nil
 			}
 			return m.setFileViewMode(fileViewDiff), nil
-		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && (!m.keyBindings.toggleMouse.isZero() || m.composerValue() == ""):
+		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && (!requiresEmptyComposer(m.keyBindings.toggleMouse, defaultToggleMouseChord) || m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection). The
-			// composer-empty requirement only applies to the default Ctrl+E chord,
-			// which readline navigation (move-to-end-of-line) also claims while
-			// typing; a user-remapped, non-conflicting binding still fires mid-type.
+			// composer-empty requirement only applies when the binding resolves to
+			// the conflicting default Ctrl+E chord (unset, or explicitly configured
+			// to the same chord), which readline navigation (move-to-end-of-line)
+			// also claims while typing; a binding that resolves to a genuinely
+			// different chord still fires mid-type.
 			m.mouseReleased = !m.mouseReleased
 			if m.mouseReleased {
 				mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
@@ -1372,11 +1374,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
-		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && (!m.keyBindings.toggleSidebar.isZero() || m.composerValue() == ""):
+		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && (!requiresEmptyComposer(m.keyBindings.toggleSidebar, defaultToggleSidebarChord) || m.composerValue() == ""):
 			// Ctrl+B collapses / restores the right context sidebar. The composer-empty
-			// requirement only applies to the default Ctrl+B chord, which readline
-			// navigation (move-to-beginning-of-line) also claims while typing; a
-			// user-remapped, non-conflicting binding still fires mid-type. Only acts when
+			// requirement only applies when the binding resolves to the conflicting
+			// default Ctrl+B chord (unset, or explicitly configured to the same
+			// chord), which readline navigation (move-to-beginning-of-line) also
+			// claims while typing; a binding that resolves to a genuinely different
+			// chord still fires mid-type. Only acts when
 			// the sidebar would otherwise be on screen (managed mode, wide enough,
 			// real conversation) so it's a no-op — not a confusing notice — on the
 			// home screen or a narrow terminal. Hiding reflows the chat to full

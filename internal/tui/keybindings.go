@@ -26,6 +26,27 @@ func (p parsedBinding) isZero() bool {
 	return p.code == 0 && p.text == ""
 }
 
+// defaultToggleMouseChord and defaultToggleSidebarChord are the built-in
+// Ctrl+E/Ctrl+B chords that conflict with readline cursor navigation
+// (move-to-end-of-line / move-to-beginning-of-line) while typing in the
+// composer.
+var (
+	defaultToggleMouseChord   = parseBinding("ctrl+e")
+	defaultToggleSidebarChord = parseBinding("ctrl+b")
+)
+
+// requiresEmptyComposer reports whether binding b resolves to conflicting, the
+// hardcoded default chord it can fall back to. That happens either because b
+// is unset (isZero, so keyMatch uses the default matcher) or because the user
+// explicitly configured the identical chord (e.g. toggleMouse: "ctrl+e"),
+// which parseBinding does not treat as zero. Only a binding that resolves to
+// a genuinely different chord may fire while the composer has text; one that
+// resolves to the conflicting default must still wait for it to be empty so
+// readline navigation gets the keystroke instead.
+func requiresEmptyComposer(b parsedBinding, conflicting parsedBinding) bool {
+	return b.isZero() || b == conflicting
+}
+
 // Label returns a human-readable representation of the binding, e.g. "Ctrl+O"
 // or "Cmd+Shift+Enter". Used in the help overlay. Returns empty string for
 // zero (unset) bindings.

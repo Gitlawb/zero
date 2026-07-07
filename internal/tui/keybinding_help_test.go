@@ -254,3 +254,42 @@ func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
 		t.Fatalf("remapped toggleSidebar binding should not fall through to composer input, got %q", next.composerValue())
 	}
 }
+
+// TestExplicitDefaultChordConfigStillRequiresEmptyComposer guards against
+// treating "explicitly configured" the same as "genuinely remapped": a user
+// who writes toggleMouse: "ctrl+e" / toggleSidebar: "ctrl+b" in config (the
+// same chord as the built-in default) gets a non-zero parsedBinding, not the
+// isZero() sentinel, so a check that only asked "is this unset" would wrongly
+// let Ctrl+E/Ctrl+B bypass the composer guard again instead of reaching the
+// readline cursor-navigation handlers.
+func TestExplicitDefaultChordConfigStillRequiresEmptyComposer(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m.altScreen = true
+	m.width = 120
+	m.height = 40
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	m.keyBindings.toggleMouse = parseBinding("ctrl+e")
+	m.keyBindings.toggleSidebar = parseBinding("ctrl+b")
+	if !m.sidebarToggleAllowed() {
+		t.Fatal("sidebar toggle should be allowed")
+	}
+
+	m = typeRunes(t, m, "hello")
+	if m.composerValue() != "hello" {
+		t.Fatalf("composerValue = %q, want 'hello'", m.composerValue())
+	}
+
+	initialMouse := m.mouseReleased
+	updated, _ := m.Update(testKeyCtrl('e'))
+	next := updated.(model)
+	if next.mouseReleased != initialMouse {
+		t.Fatal("explicit ctrl+e config should NOT toggle mouseReleased with a non-empty composer")
+	}
+
+	initialSidebar := next.sidebarHidden
+	updated, _ = next.Update(testKeyCtrl('b'))
+	next = updated.(model)
+	if next.sidebarHidden != initialSidebar {
+		t.Fatal("explicit ctrl+b config should NOT toggle sidebarHidden with a non-empty composer")
+	}
+}
