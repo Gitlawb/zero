@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -36,6 +37,59 @@ func (provider *mockProvider) StreamCompletion(ctx context.Context, request zero
 	}
 	close(ch)
 	return ch, nil
+}
+
+func TestRunDispatchesSessionLifecycleHooks(t *testing.T) {
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: "zero-missing-hook-command", Enabled: true},
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: "zero-missing-hook-command", Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+
+	_, err = Run(context.Background(), "hi", provider, Options{
+		SessionID:    "session-123",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Hooks:        dispatcher,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	started := map[hooks.Event]int{}
+	completed := map[hooks.Event]int{}
+	for _, event := range events {
+		switch event.Type {
+		case "hook_execution_started":
+			started[event.Event]++
+		case "hook_execution_completed":
+			completed[event.Event]++
+		}
+	}
+	if started[hooks.EventSessionStart] != 1 || completed[hooks.EventSessionStart] != 1 {
+		t.Fatalf("sessionStart audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionStart], completed[hooks.EventSessionStart], events)
+	}
+	if started[hooks.EventSessionEnd] != 1 || completed[hooks.EventSessionEnd] != 1 {
+		t.Fatalf("sessionEnd audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionEnd], completed[hooks.EventSessionEnd], events)
+	}
 }
 
 type recordingWebSearchTool struct {

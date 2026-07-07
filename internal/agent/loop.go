@@ -109,7 +109,7 @@ const escalationFailedNoticePrefix = "Note: could not switch to the requested mo
 // The system prompt (core coding-craft instructions + workspace context + safety
 // confirmation policy) is assembled in system_prompt.go via buildSystemPrompt.
 
-func Run(ctx context.Context, prompt string, provider Provider, options Options) (Result, error) {
+func Run(ctx context.Context, prompt string, provider Provider, options Options) (result Result, err error) {
 	if provider == nil {
 		return Result{}, errors.New("agent provider is required")
 	}
@@ -161,7 +161,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// doesn't re-run the recursive schema→map conversion for every tool every turn.
 	toolDefCache := map[string]zeroruntime.ToolDefinition{}
 
-	result := Result{Messages: copyMessages(messages)}
+	result = Result{Messages: copyMessages(messages)}
+	dispatchSessionStart(ctx, options)
+	defer func() {
+		dispatchSessionEnd(ctx, options, result, err)
+	}()
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
 
@@ -1568,6 +1572,54 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 		},
 	})
 	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+}
+
+// dispatchSessionStart runs configured sessionStart hooks once before the first
+// model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
+// never block the run.
+func dispatchSessionStart(ctx context.Context, options Options) {
+	if options.Hooks == nil {
+		return
+	}
+	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event: hooks.EventSessionStart,
+		Payload: map[string]any{
+			"event":        string(hooks.EventSessionStart),
+			"sessionId":    options.SessionID,
+			"cwd":          options.Cwd,
+			"provider":     options.ProviderName,
+			"model":        options.Model,
+			"depth":        options.Depth,
+			"tag":          options.Tag,
+			"sessionTitle": options.SessionTitle,
+		},
+	})
+}
+
+// dispatchSessionEnd runs configured sessionEnd hooks once when the agent run
+// exits, including early error returns. Lifecycle hooks are advisory.
+func dispatchSessionEnd(ctx context.Context, options Options, result Result, runErr error) {
+	if options.Hooks == nil {
+		return
+	}
+	payload := map[string]any{
+		"event":        string(hooks.EventSessionEnd),
+		"sessionId":    options.SessionID,
+		"cwd":          options.Cwd,
+		"provider":     options.ProviderName,
+		"model":        options.Model,
+		"turns":        result.Turns,
+		"stopReason":   string(result.StopReason),
+		"finishReason": result.FinishReason,
+		"incomplete":   result.Incomplete,
+	}
+	if runErr != nil {
+		payload["error"] = runErr.Error()
+	}
+	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event:   hooks.EventSessionEnd,
+		Payload: payload,
+	})
 }
 
 // blockedByHookResult is the tool result for a call vetoed by a beforeTool hook.
