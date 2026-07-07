@@ -64,7 +64,8 @@ func (k *Keyring) Set(service, account, secret string) error {
 	switch k.goos {
 	case "darwin":
 		// -U updates the item if it already exists rather than failing.
-		_, err := k.exec(nil, "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", secret)
+		// Pass the secret via stdin to prevent leaking it in the process list.
+		_, err := k.exec([]byte(secret), "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w")
 		return wrap("set", err)
 	case "linux":
 		// secret-tool reads the secret from stdin, keeping it out of the argv.

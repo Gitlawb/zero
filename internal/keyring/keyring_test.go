@@ -61,7 +61,11 @@ func (f *fakeKeyring) run(_ context.Context, name string, stdin []byte, args ...
 		svc, acct := flagValue(args, "-s"), flagValue(args, "-a")
 		switch args[0] {
 		case "add-generic-password":
-			f.data[key(svc, acct)] = flagValue(args, "-w")
+			password := flagValue(args, "-w")
+			if password == "" && len(args) > 0 && args[len(args)-1] == "-w" {
+				password = string(stdin)
+			}
+			f.data[key(svc, acct)] = password
 			return nil, nil
 		case "find-generic-password":
 			if v, ok := f.data[key(svc, acct)]; ok {
@@ -126,6 +130,31 @@ func TestKeyringRoundTripDarwin(t *testing.T) {
 	}
 	if _, ok, _ := k.Get("zero", "tokens"); ok {
 		t.Fatal("token should be gone after delete")
+	}
+}
+
+func TestKeyringRoundTripDarwinUsesStdin(t *testing.T) {
+	f := newFake("darwin")
+	k := f.keyring()
+	if err := k.Set("zero", "tokens", "blob-CCC"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	// The secret must travel via stdin, never the argument vector.
+	if f.lastStdin != "blob-CCC" {
+		t.Fatalf("secret not sent via stdin: stdin=%q", f.lastStdin)
+	}
+	for _, a := range f.lastArgs {
+		if strings.Contains(a, "blob-CCC") {
+			t.Fatalf("secret leaked into argv: %v", f.lastArgs)
+		}
+	}
+	got, ok, err := k.Get("zero", "tokens")
+	if err != nil || !ok || got != "blob-CCC" {
+		t.Fatalf("Get = %q ok=%v err=%v", got, ok, err)
+	}
+	existed, err := k.Delete("zero", "tokens")
+	if err != nil || !existed {
+		t.Fatalf("Delete: existed=%v err=%v", existed, err)
 	}
 }
 
