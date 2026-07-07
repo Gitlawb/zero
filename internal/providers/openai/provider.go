@@ -266,9 +266,38 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 	if chunk.Error != nil {
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
+		statusCode := http.StatusInternalServerError
+		if chunk.Error.Code != nil {
+			switch c := chunk.Error.Code.(type) {
+			case string:
+				if c == "429" {
+					statusCode = http.StatusTooManyRequests
+				} else if c == "401" {
+					statusCode = http.StatusUnauthorized
+				} else if c == "403" {
+					statusCode = http.StatusForbidden
+				}
+			case float64:
+				if int(c) == 429 {
+					statusCode = http.StatusTooManyRequests
+				} else if int(c) == 401 {
+					statusCode = http.StatusUnauthorized
+				} else if int(c) == 403 {
+					statusCode = http.StatusForbidden
+				}
+			case int:
+				if c == 429 {
+					statusCode = http.StatusTooManyRequests
+				} else if c == 401 {
+					statusCode = http.StatusUnauthorized
+				} else if c == 403 {
+					statusCode = http.StatusForbidden
+				}
+			}
+		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
-			Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
+			Error: provider.classifiedError(statusCode, chunk.Error.Message),
 		})
 		state.done = true
 		return false

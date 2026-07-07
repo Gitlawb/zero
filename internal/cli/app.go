@@ -554,6 +554,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	deps.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 		return baseNewProvider(applyStoredProviderKeyAt(profile, userConfigPath))
 	}
+	baseProbeProviderHealth := deps.probeProviderHealth
+	deps.probeProviderHealth = func(ctx context.Context, options providerhealth.Options) providerhealth.Result {
+		options.Profile = applyStoredProviderKeyAt(options.Profile, userConfigPath)
+		return baseProbeProviderHealth(ctx, options)
+	}
 	return deps
 }
 
