@@ -1183,7 +1183,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Paste-detection timing trackers. MUST run before any early return
 		// so burst counting stays accurate regardless of which branch fires.
-		now := time.Now()
+		now := m.now()
 		if !m.lastKeyTime.IsZero() && now.Sub(m.lastKeyTime) < 100*time.Millisecond {
 			m.burstCount++
 		} else {
@@ -1421,10 +1421,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.suggestionsActive() {
 				return m.chooseSuggestion()
 			}
-			// Timing-based paste protection: 2+ rapid keys within 100ms
-			// (as opposed to 1 or 2 = normal typing + Enter) means we are
-			// inside a character-by-character paste. Insert newline.
-			if m.burstCount > 1 {
+			// Timing-based paste protection: 3+ rapid keys within 100ms
+			// means we are inside a character-by-character paste (Termux
+			// context menu). 1-2 fast keys + Enter is normal fast typing
+			// and should submit, not insert newline.
+			if m.burstCount > 2 {
 				state := m.currentComposerState()
 				m = m.insertComposerTextWithPastePreview(state, "\n", "")
 				m.clearSuggestions()
