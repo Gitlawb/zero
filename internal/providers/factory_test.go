@@ -145,7 +145,7 @@ func TestNewThreadsCustomProviderHeaders(t *testing.T) {
 	}
 }
 
-func TestNewAIMLAPIProviderAddsAttributionHeaders(t *testing.T) {
+func TestNewAIMLAPIProviderSendsEndpointAndAuthWithoutAttribution(t *testing.T) {
 	transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
 	provider, err := New(config.ProviderProfile{
 		Name:          "aimlapi",
@@ -174,14 +174,22 @@ func TestNewAIMLAPIProviderAddsAttributionHeaders(t *testing.T) {
 		t.Fatalf("request URL = %q, want AI/ML API endpoint", got)
 	}
 	for header, want := range map[string]string{
-		"Authorization":                 "Bearer aimlapi-test-key",
-		"X-AIMLAPI-Partner-ID":          "Gitlawb",
-		"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
-		"X-AIMLAPI-Integration-Version": "1.0.0",
-		"X-Trace":                       "test",
+		"Authorization": "Bearer aimlapi-test-key",
+		"X-Trace":       "test",
 	} {
 		if got := transport.request.Header.Get(header); got != want {
 			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+	// No first-party referral/attribution headers are injected for catalog
+	// presets; aimlapi rides through CopyHeaders like every other provider.
+	for _, header := range []string{
+		"X-AIMLAPI-Partner-ID",
+		"X-AIMLAPI-Integration-Repo",
+		"X-AIMLAPI-Integration-Version",
+	} {
+		if got := transport.request.Header.Get(header); got != "" {
+			t.Fatalf("%s = %q, want no attribution header", header, got)
 		}
 	}
 }

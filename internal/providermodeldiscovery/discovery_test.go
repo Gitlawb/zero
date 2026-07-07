@@ -52,16 +52,25 @@ func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	}
 }
 
-func TestDiscoverAIMLAPIModelsAddsAttributionHeaders(t *testing.T) {
+func TestDiscoverAIMLAPIModelsSendsAuthAndCustomHeadersWithoutAttribution(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for header, want := range map[string]string{
-			"X-AIMLAPI-Partner-ID":          "Gitlawb",
-			"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
-			"X-AIMLAPI-Integration-Version": "1.0.0",
-			"X-Trace":                       "test",
+			"Authorization": "Bearer test-key",
+			"X-Trace":       "test",
 		} {
 			if got := r.Header.Get(header); got != want {
 				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+		// No first-party referral/attribution headers are injected for catalog
+		// presets; aimlapi rides through CopyHeaders like every other provider.
+		for _, header := range []string{
+			"X-AIMLAPI-Partner-ID",
+			"X-AIMLAPI-Integration-Repo",
+			"X-AIMLAPI-Integration-Version",
+		} {
+			if got := r.Header.Get(header); got != "" {
+				t.Errorf("%s = %q, want no attribution header", header, got)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
