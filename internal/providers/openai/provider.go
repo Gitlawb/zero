@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,6 +249,24 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 }
 
+// openAIStreamErrorStatusByCode maps a streamed error payload's "code" field
+// to the HTTP status classifiedError expects, covering both the numeric-string
+// codes some providers send ("429") and the semantic string codes OpenAI-
+// compatible providers commonly send instead (rate_limit_exceeded). Both
+// forms of the same condition must classify identically, or retry/backoff
+// logic downstream would only kick in for whichever form a given provider
+// happens to use. insufficient_quota maps to 429 (Too Many Requests) to match
+// OpenAI's own API, which returns that code with a 429 status when a caller
+// has exceeded their billing quota.
+var openAIStreamErrorStatusByCode = map[string]int{
+	"429":                 http.StatusTooManyRequests,
+	"401":                 http.StatusUnauthorized,
+	"403":                 http.StatusForbidden,
+	"rate_limit_exceeded": http.StatusTooManyRequests,
+	"insufficient_quota":  http.StatusTooManyRequests,
+	"invalid_api_key":     http.StatusUnauthorized,
+}
+
 // emitPayload handles one accumulated SSE data payload ([DONE]/blank lines are
 // already filtered by the shared reader). It returns false to abort the stream
 // after emitting a terminal error.
@@ -270,28 +289,16 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 		if chunk.Error.Code != nil {
 			switch c := chunk.Error.Code.(type) {
 			case string:
-				if c == "429" {
-					statusCode = http.StatusTooManyRequests
-				} else if c == "401" {
-					statusCode = http.StatusUnauthorized
-				} else if c == "403" {
-					statusCode = http.StatusForbidden
+				if code, ok := openAIStreamErrorStatusByCode[c]; ok {
+					statusCode = code
 				}
 			case float64:
-				if int(c) == 429 {
-					statusCode = http.StatusTooManyRequests
-				} else if int(c) == 401 {
-					statusCode = http.StatusUnauthorized
-				} else if int(c) == 403 {
-					statusCode = http.StatusForbidden
+				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(int(c))]; ok {
+					statusCode = code
 				}
 			case int:
-				if c == 429 {
-					statusCode = http.StatusTooManyRequests
-				} else if c == 401 {
-					statusCode = http.StatusUnauthorized
-				} else if c == 403 {
-					statusCode = http.StatusForbidden
+				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(c)]; ok {
+					statusCode = code
 				}
 			}
 		}

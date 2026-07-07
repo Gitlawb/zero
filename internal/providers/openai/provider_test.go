@@ -455,6 +455,43 @@ func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionClassifiesStreamErrorCode(t *testing.T) {
+	// The error arrives inside a 200 OK SSE payload's "code" field, not the
+	// HTTP status, so this exercises openAIStreamErrorStatusByCode directly:
+	// both the numeric-string codes some providers send and the semantic
+	// string codes OpenAI-compatible providers commonly send instead must
+	// classify identically.
+	cases := []struct {
+		name       string
+		code       string
+		wantPrefix string
+	}{
+		{"numeric 429", `"429"`, "rate limit error:"},
+		{"numeric 401", `"401"`, "auth error:"},
+		{"numeric 403", `"403"`, "auth error:"},
+		{"json number 429", `429`, "rate limit error:"},
+		{"semantic rate_limit_exceeded", `"rate_limit_exceeded"`, "rate limit error:"},
+		{"semantic insufficient_quota", `"insufficient_quota"`, "rate limit error:"},
+		{"semantic invalid_api_key", `"invalid_api_key"`, "auth error:"},
+		{"unknown code", `"server_error"`, "provider error:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(w, `{"error":{"message":"failed","code":`+tc.code+`}}`)
+			})
+
+			events := collectProviderEvents(t, provider)
+			if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+				t.Fatalf("events = %#v, want one error", events)
+			}
+			if !strings.HasPrefix(events[0].Error, tc.wantPrefix) {
+				t.Fatalf("error = %q, want prefix %q", events[0].Error, tc.wantPrefix)
+			}
+		})
+	}
+}
+
 func TestStreamCompletionEmitsErrorForMalformedJSON(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":`)
