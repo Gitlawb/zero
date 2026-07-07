@@ -47,6 +47,14 @@ func requiresEmptyComposer(b parsedBinding, conflicting parsedBinding) bool {
 	return b.isZero() || b == conflicting
 }
 
+// canFireComposerGatedToggle reports whether a toggle bound to b (whose
+// conflicting hardcoded default is conflicting) may fire given the current
+// composer-empty state. Factored out of the toggleMouse/toggleSidebar dispatch
+// cases in model.go, which both repeated this same condition inline.
+func canFireComposerGatedToggle(b parsedBinding, conflicting parsedBinding, composerEmpty bool) bool {
+	return !requiresEmptyComposer(b, conflicting) || composerEmpty
+}
+
 // Label returns a human-readable representation of the binding, e.g. "Ctrl+O"
 // or "Cmd+Shift+Enter". Used in the help overlay. Returns empty string for
 // zero (unset) bindings.
