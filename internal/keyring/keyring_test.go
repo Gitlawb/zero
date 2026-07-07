@@ -63,7 +63,10 @@ func (f *fakeKeyring) run(_ context.Context, name string, stdin []byte, args ...
 		case "add-generic-password":
 			password := flagValue(args, "-w")
 			if password == "" && len(args) > 0 && args[len(args)-1] == "-w" {
-				password = string(stdin)
+				// Mirror real security behavior: read the first line as
+				// the password (the second line is the retype confirmation).
+				lines := strings.SplitN(string(stdin), "\n", 2)
+				password = lines[0]
 			}
 			f.data[key(svc, acct)] = password
 			return nil, nil
@@ -140,8 +143,11 @@ func TestKeyringRoundTripDarwinUsesStdin(t *testing.T) {
 		t.Fatalf("Set: %v", err)
 	}
 	// The secret must travel via stdin, never the argument vector.
-	if f.lastStdin != "blob-CCC" {
-		t.Fatalf("secret not sent via stdin: stdin=%q", f.lastStdin)
+	// The payload contains the secret twice (password + retype confirmation)
+	// separated by newlines, matching the real security prompt behavior.
+	wantStdin := "blob-CCC\nblob-CCC\n"
+	if f.lastStdin != wantStdin {
+		t.Fatalf("secret not sent via stdin correctly: stdin=%q, want=%q", f.lastStdin, wantStdin)
 	}
 	for _, a := range f.lastArgs {
 		if strings.Contains(a, "blob-CCC") {
