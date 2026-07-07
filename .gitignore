@@ -37,7 +37,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 /zero
 /zero.exe
+/zero-windows-command-runner.exe
+/zero-windows-sandbox-setup.exe
 /zero-skills
+/.zero-binary-version
 /snake-game.html
 
 # Superpowers skill artifacts (brainstorm mockups, specs, plans) — local only
