@@ -516,3 +516,101 @@ func TestCodexAccountForKey(t *testing.T) {
 		t.Fatalf("account = %q, want acc-rotated (in-place refresh must be picked up)", got)
 	}
 }
+
+// TestNewRejectsModelOutsideProviderAllowlist guards the PR #544 P2 fix:
+// opencode-go-anthropic-compatible only accepts Qwen and MiniMax model IDs,
+// so a Claude model routed through this catalog-backed profile must be rejected
+// at runtime, not silently forwarded to https://opencode.ai/zen/go/v1/messages.
+func TestNewRejectsModelOutsideProviderAllowlist(t *testing.T) {
+	_, err := New(config.ProviderProfile{
+		Name:      "opencode-go-anthropic",
+		CatalogID: "opencode-go-anthropic-compatible",
+		APIKey:    "sk-test",
+		Model:     "claude-sonnet-4.5",
+	}, Options{})
+	if err == nil {
+		t.Fatal("New() error = nil, want claude-sonnet-4.5 rejected for opencode-go-anthropic-compatible")
+	}
+	if !strings.Contains(err.Error(), "opencode-go-anthropic-compatible") {
+		t.Fatalf("error = %q, want it to name the provider", err.Error())
+	}
+	if !strings.Contains(err.Error(), "claude-sonnet-4.5") {
+		t.Fatalf("error = %q, want it to name the rejected model", err.Error())
+	}
+}
+
+// TestNewRejectsRawModelOutsideProviderAllowlist covers the registry-miss
+// branch of resolveProfile: an unknown raw model id (not in the model registry)
+// typed by the user into a restricted-provider profile must still be rejected
+// rather than passthrough-sent.
+func TestNewRejectsRawModelOutsideProviderAllowlist(t *testing.T) {
+	_, err := New(config.ProviderProfile{
+		Name:      "opencode-go-anthropic",
+		CatalogID: "opencode-go-anthropic-compatible",
+		APIKey:    "sk-test",
+		Model:     "totally-custom-not-in-allowlist-12345",
+	}, Options{})
+	if err == nil {
+		t.Fatal("New() error = nil, want unknown raw model rejected for opencode-go-anthropic-compatible")
+	}
+	if !strings.Contains(err.Error(), "does not allow model") {
+		t.Fatalf("error = %q, want allowlist rejection", err.Error())
+	}
+	if !strings.Contains(err.Error(), "totally-custom-not-in-allowlist-12345") {
+		t.Fatalf("error = %q, want the raw model name to appear in the error", err.Error())
+	}
+}
+
+// TestNewAllowsCuratedModelsForRestrictedProvider proves the gate is not
+// over-eager: Qwen and MiniMax curated models pass through unchanged for
+// opencode-go-anthropic-compatible.
+func TestNewAllowsCuratedModelsForRestrictedProvider(t *testing.T) {
+	for _, model := range []string{"minimax-m3", "qwen3.7-plus", "qwen3.7-max", "minimax-m2.7"} {
+		_, err := New(config.ProviderProfile{
+			Name:      "opencode-go-anthropic",
+			CatalogID: "opencode-go-anthropic-compatible",
+			APIKey:    "sk-test",
+			Model:     model,
+		}, Options{})
+		if err != nil {
+			t.Fatalf("New() error = %v, want curated model %q to be allowed", err, model)
+		}
+	}
+}
+
+// TestNewAllowsAnyModelForUnrestrictedProvider is the regression guard:
+// unrestricted providers (no catalog or default catalog id) must continue to
+// accept any model id, including those outside the opencode allowlist.
+func TestNewAllowsAnyModelForUnrestrictedProvider(t *testing.T) {
+	_, err := New(config.ProviderProfile{
+		Name:         "anthropic",
+		ProviderKind: config.ProviderKindAnthropic,
+		APIKey:       "sk-ant",
+		Model:        "claude-sonnet-4.5",
+	}, Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v, want unrestricted anthropic provider to accept claude-sonnet-4.5", err)
+	}
+}
+
+// TestResolveRuntimeMetadataRejectsModelOutsideProviderAllowlist guards the
+// read-only metadata path (called from TUI command_center, exec, provider
+// health, context report). The metadata path must enforce the same gate as
+// New() so a config-time override cannot escape through it.
+func TestResolveRuntimeMetadataRejectsModelOutsideProviderAllowlist(t *testing.T) {
+	_, err := ResolveRuntimeMetadata(config.ProviderProfile{
+		Name:      "opencode-go-anthropic",
+		CatalogID: "opencode-go-anthropic-compatible",
+		APIKey:    "sk-test",
+		Model:     "claude-sonnet-4.5",
+	}, Options{})
+	if err == nil {
+		t.Fatal("ResolveRuntimeMetadata error = nil, want claude-sonnet-4.5 rejected")
+	}
+	if !strings.Contains(err.Error(), "opencode-go-anthropic-compatible") {
+		t.Fatalf("error = %q, want it to name the provider", err.Error())
+	}
+	if !strings.Contains(err.Error(), "claude-sonnet-4.5") {
+		t.Fatalf("error = %q, want it to name the rejected model", err.Error())
+	}
+}
