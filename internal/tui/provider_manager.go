@@ -10,7 +10,6 @@ package tui
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -102,13 +101,14 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	// activeProvider follows it on every switch).
 	m.providerWizard.manageActiveName = m.providerName
 	m.providerWizard.manageCredGen++
-	return m, providerManagerCredsCmd(m.providerWizard.manageCredGen, rows)
+	return m, providerManagerCredsCmd(m.providerWizard.manageCredGen, rows, m.userConfigPath)
 }
 
 // providerManagerCredsCmd resolves each row's credential state off the UI
 // goroutine: encrypted-store reads (keychain subprocess on macOS), env lookups,
-// and the OAuth token store.
-func providerManagerCredsCmd(gen int, rows []providerManagerRow) tea.Cmd {
+// and the OAuth token store. Keys are read from the store BESIDE configPath —
+// the one the manager's write paths use.
+func providerManagerCredsCmd(gen int, rows []providerManagerRow, configPath string) tea.Cmd {
 	profiles := make([]config.ProviderProfile, len(rows))
 	locals := make([]bool, len(rows))
 	for i, row := range rows {
@@ -116,7 +116,7 @@ func providerManagerCredsCmd(gen int, rows []providerManagerRow) tea.Cmd {
 		locals[i] = row.local
 	}
 	return func() tea.Msg {
-		store, storeErr := config.ProviderKeyStore()
+		store, storeErr := providerKeyStoreForPath(configPath)
 		creds := make(map[string]string, len(profiles))
 		for i, profile := range profiles {
 			var getter config.APIKeyGetter
@@ -312,7 +312,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// Drop the stored key from the store BESIDE the edited config (the store
 	// the key was captured into), surfacing a failure instead of letting a
 	// lingering secret read as a clean removal.
-	keyStore, storeErr := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath))
+	keyStore, storeErr := m.providerKeyStore()
 	if storeErr == nil {
 		_, storeErr = keyStore.Delete(name)
 	}

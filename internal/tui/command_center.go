@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/oauth"
@@ -564,7 +566,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 // profile; newProvider resolves the login itself.
 func (m model) profileWithCredential(profile config.ProviderProfile) config.ProviderProfile {
 	if strings.TrimSpace(profile.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
+		if store, err := m.providerKeyStore(); err == nil {
 			profile = config.ApplyStoredAPIKey(profile, store)
 		}
 	}
@@ -572,6 +574,23 @@ func (m model) profileWithCredential(profile config.ProviderProfile) config.Prov
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}
 	return profile
+}
+
+// providerKeyStore opens the credential store co-located with THIS session's
+// config path — the store every TUI write path (SecureProviderProfile capture,
+// rename migration, delete) uses. Reading from the default-path store instead
+// makes a stored key invisible whenever userConfigPath is non-default, so the
+// switch gate rejects a provider whose key is right there beside its config.
+// Ephemeral sessions without a config path fall back to the default store.
+func (m model) providerKeyStore() (*credstore.Store, error) {
+	return providerKeyStoreForPath(m.userConfigPath)
+}
+
+func providerKeyStoreForPath(configPath string) (*credstore.Store, error) {
+	if strings.TrimSpace(configPath) != "" {
+		return config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	}
+	return config.ProviderKeyStore()
 }
 
 // oauthLoginAvailable reports whether a stored OAuth login exists for any of the

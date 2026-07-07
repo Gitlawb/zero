@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,10 +81,8 @@ func TestFirstUsableProviderSkipsUnresolvableCatalogWithoutBaseURL(t *testing.T)
 // authenticated user gets forced back into onboarding when activeProvider
 // goes stale.
 func TestFirstUsableProviderRecognizesOAuthLogin(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tok.json")
-	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
-	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	withAuthStore(t)
+	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

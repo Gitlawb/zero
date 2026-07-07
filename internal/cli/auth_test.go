@@ -12,11 +12,14 @@ import (
 	"github.com/Gitlawb/zero/internal/oauth"
 )
 
-// withAuthStore points the provider OAuth store at a temp file for the test.
+// withAuthStore points the provider OAuth store at a temp file for the test,
+// pinning the file backend so an inherited ZERO_OAUTH_STORAGE=keyring can't
+// ignore the temp path and hit the OS keychain.
 func withAuthStore(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	return path
 }
 

@@ -388,7 +388,7 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 // OAuth bearer for token-login providers (e.g. xAI).
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
-	if store, err := config.ProviderKeyStore(); err == nil {
+	if store, err := m.providerKeyStore(); err == nil {
 		authed = config.ApplyStoredAPIKey(authed, store)
 	}
 	key := strings.TrimSpace(authed.APIKey)

@@ -410,3 +410,60 @@ func TestProviderManagerDeleteHintNamesActualOAuthLogin(t *testing.T) {
 		t.Fatalf("hint must not point at a login key that does not exist, got %q", status)
 	}
 }
+
+// TestProviderManagerReadsStoredKeyBesideConfig: the TUI must READ stored keys
+// from the same config-adjacent store its write paths use. managerTestModel
+// deliberately puts userConfigPath outside XDG_CONFIG_HOME, so a key seeded
+// beside the config is invisible to the default-path store — with the old
+// default-store reads, the switch gate rejected the provider and the manager
+// showed "stored key missing" for a perfectly healthy profile (PR #560, P2).
+func TestProviderManagerReadsStoredKeyBesideConfig(t *testing.T) {
+	m := managerTestModel(t)
+	// Reshape "backup" into a stored-key profile whose key lives ONLY in the
+	// store beside userConfigPath.
+	seedCfg := readManagerConfig(t, m.userConfigPath)
+	seedCfg.Providers[1].APIKey = ""
+	seedCfg.Providers[1].APIKeyStored = true
+	data, err := json.MarshalIndent(seedCfg, "", "  ")
+	if err != nil {
+		t.Fatalf("encode config: %v", err)
+	}
+	if err := os.WriteFile(m.userConfigPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.Set("backup", "sk-beside-config"); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	m.savedProviders = seedCfg.Providers
+	next, _ := m.reloadProviderManagerRows()
+	m = next
+
+	// The async credential probe must find the key in the config-adjacent store.
+	cmd := providerManagerCredsCmd(m.providerWizard.manageCredGen, m.providerWizard.manageRows, m.userConfigPath)
+	msg, ok := cmd().(providerManagerCredsMsg)
+	if !ok {
+		t.Fatalf("expected creds msg")
+	}
+	if msg.creds["backup"] != "key stored" {
+		t.Fatalf("creds probe must read the store beside the config, got %q", msg.creds["backup"])
+	}
+
+	// And the switch path must load the key instead of rejecting the provider.
+	var built config.ProviderProfile
+	m.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		built = profile
+		return &fakeProvider{}, nil
+	}
+	m = managerKey(t, m, testKey(tea.KeyDown)) // select "backup"
+	next, _ = m.handleProviderWizardKey(testKey(tea.KeyEnter))
+	if next.providerWizard != nil {
+		t.Fatalf("switch must succeed on a config-adjacent stored key, status=%q", next.providerWizard.manageStatus)
+	}
+	if built.APIKey != "sk-beside-config" {
+		t.Fatalf("switch must load the key from the store beside the config, got %q", built.APIKey)
+	}
+}
