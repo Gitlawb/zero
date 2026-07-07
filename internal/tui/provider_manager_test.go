@@ -471,7 +471,6 @@ func TestProviderManagerReadsStoredKeyBesideConfig(t *testing.T) {
 	}
 }
 
-
 // drainProviderManagerCmds executes a manager action's follow-up cmds (batch
 // or single) and applies any providerManagerCleanupMsg, mirroring what the
 // bubbletea runtime does with the returned tea.Cmd.
