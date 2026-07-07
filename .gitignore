@@ -50,3 +50,4 @@ docs/superpowers/
 # Termux/Android build artifacts
 zero-termux-arm64
 zero-linux-sandbox
+zero-seccomp
