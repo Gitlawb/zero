@@ -51,10 +51,15 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 		m.providerWizard.apiKey = msg.apiKey
 	}
 	if msg.tokenLogin {
-		// The login already persisted a profile (persistOAuthLoginProvider); mirror
-		// it into the in-memory saved list so the provider shows in /model and the
-		// lifecycle list this session even if the wizard is abandoned before the
-		// model step (savedProviders is otherwise only loaded at startup).
+		// Persist the profile HERE, on the Update goroutine (see
+		// persistOAuthLoginProvider for the threading contract), and only mirror
+		// it into the in-memory saved list when the write succeeded — a mirror of
+		// a profile that never reached disk shows a phantom provider that works
+		// this session and silently vanishes on restart.
+		if err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID); err != nil {
+			m.providerWizard.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
+			return m, nil
+		}
 		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID)
 	}
 	// OAuth succeeded (key minted, or a refreshable token stored for the runtime
@@ -84,7 +89,7 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth, m.userConfigPath)
+	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -102,7 +107,7 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // from the ID token and stores it on the saved token so the Codex provider can
 // inject it as a header on every request; other OAuth providers (xAI) run the
 // generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath string) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
 	providerID := provider.ID
 	switch {
 	case provider.OAuthMintsKey:
@@ -115,12 +120,12 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 		}
 	case providerID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin(configPath)
+			err := runProviderChatGPTLogin()
 			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: err}
 		}
 	default:
 		return func() tea.Msg {
-			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID, configPath)}
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
 		}
 	}
 }
@@ -130,7 +135,7 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 // the token's Account field) and persists the resulting token via the oauth
 // store. The runtime resolver then attaches the bearer to Codex calls and the
 // Codex provider reads the Account field for the `chatgpt-account-id` header.
-func runProviderChatGPTLogin(configPath string) error {
+func runProviderChatGPTLogin() error {
 	env := buildOAuthPresetEnv()
 	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:         env,
@@ -145,11 +150,7 @@ func runProviderChatGPTLogin(configPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
-		return err
-	}
-	persistOAuthLoginProvider(configPath, "chatgpt")
-	return nil
+	return store.Save(oauth.ProviderKey("chatgpt"), token)
 }
 
 // appendOAuthLoginProfile mirrors the profile persistOAuthLoginProvider wrote to
@@ -178,14 +179,20 @@ func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) 
 // persistOAuthLoginProvider guarantees the stored login is reachable from the
 // provider list even when the wizard is abandoned before the model step: the
 // token alone is invisible — no profile means no entry in /provider, /model, or
-// `zero providers use`, which reads as the login having vanished. Best-effort:
-// the login itself succeeded and the wizard's completion path persists the full
-// profile (with the chosen model) anyway, so a failure here is not surfaced.
-func persistOAuthLoginProvider(configPath string, catalogID string) {
+// `zero providers use`, which reads as the login having vanished.
+//
+// MUST run on the Update goroutine (call it from a message handler, never from
+// inside a tea.Cmd): config.json writes are unlocked read-modify-writes, and a
+// background login — a device-code poll can complete minutes later — racing a
+// UI-thread write would silently clobber it (lost update). The returned error
+// lets the caller surface a failed write instead of showing a provider that
+// never reached disk.
+func persistOAuthLoginProvider(configPath string, catalogID string) error {
 	if strings.TrimSpace(configPath) == "" {
-		return
+		return nil
 	}
-	_, _ = config.EnsureCatalogProvider(configPath, catalogID)
+	_, err := config.EnsureCatalogProvider(configPath, catalogID)
+	return err
 }
 
 // buildOAuthPresetEnv layers the process env with the preset opt-in so a
@@ -205,7 +212,7 @@ func buildOAuthPresetEnv() map[string]string {
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
 // has a built-in preset (e.g. xAI), storing a refreshable token under
 // provider:<name>. The runtime resolver then attaches it to model calls.
-func runProviderTokenLogin(name string, configPath string) error {
+func runProviderTokenLogin(name string) error {
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -224,11 +231,8 @@ func runProviderTokenLogin(name string, configPath string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if _, err = manager.Login(ctx, oauth.LoginOptions{Provider: name}); err != nil {
-		return err
-	}
-	persistOAuthLoginProvider(configPath, name)
-	return nil
+	_, err = manager.Login(ctx, oauth.LoginOptions{Provider: name})
+	return err
 }
 
 // providerWizardDeviceCodeMsg carries the result of phase 1 (RequestDeviceCode):
@@ -264,9 +268,9 @@ func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) tea.Cmd {
+func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth, configPath)}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
 	}
 }
 
@@ -694,6 +698,26 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	// A manager-launched add flow honors the manager's "Esc walks back one
+	// level" contract on EVERY step (not just the first): Esc returns to the
+	// provider list instead of destroying the overlay — and with it the user's
+	// cursor and status — from a step deep in the flow. An in-flight OAuth login
+	// is abandoned the same way; bumping the attempt id makes its late result
+	// stale so applyProviderWizardOAuth drops it.
+	if m.providerWizard.manage && !m.providerWizard.managerStep() && keyIs(msg, tea.KeyEsc) {
+		wizard := m.providerWizard
+		if wizard.oauthPending {
+			wizard.oauthPending = false
+			wizard.oauthAttemptID++
+		}
+		wizard.oauthDevice = false
+		wizard.deviceUserCode = ""
+		wizard.deviceVerificationURI = ""
+		wizard.err = ""
+		wizard.oauthErr = ""
+		wizard.step = providerWizardStepManage
+		return m, nil
+	}
 	// While a browser/device OAuth login is in flight, ignore input except Esc,
 	// which abandons the wizard (the background flow times out and is dropped).
 	if m.providerWizard.oauthPending {
@@ -705,13 +729,6 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// Manager steps (list / edit) own their keys entirely.
 	if m.providerWizard.managerStep() {
 		return m.handleProviderManagerKey(msg)
-	}
-	// An add flow opened FROM the manager: Esc on its first step returns to the
-	// list instead of closing the overlay, so a mis-press doesn't lose the place.
-	if m.providerWizard.manage && m.providerWizard.step == providerWizardStepMethod && keyIs(msg, tea.KeyEsc) {
-		m.providerWizard.step = providerWizardStepManage
-		m.providerWizard.err = ""
-		return m, nil
 	}
 	// Manage-key step: keep/replace/remove a provider's stored key.
 	if m.providerWizard.step == providerWizardStepManageKey {
@@ -804,7 +821,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				provider := m.providerWizard.currentProvider()
 				attemptID := m.providerWizard.beginOAuthAttempt(false)
-				return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
+				return m, providerWizardOAuthCmdFor(provider, attemptID)
 			}
 			return m, nil
 		case keyText(msg) != "":
@@ -1246,6 +1263,16 @@ func (wizard *providerWizardState) render(width int) string {
 }
 
 func (wizard *providerWizardState) footer() string {
+	text := wizard.footerText()
+	// Inside a manager-launched add flow, Esc walks back to the provider list
+	// (see handleProviderWizardKey) — the hint must match.
+	if wizard.manage && !wizard.managerStep() {
+		text = strings.ReplaceAll(text, "Esc close", "Esc back")
+	}
+	return text
+}
+
+func (wizard *providerWizardState) footerText() string {
 	canRight := wizard.canAdvanceWithRight()
 	switch wizard.step {
 	case providerWizardStepManage:
@@ -1261,9 +1288,6 @@ func (wizard *providerWizardState) footer() string {
 	case providerWizardStepEditValue:
 		return "type to edit   Enter apply   Ctrl+U clear   Esc back"
 	case providerWizardStepMethod:
-		if wizard.manage {
-			return "↑/↓ move   Enter/→ continue   Esc back"
-		}
 		return "↑/↓ move   Enter/→ continue   Esc close"
 	case providerWizardStepProvider:
 		if wizard.oauthMode && wizard.currentProvider().OAuthDeviceFlow {

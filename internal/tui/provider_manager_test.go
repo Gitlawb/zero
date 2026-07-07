@@ -398,10 +398,13 @@ func TestProviderManagerDeleteHintNamesActualOAuthLogin(t *testing.T) {
 
 	m = managerKey(t, m, testKey(tea.KeyDown)) // select "codex"
 	m = managerKey(t, m, testKeyText("d"))
-	next, _ = m.handleProviderWizardKey(testKeyText("y"))
+	next, cmd := m.handleProviderWizardKey(testKeyText("y"))
 	if next.providerWizard == nil {
 		t.Fatalf("manager should stay open")
 	}
+	// The stored-key delete and OAuth hint run in a follow-up cmd off the UI
+	// goroutine; drain it into the model like the runtime would.
+	next = drainProviderManagerCmds(t, next, cmd)
 	status := next.providerWizard.manageStatus
 	if !strings.Contains(status, "zero auth logout chatgpt") {
 		t.Fatalf("hint must name the stored login (chatgpt), got %q", status)
@@ -465,5 +468,181 @@ func TestProviderManagerReadsStoredKeyBesideConfig(t *testing.T) {
 	}
 	if built.APIKey != "sk-beside-config" {
 		t.Fatalf("switch must load the key from the store beside the config, got %q", built.APIKey)
+	}
+}
+
+
+// drainProviderManagerCmds executes a manager action's follow-up cmds (batch
+// or single) and applies any providerManagerCleanupMsg, mirroring what the
+// bubbletea runtime does with the returned tea.Cmd.
+func drainProviderManagerCmds(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	var apply func(c tea.Cmd)
+	apply = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		switch msg := c().(type) {
+		case tea.BatchMsg:
+			for _, sub := range msg {
+				apply(sub)
+			}
+		case providerManagerCleanupMsg:
+			m, _ = m.applyProviderManagerCleanup(msg)
+		}
+	}
+	apply(cmd)
+	return m
+}
+
+// TestProviderManagerCaseOnlyRenameUpdatesInPlace: groq → Groq through the
+// editor must rename in place — the old EqualFold-skip + case-sensitive upsert
+// combination appended a duplicate profile (review finding, empirically shown).
+func TestProviderManagerCaseOnlyRenameUpdatesInPlace(t *testing.T) {
+	m := managerTestModel(t)
+	m = managerKey(t, m, testKeyText("e"))
+	m = managerKey(t, m, testKey(tea.KeyEnter)) // edit Name (cursor 0)
+	m.providerWizard.editBuffer = "OpenGateway"
+	m = managerKey(t, m, testKey(tea.KeyEnter))
+	for range 5 {
+		m = managerKey(t, m, testKey(tea.KeyDown))
+	}
+	next, _ := m.handleProviderWizardKey(testKey(tea.KeyEnter)) // Save
+	if next.providerWizard == nil || next.providerWizard.step != providerWizardStepManage {
+		t.Fatalf("save should return to the list, err=%q", next.providerWizard.err)
+	}
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if len(persisted.Providers) != 2 {
+		t.Fatalf("case-only rename must not duplicate: %d providers", len(persisted.Providers))
+	}
+	if persisted.Providers[0].Name != "OpenGateway" || persisted.Providers[0].APIKey != "sk-gw" {
+		t.Fatalf("in-place update wrong: %+v", persisted.Providers[0])
+	}
+	if persisted.ActiveProvider != "OpenGateway" {
+		t.Fatalf("active must follow, got %q", persisted.ActiveProvider)
+	}
+	if len(next.savedProviders) != 2 || next.savedProviders[0].Name != "OpenGateway" {
+		t.Fatalf("in-memory list must mirror the rename: %+v", next.savedProviders)
+	}
+}
+
+// TestProviderManagerMutationsKeepResolvedProviders: savedProviders is seeded
+// from the RESOLVED+FILTERED provider set — a manager delete/edit must mutate
+// it surgically, not replace it with the raw user-config list (which would drop
+// project-config-contributed providers for the session).
+func TestProviderManagerMutationsKeepResolvedProviders(t *testing.T) {
+	m := managerTestModel(t)
+	// Simulate a project-config-contributed provider: present in the session's
+	// resolved list, absent from the user config.json the writers operate on.
+	projectProvider := config.ProviderProfile{Name: "team-gateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://team.example.com/v1", APIKey: "sk-team", Model: "team-model"}
+	m.savedProviders = append(m.savedProviders, projectProvider)
+	next, _ := m.reloadProviderManagerRows()
+	m = next
+
+	// Delete "backup" (a user-config profile): team-gateway must survive.
+	m = managerKey(t, m, testKey(tea.KeyDown)) // select "backup"
+	m = managerKey(t, m, testKeyText("d"))
+	next, _ = m.handleProviderWizardKey(testKeyText("y"))
+	names := []string{}
+	for _, profile := range next.savedProviders {
+		names = append(names, profile.Name)
+	}
+	if len(next.savedProviders) != 2 || names[0] != "opengateway" || names[1] != "team-gateway" {
+		t.Fatalf("project-contributed provider lost by delete: %v", names)
+	}
+
+	// Edit opengateway's model: team-gateway must still survive.
+	m = next
+	m.providerWizard.manageCursor = 0
+	m = managerKey(t, m, testKeyText("e"))
+	for range 2 {
+		m = managerKey(t, m, testKey(tea.KeyDown))
+	}
+	m = managerKey(t, m, testKey(tea.KeyEnter)) // Model field
+	m.providerWizard.editBuffer = "mimo-next"
+	m = managerKey(t, m, testKey(tea.KeyEnter))
+	for range 3 {
+		m = managerKey(t, m, testKey(tea.KeyDown))
+	}
+	next, _ = m.handleProviderWizardKey(testKey(tea.KeyEnter)) // Save
+	names = names[:0]
+	for _, profile := range next.savedProviders {
+		names = append(names, profile.Name)
+	}
+	if len(next.savedProviders) != 2 || names[1] != "team-gateway" {
+		t.Fatalf("project-contributed provider lost by edit: %v", names)
+	}
+	if next.savedProviders[0].Model != "mimo-next" {
+		t.Fatalf("edit not mirrored in-memory: %+v", next.savedProviders[0])
+	}
+}
+
+// TestProviderManagerEscWalksBackFromDeepAddFlow: Esc anywhere inside a
+// manager-launched add flow returns to the provider list ("Esc walks back one
+// level"), never destroying the manager context — previously only the first
+// step walked back and every deeper step hard-closed the overlay.
+func TestProviderManagerEscWalksBackFromDeepAddFlow(t *testing.T) {
+	m := managerTestModel(t)
+	m = managerKey(t, m, testKeyText("a")) // add flow, method step
+	m = managerKey(t, m, testKey(tea.KeyEnter))
+	if m.providerWizard == nil || m.providerWizard.step == providerWizardStepMethod {
+		t.Fatalf("expected to advance past the method step, got %+v", m.providerWizard)
+	}
+	deepStep := m.providerWizard.step
+	m = managerKey(t, m, testKey(tea.KeyEsc))
+	if m.providerWizard == nil {
+		t.Fatalf("Esc on step %v must not destroy the manager overlay", deepStep)
+	}
+	if m.providerWizard.step != providerWizardStepManage {
+		t.Fatalf("Esc must return to the provider list, got step %v", m.providerWizard.step)
+	}
+}
+
+// TestProviderManagerActivationUsesStructuredResult: a refusal whose display
+// text happens to contain "Switched to" (a provider literally named that) must
+// NOT close the manager as a success — the outcome bool, not UI copy, decides.
+func TestProviderManagerActivationUsesStructuredResult(t *testing.T) {
+	m := managerTestModel(t)
+	seedCfg := readManagerConfig(t, m.userConfigPath)
+	seedCfg.Providers[1] = config.ProviderProfile{Name: "Switched to prod", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://p.example.com/v1", Model: "m"}
+	data, err := json.MarshalIndent(seedCfg, "", "  ")
+	if err != nil {
+		t.Fatalf("encode config: %v", err)
+	}
+	if err := os.WriteFile(m.userConfigPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	m.savedProviders = seedCfg.Providers
+	next, _ := m.reloadProviderManagerRows()
+	m = next
+
+	m = managerKey(t, m, testKey(tea.KeyDown)) // select the credential-less provider
+	next, _ = m.handleProviderWizardKey(testKey(tea.KeyEnter))
+	if next.providerWizard == nil {
+		t.Fatalf("a refused switch must keep the manager open even when the refusal text contains \"Switched to\"")
+	}
+	if !strings.Contains(next.providerWizard.manageStatus, "no usable credential") {
+		t.Fatalf("expected the refusal inline, got %q", next.providerWizard.manageStatus)
+	}
+	if next.providerName != "opengateway" {
+		t.Fatalf("provider must not switch, got %q", next.providerName)
+	}
+}
+
+// TestProviderManagerCredStateFallsThroughStaleMarker: a stale APIKeyStored
+// marker with a SET env var must render the env credential (the runtime falls
+// back the same way and switches fine), not "stored key missing".
+func TestProviderManagerCredStateFallsThroughStaleMarker(t *testing.T) {
+	t.Setenv("STALE_MARKER_KEY", "sk-env")
+	profile := config.ProviderProfile{Name: "gw", APIKeyStored: true, APIKeyEnv: "STALE_MARKER_KEY"}
+	state := providerManagerCredState(profile, false, nil, map[string]bool{})
+	if state != "env STALE_MARKER_KEY" {
+		t.Fatalf("stale marker must fall through to the env credential, got %q", state)
+	}
+	// Marker with neither store entry nor fallback: the broken state still shows.
+	t.Setenv("STALE_MARKER_KEY", "")
+	state = providerManagerCredState(profile, false, nil, map[string]bool{})
+	if state != "stored key missing" {
+		t.Fatalf("expected stored key missing with no fallback, got %q", state)
 	}
 }

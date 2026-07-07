@@ -322,7 +322,9 @@ func setupRequired(resolved config.ResolvedConfig) bool {
 // the candidate set is permissive (profile name + catalog ID).
 func providerHasOAuthLogin(profile config.ProviderProfile, oauthLogins map[string]bool) bool {
 	for _, name := range profile.OAuthLoginCandidates() {
-		if oauthLogins[name] {
+		// Store keys are normalized to lower case (oauth.ProviderKey), so the
+		// presence check must compare the same way.
+		if oauthLogins[strings.ToLower(strings.TrimSpace(name))] {
 			return true
 		}
 	}
@@ -344,7 +346,7 @@ func oauthLoggedInProviders() map[string]bool {
 	}
 	for _, status := range statuses {
 		if status.HasToken {
-			out[strings.TrimPrefix(status.Key, oauth.KeyPrefixProvider)] = true
+			out[strings.ToLower(strings.TrimPrefix(status.Key, oauth.KeyPrefixProvider))] = true
 		}
 	}
 	return out

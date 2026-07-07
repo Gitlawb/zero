@@ -496,16 +496,21 @@ func (m model) handleModelCommand(args string) (model, string) {
 // picker calls this when a model from a non-active provider is chosen, so the
 // picker can list every saved provider and switch across them (like a unified
 // provider+model selector). The key is loaded from the encrypted store / env.
-func (m model) switchProviderModel(providerName, modelID string) (model, string, tea.Cmd) {
+// The returned bool reports whether the switch actually committed — callers
+// that branch on the outcome (the provider manager) must use it, never the
+// display text: UI copy is not a control-flow contract (a refusal quoting a
+// provider name could contain any substring, and rewording the success line
+// must not change behavior).
+func (m model) switchProviderModel(providerName, modelID string) (model, string, bool, tea.Cmd) {
 	if m.pending {
-		return m, "Model\nCannot switch providers while a run is active.", nil
+		return m, "Model\nCannot switch providers while a run is active.", false, nil
 	}
 	if m.newProvider == nil {
-		return m, "Model\nProvider rebuild is not available for this TUI session.", nil
+		return m, "Model\nProvider rebuild is not available for this TUI session.", false, nil
 	}
 	target, ok := m.savedProviderByName(providerName)
 	if !ok {
-		return m, "Model\nunknown provider " + strconv.Quote(providerName), nil
+		return m, "Model\nunknown provider " + strconv.Quote(providerName), false, nil
 	}
 	target = m.profileWithCredential(target)
 	target.Model = strings.TrimSpace(modelID)
@@ -517,11 +522,11 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// keyless on purpose so newProvider attaches the bearer resolver + login key.
 	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" &&
 		!(hasDescriptor && descriptor.Local) && !oauthLoginAvailable(target) {
-		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", nil
+		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", false, nil
 	}
 	next, err := m.newProvider(target)
 	if err != nil {
-		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}}), nil
+		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}}), false, nil
 	}
 	m.provider = next
 	m.providerProfile = target
@@ -549,7 +554,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	if warn := m.visionDropWarning(); warn != "" {
 		status += "\n" + warn
 	}
-	return m, status, tea.Batch(cmds...)
+	return m, status, true, tea.Batch(cmds...)
 }
 
 // profileWithCredential fills a profile's APIKey for provider construction the same

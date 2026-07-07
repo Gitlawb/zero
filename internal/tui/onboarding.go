@@ -474,7 +474,7 @@ func (m *model) moveSetupMethod(delta int) {
 
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
-func setupOAuthCmd(provider providercatalog.Descriptor, configPath string) tea.Cmd {
+func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
@@ -486,13 +486,13 @@ func setupOAuthCmd(provider providercatalog.Descriptor, configPath string) tea.C
 		}
 	case provider.ID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin(configPath)
+			err := runProviderChatGPTLogin()
 			return setupOAuthMsg{tokenLogin: true, providerID: provider.ID, err: err}
 		}
 	default:
 		name := provider.ID
 		return func() tea.Msg {
-			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name, configPath)}
+			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name)}
 		}
 	}
 }
@@ -524,9 +524,9 @@ func setupDevicePrepareCmd(name string) tea.Cmd {
 	}
 }
 
-func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) tea.Cmd {
+func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth, configPath)}
+		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth)}
 	}
 }
 
@@ -563,7 +563,7 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 	}
 	m.setup.deviceUserCode = msg.userCode
 	m.setup.deviceVerificationURI = msg.verifyURL
-	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth, m.setup.configPath)
+	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
 }
 
 // applySetupOAuth folds an OAuth login result into the first-run setup: on success
@@ -585,6 +585,13 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.apiKey != "" {
 		m.setup.apiKey.SetValue(msg.apiKey)
+	}
+	if msg.tokenLogin {
+		// Early persist on the Update goroutine (see persistOAuthLoginProvider's
+		// threading contract) so quitting setup after the login doesn't lose it;
+		// completeSetup persists the full profile with the chosen model anyway,
+		// so a failure here is recoverable and not fatal to setup.
+		_ = persistOAuthLoginProvider(m.setup.configPath, msg.providerID)
 	}
 	m.setup.oauthErr = ""
 	m.setup.err = ""
@@ -664,7 +671,7 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 				m.setup.oauthPending = true
 				m.setup.oauthDevice = false
 				m.setup.oauthErr = ""
-				return m, setupOAuthCmd(descriptor, m.setup.configPath)
+				return m, setupOAuthCmd(descriptor)
 			}
 		}
 		if m.setup.stage == setupStageProvider {

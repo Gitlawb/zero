@@ -966,9 +966,9 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 		},
 	})
 
-	next, text, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
-	if !strings.Contains(text, "Switched to ollama") {
-		t.Fatalf("switch notice = %q, want it to confirm the switch", text)
+	next, text, ok, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	if !ok || !strings.Contains(text, "Switched to ollama") {
+		t.Fatalf("switch notice = %q (ok=%v), want a committed switch", text, ok)
 	}
 	if next.modelName != "kimi-k2.7-code:cloud" || next.providerName != "ollama" {
 		t.Fatalf("model/provider not switched: modelName=%q providerName=%q", next.modelName, next.providerName)
@@ -1058,9 +1058,9 @@ func TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer(t *testing.T) {
 		},
 	})
 
-	next, text, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
-	if !strings.Contains(text, "Switched to chatgpt") {
-		t.Fatalf("switch should succeed on the stored OAuth login, got %q", text)
+	next, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if !ok || !strings.Contains(text, "Switched to chatgpt") {
+		t.Fatalf("switch should succeed on the stored OAuth login, got %q (ok=%v)", text, ok)
 	}
 	if next.providerName != "chatgpt" || next.modelName != "gpt-5.5" {
 		t.Fatalf("switch did not commit: provider=%q model=%q", next.providerName, next.modelName)
@@ -1091,8 +1091,8 @@ func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
 		},
 	})
 
-	_, text, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
-	if !strings.Contains(text, "no usable credential") {
-		t.Fatalf("expected the credential gate to refuse, got %q", text)
+	_, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if ok || !strings.Contains(text, "no usable credential") {
+		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}
 }

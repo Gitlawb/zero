@@ -16,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 )
 
 const providerManagerMaxVisible = 10
@@ -87,9 +88,16 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	// Carry resolved credential states forward for names still present, so a
+	// single-row mutation doesn't flash every other row back to "checking…"
+	// while the async probe re-runs.
+	previous := make(map[string]string, len(m.providerWizard.manageRows))
+	for _, row := range m.providerWizard.manageRows {
+		previous[row.profile.Name] = row.cred
+	}
 	rows := make([]providerManagerRow, 0, len(m.savedProviders))
 	for _, profile := range m.savedProviders {
-		row := providerManagerRow{profile: profile}
+		row := providerManagerRow{profile: profile, cred: previous[profile.Name]}
 		if descriptor, ok := m.descriptorForProfile(profile); ok {
 			row.local = descriptor.Local
 		}
@@ -117,13 +125,17 @@ func providerManagerCredsCmd(gen int, rows []providerManagerRow, configPath stri
 	}
 	return func() tea.Msg {
 		store, storeErr := providerKeyStoreForPath(configPath)
+		var getter config.APIKeyGetter
+		if storeErr == nil {
+			getter = store
+		}
+		// One token-store snapshot answers every row's OAuth question — a fresh
+		// store open + full file read per row (×2 candidates) answered the same
+		// question N times over.
+		logins := storedOAuthLogins()
 		creds := make(map[string]string, len(profiles))
 		for i, profile := range profiles {
-			var getter config.APIKeyGetter
-			if storeErr == nil {
-				getter = store
-			}
-			creds[profile.Name] = providerManagerCredState(profile, locals[i], getter)
+			creds[profile.Name] = providerManagerCredState(profile, locals[i], getter, logins)
 		}
 		return providerManagerCredsMsg{gen: gen, creds: creds}
 	}
@@ -131,29 +143,60 @@ func providerManagerCredsCmd(gen int, rows []providerManagerRow, configPath stri
 
 // providerManagerCredState classifies how a profile authenticates, surfacing
 // broken states ("stored key missing") instead of hiding them — that exact
-// state is how a lost keychain entry shows up.
-func providerManagerCredState(profile config.ProviderProfile, local bool, store config.APIKeyGetter) string {
+// state is how a lost keychain entry shows up. A stale APIKeyStored marker
+// falls THROUGH to the env/OAuth checks first, matching the runtime's own
+// fallback order (profileWithCredential): a provider that will switch fine via
+// its env var must not render as broken.
+func providerManagerCredState(profile config.ProviderProfile, local bool, store config.APIKeyGetter, logins map[string]bool) string {
 	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
 		return "key set"
 	}
-	if profile.APIKeyStored {
-		if store != nil {
-			if key, ok, err := store.Get(profile.Name); err == nil && ok && strings.TrimSpace(key) != "" {
-				return "key stored"
-			}
+	if profile.APIKeyStored && store != nil {
+		if key, ok, err := store.Get(profile.Name); err == nil && ok && strings.TrimSpace(key) != "" {
+			return "key stored"
 		}
-		return "stored key missing"
 	}
 	if env := strings.TrimSpace(profile.APIKeyEnv); env != "" && strings.TrimSpace(os.Getenv(env)) != "" {
 		return "env " + env
 	}
-	if oauthLoginAvailable(profile) {
-		return "oauth login"
+	// OAuthLoginCandidates is nil for key-authed profiles, so probe a marker-free
+	// copy: a stale marker must not hide a usable login.
+	keyless := profile
+	keyless.APIKeyStored = false
+	for _, candidate := range keyless.OAuthLoginCandidates() {
+		// Store keys are normalized to lower case (oauth.ProviderKey).
+		if logins[strings.ToLower(strings.TrimSpace(candidate))] {
+			return "oauth login"
+		}
 	}
 	if local {
 		return "local"
 	}
+	if profile.APIKeyStored {
+		return "stored key missing"
+	}
 	return "no credential"
+}
+
+// storedOAuthLogins snapshots which provider logins exist in the token store —
+// the same one-read pattern as cli's oauthLoggedInProviders. Errors degrade to
+// an empty set.
+func storedOAuthLogins() map[string]bool {
+	logins := map[string]bool{}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return logins
+	}
+	statuses, err := store.Status(oauth.KeyPrefixProvider)
+	if err != nil {
+		return logins
+	}
+	for _, status := range statuses {
+		if status.HasToken {
+			logins[strings.ToLower(strings.TrimPrefix(status.Key, oauth.KeyPrefixProvider))] = true
+		}
+	}
+	return logins
 }
 
 func (m model) applyProviderManagerCreds(msg providerManagerCredsMsg) (model, tea.Cmd) {
@@ -273,8 +316,8 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 		wizard.manageStatus = "Cannot switch providers while a run is active."
 		return m, nil
 	}
-	next, text, cmd := m.switchProviderModel(row.profile.Name, row.profile.Model)
-	if strings.Contains(text, "Switched to") {
+	next, text, switched, cmd := m.switchProviderModel(row.profile.Name, row.profile.Model)
+	if switched {
 		next.providerWizard = nil
 		next.transcript = reduceTranscript(next.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return next, cmd
@@ -285,10 +328,13 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 	return next, cmd
 }
 
-// deleteManagerSelection removes the confirmed provider: config profile first
-// (active pointer hands off inside RemoveProvider), then its stored key. The
-// OAuth token is deliberately kept — logins outlive profiles so re-adding the
-// provider doesn't force a browser round-trip; zero auth logout removes it.
+// deleteManagerSelection removes the confirmed provider: the config write runs
+// synchronously (the list must reflect the config the instant the confirm
+// resolves), while the stored-key delete and the OAuth-login lookup — a
+// keychain subprocess and a token-store read — run in a follow-up tea.Cmd so
+// the confirm keypress never stalls the render loop. The OAuth token is
+// deliberately kept — logins outlive profiles so re-adding the provider
+// doesn't force a browser round-trip; zero auth logout removes it.
 func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	wizard := m.providerWizard
 	wizard.manageDeleting = false
@@ -306,36 +352,85 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		wizard.manageStatus = "Delete failed: " + err.Error()
 		return m, nil
 	}
-	m.savedProviders = cfg.Providers
+	// Surgical removal — see saveManagerEdit for why the raw cfg.Providers list
+	// must not replace the resolved/filtered savedProviders wholesale.
+	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
 	notes := []string{"Deleted " + name + "."}
-	// Drop the stored key from the store BESIDE the edited config (the store
-	// the key was captured into), surfacing a failure instead of letting a
-	// lingering secret read as a clean removal.
-	keyStore, storeErr := m.providerKeyStore()
-	if storeErr == nil {
-		_, storeErr = keyStore.Delete(name)
-	}
-	if storeErr != nil {
-		notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
-	}
 	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(name)) {
 		notes = append(notes, "This session keeps running on it until you switch.")
 	} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" && !strings.EqualFold(active, name) {
 		notes = append(notes, "Active provider: "+active+".")
 	}
-	if login, ok := oauthLoginName(config.ProviderProfile{Name: row.profile.Name, CatalogID: row.profile.CatalogID}); ok {
-		notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
-	}
+	cleanup := providerManagerCleanupCmd(m.userConfigPath, row.profile)
 
 	if len(m.savedProviders) == 0 {
 		m.providerWizard = nil
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\n" + strings.Join(notes, " ")})
-		return m, nil
+		return m, cleanup
 	}
 	next, cmd := m.reloadProviderManagerRows()
 	next.providerWizard.manageStatus = strings.Join(notes, " ")
-	return next, cmd
+	return next, tea.Batch(cmd, cleanup)
+}
+
+// removeSavedProvider drops one profile from the in-memory saved list.
+func removeSavedProvider(saved []config.ProviderProfile, name string) []config.ProviderProfile {
+	kept := saved[:0]
+	for _, profile := range saved {
+		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(name)) {
+			continue
+		}
+		kept = append(kept, profile)
+	}
+	return kept
+}
+
+// providerManagerCleanupMsg reports the off-thread half of a delete: the
+// stored-key removal outcome and the OAuth-login hint.
+type providerManagerCleanupMsg struct {
+	notes []string
+}
+
+// providerManagerCleanupCmd finishes a delete off the UI goroutine: the
+// keychain delete shells out to `security` on macOS and the OAuth-login lookup
+// reads the token store — blocking work the confirm keypress must not wait on.
+// A failed key delete is surfaced rather than letting a lingering secret read
+// as a clean removal.
+func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile) tea.Cmd {
+	name := profile.Name
+	catalogID := profile.CatalogID
+	return func() tea.Msg {
+		notes := []string{}
+		keyStore, storeErr := providerKeyStoreForPath(configPath)
+		if storeErr == nil {
+			_, storeErr = keyStore.Delete(name)
+		}
+		if storeErr != nil {
+			notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+		}
+		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
+			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
+		}
+		return providerManagerCleanupMsg{notes: notes}
+	}
+}
+
+func (m model) applyProviderManagerCleanup(msg providerManagerCleanupMsg) (model, tea.Cmd) {
+	if len(msg.notes) == 0 {
+		return m, nil
+	}
+	extra := strings.Join(msg.notes, " ")
+	if m.providerWizard != nil && m.providerWizard.manage {
+		if m.providerWizard.manageStatus != "" {
+			m.providerWizard.manageStatus += " " + extra
+		} else {
+			m.providerWizard.manageStatus = extra
+		}
+		return m, nil
+	}
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\n" + extra})
+	return m, nil
 }
 
 // --- edit -------------------------------------------------------------------
@@ -460,11 +555,14 @@ func (wizard *providerWizardState) commitEditBuffer() string {
 	return ""
 }
 
-// saveManagerEdit persists the draft: rename first (migrates the stored key and
-// the active pointer atomically with respect to the name), then merge the field
-// changes; a freshly entered key is captured into the encrypted store so
-// config.json never holds it in cleartext. The live session follows a rename so
-// ZERO_PROVIDER and the status line never point at a name that no longer exists.
+// saveManagerEdit persists the draft in ONE atomic config write
+// (config.EditProvider handles rename — case-only included — field merge,
+// verbatim description, the stored-key marker, and key migration together, so
+// a failure leaves nothing half-applied). A freshly entered key is captured
+// into the encrypted store under the CURRENT name first (EditProvider's rename
+// migration then moves it), so config.json never holds it in cleartext. The
+// live session follows a rename so ZERO_PROVIDER and the status line never
+// point at a name that no longer exists.
 func (m model) saveManagerEdit() (model, tea.Cmd) {
 	wizard := m.providerWizard
 	if strings.TrimSpace(m.userConfigPath) == "" {
@@ -477,38 +575,30 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "name cannot be empty"
 		return m, nil
 	}
-	if !strings.EqualFold(oldName, newName) {
-		if _, err := config.RenameProvider(m.userConfigPath, oldName, newName); err != nil {
-			wizard.err = err.Error()
-			return m, nil
-		}
-	}
-	profile := config.ProviderProfile{
-		Name:    newName,
-		BaseURL: strings.TrimSpace(wizard.editDraft.BaseURL),
-		Model:   strings.TrimSpace(wizard.editDraft.Model),
+	edit := config.ProviderEdit{
+		Name:        oldName,
+		NewName:     newName,
+		BaseURL:     strings.TrimSpace(wizard.editDraft.BaseURL),
+		Model:       strings.TrimSpace(wizard.editDraft.Model),
+		Description: wizard.editDraft.Description,
 	}
 	if key := strings.TrimSpace(wizard.editDraft.APIKey); key != "" {
-		profile.APIKey = key
-		profile = config.SecureProviderProfile(profile, m.userConfigPath)
+		captured := config.SecureProviderProfile(config.ProviderProfile{Name: oldName, APIKey: key}, m.userConfigPath)
+		// On a store failure SecureProviderProfile keeps the inline key, which
+		// EditProvider then persists (the startup migration re-captures later) —
+		// the same fail-soft posture as every other capture path.
+		edit.APIKey = captured.APIKey
+		edit.APIKeyStored = captured.APIKeyStored
 	}
-	cfg, err := config.UpsertProvider(m.userConfigPath, profile, false)
-	if err != nil {
+	if _, err := config.EditProvider(m.userConfigPath, edit); err != nil {
 		wizard.err = err.Error()
 		return m, nil
 	}
-	// Description is set VERBATIM through its dedicated setter: the upsert merge
-	// treats an empty field as "unchanged", which would make clearing a
-	// description report success while the old text reappears in the list.
-	if strings.TrimSpace(wizard.editDraft.Description) != strings.TrimSpace(wizard.editOriginal.Description) {
-		if described, descErr := config.SetProviderDescription(m.userConfigPath, newName, wizard.editDraft.Description); descErr == nil {
-			cfg = described
-		} else {
-			wizard.err = descErr.Error()
-			return m, nil
-		}
-	}
-	m.savedProviders = cfg.Providers
+	// Mirror the edit into the in-memory list surgically. savedProviders was
+	// seeded from the RESOLVED (project-config layered) and usability-FILTERED
+	// provider set — substituting the raw user-file list here would drop
+	// project-contributed providers and resurrect filtered stubs for the session.
+	m.savedProviders = applySavedProviderEdit(m.savedProviders, oldName, edit)
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
@@ -520,19 +610,50 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	wizard.step = providerWizardStepManage
 	next, cmd := m.reloadProviderManagerRows()
-	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next, oldName)
+	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.providerName, newName)
 	return next, cmd
 }
 
 // providerEditRestartNote reminds the user when the edited provider is the one
 // this session is running on — endpoint/model/key changes only apply to the
 // built client after a switch (Enter on the row re-activates and rebuilds).
-func providerEditRestartNote(m model, oldName string) string {
-	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(oldName)) ||
-		strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(m.providerWizard.editDraft.Name)) {
+// liveName is the session's provider AFTER any rename sync, so a single
+// comparison against the edited profile's final name suffices.
+func providerEditRestartNote(liveName string, editedName string) string {
+	if strings.EqualFold(strings.TrimSpace(liveName), strings.TrimSpace(editedName)) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""
+}
+
+// applySavedProviderEdit mirrors a persisted config.EditProvider into the
+// in-memory saved list without wholesale replacement (see saveManagerEdit).
+func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit config.ProviderEdit) []config.ProviderProfile {
+	for index := range saved {
+		if !strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(oldName)) {
+			continue
+		}
+		profile := &saved[index]
+		if newName := strings.TrimSpace(edit.NewName); newName != "" {
+			profile.Name = newName
+		}
+		if baseURL := strings.TrimSpace(edit.BaseURL); baseURL != "" {
+			profile.BaseURL = baseURL
+		}
+		if model := strings.TrimSpace(edit.Model); model != "" {
+			profile.Model = model
+		}
+		if apiKey := strings.TrimSpace(edit.APIKey); apiKey != "" {
+			profile.APIKey = apiKey
+		}
+		if edit.APIKeyStored {
+			profile.APIKeyStored = true
+			profile.APIKey = ""
+		}
+		profile.Description = strings.TrimSpace(edit.Description)
+		break
+	}
+	return saved
 }
 
 // --- rendering ---------------------------------------------------------------

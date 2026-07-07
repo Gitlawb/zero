@@ -59,7 +59,7 @@ func oauthDevicePrepare(name string) (oauth.DeviceAuth, oauth.Config, error) {
 // oauthDeviceComplete polls for the token authorized via oauthDevicePrepare and
 // stores it under provider:<name> (phase 2). The runtime resolver then attaches
 // the refreshable token to model calls.
-func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) error {
+func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) error {
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -74,11 +74,8 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, c
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if _, err = manager.CompleteDeviceLogin(ctx, name, cfg, auth); err != nil {
-		return err
-	}
-	persistOAuthLoginProvider(configPath, name)
-	return nil
+	_, err = manager.CompleteDeviceLogin(ctx, name, cfg, auth)
+	return err
 }
 
 // oauthStoredToken returns a fresh access token for a provider that was logged in

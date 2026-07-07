@@ -775,3 +775,156 @@ func TestRenameProviderCaseOnlyKeepsStoredKey(t *testing.T) {
 		t.Fatalf("stored key lost on case-only rename: key=%q ok=%v err=%v", key, ok, err)
 	}
 }
+
+func TestEditProviderAppliesRenameFieldsAndDescriptionAtomically(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "groq",
+		Providers: []ProviderProfile{
+			{Name: "groq", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", APIKeyStored: true, Model: "m1", Description: "old text"},
+			{Name: "other", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://o.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.Set("groq", "sk-old"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	cfg, err := EditProvider(path, ProviderEdit{
+		Name:        "groq",
+		NewName:     "grok-main",
+		Model:       "m1-pro",
+		Description: "", // cleared — must persist verbatim
+	})
+	if err != nil {
+		t.Fatalf("EditProvider() error = %v", err)
+	}
+	edited := cfg.Providers[0]
+	if edited.Name != "grok-main" || edited.Model != "m1-pro" || edited.Description != "" {
+		t.Fatalf("edit not applied: %+v", edited)
+	}
+	if edited.BaseURL != "https://api.groq.com/openai/v1" || !edited.APIKeyStored {
+		t.Fatalf("untouched fields must survive: %+v", edited)
+	}
+	if cfg.ActiveProvider != "grok-main" {
+		t.Fatalf("active must follow the rename, got %q", cfg.ActiveProvider)
+	}
+	if key, ok, _ := store.Get("grok-main"); !ok || key != "sk-old" {
+		t.Fatalf("stored key must migrate with the rename, got %q ok=%v", key, ok)
+	}
+	if len(cfg.Providers) != 2 || cfg.Providers[1].Name != "other" {
+		t.Fatalf("unrelated profile changed: %+v", cfg.Providers)
+	}
+}
+
+// TestEditProviderCaseOnlyRenameUpdatesInPlace: the manager previously skipped
+// RenameProvider on case-insensitively-equal names and fell into UpsertProvider,
+// whose case-SENSITIVE merge appended a duplicate profile. EditProvider matches
+// case-insensitively, so a case-only rename is an in-place update and the store
+// entry (case-normalized) survives.
+func TestEditProviderCaseOnlyRenameUpdatesInPlace(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "groq",
+		Providers: []ProviderProfile{
+			{Name: "groq", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", APIKeyStored: true, Model: "m1"},
+		},
+	}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.Set("groq", "sk-secret"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	cfg, err := EditProvider(path, ProviderEdit{Name: "groq", NewName: "Groq"})
+	if err != nil {
+		t.Fatalf("EditProvider() error = %v", err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("case-only rename must not duplicate the profile: %+v", cfg.Providers)
+	}
+	if cfg.Providers[0].Name != "Groq" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("in-place update wrong: %+v", cfg.Providers[0])
+	}
+	if cfg.Providers[0].BaseURL != "https://api.groq.com/openai/v1" {
+		t.Fatalf("fields must survive a case-only rename: %+v", cfg.Providers[0])
+	}
+	if cfg.ActiveProvider != "Groq" {
+		t.Fatalf("active must follow, got %q", cfg.ActiveProvider)
+	}
+	if key, ok, _ := store.Get("Groq"); !ok || key != "sk-secret" {
+		t.Fatalf("stored key lost on case-only rename: %q ok=%v", key, ok)
+	}
+}
+
+// TestEditProviderRenameMigratesFreshlyCapturedKey: replacing the key AND
+// renaming in one edit — the caller captures under the CURRENT name and the
+// rename migration moves it, so the new key lands under the new name.
+func TestEditProviderRenameMigratesFreshlyCapturedKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	path := filepath.Join(dir, "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "gw",
+		Providers: []ProviderProfile{
+			{Name: "gw", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://gw.example.com/v1", APIKeyEnv: "GW_KEY", Model: "m1"},
+		},
+	}, 0o600)
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// The caller's contract: a replacement key is stored under the CURRENT name
+	// before EditProvider runs (what SecureProviderProfile does).
+	if err := store.Set("gw", "sk-new"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	cfg, err := EditProvider(path, ProviderEdit{Name: "gw", NewName: "gateway", APIKeyStored: true})
+	if err != nil {
+		t.Fatalf("EditProvider() error = %v", err)
+	}
+	if !cfg.Providers[0].APIKeyStored || cfg.Providers[0].Name != "gateway" {
+		t.Fatalf("marker/rename wrong: %+v", cfg.Providers[0])
+	}
+	if key, ok, _ := store.Get("gateway"); !ok || key != "sk-new" {
+		t.Fatalf("captured key must migrate to the new name, got %q ok=%v", key, ok)
+	}
+	if _, ok, _ := store.Get("gw"); ok {
+		t.Fatalf("old entry must be cleaned up after migration")
+	}
+}
+
+func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "alpha",
+		Providers: []ProviderProfile{
+			{Name: "alpha", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "beta", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	if _, err := EditProvider(path, ProviderEdit{Name: "alpha", NewName: "BETA"}); err == nil {
+		t.Fatal("rename onto an existing name must fail")
+	}
+	if _, err := EditProvider(path, ProviderEdit{Name: "ghost", Model: "x"}); err == nil {
+		t.Fatal("editing an unknown provider must fail")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten by a rejected edit")
+	}
+}

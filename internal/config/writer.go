@@ -263,6 +263,114 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 	return cfg, nil
 }
 
+// ProviderEdit is a field-level edit of one saved provider, applied by
+// EditProvider in a single atomic write. Name is the CURRENT profile name
+// (matched case-insensitively); NewName renames (case-only renames included).
+// Empty BaseURL/Model/APIKey mean "leave unchanged"; Description is applied
+// VERBATIM (the editor always knows the full desired text, so clearing works).
+type ProviderEdit struct {
+	Name         string
+	NewName      string
+	BaseURL      string
+	Model        string
+	APIKey       string
+	APIKeyStored bool
+	Description  string
+}
+
+// EditProvider applies a provider edit in ONE read-modify-write: rename
+// (activeProvider follows; a stored key migrates, with a best-effort rollback
+// if the config write fails), field updates, the stored-key marker, and the
+// verbatim description. A single write keeps the operation atomic — the
+// previous rename+upsert+describe sequence could fail halfway and leave
+// config.json renamed while every in-memory consumer still held the old name —
+// and, unlike UpsertProvider's exact-name merge, the case-insensitive match
+// here makes a case-only rename (groq -> Groq) an in-place update instead of
+// an appended duplicate profile.
+func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	oldName := strings.TrimSpace(edit.Name)
+	if oldName == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+	newName := strings.TrimSpace(edit.NewName)
+	if newName == "" {
+		newName = oldName
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg := FileConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+
+	index := -1
+	for i, provider := range cfg.Providers {
+		providerName := strings.TrimSpace(provider.Name)
+		if strings.EqualFold(providerName, oldName) {
+			index = i
+			continue
+		}
+		if strings.EqualFold(providerName, newName) {
+			return FileConfig{}, fmt.Errorf("provider %q already exists", newName)
+		}
+	}
+	if index < 0 {
+		return FileConfig{}, fmt.Errorf("provider %q not found", oldName)
+	}
+
+	previousName := cfg.Providers[index].Name
+	renamed := previousName != newName
+	keyMigrated := false
+	// A rename moves the stored key along: either the profile's existing entry,
+	// or a replacement key the caller just captured — the contract is that a
+	// captured key is stored under the CURRENT name before EditProvider runs, so
+	// one migration covers both. migrateStoredProviderKey no-ops on case-only
+	// renames (the store normalizes names), so it cannot delete the key it just
+	// moved.
+	if renamed && (cfg.Providers[index].APIKeyStored || edit.APIKeyStored) {
+		if err := migrateStoredProviderKey(path, previousName, newName); err != nil {
+			return FileConfig{}, fmt.Errorf("migrate stored key for %q: %w", oldName, err)
+		}
+		keyMigrated = true
+	}
+	if renamed && strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
+		cfg.ActiveProvider = newName
+	}
+
+	profile := &cfg.Providers[index]
+	profile.Name = newName
+	if baseURL := strings.TrimSpace(edit.BaseURL); baseURL != "" {
+		profile.BaseURL = baseURL
+	}
+	if model := strings.TrimSpace(edit.Model); model != "" {
+		profile.Model = model
+	}
+	if apiKey := strings.TrimSpace(edit.APIKey); apiKey != "" {
+		profile.APIKey = apiKey
+	}
+	if edit.APIKeyStored {
+		profile.APIKeyStored = true
+	}
+	profile.Description = strings.TrimSpace(edit.Description)
+
+	if err := writeConfigFile(path, cfg); err != nil {
+		if keyMigrated {
+			// Compensate best-effort: config.json still names the OLD profile, so
+			// move the key back where that config can find it.
+			_ = migrateStoredProviderKey(path, newName, previousName)
+		}
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 // SetProviderDescription sets a provider's description VERBATIM — including to
 // empty. The generic UpsertProvider merge treats empty fields as "leave
 // unchanged", so clearing a description needs this dedicated setter.

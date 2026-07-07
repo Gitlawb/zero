@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
@@ -143,12 +144,19 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 	// Report credential PRESENCE, never the value. Reported under a non-sensitive
 	// key ("credentialConfigured"): the prior "apiKey" key was itself sensitive, so
 	// check()'s redaction scrubbed the indicator to [REDACTED] — making "set"/"not
-	// set" invisible. A profile can authenticate via a raw auth-header value instead
-	// of APIKey, and both are trimmed so a whitespace-only value reads "not set"
-	// (matching ProviderSnapshot.APIKeySet).
+	// set" invisible. HasConfiguredCredential is the shared definition of
+	// "key-authed" (inline key, raw auth header, or a key in the encrypted
+	// credential store), matching ProviderSnapshot.APIKeySet — checking only the
+	// inline fields made doctor and `zero providers list` disagree about the
+	// same stored-key profile. A stored OAuth login counts too: a keyless
+	// token-login provider (e.g. ChatGPT) is fully able to make requests and
+	// must not fail the one tool meant to verify setup.
 	credential := "not set"
-	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
+	switch {
+	case profile.HasConfiguredCredential():
 		credential = "set"
+	case providerHasStoredOAuthLogin(profile):
+		credential = "oauth login"
 	}
 	details := map[string]any{
 		"name":                 profile.Name,
@@ -167,6 +175,22 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 			details)
 	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), details)
+}
+
+// providerHasStoredOAuthLogin reports whether the token store holds a login for
+// any of the profile's candidates — the same candidate set and normalized-key
+// matching the runtime resolver uses. Errors degrade to false.
+func providerHasStoredOAuthLogin(profile config.ProviderProfile) bool {
+	candidates := profile.OAuthLoginCandidates()
+	if len(candidates) == 0 {
+		return false
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return false
+	}
+	_, _, ok := oauth.FirstStored(store, candidates)
+	return ok
 }
 
 // localProviderBaseURL reports whether the configured base_url is a loopback host

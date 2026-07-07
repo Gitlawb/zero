@@ -419,12 +419,23 @@ func (m model) providerText() string {
 	}
 
 	snapshot := zerocommands.ProviderSnapshotFromProfile(m.providerProfile, true)
+	// A keyless profile backed by a stored OAuth login (e.g. ChatGPT) is fully
+	// authenticated — without this, /provider status showed a WORKING provider
+	// as "api key: not set" with a warning, unlike `zero providers list` which
+	// already fills OAuthLogin.
+	if !snapshot.APIKeySet {
+		snapshot.OAuthLogin = oauthLoginAvailable(m.providerProfile)
+	}
+	credentialState := apiKeyState(snapshot.APIKeySet)
+	if !snapshot.APIKeySet && snapshot.OAuthLogin {
+		credentialState = "oauth login"
+	}
 	profileLines = append(profileLines,
 		"active: "+boolText(snapshot.Active),
 		"kind: "+displayValue(snapshot.ProviderKind, "unknown"),
 		"api model: "+displayValue(snapshot.APIModel, "unknown"),
 		"base url: "+displayValue(snapshot.BaseURL, "default"),
-		"api key: "+apiKeyState(snapshot.APIKeySet),
+		"api key: "+credentialState,
 	)
 	if snapshot.Message != "" {
 		profileLines = append(profileLines, "provider status: "+snapshot.Status+" - "+snapshot.Message)
@@ -432,7 +443,7 @@ func (m model) providerText() string {
 
 	status := commandStatusOK
 	actionLines := providerNextActionLines(m.providerProfile, snapshot, m.providerName)
-	if providerCredentialRequired(m.providerProfile, snapshot.ProviderKind) && !providerProfileHasCredential(m.providerProfile) {
+	if providerCredentialRequired(m.providerProfile, snapshot.ProviderKind) && !providerProfileHasCredential(m.providerProfile) && !snapshot.OAuthLogin {
 		status = commandStatusWarning
 	}
 	return renderCommandOutput(commandOutput{

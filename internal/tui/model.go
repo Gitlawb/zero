@@ -1106,6 +1106,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardDeviceCode(msg)
 	case providerManagerCredsMsg:
 		return m.applyProviderManagerCreds(msg)
+	case providerManagerCleanupMsg:
+		return m.applyProviderManagerCleanup(msg)
 	case clipboardReadMsg:
 		// Result of a right-click paste. Insert on success; surface a brief
 		// status if the clipboard couldn't be read (e.g. no clipboard utility on
@@ -3766,7 +3768,7 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
 			// A model from another saved provider: switch provider + model together.
-			m, text, cmd = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
 		} else {
 			m, text = m.handleModelCommand(item.Value)
 		}
