@@ -1169,7 +1169,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.setFileViewMode(fileViewFull), nil
 			}
 			return m.setFileViewMode(fileViewDiff), nil
-		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }):
+		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && m.composerValue() == "":
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection).
 			m.mouseReleased = !m.mouseReleased
@@ -1369,7 +1369,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
-		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }):
+		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && m.composerValue() == "":
 			// Ctrl+B collapses / restores the right context sidebar. Only acts when
 			// the sidebar would otherwise be on screen (managed mode, wide enough,
 			// real conversation) so it's a no-op — not a confusing notice — on the

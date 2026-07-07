@@ -159,3 +159,55 @@ func TestHelpOverlayKeepsTranscriptBodyBehindIt(t *testing.T) {
 		t.Fatalf("#419: transcript body was replaced by the help overlay:\n%s", view)
 	}
 }
+
+func TestCtrlBCtrlECursorNavigationBypass(t *testing.T) {
+	// 1. Empty composer: Ctrl+B should toggle sidebarHidden, Ctrl+E should toggle mouseReleased
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m.altScreen = true
+	m.width = 120
+	m.height = 40
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	if !m.sidebarToggleAllowed() {
+		t.Fatal("sidebar toggle should be allowed")
+	}
+
+	initialSidebar := m.sidebarHidden
+	updated, _ := m.Update(testKeyCtrl('b'))
+	next := updated.(model)
+	if next.sidebarHidden == initialSidebar {
+		t.Fatal("Ctrl+B on empty composer should toggle sidebarHidden")
+	}
+
+	initialMouse := next.mouseReleased
+	updated, _ = next.Update(testKeyCtrl('e'))
+	next = updated.(model)
+	if next.mouseReleased == initialMouse {
+		t.Fatal("Ctrl+E on empty composer should toggle mouseReleased")
+	}
+
+	// 2. Non-empty composer: Ctrl+B and Ctrl+E should not toggle state, but act as cursor movement
+	m2 := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m2.altScreen = true
+	m2.width = 120
+	m2.height = 40
+	m2.transcript = append(m2.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	
+	m2 = typeRunes(t, m2, "hello")
+	if m2.composerValue() != "hello" {
+		t.Fatalf("composerValue = %q, want 'hello'", m2.composerValue())
+	}
+
+	initialSidebar2 := m2.sidebarHidden
+	updated, _ = m2.Update(testKeyCtrl('b'))
+	next2 := updated.(model)
+	if next2.sidebarHidden != initialSidebar2 {
+		t.Fatal("Ctrl+B on non-empty composer should NOT toggle sidebarHidden")
+	}
+
+	initialMouse2 := next2.mouseReleased
+	updated, _ = next2.Update(testKeyCtrl('e'))
+	next2 = updated.(model)
+	if next2.mouseReleased != initialMouse2 {
+		t.Fatal("Ctrl+E on non-empty composer should NOT toggle mouseReleased")
+	}
+}
