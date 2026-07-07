@@ -152,7 +152,7 @@ func TestDetectShellCommandIssueAllowsWindowsCDSwitch(t *testing.T) {
 	}
 }
 
-func TestDetectShellCommandIssueRequiresActualLSCommand(t *testing.T) {
+func TestDetectShellCommandIssueFlagsWindowsBadCommands(t *testing.T) {
 	for _, command := range []string{
 		`echo false ls -la`,
 		`echo list -items`,
@@ -172,6 +172,22 @@ func TestDetectShellCommandIssueRequiresActualLSCommand(t *testing.T) {
 			t.Fatalf("expected actual ls command to be flagged for %q", command)
 		}
 	}
+
+	// Common Unix filters used for truncation (e.g. gh output) must be caught.
+	for _, command := range []string{
+		`gh pr view 465 | head -200`,
+		`some-cmd | tail -n 10`,
+		`cat file | head -5`,
+		`ps aux | head`,
+		// Issue #467's exact reported case: `| cat` alone (no other POSIX
+		// utility in the pipeline) must also be flagged before execution.
+		`gh pr view 465 --json reviews,comments -q '.reviews | length' 2>&1 | cat`,
+		`some-cmd | cat`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+			t.Fatalf("expected POSIX filter command to be flagged for %q", command)
+		}
+	}
 }
 
 func TestDetectShellCommandIssueFlagsPipedPosixUtilities(t *testing.T) {
@@ -188,6 +204,55 @@ func TestDetectShellCommandIssueFlagsPipedPosixUtilities(t *testing.T) {
 		if issue.Kind != "windows_msys_sandbox" {
 			t.Fatalf("expected windows_msys_sandbox for %q, got %q", command, issue.Kind)
 		}
+	}
+}
+
+func TestDetectShellCommandIssueIgnoresQuotedPipeText(t *testing.T) {
+	for _, command := range []string{
+		`gh pr comment --body "please do not use | cat here"`,
+		`git commit -m "grep for TODO later"`,
+		`git commit -m "fix | cat pipe"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected POSIX-utility text inside a quoted argument to pass for %q, got %#v", command, issue)
+		}
+	}
+
+	// The same utility names, actually piped (unquoted), must still be flagged.
+	for _, command := range []string{
+		`echo test | cat`,
+		`echo test | grep TODO`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+			t.Fatalf("expected unquoted POSIX utility pipeline to still be flagged for %q", command)
+		}
+	}
+}
+
+func TestDetectShellCommandIssueIgnoresCaretEscapedMetachars(t *testing.T) {
+	for _, command := range []string{
+		`foo^|cat`,
+		`echo a^&cat`,
+		`echo a^;cat`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected caret-escaped metachar to read as a literal for %q, got %#v", command, issue)
+		}
+	}
+
+	// The same shape, unescaped, must still be flagged.
+	if issue := detectShellCommandIssue(`foo|cat`, "windows"); issue == nil {
+		t.Fatal("expected unescaped pipe into cat to still be flagged")
+	}
+}
+
+func TestDetectShellCommandIssueSuggestionOmitsBlockedMore(t *testing.T) {
+	issue := detectShellCommandIssue(`some_command | wc -l`, "windows")
+	if issue == nil {
+		t.Fatal("expected POSIX utility pipeline to be flagged")
+	}
+	if strings.Contains(issue.Suggestion, "more") {
+		t.Fatalf("suggestion should not recommend more, which is itself blocked as an interactive pager on Windows: %q", issue.Suggestion)
 	}
 }
 
@@ -693,8 +758,15 @@ func TestBashToolBlocksInteractiveCommandThroughSandbox(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "interactive") || !strings.Contains(result.Output, "cat") {
-		t.Fatalf("expected pager guard message with cat suggestion, got %q", result.Output)
+	// The suggested non-interactive alternative is platform-specific: cat
+	// doesn't exist on Windows cmd.exe, so the guard suggests `type` there
+	// instead (see safe_command.go's windowsSuggestion).
+	wantSuggestion := "cat"
+	if runtime.GOOS == "windows" {
+		wantSuggestion = "type"
+	}
+	if !strings.Contains(result.Output, "interactive") || !strings.Contains(result.Output, wantSuggestion) {
+		t.Fatalf("expected pager guard message with %q suggestion, got %q", wantSuggestion, result.Output)
 	}
 }
 

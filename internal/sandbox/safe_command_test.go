@@ -88,6 +88,28 @@ func TestDetectInteractiveCommandHonorsWindows(t *testing.T) {
 	}
 }
 
+// TestDetectInteractiveCommandPagerSuggestionIsPlatformSpecific covers a fix
+// for suggesting POSIX-only tools (cat/head/tail) as the escape hatch for a
+// blocked pager on Windows, where cmd.exe has none of them.
+func TestDetectInteractiveCommandPagerSuggestionIsPlatformSpecific(t *testing.T) {
+	for _, pager := range []string{"less", "more", "most"} {
+		linux := DetectInteractiveCommand(pager+" notes.txt", "linux")
+		if !linux.Interactive || !strings.Contains(linux.Suggestion, "cat") {
+			t.Fatalf("%s on linux: expected cat/head/tail suggestion, got %+v", pager, linux)
+		}
+		windows := DetectInteractiveCommand(pager+" notes.txt", "windows")
+		if !windows.Interactive {
+			t.Fatalf("%s on windows: expected interactive block, got %+v", pager, windows)
+		}
+		if strings.Contains(windows.Suggestion, "cat") || strings.Contains(windows.Suggestion, "tail") {
+			t.Fatalf("%s on windows: suggestion should not name POSIX-only tools, got %q", pager, windows.Suggestion)
+		}
+		if !strings.Contains(windows.Suggestion, "type") {
+			t.Fatalf("%s on windows: expected type suggestion, got %q", pager, windows.Suggestion)
+		}
+	}
+}
+
 func TestDetectInteractiveCommandFindsAcrossSeparators(t *testing.T) {
 	// Interactive commands hidden after a shell operator should still be caught.
 	for _, command := range []string{

@@ -26,6 +26,10 @@ type interactiveProgram struct {
 	suggestion string
 	// windowsOnly limits the match to GOOS == "windows" (e.g. notepad).
 	windowsOnly bool
+	// windowsSuggestion overrides suggestion on GOOS == "windows", for cases
+	// where the default suggestion names POSIX-only tools (cat/head/tail)
+	// that cmd.exe does not have.
+	windowsSuggestion string
 }
 
 // interactivePrograms maps a bare command name to its non-interactive guidance.
@@ -39,9 +43,21 @@ var interactivePrograms = map[string]interactiveProgram{
 	"emacs": {reason: "emacs opens an interactive session", suggestion: "Use `emacs --batch` for scripting, or the edit_file/write_file tools."},
 	"pico":  {reason: "pico is a full-screen editor that waits for keystrokes", suggestion: "Use the edit_file/write_file tools or `sed -i`."},
 	// Pagers.
-	"less": {reason: "less is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
-	"more": {reason: "more is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
-	"most": {reason: "most is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
+	"less": {
+		reason:            "less is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"more": {
+		reason:            "more is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"most": {
+		reason:            "most is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
 	// Process/system monitors.
 	"top":   {reason: "top runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot."},
 	"htop":  {reason: "htop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot."},
@@ -186,11 +202,15 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 		if hasNonInteractiveFlag(first, fields) {
 			continue
 		}
+		suggestion := program.suggestion
+		if goos == "windows" && program.windowsSuggestion != "" {
+			suggestion = program.windowsSuggestion
+		}
 		return InteractiveCommandResult{
 			Interactive: true,
 			Command:     first,
 			Reason:      program.reason,
-			Suggestion:  program.suggestion,
+			Suggestion:  suggestion,
 		}
 	}
 
