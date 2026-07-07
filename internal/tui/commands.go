@@ -48,6 +48,8 @@ const (
 	commandNew
 	commandSkills
 	commandLoop
+	commandVoice
+	commandSTTModel
 	commandUnknown
 )
 
@@ -90,6 +92,20 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupModel,
 		description: "Show or switch the active model.",
 		kind:        commandModel,
+	},
+	{
+		name:        "/stt-model",
+		usage:       "/stt-model",
+		group:       commandGroupModel,
+		description: "Choose the speech-to-text (dictation) model.",
+		kind:        commandSTTModel,
+	},
+	{
+		name:        "/voice",
+		usage:       "/voice",
+		group:       commandGroupRuntime,
+		description: "Toggle voice mode (hold Space to dictate).",
+		kind:        commandVoice,
 	},
 	{
 		name:        "/plan",
