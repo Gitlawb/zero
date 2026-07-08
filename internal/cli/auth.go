@@ -108,6 +108,7 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	key = strings.TrimSpace(key)
 	line, err := saveOpenRouterProviderKey(deps, key)
 	if err != nil {
 		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
@@ -142,6 +143,9 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 		return "", err
 	}
 	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
+		// Best-effort rollback: don't leave the key orphaned in the credential
+		// store while config.json still says it isn't there.
+		_, _ = store.Delete(ensured.Name)
 		return "", err
 	}
 	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
