@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const maxMCPRedirects = 10
@@ -14,6 +15,7 @@ func mcpHTTPClient(server Server, transport http.RoundTripper) *http.Client {
 	return &http.Client{
 		Transport:     transport,
 		CheckRedirect: checkMCPRedirect(server),
+		Timeout:       30 * time.Second,
 	}
 }
 
