@@ -27,6 +27,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
+# Go build/module caches (GOCACHE/GOMODCACHE pointed here for local runs)
+.gocache/
+.gomodcache/
+
 # IntelliJ based IDEs
 .idea
 
@@ -37,7 +41,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 /zero
 /zero.exe
+/zero-windows-command-runner.exe
+/zero-windows-sandbox-setup.exe
 /zero-skills
+/.zero-binary-version
 /snake-game.html
 
 # Superpowers skill artifacts (brainstorm mockups, specs, plans) — local only
@@ -47,3 +54,4 @@ docs/superpowers/
 # Termux/Android build artifacts
 zero-termux-arm64
 zero-linux-sandbox
+zero-seccomp

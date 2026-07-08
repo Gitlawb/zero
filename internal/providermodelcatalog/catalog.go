@@ -140,12 +140,13 @@ var curatedModels = map[string][]Model{
 	"zai":    zaiCuratedModels,
 	"zai-cn": zaiCuratedModels,
 	// OpenGateway smart-routes by model id across its upstream providers
-	// (see /health: xiaomi-mimo, minimax, qwen, google, nvidia, z-ai). These are
-	// the curated coding defaults; the gateway accepts any model its upstreams
-	// expose, so users can also type an id the picker doesn't list.
+	// (see /health: xiaomi-mimo, minimax, qwen, google, nvidia, tencent, z-ai).
+	// These are the curated coding defaults; the gateway accepts any model its
+	// upstreams expose, so users can also type an id the picker doesn't list.
 	"gitlawb-opengateway": {
 		{ID: "mimo-v2.5-pro", Description: "catalog default (Xiaomi MiMo)"},
 		{ID: "mimo-v2.5-pro-ultraspeed", Description: "fast model (Xiaomi MiMo)"},
+		{ID: "tencent/hy3", Description: "free Tencent HY3 model"},
 		{ID: "MiniMax-M3", Description: "MiniMax model"},
 		{ID: "qwen-plus", Description: "Qwen model"},
 		{ID: "gemini-2.5-pro", Description: "long-context model (Google)"},
@@ -155,6 +156,12 @@ var curatedModels = map[string][]Model{
 	"atomic-chat": {
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
+	},
+	"opencode-go-anthropic-compatible": {
+		{ID: "minimax-m3", Description: "MiniMax M3: default"},
+		{ID: "minimax-m2.7", Description: "MiniMax M2.7: coding model"},
+		{ID: "qwen3.7-plus", Description: "Qwen 3.7 Plus: balanced model"},
+		{ID: "qwen3.7-max", Description: "Qwen 3.7 Max: strong model"},
 	},
 	"custom-openai-compatible": {
 		{ID: "custom-model", Description: "custom endpoint model"},
@@ -166,13 +173,13 @@ var curatedModels = map[string][]Model{
 
 func Models(provider providercatalog.Descriptor) []Model {
 	if models, ok := curatedModels[provider.ID]; ok {
-		return dedupeModels(provider.DefaultModel, models)
+		return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, models))
 	}
 	models := registryModels(provider)
 	if len(models) > 0 {
-		return dedupeModels(provider.DefaultModel, models)
+		return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, models))
 	}
-	return dedupeModels(provider.DefaultModel, nil)
+	return FilterModelsForProvider(provider.ID, dedupeModels(provider.DefaultModel, nil))
 }
 
 func registryModels(provider providercatalog.Descriptor) []Model {

@@ -11,9 +11,45 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
+
+// ensureLoginProviderProfile makes a freshly stored OAuth login visible as a
+// provider: without a profile in config.json the login shows up nowhere — not in
+// `zero providers list`, not in the TUI picker — and `zero providers use <name>`
+// fails "not found", so the user's working active provider looks broken while
+// the new login looks lost. Returns user-facing guidance lines ("" when the
+// login has no catalog entry to scaffold from). Best-effort by design: the
+// token is already stored, so a profile-write failure degrades to a warning
+// line instead of failing a login that succeeded.
+func ensureLoginProviderProfile(deps appDeps, provider string) string {
+	if _, ok := providercatalog.Get(provider); !ok {
+		// Custom OAuth server without a catalog entry — no endpoint/model defaults
+		// to scaffold a profile from; the user wires their own profile.
+		return ""
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return "warning: login saved, but no provider profile was written: " + err.Error()
+	}
+	ensured, err := config.EnsureCatalogProvider(configPath, provider)
+	if err != nil {
+		return "warning: login saved, but no provider profile was written: " + err.Error()
+	}
+	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	switch {
+	case ensured.Created && active:
+		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
+	case ensured.Created:
+		return fmt.Sprintf("Added provider %q to your config; the active provider is still %q.\nSwitch with: zero providers use %s", ensured.Name, ensured.Active, ensured.Name)
+	case active:
+		return fmt.Sprintf("Provider %q is configured and active.", ensured.Name)
+	default:
+		return fmt.Sprintf("Provider %q is already configured.\nSwitch with: zero providers use %s", ensured.Name, ensured.Name)
+	}
+}
 
 // runAuth dispatches `zero auth <command>` for provider OAuth login. It is
 // additive and independent of `zero mcp oauth` (MCP server auth), which is
@@ -138,8 +174,10 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if _, err := fmt.Fprint(stdout, statuses); err != nil {
 		return exitCrash
 	}
-	if _, err := fmt.Fprint(stdout, "\nUse it with zero, e.g.:\n  zero --provider chatgpt --model gpt-5.5\n"); err != nil {
-		return exitCrash
+	if line := ensureLoginProviderProfile(deps, "chatgpt"); line != "" {
+		if _, err := fmt.Fprintf(stdout, "\n%s\n", line); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }
@@ -330,6 +368,11 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	if _, err := fmt.Fprintf(stdout, "Logged in to %s.\n%s\n", parsed.positional[0], oauth.FormatStatuses([]oauth.Status{status})); err != nil {
 		return exitCrash
+	}
+	if line := ensureLoginProviderProfile(deps, provider); line != "" {
+		if _, err := fmt.Fprintln(stdout, line); err != nil {
+			return exitCrash
+		}
 	}
 	return exitSuccess
 }

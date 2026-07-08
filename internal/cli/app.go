@@ -686,8 +686,14 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	defer closeMCPRuntime(stderr, mcpRuntime)
 	// A server that could not be reached or validated is skipped, not fatal (one
 	// bad MCP server must not abort startup) — surface each so a missing tool set is
-	// explained rather than silently absent.
+	// explained rather than silently absent. A built-in default the user never
+	// configured (e.g. keyless Firecrawl with no credentials) is the exception: it
+	// was never asked for, so its failure is not worth a startup warning — only
+	// servers the user actually configured warn on failure (issue #552).
 	for _, skipped := range mcpRuntime.Skipped() {
+		if skipped.UnconfiguredDefault {
+			continue
+		}
 		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
 	}
 	// Make local plugins live: register their declared tools into the registry and
@@ -729,8 +735,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Scope:         scope,
 	})
 	lastKnownMCPConfig := mcpConfig
+	sttServerManager := newDictationServerManager(resolved.STT)
+	// Keep STT downloads in the SAME config tree the rest of the TUI uses. Deriving
+	// from userConfigPath (rather than config.UserConfigDir()) matters when the config
+	// root is overridden — e.g. in tests or a custom ZERO config dir — so the two
+	// don't diverge. userConfigPath points at .../zero/config.json, so its dir is the
+	// zero config dir.
+	sttDownloadRoot := ""
+	if userConfigPath != "" {
+		sttDownloadRoot = filepath.Join(filepath.Dir(userConfigPath), "stt")
+	}
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
+		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
 		UserConfigPath:       userConfigPath,
@@ -741,6 +758,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ProviderProfile:      resolved.Provider,
 		SavedProviders:       usableSavedProviders(resolved.Providers),
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
+		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
@@ -791,9 +809,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			merged, _ := plugins.MergedSkillsLoaded(deps.skillsDir(), pluginActivation.skillRoots)
 			return merged
 		}),
-		PermissionMode: permissionMode,
-		Notify:         resolved.Notify,
-		KeyBindings:    resolved.KeyBindings,
+		PermissionMode:            permissionMode,
+		Notify:                    resolved.Notify,
+		KeyBindings:               resolved.KeyBindings,
+		STT:                       resolved.STT,
+		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
+		ShutdownDictationServer:   sttServerManager.Shutdown,
+		STTDownloadRoot:           sttDownloadRoot,
+		STTKeyStatus:              newSTTKeyStatus(resolved, userConfigPath),
+		SaveSTTKey:                newSaveSTTKey(userConfigPath),
 		Setup: tui.SetupOptions{
 			Visible:    setupVisible,
 			Required:   needsSetup,

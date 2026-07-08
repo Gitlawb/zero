@@ -40,6 +40,7 @@ var expectedCatalogIDs = []string{
 	"kilocode",
 	"opencode",
 	"opencode-go",
+	"opencode-go-anthropic-compatible",
 	"atomic-chat",
 	"chatgpt-proxy",
 	"custom-openai-compatible",
@@ -291,7 +292,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportGoogle:          {"google"},
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
-		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "custom-anthropic-compatible"},
+		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
 		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 

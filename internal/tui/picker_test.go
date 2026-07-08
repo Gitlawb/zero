@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -500,6 +502,291 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	}
 }
 
+// recentModelPairsForPicker pins the active provider+model first (even before
+// it is recorded to history), then follows persisted history in order,
+// de-duplicating by provider+model pair and capping to config.MaxRecentModels
+// (issue: /model picker's "Recent" section only ever showed the active model).
+func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
+	m := model{
+		providerName: "openrouter",
+		modelName:    "google/gemini-2.5-pro",
+		recentModels: []config.RecentModelEntry{
+			{Provider: "openrouter", Model: "google/gemini-2.5-pro"}, // dup of active: collapses
+			{Provider: "openrouter", Model: "a"},
+			{Provider: "openrouter", Model: "b"},
+			{Provider: "openrouter", Model: "c"},
+			{Provider: "openrouter", Model: "d"},
+			{Provider: "openrouter", Model: "e"}, // beyond the cap: dropped
+		},
+	}
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "a"},
+		{Provider: "openrouter", Model: "b"},
+		{Provider: "openrouter", Model: "c"},
+		{Provider: "openrouter", Model: "d"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
+	}
+	if len(got) != config.MaxRecentModels {
+		t.Fatalf("len = %d, want config.MaxRecentModels (%d)", len(got), config.MaxRecentModels)
+	}
+}
+
+// The picker's cross-group de-dup must key on provider+model, not model id
+// alone: the same model id can be offered by two different providers, and
+// those are distinct, independently selectable rows (issue: recents should
+// "de-duplicate by provider+model pair, not model name alone").
+func TestAssembleModelPickerItemsDedupesByProviderAndModelPairNotModelIDAlone(t *testing.T) {
+	m := model{}
+	recent := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-b"},
+	}
+	items := m.assembleModelPickerItems(recent, nil)
+	if len(items) != 2 {
+		t.Fatalf("expected both provider-a and provider-b rows to survive de-dup, got %#v", items)
+	}
+	owners := map[string]bool{}
+	for _, item := range items {
+		owners[item.OwnerProvider] = true
+	}
+	if !owners["provider-a"] || !owners["provider-b"] {
+		t.Fatalf("expected rows from both providers, got %#v", items)
+	}
+}
+
+// Favorites keep the pre-provider-aware semantics: one row per favorited
+// model ID, even when that model ID is offered by multiple providers. Recent
+// and Catalog must also skip any model ID already surfaced under Favorites,
+// so a favorited model doesn't reappear in a second group. Recent/Catalog
+// still de-dup among themselves by provider+model so cross-provider rows stay
+// distinct.
+func TestAssembleModelPickerItemsFavoritesDedupByModelIDAndHideFromOtherGroups(t *testing.T) {
+	m := model{favoriteModels: map[string]bool{"shared-model": true}}
+	recent := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-b"},
+	}
+	catalog := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-c"},
+		{Value: "other-model", OwnerProvider: "provider-a"},
+	}
+	items := m.assembleModelPickerItems(recent, catalog)
+
+	var favorites []pickerItem
+	for _, item := range items {
+		if item.Group == "Favorites" {
+			favorites = append(favorites, item)
+		}
+	}
+	if len(favorites) != 1 {
+		t.Fatalf("expected exactly one Favorites row for shared-model, got %#v", favorites)
+	}
+	// The deduped Favorites row keeps whichever occurrence comes first in
+	// recent+catalog order — here provider-a from recent[0]. Pin that down
+	// explicitly rather than leaving it implicit.
+	if favorites[0].OwnerProvider != "provider-a" {
+		t.Fatalf("expected surviving favorite to keep first-seen provider %q, got %#v", "provider-a", favorites[0])
+	}
+	for _, item := range items {
+		if item.Group != "Favorites" && item.Value == "shared-model" {
+			t.Fatalf("favorited model id leaked into %s: %#v", item.Group, item)
+		}
+	}
+	var otherCatalog []pickerItem
+	for _, item := range items {
+		if item.Group != "Favorites" && item.Group != "Recent" && item.Value == "other-model" {
+			otherCatalog = append(otherCatalog, item)
+		}
+	}
+	if len(otherCatalog) != 1 {
+		t.Fatalf("expected other-model to appear once in Catalog, got %#v", items)
+	}
+}
+
+// registryModelPickerItem must tag rows with OwnerProvider so
+// pickerItemDedupKey keys them by provider+model instead of falling back to
+// Value alone. This matters most for the plain-registry fallback path (no
+// saved providers resolved any models — newModelPicker lists the full
+// registry directly via registryModelPickerItem), where two registry entries
+// sharing a model id but offered by different providers would otherwise
+// collide and silently drop one row.
+func TestRegistryModelPickerItemSetsOwnerProvider(t *testing.T) {
+	entry := testModelEntry("shared-model", 128000, nil)
+	entry.Provider = modelregistry.ProviderAnthropic
+	item := registryModelPickerItem(entry, "Catalog")
+	if item.OwnerProvider != string(modelregistry.ProviderAnthropic) {
+		t.Fatalf("expected OwnerProvider %q, got %q", modelregistry.ProviderAnthropic, item.OwnerProvider)
+	}
+
+	// Two catalog rows for the same model id from different providers must
+	// survive assembleModelPickerItems as distinct rows, not collide on Value.
+	entryA := testModelEntry("shared-model", 128000, nil)
+	entryA.Provider = modelregistry.ProviderAnthropic
+	entryB := testModelEntry("shared-model", 128000, nil)
+	entryB.Provider = modelregistry.ProviderOpenAI
+	catalog := []pickerItem{
+		registryModelPickerItem(entryA, "Catalog"),
+		registryModelPickerItem(entryB, "Catalog"),
+	}
+	m := model{}
+	items := m.assembleModelPickerItems(nil, catalog)
+	if len(items) != 2 {
+		t.Fatalf("expected both provider rows to survive de-dup, got %#v", items)
+	}
+}
+
+// End-to-end: the picker's "Recent" section shows the active model plus prior
+// history, newest first, with the active entry deduped against a stale copy
+// already present in history.
+func TestModelPickerRecentSectionShowsHistoryPastTheActiveModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+			{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	recentValues := []string{}
+	for _, item := range picker.items {
+		if item.Group != "Recent" {
+			break
+		}
+		recentValues = append(recentValues, item.Value)
+	}
+	want := []string{"google/gemini-2.5-pro", "minimax/minimax-m2.1"}
+	if !reflect.DeepEqual(recentValues, want) {
+		t.Fatalf("Recent section values = %#v, want %#v (active pinned first, history deduped)", recentValues, want)
+	}
+}
+
+// Typed /model switches must record + persist recent history, moving a
+// re-selected pair back to the front rather than leaving a stale duplicate.
+func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	m.input.SetValue("/model anthropic/claude-sonnet-4.5")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("modelName = %q, want the switch to apply", m.modelName)
+	}
+
+	m.input.SetValue("/model minimax/minimax-m2.1")
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	want := []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "anthropic/claude-sonnet-4.5"},
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+	}
+	if !reflect.DeepEqual(m.recentModels, want) {
+		t.Fatalf("recentModels = %#v, want %#v", m.recentModels, want)
+	}
+	persisted := readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+
+	// Re-selecting the oldest pair moves it to the front instead of leaving a
+	// stale duplicate further down the list.
+	m.input.SetValue("/model google/gemini-2.5-pro")
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	want = []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "anthropic/claude-sonnet-4.5"},
+	}
+	if !reflect.DeepEqual(m.recentModels, want) {
+		t.Fatalf("recentModels after re-selecting = %#v, want %#v", m.recentModels, want)
+	}
+	// Also check the persisted copy for this reorder/dedupe case (the trickiest
+	// path): if recordRecentModel(s)'s in-memory reordering ever diverges from
+	// SetRecentModels/NormalizeRecentModels' disk-write semantics, this is the
+	// case most likely to expose it.
+	persisted = readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels after re-selecting = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+}
+
+// switchProviderModel (the picker's cross-provider path) must also record
+// history, tagged with the provider actually switched to.
+func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	next, status, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud"
+	if status != wantStatus {
+		t.Fatalf("switchProviderModel() status = %q, want %q (a mismatch here means the switch itself failed, not the recentModels assertion below)", status, wantStatus)
+	}
+
+	want := []config.RecentModelEntry{
+		{Provider: "ollama", Model: "kimi-k2.7-code:cloud"},
+		{Provider: "openai", Model: "gpt-5.1"},
+	}
+	if !reflect.DeepEqual(next.recentModels, want) {
+		t.Fatalf("recentModels = %#v, want %#v", next.recentModels, want)
+	}
+	persisted := readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+}
+
 func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{
@@ -965,9 +1252,9 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 		},
 	})
 
-	next, text, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
-	if !strings.Contains(text, "Switched to ollama") {
-		t.Fatalf("switch notice = %q, want it to confirm the switch", text)
+	next, text, ok, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	if !ok || !strings.Contains(text, "Switched to ollama") {
+		t.Fatalf("switch notice = %q (ok=%v), want a committed switch", text, ok)
 	}
 	if next.modelName != "kimi-k2.7-code:cloud" || next.providerName != "ollama" {
 		t.Fatalf("model/provider not switched: modelName=%q providerName=%q", next.modelName, next.providerName)
@@ -1020,5 +1307,78 @@ func TestNormalizeProfileForProviderCanonicalizesPlaceholderName(t *testing.T) {
 		if got.Name != "openai" {
 			t.Fatalf("Name = %q for placeholder %q, want canonicalized to %q", got.Name, name, "openai")
 		}
+	}
+}
+
+// TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer: switching to a
+// token-login provider (ChatGPT) must pass the credential gate on the stored
+// OAuth login and hand newProvider a KEYLESS profile. Inlining the bearer as
+// APIKey makes HasConfiguredCredential true, which strips the OAuth login
+// candidates at build time — the client is then constructed without the bearer
+// resolver and login key, dropping token refresh and the Codex
+// `chatgpt-account-id` header, so every call 401s.
+func TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "bearer-123", TokenType: "Bearer"}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	var built config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName:    "opengateway",
+		ModelName:       "some-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			built = profile
+			return &fakeProvider{}, nil
+		},
+	})
+
+	next, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if !ok || !strings.Contains(text, "Switched to chatgpt") {
+		t.Fatalf("switch should succeed on the stored OAuth login, got %q (ok=%v)", text, ok)
+	}
+	if next.providerName != "chatgpt" || next.modelName != "gpt-5.5" {
+		t.Fatalf("switch did not commit: provider=%q model=%q", next.providerName, next.modelName)
+	}
+	if built.APIKey != "" {
+		t.Fatalf("OAuth bearer must not be inlined as APIKey (suppresses the runtime resolver), got %q", built.APIKey)
+	}
+}
+
+// TestSwitchProviderModelStillRejectsProviderWithNoCredential: with no key, no
+// header, no local runtime, and no OAuth login, the gate must keep refusing.
+func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "opengateway",
+		ModelName:       "some-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("newProvider must not run for a credential-less provider")
+			return nil, nil
+		},
+	})
+
+	_, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	if ok || !strings.Contains(text, "no usable credential") {
+		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}
 }

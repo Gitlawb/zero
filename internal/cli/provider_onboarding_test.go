@@ -234,3 +234,48 @@ func writeProviderOnboardingConfig(t *testing.T, path string, cfg config.FileCon
 		t.Fatalf("write config: %v", err)
 	}
 }
+
+// TestRunProvidersRemoveDeletesKeyBesideConfig: the stored key must be deleted
+// from the credential store CO-LOCATED with the config being edited (where
+// SecureProviderProfile captured it), not the default-path store.
+func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := `{"activeProvider":"gw","providers":[{"name":"gw","provider_kind":"openai-compatible","baseURL":"https://gw.example.com/v1","apiKeyStored":true,"model":"m1"},{"name":"other","provider_kind":"openai-compatible","baseURL":"https://o.example.com/v1","model":"m2"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.Set("gw", "sk-secret"); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "gw", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+
+	var payload struct {
+		Removed        string `json:"removed"`
+		KeyRemoved     bool   `json:"keyRemoved"`
+		KeyError       string `json:"keyError"`
+		ActiveProvider string `json:"activeProvider"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Removed != "gw" || !payload.KeyRemoved || payload.KeyError != "" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if payload.ActiveProvider != "other" {
+		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
+	}
+	if _, ok, _ := store.Get("gw"); ok {
+		t.Fatalf("stored key must be deleted from the store beside the config")
+	}
+}

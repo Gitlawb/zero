@@ -99,6 +99,12 @@ func (m model) startNewSession() model {
 	// Scrollback above can't be un-printed; a faint divider marks the boundary and
 	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).
 	m.resetFlushFrontier("· new session ·")
+	// Loops belong to the previous session; stop them so they don't fire the old
+	// conversation's prompt into the fresh one.
+	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
+		m = updated
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared)})
+	}
 	return m
 }
 
@@ -205,6 +211,10 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		return m, "Sessions\nerror: " + err.Error()
 	}
 
+	// Capture the current session id before switching so loops are only torn down
+	// on a real change — `/resume latest` or `/resume <currentID>` can resolve to
+	// the already-active session, whose loops belong to it, not a "previous" one.
+	previousID := m.activeSession.SessionID
 	m.activeSession = *session
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
@@ -213,9 +223,16 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	if m.modelName == "" {
 		m.modelName = session.ModelID
 	}
+	loopsCleared := 0
+	if session.SessionID != previousID {
+		m, loopsCleared = m.clearLoopsForSessionSwitch()
+	}
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
+	if loopsCleared > 0 {
+		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
+	}
 	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
 	m.transcript = rows
 	// Every rehydrated row is settled by construction, so resetting the flush

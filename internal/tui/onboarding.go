@@ -586,6 +586,13 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 	if msg.apiKey != "" {
 		m.setup.apiKey.SetValue(msg.apiKey)
 	}
+	if msg.tokenLogin {
+		// Early persist on the Update goroutine (see persistOAuthLoginProvider's
+		// threading contract) so quitting setup after the login doesn't lose it;
+		// completeSetup persists the full profile with the chosen model anyway,
+		// so a failure here is recoverable and not fatal to setup.
+		_ = persistOAuthLoginProvider(m.setup.configPath, msg.providerID)
+	}
 	m.setup.oauthErr = ""
 	m.setup.err = ""
 	m.setup.oauthDevice = false

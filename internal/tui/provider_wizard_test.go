@@ -453,8 +453,13 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	if captured.Model != "my-custom-model" {
 		t.Fatalf("captured Model = %q, want typed model", captured.Model)
 	}
-	if captured.APIKeyEnv != "OPENAI_API_KEY" {
-		t.Fatalf("captured APIKeyEnv = %q, want OPENAI_API_KEY fallback", captured.APIKeyEnv)
+	// A custom endpoint left with no credential means "this endpoint needs no
+	// auth" (e.g. a local llama.cpp server) — it must not be stamped with the
+	// catalog's generic OPENAI_API_KEY placeholder, or the saved profile gets
+	// treated as missing a credential and filtered out of /model on the next
+	// run (issue #555).
+	if captured.APIKeyEnv != "" {
+		t.Fatalf("captured APIKeyEnv = %q, want empty for a no-auth custom endpoint", captured.APIKeyEnv)
 	}
 }
 

@@ -289,3 +289,98 @@ func TestDispatchOptionO(t *testing.T) {
 		t.Errorf("model.keyMatch should NOT match ctrl+o when option+o is configured")
 	}
 }
+
+// A configured binding equal to a reserved hardcoded chord must be reverted
+// to default rather than silently making the hardcoded action unreachable
+// (e.g. configuring toggleDetailed to ctrl+f would otherwise swallow the
+// /model picker's "favorite" shortcut).
+func TestSanitizeKeyBindingsDropsReservedCollision(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "ctrl+f", // collides with the hardcoded favorite-model shortcut
+		ToggleMouse:    "ctrl+e", // unaffected, should survive untouched
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleDetailed.isZero() {
+		t.Errorf("toggleDetailed should be reverted to default, got %q", sanitized.toggleDetailed.Label())
+	}
+	if sanitized.toggleMouse.isZero() || sanitized.toggleMouse.Label() != "Ctrl+E" {
+		t.Errorf("toggleMouse should be untouched, got %q", sanitized.toggleMouse.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
+// Two configurable actions bound to the same chord must not both fire —
+// sanitizeKeyBindings should keep the first and revert the rest to default.
+func TestSanitizeKeyBindingsDropsMutualCollision(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "ctrl+o",
+		CycleReasoning: "ctrl+o", // collides with toggleDetailed above
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if sanitized.toggleDetailed.isZero() || sanitized.toggleDetailed.Label() != "Ctrl+O" {
+		t.Errorf("toggleDetailed (first claimant) should keep ctrl+o, got %q", sanitized.toggleDetailed.Label())
+	}
+	if !sanitized.cycleReasoning.isZero() {
+		t.Errorf("cycleReasoning (second claimant) should be reverted to default, got %q", sanitized.cycleReasoning.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
+// Non-colliding configured bindings must pass through unchanged with no
+// warnings.
+func TestSanitizeKeyBindingsNoCollisions(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "option+o",
+		ToggleSidebar:  "option+b",
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if len(warnings) != 0 {
+		t.Fatalf("want no warnings, got %v", warnings)
+	}
+	if sanitized.toggleDetailed.Label() != "Alt+O" || sanitized.toggleSidebar.Label() != "Alt+B" {
+		t.Fatalf("bindings should be unchanged: toggleDetailed=%q toggleSidebar=%q",
+			sanitized.toggleDetailed.Label(), sanitized.toggleSidebar.Label())
+	}
+}
+
+// A configured binding must not shadow another action that is still on its
+// built-in default chord.
+func TestSanitizeKeyBindingsDropsCollisionWithOtherDefault(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "ctrl+t", // collides with cycleReasoning default
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleDetailed.isZero() {
+		t.Errorf("toggleDetailed should be reverted to default, got %q", sanitized.toggleDetailed.Label())
+	}
+	if !sanitized.cycleReasoning.isZero() {
+		t.Errorf("cycleReasoning should remain default (zero), got %q", sanitized.cycleReasoning.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
+// Bare hardcoded keys handled directly in updateModel (e.g. Tab navigation)
+// are reserved too and must not be shadowed by configurable bindings.
+func TestSanitizeKeyBindingsDropsBareHardcodedCollision(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "tab",
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleDetailed.isZero() {
+		t.Errorf("toggleDetailed should be reverted to default, got %q", sanitized.toggleDetailed.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}

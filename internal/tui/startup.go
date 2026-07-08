@@ -92,10 +92,14 @@ func (m model) emptyStateLines(width int) []string {
 // emptyStateExamples seeds the first prompt with a few representative asks.
 const emptyStateExamples = `Try  "explain this codebase"  ·  "fix the failing test"  ·  "add a --json flag"`
 
-// emptyStateOrientation renders a faint "cwd · branch · model" line for the home
-// screen, omitting any piece that's unknown. Empty when nothing is known.
+// emptyStateOrientation renders a faint "version · cwd · branch · model" line
+// for the home screen, omitting any piece that's unknown. Empty when nothing
+// is known.
 func (m model) emptyStateOrientation() string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
+	if version := displayVersion(m.appVersion); version != "" {
+		parts = append(parts, version)
+	}
 	if cwd := strings.TrimSpace(m.cwd); cwd != "" {
 		parts = append(parts, shortenPath(cwd))
 	}
@@ -109,6 +113,20 @@ func (m model) emptyStateOrientation() string {
 		return ""
 	}
 	return zeroTheme.faint.Render(strings.Join(parts, "  ·  "))
+}
+
+// displayVersion formats the CLI build version for display: numeric releases
+// gain a "v" prefix (0.2.0 → v0.2.0), anything else (dev, git SHAs) passes
+// through unchanged. Empty stays empty so unset builds show nothing.
+func displayVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return ""
+	}
+	if version[0] >= '0' && version[0] <= '9' {
+		return "v" + version
+	}
+	return version
 }
 
 func zeroWordmarkLines() []string {

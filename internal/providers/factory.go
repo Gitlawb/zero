@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers/anthropic"
 	"github.com/Gitlawb/zero/internal/providers/gemini"
 	"github.com/Gitlawb/zero/internal/providers/openai"
@@ -205,6 +206,9 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 		}
+		if err := validateModelAllowedForProvider(profile, entry.ID); err != nil {
+			return resolvedProfile{}, err
+		}
 		return resolvedProfile{
 			providerKind:    providerKind,
 			apiModel:        entry.APIModel,
@@ -216,11 +220,37 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 	if providerKind == "" {
 		providerKind = config.ProviderKindOpenAI
 	}
+	if err := validateModelAllowedForProvider(profile, model); err != nil {
+		return resolvedProfile{}, err
+	}
 	return resolvedProfile{
 		providerKind: providerKind,
 		apiModel:     model,
 		baseURL:      baseURL,
 	}, nil
+}
+
+// validateModelAllowedForProvider enforces provider-scoped model allowlists at
+// runtime resolution time. It delegates to
+// providermodelcatalog.ModelIDAllowedForProvider, which encodes the per-provider
+// rules in one place; restricted providers (such as
+// opencode-go-anthropic-compatible) only accept a curated subset of model
+// families, while the default branch makes unrestricted providers a no-op. This
+// guards both New() (TUI /model, headless --model overrides) and
+// ResolveRuntimeMetadata (the read-only metadata path) so a catalog-backed
+// profile cannot persist or send a model outside its scoped allowlist.
+func validateModelAllowedForProvider(profile config.ProviderProfile, model string) error {
+	providerID := strings.TrimSpace(profile.CatalogID)
+	if providermodelcatalog.ModelIDAllowedForProvider(providerID, model) {
+		return nil
+	}
+	if providerID == "" {
+		providerID = strings.TrimSpace(profile.Name)
+	}
+	if providerID == "" {
+		providerID = "provider"
+	}
+	return fmt.Errorf("provider %s does not allow model %s", providerID, strings.TrimSpace(model))
 }
 
 func explicitProviderKind(profile config.ProviderProfile) (config.ProviderKind, bool) {

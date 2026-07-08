@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
@@ -637,6 +638,23 @@ func TestFormatExecPromptTruncatesConversationMessagesAfterFilteringNoise(t *tes
 		if strings.Contains(prompt, unwanted) {
 			t.Fatalf("expected prompt to omit %q, got %q", unwanted, prompt)
 		}
+	}
+}
+
+// A truncation cut at a raw byte offset can land in the middle of a
+// multi-byte UTF-8 rune (e.g. CJK text), embedding invalid UTF-8 into the
+// exec prompt. summarizePayload must back off to a rune boundary instead.
+func TestSummarizePayloadTruncatesOnRuneBoundary(t *testing.T) {
+	content := strings.Repeat("中文", 300) // 900 bytes of 3-byte runes
+	payload := json.RawMessage(fmt.Sprintf(`{"role":"user","content":%q}`, content))
+
+	got := summarizePayload(payload)
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("summarizePayload produced invalid UTF-8: %q", got)
+	}
+	if len(got) > 500 {
+		t.Fatalf("expected summary to be at most 500 bytes, got %d", len(got))
 	}
 }
 

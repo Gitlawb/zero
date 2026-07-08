@@ -45,7 +45,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 
 	for _, want := range []string{
 		"model:",
-		"  /provider [status] - Open provider setup.",
+		"  /provider [add|status] - Manage providers: activate, add, edit, delete.",
 		"  /model [list|id] - Show or switch the active model.",
 		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
 		"session:",

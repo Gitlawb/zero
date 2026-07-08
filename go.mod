@@ -1,8 +1,6 @@
 module github.com/Gitlawb/zero
 
-go 1.25.0
-
-toolchain go1.26.4
+go 1.26.4
 
 require (
 	charm.land/bubbles/v2 v2.1.0
@@ -14,6 +12,7 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/term v0.2.2
+	github.com/coder/websocket v1.8.15
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/sys v0.46.0
 	mvdan.cc/sh/v3 v3.13.1

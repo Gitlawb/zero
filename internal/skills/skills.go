@@ -77,9 +77,9 @@ type DuplicateName struct {
 // winner regardless of sort stability. Use Duplicates to surface a warning about
 // any such collisions.
 //
-// NOTE: Load currently scans a single root (ZERO_SKILLS_DIR / the data dir).
-// Plugin-declared skill paths (the plugins manifest "skills" array) are NOT yet
-// merged into this lookup; multi-root loading is tracked as a separate feature.
+// NOTE: Load scans one root. Agent startup merges plugin-declared skill roots
+// separately during plugin activation, so the runtime skill surface can include
+// both the default directory and skills bundled by active plugins.
 func Load(dir string) ([]Skill, error) {
 	skills, _, err := load(dir)
 	return skills, err

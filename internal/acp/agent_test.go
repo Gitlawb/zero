@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -242,8 +244,77 @@ func TestACPRejectsInvalidCwd(t *testing.T) {
 	}
 }
 
+func TestACPPromptWarnsWhenTurnPersistenceFails(t *testing.T) {
+	deps := testDeps(t)
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	metadataPath := filepath.Join(deps.Store.RootDir, newRes.SessionID, sessions.MetadataFile)
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatalf("remove metadata: %v", err)
+	}
+
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt:    []ContentBlock{TextBlock("hi")},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if promptRes.StopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q, want %q", promptRes.StopReason, StopEndTurn)
+	}
+	got := drainTextUntil(t, h.updates, func(text string) bool {
+		return strings.Contains(text, "Hello from ZERO") &&
+			strings.Contains(text, "Could not save session history")
+	})
+	if !strings.Contains(got, "Could not save session history") {
+		t.Fatalf("streamed text = %q, want persistence warning", got)
+	}
+}
+
+func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: cwd})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	eventsPath := filepath.Join(deps.Store.RootDir, meta.SessionID, sessions.EventsFile)
+	if err := os.WriteFile(eventsPath, []byte("{bad json}\n"), 0o600); err != nil {
+		t.Fatalf("write corrupt events: %v", err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	got := drainTextUntil(t, h.updates, func(text string) bool {
+		return strings.Contains(text, "Could not load session history")
+	})
+	if !strings.Contains(got, "Could not load session history") {
+		t.Fatalf("streamed text = %q, want load warning", got)
+	}
+}
+
 // drainText collects streamed chunks for a short window and concatenates them.
 func drainText(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	return drainTextUntil(t, ch, func(text string) bool {
+		return strings.Contains(text, "Hello from ZERO")
+	})
+}
+
+func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) string {
 	t.Helper()
 	var b strings.Builder
 	deadline := time.After(2 * time.Second)
@@ -251,7 +322,7 @@ func drainText(t *testing.T, ch <-chan string) string {
 		select {
 		case s := <-ch:
 			b.WriteString(s)
-			if strings.Contains(b.String(), "Hello from ZERO") {
+			if done(b.String()) {
 				return b.String()
 			}
 		case <-deadline:

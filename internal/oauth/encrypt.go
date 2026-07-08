@@ -122,17 +122,17 @@ func createSecretFile(path string) ([]byte, error) {
 		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, fmt.Errorf("oauth: create token secret lock: %w", err)
 		}
+		// Remember the lock-creation error itself rather than a subsequent
+		// "secret file doesn't exist yet" read error -- otherwise a real
+		// contention/ACL problem is masked by the expected-while-waiting
+		// ErrNotExist once the retries are exhausted.
+		lastErr = err
 		if data, rerr := readSecretFileRetry(path); rerr == nil {
 			return data, nil
-		} else {
-			lastErr = rerr
 		}
 		time.Sleep(secretRetryDelay)
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("oauth: timed out waiting for token secret %s: %w", path, lastErr)
-	}
-	return nil, fmt.Errorf("oauth: timed out waiting for token secret lock %s", lockPath)
+	return nil, fmt.Errorf("oauth: timed out waiting for token secret %s: %w", path, lastErr)
 }
 
 func writeNewSecretFile(path string) ([]byte, error) {

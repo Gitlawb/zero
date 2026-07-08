@@ -261,6 +261,47 @@ func TestDiscoverCatalogMergesLiveModelsWithModelsDevMetadata(t *testing.T) {
 	t.Fatal("missing gpt-4.1")
 }
 
+func TestLiveModelAllowedWithoutCatalogChecksProviderGateFirst(t *testing.T) {
+	// The ModelIDAllowedForProvider check runs before the others.
+	// For the restricted provider (opencode-go-anthropic-compatible) a
+	// non-allowed model returns false immediately, without reaching the
+	// IsKnownNonCodingModelID, Local, or LooksLikeCodingModelID checks.
+	restricted := providercatalog.Descriptor{
+		ID:    "opencode-go-anthropic-compatible",
+		Local: true, // would pass the Local check if we got past the gate
+	}
+
+	// A model that isn't qwen/minimax is blocked at the gate, even though
+	// Local=true would let any model through on its own.
+	if got := liveModelAllowedWithoutCatalog(restricted, "claude-sonnet-4"); got != false {
+		t.Fatal("liveModelAllowedWithoutCatalog: want false for claude-sonnet-4 on opencode-go-anthropic-compatible (blocked by ModelIDAllowedForProvider)")
+	}
+
+	// A qwen model passes the gate and continues to the remaining checks;
+	// it's not a known non-coding model and looks like a coding model, so
+	// the result is true.
+	if got := liveModelAllowedWithoutCatalog(restricted, "qwen-max"); got != true {
+		t.Fatal("liveModelAllowedWithoutCatalog: want true for qwen-max on opencode-go-anthropic-compatible (passes all checks)")
+	}
+
+	// A minimax model also passes the gate.
+	if got := liveModelAllowedWithoutCatalog(restricted, "minimax-text-01"); got != true {
+		t.Fatal("liveModelAllowedWithoutCatalog: want true for minimax-text-01 on opencode-go-anthropic-compatible (passes all checks)")
+	}
+
+	// Unrestricted provider: all models pass the gate, so the other checks
+	// decide the result. claude-sonnet-4 looks like a coding model → true.
+	openAI := providercatalog.Descriptor{ID: "openai"}
+	if got := liveModelAllowedWithoutCatalog(openAI, "claude-sonnet-4"); got != true {
+		t.Fatal("liveModelAllowedWithoutCatalog: want true for claude-sonnet-4 on openai (unrestricted)")
+	}
+
+	// Non-coding model still filtered on an unrestricted provider.
+	if got := liveModelAllowedWithoutCatalog(openAI, "text-embedding-3-large"); got != false {
+		t.Fatal("liveModelAllowedWithoutCatalog: want false for embedding model on openai")
+	}
+}
+
 func modelIDs(models []Model) []string {
 	ids := make([]string, 0, len(models))
 	for _, model := range models {

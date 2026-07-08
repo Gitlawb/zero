@@ -467,7 +467,8 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
 	visible := m.picker.items[start : start+maxVisible]
-	line := 2
+	// y=0 titled top border, y=1 search line, y=2 separator; rows begin at y=3.
+	line := 3
 	lastGroup := ""
 	for offset, item := range visible {
 		if item.Group != "" && item.Group != lastGroup {

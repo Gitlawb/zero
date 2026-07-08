@@ -132,7 +132,7 @@ description: Run the project's benchmark suite and summarize the deltas.
 3. Report any regression > 5% with the function name and the previous value.
 ```
 
-Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. If two skills declare the same name, the one in the lexicographically-first directory wins — duplicates are dropped silently. Plugin-declared skills (section 6) are not yet merged into the loader, so a `skills:` entry inside a plugin's `plugin.json` is not visible to the `skill` tool today.
+Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. During an agent run, Zero loads the default skills directory before plugin skill roots; earlier roots win name collisions silently. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
 
 The `skill` core tool lets the agent load any discovered skill by name.
 
@@ -282,7 +282,7 @@ A plugin is enabled by being present in the plugins directory and disabled by re
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
-> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
+> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above.
 
 ## 7. Configuration locations
 

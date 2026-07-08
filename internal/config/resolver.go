@@ -127,6 +127,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focusMode)
 		}
 	}
+	if err := validateSTTConfig(cfg.STT); err != nil {
+		return ResolvedConfig{}, err
+	}
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
@@ -150,6 +153,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Preferences:    cfg.Preferences,
 		KeyBindings:    cfg.KeyBindings,
 		LocalControl:   cfg.LocalControl,
+		STT:            cfg.STT,
 	}, nil
 }
 
@@ -223,6 +227,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
+	if src.Preferences.RecentModels != nil {
+		dst.Preferences.RecentModels = NormalizeRecentModels(src.Preferences.RecentModels)
+	}
 	if src.Preferences.Recaps != nil {
 		dst.Preferences.Recaps = src.Preferences.Recaps
 	}
@@ -231,6 +238,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
+	mergeSTTConfig(&dst.STT, src.STT)
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -681,6 +689,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
 	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
+	mergeSTTConfig(&cfg.STT, overrides.STT)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
 	}
@@ -734,6 +743,91 @@ func mergeKeyBindings(dst *KeyBindingsConfig, src KeyBindingsConfig) {
 	}
 }
 
+// mergeSTTConfig overlays any set field of src onto dst. Each field carries its
+// own "unset" sentinel (empty string, 0, or nil *bool), matching how the other
+// section mergers detect intent.
+func mergeSTTConfig(dst *STTConfig, src STTConfig) {
+	if src.Provider != "" {
+		dst.Provider = src.Provider
+	}
+	if src.StreamProvider != "" {
+		dst.StreamProvider = src.StreamProvider
+	}
+	if src.Streaming != nil {
+		dst.Streaming = src.Streaming
+	}
+	if src.Model != "" {
+		dst.Model = src.Model
+	}
+	if src.StreamModel != "" {
+		dst.StreamModel = src.StreamModel
+	}
+	if src.LocalModelPath != "" {
+		dst.LocalModelPath = src.LocalModelPath
+	}
+	if src.LocalBinary != "" {
+		dst.LocalBinary = src.LocalBinary
+	}
+	if src.LocalServerBinary != "" {
+		dst.LocalServerBinary = src.LocalServerBinary
+	}
+	if src.LocalServerPort != 0 {
+		dst.LocalServerPort = src.LocalServerPort
+	}
+	if src.EngineVersion != "" {
+		dst.EngineVersion = src.EngineVersion
+	}
+	if src.NumThreads != 0 {
+		dst.NumThreads = src.NumThreads
+	}
+	if src.Language != "" {
+		dst.Language = src.Language
+	}
+	if src.MaxDurationSeconds != 0 {
+		dst.MaxDurationSeconds = src.MaxDurationSeconds
+	}
+	if src.SilenceAutoStop != nil {
+		dst.SilenceAutoStop = src.SilenceAutoStop
+	}
+	if src.AutoSubmit != nil {
+		dst.AutoSubmit = src.AutoSubmit
+	}
+	if src.WindowsAudioDevice != "" {
+		dst.WindowsAudioDevice = src.WindowsAudioDevice
+	}
+}
+
+// validateSTTConfig rejects unknown provider/streamProvider values and a
+// negative maxDurationSeconds at load time — a clear startup error naming the
+// bad value and the valid options, never a silent fallback the user did not ask
+// for (§11a).
+func validateSTTConfig(cfg STTConfig) error {
+	if cfg.Provider != "" {
+		switch cfg.Provider {
+		case STTProviderLocal, STTProviderGroq, STTProviderOpenAI:
+		default:
+			return fmt.Errorf("invalid stt.provider %q: expected local, groq, or openai", cfg.Provider)
+		}
+	}
+	if cfg.StreamProvider != "" {
+		switch cfg.StreamProvider {
+		case STTProviderLocal, STTProviderDeepgram, STTProviderOpenAI:
+		default:
+			return fmt.Errorf("invalid stt.streamProvider %q: expected local, deepgram, or openai", cfg.StreamProvider)
+		}
+	}
+	if cfg.MaxDurationSeconds < 0 {
+		return fmt.Errorf("invalid stt.maxDurationSeconds %d: must be >= 0 (0 uses the default)", cfg.MaxDurationSeconds)
+	}
+	if cfg.NumThreads < 0 {
+		return fmt.Errorf("invalid stt.numThreads %d: must be >= 0 (0 uses the engine default)", cfg.NumThreads)
+	}
+	if cfg.LocalServerPort < 0 || cfg.LocalServerPort > 65535 {
+		return fmt.Errorf("invalid stt.localServerPort %d: must be between 1 and 65535 (0 uses the default)", cfg.LocalServerPort)
+	}
+	return nil
+}
+
 func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
 	if len(src.Servers) == 0 {
 		return
@@ -773,6 +867,9 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 	}
 	if next.disabledSet || next.Disabled {
 		base.Disabled = next.Disabled
+	}
+	if next.configured {
+		base.configured = true
 	}
 	return base
 }

@@ -127,6 +127,79 @@ func TestResolveLoadsFavoriteModelsFromUserConfigOnly(t *testing.T) {
 	}
 }
 
+func TestResolveLoadsRecentModelsFromUserConfigOnly(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"activeProvider": "user",
+		"providers": [{
+			"name": "user",
+			"provider": "openai",
+			"apiKey": "sk-user",
+			"model": "gpt-user"
+		}],
+		"preferences": {
+			"recentModels": [
+				{"provider": "openrouter", "model": " google/gemini-2.5-pro "},
+				{"provider": "openrouter", "model": "minimax/minimax-m2.1"}
+			]
+		}
+	}`)
+	projectPath := writeConfig(t, `{
+		"preferences": {
+			"recentModels": [{"provider": "project", "model": "project-model"}]
+		}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	want := []RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+	}
+	if !reflect.DeepEqual(resolved.Preferences.RecentModels, want) {
+		t.Fatalf("RecentModels = %#v, want %#v", resolved.Preferences.RecentModels, want)
+	}
+}
+
+// recentModels must never be merged from project config (same posture as
+// favoriteModels): a project setting it with no corresponding user setting
+// should leave the resolved value empty, not pick up the project's list.
+func TestResolveIgnoresProjectOnlyRecentModels(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"activeProvider": "user",
+		"providers": [{
+			"name": "user",
+			"provider": "openai",
+			"apiKey": "sk-user",
+			"model": "gpt-user"
+		}]
+	}`)
+	projectPath := writeConfig(t, `{
+		"preferences": {
+			"recentModels": [{"provider": "project", "model": "project-model"}]
+		}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if len(resolved.Preferences.RecentModels) != 0 {
+		t.Fatalf("RecentModels = %#v, want empty (project-only recentModels must not be merged)", resolved.Preferences.RecentModels)
+	}
+}
+
 func TestResolveLoadsProviderCatalogSnakeAndCamelJSONFields(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "snake",

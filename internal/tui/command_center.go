@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -10,8 +11,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -411,6 +414,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 		return m, "Model\nProvider rebuild is not available for this TUI session."
 	}
 
+	previousProviderName := m.providerName
+	previousModel := m.modelName
+
 	nextProfile := m.providerProfile
 	if provider, ok := m.activeProviderDescriptor(); ok {
 		nextProfile = m.normalizeProfileForProvider(provider)
@@ -444,6 +450,20 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(nextProfile.Name)
 	m.modelName = target.modelID
+	// Record the outgoing pair too, not just the destination: otherwise the
+	// model a session started on (never itself the target of a recordRecentModel
+	// call) would silently drop out of "Recent" the moment you switch away from
+	// it once. Recording old-then-new leaves new at the front, with old right
+	// behind it. recordRecentModels batches both into a single normalize+persist
+	// instead of two separate disk writes for this one switch.
+	m = m.recordRecentModels(
+		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
+		// Record under m.providerName (the same resolved value recentModelPairsForPicker
+		// pins the active row with), not the raw nextProfile.Name: for a provider profile
+		// with no Name set, those two diverge and the pinned active row would fail to
+		// dedupe against the entry just persisted here, showing the same switch twice.
+		config.RecentModelEntry{Provider: m.providerName, Model: target.modelID},
+	)
 	resetEffort := false
 	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
 		// Drop an unsupported carry-over preference and fall back to the
@@ -493,34 +513,53 @@ func (m model) handleModelCommand(args string) (model, string) {
 // picker calls this when a model from a non-active provider is chosen, so the
 // picker can list every saved provider and switch across them (like a unified
 // provider+model selector). The key is loaded from the encrypted store / env.
-func (m model) switchProviderModel(providerName, modelID string) (model, string, tea.Cmd) {
+// The returned bool reports whether the switch actually committed — callers
+// that branch on the outcome (the provider manager) must use it, never the
+// display text: UI copy is not a control-flow contract (a refusal quoting a
+// provider name could contain any substring, and rewording the success line
+// must not change behavior).
+func (m model) switchProviderModel(providerName, modelID string) (model, string, bool, tea.Cmd) {
 	if m.pending {
-		return m, "Model\nCannot switch providers while a run is active.", nil
+		return m, "Model\nCannot switch providers while a run is active.", false, nil
 	}
 	if m.newProvider == nil {
-		return m, "Model\nProvider rebuild is not available for this TUI session.", nil
+		return m, "Model\nProvider rebuild is not available for this TUI session.", false, nil
 	}
 	target, ok := m.savedProviderByName(providerName)
 	if !ok {
-		return m, "Model\nunknown provider " + strconv.Quote(providerName), nil
+		return m, "Model\nunknown provider " + strconv.Quote(providerName), false, nil
 	}
+	previousProviderName := m.providerName
+	previousModel := m.modelName
 	target = m.profileWithCredential(target)
 	target.Model = strings.TrimSpace(modelID)
 	descriptor, hasDescriptor := m.descriptorForProfile(target)
 	// Gate on the resolved credential, not the APIKeyStored marker: if the stored key
 	// was deleted/unreadable the marker can still be set, and building a keyless
-	// provider would only fail later with a 401. Local/no-auth providers need no key.
-	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" && !(hasDescriptor && descriptor.Local) {
-		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", nil
+	// provider would only fail later with a 401. Local/no-auth providers need no key,
+	// and a stored OAuth login (e.g. ChatGPT) is a credential too — the profile stays
+	// keyless on purpose so newProvider attaches the bearer resolver + login key.
+	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" &&
+		!(hasDescriptor && descriptor.Local) && !oauthLoginAvailable(target) {
+		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", false, nil
 	}
 	next, err := m.newProvider(target)
 	if err != nil {
-		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}}), nil
+		return m, "Model\n" + redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{target.APIKey}}), false, nil
 	}
 	m.provider = next
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
+	// Record the outgoing pair too — see the matching comment in
+	// handleModelCommand for why (keeps the session's starting model from
+	// silently dropping out of "Recent" on the first switch away from it).
+	// recordRecentModels batches both into a single normalize+persist instead
+	// of two separate disk writes for this one switch.
+	m = m.recordRecentModels(
+		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
+		config.RecentModelEntry{Provider: target.Name, Model: target.Model},
+	)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
 	if strings.TrimSpace(m.userConfigPath) != "" {
@@ -543,30 +582,78 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	if warn := m.visionDropWarning(); warn != "" {
 		status += "\n" + warn
 	}
-	return m, status, tea.Batch(cmds...)
+	return m, status, true, tea.Batch(cmds...)
 }
 
 // profileWithCredential fills a profile's APIKey for provider construction the same
-// way the runtime resolves it: a stored key (encrypted credstore), then an env var,
-// then a stored OAuth bearer for token-login providers. The config resolver is pure
-// (no secret I/O), so a stored-key profile carries an empty APIKey until this runs —
-// every place that rebuilds the provider (model switch, provider switch) must call
-// this or the request goes out with no key.
+// way the runtime resolves it: a stored key (encrypted credstore), then an env var.
+// The config resolver is pure (no secret I/O), so a stored-key profile carries an
+// empty APIKey until this runs — every place that rebuilds the provider (model
+// switch, provider switch) must call this or the request goes out with no key.
+//
+// A stored OAuth bearer is deliberately NOT copied into APIKey: an inline key makes
+// HasConfiguredCredential true, which strips the OAuth login candidates at build
+// time, so newProvider would construct the client without the bearer resolver and
+// login key — for ChatGPT (Codex) that drops the `chatgpt-account-id` header and
+// token refresh, 401-ing every call. Keyless is the correct shape for a token-login
+// profile; newProvider resolves the login itself.
 func (m model) profileWithCredential(profile config.ProviderProfile) config.ProviderProfile {
 	if strings.TrimSpace(profile.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
+		if store, err := m.providerKeyStore(); err == nil {
 			profile = config.ApplyStoredAPIKey(profile, store)
 		}
 	}
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}
-	if descriptor, ok := m.descriptorForProfile(profile); ok && strings.TrimSpace(profile.APIKey) == "" && descriptor.OAuth && !descriptor.OAuthMintsKey {
-		if token := oauthStoredToken(m.ctx, descriptor.ID); token != "" {
-			profile.APIKey = token
-		}
-	}
 	return profile
+}
+
+// providerKeyStore opens the credential store co-located with THIS session's
+// config path — the store every TUI write path (SecureProviderProfile capture,
+// rename migration, delete) uses. Reading from the default-path store instead
+// makes a stored key invisible whenever userConfigPath is non-default, so the
+// switch gate rejects a provider whose key is right there beside its config.
+// Ephemeral sessions without a config path fall back to the default store.
+func (m model) providerKeyStore() (*credstore.Store, error) {
+	return providerKeyStoreForPath(m.userConfigPath)
+}
+
+func providerKeyStoreForPath(configPath string) (*credstore.Store, error) {
+	if strings.TrimSpace(configPath) != "" {
+		return config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	}
+	return config.ProviderKeyStore()
+}
+
+// oauthLoginAvailable reports whether a stored OAuth login exists for any of the
+// profile's login candidates — the SAME candidate set the runtime bearer resolver
+// uses (profile name, then catalog id, only for keyless profiles), so the switch
+// gate and the runtime can never disagree about whether a login counts.
+func oauthLoginAvailable(profile config.ProviderProfile) bool {
+	_, ok := oauthLoginName(profile)
+	return ok
+}
+
+// oauthLoginName resolves WHICH stored login serves this profile — the same
+// FirstStored selection the runtime makes. User-facing hints must name this
+// entry, not the profile: after a rename ({name:"codex", catalogID:"chatgpt"})
+// the token lives under the catalog id, and `zero auth logout codex` would
+// delete nothing while the real login stays behind.
+func oauthLoginName(profile config.ProviderProfile) (string, bool) {
+	candidates := profile.OAuthLoginCandidates()
+	if len(candidates) == 0 {
+		return "", false
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return "", false
+	}
+	_, key, ok := oauth.FirstStored(store, candidates)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(key, oauth.KeyPrefixProvider), true
 }
 
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {

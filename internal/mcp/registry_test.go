@@ -153,6 +153,47 @@ func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 	}
 }
 
+func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
+	// firecrawl is seeded by config.DefaultMCPServers with no credentials; when a
+	// user never configures it, a connect failure (e.g. the real HTTP 401 from
+	// issue #552) must be recorded as UnconfiguredDefault so callers can avoid
+	// warning about a server the user never asked for. "custom" is configured by
+	// the user and must NOT be flagged even though it also fails to connect.
+	registry := tools.NewRegistry()
+
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"firecrawl": config.DefaultMCPServers()["firecrawl"],
+		"custom":    {Type: "stdio", Command: "custom-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
+			return nil, errors.New(server.Name + " connect failed")
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools returned error, want a skip: %v", err)
+	}
+	defer runtime.Close()
+
+	byName := make(map[string]SkippedServer)
+	for _, skipped := range runtime.Skipped() {
+		byName[skipped.Name] = skipped
+	}
+	firecrawl, ok := byName["firecrawl"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
+	}
+	if !firecrawl.UnconfiguredDefault {
+		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	}
+	custom, ok := byName["custom"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for custom", runtime.Skipped())
+	}
+	if custom.UnconfiguredDefault {
+		t.Fatalf("Skipped()[custom] = %#v, want a user-configured server not flagged", custom)
+	}
+}
+
 func TestRegisterToolsKeepsPriorStateAndReachableServersWhenOneIsSkipped(t *testing.T) {
 	// A tool that predates registration must survive, the reachable server's tools
 	// must register, and the unreachable server is skipped (recorded), not fatal.

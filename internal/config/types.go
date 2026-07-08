@@ -97,6 +97,11 @@ type ToolsConfig struct {
 
 type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
+	// RecentModels is the short automatic history of provider+model pairs the
+	// user has switched to via /model, newest first. Unlike FavoriteModels
+	// (manual pins), this list is maintained automatically on every switch and
+	// capped to MaxRecentModels entries. See RecentModelEntry.
+	RecentModels []RecentModelEntry `json:"recentModels,omitempty"`
 	// Theme is the persisted TUI palette preference — "auto" or a registered theme
 	// name (e.g. "dracula"). Applied at startup below the --theme flag and
 	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
@@ -106,6 +111,18 @@ type PreferencesConfig struct {
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
 }
+
+// RecentModelEntry is one provider-qualified model selection recorded in
+// Preferences.RecentModels. Provider is the saved provider profile's Name (not
+// a display label), so a recent entry can be resolved back to a concrete
+// profile the same way the /model picker's cross-provider rows are.
+type RecentModelEntry struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// MaxRecentModels caps the persisted/displayed recent-selection history.
+const MaxRecentModels = 5
 
 // RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
 func (p PreferencesConfig) RecapsEnabled() bool {
@@ -129,6 +146,115 @@ type KeyBindingsConfig struct {
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
+}
+
+// STTProviderKind is the batch (or streaming) transcription backend selector.
+// Validated at config load time against the known set, so a typo fails loudly
+// with the valid options rather than silently falling back to a default.
+type STTProviderKind string
+
+const (
+	STTProviderLocal    STTProviderKind = "local"
+	STTProviderGroq     STTProviderKind = "groq"
+	STTProviderOpenAI   STTProviderKind = "openai"
+	STTProviderDeepgram STTProviderKind = "deepgram"
+)
+
+// STTConfig configures speech-to-text dictation. All fields are optional; empty
+// values take the documented defaults. Booleans that need a real tri-state
+// (distinguishing "unset" from "false") use *bool, matching PreferencesConfig.Recaps.
+type STTConfig struct {
+	// Provider is the batch transcription backend: "local" (sherpa-onnx-offline,
+	// the default), "groq", or "openai". Termux and the fallback everywhere use
+	// this path.
+	Provider STTProviderKind `json:"provider,omitempty"`
+	// StreamProvider is the streaming backend on desktop: "local" (sherpa-onnx
+	// websocket server, default), "deepgram", or "openai" (Realtime).
+	StreamProvider STTProviderKind `json:"streamProvider,omitempty"`
+	// Streaming enables the live-transcript pipeline on platforms that support
+	// it (desktop). Defaults to on; set false to always use the batch pipeline.
+	Streaming *bool `json:"streaming,omitempty"`
+	// Model overrides the cloud batch model (e.g. "whisper-large-v3-turbo" for
+	// Groq, "whisper-1" for OpenAI). Empty uses the provider default.
+	Model string `json:"model,omitempty"`
+	// StreamModel overrides the cloud streaming model (Deepgram/OpenAI Realtime).
+	StreamModel string `json:"streamModel,omitempty"`
+	// LocalModelPath is the sherpa-onnx model directory for local transcription
+	// (batch and streaming). Required to use a local provider.
+	LocalModelPath string `json:"localModelPath,omitempty"`
+	// LocalBinary overrides the offline binary name/path (default
+	// "sherpa-onnx-offline"); LocalServerBinary overrides the streaming server
+	// (default "sherpa-onnx-online-websocket-server"). Both looked up on PATH.
+	LocalBinary       string `json:"localBinary,omitempty"`
+	LocalServerBinary string `json:"localServerBinary,omitempty"`
+	// LocalServerPort is the localhost port for the sherpa-onnx websocket server
+	// (default 6006).
+	LocalServerPort int `json:"localServerPort,omitempty"`
+	// EngineVersion selects the sherpa-onnx release the auto-download fetches
+	// ("" → a pinned known-good default; "latest" or any release tag also works,
+	// so a newer engine needs no Zero update). Verified against the release's
+	// published SHA256 digest either way.
+	EngineVersion string `json:"engineVersion,omitempty"`
+	// NumThreads sets the local engine's thread count (0 = engine default).
+	NumThreads int `json:"numThreads,omitempty"`
+	// Language optionally constrains recognition (ISO-639-1, e.g. "en"). Empty =
+	// auto-detect.
+	Language string `json:"language,omitempty"`
+	// MaxDurationSeconds is the hard runaway-recording cap on every platform
+	// (0 = default 300s).
+	MaxDurationSeconds int `json:"maxDurationSeconds,omitempty"`
+	// SilenceAutoStop ends a recording ~2s after the signal goes quiet, as a
+	// backstop for a forgotten manual stop (not VAD-triggered start). Defaults on.
+	SilenceAutoStop *bool `json:"silenceAutoStop,omitempty"`
+	// AutoSubmit fires the transcript at the agent instead of inserting it for
+	// review. Defaults OFF — insert-for-review is the safety net for a misheard
+	// prompt (§3).
+	AutoSubmit *bool `json:"autoSubmit,omitempty"`
+	// WindowsAudioDevice names the dshow capture device (auto-detected when empty).
+	WindowsAudioDevice string `json:"windowsAudioDevice,omitempty"`
+}
+
+// STTProvider returns the configured batch provider, defaulting to local.
+func (c STTConfig) STTProvider() STTProviderKind {
+	if c.Provider == "" {
+		return STTProviderLocal
+	}
+	return c.Provider
+}
+
+// STTStreamProvider returns the configured streaming provider, defaulting to local.
+func (c STTConfig) STTStreamProvider() STTProviderKind {
+	if c.StreamProvider == "" {
+		return STTProviderLocal
+	}
+	return c.StreamProvider
+}
+
+// StreamingEnabled reports whether the live pipeline is on. Unset defaults ON.
+func (c STTConfig) StreamingEnabled() bool {
+	return c.Streaming == nil || *c.Streaming
+}
+
+// SilenceAutoStopEnabled reports whether trailing-silence auto-stop is on.
+// Unset defaults ON.
+func (c STTConfig) SilenceAutoStopEnabled() bool {
+	return c.SilenceAutoStop == nil || *c.SilenceAutoStop
+}
+
+// AutoSubmitEnabled reports whether transcripts are auto-fired. Unset defaults OFF.
+func (c STTConfig) AutoSubmitEnabled() bool {
+	return c.AutoSubmit != nil && *c.AutoSubmit
+}
+
+// Empty reports whether the STT config carries no user-set values (so it can be
+// omitted from a marshaled config).
+func (c STTConfig) Empty() bool {
+	return c.Provider == "" && c.StreamProvider == "" && c.Streaming == nil &&
+		c.Model == "" && c.StreamModel == "" && c.LocalModelPath == "" &&
+		c.LocalBinary == "" && c.LocalServerBinary == "" && c.LocalServerPort == 0 &&
+		c.EngineVersion == "" && c.NumThreads == 0 && c.Language == "" &&
+		c.MaxDurationSeconds == 0 && c.SilenceAutoStop == nil && c.AutoSubmit == nil &&
+		c.WindowsAudioDevice == ""
 }
 
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.
@@ -227,6 +353,7 @@ type FileConfig struct {
 	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
 	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
+	STT            STTConfig          `json:"stt,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
@@ -242,6 +369,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
 		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
+		STT            *STTConfig          `json:"stt,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider: cfg.ActiveProvider,
@@ -257,6 +385,9 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
+	}
+	if !cfg.STT.Empty() {
+		raw.STT = &cfg.STT
 	}
 	return json.Marshal(raw)
 }
@@ -280,6 +411,7 @@ type Overrides struct {
 	Tools          ToolsConfig
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
+	STT            STTConfig
 }
 
 type ResolvedConfig struct {
@@ -295,6 +427,7 @@ type ResolvedConfig struct {
 	Preferences    PreferencesConfig
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
+	STT            STTConfig
 }
 
 type MCPConfig struct {
@@ -312,6 +445,16 @@ type MCPServerConfig struct {
 	OAuth       *MCPOAuthConfig   `json:"oauth,omitempty"`
 	Disabled    bool              `json:"disabled,omitempty"`
 	disabledSet bool
+	// configured is true when the user's config JSON declared an object for
+	// this server at all (i.e. UnmarshalJSON ran for it), regardless of which
+	// fields it set or what values they hold. A built-in default seeded by
+	// DefaultMCPServers() is never unmarshaled from JSON, so it starts false;
+	// any explicit entry in the user/project file — even one that happens to
+	// repeat a default's exact field values (e.g. re-declaring firecrawl's
+	// default URL) — sets it true. IsUnconfiguredDefault checks this alongside
+	// a resolved-value comparison, so redeclaring default values verbatim still
+	// counts as user-configured.
+	configured bool
 }
 
 // MCPOAuthConfig describes how to authenticate to a remote MCP server using an
@@ -342,6 +485,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Preferences     PreferencesConfig          `json:"preferences"`
 		KeyBindings     KeyBindingsConfig          `json:"keybindings"`
 		LocalControl    LocalControlConfig         `json:"localControl"`
+		STT             STTConfig                  `json:"stt"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -369,6 +513,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Preferences = raw.Preferences
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
+	cfg.STT = raw.STT
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}
@@ -503,6 +648,10 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 		server.Disabled = *raw.Disabled
 		server.disabledSet = true
 	}
+	// This method only runs when the user's JSON actually has an object for this
+	// server key (built-in defaults are seeded as Go struct literals, never
+	// unmarshaled), so reaching here at all means the user configured it.
+	server.configured = true
 	return nil
 }
 

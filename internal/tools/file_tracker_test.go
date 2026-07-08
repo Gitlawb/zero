@@ -34,6 +34,18 @@ func TestFileTrackerRecordsAndReadsBackVersion(t *testing.T) {
 	}
 }
 
+func TestFileTrackerRecordHashMatchesRecord(t *testing.T) {
+	tracker := NewFileTracker()
+	content := []byte("streamed content")
+	tracker.RecordHash("/repo/x.txt", HashContent(content), nil)
+	if err := tracker.CheckConflict("/repo/x.txt", content); err != nil {
+		t.Fatalf("recorded hash should match content, got %v", err)
+	}
+	if err := tracker.CheckConflict("/repo/x.txt", []byte("changed")); err != ErrFileChangedOnDisk {
+		t.Fatalf("changed content should conflict, got %v", err)
+	}
+}
+
 func TestCheckConflictAllowsUntrackedPath(t *testing.T) {
 	tracker := NewFileTracker()
 	// No Record call: a first-touch write has no baseline to conflict against.

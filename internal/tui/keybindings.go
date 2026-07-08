@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -23,6 +25,35 @@ type parsedBinding struct {
 // isZero returns true when p is the nil sentinel (no binding configured).
 func (p parsedBinding) isZero() bool {
 	return p.code == 0 && p.text == ""
+}
+
+// defaultToggleMouseChord and defaultToggleSidebarChord are the built-in
+// Ctrl+E/Ctrl+B chords that conflict with readline cursor navigation
+// (move-to-end-of-line / move-to-beginning-of-line) while typing in the
+// composer.
+var (
+	defaultToggleMouseChord   = parseBinding("ctrl+e")
+	defaultToggleSidebarChord = parseBinding("ctrl+b")
+)
+
+// requiresEmptyComposer reports whether binding b resolves to conflicting, the
+// hardcoded default chord it can fall back to. That happens either because b
+// is unset (isZero, so keyMatch uses the default matcher) or because the user
+// explicitly configured the identical chord (e.g. toggleMouse: "ctrl+e"),
+// which parseBinding does not treat as zero. Only a binding that resolves to
+// a genuinely different chord may fire while the composer has text; one that
+// resolves to the conflicting default must still wait for it to be empty so
+// readline navigation gets the keystroke instead.
+func requiresEmptyComposer(b parsedBinding, conflicting parsedBinding) bool {
+	return b.isZero() || b == conflicting
+}
+
+// canFireComposerGatedToggle reports whether a toggle bound to b (whose
+// conflicting hardcoded default is conflicting) may fire given the current
+// composer-empty state. Factored out of the toggleMouse/toggleSidebar dispatch
+// cases in model.go, which both repeated this same condition inline.
+func canFireComposerGatedToggle(b parsedBinding, conflicting parsedBinding, composerEmpty bool) bool {
+	return !requiresEmptyComposer(b, conflicting) || composerEmpty
 }
 
 // Label returns a human-readable representation of the binding, e.g. "Ctrl+O"
@@ -77,6 +108,9 @@ func (p parsedBinding) Label() string {
 			b.WriteString("PgUp")
 		case tea.KeyPgDown:
 			b.WriteString("PgDn")
+		case tea.KeyF1, tea.KeyF2, tea.KeyF3, tea.KeyF4, tea.KeyF5, tea.KeyF6,
+			tea.KeyF7, tea.KeyF8, tea.KeyF9, tea.KeyF10, tea.KeyF11, tea.KeyF12:
+			b.WriteString(fKeyLabel(p.code))
 		default:
 			// Printable character — uppercase for display
 			if p.code >= 'a' && p.code <= 'z' {
@@ -206,6 +240,30 @@ func parseBinding(s string) parsedBinding {
 		p.code = tea.KeyPgUp
 	case "pgdown", "pagedown":
 		p.code = tea.KeyPgDown
+	case "f1":
+		p.code = tea.KeyF1
+	case "f2":
+		p.code = tea.KeyF2
+	case "f3":
+		p.code = tea.KeyF3
+	case "f4":
+		p.code = tea.KeyF4
+	case "f5":
+		p.code = tea.KeyF5
+	case "f6":
+		p.code = tea.KeyF6
+	case "f7":
+		p.code = tea.KeyF7
+	case "f8":
+		p.code = tea.KeyF8
+	case "f9":
+		p.code = tea.KeyF9
+	case "f10":
+		p.code = tea.KeyF10
+	case "f11":
+		p.code = tea.KeyF11
+	case "f12":
+		p.code = tea.KeyF12
 	case "?":
 		p.text = "?"
 		p.code = 0
@@ -242,6 +300,13 @@ type keyBindings struct {
 	toggleSidebar  parsedBinding
 }
 
+// fKeyLabel renders a function-key code as "F9" etc. tea.KeyF1..KeyF12 are
+// sequential, so the offset from KeyF1 gives the number.
+func fKeyLabel(code rune) string {
+	n := int(code-tea.KeyF1) + 1
+	return "F" + strconv.Itoa(n)
+}
+
 // resolveKeyBindings converts a user-facing KeyBindingsConfig into the
 // dispatch-ready parsed form, using empty-is-default semantics.
 func resolveKeyBindings(cfg config.KeyBindingsConfig) keyBindings {
@@ -262,4 +327,97 @@ func (m model) keyMatch(b parsedBinding, msg tea.KeyMsg, defaultFn func(tea.KeyM
 		return b.Matcher()(msg)
 	}
 	return defaultFn(msg)
+}
+
+// reservedBindings lists hardcoded (non-configurable) chords handled directly in
+// model.go's key dispatch. If a configurable binding uses one of these chords,
+// one of the actions becomes unreachable (depending on switch order), so
+// sanitizeKeyBindings reverts the configurable binding back to its default.
+var reservedBindings = []struct {
+	binding     parsedBinding
+	description string
+}{
+	{parseBinding("ctrl+c"), "cancel / exit"},
+	{parseBinding("esc"), "cancel / close"},
+	{parseBinding("enter"), "submit"},
+	{parseBinding("shift+tab"), "cycle permission mode"},
+	{parseBinding("tab"), "navigation / completion"},
+	{parseBinding("backspace"), "composer edit / attachment removal"},
+	{parseBinding("up"), "history/navigation"},
+	{parseBinding("down"), "history/navigation"},
+	{parseBinding("pgup"), "transcript scroll"},
+	{parseBinding("pgdown"), "transcript scroll"},
+	{parseBinding("ctrl+f"), "favorite model (in the /model picker)"},
+	{parseBinding("?"), "help overlay"},
+}
+
+// sanitizeKeyBindings drops (reverts to default) any configured binding that
+// collides with a reserved hardcoded chord above, or with another
+// configured binding, since either collision would silently make one of the
+// two actions permanently unreachable. Returns the sanitized bindings plus a
+// human-readable warning for each dropped binding, for the caller to surface
+// as a startup notice.
+func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
+	entries := []struct {
+		name           string
+		binding        *parsedBinding
+		defaultBinding parsedBinding
+	}{
+		{"toggleDetailed", &b.toggleDetailed, parseBinding("ctrl+o")},
+		{"toggleMouse", &b.toggleMouse, parseBinding("ctrl+e")},
+		{"cycleReasoning", &b.cycleReasoning, parseBinding("ctrl+t")},
+		{"togglePlan", &b.togglePlan, parseBinding("ctrl+p")},
+		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
+	}
+
+	var warnings []string
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		for _, other := range entries {
+			if other.name == e.name || !other.binding.isZero() {
+				continue
+			}
+			if *e.binding == other.defaultBinding {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with keybindings.%s default (%s); using the default instead.",
+					e.name, e.binding.Label(), other.name, other.defaultBinding.Label()))
+				*e.binding = parsedBinding{}
+				break
+			}
+		}
+	}
+
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		for _, reserved := range reservedBindings {
+			if *e.binding == reserved.binding {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with the built-in %s shortcut; using the default instead.",
+					e.name, e.binding.Label(), reserved.description))
+				*e.binding = parsedBinding{}
+				break
+			}
+		}
+	}
+
+	claimedBy := map[parsedBinding]string{}
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		if other, ok := claimedBy[*e.binding]; ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"keybindings.%s (%s) conflicts with keybindings.%s; using the default instead.",
+				e.name, e.binding.Label(), other))
+			*e.binding = parsedBinding{}
+			continue
+		}
+		claimedBy[*e.binding] = e.name
+	}
+
+	return b, warnings
 }

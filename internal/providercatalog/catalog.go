@@ -48,6 +48,14 @@ type Descriptor struct {
 	SupportedAPIFormats []APIFormat
 	Aliases             []string
 
+	// Custom marks the "bring your own endpoint" catalog entries
+	// (custom-openai-compatible, custom-anthropic-compatible). Unlike every other
+	// descriptor, RequiresAuth here is just a template default for the credential
+	// wizard step, not a fact about the user's actual endpoint — a custom target may
+	// or may not need auth, so callers deciding whether a *saved profile* is missing
+	// a credential must not treat RequiresAuth as authoritative for these entries.
+	Custom bool
+
 	// OAuth reports that this provider offers an in-app OAuth login that yields a
 	// credential usable for model calls (browser PKCE and/or device code). Only
 	// set for providers where this actually works (not subscription-via-proxy).
@@ -89,8 +97,8 @@ func RuntimeUnsupportedReason(descriptor Descriptor) string {
 var descriptors = []Descriptor{
 	// GitLawb OpenGateway — the recommended default. An OpenAI-compatible gateway
 	// that smart-routes by model id across upstream providers (xiaomi-mimo,
-	// minimax, qwen, google, nvidia, z-ai). Flat /v1/chat/completions with a
-	// Bearer ogw_live_… key; listed first and badged in every picker.
+	// minimax, qwen, google, nvidia, tencent, z-ai). Flat /v1/chat/completions
+	// with a Bearer ogw_live_… key; listed first and badged in every picker.
 	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
 	openAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1", []string{"OPENAI_API_KEY"}),
 	anthropic("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4.5", []string{"ANTHROPIC_API_KEY"}),
@@ -140,6 +148,7 @@ var descriptors = []Descriptor{
 	openAICompat("kilocode", "KiloCode", "https://api.kilo.ai/api/gateway", "anthropic/claude-sonnet-4.6", []string{"KILO_API_KEY"}, "kilo", "kilo gateway"),
 	openAICompat("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "deepseek-v4-flash", []string{"OPENCODE_API_KEY"}, "opencode zen"),
 	openAICompat("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", "deepseek-v4-pro", []string{"OPENCODE_API_KEY"}, "opencode go"),
+	anthropicCompat("opencode-go-anthropic-compatible", "OpenCode Go Anthropic-compatible", "https://opencode.ai/zen/go", "minimax-m3", []string{"OPENCODE_API_KEY"}),
 	openAICompat("atomic-chat", "Atomic Chat", "https://api.atomic.chat/v1", "gpt-4.1", []string{"ATOMIC_CHAT_API_KEY"}),
 	// ChatGPT subscription via a local OAuth proxy. A ChatGPT (Plus/Pro) OAuth
 	// token only works against ChatGPT's own backend (which is Cloudflare-gated to
@@ -148,8 +157,16 @@ var descriptors = []Descriptor{
 	// endpoint. Local (no API key — the proxy authenticates); override the base URL
 	// for your proxy's port. See docs/oauth-subscriptions.md.
 	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
-	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
-	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),
+	func() Descriptor {
+		d := openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible")
+		d.Custom = true
+		return d
+	}(),
+	func() Descriptor {
+		d := anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible")
+		d.Custom = true
+		return d
+	}(),
 }
 
 func All() []Descriptor {

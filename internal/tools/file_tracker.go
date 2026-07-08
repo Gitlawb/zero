@@ -42,10 +42,16 @@ func NewFileTracker() *FileTracker {
 
 // Record stores the version of absPath given its content and optional stat info.
 func (tracker *FileTracker) Record(absPath string, content []byte, info os.FileInfo) {
+	tracker.RecordHash(absPath, HashContent(content), info)
+}
+
+// RecordHash stores the version of absPath when the caller already computed
+// the same HashContent-compatible SHA-256 while reading the file.
+func (tracker *FileTracker) RecordHash(absPath string, hash string, info os.FileInfo) {
 	if tracker == nil {
 		return
 	}
-	version := FileVersion{Hash: HashContent(content)}
+	version := FileVersion{Hash: hash}
 	if info != nil {
 		version.Size = info.Size()
 		version.MTime = info.ModTime()

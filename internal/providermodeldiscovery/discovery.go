@@ -405,6 +405,9 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 }
 
 func liveModelAllowedWithoutCatalog(provider providercatalog.Descriptor, id string) bool {
+	if !providermodelcatalog.ModelIDAllowedForProvider(provider.ID, id) {
+		return false
+	}
 	if providermodelcatalog.IsKnownNonCodingModelID(id) {
 		return false
 	}
