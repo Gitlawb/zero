@@ -20,21 +20,29 @@ type shellIssue struct {
 
 const windowsMsysSandboxKind = "windows_msys_sandbox"
 
-const windowsMsysSandboxSuggestion = "MSYS/Cygwin coreutils from Git for Windows cannot run under Zero's write-restricted Windows sandbox. Prefer Zero native tools (grep, read_file with offset/limit, list_directory, glob), cmd.exe findstr, or PowerShell Select-Object -First/-Last. If host-level execution is truly required, rerun with sandbox_permissions: \"require_escalated\" and a narrow justification."
+const windowsMsysSandboxSuggestion = "MSYS/Cygwin coreutils and shells (bash, sh) from Git for Windows cannot run under Zero's write-restricted Windows sandbox, and the WSL bash launcher cannot reach the WSL service from it either. This also hits native commands that spawn Git Bash internally: git hooks and git/gh credential helpers can fail this way even though git and gh themselves run fine. Prefer Zero native tools (grep, read_file with offset/limit, list_directory, glob), cmd.exe findstr, or PowerShell Select-Object -First/-Last. If host-level execution is truly required, rerun with sandbox_permissions: \"require_escalated\" and a narrow justification."
 
-// windowsMsysProneNames is the single source of truth for POSIX coreutil names
-// that commonly resolve to a Git-for-Windows MSYS/Cygwin binary rather than a
-// cmd.exe-native command, and so fail under the write-restricted Windows
-// sandbox (#458). Every Windows MSYS-detection path (the preflight command
-// scan below, the exported MsysProneCommandName, and the known-safe-segment
-// guard in internal/agent/command_prefix.go) derives from this one set, so
-// they cannot drift out of sync with each other.
+// windowsMsysProneNames is the single source of truth for POSIX coreutil and
+// shell names that commonly resolve to a Git-for-Windows MSYS/Cygwin binary
+// rather than a cmd.exe-native command, and so fail under the write-restricted
+// Windows sandbox (#458). Every Windows MSYS-detection path (the preflight
+// command scan below, the exported MsysProneCommandName, and the
+// known-safe-segment guard in internal/agent/command_prefix.go) derives from
+// this one set, so they cannot drift out of sync with each other.
 var windowsMsysProneNames = map[string]bool{
 	"cat": true, "cut": true, "expr": true, "grep": true, "head": true,
 	"id": true, "ls": true, "nl": true, "paste": true, "rev": true,
 	"seq": true, "stat": true, "tail": true, "tr": true, "uname": true,
 	"uniq": true, "wc": true, "which": true, "awk": true, "sed": true,
 	"xargs": true,
+	// Shells. Git-for-Windows bash.exe/sh.exe are MSYS binaries and die during
+	// MSYS runtime init under the restricted token ("couldn't create signal
+	// pipe" or "CreateFileMapping <SID>.1", both Win32 error 5), and the
+	// System32 WSL bash launcher fails equivalently at a different layer (the
+	// restricted token cannot connect to the WSL service:
+	// Bash/Service/CreateInstance/E_ACCESSDENIED), so every executable a bare
+	// `bash` can resolve to fails under the sandbox.
+	"bash": true, "sh": true,
 }
 
 var (
@@ -255,6 +263,9 @@ func detectShellOutputIssue(output string, goos string) *shellIssue {
 	if msysRuntimeFailedInOutput(lower) {
 		return windowsMsysSandboxIssue("An MSYS/Cygwin runtime failed under Zero's Windows sandbox (ACCESS_DENIED during MSYS startup).")
 	}
+	if wslServiceDeniedInOutput(lower) {
+		return windowsMsysSandboxIssue("WSL bash could not connect to the WSL service under Zero's Windows sandbox (Bash/Service/CreateInstance/E_ACCESSDENIED).")
+	}
 	if strings.Contains(lower, "the syntax of the command is incorrect") ||
 		strings.Contains(lower, "is not recognized as an internal or external command") {
 		return &shellIssue{
@@ -290,6 +301,15 @@ func msysRuntimeFailedInOutput(lower string) bool {
 		strings.Contains(lower, "msys-2.0.dll") ||
 		strings.Contains(lower, "cygwin1.dll") ||
 		strings.Contains(lower, "[main]")
+}
+
+// wslServiceDeniedInOutput matches the WSL bash launcher's failure to open its
+// service connection under the restricted token. The launcher writes UTF-16LE
+// to its (piped, non-console) stderr, which the byte-based capture renders as
+// ASCII interleaved with NUL bytes, so the NULs are stripped before matching.
+func wslServiceDeniedInOutput(lower string) bool {
+	compact := strings.ReplaceAll(lower, "\x00", "")
+	return strings.Contains(compact, "bash/service/") && strings.Contains(compact, "e_accessdenied")
 }
 
 func appendShellIssueHint(output string, issue shellIssue) string {

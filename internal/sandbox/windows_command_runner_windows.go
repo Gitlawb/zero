@@ -50,6 +50,24 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// mitigation is to run TLS in a broker process, not the sandboxed one) and
 	// has no clean in-token fix. Workarounds: the degraded path (no restricted
 	// token) or the in-process web_fetch tool.
+	//
+	// KNOWN LIMITATION: MSYS2/Cygwin binaries (Git for Windows bash.exe,
+	// sh.exe, and the usr\bin coreutils) cannot initialize under this token at
+	// all, whether invoked directly or spawned internally by an otherwise
+	// native command (git hooks, git/gh credential helpers). The MSYS runtime
+	// secures its signal pipe and shared-memory sections with explicit DACLs
+	// granting only the user, Administrators, and SYSTEM (msys2-runtime
+	// sigproc.cc sigproc_init -> sec_user_nih -> __sec_user), and a
+	// WRITE_RESTRICTED write check must ALSO match one of the token's
+	// restricted SIDs (logon SID, Everyone, capability SIDs). None of the
+	// granted SIDs can be added to the restricted list without collapsing the
+	// write jail (each has write access nearly everywhere), so MSYS startup
+	// dies with "couldn't create signal pipe" or "CreateFileMapping <SID>.1",
+	// Win32 error 5, and exit status 0xC0000142. The System32 WSL bash
+	// launcher fails equivalently (the restricted token cannot connect to the
+	// WSL service: Bash/Service/CreateInstance/E_ACCESSDENIED). Like Schannel,
+	// this has no in-token fix; preflight blocking and output hints live in
+	// internal/tools/shell_runtime.go.
 	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs)
 	if err != nil {
