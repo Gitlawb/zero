@@ -40,6 +40,7 @@ func TestDetectShellCommandIssueFlagsShells(t *testing.T) {
 		`bash -c "make test"`,
 		`bash.exe -lc ls`,
 		`sh -c "echo hi"`,
+		`sh.exe -c "echo hi"`,
 		`git status && bash -c "echo hi"`,
 	} {
 		issue := detectShellCommandIssue(command, "windows")
