@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -319,43 +318,14 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 	return transport
 }
 
-// resolveWebFetchProxyAddrs resolves configured HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
-// hostnames to IPs once per transport creation, so webFetchSafeDialContext can
-// distinguish a proxy dial from a target endpoint dial. (ponytail)
-func resolveWebFetchProxyAddrs(resolver webFetchResolver) []string {
-	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"} {
-		val := os.Getenv(key)
-		if val == "" {
-			continue
-		}
-		u, err := url.Parse(val)
-		if err != nil || u.Hostname() == "" {
-			continue
-		}
-		host := u.Hostname()
-		if addr, err := netip.ParseAddr(host); err == nil {
-			return []string{addr.String()}
-		}
-		addrs, err := resolver.LookupNetIP(context.Background(), "ip", host)
-		if err == nil {
-			out := make([]string, len(addrs))
-			for i, a := range addrs {
-				out[i] = a.String()
-			}
-			return out
-		}
-	}
-	return nil
-}
-
 func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
-	proxyHosts := resolveWebFetchProxyAddrs(resolver) // ponytail
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
-		host, _, _ := net.SplitHostPort(address)
-		// ponytail: bypass SSRF check when dialing a configured forward proxy
-		for _, ph := range proxyHosts {
-			if host == ph {
-				return dialer.DialContext(ctx, network, address)
+		// ponytail: forward proxy on loopback — this is the proxy address, not the endpoint
+		if proxyURL := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Host: "x"}}); proxyURL != nil {
+			if h, p, err := net.SplitHostPort(address); err == nil {
+				if proxyURL.Hostname() == h && (proxyURL.Port() == "" || proxyURL.Port() == p) {
+					return dialer.DialContext(ctx, network, address)
+				}
 			}
 		}
 		pinnedAddress, err := webFetchSafeDialAddress(ctx, resolver, address)

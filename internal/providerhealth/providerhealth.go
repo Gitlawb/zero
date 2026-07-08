@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -532,48 +531,19 @@ func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.Provid
 	return out
 }
 
-// resolveProxyEnvAddrs resolves configured HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
-// hostnames to IPs once per transport creation, so safeDialContext can
-// distinguish a proxy dial from a provider endpoint dial. (ponytail)
-func resolveProxyEnvAddrs(resolver Resolver) []string {
-	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"} {
-		val := os.Getenv(key)
-		if val == "" {
-			continue
-		}
-		u, err := url.Parse(val)
-		if err != nil || u.Hostname() == "" {
-			continue
-		}
-		host := u.Hostname()
-		if addr, err := netip.ParseAddr(host); err == nil {
-			return []string{addr.String()}
-		}
-		if addrs, err := resolver.LookupNetIP(context.Background(), "ip", host); err == nil {
-			out := make([]string, len(addrs))
-			for i, a := range addrs {
-				out[i] = a.String()
-			}
-			return out
-		}
-	}
-	return nil
-}
-
 // safeDialContext returns a dial function that resolves the target host, refuses
 // the connection if any resolved address is blocked, then dials the validated IP
 // literal so the kernel cannot re-resolve to a different address after the check.
 func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	proxyHosts := resolveProxyEnvAddrs(resolver) // ponytail
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		// ponytail: bypass SSRF check when dialing a configured forward proxy
-		for _, ph := range proxyHosts {
-			if host == ph {
+		// ponytail: forward proxy on loopback — this is the proxy address, not the endpoint
+		if proxyURL := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Host: "x"}}); proxyURL != nil {
+			if proxyURL.Hostname() == host && (proxyURL.Port() == "" || proxyURL.Port() == port) {
 				return dialer.DialContext(ctx, network, address)
 			}
 		}
