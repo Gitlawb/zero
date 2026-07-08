@@ -199,8 +199,7 @@ var curatedModels = map[string][]Model{
 		{ID: "nvidia/nemotron-3-ultra-550b-a55b:free", Description: "free Nemotron 3 Ultra reasoning MoE"},
 	},
 	"atomic-chat": {
-		{ID: "gpt-4.1", Description: "catalog default"},
-		{ID: "gpt-4o-mini", Description: "fast model"},
+		{ID: "local-model", Description: "loaded model from GET /v1/models"},
 	},
 	"opencode-go-anthropic-compatible": {
 		{ID: "minimax-m3", Description: "MiniMax M3: default"},

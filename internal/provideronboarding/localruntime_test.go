@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestLocalRuntimeCandidatesCoverOllamaAndLMStudio(t *testing.T) {
+func TestLocalRuntimeCandidatesCoverOllamaLMStudioAndAtomicChat(t *testing.T) {
 	candidates := LocalRuntimeCandidates()
 	if len(candidates) == 0 {
 		t.Fatalf("LocalRuntimeCandidates() returned no candidates")
@@ -38,6 +38,16 @@ func TestLocalRuntimeCandidatesCoverOllamaAndLMStudio(t *testing.T) {
 	}
 	if lmstudio.RequiresKey {
 		t.Fatalf("lmstudio candidate must not require an API key: %#v", lmstudio)
+	}
+	atomicChat, ok := byCatalog["atomic-chat"]
+	if !ok {
+		t.Fatalf("expected an atomic-chat candidate, got %#v", candidates)
+	}
+	if !strings.Contains(atomicChat.BaseURL, "1337") {
+		t.Fatalf("atomic-chat candidate must probe default port 1337, got %q", atomicChat.BaseURL)
+	}
+	if atomicChat.RequiresKey {
+		t.Fatalf("atomic-chat candidate must not require an API key: %#v", atomicChat)
 	}
 }
 

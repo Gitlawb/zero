@@ -25,7 +25,7 @@ zero exec --output-format stream-json < turns.jsonl
 ## Why Zero
 
 - **Use the model you want.** Bring OpenAI, Anthropic, Gemini, Groq, OpenRouter,
-  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, or any
+  DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, Ollama, LM Studio, Atomic Chat, or any
   OpenAI-/Anthropic-compatible endpoint.
 - **Stay in control.** File writes, shell commands, network access, and
   out-of-workspace writes go through Zero's permission and sandbox policy.
@@ -174,7 +174,8 @@ zero providers add custom-openai-compatible \
   --set-active
 ```
 
-For local models, run Ollama or LM Studio and then use `zero setup` or
+For local models, run Ollama, LM Studio, or the [Atomic Chat](https://atomic.chat) desktop app and ensure its local
+OpenAI-compatible API is reachable at `http://127.0.0.1:1337/v1` (default) before using `zero setup` or
 `zero providers detect`.
 
 ## Daily Use
