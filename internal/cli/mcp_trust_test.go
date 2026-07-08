@@ -302,3 +302,57 @@ func TestMCPGateUntrustedNoticesProjectMCPConfig(t *testing.T) {
 		t.Fatalf("trusted workspace must not flag an excluded project MCP layer")
 	}
 }
+
+// TestMCPCheckSurfacesTrustNotice proves the `zero mcp check` notice fix: in an untrusted
+// workspace whose only definition of a server lives in ./.zero/config.json, the gate
+// drops the server and the command must emit the one-line trust notice before the
+// "not configured" error, instead of a bare miss that hides the trust exclusion. The R4
+// half proves the notice self-gates: a genuinely-absent server in a workspace with no
+// project config on disk prints "not configured" with no notice.
+func TestMCPCheckSurfacesTrustNotice(t *testing.T) {
+	setTrustConfigRoot(t)
+
+	// resolveMCPConfig fake that HONORS excludeProject: `proj` survives only when the
+	// project layer is included, mirroring the real gate.
+	dropFake := func(_ string, excludeProject bool) (config.MCPConfig, error) {
+		servers := map[string]config.MCPServerConfig{}
+		if !excludeProject {
+			servers["proj"] = config.MCPServerConfig{Type: "stdio", Command: "proj-cmd"}
+		}
+		return config.MCPConfig{Servers: servers}, nil
+	}
+
+	// Untrusted workspace whose ONLY definition of `proj` is project config on disk.
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	deps := appDeps{getwd: func() (string, error) { return repo, nil }, resolveMCPConfig: dropFake}
+	if code := runWithDeps([]string{"mcp", "check", "proj"}, &out, &errBuf, deps); code == exitSuccess {
+		t.Fatalf("mcp check on a gated project server must fail, got success; stderr=%q", errBuf.String())
+	}
+	if got := errBuf.String(); !strings.Contains(got, "not configured") ||
+		!strings.Contains(got, "MCP servers") || !strings.Contains(got, "zero trust") {
+		t.Fatalf("untrusted mcp check must report not-configured AND surface the trust notice, got %q", got)
+	}
+
+	// R4: an untrusted workspace with NO project MCP config on disk has nothing to
+	// notice about, so an absent server prints "not configured" with no trust notice.
+	bare := t.TempDir()
+	var out2, errBuf2 bytes.Buffer
+	deps2 := appDeps{getwd: func() (string, error) { return bare, nil }, resolveMCPConfig: dropFake}
+	if code := runWithDeps([]string{"mcp", "check", "ghost"}, &out2, &errBuf2, deps2); code == exitSuccess {
+		t.Fatalf("mcp check on an absent server must fail")
+	}
+	if got := errBuf2.String(); !strings.Contains(got, "not configured") {
+		t.Fatalf("stderr must report not configured, got %q", got)
+	}
+	if got := errBuf2.String(); strings.Contains(got, "ignoring project") || strings.Contains(got, "zero trust") {
+		t.Fatalf("no project config on disk means no trust notice, got %q", got)
+	}
+}

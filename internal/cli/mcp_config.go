@@ -268,13 +268,21 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	// so it is a spawn site: gate the project layer behind the trust check (fail-closed)
 	// so a cloned repo cannot have `zero mcp check <its-server>` run its command. No
 	// --worktree reassignment on this command path, so trustRoot == cwd.
-	mcpExcludeProject, _ := resolveTrust(cwd)
+	mcpExcludeProject, trustCheckErrored := resolveTrust(cwd)
 	cfg, err := deps.resolveMCPConfig(cwd, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	raw, ok := cfg.Servers[serverName]
 	if !ok {
+		// The server may be missing because the project layer was gated out in an
+		// untrusted workspace; emit the same one-line notice the other spawn sites use so
+		// a dropped project server reads as "run zero trust", not a bare miss. The notice
+		// self-gates: it stays silent unless a project MCP config was actually excluded.
+		emitTrustNotice(stderr, trustSkip{
+			excludedProjectConfig: mcpExcludeProject && projectMCPConfigExists(cwd),
+			trustCheckErrored:     trustCheckErrored,
+		})
 		return writeAppError(stderr, fmt.Sprintf("MCP server %q is not configured", serverName), exitCrash)
 	}
 	if raw.Disabled {
