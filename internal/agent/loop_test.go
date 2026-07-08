@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -89,6 +90,78 @@ func TestRunDispatchesSessionLifecycleHooks(t *testing.T) {
 	}
 	if started[hooks.EventSessionEnd] != 1 || completed[hooks.EventSessionEnd] != 1 {
 		t.Fatalf("sessionEnd audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionEnd], completed[hooks.EventSessionEnd], events)
+	}
+}
+
+// cancelingProvider simulates an Esc/Ctrl+C abort: it cancels the run's own
+// context mid-stream (as the TUI's interrupt handler would) and returns no
+// events, so Run observes ctx.Err() and returns early with an already-canceled
+// context in scope for the deferred sessionEnd dispatch.
+type cancelingProvider struct {
+	cancel context.CancelFunc
+}
+
+func (provider *cancelingProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	provider.cancel()
+	ch := make(chan zeroruntime.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+// TestRunDispatchesSessionEndHookAfterContextCancellation is a regression test
+// for a bug where an interrupted run (Esc/Ctrl+C) canceled ctx before the
+// deferred sessionEnd dispatch ran, so Hooks.Dispatch's context.WithTimeout(ctx, ...)
+// derived an already-canceled context and the hook command never actually launched.
+func TestRunDispatchesSessionEndHookAfterContextCancellation(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go binary not on PATH")
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &cancelingProvider{cancel: cancel}
+
+	_, err = Run(ctx, "hi", provider, Options{
+		SessionID:    "session-cancel",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Hooks:        dispatcher,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var completedStatus hooks.AuditStatus
+	found := false
+	for _, event := range events {
+		if event.Type == "hook_execution_completed" && event.Event == hooks.EventSessionEnd {
+			completedStatus = event.Status
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no sessionEnd hook_execution_completed audit event, events=%#v", events)
+	}
+	if completedStatus != hooks.AuditCompleted {
+		t.Fatalf("sessionEnd hook status = %q, want %q (hook must actually run despite ctx cancellation)", completedStatus, hooks.AuditCompleted)
 	}
 }
 
