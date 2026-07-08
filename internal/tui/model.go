@@ -1437,8 +1437,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Composer-based paste protection: when the composer already has
 			// multiline text (e.g. pasted via bracketed paste / Ctrl+Shift+V),
 			// plain Enter inserts a newline instead of submitting so each
-			// pasted \n does not trigger a premature submit.
-			if m.composerActive && m.burstCount > 0 && strings.Contains(m.composer.text, "\n") {
+			// pasted \n does not trigger a premature submit. Uses the same
+			// burstCount > 2 threshold as the Termux path so a single fast
+			// key + Enter on a multiline prompt still submits.
+			if m.composerActive && m.burstCount > 2 && strings.Contains(m.composer.text, "\n") {
 				state := m.currentComposerState()
 				m = m.insertComposerTextWithPastePreview(state, "\n", "")
 				m.clearSuggestions()
