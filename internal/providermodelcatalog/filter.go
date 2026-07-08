@@ -1,6 +1,10 @@
 package providermodelcatalog
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/providercatalog"
+)
 
 func IsCodingModel(model Model) bool {
 	if IsKnownNonCodingModelID(model.ID) {
@@ -136,4 +140,32 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ModelIDAllowedForProvider reports whether a model ID is permitted for the
+// given provider under provider-specific allow/block rules.
+// For opencode-go-anthropic-compatible: only Qwen and MiniMax model IDs are allowed.
+// For all other providers: all model IDs are allowed.
+func ModelIDAllowedForProvider(providerID, modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+	switch providercatalog.NormalizeID(providerID) {
+	case "opencode-go-anthropic-compatible":
+		return strings.Contains(modelID, "qwen") || strings.Contains(modelID, "minimax")
+	default:
+		return true
+	}
+}
+
+// FilterModelsForProvider filters a model slice by ModelIDAllowedForProvider.
+func FilterModelsForProvider(providerID string, models []Model) []Model {
+	result := make([]Model, 0, len(models))
+	for _, model := range models {
+		if ModelIDAllowedForProvider(providerID, model.ID) {
+			result = append(result, model)
+		}
+	}
+	return result
 }

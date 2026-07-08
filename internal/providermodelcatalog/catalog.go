@@ -163,6 +163,12 @@ var curatedModels = map[string][]Model{
 	"custom-anthropic-compatible": {
 		{ID: "custom-model", Description: "custom endpoint model"},
 	},
+	"opencode-go-anthropic-compatible": {
+		{ID: "minimax-m3", Description: "catalog default"},
+		{ID: "minimax-m2.7", Description: "MiniMax model"},
+		{ID: "qwen3.7-plus", Description: "Qwen model"},
+		{ID: "qwen3.7-max", Description: "Qwen model"},
+	},
 }
 
 func Models(provider providercatalog.Descriptor) []Model {

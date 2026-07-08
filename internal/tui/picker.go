@@ -519,27 +519,46 @@ func modelFavoriteKey(item pickerItem) string {
 	return id
 }
 
-func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID string) pickerItem {
+// recentModelPairsForPicker returns the provider+model pairs to show under
+// "Recent", newest first: the active provider/model is always pinned first
+// (even before it has been recorded to history), followed by persisted
+// history, de-duplicated by provider+model pair and capped to
+// config.MaxRecentModels.
+func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
+	pairs := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
+	pairs = append(pairs, config.RecentModelEntry{Provider: m.providerName, Model: m.modelName})
+	pairs = append(pairs, m.recentModels...)
+	return config.NormalizeRecentModels(pairs)
+}
+
+// modelPickerRecentItem resolves one "Recent" row for a provider+model pair,
+// tagging it with OwnerProvider so choosing it can switch providers (like any
+// other cross-provider picker row) even when it isn't the active provider.
+func (m model) modelPickerRecentItem(registry modelregistry.Registry, providerName, modelID string) pickerItem {
+	providerName = strings.TrimSpace(providerName)
 	if entry, ok := registry.Resolve(modelID); ok {
 		item := registryModelPickerItem(entry, "Recent")
 		item.Value = modelID
-		item.OwnerProvider = m.providerName
+		item.OwnerProvider = providerName
 		return item
 	}
-	if provider, ok := m.activeProviderDescriptor(); ok {
-		for _, model := range providermodelcatalog.Models(provider) {
-			if model.ID == modelID {
-				item := providerModelPickerItem(provider, model, "Recent")
-				item.Value = modelID
-				item.OwnerProvider = m.providerName
-				return item
+	if profile, ok := m.savedProviderByName(providerName); ok {
+		if descriptor, hasDescriptor := m.descriptorForProfile(profile); hasDescriptor {
+			for _, model := range providermodelcatalog.Models(descriptor) {
+				if model.ID == modelID {
+					item := providerModelPickerItem(descriptor, model, "Recent")
+					item.Value = modelID
+					item.OwnerProvider = profile.Name
+					return item
+				}
 			}
+			item := providerModelPickerItem(descriptor, providermodelcatalog.Model{ID: modelID}, "Recent")
+			item.Value = modelID
+			item.OwnerProvider = profile.Name
+			return item
 		}
-		item := providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
-		item.OwnerProvider = m.providerName
-		return item
 	}
-	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID, OwnerProvider: m.providerName}
+	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID, OwnerProvider: providerName}
 }
 
 func registryModelPickerItem(entry modelregistry.ModelEntry, group string) pickerItem {
