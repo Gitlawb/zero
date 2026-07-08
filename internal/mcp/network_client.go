@@ -68,9 +68,13 @@ func connectRemoteSSE(ctx context.Context, server Server) (ToolClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Shallow-copy the shared client to inherit its transport configuration
+	// while stripping the end-to-end timeout for persistent SSE streaming.
+	sseClient := *httpClient
+	sseClient.Timeout = 0
 	client := &remoteSSEClient{
 		server:  server,
-		client:  httpClient,
+		client:  &sseClient,
 		nextID:  1,
 		pending: map[string]chan ssePendingResponse{},
 	}
