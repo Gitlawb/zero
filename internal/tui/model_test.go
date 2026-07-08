@@ -2677,10 +2677,11 @@ func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
 	}
 }
 
-// TestTermuxBurstInsertsNewline: under Termux, 3+ rapid chars + Enter inserts newline.
-func TestTermuxBurstInsertsNewline(t *testing.T) {
+// burstTestModel creates a model with fake provider, advancing clock (60ms/tick),
+// and empty composer for burst/paste testing. termuxVersion controls the env var.
+func burstTestModel(t *testing.T, termuxVersion string) model {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("TERMUX_VERSION", "v0.118.0")
+	t.Setenv("TERMUX_VERSION", termuxVersion)
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "ok"},
 		{Type: zeroruntime.StreamEventDone},
@@ -2701,12 +2702,22 @@ func TestTermuxBurstInsertsNewline(t *testing.T) {
 	m.input.SetValue("")
 	m.width = 100
 	m.height = 30
+	return m
+}
 
-	for _, ch := range "abc" {
+// typeKeys simulates rapid keypresses into the model, returning the final state.
+func typeKeys(m model, keys string) model {
+	for _, ch := range keys {
 		updated, _ := m.Update(testKeyText(string(ch)))
 		m = updated.(model)
 	}
+	return m
+}
 
+// TestTermuxBurstInsertsNewline: under Termux, 3+ rapid chars + Enter inserts newline.
+func TestTermuxBurstInsertsNewline(t *testing.T) {
+	m := burstTestModel(t, "v0.118.0")
+	m = typeKeys(m, "abc")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.pending {
@@ -2719,36 +2730,13 @@ func TestTermuxBurstInsertsNewline(t *testing.T) {
 
 // TestTermuxFastTypingSubmits: under Termux, 2 fast chars + Enter still submits.
 func TestTermuxFastTypingSubmits(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("TERMUX_VERSION", "v0.118.0")
-	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
-		{Type: zeroruntime.StreamEventText, Content: "ok"},
-		{Type: zeroruntime.StreamEventDone},
-	}}
-	m := newModel(context.Background(), Options{
-		Cwd:          t.TempDir(),
-		ProviderName: "tokenrouter",
-		ModelName:    "MiniMax-M3",
-		Provider:     provider,
-		Registry:     tools.NewRegistry(),
-	})
-	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
-	tick := 0
-	m.now = func() time.Time {
-		tick++
-		return base.Add(time.Duration(tick) * 60 * time.Millisecond)
-	}
-	m.input.SetValue("")
-	m.width = 100
-	m.height = 30
-
-	for _, ch := range "ab" {
-		updated, _ := m.Update(testKeyText(string(ch)))
-		m = updated.(model)
-	}
-
+	m := burstTestModel(t, "v0.118.0")
+	m = typeKeys(m, "ab")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
+	if !m.pending {
+		t.Fatal("fast typing should be pending after submit")
+	}
 	if cmd == nil {
 		t.Fatal("fast typing should submit, got nil cmd")
 	}
@@ -2756,37 +2744,41 @@ func TestTermuxFastTypingSubmits(t *testing.T) {
 
 // TestDesktopBurstNotAffected: on desktop (no TERMUX_VERSION), 3 fast chars + Enter submits.
 func TestDesktopBurstNotAffected(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("TERMUX_VERSION", "")
-	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
-		{Type: zeroruntime.StreamEventText, Content: "ok"},
-		{Type: zeroruntime.StreamEventDone},
-	}}
-	m := newModel(context.Background(), Options{
-		Cwd:          t.TempDir(),
-		ProviderName: "tokenrouter",
-		ModelName:    "MiniMax-M3",
-		Provider:     provider,
-		Registry:     tools.NewRegistry(),
-	})
-	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
-	tick := 0
-	m.now = func() time.Time {
-		tick++
-		return base.Add(time.Duration(tick) * 60 * time.Millisecond)
+	m := burstTestModel(t, "")
+	m = typeKeys(m, "abc")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("desktop burst should be pending after submit")
 	}
-	m.input.SetValue("")
-	m.width = 100
-	m.height = 30
-
-	for _, ch := range "abc" {
-		updated, _ := m.Update(testKeyText(string(ch)))
-		m = updated.(model)
+	if cmd == nil {
+		t.Fatal("desktop burst should submit, got nil cmd")
 	}
+}
 
+// TestBurstResetAfterSubmit: after submit, burstCount is reset so normal
+// typing (2 chars + Enter) still submits without false newline insertion.
+func TestBurstResetAfterSubmit(t *testing.T) {
+	m := burstTestModel(t, "v0.118.0")
+	// Type and submit normally
+	m = typeKeys(m, "hi")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
-		t.Fatal("desktop burst should submit, got nil cmd")
+		t.Fatal("first submit should start a run")
+	}
+	// Process the agent response so the model is no longer pending
+	resp, _ := m.Update(execCmd(cmd))
+	m = resp.(model)
+
+	// After reset, 2 fast chars + Enter should still submit (burstCount < 3)
+	m = typeKeys(m, "ok")
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("after burst reset, fast typing should submit")
+	}
+	if cmd == nil {
+		t.Fatal("after burst reset, got nil cmd")
 	}
 }
