@@ -768,7 +768,7 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 		},
 	})
 
-	next, status, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	next, status, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud"
 	if status != wantStatus {
 		t.Fatalf("switchProviderModel() status = %q, want %q (a mismatch here means the switch itself failed, not the recentModels assertion below)", status, wantStatus)
