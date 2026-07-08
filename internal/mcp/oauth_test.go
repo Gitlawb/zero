@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -72,16 +73,26 @@ func TestResolveEndpointsFallsBackToConfig(t *testing.T) {
 	}
 }
 
+// roundTripperFunc adapts a function to http.RoundTripper so a test can
+// observe every outbound request.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestResolveEndpointsSkipsDiscoveryWhenBothConfigured(t *testing.T) {
 	// When both endpoints are configured, discovery must be skipped entirely.
-	// Point the base URL at an invalid host so any discovery call would fail
-	// or hang -- if the fast path works, the test completes instantly.
+	// The client fails any outbound request, so this test distinguishes the
+	// fast path from a discovery failure rescued by the config fallback.
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected HTTP request to %s: discovery should be skipped", r.URL)
+		return nil, errors.New("discovery must be skipped")
+	})}
 	cfg := OAuthConfig{
 		AuthorizationEndpoint: "  https://issuer.example/authorize  ",
 		TokenEndpoint:         "  https://issuer.example/token  ",
 		RegistrationEndpoint:  "  https://issuer.example/register  ",
 	}
-	meta, err := resolveAuthorizationServer(context.Background(), http.DefaultClient, "http://0.0.0.0:0/invalid", cfg)
+	meta, err := resolveAuthorizationServer(context.Background(), client, "https://issuer.example", cfg)
 	if err != nil {
 		t.Fatalf("resolveAuthorizationServer() error = %v", err)
 	}
