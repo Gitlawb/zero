@@ -140,8 +140,9 @@ func TestGrepScanStopsMidFileOnCancelledContext(t *testing.T) {
 	const allowed = 5
 	ctx := &countingCancelContext{Context: context.Background(), remaining: allowed}
 	matches := 0
-	err = scanGrepFile(ctx, resolvedRoot, false, file, presenceGrepLineMatcher(compiled), func(grepMatch) {
+	err = scanGrepFile(ctx, resolvedRoot, false, file, presenceGrepLineMatcher(compiled), func(grepMatch) bool {
 		matches++
+		return true
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)

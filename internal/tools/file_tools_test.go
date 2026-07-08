@@ -239,12 +239,18 @@ func TestGrepToolMakesHeadLimitTruncationVisible(t *testing.T) {
 	if result.Status != StatusOK || !result.Truncated {
 		t.Fatalf("expected ok+truncated, got status=%s truncated=%v output=%q", result.Status, result.Truncated, result.Output)
 	}
-	if !strings.Contains(result.Output, "[truncated: showing first 2 of 3 matches") {
+	if !strings.Contains(result.Output, "[truncated: showing first 2 matches") {
 		t.Fatalf("expected visible grep truncation marker, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, " of 3 matches") {
+		t.Fatalf("content truncation marker must not claim exact total, got %q", result.Output)
+	}
+	if result.Meta["truncation_reason"] != "head_limit" {
+		t.Fatalf("expected head_limit truncation reason, got %v", result.Meta)
 	}
 }
 
-func TestGrepToolCountsAllLinesWhileKeepingHeadLimitSmall(t *testing.T) {
+func TestGrepToolStopsAfterHeadLimitInContentMode(t *testing.T) {
 	root := t.TempDir()
 	var builder strings.Builder
 	for i := 0; i < 100; i++ {
@@ -263,11 +269,46 @@ func TestGrepToolCountsAllLinesWhileKeepingHeadLimitSmall(t *testing.T) {
 	if result.Status != StatusOK || !result.Truncated {
 		t.Fatalf("expected ok+truncated, got status=%s truncated=%v output=%q", result.Status, result.Truncated, result.Output)
 	}
-	if !strings.Contains(result.Output, "[truncated: showing first 3 of 100 matches") {
-		t.Fatalf("expected exact total match count, got %q", result.Output)
+	if !strings.Contains(result.Output, "[truncated: showing first 3 matches") {
+		t.Fatalf("expected visible grep truncation marker, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, " of 100 matches") {
+		t.Fatalf("content truncation marker must not claim exact total, got %q", result.Output)
 	}
 	if strings.Contains(result.Output, "notes.txt:4:") {
 		t.Fatalf("head_limit leaked fourth result: %q", result.Output)
+	}
+	if result.Meta["truncation_reason"] != "head_limit" {
+		t.Fatalf("expected head_limit truncation reason, got %v", result.Meta)
+	}
+}
+
+func TestGrepContentScanStopsAfterHeadLimitPlusOne(t *testing.T) {
+	root := t.TempDir()
+	var builder strings.Builder
+	for i := 0; i < 100; i++ {
+		builder.WriteString("needle\n")
+	}
+	writeTestFile(t, filepath.Join(root, "notes.txt"), builder.String())
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	matcherCalls := 0
+	collector := &grepContentCollector{headLimit: 3}
+	err = scanGrepMatches(context.Background(), resolvedRoot, root, nil, readExcluder{}, false, func([]byte) (int, bool) {
+		matcherCalls++
+		return 1, true
+	}, collector.collect)
+	if err != nil {
+		t.Fatalf("scanGrepMatches: %v", err)
+	}
+	if matcherCalls != 4 {
+		t.Fatalf("matcher calls = %d, want head_limit+1", matcherCalls)
+	}
+	if !collector.truncated {
+		t.Fatal("collector should mark content results truncated")
 	}
 }
 

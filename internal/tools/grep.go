@@ -3,6 +3,7 @@ package tools
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,8 @@ type grepMatch struct {
 	text string
 	hits int
 }
+
+var errGrepLimitReached = errors.New("grep head limit reached")
 
 func NewGrepTool(workspaceRoot string) Tool {
 	return NewScopedGrepTool(workspaceRoot, nil)
@@ -307,11 +310,11 @@ func walkGrepFiles(ctx context.Context, resolvedRoot string, target string, glob
 	})
 }
 
-type grepLineMatcher func(string) (int, bool)
+type grepLineMatcher func([]byte) (int, bool)
 
 func presenceGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
-	return func(line string) (int, bool) {
-		if !compiled.MatchString(line) {
+	return func(line []byte) (int, bool) {
+		if !compiled.Match(line) {
 			return 0, false
 		}
 		return 1, true
@@ -319,8 +322,8 @@ func presenceGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
 }
 
 func exactGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
-	return func(line string) (int, bool) {
-		matches := compiled.FindAllStringIndex(line, -1)
+	return func(line []byte) (int, bool) {
+		matches := compiled.FindAllIndex(line, -1)
 		if len(matches) == 0 {
 			return 0, false
 		}
@@ -328,13 +331,17 @@ func exactGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
 	}
 }
 
-func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, absolutePaths bool, matcher grepLineMatcher, emit func(grepMatch)) error {
-	return walkGrepFiles(ctx, resolvedRoot, target, globMatcher, exclude, func(file string) error {
+func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, absolutePaths bool, matcher grepLineMatcher, emit func(grepMatch) bool) error {
+	err := walkGrepFiles(ctx, resolvedRoot, target, globMatcher, exclude, func(file string) error {
 		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, matcher, emit)
 	})
+	if errors.Is(err, errGrepLimitReached) {
+		return nil
+	}
+	return err
 }
 
-func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, matcher grepLineMatcher, emit func(grepMatch)) error {
+func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, matcher grepLineMatcher, emit func(grepMatch) bool) error {
 	// Re-confine at read time (defense-in-depth) AND to compute the clean
 	// workspace-relative path used in output.
 	relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
@@ -372,7 +379,7 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 		raw, ended, err := readRawLine(reader)
 		if err == io.EOF {
 			if !sawLine || lastEnded {
-				emitGrepLine(matcher, fileLabel, lineNumber, "", emit)
+				return emitGrepLine(matcher, fileLabel, lineNumber, nil, emit)
 			}
 			return nil
 		}
@@ -381,31 +388,44 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 		}
 		sawLine = true
 		lastEnded = ended
-		line := strings.TrimRight(string(trimLineBreak(raw, ended)), "\r")
-		emitGrepLine(matcher, fileLabel, lineNumber, line, emit)
+		line := trimTrailingCarriageReturns(trimLineBreak(raw, ended))
+		if err := emitGrepLine(matcher, fileLabel, lineNumber, line, emit); err != nil {
+			return err
+		}
 		lineNumber++
 	}
 }
 
-func emitGrepLine(matcher grepLineMatcher, fileLabel string, lineNumber int, line string, emit func(grepMatch)) {
+func trimTrailingCarriageReturns(line []byte) []byte {
+	for len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+func emitGrepLine(matcher grepLineMatcher, fileLabel string, lineNumber int, line []byte, emit func(grepMatch) bool) error {
 	hits, ok := matcher(line)
 	if !ok {
-		return
+		return nil
 	}
-	emit(grepMatch{
+	if !emit(grepMatch{
 		file: fileLabel,
 		line: lineNumber,
-		text: line,
+		text: string(line),
 		hits: hits,
-	})
+	}) {
+		return errGrepLimitReached
+	}
+	return nil
 }
 
 type grepCountCollector struct {
 	hits int
 }
 
-func (collector *grepCountCollector) collect(match grepMatch) {
+func (collector *grepCountCollector) collect(match grepMatch) bool {
 	collector.hits += match.hits
+	return true
 }
 
 func (collector *grepCountCollector) result() Result {
@@ -417,15 +437,16 @@ type grepFileListCollector struct {
 	seen  map[string]bool
 }
 
-func (collector *grepFileListCollector) collect(match grepMatch) {
+func (collector *grepFileListCollector) collect(match grepMatch) bool {
 	if collector.seen == nil {
 		collector.seen = map[string]bool{}
 	}
 	if collector.seen[match.file] {
-		return
+		return true
 	}
 	collector.seen[match.file] = true
 	collector.files = append(collector.files, match.file)
+	return true
 }
 
 func (collector *grepFileListCollector) result() Result {
@@ -443,30 +464,34 @@ func (collector *grepFileListCollector) result() Result {
 }
 
 type grepContentCollector struct {
-	headLimit     int
-	matches       []grepMatch
-	matchingLines int
+	headLimit   int
+	matches     []grepMatch
+	matchesSeen int
+	truncated   bool
 }
 
-func (collector *grepContentCollector) collect(match grepMatch) {
-	collector.matchingLines++
+func (collector *grepContentCollector) collect(match grepMatch) bool {
+	collector.matchesSeen++
 	if len(collector.matches) < collector.headLimit {
 		collector.matches = append(collector.matches, match)
+		return true
 	}
+	collector.truncated = true
+	return false
 }
 
 func (collector *grepContentCollector) result() Result {
-	if collector.matchingLines == 0 {
+	if collector.matchesSeen == 0 {
 		return okResult("No matches found.")
 	}
 	lines := make([]string, 0, len(collector.matches))
 	for _, match := range collector.matches {
 		lines = append(lines, fmt.Sprintf("%s:%d: %s", match.file, match.line, match.text))
 	}
-	truncated := collector.matchingLines > collector.headLimit
+	truncated := collector.truncated
 	output := strings.Join(lines, "\n")
 	if truncated {
-		output += fmt.Sprintf("\n\n[truncated: showing first %d of %d matches; narrow path/glob/pattern or increase head_limit]", len(lines), collector.matchingLines)
+		output += fmt.Sprintf("\n\n[truncated: showing first %d matches; narrow path/glob/pattern or increase head_limit]", len(lines))
 	}
 	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "narrow path/glob/pattern or increase head_limit")
 	meta := outputBudgetMeta(budgeted)
