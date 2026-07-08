@@ -111,6 +111,39 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 	return EnsuredProvider{Name: profile.Name, Created: true, Active: written.ActiveProvider}, nil
 }
 
+// MarkProviderAPIKeyStored records that provider's API key now lives in the
+// credential store. It also clears inline/env key fields so the stored key is the
+// runtime credential; an old apiKeyEnv value must not keep overriding a freshly
+// captured key from `zero auth openrouter` or provider setup.
+func MarkProviderAPIKeyStored(path string, provider string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return fmt.Errorf("provider name is required")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for index := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) {
+			cfg.Providers[index].APIKey = ""
+			cfg.Providers[index].APIKeyEnv = ""
+			cfg.Providers[index].APIKeyStored = true
+			return writeConfigFile(path, cfg)
+		}
+	}
+	return fmt.Errorf("provider %q not found", provider)
+}
+
 func SetActiveProvider(path string, name string) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {

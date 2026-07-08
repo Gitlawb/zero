@@ -25,6 +25,7 @@ import (
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -60,6 +61,7 @@ type appDeps struct {
 	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
+	openRouterLogin        func(context.Context, provideroauth.OpenRouterOptions) (string, error)
 	newSessionStore        func() *sessions.Store
 	loadPlugins            func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks              func(hooks.LoadOptions) (hooks.LoadResult, error)
@@ -144,6 +146,7 @@ func defaultAppDeps() appDeps {
 		probeProviderHealth:    providerhealth.Probe,
 		discoverProviderModels: defaultDiscoverProviderModels,
 		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
+		openRouterLogin:        provideroauth.OpenRouterLogin,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -464,6 +467,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.detectLocalRuntimes == nil {
 		deps.detectLocalRuntimes = defaults.detectLocalRuntimes
+	}
+	if deps.openRouterLogin == nil {
+		deps.openRouterLogin = defaults.openRouterLogin
 	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore

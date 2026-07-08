@@ -385,7 +385,7 @@ func ClassifiedError(statusCode int, message string, secrets ...string) string {
 		// Lead with an actionable instruction rather than the raw upstream auth blurb
 		// (which often points the user at the wrong provider's dashboard URL). Keep a
 		// redacted, one-line upstream detail for context — never the raw body. (AUDIT-H7)
-		curated := "auth error: your API key is missing or invalid — run `zero auth`, or set the provider's API key, then retry."
+		curated := "auth error: your API key is missing or invalid — run `zero setup`, `zero auth openrouter` for OpenRouter, or set the provider's API key, then retry."
 		if detail := strings.TrimSpace(Redact(message, secrets...)); detail != "" {
 			return curated + " (provider said: " + detail + ")"
 		}

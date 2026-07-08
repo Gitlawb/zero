@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,11 +83,11 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 }
 
-// runAuthOpenRouter runs OpenRouter's browser PKCE login and prints the freshly
-// minted API key. Unlike `auth login` (which stores an OAuth bearer token),
-// OpenRouter's flow mints a normal API key; the setup wizard saves it to a
-// provider profile, while this command prints it for manual configuration.
-func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int {
+// runAuthOpenRouter runs OpenRouter's browser PKCE login and saves the freshly
+// minted API key into the user's provider credential store. Unlike `auth login`
+// (which stores an OAuth bearer token), OpenRouter's flow mints a normal API key;
+// persist it immediately so the provider is usable after the command completes.
+func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	for _, a := range args {
 		if a == "-h" || a == "--help" || a == "help" {
 			_ = writeAuthHelp(stdout)
@@ -98,7 +99,7 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
-	key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
+	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 		// ZERO_OPENROUTER_BASE_URL overrides the endpoint (self-hosted gateway or tests).
@@ -107,10 +108,53 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted.\nUse it with zero, e.g.:\n  export OPENROUTER_API_KEY=%s\n(or add it to a provider profile with catalogID \"openrouter\").\n", key); err != nil {
+	line, err := saveOpenRouterProviderKey(deps, key)
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("OpenRouter returned an empty API key")
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return "", err
+	}
+	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
+	if err != nil {
+		return "", err
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		return "", err
+	}
+	if err := store.Set(ensured.Name, key); err != nil {
+		return "", err
+	}
+	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
+		return "", err
+	}
+	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	switch {
+	case ensured.Created && active:
+		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
+	case ensured.Created:
+		return fmt.Sprintf("Added provider %q to your config; the active provider is still %q.\nSwitch with: zero providers use %s", ensured.Name, ensured.Active, ensured.Name), nil
+	case active:
+		return fmt.Sprintf("Provider %q is configured, active, and ready to use.", ensured.Name), nil
+	default:
+		return fmt.Sprintf("Provider %q is configured with the new key.\nSwitch with: zero providers use %s", ensured.Name, ensured.Name), nil
+	}
 }
 
 // runAuthChatGPT runs the ChatGPT (Codex) browser PKCE login, persists the

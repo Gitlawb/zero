@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 )
 
 // withAuthStore points the provider OAuth store at a temp file for the test,
@@ -148,6 +150,44 @@ func TestRunAuthOpenRouterRejectsArgs(t *testing.T) {
 	stderr.Reset()
 	if code := runWithDeps([]string{"auth", "openrouter", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("openrouter --help should succeed, stderr=%q", stderr.String())
+	}
+}
+
+func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	var stdout, stderr bytes.Buffer
+
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			return "sk-openrouter-test", nil
+		},
+	})
+
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "new API key saved") {
+		t.Fatalf("expected saved-key confirmation, got %q", stdout.String())
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.ActiveProvider != "openrouter" || len(cfg.Providers) != 1 {
+		t.Fatalf("config = %#v", cfg)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "openrouter" || profile.CatalogID != "openrouter" || !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
+		t.Fatalf("provider not stored-key sanitized: %#v", profile)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok, err := store.Get("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || key != "sk-openrouter-test" {
+		t.Fatalf("stored key = %q, %v", key, ok)
 	}
 }
 

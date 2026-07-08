@@ -554,6 +554,36 @@ func TestEnsureCatalogProviderRejectsUnknownCatalogID(t *testing.T) {
 	}
 }
 
+func TestMarkProviderAPIKeyStoredClearsInlineAndEnvKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openrouter",
+		Providers: []ProviderProfile{{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			APIKey:    "sk-inline",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Model:     "openai/gpt-4.1",
+		}},
+	}, 0o600)
+
+	if err := MarkProviderAPIKeyStored(path, "openrouter"); err != nil {
+		t.Fatalf("MarkProviderAPIKeyStored: %v", err)
+	}
+
+	cfg := readConfigFixture(t, path)
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %#v", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
+		t.Fatalf("provider credential fields = %#v", profile)
+	}
+	if profile.Model != "openai/gpt-4.1" || cfg.ActiveProvider != "openrouter" {
+		t.Fatalf("unrelated config changed: %#v", cfg)
+	}
+}
+
 func TestRemoveProviderDeletesAndHandsOffActive(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
