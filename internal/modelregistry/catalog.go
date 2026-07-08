@@ -214,11 +214,22 @@ func reasoningEffortsForModelName(name string) []ReasoningEffort {
 	if i := strings.IndexByte(n, ':'); i >= 0 { // drop a "provider:" qualifier
 		n = n[i+1:]
 	}
+	// Gateway ids also carry a slash-form "vendor/" qualifier (e.g. the
+	// OpenGateway's tencent/hy3, github's openai/o3-mini) — match on the bare name.
+	if i := strings.LastIndexByte(n, '/'); i >= 0 {
+		n = n[i+1:]
+	}
 	switch {
 	case strings.HasPrefix(n, "gpt-5") || strings.HasPrefix(n, "gpt5"):
 		// GPT-5 / Codex (gpt-5.x) add a "minimal" tier below low.
 		return []ReasoningEffort{ReasoningEffortMinimal, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
 	case strings.Contains(n, "codex") || isOSeriesModelName(n):
+		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
+	case strings.HasPrefix(n, "hy3") || strings.Contains(n, "hunyuan"):
+		// Tencent Hunyuan reasoning models (served via OpenAI-compatible gateways).
+		// The client forwards reasoning_effort; whether the upstream honors it is
+		// the gateway's translation concern — unknown fields are ignored, so the
+		// worst case is a silent no-op rather than a 400.
 		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
 	default:
 		return nil
