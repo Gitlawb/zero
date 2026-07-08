@@ -847,7 +847,7 @@ func (source *storeTokenSource) config() OAuthConfig {
 }
 
 func (source *storeTokenSource) AccessToken(ctx context.Context) (string, error) {
-	token, ok, err := source.store.Load(source.server.Name)
+	token, ok, err := source.store.LoadForServer(source.server)
 	if err != nil {
 		return "", err
 	}
@@ -858,7 +858,7 @@ func (source *storeTokenSource) AccessToken(ctx context.Context) (string, error)
 }
 
 func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
-	token, ok, err := source.store.Load(source.server.Name)
+	token, ok, err := source.store.LoadForServer(source.server)
 	if err != nil {
 		return "", err
 	}
@@ -869,7 +869,7 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := source.store.Save(source.server.Name, refreshed); err != nil {
+	if err := source.store.SaveForServer(source.server, refreshed); err != nil {
 		return "", err
 	}
 	return refreshed.AccessToken, nil

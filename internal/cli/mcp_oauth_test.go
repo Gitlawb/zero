@@ -88,6 +88,9 @@ func TestRunMCPOAuthLogout(t *testing.T) {
 	if err := store.Save("remote", mcp.StoredToken{AccessToken: "a", RefreshToken: "r"}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
+	if err := store.SaveForServer(mcp.Server{Name: "remote", Identity: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, mcp.StoredToken{AccessToken: "identity", RefreshToken: "ir"}); err != nil {
+		t.Fatalf("SaveForServer() error = %v", err)
+	}
 	deps := appDeps{newMCPTokenStore: func() (*mcp.TokenStore, error) { return store, nil }}
 
 	var stdout, stderr bytes.Buffer
@@ -100,6 +103,9 @@ func TestRunMCPOAuthLogout(t *testing.T) {
 	}
 	if _, ok, _ := store.Load("remote"); ok {
 		t.Fatal("token still present after logout")
+	}
+	if statuses, err := store.Status(); err != nil || len(statuses) != 0 {
+		t.Fatalf("status after logout = %#v err=%v, want no tokens", statuses, err)
 	}
 }
 
@@ -122,23 +128,24 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
+	mcpConfig := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"remote": {
+			Type: "http",
+			URL:  "https://remote.invalid/mcp",
+			Auth: "oauth",
+			OAuth: &config.MCPOAuthConfig{
+				ClientID:              "client-123",
+				AuthorizationEndpoint: "https://remote.invalid/authorize",
+				TokenEndpoint:         tokenServer.URL,
+				Scopes:                []string{"read"},
+			},
+		},
+	}}
 	deps := appDeps{
 		getwd:            func() (string, error) { return cwd, nil },
 		newMCPTokenStore: func() (*mcp.TokenStore, error) { return store, nil },
-		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
-			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-				"remote": {
-					Type: "http",
-					URL:  "https://remote.invalid/mcp",
-					Auth: "oauth",
-					OAuth: &config.MCPOAuthConfig{
-						ClientID:              "client-123",
-						AuthorizationEndpoint: "https://remote.invalid/authorize",
-						TokenEndpoint:         tokenServer.URL,
-						Scopes:                []string{"read"},
-					},
-				},
-			}}, nil
+		resolveMCPConfig: func(_ string, _ bool) (config.MCPConfig, error) {
+			return mcpConfig, nil
 		},
 		now: time.Now,
 	}
@@ -173,9 +180,13 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("exitCode = %d stderr=%s stdout=%s", exitCode, stderr.String(), stdout.String())
 	}
-	token, ok, err := store.Load("remote")
+	servers, err := mcp.NormalizeConfig(mcpConfig)
+	if err != nil || len(servers) != 1 {
+		t.Fatalf("NormalizeConfig() servers=%#v err=%v", servers, err)
+	}
+	token, ok, err := store.LoadForServer(servers[0])
 	if err != nil || !ok {
-		t.Fatalf("Load() ok=%v err=%v", ok, err)
+		t.Fatalf("LoadForServer() ok=%v err=%v", ok, err)
 	}
 	if token.AccessToken != "access-final" || token.RefreshToken != "refresh-final" {
 		t.Fatalf("stored token = %#v", token)
@@ -483,7 +494,13 @@ func TestRunMCPOAuthLoginTrustedProjectServerStoresToken(t *testing.T) {
 	if gotExclude {
 		t.Fatal("trusted workspace must resolve MCP config with excludeProject=false")
 	}
-	token, ok, err := store.Load("remote")
+	servers, err := mcp.NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"remote": projectServer,
+	}})
+	if err != nil || len(servers) != 1 {
+		t.Fatalf("NormalizeConfig() servers=%#v err=%v", servers, err)
+	}
+	token, ok, err := store.LoadForServer(servers[0])
 	if err != nil || !ok {
 		t.Fatalf("token must be stored on trusted login; ok=%v err=%v", ok, err)
 	}
