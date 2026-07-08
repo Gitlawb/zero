@@ -21,7 +21,7 @@ func TestResolveLocalControlFromUserConfig(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path})
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestResolveLocalControlIgnoresProjectOptIn(t *testing.T) {
 		t.Fatalf("write project config: %v", err)
 	}
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestResolveLocalControlIgnoresProjectOptIn(t *testing.T) {
 }
 
 func TestLocalControlDefaultsBrowserAndTerminalOn(t *testing.T) {
-	resolved, err := Resolve(ResolveOptions{})
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestLocalControlExplicitGlobalDisable(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"localControl":{"enabled":false}}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path})
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
