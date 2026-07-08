@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -33,25 +34,25 @@ const (
 type Category string
 
 const (
-	CategoryConfig       Category = "config"
-	CategoryUnsupported  Category = "unsupported"
-	CategoryAuth         Category = "auth"
-	CategoryRateLimit    Category = "rate_limit"
-	CategoryNetwork      Category = "network"
-	CategoryTimeout      Category = "timeout"
-	CategoryProvider     Category = "provider_error"
-	CategoryConnectivity Category = "connectivity"
+	CategoryConfig        Category = "config"
+	CategoryUnsupported   Category = "unsupported"
+	CategoryAuth          Category = "auth"
+	CategoryRateLimit     Category = "rate_limit"
+	CategoryNetwork       Category = "network"
+	CategoryTimeout       Category = "timeout"
+	CategoryProvider      Category = "provider_error"
+	CategoryConnectivity  Category = "connectivity"
 )
 
 const defaultTimeout = 5 * time.Second
 
 type Options struct {
-	Profile      config.ProviderProfile
-	Connectivity bool
-	HTTPClient   *http.Client
-	Resolver     Resolver
-	Timeout      time.Duration
-	UserAgent    string
+	Profile       config.ProviderProfile
+	Connectivity  bool
+	HTTPClient    *http.Client
+	Resolver      Resolver
+	Timeout       time.Duration
+	UserAgent     string
 }
 
 type Resolver interface {
@@ -70,7 +71,7 @@ type blockedPrefix struct {
 }
 
 type embeddedIPv4Prefix struct {
-	prefix     netip.Prefix
+	prefix    netip.Prefix
 	byteOffset int
 }
 
@@ -179,10 +180,12 @@ func Probe(ctx context.Context, options Options) Result {
 		result.add(check("provider.config", "Provider config", StatusFail, CategoryConfig, "No LLM provider is configured.", nil, profile))
 		return result.finalize()
 	}
+
 	if strings.TrimSpace(profile.Model) == "" {
 		result.add(check("provider.config", "Provider config", StatusFail, CategoryConfig, fmt.Sprintf("Provider %s requires model.", providerName(profile)), nil, profile))
 		return result.finalize()
 	}
+
 	result.add(check("provider.config", "Provider config", StatusPass, CategoryConfig, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{
 		"name":     profile.Name,
 		"provider": profile.ProviderKind,
@@ -202,6 +205,7 @@ func Probe(ctx context.Context, options Options) Result {
 	}
 	result.ProviderKind = redact(string(metadata.ProviderKind), profile)
 	result.APIModel = redact(metadata.APIModel, profile)
+
 	result.add(check("provider.runtime", "Provider runtime", StatusPass, CategoryConfig, fmt.Sprintf("Provider runtime resolves %s as %s.", providerName(profile), metadata.ProviderKind), map[string]any{
 		"apiModel":     metadata.APIModel,
 		"providerKind": metadata.ProviderKind,
@@ -211,6 +215,7 @@ func Probe(ctx context.Context, options Options) Result {
 		result.add(check("provider.auth", "Provider auth", StatusFail, CategoryAuth, fmt.Sprintf("Provider %s requires API credentials.", providerName(profile)), credentialDetails(profile), profile))
 		return result.finalize()
 	}
+
 	if hasCredential(profile) {
 		result.add(check("provider.auth", "Provider auth", StatusPass, CategoryAuth, fmt.Sprintf("Provider %s has credentials configured.", providerName(profile)), credentialDetails(profile), profile))
 	} else {
@@ -220,6 +225,7 @@ func Probe(ctx context.Context, options Options) Result {
 	if !options.Connectivity {
 		return result.finalize()
 	}
+
 	result.add(connectivityCheck(ctx, profile, metadata.ProviderKind, options))
 	return result.finalize()
 }
@@ -266,6 +272,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
+
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -278,10 +285,12 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 		}
 		return check("provider.connectivity", "Provider connectivity", StatusFail, category, err.Error(), nil, profile)
 	}
+
 	client := options.HTTPClient
 	if client == nil {
 		client = newConnectivityClient(timeout, options.Resolver, sensitiveAuthHeaderNames(profile, kind), allowLoopbackOrPrivate)
 	}
+
 	response, err := client.Do(request)
 	if err != nil {
 		return classifyTransportError(err, profile)
@@ -297,6 +306,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 			"endpoint":   request.URL.String(),
 		}, profile)
 	}
+
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		return check("provider.connectivity", "Provider connectivity", StatusPass, CategoryConnectivity, fmt.Sprintf("Provider endpoint reachable (%d).", response.StatusCode), map[string]any{
 			"statusCode": response.StatusCode,
@@ -313,6 +323,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 		category = CategoryRateLimit
 		status = StatusWarn
 	}
+
 	message := responseMessage(response.StatusCode, body)
 	return check("provider.connectivity", "Provider connectivity", status, category, message, map[string]any{
 		"statusCode": response.StatusCode,
@@ -325,10 +336,12 @@ func healthRequest(ctx context.Context, profile config.ProviderProfile, kind con
 	if err != nil {
 		return nil, false, err
 	}
+
 	endpoint := baseURL + healthPath(kind)
 	if override, ok := overrideHealthEndpoint(profile, baseURL); ok {
 		endpoint = override
 	}
+
 	// Loopback is permitted only when the user's OWN configured base_url is loopback
 	// (a local provider like Ollama/LM Studio) — never for a redirect target. This is
 	// the flag returned to the caller so the dial path applies the same policy. (AUDIT-H1)
@@ -336,6 +349,7 @@ func healthRequest(ctx context.Context, profile config.ProviderProfile, kind con
 	if err := validateEndpoint(ctx, endpoint, options.Resolver, allowLoopbackOrPrivate); err != nil {
 		return nil, false, err
 	}
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, false, err
@@ -441,13 +455,13 @@ const maxConnectivityRedirects = 5
 // newConnectivityClient builds the HTTP client used for the default (no
 // caller-supplied client) connectivity probe. It is hardened against SSRF:
 //
-//   - CheckRedirect re-validates every redirect target with the same address
-//     rules as the initial endpoint, so a 3xx pointing at an internal address
-//     (e.g. 169.254.169.254) is refused rather than followed blindly.
-//   - the transport's DialContext re-resolves and validates the host at dial
-//     time and then dials the validated IP literal, closing the TOCTOU window
-//     between the pre-flight validateEndpoint check and the actual connection
-//     (DNS rebinding).
+// - CheckRedirect re-validates every redirect target with the same address
+// rules as the initial endpoint, so a 3xx pointing at an internal address
+// (e.g. 169.254.169.254) is refused rather than followed blindly.
+// - the transport's DialContext re-resolves and validates the host at dial
+// time and then dials the validated IP literal, closing the TOCTOU window
+// between the pre-flight validateEndpoint check and the actual connection
+// (DNS rebinding).
 func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHeaders []string, allowLoopbackOrPrivate bool) *http.Client {
 	if resolver == nil {
 		resolver = defaultResolver{}
@@ -460,7 +474,7 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 	}
 	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate)
 	return &http.Client{
-		Timeout:   timeout,
+		Timeout: timeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxConnectivityRedirects {
@@ -492,7 +506,7 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 // redirect on the health probe.
 func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.ProviderKind) []string {
 	names := map[string]struct{}{
-		"Authorization": {}, "Proxy-Authorization": {}, "Cookie": {},
+		"Authorization":      {}, "Proxy-Authorization": {}, "Cookie": {},
 		"x-api-key": {}, "x-goog-api-key": {}, "api-key": {},
 	}
 	switch kind {
@@ -518,15 +532,50 @@ func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.Provid
 	return out
 }
 
+// resolveProxyEnvAddrs resolves configured HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+// hostnames to IPs once per transport creation, so safeDialContext can
+// distinguish a proxy dial from a provider endpoint dial. (ponytail)
+func resolveProxyEnvAddrs(resolver Resolver) []string {
+	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"} {
+		val := os.Getenv(key)
+		if val == "" {
+			continue
+		}
+		u, err := url.Parse(val)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		host := u.Hostname()
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return []string{addr.String()}
+		}
+		if addrs, err := resolver.LookupNetIP(context.Background(), "ip", host); err == nil {
+			out := make([]string, len(addrs))
+			for i, a := range addrs {
+				out[i] = a.String()
+			}
+			return out
+		}
+	}
+	return nil
+}
+
 // safeDialContext returns a dial function that resolves the target host, refuses
 // the connection if any resolved address is blocked, then dials the validated IP
 // literal so the kernel cannot re-resolve to a different address after the check.
 func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	proxyHosts := resolveProxyEnvAddrs(resolver) // ponytail
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
+		}
+		// ponytail: bypass SSRF check when dialing a configured forward proxy
+		for _, ph := range proxyHosts {
+			if host == ph {
+				return dialer.DialContext(ctx, network, address)
+			}
 		}
 		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
 			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
@@ -600,7 +649,7 @@ func blockedAddrReason(addr netip.Addr) string {
 // overrideHealthEndpoint returns a provider-specific connectivity probe URL when
 // the default {baseURL}+/models path does not exist. GitLawb OpenGateway is a
 // smart-routing gateway whose flat /v1/models endpoint 404s by design ("Use
-// /v1/<provider>/<path>"), so probe its public /health endpoint at the host root
+// /v1/<model>"), so probe its public /health endpoint at the host root
 // instead, which reports real reachability without a per-model call.
 func overrideHealthEndpoint(profile config.ProviderProfile, baseURL string) (string, bool) {
 	if profile.CatalogID != "gitlawb-opengateway" {
@@ -629,31 +678,31 @@ func applyAuth(request *http.Request, profile config.ProviderProfile, kind confi
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		request.Header.Set("anthropic-version", "2023-06-01")
 		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
-			APIKey:            profile.APIKey,
+			APIKey:          profile.APIKey,
 			DefaultAuthHeader: "x-api-key",
-			AuthHeader:        profile.AuthHeader,
-			AuthScheme:        profile.AuthScheme,
-			AuthHeaderValue:   profile.AuthHeaderValue,
-			CustomHeaders:     profile.CustomHeaders,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
 		})
 	case config.ProviderKindGoogle:
 		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
-			APIKey:            profile.APIKey,
+			APIKey:          profile.APIKey,
 			DefaultAuthHeader: "x-goog-api-key",
-			AuthHeader:        profile.AuthHeader,
-			AuthScheme:        profile.AuthScheme,
-			AuthHeaderValue:   profile.AuthHeaderValue,
-			CustomHeaders:     profile.CustomHeaders,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
 		})
 	default:
 		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
-			APIKey:            profile.APIKey,
+			APIKey:          profile.APIKey,
 			DefaultAuthHeader: "Authorization",
 			DefaultAuthScheme: "Bearer",
-			AuthHeader:        profile.AuthHeader,
-			AuthScheme:        profile.AuthScheme,
-			AuthHeaderValue:   profile.AuthHeaderValue,
-			CustomHeaders:     profile.CustomHeaders,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
 		})
 	}
 }

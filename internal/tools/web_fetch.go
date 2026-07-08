@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -57,7 +58,7 @@ type webFetchBlockedPrefix struct {
 }
 
 type webFetchEmbeddedIPv4Prefix struct {
-	prefix     netip.Prefix
+	prefix    netip.Prefix
 	byteOffset int
 }
 
@@ -132,7 +133,7 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 						Default:     "auto",
 					},
 				},
-				Required:             []string{"url"},
+				Required: []string{"url"},
 				AdditionalProperties: false,
 			},
 			safety: Safety{
@@ -193,10 +194,10 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	default:
 		return errorResult(`Error: Invalid arguments for web_fetch: format must be "auto", "raw", or "markdown".`)
 	}
+
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
 	}
-
 	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)
 	if err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
@@ -224,6 +225,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 		finalURL = redactWebFetchURL(response.Request.URL)
 	}
 	contentType := redactWebFetchText(response.Header.Get("Content-Type"))
+
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _, _ := readWebFetchBody(response.Body, min(maxBytes, webFetchErrorBodyLimit))
 		message := fmt.Sprintf("Error fetching URL: HTTP %s", webFetchStatusLine(response))
@@ -266,7 +268,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 		"Bytes: " + strconv.Itoa(len(body)),
 	}
 	if converted {
-		headers = append(headers, "Converted: html -> markdown (pass format: \"raw\" for the original HTML)")
+		headers = append(headers, `Converted: html -> markdown (pass format: "raw" for the original HTML)`)
 	}
 	output := strings.Join(append(headers, "", body), "\n")
 
@@ -311,14 +313,51 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 	}
 
 	dialer := &net.Dialer{Timeout: webFetchTimeout, KeepAlive: 30 * time.Second}
-	transport.Proxy = nil
+	transport.Proxy = http.ProxyFromEnvironment
 	transport.DialContext = webFetchSafeDialContext(resolver, dialer)
 	transport.DialTLSContext = nil
 	return transport
 }
 
+// resolveWebFetchProxyAddrs resolves configured HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+// hostnames to IPs once per transport creation, so webFetchSafeDialContext can
+// distinguish a proxy dial from a target endpoint dial. (ponytail)
+func resolveWebFetchProxyAddrs(resolver webFetchResolver) []string {
+	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"} {
+		val := os.Getenv(key)
+		if val == "" {
+			continue
+		}
+		u, err := url.Parse(val)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		host := u.Hostname()
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return []string{addr.String()}
+		}
+		addrs, err := resolver.LookupNetIP(context.Background(), "ip", host)
+		if err == nil {
+			out := make([]string, len(addrs))
+			for i, a := range addrs {
+				out[i] = a.String()
+			}
+			return out
+		}
+	}
+	return nil
+}
+
 func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
+	proxyHosts := resolveWebFetchProxyAddrs(resolver) // ponytail
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		// ponytail: bypass SSRF check when dialing a configured forward proxy
+		for _, ph := range proxyHosts {
+			if host == ph {
+				return dialer.DialContext(ctx, network, address)
+			}
+		}
 		pinnedAddress, err := webFetchSafeDialAddress(ctx, resolver, address)
 		if err != nil {
 			return nil, err
@@ -382,223 +421,4 @@ func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchRe
 		return nil, err
 	}
 	return parsed, nil
-}
-
-func validateWebFetchURLBeforePermission(rawURL string) error {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return fmt.Errorf("url is required")
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return err
-	}
-	return validateParsedWebFetchURLBeforePermission(parsed)
-}
-
-func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver webFetchResolver) error {
-	if err := validateParsedWebFetchURLBeforePermission(parsed); err != nil {
-		return err
-	}
-	host := strings.TrimSpace(parsed.Hostname())
-	if err := rejectUnsafeWebFetchHost(ctx, host, resolver); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateParsedWebFetchURLBeforePermission(parsed *url.URL) error {
-	if parsed == nil {
-		return fmt.Errorf("url is required")
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return fmt.Errorf("only http and https URLs are supported")
-	}
-	if parsed.User != nil {
-		return fmt.Errorf("URLs with user info are not allowed")
-	}
-	host := strings.TrimSpace(parsed.Hostname())
-	if host == "" {
-		return fmt.Errorf("URL host is required")
-	}
-	if strings.Contains(host, "%") {
-		return fmt.Errorf("URL host zones are not allowed")
-	}
-	if err := rejectUnsafeWebFetchLiteralHost(host); err != nil {
-		return err
-	}
-	if err := validateWebFetchPort(parsed); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateWebFetchPort(parsed *url.URL) error {
-	port := parsed.Port()
-	if port == "" {
-		return nil
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http":
-		if port == "80" {
-			return nil
-		}
-	case "https":
-		if port == "443" {
-			return nil
-		}
-	}
-	return fmt.Errorf("only default ports are allowed for %s URLs", parsed.Scheme)
-}
-
-func rejectUnsafeWebFetchLiteralHost(host string) error {
-	normalized := strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
-	if normalized == "" {
-		return fmt.Errorf("URL host is required")
-	}
-	switch {
-	case normalized == "localhost" || strings.HasSuffix(normalized, ".localhost"):
-		return errors.New(webFetchPublicOnlyHint)
-	case normalized == "metadata" || normalized == "metadata.google.internal":
-		return errors.New(webFetchPublicOnlyHint)
-	case strings.HasSuffix(normalized, ".local"):
-		return errors.New(webFetchPublicOnlyHint)
-	}
-
-	addr, err := netip.ParseAddr(normalized)
-	if err != nil {
-		return nil
-	}
-	if err := rejectUnsafeWebFetchAddr(addr); err != nil {
-		return errors.New(webFetchPublicOnlyHint)
-	}
-	return nil
-}
-
-func rejectUnsafeWebFetchHost(ctx context.Context, host string, resolver webFetchResolver) error {
-	_, err := resolveWebFetchHostAddrs(ctx, host, resolver, false)
-	return err
-}
-
-func resolveWebFetchHostAddrs(ctx context.Context, host string, resolver webFetchResolver, requireResolver bool) ([]netip.Addr, error) {
-	normalized := strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
-	if normalized == "" {
-		return nil, fmt.Errorf("URL host is required")
-	}
-	switch {
-	case normalized == "localhost" || strings.HasSuffix(normalized, ".localhost"):
-		return nil, fmt.Errorf("localhost hosts are blocked")
-	case normalized == "metadata" || normalized == "metadata.google.internal":
-		return nil, fmt.Errorf("metadata service hosts are blocked")
-	case strings.HasSuffix(normalized, ".local"):
-		return nil, fmt.Errorf("local network hosts are blocked")
-	}
-
-	addr, err := netip.ParseAddr(normalized)
-	if err == nil {
-		if err := rejectUnsafeWebFetchAddr(addr); err != nil {
-			return nil, err
-		}
-		return []netip.Addr{addr.Unmap()}, nil
-	}
-	if resolver == nil {
-		if requireResolver {
-			return nil, fmt.Errorf("host resolver is required")
-		}
-		return nil, nil
-	}
-
-	addrs, err := resolver.LookupNetIP(ctx, "ip", normalized)
-	if err != nil {
-		return nil, fmt.Errorf("resolve host: %w", err)
-	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("host did not resolve to an IP address")
-	}
-	for _, addr := range addrs {
-		if err := rejectUnsafeWebFetchAddr(addr); err != nil {
-			return nil, err
-		}
-	}
-	return addrs, nil
-}
-
-func rejectUnsafeWebFetchAddr(addr netip.Addr) error {
-	if !addr.IsValid() {
-		return fmt.Errorf("invalid resolved host address")
-	}
-	addr = addr.Unmap()
-	if embedded, ok := webFetchEmbeddedIPv4(addr); ok {
-		return rejectUnsafeWebFetchAddr(embedded)
-	}
-	for _, blocked := range webFetchBlockedAddrPrefixes {
-		if blocked.prefix.Contains(addr) {
-			return errors.New(blocked.reason)
-		}
-	}
-	if !addr.IsGlobalUnicast() {
-		return fmt.Errorf("non-global hosts are blocked")
-	}
-	return nil
-}
-
-func webFetchEmbeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
-	if addr.Is4() {
-		return netip.Addr{}, false
-	}
-	bytes := addr.As16()
-	for _, candidate := range webFetchEmbeddedIPv4Prefixes {
-		if !candidate.prefix.Contains(addr) {
-			continue
-		}
-		if candidate.byteOffset < 0 || candidate.byteOffset+4 > len(bytes) {
-			continue
-		}
-		embedded := [4]byte{
-			bytes[candidate.byteOffset],
-			bytes[candidate.byteOffset+1],
-			bytes[candidate.byteOffset+2],
-			bytes[candidate.byteOffset+3],
-		}
-		return netip.AddrFrom4(embedded), true
-	}
-	return netip.Addr{}, false
-}
-
-func redactWebFetchURL(value *url.URL) string {
-	if value == nil {
-		return ""
-	}
-	return redactWebFetchText(value.String())
-}
-
-func redactWebFetchText(value string) string {
-	return redaction.RedactString(value, redaction.Options{})
-}
-
-func webFetchStatusLine(response *http.Response) string {
-	if response == nil {
-		return ""
-	}
-	if strings.TrimSpace(response.Status) != "" {
-		return response.Status
-	}
-	return strings.TrimSpace(strconv.Itoa(response.StatusCode) + " " + http.StatusText(response.StatusCode))
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func firstWebFetchResolver(resolver webFetchResolver) webFetchResolver {
-	if resolver != nil {
-		return resolver
-	}
-	return defaultWebFetchResolver{}
 }
