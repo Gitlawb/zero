@@ -87,7 +87,6 @@ func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
 	}
 }
 
-
 func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	root := t.TempDir()
 	manager := newExecSessionManager()
