@@ -203,24 +203,33 @@ var narrativeMarkers = []string{
 
 // stripQuoted removes spans enclosed in double quotes (straight or curly) or
 // backticks, so an admission the model merely QUOTES — its own earlier message,
-// a log line, an error string — cannot fire the detector. Single quotes are
-// left alone: they are overwhelmingly apostrophes ("couldn't"), and treating
-// them as quote delimiters would swallow the text between two contractions.
+// a log line, an error string — cannot fire the detector. Only BALANCED spans
+// are removed: an opening delimiter that never closes is kept as literal text,
+// so a stray quote cannot swallow the rest of the message (and with it a
+// genuine admission the detector must see). Single quotes are left alone: they
+// are overwhelmingly apostrophes ("couldn't"), and treating them as quote
+// delimiters would swallow the text between two contractions.
 func stripQuoted(s string) string {
 	var b strings.Builder
+	var span strings.Builder // pending text since the open delimiter, kept if it never closes
 	open := rune(0)
 	for _, r := range s {
 		switch {
 		case open != 0:
 			if (open == '"' && r == '"') || (open == '“' && r == '”') || (open == '`' && r == '`') {
 				open = 0
+				span.Reset()
+				continue
 			}
+			span.WriteRune(r)
 		case r == '"' || r == '“' || r == '`':
 			open = r
+			span.WriteRune(r)
 		default:
 			b.WriteRune(r)
 		}
 	}
+	b.WriteString(span.String()) // dangling delimiter: restore the span verbatim
 	return b.String()
 }
 

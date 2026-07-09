@@ -23,3 +23,12 @@ func TestParseExecArgsNoCompletionGate(t *testing.T) {
 		t.Fatal("noCompletionGate must default to false (gate on)")
 	}
 }
+
+// The spec-draft path never consults the completion gate, so the combination
+// must be rejected up front instead of silently ignoring the flag (mirrors the
+// existing --self-correct + --use-spec check).
+func TestParseExecArgsNoCompletionGateRejectsUseSpec(t *testing.T) {
+	if _, _, err := parseExecArgs([]string{"--prompt", "hi", "--use-spec", "--no-completion-gate"}); err == nil {
+		t.Fatal("--no-completion-gate with --use-spec must error")
+	}
+}

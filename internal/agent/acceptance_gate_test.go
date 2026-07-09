@@ -87,6 +87,11 @@ func TestSelfReportedIncompletionMatching(t *testing.T) {
 		{"I couldn't complete the refactor.", true},
 		{"I hit an error I could not resolve, so the migration is unfinished.", true},
 		{"You asked me to port the parser. I couldn't finish the second half.", true},
+		// unbalanced delimiters must not swallow the tail (only BALANCED quoted
+		// spans are stripped), so an admission after a stray quote still fires:
+		{"The log ends with a stray \" and I couldn't finish the migration.", true},
+		{"There is an unterminated `code span and I cannot proceed with the fix.", true},
+		{"The doc opens with “a curly quote and I was unable to complete the task.", true},
 	}
 	for _, c := range cases {
 		got := selfReportedIncompletion(c.text) != ""
