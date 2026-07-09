@@ -316,10 +316,12 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
 		// ponytail: forward proxy on loopback — this is the proxy address, not the endpoint
-		if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Host: "x"}}); proxyURL != nil {
-			if h, p, err := net.SplitHostPort(address); err == nil {
-				if proxyURL.Hostname() == h && (proxyURL.Port() == "" || proxyURL.Port() == p) {
-					return dialer.DialContext(ctx, network, address)
+		for _, s := range []string{"https", "http"} {
+			if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: s, Host: "x"}}); proxyURL != nil {
+				if h, p, err := net.SplitHostPort(address); err == nil {
+					if proxyURL.Hostname() == h && (proxyURL.Port() == "" || proxyURL.Port() == p) {
+						return dialer.DialContext(ctx, network, address)
+					}
 				}
 			}
 		}

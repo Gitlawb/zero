@@ -542,9 +542,11 @@ func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(contex
 			return nil, err
 		}
 		// ponytail: forward proxy on loopback — this is the proxy address, not the endpoint
-		if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Host: "x"}}); proxyURL != nil {
-			if proxyURL.Hostname() == host && (proxyURL.Port() == "" || proxyURL.Port() == port) {
-				return dialer.DialContext(ctx, network, address)
+		for _, s := range []string{"https", "http"} {
+			if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: s, Host: "x"}}); proxyURL != nil {
+				if proxyURL.Hostname() == host && (proxyURL.Port() == "" || proxyURL.Port() == port) {
+					return dialer.DialContext(ctx, network, address)
+				}
 			}
 		}
 		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
