@@ -180,7 +180,7 @@ func TestTUIStartupSuppressesWarningForUnconfiguredDefaultServer(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"firecrawl": config.DefaultMCPServers()["firecrawl"],
 			}}, nil
@@ -216,7 +216,7 @@ func TestTUIStartupWarnsForUserConfiguredServerSkip(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"custom": {Type: "stdio", Command: "custom-mcp"},
 			}}, nil
