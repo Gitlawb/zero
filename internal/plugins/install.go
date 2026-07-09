@@ -140,13 +140,16 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return InstallResult{}, fmt.Errorf("create plugins dir: %w", err)
 	}
-	if err := os.RemoveAll(target); err != nil {
-		return InstallResult{}, fmt.Errorf("clear previous plugin: %w", err)
-	}
+	// Stage the new tree into a temp dir on the SAME filesystem as dir (its
+	// parent directory) so the swap into place is a single atomic rename. We
+	// copy FIRST and only clear the previous install AFTER the copy succeeds,
+	// so a failed copy (full disk, permission denied) leaves the previously
+	// installed plugin and its lockfile entry completely intact instead of
+	// wiping them and stranding the lockfile pointing at a deleted directory.
 	// Copy the whole plugin tree (entry scripts, prompts, skills) so the installed
 	// plugin is runnable through activation. Copy DATA only — never execute it.
-	if err := fscopy.CopyTree(pluginDir, target); err != nil {
-		return InstallResult{}, fmt.Errorf("copy plugin: %w", err)
+	if err := copyAndSwapIntoPlace(pluginDir, dir, target); err != nil {
+		return InstallResult{}, err
 	}
 
 	lock[id] = LockEntry{Source: source, Hash: hash}
@@ -167,6 +170,52 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		result.PreviousHash = previous.Hash
 	}
 	return result, nil
+}
+
+// copyAndSwapIntoPlace copies src into a temp staging dir on the same filesystem
+// as target (its parent, dirParent), then atomically swaps the staging dir into
+// place at target. The copy happens before the previous install is touched, so a
+// copy failure leaves the existing target (if any) intact. On success the old
+// install (if any) is removed; on a swap failure it is rolled back into place, so
+// an install never ends with the plugin gone but the lockfile still pointing at
+// it.
+func copyAndSwapIntoPlace(src, dirParent, target string) error {
+	staging, err := os.MkdirTemp(dirParent, ".zero-plugin-install-")
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+	if err := fscopy.CopyTree(src, staging); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("copy plugin: %w", err)
+	}
+	// No existing install: a plain rename is already atomic.
+	if _, err := os.Stat(target); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			_ = os.RemoveAll(staging)
+			return fmt.Errorf("stat target: %w", err)
+		}
+		if err := os.Rename(staging, target); err != nil {
+			_ = os.RemoveAll(staging)
+			return fmt.Errorf("install plugin: %w", err)
+		}
+		return nil
+	}
+	// Existing install: move it aside, swap the new tree in, then drop the old
+	// one — only after the swap succeeds, so a failed rename rolls the previous
+	// install back into place and the failure stays non-destructive.
+	backup := staging + ".old"
+	if err := os.Rename(target, backup); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("stash previous plugin: %w", err)
+	}
+	if err := os.Rename(staging, target); err != nil {
+		// Roll the previous install back so the failure leaves the old plugin intact.
+		_ = os.Rename(backup, target)
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("install plugin: %w", err)
+	}
+	_ = os.RemoveAll(backup)
+	return nil
 }
 
 // Remove deletes an installed plugin directory and its lockfile entry. It errors

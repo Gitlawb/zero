@@ -72,7 +72,12 @@ func FormatOutput(skill Skill) string {
 		for _, asset := range skill.Assets {
 			rel := asset.Name // already skill-relative from loadAssets
 			if rel == "" {
-				rel = asset.Path
+				// A manual asset without a relative name must never fall back to
+				// asset.Path: that is an absolute, symlink-resolved install path
+				// that contains the user's home directory. Surface the basename
+				// so the asset is still identifiable without leaking the host
+				// absolute path to the model.
+				rel = filepath.Base(asset.Path)
 			}
 			fmt.Fprintf(&b, "- %s (%s)\n", rel, humanSize(asset.Size))
 		}

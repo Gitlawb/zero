@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -368,5 +369,51 @@ func TestInstallCopiesEntireTree(t *testing.T) {
 	copied := filepath.Join(filepath.Dir(result.ManifestPath), "tools", "lookup.mjs")
 	if _, err := os.Stat(copied); err != nil {
 		t.Fatalf("entry script not copied into install dir: %v", err)
+	}
+}
+
+// TestInstallDoesNotWipePreviousOnCopyFailure guards the atomic install: a
+// reinstall whose COPY step fails must leave the previously installed plugin and
+// its lockfile entry completely intact, rather than RemoveAll-ing the old tree
+// and stranding the lockfile pointing at a deleted directory. We drive the
+// package swap helper directly with a prior install present and force the copy
+// to fail by passing a src whose CopyTree cannot run (a directory with a
+// non-existent staging path), so copyAndSwapIntoPlace returns early before
+// touching the previous install — the regression the atomic swap prevents is
+// exactly the old RemoveAll(target)-before-copy, which would already be gone.
+func TestInstallDoesNotWipePreviousOnCopyFailure(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "prior")
+	if err := os.MkdirAll(filepath.Join(target, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, manifestFileName), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// staging does not exist: CopyTree cannot write into it, so the copy fails
+	// and copyAndSwapIntoPlace returns before the previous install is touched.
+	missingSrc := filepath.Join(parent, "src-does-not-exist")
+	if err := copyAndSwapIntoPlace(missingSrc, parent, target); err == nil {
+		t.Fatal("expected copyAndSwapIntoPlace to fail when the source copy fails")
+	}
+
+	// The previous install must survive the failed copy, content intact.
+	data, err := os.ReadFile(filepath.Join(target, manifestFileName))
+	if err != nil {
+		t.Fatalf("previous install lost during failed copy: %v", err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("previous install content = %q, want %q", string(data), "old")
+	}
+	// No partial staging or backup dir left behind on the parent.
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".zero-plugin-install-") {
+			t.Fatalf("leftover staging/backup dir after failed copy: %s", e.Name())
+		}
 	}
 }
