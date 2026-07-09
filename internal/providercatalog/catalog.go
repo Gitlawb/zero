@@ -34,6 +34,7 @@ const (
 
 var ErrUnknownProvider = errors.New("unknown provider")
 
+// AIMLAPIID is the provider catalog identifier for the AI/ML API preset.
 const AIMLAPIID = "aimlapi"
 
 type Descriptor struct {
