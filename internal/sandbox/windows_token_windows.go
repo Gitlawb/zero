@@ -105,7 +105,7 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 	var restricted windows.Token
 	result, _, callErr := procCreateRestrictedToken.Call(
 		uintptr(base),
-		uintptr(windowsDisableMaxPrivilege|windowsLUAToken|windowsWriteRestricted),
+		uintptr(windowsDisableMaxPrivilege|windowsLUAToken),
 		0,
 		0,
 		0,
