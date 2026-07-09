@@ -424,7 +424,7 @@ func TestFindProjectGitRootIgnoresEmptyGitDirectory(t *testing.T) {
 	if err := os.MkdirAll(leaf, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := findProjectGitRoot(leaf); got != "" {
-		t.Fatalf("findProjectGitRoot = %q, want empty for invalid .git directory", got)
+	if got := FindProjectGitRoot(leaf); got != "" {
+		t.Fatalf("FindProjectGitRoot = %q, want empty for invalid .git directory", got)
 	}
 }
