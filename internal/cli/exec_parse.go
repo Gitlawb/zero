@@ -30,6 +30,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.selfCorrect = true
 		case arg == "--no-notify":
 			options.noNotify = true
+		case arg == "--no-completion-gate":
+			options.noCompletionGate = true
 		case arg == "--notify":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
