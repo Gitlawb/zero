@@ -23,8 +23,8 @@ const (
 	// secretBytes is the AES-256 key length kept in the per-user secret file.
 	secretBytes = 32
 
-	secretRetryAttempts = 500
-	secretRetryDelay    = 2 * time.Millisecond
+	secretRetryAttempts  = 500
+	secretRetryDelay     = 2 * time.Millisecond
 	secureLockStaleAfter = 10 * time.Second
 )
 
