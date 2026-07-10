@@ -345,8 +345,8 @@ func TestRunExecModeSeedsModelAndTurnOverrides(t *testing.T) {
 	if gotModel != "claude-opus-4.1" {
 		t.Fatalf("overrides.Provider.Model = %q, want claude-opus-4.1", gotModel)
 	}
-	if gotMaxTurns != 50 {
-		t.Fatalf("overrides.MaxTurns = %d, want 50", gotMaxTurns)
+	if gotMaxTurns != 160 {
+		t.Fatalf("overrides.MaxTurns = %d, want 160 (deep mode)", gotMaxTurns)
 	}
 }
 
