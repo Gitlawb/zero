@@ -238,6 +238,61 @@ func TestEventBrokerDisconnectsSlowSubscriberOnBlockingControlEvent(t *testing.T
 	}
 }
 
+func TestEventBrokerReplaysPendingControlEventsToLateSubscriber(t *testing.T) {
+	broker := newEventBroker()
+	permissionEvent := streamjson.Event{
+		Type:      streamjson.EventPermissionRequest,
+		SessionID: "s1",
+		ID:        "perm_late",
+	}
+	broker.publish(permissionEvent)
+
+	other, unsubscribeOther := broker.subscribe("s2")
+	defer unsubscribeOther()
+	select {
+	case event := <-other.ch:
+		t.Fatalf("unexpected replay for different session: %#v", event)
+	default:
+	}
+
+	subscription, unsubscribe := broker.subscribe("s1")
+	defer unsubscribe()
+	select {
+	case event := <-subscription.ch:
+		if event.ID != permissionEvent.ID || event.Type != permissionEvent.Type {
+			t.Fatalf("replayed event = %#v, want %#v", event, permissionEvent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending permission event was not replayed")
+	}
+
+	broker.ackControl(permissionEvent.ID)
+	afterAck, unsubscribeAfterAck := broker.subscribe("s1")
+	defer unsubscribeAfterAck()
+	select {
+	case event := <-afterAck.ch:
+		t.Fatalf("unexpected replay after ack: %#v", event)
+	default:
+	}
+
+	askEvent := streamjson.Event{
+		Type:      streamjson.EventType("ask_user_request"),
+		SessionID: "s1",
+		ID:        "ask_late",
+	}
+	broker.publish(askEvent)
+	askSubscription, unsubscribeAsk := broker.subscribe("s1")
+	defer unsubscribeAsk()
+	select {
+	case event := <-askSubscription.ch:
+		if event.ID != askEvent.ID || event.Type != askEvent.Type {
+			t.Fatalf("replayed ask event = %#v, want %#v", event, askEvent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending ask event was not replayed")
+	}
+}
+
 func TestAsyncRunPanicPublishesTerminalEvents(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	if _, err := store.Create(sessions.CreateInput{SessionID: "s1", Title: "One"}); err != nil {
@@ -300,6 +355,10 @@ func TestPermissionAndAskBrokersBlockUntilHTTPAnswer(t *testing.T) {
 				PermissionMode: agent.PermissionModeAsk,
 				SideEffect:     "shell",
 				Reason:         "test",
+				AvailableDecisions: []agent.PermissionDecisionAction{
+					agent.PermissionDecisionAllow,
+					agent.PermissionDecisionDeny,
+				},
 			})
 			if err != nil {
 				return RunResult{}, err
@@ -328,7 +387,20 @@ func TestPermissionAndAskBrokersBlockUntilHTTPAnswer(t *testing.T) {
 	}()
 
 	permissionID := waitForPendingPermission(t, server)
-	resp, err := http.Post(httpServer.URL+"/session/s1/permissions/"+permissionID, "application/json", strings.NewReader(`{"action":"allow","reason":"ok"}`))
+	resp, err := http.Post(httpServer.URL+"/session/s1/permissions/"+permissionID, "application/json", strings.NewReader(`{"action":"always_allow"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unoffered permission status = %d; body=%s", resp.StatusCode, string(invalidBody))
+	}
+	if !bytes.Contains(invalidBody, []byte(`permission_action_not_allowed`)) {
+		t.Fatalf("unexpected unoffered permission body: %s", string(invalidBody))
+	}
+
+	resp, err = http.Post(httpServer.URL+"/session/s1/permissions/"+permissionID, "application/json", strings.NewReader(`{"action":"allow","reason":"ok"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

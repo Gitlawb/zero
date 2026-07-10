@@ -16,8 +16,9 @@ import (
 )
 
 type eventBroker struct {
-	mu          sync.Mutex
-	subscribers map[*eventSubscription]struct{}
+	mu             sync.Mutex
+	subscribers    map[*eventSubscription]struct{}
+	pendingControl map[string]streamjson.Event
 }
 
 var controlEventSendTimeout = 5 * time.Second
@@ -30,18 +31,34 @@ type eventSubscription struct {
 }
 
 func newEventBroker() *eventBroker {
-	return &eventBroker{subscribers: map[*eventSubscription]struct{}{}}
+	return &eventBroker{
+		subscribers:    map[*eventSubscription]struct{}{},
+		pendingControl: map[string]streamjson.Event{},
+	}
 }
 
 func (broker *eventBroker) subscribe(sessionID string) (*eventSubscription, func()) {
+	sessionID = strings.TrimSpace(sessionID)
 	subscription := &eventSubscription{
 		ch:        make(chan streamjson.Event, 64),
 		done:      make(chan struct{}),
-		sessionID: strings.TrimSpace(sessionID),
+		sessionID: sessionID,
 	}
 	broker.mu.Lock()
 	broker.subscribers[subscription] = struct{}{}
+	replay := make([]streamjson.Event, 0, len(broker.pendingControl))
+	for _, event := range broker.pendingControl {
+		if matchesSubscription(subscription, event) {
+			replay = append(replay, event)
+		}
+	}
 	broker.mu.Unlock()
+	for _, event := range replay {
+		if !subscription.sendControl(event, controlEventSendTimeout) {
+			broker.remove(subscription)
+			break
+		}
+	}
 	return subscription, func() {
 		broker.mu.Lock()
 		if _, ok := broker.subscribers[subscription]; ok {
@@ -53,17 +70,20 @@ func (broker *eventBroker) subscribe(sessionID string) (*eventSubscription, func
 }
 
 func (broker *eventBroker) publish(event streamjson.Event) {
+	controlEvent := isBlockingControlEvent(event)
 	broker.mu.Lock()
+	if controlEvent && event.ID != "" {
+		broker.pendingControl[event.ID] = event
+	}
 	targets := make([]*eventSubscription, 0, len(broker.subscribers))
 	for subscription := range broker.subscribers {
-		if subscription.sessionID != "" && event.SessionID != "" && subscription.sessionID != event.SessionID {
+		if !matchesSubscription(subscription, event) {
 			continue
 		}
 		targets = append(targets, subscription)
 	}
 	broker.mu.Unlock()
 
-	controlEvent := isBlockingControlEvent(event)
 	for _, subscription := range targets {
 		if controlEvent {
 			if !subscription.sendControl(event, controlEventSendTimeout) {
@@ -75,8 +95,22 @@ func (broker *eventBroker) publish(event streamjson.Event) {
 	}
 }
 
+func (broker *eventBroker) ackControl(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	broker.mu.Lock()
+	delete(broker.pendingControl, id)
+	broker.mu.Unlock()
+}
+
 func isBlockingControlEvent(event streamjson.Event) bool {
 	return event.Type == streamjson.EventPermissionRequest || event.Type == streamjson.EventType("ask_user_request")
+}
+
+func matchesSubscription(subscription *eventSubscription, event streamjson.Event) bool {
+	return subscription.sessionID == "" || event.SessionID == "" || subscription.sessionID == event.SessionID
 }
 
 func (broker *eventBroker) remove(subscription *eventSubscription) {
@@ -140,6 +174,7 @@ type permissionBroker struct {
 type pendingPermission struct {
 	sessionID string
 	ch        chan permissionResponse
+	allowed   map[agent.PermissionDecisionAction]struct{}
 }
 
 type permissionResponse struct {
@@ -151,19 +186,23 @@ func newPermissionBroker() *permissionBroker {
 	return &permissionBroker{pending: map[string]pendingPermission{}}
 }
 
-func (broker *permissionBroker) request(ctx context.Context, sessionID string, req agent.PermissionRequest, publish func(streamjson.Event)) (agent.PermissionDecision, error) {
+func (broker *permissionBroker) request(ctx context.Context, sessionID string, req agent.PermissionRequest, publish func(streamjson.Event), ackControl func(string)) (agent.PermissionDecision, error) {
 	id, err := newOpaqueID("perm")
 	if err != nil {
 		return agent.PermissionDecision{}, err
 	}
 	ch := make(chan permissionResponse, 1)
+	allowed := allowedPermissionDecisions(req.AvailableDecisions)
 	broker.mu.Lock()
-	broker.pending[id] = pendingPermission{sessionID: sessionID, ch: ch}
+	broker.pending[id] = pendingPermission{sessionID: sessionID, ch: ch, allowed: allowed}
 	broker.mu.Unlock()
 	defer func() {
 		broker.mu.Lock()
 		delete(broker.pending, id)
 		broker.mu.Unlock()
+		if ackControl != nil {
+			ackControl(id)
+		}
 	}()
 
 	risk := req.Risk
@@ -228,10 +267,34 @@ func (broker *permissionBroker) respond(sessionID string, id string, decision ag
 		broker.mu.Unlock()
 		return notFoundError("permission_not_found", "permission request not found")
 	}
+	if _, ok := pending.allowed[decision.Action]; !ok {
+		broker.mu.Unlock()
+		return domainError{status: http.StatusBadRequest, code: "permission_action_not_allowed", message: "permission action was not offered for this request"}
+	}
 	delete(broker.pending, id)
 	broker.mu.Unlock()
 	pending.ch <- permissionResponse{decision: decision}
 	return nil
+}
+
+func allowedPermissionDecisions(decisions []agent.PermissionDecisionAction) map[agent.PermissionDecisionAction]struct{} {
+	if len(decisions) == 0 {
+		decisions = []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionDeny,
+		}
+	}
+	allowed := make(map[agent.PermissionDecisionAction]struct{}, len(decisions))
+	for _, decision := range decisions {
+		if strings.TrimSpace(string(decision)) == "" {
+			continue
+		}
+		allowed[decision] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		allowed[agent.PermissionDecisionDeny] = struct{}{}
+	}
+	return allowed
 }
 
 type askBroker struct {
@@ -253,7 +316,7 @@ func newAskBroker() *askBroker {
 	return &askBroker{pending: map[string]pendingAsk{}}
 }
 
-func (broker *askBroker) request(ctx context.Context, sessionID string, req agent.AskUserRequest, publish func(streamjson.Event)) (agent.AskUserResponse, error) {
+func (broker *askBroker) request(ctx context.Context, sessionID string, req agent.AskUserRequest, publish func(streamjson.Event), ackControl func(string)) (agent.AskUserResponse, error) {
 	id, err := newOpaqueID("ask")
 	if err != nil {
 		return agent.AskUserResponse{}, err
@@ -266,6 +329,9 @@ func (broker *askBroker) request(ctx context.Context, sessionID string, req agen
 		broker.mu.Lock()
 		delete(broker.pending, id)
 		broker.mu.Unlock()
+		if ackControl != nil {
+			ackControl(id)
+		}
 	}()
 
 	publish(streamjson.Event{

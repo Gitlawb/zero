@@ -229,4 +229,4 @@ export interface ZeroClient {
   }
 }
 
-export function createZeroClient(options?: ZeroClientOptions): ZeroClient
+export function createZeroClient(options: ZeroClientOptions): ZeroClient

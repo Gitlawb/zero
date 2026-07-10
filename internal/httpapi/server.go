@@ -388,12 +388,12 @@ func (server *Server) executeRun(ctx context.Context, cancel context.CancelFunc,
 		OnPermissionRequest: func(ctx context.Context, req agent.PermissionRequest) (agent.PermissionDecision, error) {
 			return server.permissions.request(ctx, request.SessionID, req, func(event streamjson.Event) {
 				server.publish(request, event)
-			})
+			}, server.events.ackControl)
 		},
 		OnAskUser: func(ctx context.Context, req agent.AskUserRequest) (agent.AskUserResponse, error) {
 			return server.asks.request(ctx, request.SessionID, req, func(event streamjson.Event) {
 				server.publish(request, event)
-			})
+			}, server.events.ackControl)
 		},
 	}
 	result, err := server.options.Runner.Run(ctx, request, hooks)
