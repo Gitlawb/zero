@@ -620,14 +620,12 @@ func (tool pluginTool) meta() map[string]string {
 // (parsePermission clamps allow→prompt otherwise), so honoring it does not
 // silently auto-approve a mutating plugin tool.
 func toolSafety(plugin LoadedPlugin, ext ToolExtension) tools.Safety {
-	permission := tools.PermissionPrompt
+	var permission tools.Permission
 	switch ext.Permission {
 	case PermissionAllow:
 		permission = tools.PermissionAllow
 	case PermissionDeny:
 		permission = tools.PermissionDeny
-	case PermissionPrompt:
-		permission = tools.PermissionPrompt
 	default:
 		permission = tools.PermissionPrompt
 	}
