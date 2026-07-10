@@ -42,8 +42,10 @@ func (e *setupFixableError) Unwrap() []error { return []error{e.err, e.sentinel}
 
 // defaultMaxTurns is the per-run tool-turn budget when none is configured. 30 was
 // too low for real multi-step agentic work (agents ran out mid-task before reaching
-// later steps); 50 matches the old "deep" preset. Raise per-session with /turns.
-const defaultMaxTurns = 50
+// later steps); 50 was still too low for larger tasks spanning several files (agents
+// hit the ceiling and stopped with a "remaining work" summary instead of finishing).
+// Raise per-session with /turns.
+const defaultMaxTurns = 80
 
 // MaxTurnsCeiling caps the per-run tool-turn budget so a stray env value or typo
 // can't set an absurd ceiling. Shared between applyEnv (read site) and the /turns

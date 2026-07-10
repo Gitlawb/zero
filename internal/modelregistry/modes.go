@@ -39,7 +39,7 @@ var defaultModes = []Mode{
 		Description: "Hardest tasks: deep reasoning with a larger turn budget.",
 		Model:       "claude-opus-4.1",
 		Effort:      ReasoningEffortHigh,
-		MaxTurns:    50,
+		MaxTurns:    160,
 	},
 	{
 		Name:        "fast",
