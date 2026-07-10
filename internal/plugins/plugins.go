@@ -27,6 +27,7 @@ const (
 	DiagnosticJSON      DiagnosticKind = "json"
 	DiagnosticSchema    DiagnosticKind = "schema"
 	DiagnosticDuplicate DiagnosticKind = "duplicate"
+	DiagnosticIntegrity DiagnosticKind = "integrity"
 )
 
 const (
@@ -245,46 +246,48 @@ func Load(options LoadOptions) (LoadResult, error) {
 			continue
 		}
 
+		lock, lockErr := ReadLock(rootPath)
+		if lockErr != nil {
+			diagnostics = append(diagnostics, Diagnostic{
+				Kind:    DiagnosticIO,
+				Source:  root.Source,
+				Root:    rootPath,
+				Message: lockErr.Error(),
+			})
+			lock = map[string]LockEntry{}
+		}
+
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() || entry.Name() == disabledDirName {
 				continue
 			}
 			pluginDir := filepath.Join(rootPath, entry.Name())
-			manifestPath := filepath.Join(pluginDir, "plugin.json")
-			data, err := os.ReadFile(manifestPath)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				diagnostics = append(diagnostics, toDiagnostic(err, root, rootPath, pluginDir, manifestPath))
-				continue
+			if plugin, ok := loadPluginDir(root, rootPath, pluginDir, false, options, lock, &diagnostics); ok {
+				discovered = append(discovered, plugin)
 			}
+		}
 
-			var manifest any
-			if err := json.Unmarshal(data, &manifest); err != nil {
+		disabledRoot := filepath.Join(rootPath, disabledDirName)
+		disabledEntries, err := os.ReadDir(disabledRoot)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
 				diagnostics = append(diagnostics, Diagnostic{
-					Kind:         DiagnosticJSON,
-					Source:       root.Source,
-					Root:         rootPath,
-					PluginPath:   pluginDir,
-					ManifestPath: manifestPath,
-					Message:      err.Error(),
+					Kind:    DiagnosticIO,
+					Source:  root.Source,
+					Root:    disabledRoot,
+					Message: err.Error(),
 				})
+			}
+			continue
+		}
+		for _, entry := range disabledEntries {
+			if !entry.IsDir() {
 				continue
 			}
-
-			plugin, err := ParseManifest(manifest, ParseManifestOptions{
-				Source:                        root.Source,
-				Root:                          rootPath,
-				PluginDir:                     pluginDir,
-				ManifestPath:                  manifestPath,
-				AllowManifestToolAutoApproval: options.AllowManifestToolAutoApproval,
-			})
-			if err != nil {
-				diagnostics = append(diagnostics, toDiagnostic(err, root, rootPath, pluginDir, manifestPath))
-				continue
+			pluginDir := filepath.Join(disabledRoot, entry.Name())
+			if plugin, ok := loadPluginDir(root, rootPath, pluginDir, true, options, lock, &diagnostics); ok {
+				discovered = append(discovered, plugin)
 			}
-			discovered = append(discovered, plugin)
 		}
 	}
 
@@ -293,6 +296,74 @@ func Load(options LoadOptions) (LoadResult, error) {
 		Plugins:     mergePlugins(discovered, &diagnostics),
 		Diagnostics: diagnostics,
 	}, nil
+}
+
+func loadPluginDir(root Root, rootPath string, pluginDir string, disabled bool, options LoadOptions, lock map[string]LockEntry, diagnostics *[]Diagnostic) (LoadedPlugin, bool) {
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return LoadedPlugin{}, false
+		}
+		*diagnostics = append(*diagnostics, toDiagnostic(err, root, rootPath, pluginDir, manifestPath))
+		return LoadedPlugin{}, false
+	}
+
+	var manifest any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		*diagnostics = append(*diagnostics, Diagnostic{
+			Kind:         DiagnosticJSON,
+			Source:       root.Source,
+			Root:         rootPath,
+			PluginPath:   pluginDir,
+			ManifestPath: manifestPath,
+			Message:      err.Error(),
+		})
+		return LoadedPlugin{}, false
+	}
+
+	plugin, err := ParseManifest(manifest, ParseManifestOptions{
+		Source:                        root.Source,
+		Root:                          rootPath,
+		PluginDir:                     pluginDir,
+		ManifestPath:                  manifestPath,
+		AllowManifestToolAutoApproval: options.AllowManifestToolAutoApproval,
+	})
+	if err != nil {
+		*diagnostics = append(*diagnostics, toDiagnostic(err, root, rootPath, pluginDir, manifestPath))
+		return LoadedPlugin{}, false
+	}
+	if disabled {
+		plugin.Enabled = false
+	}
+	if entry, ok := lock[plugin.ID]; ok && strings.TrimSpace(entry.Hash) != "" {
+		hash, err := hashTree(pluginDir)
+		if err != nil {
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Kind:         DiagnosticIntegrity,
+				Source:       root.Source,
+				Root:         rootPath,
+				PluginPath:   pluginDir,
+				ManifestPath: manifestPath,
+				PluginID:     plugin.ID,
+				Message:      "failed to hash managed plugin: " + err.Error(),
+			})
+			return LoadedPlugin{}, false
+		}
+		if hash != entry.Hash {
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Kind:         DiagnosticIntegrity,
+				Source:       root.Source,
+				Root:         rootPath,
+				PluginPath:   pluginDir,
+				ManifestPath: manifestPath,
+				PluginID:     plugin.ID,
+				Message:      fmt.Sprintf("managed plugin hash mismatch: lock has %s, filesystem has %s", entry.Hash, hash),
+			})
+			return LoadedPlugin{}, false
+		}
+	}
+	return plugin, true
 }
 
 func ParseManifest(raw any, options ParseManifestOptions) (LoadedPlugin, error) {
