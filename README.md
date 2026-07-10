@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26+" src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
@@ -75,7 +75,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.25+.
+Source builds require Go 1.26+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -319,6 +319,27 @@ go run ./cmd/zero-release build
 go run ./cmd/zero-release smoke
 go run ./cmd/zero-perf-bench
 ```
+
+### Code Quality and Security Checks
+
+Before committing any changes, run all Go code quality and security checks:
+
+1. **Formatting**: Run `go fmt ./...` (or `make fmt`).
+2. **Vetting**: Run `go vet ./...` (or `make vet`).
+3. **Linting**: Run `golangci-lint run`.
+4. **Vulnerability Scan**: Run `govulncheck ./...`.
+
+If `golangci-lint` or `govulncheck` are not installed, install them with:
+
+```bash
+# Install golangci-lint
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Install govulncheck
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
+### Cross-Compile Examples
 
 Cross-compile examples:
 

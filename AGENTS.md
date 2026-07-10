@@ -331,3 +331,15 @@ That's it. Run `zero` from the repo root and the agent has the team's full instr
 - [docs/SPECIALISTS.md](docs/SPECIALISTS.md) — full specialist manifest spec.
 - [docs/STREAM_JSON_PROTOCOL.md](docs/STREAM_JSON_PROTOCOL.md) — `zero exec` I/O contract.
 - [docs/INSTALL.md](docs/INSTALL.md) — install from source or release.
+
+## 10. Repository Guidelines for coding agents
+
+If you are an AI coding agent executing tasks in this repository, you **MUST** run all Go code quality and security checks before committing code or completing your task:
+
+1. **Formatting**: Run `go fmt ./...` (or `make fmt`) to format code.
+2. **Vetting**: Run `go vet ./...` (or `make vet`) to check for common mistakes.
+3. **Linting**: Run `golangci-lint run` to inspect code style and quality.
+4. **Vulnerability Scanning**: Run `govulncheck ./...` to check for security vulnerabilities.
+
+If any of these tools (`golangci-lint` or `govulncheck`) are not installed or are unavailable in the path when you attempt to run them, do not ignore the check. You must prompt the user with instructions to install them (e.g., `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` or `go install golang.org/x/vuln/cmd/govulncheck@latest`) and ask for confirmation/action before proceeding.
+
