@@ -353,12 +353,12 @@ func TestPluginManagerMarketplaceInstallActionsUseBridgeScopes(t *testing.T) {
 		{
 			name: "user",
 			key:  testKeyAltText("i"),
-			want: []string{"install", "zero.demo@team", "--scope", "user", "--yes", "--allow-unverified"},
+			want: []string{"install", "zero.demo@team", "--scope", "user", "--yes"},
 		},
 		{
 			name: "project",
 			key:  testKeyAltText("p"),
-			want: []string{"install", "zero.demo@team", "--scope", "project", "--yes", "--allow-unverified"},
+			want: []string{"install", "zero.demo@team", "--scope", "project", "--yes"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -383,8 +383,8 @@ func TestPluginManagerMarketplaceInstallActionsUseBridgeScopes(t *testing.T) {
 			if next.pluginManager == nil || next.pluginManager.confirm == nil {
 				t.Fatal("expected install action confirmation")
 			}
-			if !strings.Contains(next.pluginManager.confirm.message, "Warning: installing from unsigned/stale catalog") {
-				t.Fatalf("expected unsigned/stale warning, got %q", next.pluginManager.confirm.message)
+			if strings.Contains(next.pluginManager.confirm.message, "--allow-unverified") {
+				t.Fatalf("manager must not auto-add --allow-unverified, got %q", next.pluginManager.confirm.message)
 			}
 
 			updated, cmd = next.Update(testKey(tea.KeyEnter))
@@ -400,6 +400,114 @@ func TestPluginManagerMarketplaceInstallActionsUseBridgeScopes(t *testing.T) {
 				t.Fatal("expected plugin manager to stay open after install action")
 			}
 		})
+	}
+}
+
+func TestPluginManagerMarketplaceInstalledUpdateDoesNotAutoAllowUnverified(t *testing.T) {
+	enabled := true
+	var called []string
+	m := newModel(context.Background(), Options{
+		Cwd:      t.TempDir(),
+		Registry: tools.NewRegistry(),
+		PluginCommand: func(_ context.Context, args []string) PluginCommandResult {
+			called = append([]string{}, args...)
+			return PluginCommandResult{ExitCode: 0, Snapshot: PluginSnapshot{
+				Plugins: []plugins.LoadedPlugin{{
+					ID:      "zero.demo",
+					Name:    "Zero Demo",
+					Version: "1.2.3",
+					Enabled: true,
+					Source:  plugins.SourceUser,
+				}},
+				Installed: []PluginInstalledSnapshot{{
+					ID:      "zero.demo",
+					Source:  plugins.SourceUser,
+					Catalog: "team",
+					Version: "1.2.3",
+					Enabled: &enabled,
+				}},
+				Catalogs: []PluginCatalogSnapshot{{
+					ID:           "team",
+					Scope:        marketplace.ScopeUser,
+					Verification: marketplace.Verification{Status: marketplace.VerificationStale},
+				}},
+			}}
+		},
+	})
+	m.pluginSnapshot = PluginSnapshot{
+		Plugins: []plugins.LoadedPlugin{{
+			ID:      "zero.demo",
+			Name:    "Zero Demo",
+			Version: "1.2.3",
+			Enabled: true,
+			Source:  plugins.SourceUser,
+		}},
+		Installed: []PluginInstalledSnapshot{{
+			ID:      "zero.demo",
+			Source:  plugins.SourceUser,
+			Catalog: "team",
+			Version: "1.2.3",
+			Enabled: &enabled,
+		}},
+		Catalogs: []PluginCatalogSnapshot{{
+			ID:           "team",
+			Scope:        marketplace.ScopeUser,
+			Verification: marketplace.Verification{Status: marketplace.VerificationStale},
+		}},
+	}
+	m.pluginSnapshotReady = true
+	m.pluginManager = &pluginManagerState{}
+
+	updated, cmd := m.Update(testKeyAltText("u"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected update action to wait for confirmation")
+	}
+	if next.pluginManager == nil || next.pluginManager.confirm == nil {
+		t.Fatal("expected update action confirmation")
+	}
+
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatal("expected confirmed update action to run asynchronously")
+	}
+	next = applyCommandResult(t, next, cmd)
+	want := []string{"update", "zero.demo", "--scope", "user", "--yes"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("PluginCommand args = %#v, want %#v", called, want)
+	}
+	if next.pluginManager == nil {
+		t.Fatal("expected plugin manager to stay open after update action")
+	}
+}
+
+func TestPluginManagerMarketplaceInfoDoesNotAutoAllowUnverified(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		Cwd:      t.TempDir(),
+		Registry: tools.NewRegistry(),
+		PluginCommand: func(_ context.Context, args []string) PluginCommandResult {
+			called = append([]string{}, args...)
+			return PluginCommandResult{ExitCode: 0, Snapshot: pluginManagerMarketplaceActionSnapshot()}
+		},
+	})
+	m.pluginSnapshot = pluginManagerMarketplaceActionSnapshot()
+	m.pluginSnapshotReady = true
+	m.pluginManager = &pluginManagerState{}
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected marketplace info action to run asynchronously")
+	}
+	next = applyCommandResult(t, next, cmd)
+	want := []string{"info", "zero.demo@team"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("PluginCommand args = %#v, want %#v", called, want)
+	}
+	if next.pluginManager == nil {
+		t.Fatal("expected plugin manager to stay open after info action")
 	}
 }
 

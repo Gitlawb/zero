@@ -728,13 +728,13 @@ func runMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, dep
 		return exitSuccess
 	}
 	if id == "" {
-		return writeExecUsageError(stderr, "usage: zero plugins marketplace update <id> [--json]")
+		return writeExecUsageError(stderr, "usage: zero plugins marketplace update <id> [--scope user|project] [--json]")
 	}
 	cwd, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	entry, ok, err := findRegisteredCatalog(id, cwd, stderr)
+	entry, ok, err := findRegisteredCatalogForScope(id, cwd, options.scope, stderr)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -1098,12 +1098,16 @@ func registeredCatalogsForCLI(cwd string, stderr io.Writer) ([]marketplace.Regis
 }
 
 func findRegisteredCatalog(id string, cwd string, stderr io.Writer) (marketplace.RegisteredCatalog, bool, error) {
+	return findRegisteredCatalogForScope(id, cwd, "", stderr)
+}
+
+func findRegisteredCatalogForScope(id string, cwd string, scope marketplace.Scope, stderr io.Writer) (marketplace.RegisteredCatalog, bool, error) {
 	catalogs, err := registeredCatalogsForCLI(cwd, stderr)
 	if err != nil {
 		return marketplace.RegisteredCatalog{}, false, err
 	}
 	for _, catalog := range catalogs {
-		if catalog.ID == id {
+		if catalog.ID == id && (scope == "" || catalog.Scope == scope) {
 			return catalog, true, nil
 		}
 	}
@@ -1570,8 +1574,8 @@ func formatMarketplaceBrowse(catalogID string, plugins []marketplace.CatalogPlug
 	}
 	for _, plugin := range plugins {
 		version := ""
-		if len(plugin.Releases) > 0 {
-			version = "@" + plugin.Releases[0].Version
+		if release, ok := selectRelease(plugin, ""); ok {
+			version = "@" + release.Version
 		}
 		lines = append(lines, fmt.Sprintf("  %s%s %s [%s] - %s", plugin.ID, version, plugin.Name, plugin.Review.Status, plugin.Description))
 	}
@@ -1655,7 +1659,7 @@ func writeMarketplaceRemoveHelp(w io.Writer) error {
 
 func writeMarketplaceUpdateHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
-  zero plugins marketplace update <id> [--json]
+  zero plugins marketplace update <id> [--scope user|project] [--json]
 `)
 	return err
 }

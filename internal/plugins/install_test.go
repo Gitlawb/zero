@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initGitPluginRepo creates a real local git repo holding a plugin and returns a
@@ -327,6 +328,28 @@ func TestInstallGitSourceUsesRunner(t *testing.T) {
 	}
 	if result.ID != "zero.demo" {
 		t.Fatalf("ID = %q", result.ID)
+	}
+}
+
+func TestInstallGitSourcePassesBoundedContextToRunner(t *testing.T) {
+	destDir := t.TempDir()
+	runner := func(ctx context.Context, destination string, source string) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("expected git runner context to have a deadline")
+		}
+		if time.Until(deadline) <= 0 {
+			t.Fatalf("expected future git runner deadline, got %s", deadline)
+		}
+		writeSourcePlugin(t, destination, validManifest())
+		return nil
+	}
+	if _, err := Install(context.Background(), InstallOptions{
+		Source:    "https://example.com/plugin.git",
+		Dir:       destDir,
+		GitRunner: runner,
+	}); err != nil {
+		t.Fatalf("install via runner: %v", err)
 	}
 }
 

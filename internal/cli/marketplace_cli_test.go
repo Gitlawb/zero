@@ -231,6 +231,88 @@ func TestRunPluginsMarketplaceRemoteAddUpdateBrowse(t *testing.T) {
 	}
 }
 
+func TestRunPluginsMarketplaceUpdateHonorsScopeWhenCatalogIDsCollide(t *testing.T) {
+	setTrustConfigRoot(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	cwd := t.TempDir()
+	if err := workspacetrust.Trust(cwd); err != nil {
+		t.Fatal(err)
+	}
+	userCatalog := writeMarketplaceTestCatalog(t)
+	projectCatalog := writeMarketplaceTestCatalog(t)
+	userPath, err := marketplace.RegistryPathForScope(marketplace.ScopeUser, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectPath, err := marketplace.RegistryPathForScope(marketplace.ScopeProject, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := marketplace.SaveRegistry(userPath, marketplace.Registry{Catalogs: []marketplace.RegisteredCatalog{{
+		ID:                 "team",
+		Source:             userCatalog,
+		VerificationStatus: marketplace.VerificationStale,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := marketplace.SaveRegistry(projectPath, marketplace.Registry{Catalogs: []marketplace.RegisteredCatalog{{
+		ID:                 "team",
+		Source:             projectCatalog,
+		VerificationStatus: marketplace.VerificationStale,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"plugins", "marketplace", "update", "team", "--scope", "project", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("scoped update exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	userRegistry, err := marketplace.LoadRegistry(userPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectRegistry, err := marketplace.LoadRegistry(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userRegistry.Catalogs[0].VerificationStatus != marketplace.VerificationStale {
+		t.Fatalf("user catalog was updated despite --scope project: %#v", userRegistry.Catalogs)
+	}
+	if projectRegistry.Catalogs[0].VerificationStatus != marketplace.VerificationUnsigned {
+		t.Fatalf("project catalog was not updated: %#v", projectRegistry.Catalogs)
+	}
+}
+
+func TestRunPluginsBrowseShowsSelectedLatestRelease(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	catalogPath := writeMarketplaceMultiReleaseCatalog(t)
+	cwd := t.TempDir()
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"plugins", "marketplace", "add", catalogPath, "--allow-unverified"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("add exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "browse", "--catalog", "team"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("browse exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "zero.demo@0.2.0") {
+		t.Fatalf("browse should show selected latest release, got:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "zero.demo@0.1.0") {
+		t.Fatalf("browse displayed first catalog release instead of selected latest:\n%s", stdout.String())
+	}
+}
+
 func TestRunPluginsMarketplaceRemoteCatalogRejectsLocalReleaseRepository(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	source, hash := marketplaceTestPluginSource(t, "zero.demo", "0.1.0")
@@ -533,6 +615,52 @@ func writeMarketplaceTestCatalog(t *testing.T) string {
             "tools": [{"name": "lookup", "permission": "prompt"}],
             "hooks": [{"name": "preflight", "event": "beforeTool"}]
           }
+        }
+      ]
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeMarketplaceMultiReleaseCatalog(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.json")
+	body := `{
+  "schemaVersion": 1,
+  "id": "team",
+  "owner": "Platform",
+  "plugins": [
+    {
+      "id": "zero.demo",
+      "name": "Demo",
+      "description": "Lookup helper",
+      "author": {"name": "Platform"},
+      "license": "MIT",
+      "review": {
+        "status": "community",
+        "date": "2026-07-10",
+        "reviewer": "Zero Security",
+        "url": "https://github.com/Gitlawb/zero-plugins/pull/1"
+      },
+      "releases": [
+        {
+          "version": "0.1.0",
+          "repository": "https://github.com/Gitlawb/zero-demo-plugin.git",
+          "commit": "` + strings.Repeat("a", 40) + `",
+          "treeHash": "sha256:` + strings.Repeat("b", 64) + `",
+          "components": {"tools": [{"name": "lookup", "permission": "prompt"}]}
+        },
+        {
+          "version": "0.2.0",
+          "repository": "https://github.com/Gitlawb/zero-demo-plugin.git",
+          "commit": "` + strings.Repeat("c", 40) + `",
+          "treeHash": "sha256:` + strings.Repeat("d", 64) + `",
+          "components": {"tools": [{"name": "lookup", "permission": "prompt"}]}
         }
       ]
     }

@@ -1,10 +1,12 @@
 package marketplace
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistryAddRejectsReservedAndDuplicateCatalogIDs(t *testing.T) {
@@ -85,5 +87,17 @@ func TestReadLocalCatalogReadsCatalogAndOptionalSignature(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"id": "official"`) || string(sig) != "signature" {
 		t.Fatalf("unexpected data/signature: %q %q", data, sig)
+	}
+}
+
+func TestCatalogGitFetchContextHasDeadline(t *testing.T) {
+	ctx, cancel := catalogGitFetchContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected catalog git fetch context to have a deadline")
+	}
+	if time.Until(deadline) <= 0 {
+		t.Fatalf("expected future catalog git fetch deadline, got %s", deadline)
 	}
 }

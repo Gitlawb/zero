@@ -20,15 +20,19 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
-// manifestFileName is the plugin manifest filename, matching the loader.
-const manifestFileName = "plugin.json"
+const (
+	// manifestFileName is the plugin manifest filename, matching the loader.
+	manifestFileName = "plugin.json"
 
-// LockFileName maps an installed plugin id to its source and content hash.
-const LockFileName = "plugins.lock"
+	// LockFileName maps an installed plugin id to its source and content hash.
+	LockFileName = "plugins.lock"
 
-const disabledDirName = ".disabled"
+	disabledDirName       = ".disabled"
+	pluginGitFetchTimeout = 2 * time.Minute
+)
 
 // ErrNameClash is returned when an install would overwrite a plugin already
 // installed from a DIFFERENT source, unless InstallOptions.Force is set.
@@ -541,8 +545,16 @@ func Pin(dir string, id string, version string) (LockEntry, error) {
 			return fmt.Errorf("plugin %q is not installed", id)
 		}
 		entry.Pinned = true
-		if strings.TrimSpace(version) != "" {
-			entry.Version = strings.TrimSpace(version)
+		requestedVersion := strings.TrimSpace(version)
+		if requestedVersion != "" {
+			installedVersion, err := installedPluginVersion(dir, id)
+			if err != nil {
+				return err
+			}
+			if requestedVersion != installedVersion {
+				return fmt.Errorf("requested pin version %q does not match installed version %q", requestedVersion, installedVersion)
+			}
+			entry.Version = requestedVersion
 		}
 		lock[id] = entry
 		if err := writeLock(dir, lock); err != nil {
@@ -782,7 +794,9 @@ func fetchSource(ctx context.Context, source string, runner GitRunner) (string, 
 		return "", func() {}, fmt.Errorf("create temp dir: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(temp) }
-	if err := runner(ctx, temp, source); err != nil {
+	gitCtx, cancel := pluginGitFetchContext(ctx)
+	defer cancel()
+	if err := runner(gitCtx, temp, source); err != nil {
 		cleanup()
 		return "", func() {}, fmt.Errorf("fetch %s: %w", source, err)
 	}
@@ -806,17 +820,23 @@ func checkoutCommit(ctx context.Context, repo string, commit string) error {
 	if !installCommitPattern.MatchString(commit) {
 		return fmt.Errorf("commit must be a 40-character git SHA")
 	}
-	fetch := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "--depth", "1", "origin", commit)
+	gitCtx, cancel := pluginGitFetchContext(ctx)
+	defer cancel()
+	fetch := exec.CommandContext(gitCtx, "git", "-C", repo, "fetch", "--depth", "1", "origin", commit)
 	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := fetch.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch commit failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
-	checkout := exec.CommandContext(ctx, "git", "-C", repo, "checkout", "--detach", commit)
+	checkout := exec.CommandContext(gitCtx, "git", "-C", repo, "checkout", "--detach", commit)
 	checkout.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := checkout.CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout commit failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func pluginGitFetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, pluginGitFetchTimeout)
 }
 
 // locatePluginDir finds the directory holding plugin.json within root: the root
@@ -914,6 +934,33 @@ func copyFile(src string, dst string, perm os.FileMode) error {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+func installedPluginVersion(dir string, id string) (string, error) {
+	for _, pluginDir := range []string{
+		filepath.Join(dir, id),
+		filepath.Join(dir, disabledDirName, id),
+	} {
+		data, err := os.ReadFile(filepath.Join(pluginDir, manifestFileName))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", fmt.Errorf("read installed plugin manifest: %w", err)
+		}
+		var manifest struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return "", fmt.Errorf("parse installed plugin manifest: %w", err)
+		}
+		version := strings.TrimSpace(manifest.Version)
+		if version == "" {
+			return "", fmt.Errorf("installed plugin %q has no version", id)
+		}
+		return version, nil
+	}
+	return "", fmt.Errorf("plugin %q is not installed", id)
 }
 
 // canonicalSource normalizes a local filesystem source to an absolute,

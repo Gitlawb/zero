@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	OfficialCatalogID     = "official"
-	OfficialCatalogSource = "Gitlawb/zero-plugins"
+	OfficialCatalogID      = "official"
+	OfficialCatalogSource  = "Gitlawb/zero-plugins"
+	catalogGitFetchTimeout = 2 * time.Minute
 )
 
 // OfficialCatalogPublicKey verifies Gitlawb/zero-plugins catalog.sig. The
@@ -296,12 +297,18 @@ func fetchGitCatalog(ctx context.Context, source string) ([]byte, []byte, error)
 		return nil, nil, fmt.Errorf("create catalog fetch temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(temp) }()
-	command := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--", source, temp)
+	gitCtx, cancel := catalogGitFetchContext(ctx)
+	defer cancel()
+	command := exec.CommandContext(gitCtx, "git", "clone", "--depth", "1", "--", source, temp)
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := command.CombinedOutput(); err != nil {
 		return nil, nil, fmt.Errorf("git clone catalog failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return ReadLocalCatalog(filepath.Join(temp, "catalog.json"))
+}
+
+func catalogGitFetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, catalogGitFetchTimeout)
 }
 
 func signaturePathForCatalog(catalogPath string) string {

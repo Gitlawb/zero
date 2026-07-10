@@ -143,9 +143,6 @@ func (m model) handlePluginManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 				switch item.Kind {
 				case pluginManagerItemInstalled:
 					args := []string{"update", item.Name, "--scope", item.Scope, "--yes"}
-					if item.Verified != marketplace.VerificationSigned {
-						args = append(args, "--allow-unverified")
-					}
 					return m.runPluginManagerCommand(args, true)
 				case pluginManagerItemCatalog:
 					return m.runPluginManagerCommand([]string{"marketplace", "update", item.Name, "--scope", item.Scope}, true)
@@ -211,11 +208,7 @@ func (m model) choosePluginManagerItem() (model, tea.Cmd) {
 	case pluginManagerItemInstalled:
 		return m.runPluginManagerCommand([]string{"info", item.Name}, false)
 	case pluginManagerItemMarketplacePlugin:
-		args := []string{"info", item.Name + "@" + item.CatalogID}
-		if item.Verified != marketplace.VerificationSigned {
-			args = append(args, "--allow-unverified")
-		}
-		return m.runPluginManagerCommand(args, false)
+		return m.runPluginManagerCommand([]string{"info", item.Name + "@" + item.CatalogID}, false)
 	case pluginManagerItemCatalog:
 		return m.runPluginManagerCommand([]string{"browse", "--catalog", item.Name}, false)
 	}
@@ -472,9 +465,6 @@ func pluginManagerMarketplaceItem(entry PluginMarketplaceSnapshot) pluginManager
 		name = entry.Plugin.ID
 	}
 	input := "/plugins info " + entry.Plugin.ID + "@" + entry.CatalogID
-	if verification != marketplace.VerificationSigned {
-		input += " --allow-unverified"
-	}
 	return pluginManagerItem{
 		Kind:      pluginManagerItemMarketplacePlugin,
 		Name:      entry.Plugin.ID,
@@ -519,11 +509,7 @@ func pluginManagerCatalogItem(catalog PluginCatalogSnapshot) pluginManagerItem {
 }
 
 func pluginManagerMarketplaceInstallArgs(item pluginManagerItem, scope marketplace.Scope) []string {
-	args := []string{"install", item.Name + "@" + item.CatalogID, "--scope", string(scope), "--yes"}
-	if item.Verified != marketplace.VerificationSigned {
-		args = append(args, "--allow-unverified")
-	}
-	return args
+	return []string{"install", item.Name + "@" + item.CatalogID, "--scope", string(scope), "--yes"}
 }
 
 func pluginManagerMarketplaceDetail(entry PluginMarketplaceSnapshot) string {
