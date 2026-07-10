@@ -131,6 +131,9 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
+	// program is the live Bubble Tea program, set right before Run so /plan open
+	// can suspend the TUI, launch $EDITOR, and resume on exit.
+	program                     *tea.Program
 	selfCorrectTests            bool
 	reasoningEffort             modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
@@ -4361,8 +4364,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
-		return m, nil
+		return m.handlePlanCommand(command.text)
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
