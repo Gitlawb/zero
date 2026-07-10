@@ -26,6 +26,17 @@ type distributionAddOptions struct {
 	json  bool
 }
 
+type pluginToggleOptions struct {
+	json  bool
+	scope plugins.Source
+}
+
+type pluginPinOptions struct {
+	json    bool
+	scope   plugins.Source
+	version string
+}
+
 // parseDistributionAddArgs splits a positional source from the add flags.
 func parseDistributionAddArgs(args []string, label string) (string, distributionAddOptions, bool, error) {
 	options := distributionAddOptions{}
@@ -251,6 +262,113 @@ func runPluginRemove(args []string, dir string, stdout io.Writer, stderr io.Writ
 	return exitSuccess
 }
 
+func runPluginToggle(args []string, deps appDeps, stdout io.Writer, stderr io.Writer, enable bool) int {
+	command := "disable"
+	if enable {
+		command = "enable"
+	}
+	id, options, help, err := parsePluginToggleArgs(args, command)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writePluginToggleHelp(stdout, command); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if id == "" {
+		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--scope user|project] [--json]", command))
+	}
+	dir, err := pluginDirForScope(deps, options.scope)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if dir == "" {
+		return writeAppError(stderr, "could not resolve the plugins directory", exitCrash)
+	}
+	if enable {
+		err = plugins.Enable(dir, id)
+	} else {
+		err = plugins.Disable(dir, id)
+	}
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
+	}
+	if options.json {
+		payload := struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+			Scope   string `json:"scope"`
+		}{ID: id, Enabled: enable, Scope: string(defaultPluginScope(options.scope))}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	state := "Disabled"
+	if enable {
+		state = "Enabled"
+	}
+	if _, err := fmt.Fprintf(stdout, "%s plugin %q.\n", state, id); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runPluginPin(args []string, deps appDeps, stdout io.Writer, stderr io.Writer, pin bool) int {
+	command := "unpin"
+	if pin {
+		command = "pin"
+	}
+	id, options, help, err := parsePluginPinArgs(args, command)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writePluginPinHelp(stdout, command); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if id == "" {
+		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--version <version>] [--scope user|project] [--json]", command))
+	}
+	dir, err := pluginDirForScope(deps, options.scope)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	var entry plugins.LockEntry
+	if pin {
+		entry, err = plugins.Pin(dir, id, options.version)
+	} else {
+		entry, err = plugins.Unpin(dir, id)
+	}
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
+	}
+	if options.json {
+		payload := struct {
+			ID      string `json:"id"`
+			Pinned  bool   `json:"pinned"`
+			Version string `json:"version,omitempty"`
+			Scope   string `json:"scope"`
+		}{ID: id, Pinned: entry.Pinned, Version: entry.Version, Scope: string(defaultPluginScope(options.scope))}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	state := "Unpinned"
+	if pin {
+		state = "Pinned"
+	}
+	if _, err := fmt.Fprintf(stdout, "%s plugin %q.\n", state, id); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
 // --- tools make / list ---
 
 func runTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -269,6 +387,123 @@ func runTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 		return runToolsList(args[1:], deps.toolsDir(), stdout, stderr)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown tools subcommand %q", args[0]))
+	}
+}
+
+func parsePluginToggleArgs(args []string, command string) (string, pluginToggleOptions, bool, error) {
+	options := pluginToggleOptions{}
+	id := ""
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch arg {
+		case "-h", "--help", "help":
+			return id, options, true, nil
+		case "--json":
+			options.json = true
+		case "--scope":
+			index++
+			if index >= len(args) {
+				return id, options, false, execUsageError{"--scope requires user or project"}
+			}
+			scope, err := parsePluginScope(args[index])
+			if err != nil {
+				return id, options, false, err
+			}
+			options.scope = scope
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return id, options, false, execUsageError{fmt.Sprintf("unknown plugin %s flag %q", command, arg)}
+			}
+			if id != "" {
+				return id, options, false, execUsageError{fmt.Sprintf("plugin %s accepts a single id", command)}
+			}
+			id = arg
+		}
+	}
+	return id, options, false, nil
+}
+
+func parsePluginPinArgs(args []string, command string) (string, pluginPinOptions, bool, error) {
+	options := pluginPinOptions{}
+	id := ""
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch arg {
+		case "-h", "--help", "help":
+			return id, options, true, nil
+		case "--json":
+			options.json = true
+		case "--scope":
+			index++
+			if index >= len(args) {
+				return id, options, false, execUsageError{"--scope requires user or project"}
+			}
+			scope, err := parsePluginScope(args[index])
+			if err != nil {
+				return id, options, false, err
+			}
+			options.scope = scope
+		case "--version":
+			index++
+			if index >= len(args) || strings.TrimSpace(args[index]) == "" {
+				return id, options, false, execUsageError{"--version requires a value"}
+			}
+			options.version = args[index]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return id, options, false, execUsageError{fmt.Sprintf("unknown plugin %s flag %q", command, arg)}
+			}
+			if id != "" {
+				return id, options, false, execUsageError{fmt.Sprintf("plugin %s accepts a single id", command)}
+			}
+			id = arg
+		}
+	}
+	if command == "unpin" && options.version != "" {
+		return id, options, false, execUsageError{"plugin unpin does not accept --version"}
+	}
+	return id, options, false, nil
+}
+
+func parsePluginScope(value string) (plugins.Source, error) {
+	switch value {
+	case "", "user":
+		return plugins.SourceUser, nil
+	case "project":
+		return plugins.SourceProject, nil
+	default:
+		return "", execUsageError{"--scope must be user or project"}
+	}
+}
+
+func defaultPluginScope(scope plugins.Source) plugins.Source {
+	if scope == "" {
+		return plugins.SourceUser
+	}
+	return scope
+}
+
+func pluginDirForScope(deps appDeps, scope plugins.Source) (string, error) {
+	switch defaultPluginScope(scope) {
+	case plugins.SourceUser:
+		return deps.pluginsDir(), nil
+	case plugins.SourceProject:
+		cwd, err := deps.getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve workspace: %w", err)
+		}
+		roots, err := plugins.ResolveRoots(plugins.ResolveRootOptions{Cwd: cwd})
+		if err != nil {
+			return "", err
+		}
+		for _, root := range roots {
+			if root.Source == plugins.SourceProject {
+				return root.Path, nil
+			}
+		}
+		return "", fmt.Errorf("could not resolve the project plugins directory")
+	default:
+		return "", fmt.Errorf("--scope must be user or project")
 	}
 }
 
@@ -563,6 +798,34 @@ func writePluginRemoveHelp(w io.Writer) error {
 
 Removes an installed plugin directory and its plugins.lock entry.
 `)
+	return err
+}
+
+func writePluginToggleHelp(w io.Writer, command string) error {
+	_, err := fmt.Fprintf(w, `Usage:
+  zero plugins %s <id> [flags]
+
+Flags:
+      --scope user|project    Plugin scope (default user)
+      --json                  Print JSON
+  -h, --help                  Show this help
+`, command)
+	return err
+}
+
+func writePluginPinHelp(w io.Writer, command string) error {
+	versionLine := "      --version <version>    Pin this version\n"
+	if command == "unpin" {
+		versionLine = ""
+	}
+	_, err := fmt.Fprintf(w, `Usage:
+  zero plugins %s <id> [flags]
+
+Flags:
+%s      --scope user|project    Plugin scope (default user)
+      --json                  Print JSON
+  -h, --help                  Show this help
+`, command, versionLine)
 	return err
 }
 

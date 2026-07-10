@@ -76,10 +76,24 @@ func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 			return exitCrash
 		}
 		return exitSuccess
+	case "browse":
+		return runPluginBrowse(args[1:], stdout, stderr, deps)
+	case "install":
+		return runPluginMarketplaceInstall(args[1:], stdout, stderr, deps)
+	case "marketplace":
+		return runPluginMarketplace(args[1:], stdout, stderr, deps)
 	case "add":
 		return runPluginAdd(args[1:], deps.pluginsDir(), stdout, stderr)
 	case "remove", "rm":
 		return runPluginRemove(args[1:], deps.pluginsDir(), stdout, stderr)
+	case "enable":
+		return runPluginToggle(args[1:], deps, stdout, stderr, true)
+	case "disable":
+		return runPluginToggle(args[1:], deps, stdout, stderr, false)
+	case "pin":
+		return runPluginPin(args[1:], deps, stdout, stderr, true)
+	case "unpin":
+		return runPluginPin(args[1:], deps, stdout, stderr, false)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown plugins subcommand %q", args[0]))
 	}
@@ -561,8 +575,15 @@ func writePluginsHelp(w io.Writer) error {
 
 Commands:
   list                 List local Zero plugins
+  browse [query]       Browse marketplace plugins
+  install <id[@catalog]> Install a marketplace plugin
   add <git-url|path>   Install a plugin (manifest-validated, pinned in plugins.lock)
   remove <id>          Remove an installed plugin and its lockfile entry
+  enable <id>          Enable a quarantined plugin
+  disable <id>         Disable a plugin by moving it to .disabled
+  pin <id>             Pin a marketplace-managed plugin
+  unpin <id>           Unpin a marketplace-managed plugin
+  marketplace          Manage plugin catalogs
 `)
 	return err
 }

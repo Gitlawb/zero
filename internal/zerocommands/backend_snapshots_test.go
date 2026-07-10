@@ -2,6 +2,8 @@ package zerocommands
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -102,6 +104,39 @@ func TestMCPServerSnapshotRedactsSecretCommand(t *testing.T) {
 	}
 	if !strings.Contains(snapshot.Command, "[REDACTED]") {
 		t.Fatalf("expected redaction marker in MCP command, got %q", snapshot.Command)
+	}
+}
+
+func TestPluginSnapshotIncludesMarketplaceLockMetadata(t *testing.T) {
+	plugin := plugins.LoadedPlugin{
+		ID:        "zero.demo",
+		Name:      "Demo",
+		Version:   "0.1.0",
+		Enabled:   false,
+		Source:    plugins.SourceUser,
+		Root:      t.TempDir(),
+		PluginDir: "ignored/.disabled/zero.demo",
+	}
+	if err := os.WriteFile(filepath.Join(plugin.Root, plugins.LockFileName), []byte(`{
+  "zero.demo": {
+    "source": "https://github.com/Gitlawb/zero-demo-plugin.git",
+    "hash": "sha256:abc",
+    "catalog": "team",
+    "version": "0.1.0",
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "enabled": false,
+    "pinned": true
+  }
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := PluginSnapshotFromPlugin(plugin)
+	if !snapshot.Managed || snapshot.Catalog != "team" || snapshot.Commit != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || !snapshot.Pinned {
+		t.Fatalf("snapshot missing lock metadata: %#v", snapshot)
+	}
+	if snapshot.State != "disabled" || !snapshot.Quarantined || snapshot.Integrity != "ok" {
+		t.Fatalf("snapshot state/integrity mismatch: %#v", snapshot)
 	}
 }
 

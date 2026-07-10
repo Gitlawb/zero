@@ -2,6 +2,7 @@ package zerocommands
 
 import (
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -69,6 +70,13 @@ type PluginSnapshot struct {
 	Root         string `json:"root,omitempty"`
 	PluginDir    string `json:"pluginDir,omitempty"`
 	ManifestPath string `json:"manifestPath,omitempty"`
+	Managed      bool   `json:"managed"`
+	Catalog      string `json:"catalog,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	Pinned       bool   `json:"pinned,omitempty"`
+	Integrity    string `json:"integrity,omitempty"`
+	State        string `json:"state"`
+	Quarantined  bool   `json:"quarantined,omitempty"`
 	ToolCount    int    `json:"toolCount"`
 	PromptCount  int    `json:"promptCount"`
 	SkillCount   int    `json:"skillCount"`
@@ -207,12 +215,14 @@ func hookSnapshotsWithSource(definitions []hooks.Definition, source hooks.Config
 // after trimming and redaction because they help triage a load
 // failure but may include copied token-like strings.
 func PluginSnapshotFromPlugin(plugin plugins.LoadedPlugin) PluginSnapshot {
-	return PluginSnapshot{
+	snapshot := PluginSnapshot{
 		ID:           redactSnapshotString(plugin.ID),
 		Name:         redactSnapshotString(plugin.Name),
 		Version:      redactSnapshotString(plugin.Version),
 		Description:  redactSnapshotString(plugin.Description),
 		Enabled:      plugin.Enabled,
+		State:        pluginState(plugin),
+		Quarantined:  pluginQuarantined(plugin),
 		Source:       string(plugin.Source),
 		Root:         redactSnapshotString(plugin.Root),
 		PluginDir:    redactSnapshotString(plugin.PluginDir),
@@ -222,6 +232,41 @@ func PluginSnapshotFromPlugin(plugin plugins.LoadedPlugin) PluginSnapshot {
 		SkillCount:   len(plugin.Skills),
 		HookCount:    len(plugin.Hooks),
 	}
+	applyPluginLockMetadata(&snapshot, plugin)
+	return snapshot
+}
+
+func applyPluginLockMetadata(snapshot *PluginSnapshot, plugin plugins.LoadedPlugin) {
+	if strings.TrimSpace(plugin.Root) == "" || strings.TrimSpace(plugin.ID) == "" {
+		snapshot.Integrity = "unmanaged"
+		return
+	}
+	lock, err := plugins.ReadLock(plugin.Root)
+	if err != nil {
+		snapshot.Integrity = "unknown"
+		return
+	}
+	entry, ok := lock[plugin.ID]
+	if !ok {
+		snapshot.Integrity = "unmanaged"
+		return
+	}
+	snapshot.Managed = true
+	snapshot.Catalog = redactSnapshotString(entry.Catalog)
+	snapshot.Commit = redactSnapshotString(entry.Commit)
+	snapshot.Pinned = entry.Pinned
+	snapshot.Integrity = "ok"
+}
+
+func pluginState(plugin plugins.LoadedPlugin) string {
+	if plugin.Enabled {
+		return "active"
+	}
+	return "disabled"
+}
+
+func pluginQuarantined(plugin plugins.LoadedPlugin) bool {
+	return strings.Contains(filepath.ToSlash(plugin.PluginDir), "/.disabled/")
 }
 
 // PluginSnapshots converts a slice of plugins.LoadedPlugin into a
