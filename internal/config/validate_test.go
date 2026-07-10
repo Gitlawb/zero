@@ -122,3 +122,94 @@ func TestValidateFileValidConfigHasNoIssues(t *testing.T) {
 		t.Fatalf("expected no issues for valid config, got %#v", issues)
 	}
 }
+
+func TestValidateFileFlagsUnknownTopLevelKey(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}
+		],
+		"maxTurn": 1
+	}`)
+
+	_, issues := ValidateFile(path)
+	if len(issues) == 0 {
+		t.Fatalf("expected unknown-field issue for top-level typo, got none")
+	}
+	got := issues[0]
+	if got.FieldPath != "maxTurn" {
+		t.Fatalf("FieldPath = %q, want %q", got.FieldPath, "maxTurn")
+	}
+	if !strings.Contains(got.Message, `did you mean "maxTurns"`) {
+		t.Fatalf("expected near-match suggestion, got %q", got.Message)
+	}
+}
+
+func TestValidateFileFlagsUnknownNestedKey(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}
+		],
+		"sandbox": {
+			"network": "allow",
+			"blockUnixSocket": true
+		}
+	}`)
+
+	_, issues := ValidateFile(path)
+	var got Issue
+	found := false
+	for _, issue := range issues {
+		if issue.FieldPath == "sandbox.blockUnixSocket" {
+			got, found = issue, true
+		}
+	}
+	if !found {
+		t.Fatalf("expected nested unknown-field issue at sandbox.blockUnixSocket, got %#v", issues)
+	}
+	if !strings.Contains(got.Message, `did you mean "sandbox.blockUnixSockets"`) {
+		t.Fatalf("expected near-match suggestion, got %q", got.Message)
+	}
+}
+
+func TestValidateFileFlagsUnknownInProvider(t *testing.T) {
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1", "endpoint": "https://example.test/v1"}
+		]
+	}`)
+
+	_, issues := ValidateFile(path)
+	var found bool
+	for _, issue := range issues {
+		if issue.FieldPath == "providers[0].endpoint" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected unknown-field issue for providers[0].endpoint, got %#v", issues)
+	}
+}
+
+func TestValidateFileAllowsLegacyAliases(t *testing.T) {
+	// The legacy mcpServers / mcp_servers aliases are still read by
+	// FileConfig.UnmarshalJSON and must not be reported as unknown.
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}
+		],
+		"mcpServers": {
+			"docs": {"type": "stdio", "command": "docs-mcp"}
+		}
+	}`)
+
+	_, issues := ValidateFile(path)
+	for _, issue := range issues {
+		if strings.Contains(issue.FieldPath, "mcpServers") {
+			t.Fatalf("legacy alias mcpServers reported as unknown: %#v", issues)
+		}
+	}
+}

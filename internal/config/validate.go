@@ -31,6 +31,7 @@ func ValidateFile(path string) (FileConfig, []Issue) {
 	}
 
 	issues := validateSemantics(cfg)
+	issues = append(issues, unknownFieldIssues(data)...)
 	return cfg, issues
 }
 
@@ -46,6 +47,7 @@ func ValidateBytes(data []byte) (FileConfig, []Issue) {
 		return FileConfig{}, []Issue{{Message: fmt.Errorf("invalid config JSON: %w", err).Error()}}
 	}
 	issues := validateSemantics(cfg)
+	issues = append(issues, unknownFieldIssues(data)...)
 	return cfg, issues
 }
 
