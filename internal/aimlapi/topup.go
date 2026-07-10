@@ -30,6 +30,13 @@ const (
 	pollTimeout  = 20 * time.Minute
 )
 
+// Sentinel amount-validation errors so callers can tell an out-of-range amount
+// apart from a non-numeric one and surface the right message.
+var (
+	ErrAmountTooLow  = errors.New("top-up amount is below the minimum")
+	ErrAmountTooHigh = errors.New("top-up amount is above the maximum")
+)
+
 func ParseAmountUSD(value string) (int, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -41,10 +48,10 @@ func ParseAmountUSD(value string) (int, error) {
 	}
 	minor := int(dollars*100 + 0.5)
 	if minor < MinAmountUSDMinor {
-		return 0, fmt.Errorf("minimum top-up is $%d", MinAmountUSDMinor/100)
+		return 0, fmt.Errorf("%w of $%d", ErrAmountTooLow, MinAmountUSDMinor/100)
 	}
 	if minor > MaxAmountUSDMinor {
-		return 0, fmt.Errorf("maximum top-up is $%d", MaxAmountUSDMinor/100)
+		return 0, fmt.Errorf("%w of $%d", ErrAmountTooHigh, MaxAmountUSDMinor/100)
 	}
 	return minor, nil
 }
@@ -54,14 +61,22 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (Pa
 	for time.Now().Before(deadline) {
 		session, err := client.GetSession(ctx, sessionToken)
 		if err != nil {
-			var apiErr APIError
-			if errors.As(err, &apiErr) && apiErr.Status >= 500 {
-				if err := sleepContext(ctx, pollInterval); err != nil {
-					return PartnerCheckoutSession{}, err
-				}
-				continue
+			// Context cancellation/deadline is terminal (also covers an in-flight
+			// request cancelled mid-poll, whose transport error wraps ctx.Err()).
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return PartnerCheckoutSession{}, err
 			}
-			return PartnerCheckoutSession{}, err
+			// A 4xx API response is terminal. Everything else — a 5xx or a transient
+			// transport error (non-APIError, e.g. a dropped connection during the
+			// wait) — is retried until the poll deadline.
+			var apiErr APIError
+			if errors.As(err, &apiErr) && apiErr.Status < 500 {
+				return PartnerCheckoutSession{}, err
+			}
+			if err := sleepContext(ctx, pollInterval); err != nil {
+				return PartnerCheckoutSession{}, err
+			}
+			continue
 		}
 		switch session.Status {
 		case SessionStatusPaid, SessionStatusExchanging:

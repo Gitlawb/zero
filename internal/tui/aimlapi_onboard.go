@@ -649,7 +649,14 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		return nil, aimlapiContinue
 	}
 	if _, err := aimlapi.ParseAmountUSD(s.amount); err != nil {
-		s.errText = aimlapi.MsgTopUpTooLow
+		switch {
+		case errors.Is(err, aimlapi.ErrAmountTooLow):
+			s.errText = aimlapi.MsgTopUpTooLow
+		case errors.Is(err, aimlapi.ErrAmountTooHigh):
+			s.errText = aimlapi.MsgTopUpTooHigh
+		default:
+			s.errText = aimlapi.MsgAmountInvalid
+		}
 		s.step = aimlapiStepAmountInput
 		s.amountField = 0
 		return nil, aimlapiContinue

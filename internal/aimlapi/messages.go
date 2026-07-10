@@ -29,7 +29,9 @@ const (
 	// Top-up workflow.
 	MsgTopUpPrompt    = "Add credits.\nEnter an amount (min $20)."
 	MsgTopUpTooLow    = "Top up amount is too low."
+	MsgTopUpTooHigh   = "Top up amount is too high."
 	MsgAmountRequired = "Please enter a top-up amount."
+	MsgAmountInvalid  = "Please enter a valid dollar amount."
 	// %s = checkout URL
 	MsgTopUpBrowserFallback = "If the browser did not open automatically please use this link to top up your account: %s"
 	MsgTopUpFailed          = "Top up failed. Please try again."

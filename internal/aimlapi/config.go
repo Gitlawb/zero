@@ -47,6 +47,13 @@ func ResolveEndpoints() Endpoints {
 
 func BuildPartnerCheckoutReturnURLs(appBaseURL string, sessionToken string) (successURL string, cancelURL string) {
 	base := strings.TrimRight(strings.TrimSpace(appBaseURL), "/")
+	if base == "" {
+		// With no base there is nothing to anchor an absolute URL to. Return empty
+		// so the caller omits the return URLs entirely (client.Pay skips empty ones,
+		// leaving the backend's generic checkout) instead of emitting a broken
+		// relative "/checkout?...".
+		return "", ""
+	}
 	token := url.QueryEscape(sessionToken)
 	return base + "/checkout?checkout=success&partnerCheckout=1&sessionToken=" + token,
 		base + "/checkout?checkout=cancel&partnerCheckout=1&sessionToken=" + token
