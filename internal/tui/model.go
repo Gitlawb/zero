@@ -91,11 +91,16 @@ type model struct {
 	mcpPermissionStore   *internalmcp.PermissionStore
 	mcpTokenStore        *internalmcp.TokenStore
 	mcpCommand           func(context.Context, []string) MCPCommandResult
+	pluginCommand        func(context.Context, []string) PluginCommandResult
 	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
 	mcpViewStateCache    MCPViewState
 	mcpViewStateReady    bool
 	mcpCommandSeq        int
 	mcpCommandCancel     context.CancelFunc
+	pluginSnapshot       PluginSnapshot
+	pluginSnapshotReady  bool
+	pluginCommandSeq     int
+	pluginCommandCancel  context.CancelFunc
 	sandboxSetupSeq      int
 	sandboxSetupInFlight bool
 	doctorCommandSeq     int
@@ -412,6 +417,7 @@ type model struct {
 	providerWizard *providerWizardState
 	mcpManager     *mcpManagerState
 	mcpAddWizard   *mcpAddWizardState
+	pluginManager  *pluginManagerState
 	favoriteModels map[string]bool
 	// recentModels is the automatic history of provider+model switches, newest
 	// first, capped to config.MaxRecentModels. Unlike favoriteModels (manual
@@ -605,6 +611,27 @@ type mcpCommandResultMsg struct {
 	result  MCPCommandResult
 }
 
+type pluginCommandOrigin int
+
+const (
+	pluginCommandOriginManager pluginCommandOrigin = iota
+	pluginCommandOriginTranscript
+)
+
+type pluginCommandRequest struct {
+	id              int
+	origin          pluginCommandOrigin
+	args            []string
+	raw             string
+	managerSelected int
+	managerQuery    string
+}
+
+type pluginCommandResultMsg struct {
+	request pluginCommandRequest
+	result  PluginCommandResult
+}
+
 type doctorCommandResultMsg struct {
 	id   int
 	text string
@@ -794,6 +821,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
+		pluginCommand:               options.PluginCommand,
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		sessionCompactor:            options.SessionCompactor,
@@ -1340,6 +1368,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mcpManager = nil
 				return m, nil
 			}
+			if m.pluginManager != nil {
+				m.pluginManager = nil
+				return m, nil
+			}
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
@@ -1419,6 +1451,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
+			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
 			}
 			if m.picker != nil {
 				m.burstCount = 0
@@ -1578,6 +1614,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
@@ -1611,6 +1651,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
+			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
 			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
@@ -1651,6 +1695,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -1688,6 +1736,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
+			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
 			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
@@ -1735,6 +1787,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.pluginManager != nil {
+				m.burstCount = 0
+				return m.handlePluginManagerKey(msg)
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -1770,7 +1826,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.moveAskUserCursor(-1), nil
 			}
-			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.pendingSpecReview != nil {
+			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.pendingSpecReview != nil {
 				break
 			}
 			if m.composerValue() != "" {
@@ -1791,7 +1847,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.moveAskUserCursor(1), nil
 			}
-			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.pendingSpecReview != nil {
+			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.pendingSpecReview != nil {
 				break
 			}
 			if m.composerValue() != "" {
@@ -1841,6 +1897,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mcpManager != nil {
 			m.burstCount = 0
 			return m.handleMCPManagerKey(msg)
+		}
+		if m.pluginManager != nil {
+			m.burstCount = 0
+			return m.handlePluginManagerKey(msg)
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
@@ -2508,6 +2568,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case mcpCommandResultMsg:
 		return m.applyMCPCommandResultMessage(msg), nil
+	case pluginCommandResultMsg:
+		return m.applyPluginCommandResultMessage(msg), nil
 	}
 
 	var cmd tea.Cmd
@@ -2618,6 +2680,7 @@ func (m model) transcriptView() string {
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
+	pluginOverlay := m.pluginManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	sttKeyOverlay := m.sttKeyPromptOverlay(width)
 	viewportOverlay := ""
@@ -2632,6 +2695,8 @@ func (m model) transcriptView() string {
 		viewportOverlay = mcpAddOverlay
 	case mcpOverlay != "":
 		viewportOverlay = mcpOverlay
+	case pluginOverlay != "":
+		viewportOverlay = pluginOverlay
 	case pickerOverlay != "":
 		viewportOverlay = pickerOverlay
 	case suggestionOverlay != "":
@@ -4144,6 +4209,11 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m.openMCPManager(), nil
 		}
 		return m.startMCPTranscriptCommand(command.text)
+	case commandPlugins:
+		if strings.TrimSpace(command.text) == "" {
+			return m.openPluginManager()
+		}
+		return m.startPluginTranscriptCommand(command.text)
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil

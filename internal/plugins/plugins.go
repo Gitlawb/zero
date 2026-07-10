@@ -249,12 +249,12 @@ func Load(options LoadOptions) (LoadResult, error) {
 		lock, lockErr := ReadLock(rootPath)
 		if lockErr != nil {
 			diagnostics = append(diagnostics, Diagnostic{
-				Kind:    DiagnosticIO,
+				Kind:    DiagnosticIntegrity,
 				Source:  root.Source,
 				Root:    rootPath,
 				Message: lockErr.Error(),
 			})
-			lock = map[string]LockEntry{}
+			continue
 		}
 
 		for _, entry := range entries {
@@ -333,10 +333,32 @@ func loadPluginDir(root Root, rootPath string, pluginDir string, disabled bool, 
 		*diagnostics = append(*diagnostics, toDiagnostic(err, root, rootPath, pluginDir, manifestPath))
 		return LoadedPlugin{}, false
 	}
+	entry, locked := lock[plugin.ID]
+	if locked && entry.Enabled != nil {
+		lockDisabled := !*entry.Enabled
+		if lockDisabled != disabled {
+			expected := "active"
+			actual := "disabled"
+			if lockDisabled {
+				expected = "disabled"
+				actual = "active"
+			}
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Kind:         DiagnosticIntegrity,
+				Source:       root.Source,
+				Root:         rootPath,
+				PluginPath:   pluginDir,
+				ManifestPath: manifestPath,
+				PluginID:     plugin.ID,
+				Message:      fmt.Sprintf("plugin state mismatch: lockfile marks plugin %s but filesystem has %s content", expected, actual),
+			})
+			return LoadedPlugin{}, false
+		}
+	}
 	if disabled {
 		plugin.Enabled = false
 	}
-	if entry, ok := lock[plugin.ID]; ok && strings.TrimSpace(entry.Hash) != "" {
+	if locked && strings.TrimSpace(entry.Hash) != "" {
 		hash, err := hashTree(pluginDir)
 		if err != nil {
 			*diagnostics = append(*diagnostics, Diagnostic{

@@ -1089,7 +1089,7 @@ func (m model) transcriptHitTestSource() (header string, items []transcriptBodyI
 // transcriptHitTestBlocked reports whether mouse hit-testing must be skipped
 // outright — a modal/overlay is up, or there's no alt-screen viewport at all.
 func (m model) transcriptHitTestBlocked() bool {
-	return !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive()
+	return !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.suggestionsActive()
 }
 
 // transcriptHitTestLayout computes the frame/window/layout mouse hit-testing needs,

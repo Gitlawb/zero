@@ -124,7 +124,7 @@ func projectHooksFileExists(workspaceRoot string) bool {
 }
 
 // emitTrustNotice writes at most one stderr line summarizing that project-scoped
-// hooks, plugins, and/or MCP servers were skipped in an untrusted workspace. It
+// hooks, plugins, MCP servers, and/or marketplaces were skipped in an untrusted workspace. It
 // takes the skip report from each trust-gated surface (hooks, plugins, MCP) and ORs
 // them, so a workspace that only drops one surface still gets the notice. It is
 // computed once per session by the caller (each session-setup site runs once), so it
@@ -144,8 +144,8 @@ func emitTrustNotice(stderr io.Writer, skips ...trustSkip) {
 		return
 	}
 	if storeErrored {
-		_, _ = fmt.Fprintln(stderr, "zero: the workspace-trust store could not be read; ignoring project hooks/plugins/MCP servers (fail-closed). Run 'zero trust' to enable.")
+		_, _ = fmt.Fprintln(stderr, "zero: the workspace-trust store could not be read; ignoring project hooks/plugins/MCP servers/marketplaces (fail-closed). Run 'zero trust' to enable.")
 		return
 	}
-	_, _ = fmt.Fprintln(stderr, "zero: ignoring project hooks/plugins/MCP servers in an untrusted workspace. Run 'zero trust' to enable.")
+	_, _ = fmt.Fprintln(stderr, "zero: ignoring project hooks/plugins/MCP servers/marketplaces in an untrusted workspace. Run 'zero trust' to enable.")
 }

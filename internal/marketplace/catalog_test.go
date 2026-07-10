@@ -103,6 +103,59 @@ func TestParseCatalogRejectsInvalidReleaseAndSpecialistHookEvents(t *testing.T) 
 	}
 }
 
+func TestParseCatalogRejectsHTTPSDocumentReleaseRepository(t *testing.T) {
+	body := strings.Replace(testCatalogJSON(), `"repository": "https://github.com/Gitlawb/zero-demo-plugin.git"`, `"repository": "https://example.com/catalog.json"`, 1)
+	_, err := ParseCatalog([]byte(body))
+	if err == nil || !strings.Contains(err.Error(), "git repository source") {
+		t.Fatalf("expected git repository source error, got %v", err)
+	}
+}
+
+func TestRemoteCatalogReleaseSourcesRejectLocalPaths(t *testing.T) {
+	body := strings.Replace(testCatalogJSON(), `"repository": "https://github.com/Gitlawb/zero-demo-plugin.git"`, `"repository": "./plugins/demo"`, 1)
+	catalog, err := ParseCatalog([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseCatalog returned error: %v", err)
+	}
+	err = ValidateRemoteCatalogReleaseSources(catalog)
+	if err == nil || !strings.Contains(err.Error(), "absolute git repository source") {
+		t.Fatalf("expected absolute git source error, got %v", err)
+	}
+}
+
+func TestParseCatalogRejectsIncompleteReviewMetadata(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing review date",
+			body: strings.Replace(testCatalogJSON(), `"date": "2026-07-10",`, ``, 1),
+			want: "review.date",
+		},
+		{
+			name: "missing reviewer",
+			body: strings.Replace(testCatalogJSON(), `"reviewer": "Zero Security",`, ``, 1),
+			want: "review.reviewer",
+		},
+		{
+			name: "missing review URL",
+			body: strings.Replace(testCatalogJSON(), `"url": "https://github.com/Gitlawb/zero-plugins/pull/1"`, `"url": ""`, 1),
+			want: "review.url",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseCatalog([]byte(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestVerifyCatalogSignature(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -210,7 +263,12 @@ func testCatalogJSON() string {
       "name": "Second",
       "author": {"name": "Zero"},
       "license": "MIT",
-      "review": {"status": "community"},
+      "review": {
+        "status": "community",
+        "date": "2026-07-10",
+        "reviewer": "Zero Security",
+        "url": "https://github.com/Gitlawb/zero-plugins/pull/2"
+      },
       "releases": [
         {
           "version": "0.1.0",

@@ -126,7 +126,7 @@ func (m model) planStepAtMouse(msg tea.MouseMsg) (int, bool) {
 	if !m.sidebarActive() {
 		return 0, false
 	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.suggestionsActive() {
 		return 0, false
 	}
 	sidebarW := sidebarWidth(m.width)

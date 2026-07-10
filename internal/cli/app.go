@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/localcontrol"
+	"github.com/Gitlawb/zero/internal/marketplace"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
@@ -828,6 +830,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				ExitCode: exitCode,
 			}
 		},
+		PluginCommand:       tuiPluginCommand(workspaceRoot, deps),
 		SandboxSetupCommand: tuiSandboxSetupCommand(sandboxBackend, deps),
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
@@ -882,6 +885,157 @@ func tuiSandboxSetupCommand(backend sandbox.Backend, deps appDeps) func(context.
 			Error:    strings.TrimSpace(stderr.String()),
 			ExitCode: exitCode,
 		}
+	}
+}
+
+func tuiPluginCommand(workspaceRoot string, deps appDeps) func(context.Context, []string) tui.PluginCommandResult {
+	return func(ctx context.Context, args []string) tui.PluginCommandResult {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var stdout, stderr bytes.Buffer
+		exitCode := runPlugins(args, &stdout, &stderr, deps)
+		return tui.PluginCommandResult{
+			Snapshot:        tuiPluginSnapshot(workspaceRoot, deps),
+			Output:          strings.TrimSpace(stdout.String()),
+			Error:           strings.TrimSpace(stderr.String()),
+			ExitCode:        exitCode,
+			RestartRequired: pluginCommandNeedsRestart(args) && exitCode == exitSuccess,
+		}
+	}
+}
+
+func tuiPluginSnapshot(workspaceRoot string, deps appDeps) tui.PluginSnapshot {
+	excludeProject, trustErr := resolveTrust(workspaceRoot)
+	result, err := deps.loadPlugins(plugins.LoadOptions{Cwd: workspaceRoot, ExcludeProject: excludeProject})
+	snapshot := tui.PluginSnapshot{ProjectPluginsShown: !excludeProject}
+	if err != nil {
+		snapshot.LoadError = err.Error()
+	} else {
+		snapshot.Plugins = result.Plugins
+		snapshot.Diagnostics = result.Diagnostics
+	}
+	snapshot.Installed = tuiPluginInstalledSnapshot(deps, !excludeProject)
+	installed := map[string]tui.PluginInstalledSnapshot{}
+	for _, item := range snapshot.Installed {
+		if item.ID == "" {
+			continue
+		}
+		installed[item.ID+"|"+string(item.Source)] = item
+		if item.Catalog != "" {
+			installed[item.ID+"@"+item.Catalog] = item
+		}
+	}
+	catalogs, catalogErr := registeredCatalogs(workspaceRoot, !excludeProject)
+	if catalogErr != nil {
+		if snapshot.LoadError == "" {
+			snapshot.LoadError = catalogErr.Error()
+		}
+	} else {
+		for _, entry := range catalogs {
+			catalogSnapshot := tui.PluginCatalogSnapshot{
+				ID:     entry.ID,
+				Source: entry.Source,
+				Scope:  entry.Scope,
+				Verification: marketplace.Verification{
+					Status: entry.VerificationStatus,
+				},
+			}
+			catalog, verification, err := loadCatalogEntryCachedOnly(entry)
+			if err != nil {
+				catalogSnapshot.LoadError = err.Error()
+			} else {
+				catalogSnapshot.Owner = catalog.Owner
+				catalogSnapshot.Description = catalog.Description
+				catalogSnapshot.Verification = verification
+				for _, plugin := range catalog.Plugins {
+					release, ok := selectRelease(plugin, "")
+					if !ok {
+						continue
+					}
+					state, ok := installed[plugin.ID+"@"+catalog.ID]
+					snapshot.MarketplacePlugins = append(snapshot.MarketplacePlugins, tui.PluginMarketplaceSnapshot{
+						CatalogID:    catalog.ID,
+						CatalogScope: entry.Scope,
+						Verification: verification,
+						Plugin:       plugin,
+						Release:      release,
+						Risk:         marketplace.RiskForRelease(release),
+						Installed:    ok,
+						Pinned:       ok && state.Pinned,
+					})
+				}
+			}
+			snapshot.Catalogs = append(snapshot.Catalogs, catalogSnapshot)
+		}
+	}
+	sort.SliceStable(snapshot.Installed, func(left int, right int) bool {
+		if snapshot.Installed[left].Source != snapshot.Installed[right].Source {
+			return snapshot.Installed[left].Source < snapshot.Installed[right].Source
+		}
+		return snapshot.Installed[left].ID < snapshot.Installed[right].ID
+	})
+	sort.SliceStable(snapshot.Catalogs, func(left int, right int) bool {
+		if snapshot.Catalogs[left].Scope != snapshot.Catalogs[right].Scope {
+			return snapshot.Catalogs[left].Scope < snapshot.Catalogs[right].Scope
+		}
+		return snapshot.Catalogs[left].ID < snapshot.Catalogs[right].ID
+	})
+	sort.SliceStable(snapshot.MarketplacePlugins, func(left int, right int) bool {
+		if snapshot.MarketplacePlugins[left].CatalogID != snapshot.MarketplacePlugins[right].CatalogID {
+			return snapshot.MarketplacePlugins[left].CatalogID < snapshot.MarketplacePlugins[right].CatalogID
+		}
+		return snapshot.MarketplacePlugins[left].Plugin.ID < snapshot.MarketplacePlugins[right].Plugin.ID
+	})
+	if trustErr {
+		snapshot.TrustNotice = "project plugins hidden: trust store error"
+	} else if excludeProject {
+		snapshot.TrustNotice = "project plugins hidden until workspace trusted"
+	}
+	return snapshot
+}
+
+func tuiPluginInstalledSnapshot(deps appDeps, includeProject bool) []tui.PluginInstalledSnapshot {
+	scopes := []plugins.Source{plugins.SourceUser}
+	if includeProject {
+		scopes = append(scopes, plugins.SourceProject)
+	}
+	items := []tui.PluginInstalledSnapshot{}
+	for _, scope := range scopes {
+		dir, err := pluginDirForScope(deps, scope)
+		if err != nil {
+			items = append(items, tui.PluginInstalledSnapshot{Source: scope, Error: err.Error()})
+			continue
+		}
+		lock, err := plugins.ReadLock(dir)
+		if err != nil {
+			items = append(items, tui.PluginInstalledSnapshot{Source: scope, Error: err.Error()})
+			continue
+		}
+		for id, entry := range lock {
+			items = append(items, tui.PluginInstalledSnapshot{
+				ID:      id,
+				Source:  scope,
+				Catalog: entry.Catalog,
+				Version: entry.Version,
+				Commit:  entry.Commit,
+				Enabled: entry.Enabled,
+				Pinned:  entry.Pinned,
+			})
+		}
+	}
+	return items
+}
+
+func pluginCommandNeedsRestart(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.TrimSpace(args[0]) {
+	case "install", "add", "remove", "rm", "enable", "disable", "update":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -80,7 +80,7 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	if m.providerWizard != nil {
 		return m.handleProviderWizardPaste(content)
 	}
-	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
+	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil {
 		return m, nil
 	}
 	// A drag-dropped image/PDF arrives as a (backslash-escaped) file path. Attach

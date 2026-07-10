@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,6 +114,24 @@ func TestInstallCopiesLocalPluginAndRecordsHash(t *testing.T) {
 	}
 	if entries["zero.demo"].Hash != result.Hash || entries["zero.demo"].Source != canonicalSource(src) {
 		t.Fatalf("lockfile entry unexpected: %#v", entries["zero.demo"])
+	}
+	if entries["zero.demo"].Enabled == nil || !*entries["zero.demo"].Enabled {
+		t.Fatalf("new install must record enabled:true: %#v", entries["zero.demo"])
+	}
+}
+
+func TestInstallFailsWhenRootLocked(t *testing.T) {
+	destDir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	lock, err := acquirePluginRootLock(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.release()
+
+	_, err = Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+	if err == nil || !strings.Contains(err.Error(), "plugins root is locked") {
+		t.Fatalf("expected root lock error, got %v", err)
 	}
 }
 
@@ -324,6 +343,28 @@ func TestRemoveDeletesPluginAndLockEntry(t *testing.T) {
 	loaded, _ := Load(LoadOptions{Roots: []Root{{Source: SourceUser, Path: destDir}}})
 	if len(loaded.Plugins) != 0 {
 		t.Fatalf("plugin still present after Remove: %#v", loaded.Plugins)
+	}
+	entries, _ := ReadLock(destDir)
+	if _, ok := entries["zero.demo"]; ok {
+		t.Fatalf("lockfile entry survived Remove")
+	}
+}
+
+func TestRemoveDeletesDisabledPluginAndLockEntry(t *testing.T) {
+	destDir := t.TempDir()
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := Disable(destDir, "zero.demo"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	if err := Remove(destDir, "zero.demo"); err != nil {
+		t.Fatalf("Remove disabled: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, disabledDirName, "zero.demo")); !os.IsNotExist(err) {
+		t.Fatalf("disabled dir survived Remove, err=%v", err)
 	}
 	entries, _ := ReadLock(destDir)
 	if _, ok := entries["zero.demo"]; ok {

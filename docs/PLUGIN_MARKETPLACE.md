@@ -33,7 +33,12 @@ releases:
       "name": "Zero Demo",
       "author": {"name": "Platform"},
       "license": "MIT",
-      "review": {"status": "community"},
+      "review": {
+        "status": "community",
+        "date": "2026-07-10",
+        "reviewer": "Zero Security",
+        "url": "https://github.com/Gitlawb/zero-plugins/pull/1"
+      },
       "releases": [
         {
           "version": "0.1.0",
@@ -61,12 +66,16 @@ catalog metadata before publishing:
 
 ```bash
 zero plugins browse lookup --catalog team
-zero plugins install zero.demo@team --yes
+zero plugins install zero.demo@team --yes --allow-unverified
 ```
 
 Install checks include plugin id, manifest version, tree hash, component names,
 tool permissions, and hook events. Managed plugins are recorded in `plugins.lock`
 with catalog, version, commit, subdir, hash, pinned, and enabled state.
+
+Install/update/remove operations take a plugin-root lock. On Unix this uses an
+OS file lock, so crash-left lock files do not block later operations. On Windows
+stale lock files are recovered after a short age threshold.
 
 Disabled managed plugins move to `<plugins-root>/.disabled/<id>`. The loader
 lists quarantined plugins but never activates them; a disabled project plugin

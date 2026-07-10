@@ -7,8 +7,10 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/marketplace"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -48,6 +50,7 @@ type Options struct {
 	MCPPermissionStore          *mcp.PermissionStore
 	MCPTokenStore               *mcp.TokenStore
 	MCPCommand                  func(context.Context, []string) MCPCommandResult
+	PluginCommand               func(context.Context, []string) PluginCommandResult
 	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
 	UsageTracker                *usage.Tracker
 	SessionCompactor            SessionCompactor
@@ -125,6 +128,57 @@ type MCPCommandResult struct {
 	Output   string
 	Error    string
 	ExitCode int
+}
+
+type PluginSnapshot struct {
+	Plugins             []plugins.LoadedPlugin
+	Diagnostics         []plugins.Diagnostic
+	Installed           []PluginInstalledSnapshot
+	Catalogs            []PluginCatalogSnapshot
+	MarketplacePlugins  []PluginMarketplaceSnapshot
+	TrustNotice         string
+	LoadError           string
+	ProjectPluginsShown bool
+}
+
+type PluginInstalledSnapshot struct {
+	ID      string
+	Source  plugins.Source
+	Catalog string
+	Version string
+	Commit  string
+	Enabled *bool
+	Pinned  bool
+	Error   string
+}
+
+type PluginCatalogSnapshot struct {
+	ID           string
+	Owner        string
+	Description  string
+	Source       string
+	Scope        marketplace.Scope
+	Verification marketplace.Verification
+	LoadError    string
+}
+
+type PluginMarketplaceSnapshot struct {
+	CatalogID    string
+	CatalogScope marketplace.Scope
+	Verification marketplace.Verification
+	Plugin       marketplace.CatalogPlugin
+	Release      marketplace.Release
+	Risk         marketplace.RiskReport
+	Installed    bool
+	Pinned       bool
+}
+
+type PluginCommandResult struct {
+	Snapshot        PluginSnapshot
+	Output          string
+	Error           string
+	ExitCode        int
+	RestartRequired bool
 }
 
 type SandboxSetupCommandResult struct {

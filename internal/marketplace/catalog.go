@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/plugins"
 )
@@ -205,18 +206,38 @@ func validatePlugin(field string, plugin CatalogPlugin) error {
 func validateReview(field string, review ReviewRecord) error {
 	switch review.Status {
 	case ReviewStatusReviewed, ReviewStatusCommunity, ReviewStatusUnreviewed:
-		return nil
 	default:
 		return fmt.Errorf("%s.status: expected reviewed, community, or unreviewed", field)
 	}
+	if strings.TrimSpace(review.Date) == "" {
+		return fmt.Errorf("%s.date: required", field)
+	}
+	if _, err := time.Parse("2006-01-02", review.Date); err != nil {
+		return fmt.Errorf("%s.date: expected YYYY-MM-DD", field)
+	}
+	if strings.TrimSpace(review.Reviewer) == "" {
+		return fmt.Errorf("%s.reviewer: required", field)
+	}
+	reviewURL := strings.TrimSpace(review.URL)
+	if reviewURL == "" {
+		return fmt.Errorf("%s.url: required", field)
+	}
+	parsed, err := url.Parse(reviewURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("%s.url: expected absolute URL", field)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("%s.url: expected http or https URL", field)
+	}
+	return nil
 }
 
 func validateRelease(field string, release Release) error {
 	if !semverPattern.MatchString(release.Version) {
 		return fmt.Errorf("%s.version: expected semantic version", field)
 	}
-	if _, err := ParseCatalogSource(release.Repository); err != nil {
-		return fmt.Errorf("%s.repository: %w", field, err)
+	if err := validateReleaseRepository(field+".repository", release.Repository); err != nil {
+		return err
 	}
 	if !commitPattern.MatchString(release.Commit) {
 		return fmt.Errorf("%s.commit: expected 40-character git commit SHA", field)
@@ -228,6 +249,39 @@ func validateRelease(field string, release Release) error {
 		return err
 	}
 	return validateComponents(field+".components", release.Components)
+}
+
+func validateReleaseRepository(field string, repository string) error {
+	source, err := ParseCatalogSource(repository)
+	if err != nil {
+		return fmt.Errorf("%s: %w", field, err)
+	}
+	switch source.Kind {
+	case CatalogSourceGitHub, CatalogSourceGit:
+		return nil
+	case CatalogSourceHTTPS:
+		return fmt.Errorf("%s: expected a git repository source, got HTTPS catalog/document URL", field)
+	case CatalogSourceLocal:
+		return nil
+	default:
+		return fmt.Errorf("%s: unsupported source kind %q", field, source.Kind)
+	}
+}
+
+func ValidateRemoteCatalogReleaseSources(catalog Catalog) error {
+	for pluginIndex, plugin := range catalog.Plugins {
+		for releaseIndex, release := range plugin.Releases {
+			field := fmt.Sprintf("plugins.%d.releases.%d.repository", pluginIndex, releaseIndex)
+			source, err := ParseCatalogSource(release.Repository)
+			if err != nil {
+				return fmt.Errorf("%s: %w", field, err)
+			}
+			if source.Kind == CatalogSourceLocal {
+				return fmt.Errorf("%s: expected an absolute git repository source, got local path", field)
+			}
+		}
+	}
+	return nil
 }
 
 func validateComponents(field string, components ComponentInventory) error {
@@ -424,6 +478,11 @@ func ParseCatalogSource(raw string) (CatalogSource, error) {
 				kind = CatalogSourceGit
 			}
 			return CatalogSource{Kind: kind, Raw: raw, Canonical: source}, nil
+		case "http":
+			if !isLoopbackHost(parsed.Hostname()) {
+				return CatalogSource{}, fmt.Errorf("unsupported source scheme %q", parsed.Scheme)
+			}
+			return CatalogSource{Kind: CatalogSourceHTTPS, Raw: raw, Canonical: source}, nil
 		case "git", "ssh", "git+ssh", "file":
 			return CatalogSource{Kind: CatalogSourceGit, Raw: raw, Canonical: source}, nil
 		default:

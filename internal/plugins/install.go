@@ -103,6 +103,13 @@ type InstallResult struct {
 	PreviousHash string `json:"previousHash,omitempty"`
 }
 
+type VerifyResult struct {
+	ID           string `json:"id"`
+	Hash         string `json:"hash"`
+	ExpectedHash string `json:"expectedHash"`
+	Enabled      bool   `json:"enabled"`
+}
+
 // LockEntry records the source and content hash for one installed plugin.
 type LockEntry struct {
 	Source  string `json:"source,omitempty"`
@@ -130,7 +137,21 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	// Canonicalize a local source so clash detection keys off the resolved path,
 	// not the spelling the user typed (relative vs absolute, symlinked vs not).
 	source = canonicalSource(source)
+	options.Source = source
+	options.Dir = dir
 
+	var result InstallResult
+	err := withPluginRootLock(dir, func() error {
+		var installErr error
+		result, installErr = installLocked(ctx, options)
+		return installErr
+	})
+	return result, err
+}
+
+func installLocked(ctx context.Context, options InstallOptions) (InstallResult, error) {
+	source := options.Source
+	dir := options.Dir
 	fetchDir, cleanup, err := fetchSource(ctx, source, options.GitRunner)
 	if err != nil {
 		return InstallResult{}, err
@@ -275,6 +296,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 	stagePublished = true
 
+	enabled := true
+	if previous.Enabled != nil {
+		enabled = *previous.Enabled
+	}
 	lock[id] = LockEntry{
 		Source:  source,
 		Hash:    hash,
@@ -282,7 +307,7 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		Version: strings.TrimSpace(options.ExpectedVersion),
 		Commit:  strings.TrimSpace(options.Commit),
 		Subdir:  strings.TrimSpace(options.Subdir),
-		Enabled: previous.Enabled,
+		Enabled: &enabled,
 		Pinned:  options.Pinned,
 	}
 	if err := writeLock(dir, lock); err != nil {
@@ -320,29 +345,86 @@ func Remove(dir string, id string) error {
 		return fmt.Errorf("invalid plugin id %q", id)
 	}
 
-	lock, err := ReadLock(dir)
-	if err != nil {
-		return err
-	}
-	_, locked := lock[id]
-	target := filepath.Join(dir, id)
-	_, statErr := os.Stat(target)
-	present := statErr == nil
-	if !locked && !present {
-		return fmt.Errorf("plugin %q is not installed", id)
-	}
-	if present {
-		if err := os.RemoveAll(target); err != nil {
-			return fmt.Errorf("remove plugin dir: %w", err)
-		}
-	}
-	if locked {
-		delete(lock, id)
-		if err := writeLock(dir, lock); err != nil {
+	return withPluginRootLock(dir, func() error {
+		lock, err := ReadLock(dir)
+		if err != nil {
 			return err
 		}
+		_, locked := lock[id]
+		target := filepath.Join(dir, id)
+		disabledTarget := filepath.Join(dir, disabledDirName, id)
+		present, err := dirExists(target)
+		if err != nil {
+			return fmt.Errorf("stat plugin dir: %w", err)
+		}
+		disabledPresent, err := dirExists(disabledTarget)
+		if err != nil {
+			return fmt.Errorf("stat disabled plugin dir: %w", err)
+		}
+		if !locked && !present && !disabledPresent {
+			return fmt.Errorf("plugin %q is not installed", id)
+		}
+		if present {
+			if err := os.RemoveAll(target); err != nil {
+				return fmt.Errorf("remove plugin dir: %w", err)
+			}
+		}
+		if disabledPresent {
+			if err := os.RemoveAll(disabledTarget); err != nil {
+				return fmt.Errorf("remove disabled plugin dir: %w", err)
+			}
+		}
+		if locked {
+			delete(lock, id)
+			if err := writeLock(dir, lock); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func VerifyInstalled(dir string, id string) (VerifyResult, error) {
+	dir = strings.TrimSpace(dir)
+	id = strings.TrimSpace(id)
+	if dir == "" || id == "" {
+		return VerifyResult{}, errors.New("a plugins directory and plugin id are required")
 	}
-	return nil
+	if !validInstallID(id) {
+		return VerifyResult{}, fmt.Errorf("invalid plugin id %q", id)
+	}
+	lock, err := ReadLock(dir)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	entry, ok := lock[id]
+	if !ok {
+		return VerifyResult{}, fmt.Errorf("plugin %q is not managed by %s", id, LockFileName)
+	}
+	pluginDir := filepath.Join(dir, id)
+	enabled := true
+	if present, err := dirExists(pluginDir); err != nil {
+		return VerifyResult{}, fmt.Errorf("stat plugin dir: %w", err)
+	} else if !present {
+		pluginDir = filepath.Join(dir, disabledDirName, id)
+		enabled = false
+		if present, err := dirExists(pluginDir); err != nil {
+			return VerifyResult{}, fmt.Errorf("stat disabled plugin dir: %w", err)
+		} else if !present {
+			return VerifyResult{}, fmt.Errorf("plugin %q is not installed", id)
+		}
+	}
+	hash, err := hashTree(pluginDir)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("hash plugin: %w", err)
+	}
+	if strings.TrimSpace(entry.Hash) == "" {
+		return VerifyResult{}, fmt.Errorf("plugin %q has no integrity hash", id)
+	}
+	if hash != entry.Hash {
+		return VerifyResult{}, fmt.Errorf("plugin integrity mismatch: lock has %s, filesystem has %s", entry.Hash, hash)
+	}
+	return VerifyResult{ID: id, Hash: hash, ExpectedHash: entry.Hash, Enabled: enabled}, nil
 }
 
 func Disable(dir string, id string) error {
@@ -526,6 +608,17 @@ func ReadLock(dir string) (map[string]LockEntry, error) {
 	return entries, nil
 }
 
+func dirExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
 func verifyLockedHash(pluginDir string, entry LockEntry) error {
 	if strings.TrimSpace(entry.Hash) == "" {
 		return nil
@@ -607,16 +700,11 @@ func withPluginRootLock(dir string, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create plugins dir: %w", err)
 	}
-	lockPath := filepath.Join(dir, ".plugins-root.lock")
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	lock, err := acquirePluginRootLock(dir)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("plugins root is locked")
-		}
-		return fmt.Errorf("acquire plugins root lock: %w", err)
+		return err
 	}
-	_ = file.Close()
-	defer func() { _ = os.Remove(lockPath) }()
+	defer lock.release()
 	return fn()
 }
 
@@ -628,10 +716,44 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", LockFileName, err)
+	lockPath := filepath.Join(dir, LockFileName)
+	temp, err := os.CreateTemp(dir, "."+LockFileName+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create %s temp: %w", LockFileName, err)
 	}
+	tempName := temp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempName)
+		}
+	}()
+	if _, err := temp.Write(append(data, '\n')); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write %s temp: %w", LockFileName, err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("sync %s temp: %w", LockFileName, err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close %s temp: %w", LockFileName, err)
+	}
+	if err := os.Rename(tempName, lockPath); err != nil {
+		return fmt.Errorf("replace %s: %w", LockFileName, err)
+	}
+	cleanup = false
+	_ = syncDir(dir)
 	return nil
+}
+
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	return file.Sync()
 }
 
 // fetchSource resolves a source into a local directory. A local path is used in

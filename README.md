@@ -322,7 +322,7 @@ zero plugins marketplace validate ./catalog.json
 zero plugins marketplace add ./catalog.json --allow-unverified
 zero plugins marketplace list
 zero plugins browse lookup --catalog team
-zero plugins install zero.demo@team --yes
+zero plugins install zero.demo@team --yes --allow-unverified
 zero plugins disable zero.demo
 zero plugins enable zero.demo
 ```

@@ -297,7 +297,7 @@ func (m model) fileRowAtMouse(msg tea.MouseMsg) (string, bool) {
 	if !m.sidebarActive() {
 		return "", false
 	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.suggestionsActive() {
 		return "", false
 	}
 	sidebarW := sidebarWidth(m.width)

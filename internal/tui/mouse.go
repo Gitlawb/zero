@@ -116,6 +116,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.lastMouseSelection = target
 				return m, nil
 			}
+		case m.pluginManager != nil:
+			return m, nil
 		case m.picker != nil:
 			if target, ok := m.selectPickerAtMouse(msg); ok {
 				if m.repeatMouseSelection(target) {
@@ -165,6 +167,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.moveMCPManager(-1)
 			return m, nil
 		}
+		if m.pluginManager != nil {
+			m.movePluginManager(-1)
+			return m, nil
+		}
 		if m.picker != nil {
 			if m.modelPickerIsLoading() {
 				return m, nil
@@ -195,6 +201,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.mcpManager != nil {
 			m.moveMCPManager(1)
+			return m, nil
+		}
+		if m.pluginManager != nil {
+			m.movePluginManager(1)
 			return m, nil
 		}
 		if m.picker != nil {
@@ -231,7 +241,7 @@ func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
 	if !m.sidebarActive() {
 		return sidebarAgentHit{}, false
 	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.suggestionsActive() {
 		return sidebarAgentHit{}, false
 	}
 	sidebarW := sidebarWidth(m.width)
@@ -263,7 +273,7 @@ func (m model) wantsMouseCapture() bool {
 	if m.mouseReleased {
 		return false // user released the mouse for native text selection/copy
 	}
-	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.pluginManager != nil || m.picker != nil || m.suggestionsActive())
 }
 
 func (m model) setupWantsMouseCapture() bool {

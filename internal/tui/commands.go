@@ -14,6 +14,7 @@ const (
 	commandExit
 	commandTools
 	commandMCP
+	commandPlugins
 	commandPermissions
 	commandPS
 	commandStop
@@ -206,6 +207,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupTools,
 		description: "Show MCP server status.",
 		kind:        commandMCP,
+	},
+	{
+		name:        "/plugins",
+		usage:       "/plugins",
+		group:       commandGroupTools,
+		description: "Manage installed plugins and marketplace actions.",
+		kind:        commandPlugins,
 	},
 	{
 		name:        "/resume",

@@ -280,7 +280,7 @@ Install and manage:
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins marketplace add ./catalog.json --allow-unverified
 zero plugins browse review --catalog team
-zero plugins install github-pr-review@team --yes
+zero plugins install github-pr-review@team --yes --allow-unverified
 zero plugins list
 zero plugins disable github-pr-review
 zero plugins enable github-pr-review
@@ -292,7 +292,8 @@ zero plugins remove github-pr-review    # alias: rm
 Marketplace catalogs are local-first. User catalogs are registered in
 `~/.config/zero/marketplaces.json`; project catalogs are registered in
 `./.zero/marketplaces.json`. Unsigned catalogs can be browsed, but adding one
-requires `--allow-unverified`, and installs require `--yes`.
+requires `--allow-unverified`, and installs require both `--yes` and
+`--allow-unverified`.
 
 A disabled managed plugin is moved to `<plugins-root>/.disabled/<id>` and its
 `plugins.lock` entry records `enabled:false`. This keeps older Zero versions

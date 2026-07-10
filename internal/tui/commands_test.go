@@ -12,7 +12,9 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/marketplace"
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -96,6 +98,331 @@ func TestMCPCommandMetadataAndAutocomplete(t *testing.T) {
 		if !commandSuggestionNamesContain(matchCommandSuggestions(token), "/mcp") {
 			t.Fatalf("expected autocomplete for %q to surface canonical /mcp", token)
 		}
+	}
+}
+
+func TestPluginsCommandMetadataAndAutocomplete(t *testing.T) {
+	command, ok := resolveCommand("/plugins")
+	if !ok {
+		t.Fatal("expected /plugins to resolve")
+	}
+	if command.kind != commandPlugins {
+		t.Fatalf("expected /plugins to resolve to commandPlugins, got %v", command.kind)
+	}
+	if command.group != commandGroupTools {
+		t.Fatalf("expected /plugins in tools group, got %q", command.group)
+	}
+	if commandSelectionRequiresInput("/plugins") {
+		t.Fatal("/plugins should run without required input")
+	}
+
+	names := listCommandNames()
+	if !commandTestStringSliceContains(names, "/plugins") {
+		t.Fatalf("expected command names to contain /plugins, got %#v", names)
+	}
+	if !commandSuggestionNamesContain(matchCommandSuggestions("/plu"), "/plugins") {
+		t.Fatal("expected autocomplete for /plu to surface /plugins")
+	}
+}
+
+func TestPluginsCommandOpensManagerWithoutAgentRun(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), Registry: tools.NewRegistry()})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("/plugins")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /plugins to be handled without starting an agent run")
+	}
+	if next.pending || next.activeRunID != 0 || next.runID != 0 {
+		t.Fatalf("expected /plugins not to mutate agent run state, pending=%v activeRunID=%d runID=%d", next.pending, next.activeRunID, next.runID)
+	}
+	if next.pluginManager == nil {
+		t.Fatal("expected /plugins to open the selectable plugin manager")
+	}
+	if len(next.transcript) != len(m.transcript) {
+		t.Fatalf("/plugins should open a manager overlay without appending transcript rows; before=%d after=%d", len(m.transcript), len(next.transcript))
+	}
+	text := plainRender(t, next.View())
+	for _, want := range []string{
+		"Manage plugins",
+		"No local Zero plugins loaded.",
+		"Browse marketplaces",
+		"Install plugin",
+		"Verify installed",
+		"Esc close",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected /plugins view to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestPluginManagerRunsBridgeActionAndShowsRestartNotice(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		Cwd:      t.TempDir(),
+		Registry: tools.NewRegistry(),
+		PluginCommand: func(_ context.Context, args []string) PluginCommandResult {
+			called = append([]string{}, args...)
+			return PluginCommandResult{
+				ExitCode:        0,
+				Output:          "Verified plugin zero.demo.",
+				RestartRequired: true,
+				Snapshot: PluginSnapshot{
+					Plugins: []plugins.LoadedPlugin{{
+						ID:      "zero.demo",
+						Name:    "Zero Demo",
+						Version: "0.1.0",
+						Enabled: true,
+						Source:  plugins.SourceUser,
+					}},
+					ProjectPluginsShown: true,
+				},
+			}
+		},
+	})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("/plugins")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /plugins to load through PluginCommand")
+	}
+	next = applyCommandResult(t, next, cmd)
+	if !reflect.DeepEqual(called, []string{"list"}) {
+		t.Fatalf("initial PluginCommand args = %#v, want list", called)
+	}
+	if next.pluginManager == nil {
+		t.Fatal("expected plugin manager to stay open")
+	}
+
+	updated, cmd = next.Update(testKeyAltText("v"))
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatal("expected plugin verify action to run asynchronously")
+	}
+	if !reflect.DeepEqual(called, []string{"list"}) {
+		t.Fatalf("PluginCommand ran during Update; called=%#v", called)
+	}
+	next = applyCommandResult(t, next, cmd)
+	if !reflect.DeepEqual(called, []string{"verify", "zero.demo"}) {
+		t.Fatalf("PluginCommand args = %#v, want verify zero.demo", called)
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Plugin action complete",
+		"Verified plugin zero.demo.",
+		"Restart Zero to apply plugin changes.",
+		"zero.demo",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plugin manager action output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestPluginManagerIgnoresStaleCommandResult(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Cwd: t.TempDir(),
+		PluginCommand: func(_ context.Context, _ []string) PluginCommandResult {
+			return PluginCommandResult{ExitCode: 0}
+		},
+	})
+	m.pluginCommandSeq = 2
+	m.pluginManager = &pluginManagerState{selected: 2}
+
+	stale := pluginCommandResultMsg{
+		request: pluginCommandRequest{id: 1, origin: pluginCommandOriginManager, args: []string{"verify", "zero.demo"}},
+		result:  PluginCommandResult{ExitCode: 0, Output: "stale"},
+	}
+	next := m.applyPluginCommandResultMessage(stale)
+	if transcriptContains(next.transcript, "stale") {
+		t.Fatal("stale plugin command result should be ignored")
+	}
+}
+
+func TestPluginManagerRendersMarketplaceCatalogAndRiskState(t *testing.T) {
+	enabled := true
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), Registry: tools.NewRegistry()})
+	m.width = 180
+	m.height = 40
+	m.pluginManager = &pluginManagerState{selected: 2}
+	m.pluginSnapshotReady = true
+	m.pluginSnapshot = PluginSnapshot{
+		Plugins: []plugins.LoadedPlugin{{
+			ID:      "zero.demo",
+			Name:    "Zero Demo",
+			Version: "1.2.3",
+			Enabled: true,
+			Source:  plugins.SourceUser,
+			Tools:   []plugins.ToolExtension{{Name: "lookup"}},
+		}},
+		Installed: []PluginInstalledSnapshot{{
+			ID:      "zero.demo",
+			Source:  plugins.SourceUser,
+			Catalog: "official",
+			Version: "1.2.3",
+			Enabled: &enabled,
+			Pinned:  true,
+		}},
+		Diagnostics: []plugins.Diagnostic{{
+			Kind:     plugins.DiagnosticIntegrity,
+			PluginID: "zero.broken",
+			Message:  "hash mismatch",
+		}},
+		Catalogs: []PluginCatalogSnapshot{{
+			ID:           "official",
+			Source:       "Gitlawb/zero-plugins",
+			Scope:        marketplace.ScopeUser,
+			Verification: marketplace.Verification{Status: marketplace.VerificationSigned},
+		}, {
+			ID:           "team",
+			Source:       "https://example.com/catalog.json",
+			Scope:        marketplace.ScopeProject,
+			Verification: marketplace.Verification{Status: marketplace.VerificationStale},
+			LoadError:    "offline",
+		}},
+		MarketplacePlugins: []PluginMarketplaceSnapshot{{
+			CatalogID:    "official",
+			CatalogScope: marketplace.ScopeUser,
+			Verification: marketplace.Verification{Status: marketplace.VerificationSigned},
+			Plugin: marketplace.CatalogPlugin{
+				ID:          "zero.demo",
+				Name:        "Zero Demo",
+				Description: "Demo marketplace plugin",
+				License:     "MIT",
+				Review: marketplace.ReviewRecord{
+					Status:   marketplace.ReviewStatusReviewed,
+					Date:     "2026-07-10",
+					Reviewer: "Zero Security",
+				},
+			},
+			Release: marketplace.Release{
+				Version:    "1.2.4",
+				Repository: "https://github.com/Gitlawb/zero-demo-plugin.git",
+				Components: marketplace.ComponentInventory{
+					Tools: []marketplace.ToolComponent{{Name: "lookup", Permission: plugins.PermissionPrompt}},
+				},
+			},
+			Risk:   marketplace.RiskReport{Tools: []marketplace.ToolComponent{{Name: "lookup", Permission: plugins.PermissionPrompt}}},
+			Pinned: true,
+		}},
+		ProjectPluginsShown: true,
+	}
+
+	text := plainRender(t, m.pluginManagerOverlay(180))
+	for _, want := range []string{
+		"Installed",
+		"zero.demo",
+		"pinned",
+		"Installed issues",
+		"zero.broken",
+		"broken",
+		"Discover",
+		"1.2.4",
+		"reviewed",
+		"MIT",
+		"Catalogs",
+		"official",
+		"signed",
+		"team",
+		"stale",
+		"Alt+i install user",
+		"Alt+p install project",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected plugin manager view to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestPluginManagerMarketplaceInstallActionsUseBridgeScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyMsg
+		want []string
+	}{
+		{
+			name: "user",
+			key:  testKeyAltText("i"),
+			want: []string{"install", "zero.demo@team", "--scope", "user", "--yes", "--allow-unverified"},
+		},
+		{
+			name: "project",
+			key:  testKeyAltText("p"),
+			want: []string{"install", "zero.demo@team", "--scope", "project", "--yes", "--allow-unverified"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var called []string
+			m := newModel(context.Background(), Options{
+				Cwd:      t.TempDir(),
+				Registry: tools.NewRegistry(),
+				PluginCommand: func(_ context.Context, args []string) PluginCommandResult {
+					called = append([]string{}, args...)
+					return PluginCommandResult{ExitCode: 0, Snapshot: pluginManagerMarketplaceActionSnapshot()}
+				},
+			})
+			m.pluginSnapshot = pluginManagerMarketplaceActionSnapshot()
+			m.pluginSnapshotReady = true
+			m.pluginManager = &pluginManagerState{}
+
+			updated, cmd := m.Update(tc.key)
+			next := updated.(model)
+			if cmd != nil {
+				t.Fatal("expected install action to wait for confirmation")
+			}
+			if next.pluginManager == nil || next.pluginManager.confirm == nil {
+				t.Fatal("expected install action confirmation")
+			}
+			if !strings.Contains(next.pluginManager.confirm.message, "Warning: installing from unsigned/stale catalog") {
+				t.Fatalf("expected unsigned/stale warning, got %q", next.pluginManager.confirm.message)
+			}
+
+			updated, cmd = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			if cmd == nil {
+				t.Fatal("expected confirmed install action to run asynchronously")
+			}
+			next = applyCommandResult(t, next, cmd)
+			if !reflect.DeepEqual(called, tc.want) {
+				t.Fatalf("PluginCommand args = %#v, want %#v", called, tc.want)
+			}
+			if next.pluginManager == nil {
+				t.Fatal("expected plugin manager to stay open after install action")
+			}
+		})
+	}
+}
+
+func pluginManagerMarketplaceActionSnapshot() PluginSnapshot {
+	return PluginSnapshot{
+		MarketplacePlugins: []PluginMarketplaceSnapshot{{
+			CatalogID:    "team",
+			CatalogScope: marketplace.ScopeProject,
+			Verification: marketplace.Verification{Status: marketplace.VerificationStale},
+			Plugin: marketplace.CatalogPlugin{
+				ID:      "zero.demo",
+				Name:    "Zero Demo",
+				License: "MIT",
+				Review:  marketplace.ReviewRecord{Status: marketplace.ReviewStatusReviewed},
+			},
+			Release: marketplace.Release{Version: "1.2.3"},
+		}},
+		Catalogs: []PluginCatalogSnapshot{{
+			ID:           "team",
+			Scope:        marketplace.ScopeProject,
+			Verification: marketplace.Verification{Status: marketplace.VerificationStale},
+		}},
+		ProjectPluginsShown: true,
 	}
 }
 

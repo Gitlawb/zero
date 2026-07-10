@@ -112,7 +112,7 @@ func TestMouseWheelOnClippedFooterStatusDoesNotMoveComposerCursor(t *testing.T) 
 }
 
 func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
-	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
+	m := newModel(context.Background(), Options{AltScreen: true, Cwd: "/workspace/zero", ProviderName: "openai", ModelName: "gpt-4.1"})
 	m.width = 90
 	m.height = 10
 	m.gitBranch = "feat/pinned-header"
