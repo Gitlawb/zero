@@ -532,8 +532,13 @@ func (s *aimlapiOnboardState) applyCheck(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	if s.signinForTopup {
 		// Path A funding: only an existing account can top up the pasted key.
 		if msg.check.Action != "sign-in" {
-			s.errText = "That email has no aimlapi.com account, so it can't top up this key."
-			return s.finishEverythingRuns(), aimlapiContinue
+			// The pasted key is valid and still saved; we just can't fund it because
+			// this email has no account. Land on the terminal screen with one coherent
+			// note instead of a green "ready" plus a red error.
+			s.errText = ""
+			s.successLines = []string{aimlapi.MsgEverythingRuns, "", aimlapi.MsgTopUpNoAccount}
+			s.step = aimlapiStepDone
+			return nil, aimlapiContinue
 		}
 		s.newAccount = false
 		s.startBusy()
@@ -635,6 +640,14 @@ func (s *aimlapiOnboardState) applyTopup(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 // ---- transitions & helpers ------------------------------------------------
 
 func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
+	if strings.TrimSpace(s.amount) == "" {
+		// An empty field would otherwise fall through to the $25 default inside
+		// ParseAmountUSD and silently start a checkout the user never typed.
+		s.errText = aimlapi.MsgAmountRequired
+		s.step = aimlapiStepAmountInput
+		s.amountField = 0
+		return nil, aimlapiContinue
+	}
 	if _, err := aimlapi.ParseAmountUSD(s.amount); err != nil {
 		s.errText = aimlapi.MsgTopUpTooLow
 		s.step = aimlapiStepAmountInput
@@ -828,13 +841,6 @@ func aimlapiInputScreen(width int, prompt, inputPrompt, value, placeholder, foot
 	return lines
 }
 
-func (s *aimlapiOnboardState) amountPrompt() string {
-	if s.newAccount {
-		return aimlapi.MsgTopUpNewPrompt
-	}
-	return aimlapi.MsgTopUpExistingPrompt
-}
-
 // aimlapiOptionRows renders one selectable option as a marker+label line with an
 // optional faint subtitle beneath it, block-padded to width so the picker centers
 // as one column. The selected row is marked with ❯ and drawn in bold accent — the
@@ -885,7 +891,7 @@ func (s *aimlapiOnboardState) viewAmount(width int) []string {
 	rowWidth := aimlapiBlockWidth(width)
 	fieldWidth := maxInt(1, rowWidth-4)
 	lines := []string{}
-	lines = append(lines, aimlapiPromptLines(s.amountPrompt(), rowWidth)...)
+	lines = append(lines, aimlapiPromptLines(aimlapi.MsgTopUpPrompt, rowWidth)...)
 	lines = append(lines, blankSetupBlockLine(rowWidth))
 	lines = append(lines,
 		padSetupLine("  "+aimlapiFieldMarker(s.amountField == 0)+

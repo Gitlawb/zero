@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -1952,7 +1953,7 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		CatalogID:     provider.ID,
 		BaseURL:       firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL),
 		APIFormat:     providerWizardAPIFormat(provider),
-		CustomHeaders: copyProviderWizardHeaders(provider.CustomHeaders),
+		CustomHeaders: maps.Clone(provider.CustomHeaders),
 		Model:         firstProviderDisplayValue(model, provider.DefaultModel),
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
@@ -1966,17 +1967,6 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		profile.APIKeyEnv = env
 	}
 	return profile
-}
-
-func copyProviderWizardHeaders(headers map[string]string) map[string]string {
-	if headers == nil {
-		return nil
-	}
-	copied := make(map[string]string, len(headers))
-	for key, value := range headers {
-		copied[key] = value
-	}
-	return copied
 }
 
 func providerWizardEndpointError(value string) string {

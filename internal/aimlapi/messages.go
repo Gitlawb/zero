@@ -27,13 +27,16 @@ const (
 	MsgLowBalanceSkip  = "I'll skip topping up the balance for now"
 
 	// Top-up workflow.
-	MsgTopUpNewPrompt      = "Add credits.\nEnter an amount (min $20)."
-	MsgTopUpExistingPrompt = "Add credits.\nEnter an amount (min $20)."
-	MsgTopUpTooLow         = "Top up amount is too low."
+	MsgTopUpPrompt    = "Add credits.\nEnter an amount (min $20)."
+	MsgTopUpTooLow    = "Top up amount is too low."
+	MsgAmountRequired = "Please enter a top-up amount."
 	// %s = checkout URL
 	MsgTopUpBrowserFallback = "If the browser did not open automatically please use this link to top up your account: %s"
 	MsgTopUpFailed          = "Top up failed. Please try again."
 	MsgTopUpSuccess         = "Top-up successful."
+	// Shown on the terminal screen when a Path-A top-up can't run because the
+	// entered email has no account: the pasted key is still valid and saved.
+	MsgTopUpNoAccount = "That email has no aimlapi.com account, so the balance wasn't topped up. Your key is saved."
 
 	// Success — key delivered.
 	// %s = amount in dollars (e.g. "25")

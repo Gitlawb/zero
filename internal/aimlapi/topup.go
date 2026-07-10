@@ -2,6 +2,7 @@ package aimlapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -53,7 +54,8 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (Pa
 	for time.Now().Before(deadline) {
 		session, err := client.GetSession(ctx, sessionToken)
 		if err != nil {
-			if apiErr, ok := err.(APIError); ok && apiErr.Status >= 500 {
+			var apiErr APIError
+			if errors.As(err, &apiErr) && apiErr.Status >= 500 {
 				if err := sleepContext(ctx, pollInterval); err != nil {
 					return PartnerCheckoutSession{}, err
 				}
