@@ -186,14 +186,18 @@ func TestExecCommandRunnerCapturesExitAndStdin(t *testing.T) {
 	}
 }
 
-func TestExecCommandRunnerReportsLaunchFailureWithoutBlocking(t *testing.T) {
+func TestExecCommandRunnerReportsLaunchFailureFailsClosedForBeforeTool(t *testing.T) {
 	result := execCommandRunner(context.Background(), "definitely-not-a-real-binary-zzz", nil, nil, t.TempDir(), nil)
 	if result.Err == nil {
 		t.Fatal("expected launch error for a missing binary")
 	}
-	// A launch failure is an error, never a block, even for beforeTool.
-	if status, blocked := classifyResult(EventBeforeTool, result); blocked || status != AuditError {
-		t.Fatalf("classify = (%q, %v), want (error, false) for a launch failure", status, blocked)
+	// A launch failure for beforeTool fails closed (vetoes/blocks).
+	if status, blocked := classifyResult(EventBeforeTool, result); !blocked || status != AuditBlocked {
+		t.Fatalf("beforeTool classify = (%q, %v), want (blocked, true) for a launch failure", status, blocked)
+	}
+	// An observational afterTool hook still fails open (does not block).
+	if status, blocked := classifyResult(EventAfterTool, result); blocked || status != AuditError {
+		t.Fatalf("afterTool classify = (%q, %v), want (error, false) for a launch failure", status, blocked)
 	}
 }
 
