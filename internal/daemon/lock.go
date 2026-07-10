@@ -45,11 +45,11 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 			// the single-instance guarantee — so on write failure, remove it and fail.
 			if _, werr := fmt.Fprintf(f, "%d\n", os.Getpid()); werr != nil {
 				_ = f.Close()
-				_ = os.Remove(path)
+				_ = lockutil.RemoveLockFile(path)
 				return nil, werr
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = os.Remove(path)
+				_ = lockutil.RemoveLockFile(path)
 				return nil, cerr
 			}
 			return &fileLock{path: path}, nil
@@ -92,12 +92,12 @@ func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
 		// file. Restore it instead of stealing a live lock; let the caller refuse.
 		if err := lockutil.RestoreLockFile(reclaimed, path); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				_ = os.Remove(reclaimed)
+				_ = lockutil.RemoveLockFile(reclaimed)
 			}
 		}
 		return false
 	}
-	_ = os.Remove(reclaimed)
+	_ = lockutil.RemoveLockFile(reclaimed)
 	return true
 }
 
@@ -106,7 +106,7 @@ func (l *fileLock) release() error {
 	if l == nil || l.path == "" {
 		return nil
 	}
-	if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := lockutil.RemoveLockFile(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil

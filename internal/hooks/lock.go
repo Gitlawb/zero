@@ -46,11 +46,11 @@ func (store *AuditStore) lockAudit() (func(), error) {
 			// releaser could never delete it — stranding the lock. Fail closed.
 			if _, werr := f.WriteString(token); werr != nil {
 				_ = f.Close()
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("hooks: write audit lock: %w", werr)
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("hooks: close audit lock: %w", cerr)
 			}
 			var released bool
@@ -59,10 +59,8 @@ func (store *AuditStore) lockAudit() (func(), error) {
 					return
 				}
 				released = true
-				// Only remove if the file still carries OUR token, so a lock
-				// reclaimed as stale by another process is not deleted under it.
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					_ = os.Remove(lockPath)
+					_ = lockutil.RemoveLockFile(lockPath)
 				}
 			}, nil
 		}
@@ -104,11 +102,11 @@ func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
 	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
 		if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				_ = os.Remove(reclaimed)
+				_ = lockutil.RemoveLockFile(reclaimed)
 			}
 		}
 		return false
 	}
-	_ = os.Remove(reclaimed)
+	_ = lockutil.RemoveLockFile(reclaimed)
 	return true
 }

@@ -3,6 +3,11 @@
 package lockutil
 
 import (
+	"errors"
+	"os"
+	"syscall"
+	"time"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -24,4 +29,23 @@ func RestoreLockFile(reclaimed, path string) error {
 		return err
 	}
 	return windows.MoveFileEx(fromPtr, toPtr, 0)
+}
+
+// RemoveLockFile attempts to remove a lock file on Windows, retrying on sharing violations
+// or access denied errors that are common under heavy concurrent contention.
+func RemoveLockFile(path string) error {
+	var err error
+	for i := 0; i < 15; i++ {
+		err = os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		var errno syscall.Errno
+		if errors.As(err, &errno) && (errno == 32 || errno == 5) {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		return err
+	}
+	return err
 }

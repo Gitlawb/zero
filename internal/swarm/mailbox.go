@@ -360,7 +360,7 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 				}
 				released = true
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					os.Remove(lockPath)
+					_ = lockutil.RemoveLockFile(lockPath)
 				}
 			}, nil
 		}
@@ -379,11 +379,11 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 			reclaimed := lockPath + ".stale." + token
 			if os.Rename(lockPath, reclaimed) == nil {
 				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
-					_ = os.Remove(reclaimed) // genuinely stale — drop it
+					_ = lockutil.RemoveLockFile(reclaimed) // genuinely stale — drop it
 				} else {
 					if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
 						if errors.Is(err, os.ErrExist) {
-							_ = os.Remove(reclaimed)
+							_ = lockutil.RemoveLockFile(reclaimed)
 						}
 					}
 				}

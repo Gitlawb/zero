@@ -14,3 +14,8 @@ func RestoreLockFile(reclaimed, path string) error {
 	}
 	return os.Remove(reclaimed)
 }
+
+// RemoveLockFile removes a lock file on non-Windows platforms.
+func RemoveLockFile(path string) error {
+	return os.Remove(path)
+}
