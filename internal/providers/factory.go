@@ -55,19 +55,25 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 
 	switch resolved.providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
+		// prompt_cache_key is an OpenAI-only chat-completions field. Strict
+		// openai-compatible gateways (NVIDIA NIM, etc.) reject it with a 400
+		// instead of ignoring unknown parameters — so omit it for every
+		// openai-compatible profile. Official OpenAI keeps the field so
+		// multi-turn sessions still route to a cached-prefix replica.
 		return openai.New(openai.Options{
-			APIKey:          profile.APIKey,
-			BaseURL:         resolved.baseURL,
-			Model:           resolved.apiModel,
-			AuthHeader:      profile.AuthHeader,
-			AuthScheme:      profile.AuthScheme,
-			AuthHeaderValue: profile.AuthHeaderValue,
-			CustomHeaders:   profile.CustomHeaders,
-			OAuthResolver:   options.OAuthResolver,
-			MaxTokens:       resolved.maxOutputTokens,
-			HTTPClient:      options.HTTPClient,
-			UserAgent:       options.UserAgent,
-			ParseThinkTags:  parseThinkTagsForProfile(profile, resolved),
+			APIKey:                profile.APIKey,
+			BaseURL:               resolved.baseURL,
+			Model:                 resolved.apiModel,
+			AuthHeader:            profile.AuthHeader,
+			AuthScheme:            profile.AuthScheme,
+			AuthHeaderValue:       profile.AuthHeaderValue,
+			CustomHeaders:         profile.CustomHeaders,
+			OAuthResolver:         options.OAuthResolver,
+			MaxTokens:             resolved.maxOutputTokens,
+			HTTPClient:            options.HTTPClient,
+			UserAgent:             options.UserAgent,
+			ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
+			DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{

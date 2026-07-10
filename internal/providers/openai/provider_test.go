@@ -1300,8 +1300,9 @@ func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
 // TestOpenAIRequestPromptCacheKey locks in prompt_cache_key forwarding: a
 // session-carrying request serializes the key so the backend can route to a
 // replica holding the cached prefix, a keyless request omits the field
-// entirely (strict servers see byte-identical requests to before), and
-// ZERO_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
+// entirely (strict servers see byte-identical requests to before),
+// DisablePromptCacheKey (used for openai-compatible gateways) suppresses it,
+// and ZERO_DISABLE_PROMPT_CACHE_KEY is the env kill switch for any endpoint.
 func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 	provider, err := New(Options{Model: "gpt-test"})
 	if err != nil {
@@ -1330,6 +1331,26 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 	}
 	if strings.Contains(string(data), "prompt_cache_key") {
 		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
+	}
+
+	// openai-compatible providers are constructed with DisablePromptCacheKey so
+	// strict gateways (NVIDIA NIM, …) never see the OpenAI-only field.
+	compat, err := New(Options{Model: "gpt-test", DisablePromptCacheKey: true})
+	if err != nil {
+		t.Fatalf("New(DisablePromptCacheKey) returned error: %v", err)
+	}
+	req = compat.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "" {
+		t.Fatalf("DisablePromptCacheKey ignored; PromptCacheKey = %q", req.PromptCacheKey)
+	}
+	if data, err = json.Marshal(req); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "prompt_cache_key") {
+		t.Fatalf("compatible provider must omit prompt_cache_key: %s", data)
 	}
 
 	t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", "1")

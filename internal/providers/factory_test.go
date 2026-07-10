@@ -159,6 +159,58 @@ func TestNewSupportsOpenAIProviderKind(t *testing.T) {
 	}
 }
 
+// TestPromptCacheKeyOnlyOnOfficialOpenAI locks in #624: session-backed TUI
+// turns always carry a PromptCacheKey, but openai-compatible gateways (NVIDIA
+// NIM, strict local proxies) reject the OpenAI-only prompt_cache_key field.
+// The factory must omit it for openai-compatible profiles while still
+// forwarding it for official OpenAI so multi-turn cache routing stays intact.
+func TestPromptCacheKeyOnlyOnOfficialOpenAI(t *testing.T) {
+	requestWithSession := zeroruntime.CompletionRequest{
+		Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+		PromptCacheKey: "sess_tui_123",
+	}
+
+	for _, tc := range []struct {
+		name         string
+		kind         config.ProviderKind
+		wantCacheKey bool
+	}{
+		{name: "openai", kind: config.ProviderKindOpenAI, wantCacheKey: true},
+		{name: "openai-compatible", kind: config.ProviderKindOpenAICompatible, wantCacheKey: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
+			provider, err := New(config.ProviderProfile{
+				Name:         "test",
+				ProviderKind: tc.kind,
+				BaseURL:      "https://provider.example/v1",
+				APIKey:       "sk-test",
+				Model:        "test-model",
+			}, Options{HTTPClient: &http.Client{Transport: transport}})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), requestWithSession)
+			if err != nil {
+				t.Fatalf("StreamCompletion() error = %v", err)
+			}
+			for range stream {
+			}
+			var body map[string]any
+			if err := json.NewDecoder(transport.body()).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			_, hasKey := body["prompt_cache_key"]
+			if hasKey != tc.wantCacheKey {
+				t.Fatalf("prompt_cache_key present = %v, want %v; body = %#v", hasKey, tc.wantCacheKey, body)
+			}
+			if tc.wantCacheKey && body["prompt_cache_key"] != "sess_tui_123" {
+				t.Fatalf("prompt_cache_key = %#v, want sess_tui_123", body["prompt_cache_key"])
+			}
+		})
+	}
+}
+
 func TestParseThinkTagsForProfileUsesConservativeDefaultsAndOverride(t *testing.T) {
 	openAICompatible := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "qwen3-coder:480b"}
 	if !parseThinkTagsForProfile(config.ProviderProfile{}, openAICompatible) {

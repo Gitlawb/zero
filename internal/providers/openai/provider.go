@@ -58,25 +58,33 @@ type Options struct {
 	// "originator" value. It is also called on the 401-refresh retry, so any
 	// per-request state must be re-derivable from the live request.
 	SetRequestExtra func(*http.Request)
+	// DisablePromptCacheKey omits OpenAI's prompt_cache_key even when the
+	// caller supplies a session identity. Used for openai-compatible gateways
+	// (NVIDIA NIM, strict local proxies, …) that validate and reject unknown
+	// request fields instead of ignoring them. Official OpenAI keeps the field
+	// enabled; the ZERO_DISABLE_PROMPT_CACHE_KEY env kill switch still applies
+	// on top for any endpoint.
+	DisablePromptCacheKey bool
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
 type Provider struct {
-	apiKey            string
-	baseURL           string
-	endpoint          string
-	model             string
-	authHeader        string
-	authScheme        string
-	authHeaderValue   string
-	customHeaders     map[string]string
-	oauthResolver     providerio.TokenResolver
-	maxTokens         int
-	httpClient        *http.Client
-	userAgent         string
-	streamIdleTimeout time.Duration
-	parseThinkTags    bool
-	setRequestExtra   func(*http.Request)
+	apiKey                string
+	baseURL               string
+	endpoint              string
+	model                 string
+	authHeader            string
+	authScheme            string
+	authHeaderValue       string
+	customHeaders         map[string]string
+	oauthResolver         providerio.TokenResolver
+	maxTokens             int
+	httpClient            *http.Client
+	userAgent             string
+	streamIdleTimeout     time.Duration
+	parseThinkTags        bool
+	setRequestExtra       func(*http.Request)
+	disablePromptCacheKey bool
 }
 
 // New creates an OpenAI-compatible provider.
@@ -116,21 +124,22 @@ func New(options Options) (*Provider, error) {
 	}
 
 	return &Provider{
-		apiKey:            options.APIKey,
-		baseURL:           baseURL,
-		endpoint:          endpoint,
-		model:             model,
-		authHeader:        strings.TrimSpace(options.AuthHeader),
-		authScheme:        strings.TrimSpace(options.AuthScheme),
-		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
-		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
-		oauthResolver:     options.OAuthResolver,
-		maxTokens:         maxTokens,
-		httpClient:        httpClient,
-		userAgent:         options.UserAgent,
-		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
-		parseThinkTags:    options.ParseThinkTags,
-		setRequestExtra:   options.SetRequestExtra,
+		apiKey:                options.APIKey,
+		baseURL:               baseURL,
+		endpoint:              endpoint,
+		model:                 model,
+		authHeader:            strings.TrimSpace(options.AuthHeader),
+		authScheme:            strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:       strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:         providerio.CopyHeaders(options.CustomHeaders),
+		oauthResolver:         options.OAuthResolver,
+		maxTokens:             maxTokens,
+		httpClient:            httpClient,
+		userAgent:             options.UserAgent,
+		streamIdleTimeout:     providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
+		parseThinkTags:        options.ParseThinkTags,
+		setRequestExtra:       options.SetRequestExtra,
+		disablePromptCacheKey: options.DisablePromptCacheKey,
 	}, nil
 }
 
@@ -458,10 +467,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
 	}
-	// prompt_cache_key is a documented OpenAI parameter; compatible servers
-	// ignore unknown fields, but a strict endpoint that rejects it can be
-	// accommodated with ZERO_DISABLE_PROMPT_CACHE_KEY=1.
-	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !promptCacheKeyDisabled() {
+	// prompt_cache_key is a documented OpenAI parameter for server-side prefix
+	// cache routing. Official OpenAI accepts it; many openai-compatible
+	// gateways (NVIDIA NIM, strict local proxies) reject unknown fields with a
+	// 400. Those providers are constructed with DisablePromptCacheKey, and any
+	// endpoint can still force-omit via ZERO_DISABLE_PROMPT_CACHE_KEY=1.
+	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !provider.disablePromptCacheKey && !promptCacheKeyDisabled() {
 		mapped.PromptCacheKey = key
 	}
 	if len(request.Tools) > 0 {
