@@ -1,46 +1,30 @@
-# TUI Themes & Layout Presets
+# TUI Themes
 
-This document details the architectural plan to add custom UI theme presets to Zero. Swappable themes allow the developer to customize Zero's appearance, density, and panel layouts according to their preferences.
+Zero's TUI ships a set of built-in color themes. Pick one with `--theme <name>`,
+the `ZERO_THEME` environment variable, or the `/theme <name>` command while
+running (no argument shows the active theme). `auto` (the default) follows the
+terminal's detected background.
 
----
+Run `/theme` with no argument to list the registered names.
 
-## 🎨 Layout & Design Presets
+## Claude (`claude`)
 
-### 1. Claude Theme (`claude`)
-*   **Aesthetic**: Warm, card-based, clean, low-density.
-*   **Colors**: Sand/cream borders, soft amber highlights, charcoal body text.
-*   **Layout**: Centered single-column message feed with a right-aligned collapsable side-panel drawer.
+A warm, low-density palette: sand/cream surface, charcoal ink, and a soft
+amber accent.
 
-### 2. Codex Theme (`codex`)
-*   **Aesthetic**: Matrix-green/cyan cyberpunk theme, high-density monospace layout.
-*   **Colors**: Vibrant neon-greens and neon-cyans on pitch-black background.
-*   **Layout**: Split-pane view (Left: Chat feed / Right: Real-time daemon & command execution timeline) with a bottom grid of keyboard shortcuts.
+## Codex (`codex`)
 
----
+A high-density, neon-on-black palette: pitch-black surface, bright green ink,
+and a cyan accent.
 
-## 🏗️ Interface Architecture
+## Adding a theme
 
-Theme customization is governed by the `Theme` interface in `internal/tui/theme.go`:
+Every theme is a `palette` (a table of color hex tokens) plus one entry in
+`themeRegistry`, both in `internal/tui/theme_palettes.go`. `buildTheme` in
+`internal/tui/theme.go` turns a `palette` into the resolved `lipgloss.Style`
+set every renderer reads from the active `zeroTheme`. Adding a theme means
+adding a new `palette{...}` literal and a `themeRegistry` entry; nothing else
+needs editing.
 
-```go
-package tui
-
-import "github.com/charmbracelet/lipgloss"
-
-type Theme interface {
-    Name() string
-    ChatStyle() lipgloss.Style
-    MessageStyle(sender string) lipgloss.Style
-    SidebarStyle() lipgloss.Style
-    Border() lipgloss.Border
-    BorderStyle() lipgloss.Style
-}
-```
-
----
-
-## 🚀 Implementation Roadmap
-
-1.  **Introduce user configuration settings** inside `config.json` via a new `tui.theme` key.
-2.  **Expose `Theme` settings** dynamically inside `internal/tui/model.go` using BubbleTea.
-3.  **Refactor rendering methods** in the main model (such as `View()`) to compose panels dynamically via `lipgloss.JoinHorizontal` or `lipgloss.JoinVertical` depending on the active theme layout.
+New palettes must clear the WCAG AA contrast and gray-ramp invariants
+asserted in `internal/tui/theme_select_test.go` against the whole registry.

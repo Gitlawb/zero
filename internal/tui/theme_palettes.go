@@ -333,6 +333,38 @@ var everforestPalette = palette{
 	cardPerm:  "#96896b",
 }
 
+// codexPalette is a high-density cyberpunk console: pitch-black surface with
+// neon green ink and a cyan accent, in the spirit of a Matrix-style terminal.
+var codexPalette = palette{
+	panel:     "#050b06",
+	promptBg:  "#0c180d",
+	line:      "#1c3820",
+	line2:     "#2c5230",
+	ink:       "#c9ffd2",
+	muted:     "#7fdb8e",
+	faint:     "#5cb56c",
+	faintest:  "#419450",
+	accent:    "#00e5c8",
+	green:     "#39ff6a",
+	red:       "#ff4d6d",
+	amber:     "#f4ff3a",
+	blue:      "#22e0ff",
+	gitAdd:    "#4fdc6a",
+	gitDel:    "#ff6f80",
+	addBg:     "#0e2c14",
+	delBg:     "#2c0f16",
+	addBgWord: "#1c5b2c",
+	delBgWord: "#5c2130",
+	permBg:    "#2a2a0c",
+	selBg:     "#123a1e",
+	addInk:    "#c8ffcf",
+	delInk:    "#ffd0d6",
+	onAccent:  "#001410",
+	cardRun:   "#1f8a6e",
+	cardErr:   "#8a2f42",
+	cardPerm:  "#8a8a1f",
+}
+
 // lightPalette is dark-on-light: a warm cream surface (so cards lift off the
 // terminal page, which Zero never paints) with near-black ink and an olive-lime
 // accent that keeps the brand identity while clearing AA on the light panel. The
@@ -401,6 +433,38 @@ var solarizedLightPalette = palette{
 	cardPerm:  "#c4ae63",
 }
 
+// claudePalette is a warm, low-density card layout: sand/cream surface, charcoal
+// ink, and a soft amber accent.
+var claudePalette = palette{
+	panel:     "#f2e9d8",
+	promptBg:  "#e9dcbf",
+	line:      "#d9c7a3",
+	line2:     "#c2a97c",
+	ink:       "#2b241a",
+	muted:     "#5a4f3d",
+	faint:     "#726649",
+	faintest:  "#806252",
+	accent:    "#8f5215",
+	green:     "#4f7a3d",
+	red:       "#a83c30",
+	amber:     "#a8720f",
+	blue:      "#3d6a9e",
+	gitAdd:    "#5a7d47",
+	gitDel:    "#a35a4a",
+	addBg:     "#dcecd0",
+	delBg:     "#f5dbd5",
+	addBgWord: "#b9dc9e",
+	delBgWord: "#eebba9",
+	permBg:    "#f0dfae",
+	selBg:     "#e0cf98",
+	addInk:    "#264018",
+	delInk:    "#5c1810",
+	onAccent:  "#fdf6ea",
+	cardRun:   "#b08a4a",
+	cardErr:   "#b57560",
+	cardPerm:  "#c2a04a",
+}
+
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme
 // token (lowercase, kebab), Label is the picker display text, and IsDark groups the
 // picker (Dark/Light sections) and drives which built-in `auto` resolves to.
@@ -426,8 +490,10 @@ var themeRegistry = []themeEntry{
 	{Name: "solarized-dark", Label: "Solarized Dark", Palette: solarizedDarkPalette, IsDark: true},
 	{Name: "rose-pine", Label: "Rosé Pine", Palette: rosePinePalette, IsDark: true},
 	{Name: "everforest", Label: "Everforest", Palette: everforestPalette, IsDark: true},
+	{Name: "codex", Label: "Codex", Palette: codexPalette, IsDark: true},
 	{Name: "light", Label: "light", Palette: lightPalette, IsDark: false},
 	{Name: "solarized-light", Label: "Solarized Light", Palette: solarizedLightPalette, IsDark: false},
+	{Name: "claude", Label: "Claude", Palette: claudePalette, IsDark: false},
 }
 
 // themeByName indexes the registry by lowercased name for O(1) lookup. Built as a

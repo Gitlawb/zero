@@ -1,100 +1,227 @@
 package tui
 
 import (
-	"github.com/charmbracelet/lipgloss"
+	"image/color"
+
+	"charm.land/lipgloss/v2"
 )
 
-// Theme defines the visual styling and layout properties for the TUI.
-type Theme interface {
-	Name() string
+// tuiTheme is the resolved terminal palette Zero renders with. It is produced by
+// buildTheme from a palette, so the same renderers serve both the dark default
+// and the light variant; the active theme lives in the package var zeroTheme and
+// may be swapped at startup (background detection / ZERO_THEME / --theme) or live
+// via /theme. Colors are truecolor hex; lipgloss downsamples on limited displays
+// and renders plain text when there is no TTY (tests). Every renderer consumes
+// these named styles — no hex literal may appear outside theme_palettes.go (the
+// palette tables + theme registry).
+type tuiTheme struct {
+	// Base tokens.
+	ink        lipgloss.Style // primary text
+	muted      lipgloss.Style // secondary text, assistant interim prose
+	faint      lipgloss.Style // hints, metadata
+	faintest   lipgloss.Style // line numbers, separators, tool args
+	accent     lipgloss.Style // brand lime: prompts, spinner, focus
+	green      lipgloss.Style // success, diff add sign, ✓
+	red        lipgloss.Style // errors, diff del sign, ✗, deny
+	amber      lipgloss.Style // permission surfaces, warnings, auto badge
+	blue       lipgloss.Style // grep file locations, local-model dot
+	gitAdd     lipgloss.Style // PR/local diff additions
+	gitDel     lipgloss.Style // PR/local diff deletions
+	line       lipgloss.Style // default borders, rules, status separators
+	lineStrong lipgloss.Style // emphasized borders
+	selection  lipgloss.Style // transcript selection highlight
+	hover      lipgloss.Style // hovered clickable row (specialist card, toggle, sidebar/plan row)
 
-	// ChatStyle returns the styling for the chat container.
-	ChatStyle() lipgloss.Style
+	// Title bar.
+	badge lipgloss.Style // ` 0 ` brand chip: onAccent on accent, bold
 
-	// MessageStyle returns the styling for individual message cards based on source.
-	MessageStyle(sender string) lipgloss.Style
+	// Stream roles.
+	userPrompt lipgloss.Style // ❯ user gutter, accent bold
+	sayText    lipgloss.Style // assistant interim prose, muted
 
-	// SidebarStyle returns the styling for the sidebar.
-	SidebarStyle() lipgloss.Style
+	// Tool cards.
+	toolName   lipgloss.Style // head-row tool name, ink bold
+	toolTarget lipgloss.Style // head-row target path, ink
+	toolArg    lipgloss.Style // one-line arg hint, faintest
+	cardRun    lipgloss.Style // card border while the call runs (accent-mixed)
+	cardErr    lipgloss.Style // card border after an error (red-mixed)
+	bashPrompt lipgloss.Style // ❯ command gutter inside bash cards, accent bold
+	grepLoc    lipgloss.Style // file:line locations in grep bodies, blue
 
-	// Border returns the character definitions for panel borders.
-	Border() lipgloss.Border
+	// Diff bodies. The sign/count styles are bare foregrounds; the line styles
+	// carry the tinted backgrounds standing in for the prototype's 9% overlays.
+	// Gutter and sign columns get their own bg-carrying styles because lipgloss
+	// resets the background between adjacent Render calls — every segment of a
+	// tinted row must carry the tint itself.
+	diffAdd     lipgloss.Style // + sign in counts
+	diffDel     lipgloss.Style // − sign in counts
+	diffMeta    lipgloss.Style // @@ hunks, +++/--- headers
+	addLine     lipgloss.Style // added-line text: addInk on addBg
+	delLine     lipgloss.Style // deleted-line text: delInk on delBg
+	addLineWord lipgloss.Style // the changed span within an added line: addInk on the brighter addBgWord
+	delLineWord lipgloss.Style // the changed span within a deleted line: delInk on the brighter delBgWord
+	addLineNum  lipgloss.Style // gutter number on addBg
+	delLineNum  lipgloss.Style // gutter number on delBg
+	addSign     lipgloss.Style // + column on addBg
+	delSign     lipgloss.Style // − column on delBg
+	delText     lipgloss.Style // delInk as bare foreground (stderr-ish output)
 
-	// BorderStyle returns the border styling.
-	BorderStyle() lipgloss.Style
+	// Permission surfaces.
+	permBadge  lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	permBg     lipgloss.Style // permission card body tint
+	permBorder lipgloss.Style // permission card border (amber-mixed line)
+
+	// Surfaces.
+	panel           lipgloss.Style // bare panel background (card padding, body fill)
+	userPromptPanel lipgloss.Style // submitted user prompt background
+
+	// Permission modes.
+	modeAuto   lipgloss.Style
+	modeAsk    lipgloss.Style
+	modeUnsafe lipgloss.Style
+
+	// Raw colors a few renderers paint/interpolate with directly (the streaming
+	// fade interpolates accent→ink; panel-backed prompts paint on bgPanel), kept
+	// on the theme so a theme switch reaches them too. The bg* colors back the
+	// on* surface helpers below.
+	accentColor color.Color
+	inkColor    color.Color
+	bgPanel     color.Color
+	bgPrompt    color.Color
+	bgSel       color.Color
+	bgPerm      color.Color
 }
 
-// ClaudeTheme represents the warm, card-based, minimalist Claude layout.
-type ClaudeTheme struct{}
-
-var _ Theme = ClaudeTheme{}
-
-func (t ClaudeTheme) Name() string { return "claude" }
-
-func (t ClaudeTheme) ChatStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Padding(1, 4).
-		Align(lipgloss.Center)
+// palette is the raw color-token table for one theme. buildTheme turns it into a
+// resolved tuiTheme. The palette literals and the ordered theme registry live in
+// theme_palettes.go (the only place hex literals live). Dark palettes keep tints
+// darker than ink so every pairing survives 256-color downsampling; light palettes
+// are dark-on-light with the same intent inverted.
+type palette struct {
+	panel     string // card backgrounds (the terminal canvas itself is never painted full-bleed)
+	promptBg  string // submitted user prompt background
+	line      string // default borders, rules
+	line2     string // emphasized borders
+	ink       string // primary text
+	muted     string // secondary text
+	faint     string // hints, metadata
+	faintest  string // line numbers, separators, tool args
+	accent    string // brand lime
+	green     string // success, diff add
+	red       string // errors, diff del
+	amber     string // permission, warnings
+	blue      string // grep locations, local-model dot
+	gitAdd    string // footer PR diff additions
+	gitDel    string // footer PR diff deletions
+	addBg     string // diff added-line bg
+	delBg     string // diff deleted-line bg
+	addBgWord string // diff added-line changed-span bg (brighter than addBg)
+	delBgWord string // diff deleted-line changed-span bg (brighter than delBg)
+	permBg    string // permission card bg
+	selBg     string // selected row bg
+	addInk    string // added-line text
+	delInk    string // deleted-line text
+	onAccent  string // text on accent or amber fills
+	cardRun   string // running card border (accent mixed into line)
+	cardErr   string // errored card border (red mixed into line)
+	cardPerm  string // permission card border (amber mixed into line)
 }
 
-func (t ClaudeTheme) MessageStyle(sender string) lipgloss.Style {
-	if sender == "model" {
-		return lipgloss.NewStyle().
-			Background(lipgloss.Color("#fbf0e3")). // warm card background
-			Foreground(lipgloss.Color("#1f1f1f")).
-			Padding(1, 2).
-			MarginBottom(1)
+// buildTheme resolves a palette into the styles every renderer uses.
+func buildTheme(p palette) tuiTheme {
+	col := func(s string) color.Color { return lipgloss.Color(s) }
+	fg := func(s string) lipgloss.Style { return lipgloss.NewStyle().Foreground(col(s)) }
+	return tuiTheme{
+		ink:        fg(p.ink),
+		muted:      fg(p.muted),
+		faint:      fg(p.faint),
+		faintest:   fg(p.faintest),
+		accent:     fg(p.accent).Bold(true),
+		green:      fg(p.green),
+		red:        fg(p.red),
+		amber:      fg(p.amber),
+		blue:       fg(p.blue),
+		gitAdd:     fg(p.gitAdd),
+		gitDel:     fg(p.gitDel),
+		line:       fg(p.line),
+		lineStrong: fg(p.line2),
+		selection:  lipgloss.NewStyle().Background(col(p.accent)).Foreground(col(p.onAccent)),
+		// A full block (like selection) would be too heavy for something that
+		// repaints on every mouse movement; a soft foreground reads as
+		// "interactive" at a glance without competing with real content colors
+		// (e.g. a specialist card's red/green status glyph). Amber (not the brand
+		// lime accent) — lime read as too glaring for something that repaints
+		// continuously as the cursor moves.
+		hover: fg(p.amber),
+
+		badge: lipgloss.NewStyle().Background(col(p.accent)).Foreground(col(p.onAccent)).Bold(true),
+
+		userPrompt: fg(p.accent).Bold(true),
+		sayText:    fg(p.muted),
+		toolName:   fg(p.ink).Bold(true),
+		toolTarget: fg(p.ink),
+		toolArg:    fg(p.faintest),
+		cardRun:    fg(p.cardRun),
+		cardErr:    fg(p.cardErr),
+		bashPrompt: fg(p.accent).Bold(true),
+		grepLoc:    fg(p.blue),
+
+		diffAdd:     fg(p.green),
+		diffDel:     fg(p.red),
+		diffMeta:    fg(p.faintest),
+		addLineWord: lipgloss.NewStyle().Foreground(col(p.addInk)).Background(col(p.addBgWord)),
+		delLineWord: lipgloss.NewStyle().Foreground(col(p.delInk)).Background(col(p.delBgWord)),
+		addLine:     lipgloss.NewStyle().Foreground(col(p.addInk)).Background(col(p.addBg)),
+		delLine:     lipgloss.NewStyle().Foreground(col(p.delInk)).Background(col(p.delBg)),
+		addLineNum:  lipgloss.NewStyle().Foreground(col(p.faintest)).Background(col(p.addBg)),
+		delLineNum:  lipgloss.NewStyle().Foreground(col(p.faintest)).Background(col(p.delBg)),
+		addSign:     lipgloss.NewStyle().Foreground(col(p.green)).Background(col(p.addBg)),
+		delSign:     lipgloss.NewStyle().Foreground(col(p.red)).Background(col(p.delBg)),
+		delText:     fg(p.delInk),
+
+		permBadge:  lipgloss.NewStyle().Background(col(p.amber)).Foreground(col(p.onAccent)).Bold(true),
+		permBg:     lipgloss.NewStyle().Background(col(p.permBg)),
+		permBorder: fg(p.cardPerm),
+
+		panel:           lipgloss.NewStyle().Background(col(p.panel)),
+		userPromptPanel: lipgloss.NewStyle().Background(col(p.promptBg)),
+
+		modeAuto: fg(p.green).Bold(true),
+		// The steady "ask" footer label is calm (un-bolded) so it doesn't compete
+		// with the transient bold-amber permission badge (permBadge) shown when a
+		// tool is actually asking right now — a glance separates state from event.
+		modeAsk:    fg(p.amber),
+		modeUnsafe: fg(p.red).Bold(true),
+
+		accentColor: col(p.accent),
+		inkColor:    col(p.ink),
+		bgPanel:     col(p.panel),
+		bgPrompt:    col(p.promptBg),
+		bgSel:       col(p.selBg),
+		bgPerm:      col(p.permBg),
 	}
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#1f1f1f")).
-		Padding(1, 1).
-		MarginBottom(1)
 }
 
-func (t ClaudeTheme) SidebarStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.LeftBorder()).
-		BorderForeground(lipgloss.Color("#d0c4b2")).
-		Padding(1)
+// zeroTheme is the active palette every renderer reads. It defaults to dark and is
+// reassigned by theme selection at startup and by /theme. All references are
+// .field accesses evaluated at render time, so reassigning this var repaints every
+// subsequent render.
+var zeroTheme = buildTheme(darkPalette)
+
+// onPanel returns a copy of style that paints on the panel surface. lipgloss
+// resets the background between adjacent Render calls, so every segment of a
+// panel row (including padding) must carry the background itself — renderers wrap
+// their foreground styles through this instead of referencing hex.
+func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
+	return style.Background(t.bgPanel)
 }
 
-func (t ClaudeTheme) Border() lipgloss.Border { return lipgloss.RoundedBorder() }
-
-func (t ClaudeTheme) BorderStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("#d0c4b2"))
+// onSel paints on the selected-row tint.
+func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
+	return style.Background(t.bgSel)
 }
 
-// CodexTheme represents the high-density cyberpunk / IDE technical layout.
-type CodexTheme struct{}
-
-var _ Theme = CodexTheme{}
-
-func (t CodexTheme) Name() string { return "codex" }
-
-func (t CodexTheme) ChatStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Padding(0, 1)
-}
-
-func (t CodexTheme) MessageStyle(sender string) lipgloss.Style {
-	if sender == "model" {
-		return lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#00ff00")). // Matrix green
-			Padding(0)
-	}
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#00ffff")). // Cyberpunk cyan
-		Padding(0)
-}
-
-func (t CodexTheme) SidebarStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("#00ff00")).
-		Padding(0)
-}
-
-func (t CodexTheme) Border() lipgloss.Border { return lipgloss.ThickBorder() }
-
-func (t CodexTheme) BorderStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+// onPerm paints on the permission-card tint.
+func (t tuiTheme) onPerm(style lipgloss.Style) lipgloss.Style {
+	return style.Background(t.bgPerm)
 }
