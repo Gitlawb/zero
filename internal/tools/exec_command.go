@@ -779,7 +779,11 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 			}
 		}
 	}
-	output, outputTruncated := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
+	wait := time.Duration(yieldTimeMS) * time.Millisecond
+	if interrupted && wait < execSessionStopTimeout {
+		wait = execSessionStopTimeout
+	}
+	output, outputTruncated := session.collect(ctx, wait)
 	exitCode, exited := session.exitStatus()
 	if exited {
 		tool.manager.remove(session.id)

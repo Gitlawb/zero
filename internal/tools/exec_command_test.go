@@ -719,7 +719,7 @@ func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
 
 func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 	for _, chars := range []string{`\u0003`, "exit\n"} {
-		root := t.TempDir()
+		root := resilientTempDir(t)
 		manager := newExecSessionManager()
 		execTool := NewScopedExecCommandTool(root, nil, manager)
 		writeTool := NewWriteStdinTool(manager)
@@ -753,6 +753,45 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 		if result.Meta["interrupted"] != "true" {
 			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
 		}
+	}
+}
+
+func TestWriteStdinInterruptWaitsForDelayedNonTTYExit(t *testing.T) {
+	manager := newExecSessionManager()
+	writeTool := NewWriteStdinTool(manager)
+	cancelCalled := make(chan struct{})
+	var cancelOnce sync.Once
+	session := &execSession{
+		id:          manager.allocateID(),
+		commandText: "delayed-exit",
+		relativeCwd: ".",
+		tty:         false,
+		cancel: func() {
+			cancelOnce.Do(func() { close(cancelCalled) })
+		},
+		output: newExecOutputBuffer(),
+		done:   make(chan struct{}),
+	}
+	manager.store(session)
+	go func() {
+		<-cancelCalled
+		time.Sleep(20 * time.Millisecond)
+		session.markDone(context.Canceled, 1)
+	}()
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    session.id,
+		"chars":         `\u0003`,
+		"yield_time_ms": 1,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("interrupt status = %s: %s", result.Status, result.Output)
+	}
+	if result.Meta["session_id"] != "" {
+		t.Fatalf("interrupt should wait for delayed exit, meta=%#v output=%q", result.Meta, result.Output)
+	}
+	if result.Meta["exit_code"] == "" || result.Meta["interrupted"] != "true" {
+		t.Fatalf("interrupt should report exit metadata, meta=%#v output=%q", result.Meta, result.Output)
 	}
 }
 
