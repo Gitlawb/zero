@@ -41,8 +41,15 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if !stringSliceContains(profile.FileSystem.ReadRoots, profileRootPath()) {
 		t.Fatalf("read roots = %#v, want full read root %q", profile.FileSystem.ReadRoots, profileRootPath())
 	}
-	if !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".git") || !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".zero") {
+	if !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".zero") || !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".agents") {
 		t.Fatalf("protected metadata names = %#v, want workspace metadata protected", profile.FileSystem.WriteRoots[0].ProtectedMetadataNames)
+	}
+	resolvedRoot := profile.FileSystem.WriteRoots[0].Root
+	wantGitCarveouts := []string{filepath.Join(resolvedRoot, ".git", "hooks"), filepath.Join(resolvedRoot, ".git", "config")}
+	for _, want := range wantGitCarveouts {
+		if !stringSliceContains(profile.FileSystem.WriteRoots[0].ReadOnlySubpaths, want) {
+			t.Fatalf("read-only subpaths = %#v, want git metadata carveout %q", profile.FileSystem.WriteRoots[0].ReadOnlySubpaths, want)
+		}
 	}
 	if len(profile.FileSystem.DenyRead) != 1 || len(profile.FileSystem.DenyWrite) != 1 {
 		t.Fatalf("deny paths = %#v / %#v, want one each", profile.FileSystem.DenyRead, profile.FileSystem.DenyWrite)

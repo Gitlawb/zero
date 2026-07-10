@@ -40,8 +40,11 @@
         "writeRoots": [
           {
             "root": "$WORKSPACE",
+            "readOnlySubpaths": [
+              "$WORKSPACE/.git/hooks",
+              "$WORKSPACE/.git/config"
+            ],
             "protectedMetadataNames": [
-              ".git",
               ".zero",
               ".agents"
             ]

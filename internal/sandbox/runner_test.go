@@ -461,6 +461,35 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 }
 
+// TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
+// git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
+// default profile must stop write-denying the whole .git tree and only carve
+// out .git/hooks and .git/config, which stay dangerous (auto-executing
+// scripts, remote/credential-helper rewrites) regardless of what wrote them.
+func TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig(t *testing.T) {
+	workspace := t.TempDir()
+	profile := DefaultPermissionProfile(workspace)
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+
+	resolvedWorkspace := normalizeProfilePath(workspace)
+	gitRegex := `(deny file-write* (regex #"^` + regexpQuoteMeta(resolvedWorkspace) + `/\.git(/.*)?$"))`
+	if strings.Contains(sbpl, gitRegex) {
+		t.Fatalf("seatbelt profile must not blanket-deny the whole .git tree:\n%s", sbpl)
+	}
+	hooksPath := sandboxProfileString(filepath.Join(resolvedWorkspace, ".git", "hooks"))
+	configPath := sandboxProfileString(filepath.Join(resolvedWorkspace, ".git", "config"))
+	for _, want := range []string{
+		`(deny file-write* (literal "` + hooksPath + `"))`,
+		`(deny file-write* (subpath "` + hooksPath + `"))`,
+		`(deny file-write* (literal "` + configPath + `"))`,
+		`(deny file-write* (subpath "` + configPath + `"))`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+}
+
 func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 	if strings.Contains(off, "with message") {

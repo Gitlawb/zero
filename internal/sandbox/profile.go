@@ -39,7 +39,33 @@ type NetworkPolicy struct {
 	Mode NetworkMode `json:"mode"`
 }
 
+// protectedMetadataNames marks control-plane directories where the app-level
+// auto-allow gate (see relativePathTouchesProtectedMetadata in engine.go)
+// always requires a prompt for direct file-tool writes (write_file, edit_file,
+// apply_patch): hand-editing git's objects/refs/index or Zero's own state
+// bypasses git's and Zero's own consistency checks, regardless of subpath.
 var protectedMetadataNames = []string{".git", ".zero", ".agents"}
+
+// sandboxFullyProtectedMetadataNames are the metadata directories the OS-level
+// sandbox write-denies in full for shell-executed commands. .git is
+// deliberately excluded here: git subprocesses (fetch, commit, add, merge,
+// pull, stash, ...) need to write objects, refs, the index, and FETCH_HEAD,
+// and those writes go through git's own invariants, unlike a raw file-tool
+// write. Only .git/hooks (auto-executing scripts) and .git/config (remote
+// URLs, credential.helper, core.hooksPath) stay write-denied, via
+// gitMetadataWriteCarveouts below.
+var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
+
+// gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
+// under the OS-level sandbox even though the rest of .git is writable to git
+// subprocesses. Nonexistent paths are harmless no-ops in every backend's
+// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
+func gitMetadataWriteCarveouts(root string) []string {
+	return []string{
+		filepath.Join(root, ".git", "hooks"),
+		filepath.Join(root, ".git", "config"),
+	}
+}
 
 func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
 	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
@@ -65,7 +91,8 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	for _, root := range roots {
 		writeRoots = append(writeRoots, WritableRoot{
 			Root:                   root,
-			ProtectedMetadataNames: append([]string{}, protectedMetadataNames...),
+			ReadOnlySubpaths:       gitMetadataWriteCarveouts(root),
+			ProtectedMetadataNames: append([]string{}, sandboxFullyProtectedMetadataNames...),
 		})
 	}
 	return PermissionProfile{
