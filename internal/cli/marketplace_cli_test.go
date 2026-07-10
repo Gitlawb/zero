@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -313,6 +314,22 @@ func TestRunPluginsBrowseShowsSelectedLatestRelease(t *testing.T) {
 	}
 }
 
+func TestSelectReleasePrefersStableOverPrerelease(t *testing.T) {
+	release, ok := selectRelease(marketplace.CatalogPlugin{
+		Releases: []marketplace.Release{
+			{Version: "2.0.0-beta"},
+			{Version: "2.0.0"},
+			{Version: "1.9.9"},
+		},
+	}, "")
+	if !ok {
+		t.Fatal("selectRelease returned false")
+	}
+	if release.Version != "2.0.0" {
+		t.Fatalf("selected version = %q, want stable 2.0.0", release.Version)
+	}
+}
+
 func TestRunPluginsMarketplaceRemoteCatalogRejectsLocalReleaseRepository(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	source, hash := marketplaceTestPluginSource(t, "zero.demo", "0.1.0")
@@ -338,6 +355,43 @@ func TestRunPluginsMarketplaceRemoteCatalogRejectsLocalReleaseRepository(t *test
 	}
 	if !strings.Contains(stderr.String(), "absolute git repository source") {
 		t.Fatalf("expected remote local repository rejection, got %s", stderr.String())
+	}
+}
+
+func TestRunPluginsBrowseRefreshHonorsCanceledContext(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	catalogBytes, err := os.ReadFile(writeMarketplaceTestCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(catalogBytes)
+	}))
+	defer server.Close()
+	cwd := t.TempDir()
+	registryPath, err := marketplace.RegistryPathForScope(marketplace.ScopeUser, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := marketplace.SaveRegistry(registryPath, marketplace.Registry{Catalogs: []marketplace.RegisteredCatalog{{
+		ID:                 "team",
+		Source:             server.URL + "/catalog.json",
+		VerificationStatus: marketplace.VerificationUnsigned,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runPluginsWithContext(ctx, []string{"browse", "lookup", "--catalog", "team", "--refresh", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitUsage {
+		t.Fatalf("browse exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "context canceled") {
+		t.Fatalf("expected canceled context error, got %s", stderr.String())
 	}
 }
 

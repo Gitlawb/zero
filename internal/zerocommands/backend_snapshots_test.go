@@ -140,6 +140,18 @@ func TestPluginSnapshotIncludesMarketplaceLockMetadata(t *testing.T) {
 	}
 }
 
+func TestPluginSnapshotQuarantinedDetectsRelativeDisabledPrefix(t *testing.T) {
+	snapshot := PluginSnapshotFromPlugin(plugins.LoadedPlugin{
+		ID:        "zero.demo",
+		Name:      "Demo",
+		Enabled:   false,
+		PluginDir: ".disabled/zero.demo",
+	})
+	if !snapshot.Quarantined {
+		t.Fatalf("expected relative disabled plugin to be quarantined: %#v", snapshot)
+	}
+}
+
 func TestMCPServerSnapshotsSortsAndReturnsEmptySliceForEmptyInput(t *testing.T) {
 	servers := []mcp.Server{
 		{Name: "zulu", Type: mcp.ServerTypeHTTP, URL: "https://zulu.test"},

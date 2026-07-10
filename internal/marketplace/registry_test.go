@@ -46,6 +46,12 @@ func TestRegistryLoadSaveRoundTrip(t *testing.T) {
 	if len(loaded.Catalogs) != 1 || loaded.Catalogs[0].ID != "team" || loaded.Catalogs[0].Source != "./catalog.json" {
 		t.Fatalf("unexpected registry: %#v", loaded)
 	}
+	if loaded.Catalogs[0].PublicKeyPath != "./catalog.pub" {
+		t.Fatalf("publicKeyPath = %q, want ./catalog.pub", loaded.Catalogs[0].PublicKeyPath)
+	}
+	if loaded.Catalogs[0].VerificationStatus != VerificationUnsigned {
+		t.Fatalf("verificationStatus = %q, want %q", loaded.Catalogs[0].VerificationStatus, VerificationUnsigned)
+	}
 }
 
 func TestRegistryPathForScope(t *testing.T) {

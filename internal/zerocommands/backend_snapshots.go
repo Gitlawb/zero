@@ -266,7 +266,8 @@ func pluginState(plugin plugins.LoadedPlugin) string {
 }
 
 func pluginQuarantined(plugin plugins.LoadedPlugin) bool {
-	return strings.Contains(filepath.ToSlash(plugin.PluginDir), "/.disabled/")
+	dir := filepath.ToSlash(plugin.PluginDir)
+	return strings.Contains(dir, "/.disabled/") || strings.HasPrefix(dir, ".disabled/")
 }
 
 // PluginSnapshots converts a slice of plugins.LoadedPlugin into a

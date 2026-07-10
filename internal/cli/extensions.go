@@ -33,6 +33,13 @@ type mcpLegacyListOptions struct {
 }
 
 func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginsWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginsWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "plugins subcommand required. Use `zero plugins list`.")
 	}
@@ -77,17 +84,17 @@ func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		}
 		return exitSuccess
 	case "browse":
-		return runPluginBrowse(args[1:], stdout, stderr, deps)
+		return runPluginBrowseWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "install":
-		return runPluginMarketplaceInstall(args[1:], stdout, stderr, deps)
+		return runPluginMarketplaceInstallWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "info":
-		return runPluginMarketplaceInfo(args[1:], stdout, stderr, deps)
+		return runPluginMarketplaceInfoWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "update":
-		return runPluginMarketplaceUpdate(args[1:], stdout, stderr, deps)
+		return runPluginMarketplaceUpdateWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "verify":
 		return runPluginVerify(args[1:], stdout, stderr, deps)
 	case "marketplace":
-		return runPluginMarketplace(args[1:], stdout, stderr, deps)
+		return runPluginMarketplaceWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "add":
 		return runPluginAdd(args[1:], deps.pluginsDir(), stdout, stderr)
 	case "remove", "rm":

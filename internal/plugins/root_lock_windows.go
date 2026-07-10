@@ -9,12 +9,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 const (
 	pluginRootLockFileName = ".plugins-root.lock"
 	pluginRootLockStaleAge = 30 * time.Minute
+
+	processQueryLimitedInformation = 0x1000
 )
 
 type pluginRootLock struct {
@@ -53,13 +56,24 @@ func recoverStalePluginRootLock(lockPath string) bool {
 	data, err := os.ReadFile(lockPath)
 	if err == nil {
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if pid > 0 {
-			if process, err := os.FindProcess(pid); err == nil {
-				_ = process.Release()
-			}
+		if pid > 0 && processAlive(pid) {
+			return false
 		}
 	}
 	return os.Remove(lockPath) == nil
+}
+
+func processAlive(pid int) bool {
+	handle, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer syscall.CloseHandle(handle)
+	event, err := syscall.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return true
+	}
+	return event == syscall.WAIT_TIMEOUT
 }
 
 func (lock *pluginRootLock) release() {

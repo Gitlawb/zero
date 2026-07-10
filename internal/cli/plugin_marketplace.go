@@ -11,11 +11,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/marketplace"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
+
+const marketplaceCatalogOperationTimeout = 30 * time.Second
 
 type marketplaceCommandOptions struct {
 	json            bool
@@ -31,6 +34,13 @@ type marketplaceCommandOptions struct {
 }
 
 func runPluginMarketplace(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginMarketplaceWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginMarketplaceWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "marketplace subcommand required. Use `zero plugins marketplace list`.")
 	}
@@ -41,13 +51,13 @@ func runPluginMarketplace(args []string, stdout io.Writer, stderr io.Writer, dep
 		}
 		return exitSuccess
 	case "add":
-		return runMarketplaceAdd(args[1:], stdout, stderr, deps)
+		return runMarketplaceAddWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "list":
 		return runMarketplaceList(args[1:], stdout, stderr, deps)
 	case "remove", "rm":
 		return runMarketplaceRemove(args[1:], stdout, stderr, deps)
 	case "update", "refresh":
-		return runMarketplaceUpdate(args[1:], stdout, stderr, deps)
+		return runMarketplaceUpdateWithContext(ctx, args[1:], stdout, stderr, deps)
 	case "sign":
 		return runMarketplaceSign(args[1:], stdout, stderr)
 	case "validate":
@@ -58,6 +68,13 @@ func runPluginMarketplace(args []string, stdout io.Writer, stderr io.Writer, dep
 }
 
 func runPluginBrowse(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginBrowseWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginBrowseWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	query, options, help, err := parseBrowseArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -85,7 +102,9 @@ func runPluginBrowse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	var catalog marketplace.Catalog
 	var verification marketplace.Verification
 	if options.refresh {
-		catalog, verification, _, err = updateCatalogCache(context.Background(), catalogEntry)
+		catalogCtx, cancel := marketplaceCatalogOperationContext(ctx)
+		catalog, verification, _, err = updateCatalogCache(catalogCtx, catalogEntry)
+		cancel()
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
 		}
@@ -93,7 +112,9 @@ func runPluginBrowse(args []string, stdout io.Writer, stderr io.Writer, deps app
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	} else {
-		catalog, verification, err = loadCatalogEntry(context.Background(), catalogEntry)
+		catalogCtx, cancel := marketplaceCatalogOperationContext(ctx)
+		catalog, verification, err = loadCatalogEntry(catalogCtx, catalogEntry)
+		cancel()
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
 		}
@@ -117,6 +138,13 @@ func runPluginBrowse(args []string, stdout io.Writer, stderr io.Writer, deps app
 }
 
 func runPluginMarketplaceInstall(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginMarketplaceInstallWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginMarketplaceInstallWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	target, options, help, err := parseMarketplaceInstallArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -138,7 +166,7 @@ func runPluginMarketplaceInstall(args []string, stdout io.Writer, stderr io.Writ
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	resolved, err := resolveMarketplacePlugin(cwd, pluginID, catalogID, stderr)
+	resolved, err := resolveMarketplacePlugin(ctx, cwd, pluginID, catalogID, stderr)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -163,7 +191,7 @@ func runPluginMarketplaceInstall(args []string, stdout io.Writer, stderr io.Writ
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	result, err := plugins.Install(context.Background(), plugins.InstallOptions{
+	result, err := plugins.Install(ctx, plugins.InstallOptions{
 		Source:             release.Repository,
 		Dir:                dir,
 		ExpectedID:         resolved.plugin.ID,
@@ -214,6 +242,13 @@ func runPluginMarketplaceInstall(args []string, stdout io.Writer, stderr io.Writ
 }
 
 func runPluginMarketplaceInfo(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginMarketplaceInfoWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginMarketplaceInfoWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	target, options, help, err := parseMarketplaceInstallArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -232,7 +267,7 @@ func runPluginMarketplaceInfo(args []string, stdout io.Writer, stderr io.Writer,
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	resolved, err := resolveMarketplacePlugin(cwd, pluginID, catalogID, stderr)
+	resolved, err := resolveMarketplacePlugin(ctx, cwd, pluginID, catalogID, stderr)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -263,6 +298,13 @@ func runPluginMarketplaceInfo(args []string, stdout io.Writer, stderr io.Writer,
 }
 
 func runPluginMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runPluginMarketplaceUpdateWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runPluginMarketplaceUpdateWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	target, options, help, err := parseMarketplaceUpdateArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -302,7 +344,7 @@ func runPluginMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Write
 	}
 	results := make([]pluginUpdateResult, 0, len(targets))
 	for _, updateTarget := range targets {
-		result, err := runMarketplaceUpdateTarget(cwd, dir, updateTarget, lock[updateTarget.pluginID], options, stderr)
+		result, err := runMarketplaceUpdateTarget(ctx, cwd, dir, updateTarget, lock[updateTarget.pluginID], options, stderr)
 		if err != nil {
 			return writeExecUsageError(stderr, err.Error())
 		}
@@ -370,7 +412,7 @@ func marketplaceUpdateTargets(target string, lock map[string]plugins.LockEntry) 
 	return targets, nil
 }
 
-func runMarketplaceUpdateTarget(cwd string, dir string, target marketplaceUpdateTarget, entry plugins.LockEntry, options marketplaceCommandOptions, stderr io.Writer) (pluginUpdateResult, error) {
+func runMarketplaceUpdateTarget(ctx context.Context, cwd string, dir string, target marketplaceUpdateTarget, entry plugins.LockEntry, options marketplaceCommandOptions, stderr io.Writer) (pluginUpdateResult, error) {
 	result := pluginUpdateResult{
 		ID:             target.pluginID,
 		Catalog:        target.catalogID,
@@ -384,7 +426,7 @@ func runMarketplaceUpdateTarget(cwd string, dir string, target marketplaceUpdate
 		result.Status = "pinned"
 		return result, nil
 	}
-	resolved, err := resolveMarketplacePlugin(cwd, target.pluginID, target.catalogID, stderr)
+	resolved, err := resolveMarketplacePlugin(ctx, cwd, target.pluginID, target.catalogID, stderr)
 	if err != nil {
 		return pluginUpdateResult{}, err
 	}
@@ -411,7 +453,7 @@ func runMarketplaceUpdateTarget(cwd string, dir string, target marketplaceUpdate
 		result.Status = "current"
 		return result, nil
 	}
-	install, err := plugins.Install(context.Background(), plugins.InstallOptions{
+	install, err := plugins.Install(ctx, plugins.InstallOptions{
 		Source:             release.Repository,
 		Dir:                dir,
 		Force:              true,
@@ -550,6 +592,13 @@ func runMarketplaceValidate(args []string, stdout io.Writer, stderr io.Writer) i
 }
 
 func runMarketplaceAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runMarketplaceAddWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runMarketplaceAddWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	source, options, help, err := parseMarketplaceAddArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -581,7 +630,9 @@ func runMarketplaceAdd(args []string, stdout io.Writer, stderr io.Writer, deps a
 			return writeExecUsageError(stderr, "project marketplace catalogs require a trusted workspace; run `zero trust`")
 		}
 	}
-	catalog, verification, cachePath, err := loadCatalogForRegistration(context.Background(), source, parsedSource, options.scope, cwd, options.publicKeyPath)
+	catalogCtx, cancel := marketplaceCatalogOperationContext(ctx)
+	catalog, verification, cachePath, err := loadCatalogForRegistration(catalogCtx, source, parsedSource, options.scope, cwd, options.publicKeyPath)
+	cancel()
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
 	}
@@ -717,6 +768,13 @@ func runMarketplaceRemove(args []string, stdout io.Writer, stderr io.Writer, dep
 }
 
 func runMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runMarketplaceUpdateWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runMarketplaceUpdateWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	id, options, help, err := parseMarketplaceIDArgs(args, "marketplace update")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -741,7 +799,9 @@ func runMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, dep
 	if !ok {
 		return writeExecUsageError(stderr, fmt.Sprintf("marketplace catalog %q is not registered", id))
 	}
-	catalog, verification, cached, err := updateCatalogCache(context.Background(), entry)
+	catalogCtx, cancel := marketplaceCatalogOperationContext(ctx)
+	catalog, verification, cached, err := updateCatalogCache(catalogCtx, entry)
+	cancel()
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitUsage)
 	}
@@ -1114,6 +1174,13 @@ func findRegisteredCatalogForScope(id string, cwd string, scope marketplace.Scop
 	return marketplace.RegisteredCatalog{}, false, nil
 }
 
+func marketplaceCatalogOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, marketplaceCatalogOperationTimeout)
+}
+
 type resolvedMarketplacePlugin struct {
 	entry        marketplace.RegisteredCatalog
 	catalog      marketplace.Catalog
@@ -1121,7 +1188,10 @@ type resolvedMarketplacePlugin struct {
 	plugin       marketplace.CatalogPlugin
 }
 
-func resolveMarketplacePlugin(cwd string, pluginID string, catalogID string, stderr io.Writer) (resolvedMarketplacePlugin, error) {
+func resolveMarketplacePlugin(ctx context.Context, cwd string, pluginID string, catalogID string, stderr io.Writer) (resolvedMarketplacePlugin, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(pluginID) == "" {
 		return resolvedMarketplacePlugin{}, fmt.Errorf("plugin id is required")
 	}
@@ -1134,8 +1204,13 @@ func resolveMarketplacePlugin(cwd string, pluginID string, catalogID string, std
 		if catalogID != "" && entry.ID != catalogID {
 			continue
 		}
-		catalog, verification, err := loadCatalogEntry(context.Background(), entry)
+		catalogCtx, cancel := marketplaceCatalogOperationContext(ctx)
+		catalog, verification, err := loadCatalogEntry(catalogCtx, entry)
+		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				return resolvedMarketplacePlugin{}, ctx.Err()
+			}
 			if catalogID != "" {
 				return resolvedMarketplacePlugin{}, err
 			}
@@ -1193,8 +1268,8 @@ func selectRelease(plugin marketplace.CatalogPlugin, version string) (marketplac
 }
 
 func compareSemver(left string, right string) int {
-	leftParts := semverCore(left)
-	rightParts := semverCore(right)
+	leftParts, leftPre := semverCoreAndPre(left)
+	rightParts, rightPre := semverCoreAndPre(right)
 	for index := 0; index < 3; index++ {
 		if leftParts[index] > rightParts[index] {
 			return 1
@@ -1203,15 +1278,23 @@ func compareSemver(left string, right string) int {
 			return -1
 		}
 	}
-	return strings.Compare(left, right)
+	if leftPre == "" && rightPre != "" {
+		return 1
+	}
+	if leftPre != "" && rightPre == "" {
+		return -1
+	}
+	return strings.Compare(leftPre, rightPre)
 }
 
-func semverCore(version string) [3]int {
+func semverCoreAndPre(version string) ([3]int, string) {
 	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
-	if before, _, ok := strings.Cut(version, "-"); ok {
+	pre := ""
+	if before, _, ok := strings.Cut(version, "+"); ok {
 		version = before
 	}
-	if before, _, ok := strings.Cut(version, "+"); ok {
+	if before, _, ok := strings.Cut(version, "-"); ok {
+		pre = strings.TrimPrefix(version[len(before):], "-")
 		version = before
 	}
 	parts := strings.Split(version, ".")
@@ -1220,7 +1303,7 @@ func semverCore(version string) [3]int {
 		value, _ := strconv.Atoi(parts[index])
 		result[index] = value
 	}
-	return result
+	return result, pre
 }
 
 func readEd25519PublicKey(path string) (ed25519.PublicKey, error) {

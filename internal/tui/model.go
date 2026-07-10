@@ -1369,6 +1369,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.pluginManager != nil {
+				m.cancelPluginCommand()
 				m.pluginManager = nil
 				return m, nil
 			}

@@ -249,6 +249,31 @@ func TestPluginManagerIgnoresStaleCommandResult(t *testing.T) {
 	}
 }
 
+func TestPluginManagerEscCancelsInFlightCommandResult(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Cwd: t.TempDir(),
+		PluginCommand: func(_ context.Context, _ []string) PluginCommandResult {
+			return PluginCommandResult{ExitCode: 0, Output: "late"}
+		},
+	})
+	m.pluginManager = &pluginManagerState{}
+	updated, cmd := m.startPluginCommand(pluginCommandRequest{origin: pluginCommandOriginManager, args: []string{"verify", "zero.demo"}})
+	if cmd == nil {
+		t.Fatal("expected async plugin command")
+	}
+
+	updated, _ = updated.handlePluginManagerKey(testKey(tea.KeyEsc))
+	msg := execCmd(cmd).(pluginCommandResultMsg)
+	next := updated.applyPluginCommandResultMessage(msg)
+
+	if next.pluginManager != nil {
+		t.Fatal("late plugin result reopened manager after Esc")
+	}
+	if transcriptContains(next.transcript, "late") {
+		t.Fatal("late plugin result appended transcript after Esc")
+	}
+}
+
 func TestPluginManagerRendersMarketplaceCatalogAndRiskState(t *testing.T) {
 	enabled := true
 	m := newModel(context.Background(), Options{Cwd: t.TempDir(), Registry: tools.NewRegistry()})

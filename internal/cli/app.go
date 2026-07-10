@@ -894,7 +894,7 @@ func tuiPluginCommand(workspaceRoot string, deps appDeps) func(context.Context, 
 			ctx = context.Background()
 		}
 		var stdout, stderr bytes.Buffer
-		exitCode := runPlugins(args, &stdout, &stderr, deps)
+		exitCode := runPluginsWithContext(ctx, args, &stdout, &stderr, deps)
 		return tui.PluginCommandResult{
 			Snapshot:        tuiPluginSnapshot(workspaceRoot, deps),
 			Output:          strings.TrimSpace(stdout.String()),

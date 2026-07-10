@@ -19,7 +19,7 @@ import (
 const (
 	OfficialCatalogID      = "official"
 	OfficialCatalogSource  = "Gitlawb/zero-plugins"
-	catalogGitFetchTimeout = 2 * time.Minute
+	catalogGitFetchTimeout = 30 * time.Second
 )
 
 // OfficialCatalogPublicKey verifies Gitlawb/zero-plugins catalog.sig. The
@@ -334,8 +334,13 @@ func isLoopbackHost(host string) bool {
 	if name == "localhost" {
 		return true
 	}
-	if ip := net.ParseIP(name); ip != nil && ip.IsLoopback() {
-		return true
+	if ip := net.ParseIP(name); ip != nil {
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return true
+		}
+		if v4 := ip.To4(); v4 != nil && v4[0] == 127 {
+			return true
+		}
 	}
 	return false
 }

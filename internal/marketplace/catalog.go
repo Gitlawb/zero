@@ -276,7 +276,7 @@ func ValidateRemoteCatalogReleaseSources(catalog Catalog) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", field, err)
 			}
-			if source.Kind == CatalogSourceLocal {
+			if source.Kind == CatalogSourceLocal || strings.HasPrefix(strings.ToLower(source.Canonical), "file://") {
 				return fmt.Errorf("%s: expected an absolute git repository source, got local path", field)
 			}
 		}

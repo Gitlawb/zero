@@ -123,6 +123,18 @@ func TestRemoteCatalogReleaseSourcesRejectLocalPaths(t *testing.T) {
 	}
 }
 
+func TestRemoteCatalogReleaseSourcesRejectFileURLs(t *testing.T) {
+	body := strings.Replace(testCatalogJSON(), `"repository": "https://github.com/Gitlawb/zero-demo-plugin.git"`, `"repository": "file:///tmp/zero-demo-plugin"`, 1)
+	catalog, err := ParseCatalog([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseCatalog returned error: %v", err)
+	}
+	err = ValidateRemoteCatalogReleaseSources(catalog)
+	if err == nil || !strings.Contains(err.Error(), "absolute git repository source") {
+		t.Fatalf("expected absolute git source error, got %v", err)
+	}
+}
+
 func TestParseCatalogRejectsIncompleteReviewMetadata(t *testing.T) {
 	cases := []struct {
 		name string
@@ -208,6 +220,37 @@ func TestParseCatalogSource(t *testing.T) {
 			_, err := ParseCatalogSource(source)
 			if err == nil || !strings.Contains(err.Error(), "embedded credentials") {
 				t.Fatalf("expected credential rejection, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseCatalogSourceHTTPRequiresLoopbackHost(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantErr bool
+	}{
+		{name: "ipv4 loopback", source: "http://127.0.0.1/catalog.json"},
+		{name: "ipv6 loopback", source: "http://[::1]/catalog.json"},
+		{name: "ipv4 mapped ipv6 loopback", source: "http://[::ffff:127.0.0.1]/catalog.json"},
+		{name: "unspecified local bind", source: "http://0.0.0.0/catalog.json"},
+		{name: "localhost suffix rejected", source: "http://localhost.example.com/catalog.json", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := ParseCatalogSource(tc.source)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ParseCatalogSource(%q) returned nil error", tc.source)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseCatalogSource(%q): %v", tc.source, err)
+			}
+			if parsed.Kind != CatalogSourceHTTPS {
+				t.Fatalf("kind = %s, want %s", parsed.Kind, CatalogSourceHTTPS)
 			}
 		})
 	}

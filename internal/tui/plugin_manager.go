@@ -91,6 +91,7 @@ func (m model) handlePluginManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	}
 	switch {
 	case keyIs(msg, tea.KeyEsc):
+		m.cancelPluginCommand()
 		m.pluginManager = nil
 	case keyIs(msg, tea.KeyUp):
 		m.movePluginManager(-1)
@@ -216,6 +217,7 @@ func (m model) choosePluginManagerItem() (model, tea.Cmd) {
 }
 
 func (m model) prefillPluginManagerCommand(input string) model {
+	m.cancelPluginCommand()
 	m.pluginManager = nil
 	m.input.SetValue(input)
 	m.input.SetCursor(len([]rune(input)))
