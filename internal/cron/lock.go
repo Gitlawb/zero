@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Cross-process lock tuning. The lock is held only for a single metadata
@@ -108,7 +110,11 @@ func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
 	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
 		// Not actually stale anymore — a holder reacquired it in the gap. Put it
 		// back instead of stealing a live lock, and let the caller wait.
-		_ = os.Rename(reclaimed, lockPath)
+		if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				_ = os.Remove(reclaimed)
+			}
+		}
 		return false
 	}
 	_ = os.Remove(reclaimed)

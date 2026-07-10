@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Mailbox is a per-agent, per-team message inbox persisted as a JSON array on
@@ -377,9 +379,13 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 			reclaimed := lockPath + ".stale." + token
 			if os.Rename(lockPath, reclaimed) == nil {
 				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
-					os.Remove(reclaimed) // genuinely stale — drop it
+					_ = os.Remove(reclaimed) // genuinely stale — drop it
 				} else {
-					_ = os.Rename(reclaimed, lockPath) // young again — restore, don't steal
+					if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
+						if errors.Is(err, os.ErrExist) {
+							_ = os.Remove(reclaimed)
+						}
+					}
 				}
 			}
 			continue

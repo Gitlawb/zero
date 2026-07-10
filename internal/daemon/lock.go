@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Single-instance lock. Mirrors reference-daemon-code-agent-js/supervisor.js's
@@ -88,7 +90,11 @@ func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
 	if pid, err := readPidFile(reclaimed); err == nil && pid > 0 && isAlive(pid) {
 		// A holder reacquired the lock in the gap — its live PID is now in the moved
 		// file. Restore it instead of stealing a live lock; let the caller refuse.
-		_ = os.Rename(reclaimed, path)
+		if err := lockutil.RestoreLockFile(reclaimed, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				_ = os.Remove(reclaimed)
+			}
+		}
 		return false
 	}
 	_ = os.Remove(reclaimed)
