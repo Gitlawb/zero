@@ -133,9 +133,9 @@ type model struct {
 	permissionMode              agent.PermissionMode
 	// program is the live Bubble Tea program, set right before Run so /plan open
 	// can suspend the TUI, launch $EDITOR, and resume on exit.
-	program                     *tea.Program
-	selfCorrectTests            bool
-	reasoningEffort             modelregistry.ReasoningEffort
+	program          *tea.Program
+	selfCorrectTests bool
+	reasoningEffort  modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
