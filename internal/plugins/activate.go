@@ -460,6 +460,9 @@ func expandPluginRoot(value string, pluginDir string) string {
 // e.g. URLs or flag values).
 func expandPluginRootPath(value string, pluginDir string) string {
 	if !strings.Contains(value, pluginRootPlaceholder) {
+		if !filepath.IsAbs(value) && !isWindowsAbs(value) && !isRootedPath(value) && (strings.Contains(value, "/") || strings.Contains(value, "\\")) {
+			return filepath.Join(pluginDir, value)
+		}
 		return value
 	}
 	return filepath.FromSlash(strings.ReplaceAll(value, pluginRootPlaceholder, pluginDir))
