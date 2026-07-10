@@ -136,9 +136,15 @@ func TestValidateFileFlagsUnknownTopLevelKey(t *testing.T) {
 	if len(issues) == 0 {
 		t.Fatalf("expected unknown-field issue for top-level typo, got none")
 	}
-	got := issues[0]
-	if got.FieldPath != "maxTurn" {
-		t.Fatalf("FieldPath = %q, want %q", got.FieldPath, "maxTurn")
+	var got Issue
+	found := false
+	for _, issue := range issues {
+		if issue.FieldPath == "maxTurn" {
+			got, found = issue, true
+		}
+	}
+	if !found {
+		t.Fatalf("expected unknown-field issue at maxTurn, got %#v", issues)
 	}
 	if !strings.Contains(got.Message, `did you mean "maxTurns"`) {
 		t.Fatalf("expected near-match suggestion, got %q", got.Message)
@@ -210,6 +216,46 @@ func TestValidateFileAllowsLegacyAliases(t *testing.T) {
 	for _, issue := range issues {
 		if strings.Contains(issue.FieldPath, "mcpServers") {
 			t.Fatalf("legacy alias mcpServers reported as unknown: %#v", issues)
+		}
+	}
+}
+
+func TestValidateFileAllowsCaseVariantKey(t *testing.T) {
+	// encoding/json matches object keys case-insensitively, so "MaxTurns"
+	// parses into MaxTurns. The scanner compares lower-cased keys,
+	// so a valid case variant must not be flagged as unknown.
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}
+		],
+		"MaxTurns": 1
+	}`)
+
+	_, issues := ValidateFile(path)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "unknown config field") {
+			t.Fatalf("valid case-variant key flagged as unknown: %#v", issues)
+		}
+	}
+}
+
+func TestValidateFileAllowsLegacyProviderKeys(t *testing.T) {
+	// ProviderProfile.UnmarshalJSON accepts snake_case legacy keys
+	// (base_url, api_key, providerKind, ...). These are valid and
+	// must not be flagged as unknown — only the canonical camelCase
+	// tags are visible to the reflection scan, so they are allowlisted.
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [
+			{"name": "main", "providerKind": "openai", "base_url": "https://example.test/v1", "api_key": "sk-x", "model": "gpt-4.1"}
+		]
+	}`)
+
+	_, issues := ValidateFile(path)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "unknown config field") {
+			t.Fatalf("legacy provider key reported as unknown: %#v", issues)
 		}
 	}
 }

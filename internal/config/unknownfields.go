@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 )
 
@@ -36,15 +37,24 @@ func collectUnknownFields(t reflect.Type, raw json.RawMessage, path string, allo
 		known := knownJSONFields(t)
 		allowSet := toSet(allow)
 		for key, val := range present {
-			if allowSet[key] {
+			// JSON key matching is case-insensitive, so compare against a
+			// lower-cased key. A differently-cased but valid key (e.g.
+			// "MaxTurns") is still parsed by json and must not be flagged.
+			low := strings.ToLower(key)
+			if allowSet[low] {
 				continue
 			}
-			if ft, ok := known[key]; ok {
-				collectUnknownFields(ft, val, joinPath(path, key), nil, issues)
+			if kf, ok := known[low]; ok {
+				// Alias keys (legacy snake_case forms accepted by a
+				// custom UnmarshalJSON) have no Go type to recurse into;
+				// they are leaves, so skip descent rather than panic.
+				if kf.typ != nil {
+					collectUnknownFields(kf.typ, val, joinPath(path, key), nil, issues)
+				}
 			} else {
 				*issues = append(*issues, Issue{
 					FieldPath: joinPath(path, key),
-					Message:   unknownFieldMessage(joinPath(path, key), key, keysOf(known)),
+					Message:   unknownFieldMessage(joinPath(path, key), key, canonicalKeys(known)),
 				})
 			}
 		}
@@ -67,13 +77,30 @@ func collectUnknownFields(t reflect.Type, raw json.RawMessage, path string, allo
 	}
 }
 
+// legacyJSONAliases lists JSON keys a struct's custom UnmarshalJSON
+// accepts in addition to its declared (camelCase) json tags. Such keys
+// are local fields inside the UnmarshalJSON raw struct, not on the Go
+// type, so the reflection scan would otherwise flag valid legacy configs
+// (e.g. base_url, api_key) as unknown. Keep this in sync with each
+// UnmarshalJSON's raw struct.
+var legacyJSONAliases = map[string][]string{
+	"config.ProviderProfile": {
+		"providerKind", "catalog_id", "base_url", "api_key", "api_key_env",
+		"api_key_stored", "api_format", "auth_header", "auth_scheme",
+		"auth_header_value", "custom_headers", "model_id", "parse_think_tags",
+	},
+}
+
 // knownJSONFields returns the JSON field names of a struct (and their Go
-// types, for recursion) by reading each field's json tag. Fields without a
-// json tag (unexported helpers such as *Set markers) are omitted: they never
-// appear in serialized config and must not be treated as valid keys.
-func knownJSONFields(t reflect.Type) map[string]reflect.Type {
+// types, for recursion) by reading each field's json tag. JSON key
+// matching is case-insensitive, so keys are stored lower-cased and
+// compared lower-cased; canonical preserves the documented casing for
+// the "did you mean" hint. Fields without a json tag (unexported
+// helpers such as *Set markers) are omitted: they never appear in
+// serialized config and must not be treated as valid keys.
+func knownJSONFields(t reflect.Type) map[string]knownField {
 	t = derefType(t)
-	out := make(map[string]reflect.Type, t.NumField())
+	out := make(map[string]knownField, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		tag := f.Tag.Get("json")
@@ -84,9 +111,23 @@ func knownJSONFields(t reflect.Type) map[string]reflect.Type {
 		if name == "" {
 			continue
 		}
-		out[name] = f.Type
+		low := strings.ToLower(name)
+		out[low] = knownField{canonical: name, typ: f.Type}
+	}
+	for _, alias := range legacyJSONAliases[t.String()] {
+		// No Go type to recurse into: legacy aliases are leaf fields.
+		// canonical preserves the documented casing for the hint.
+		out[strings.ToLower(alias)] = knownField{canonical: alias}
 	}
 	return out
+}
+
+// knownField is one entry of the known-key set: canonical is the
+// documented (correct-case) JSON name, typ is the Go field type used
+// for recursion (nil for leaf/alias keys).
+type knownField struct {
+	canonical string
+	typ       reflect.Type
 }
 
 func derefType(t reflect.Type) reflect.Type {
@@ -106,15 +147,16 @@ func joinPath(path, key string) string {
 func toSet(items []string) map[string]bool {
 	s := make(map[string]bool, len(items))
 	for _, it := range items {
-		s[it] = true
+		// JSON key matching is case-insensitive.
+		s[strings.ToLower(it)] = true
 	}
 	return s
 }
 
-func keysOf(m map[string]reflect.Type) []string {
+func canonicalKeys(m map[string]knownField) []string {
 	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+	for _, kf := range m {
+		out = append(out, kf.canonical)
 	}
 	return out
 }
@@ -136,6 +178,9 @@ func suggestPath(fullPath, suggestedLeaf string) string {
 }
 
 func nearestKey(key string, candidates []string) string {
+	// Sort so map-range nondeterminism cannot change which candidate
+	// wins a distance tie: the lexically-first winner is stable.
+	sort.Strings(candidates)
 	best := ""
 	bestDist := -1
 	for _, c := range candidates {
