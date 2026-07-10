@@ -7,15 +7,14 @@ terminal's detected background.
 
 Run `/theme` with no argument to list the registered names.
 
-## Claude (`claude`)
+## Dune (`dune`)
 
-A warm, low-density palette: sand/cream surface, charcoal ink, and a soft
+A warm sand-and-cream palette: sand/cream surface, charcoal ink, and a soft
 amber accent.
 
-## Codex (`codex`)
+## Neon (`neon`)
 
-A high-density, neon-on-black palette: pitch-black surface, bright green ink,
-and a cyan accent.
+A neon-on-black palette: pitch-black surface, bright green ink, and a cyan accent.
 
 ## Adding a theme
 

@@ -333,17 +333,17 @@ var everforestPalette = palette{
 	cardPerm:  "#96896b",
 }
 
-// codexPalette is a high-density cyberpunk console: pitch-black surface with
-// neon green ink and a cyan accent, in the spirit of a Matrix-style terminal.
-var codexPalette = palette{
+// neonPalette is a neon-on-black color scheme: pitch-black surface with
+// neon green ink and a cyan accent.
+var neonPalette = palette{
 	panel:     "#050b06",
 	promptBg:  "#0c180d",
 	line:      "#1c3820",
 	line2:     "#2c5230",
 	ink:       "#c9ffd2",
-	muted:     "#7fdb8e",
-	faint:     "#5cb56c",
-	faintest:  "#419450",
+	muted:     "#80db8f",
+	faint:     "#6eca7d",
+	faintest:  "#58af69",
 	accent:    "#00e5c8",
 	green:     "#39ff6a",
 	red:       "#ff4d6d",
@@ -433,24 +433,24 @@ var solarizedLightPalette = palette{
 	cardPerm:  "#c4ae63",
 }
 
-// claudePalette is a warm, low-density card layout: sand/cream surface, charcoal
-// ink, and a soft amber accent.
-var claudePalette = palette{
+// dunePalette is a warm sand-and-cream color scheme: sand/cream surface,
+// charcoal ink, and a soft amber accent.
+var dunePalette = palette{
 	panel:     "#f2e9d8",
 	promptBg:  "#e9dcbf",
 	line:      "#d9c7a3",
 	line2:     "#c2a97c",
 	ink:       "#2b241a",
-	muted:     "#5a4f3d",
-	faint:     "#726649",
-	faintest:  "#806252",
+	muted:     "#473e32",
+	faint:     "#554a3a",
+	faintest:  "#655648",
 	accent:    "#8f5215",
-	green:     "#4f7a3d",
-	red:       "#a83c30",
-	amber:     "#a8720f",
+	green:     "#38572a",
+	red:       "#963328",
+	amber:     "#6d4600",
 	blue:      "#3d6a9e",
-	gitAdd:    "#5a7d47",
-	gitDel:    "#a35a4a",
+	gitAdd:    "#38572a",
+	gitDel:    "#963328",
 	addBg:     "#dcecd0",
 	delBg:     "#f5dbd5",
 	addBgWord: "#b9dc9e",
@@ -490,10 +490,10 @@ var themeRegistry = []themeEntry{
 	{Name: "solarized-dark", Label: "Solarized Dark", Palette: solarizedDarkPalette, IsDark: true},
 	{Name: "rose-pine", Label: "Rosé Pine", Palette: rosePinePalette, IsDark: true},
 	{Name: "everforest", Label: "Everforest", Palette: everforestPalette, IsDark: true},
-	{Name: "codex", Label: "Codex", Palette: codexPalette, IsDark: true},
+	{Name: "neon", Label: "Neon", Palette: neonPalette, IsDark: true},
 	{Name: "light", Label: "light", Palette: lightPalette, IsDark: false},
 	{Name: "solarized-light", Label: "Solarized Light", Palette: solarizedLightPalette, IsDark: false},
-	{Name: "claude", Label: "Claude", Palette: claudePalette, IsDark: false},
+	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: false},
 }
 
 // themeByName indexes the registry by lowercased name for O(1) lookup. Built as a

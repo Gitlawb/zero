@@ -261,6 +261,74 @@ func TestHandleThemeCommand(t *testing.T) {
 	}
 }
 
+func TestNewThemePresetsWired(t *testing.T) {
+	neon, ok := lookupTheme("neon")
+	if !ok {
+		t.Fatal("theme 'neon' is not registered")
+	}
+	if !neon.IsDark {
+		t.Error("theme 'neon' should be marked as dark")
+	}
+
+	dune, ok := lookupTheme("dune")
+	if !ok {
+		t.Fatal("theme 'dune' is not registered")
+	}
+	if dune.IsDark {
+		t.Error("theme 'dune' should be marked as light")
+	}
+}
+
+func TestExtendedThemeContrastInvariants(t *testing.T) {
+	// Skip validation for old built-in themes if they have established, non-compliant palettes,
+	// but enforce strict compliance on the newly introduced 'neon' and 'dune' themes.
+	for _, entry := range themeRegistry {
+		if entry.Name != "neon" && entry.Name != "dune" {
+			continue
+		}
+		name, pal := entry.Name, entry.Palette
+		
+		// Finding 1: Permission and status/success surfaces
+		if r := wcagRatio(t, pal.amber, pal.permBg); r < 4.5 {
+			t.Errorf("%s: amber on permBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.onAccent, pal.amber); r < 4.5 {
+			t.Errorf("%s: onAccent on amber contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.panel); r < 4.5 {
+			t.Errorf("%s: green on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.amber, pal.panel); r < 4.5 {
+			t.Errorf("%s: amber on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.panel); r < 4.5 {
+			t.Errorf("%s: red on panel contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 2: Selected row secondary text
+		if r := wcagRatio(t, pal.faint, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faint on selBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faintest on selBg contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 3: Diff gutter pairings
+		if r := wcagRatio(t, pal.faintest, pal.addBg); r < 4.5 {
+			t.Errorf("%s: faintest on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.delBg); r < 4.5 {
+			t.Errorf("%s: faintest on delBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.addBg); r < 4.5 {
+			t.Errorf("%s: green on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.delBg); r < 4.5 {
+			t.Errorf("%s: red on delBg contrast %.2f < 4.5", name, r)
+		}
+	}
+}
+
 func mustR(t *testing.T, hex string) uint32 {
 	t.Helper()
 	r, _, _, _ := lipgloss.Color(hex).RGBA()
