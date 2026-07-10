@@ -287,7 +287,7 @@ func TestExtendedThemeContrastInvariants(t *testing.T) {
 			continue
 		}
 		name, pal := entry.Name, entry.Palette
-		
+
 		// Finding 1: Permission and status/success surfaces
 		if r := wcagRatio(t, pal.amber, pal.permBg); r < 4.5 {
 			t.Errorf("%s: amber on permBg contrast %.2f < 4.5", name, r)
