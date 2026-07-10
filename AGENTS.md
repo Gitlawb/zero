@@ -341,5 +341,3 @@ If you are an AI coding agent executing tasks in this repository, you **MUST** r
 3. **Security**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
 
 If any check fails or cannot be run, do not ignore it. Prompt the user for instructions or setup assistance before proceeding.
-
-
