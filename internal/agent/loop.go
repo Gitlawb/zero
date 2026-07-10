@@ -898,12 +898,18 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}, nil
 	}
 	tool, toolFound := registry.Get(call.Name)
-	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
+		modeName := string(permissionMode)
+		if permissionMode == PermissionModePlan {
+			modeName = "plan"
+		} else {
+			modeName = "spec-draft"
+		}
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
 			Status:       tools.StatusError,
-			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + modeName + ` mode.`,
 			DenialReason: DenialFiltered,
 		}, nil
 	}
@@ -2857,6 +2863,9 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if permissionMode == PermissionModeSpecDraft {
 		return toolAdvertisedInSpecDraft(tool)
 	}
+	if permissionMode == PermissionModePlan {
+		return toolAdvertisedInPlan(tool)
+	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
@@ -2884,6 +2893,18 @@ func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
 		return true
 	case "update_plan":
 		return false
+	}
+	safety := tool.Safety()
+	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+}
+
+// toolAdvertisedInPlan mirrors toolAdvertisedInSpecDraft: the agent may only
+// read the workspace, ask the user, and shape the plan with update_plan. No
+// mutating tool is advertised, so plan mode stays strictly read-only.
+func toolAdvertisedInPlan(tool tools.Tool) bool {
+	switch tool.Name() {
+	case "ask_user", "update_plan":
+		return true
 	}
 	safety := tool.Safety()
 	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
