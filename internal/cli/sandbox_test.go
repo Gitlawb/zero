@@ -616,8 +616,12 @@ func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {
 func normalizePortableJSONRootString(value *any) {
 	switch current := (*value).(type) {
 	case string:
-		if current == `\` {
-			*value = "/"
+		// Normalize OS-specific path separators so the shared golden file
+		// matches on both Unix (slash) and Windows (backslash) runners.
+		// readOnlySubpaths carve-outs are built with filepath.Join, which
+		// renders as backslash paths on Windows.
+		if current != "" {
+			*value = strings.ReplaceAll(current, `\`, "/")
 		}
 	case []any:
 		for index := range current {
