@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -501,6 +502,149 @@ func TestFormatOutputTruncatesSingleLineBodyKeepsFrame(t *testing.T) {
 	if !utf8.ValidString(out) {
 		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation")
 	}
+}
+
+// Regression: when a skill has a small body but enough assets that the total
+// output exceeds the cap, the truncator must NOT cut into the <skill_assets>
+// block — that used to emit a dangling open <skill_assets> with no closing
+// </skill_assets> AND duplicate the body's </skill> (one in output[:cut], one in
+// the appended closeFrame). On truncation, assets are dropped entirely so the
+// result carries exactly one </skill> and no partial asset fragment.
+func TestFormatOutputTruncationOmitsAssetsBlock(t *testing.T) {
+	dir := t.TempDir()
+	// Many asset files whose listing lines push the total well over the cap,
+	// while the body itself is tiny. Each file stays under maxAssetSize.
+	extras := make(map[string]string, 1200)
+	longName := strings.Repeat("x", 80) // long per-line asset name
+	for i := 0; i < 1200; i++ {
+		extras[fmt.Sprintf("asset-%04d-x", i)+longName] = "d"
+	}
+	writeSkillWithAssets(t, dir, "big", "---\nname: big\n---\nsmall body\n", extras)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	if len(loaded[0].Assets) == 0 {
+		t.Skip("assets not discovered on this platform/fs; truncation-omits-assets path untestable here")
+	}
+	out := FormatOutput(loaded[0])
+
+	// Exactly one closing </skill> — the body's own; assets dropped carry no
+	// extra close tag.
+	if c := strings.Count(out, "</skill>"); c != 1 {
+		t.Fatalf("expected exactly one </skill>, got %d; output tail:\n%s", c, out[len(out)-200:])
+	}
+	// No partial/dangling <skill_assets> open tag on the truncated path.
+	if strings.Contains(out, "<skill_assets") || strings.Contains(out, "</skill_assets>") {
+		t.Fatalf("truncation leaked a <skill_assets> fragment; output tail:\n%s", out[len(out)-200:])
+	}
+	// Priority rule: a body that fits is kept COMPLETE, then assets are dropped
+	// and the note is appended AFTER the body's own </skill>. So the body close
+	// tag directly precedes the note (no duplicated close tag appended).
+	if !strings.HasSuffix(out, "</skill>\n(output truncated)") {
+		t.Fatalf("expected body's </skill> + truncation note at end, got tail=%q", out[len(out)-60:])
+	}
+	// The complete body content must survive (not erased): the open-tag
+	// content precedes the close tag.
+	if i := strings.Index(out, "small body"); i < 0 {
+		t.Fatalf("body content erased on assets-overflow truncation: %q", out)
+	}
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation")
+	}
+}
+
+// TestFormatOutputTruncationPriority locks the documented priority order — keep
+// body complete > drop assets > truncate body — across the three branches.
+func TestFormatOutputTruncationPriority(t *testing.T) {
+	t.Run("fits_body_and_assets_kept", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSkillWithAssets(t, dir, "s", "---\nname: s\n---\nbody",
+			map[string]string{"a.txt": "x"})
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := FormatOutput(loaded[0])
+		if !strings.Contains(out, "body") || !strings.Contains(out, "a.txt") {
+			t.Fatalf("expected both body and asset kept, got:\n%s", out)
+		}
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		// No truncation note when everything fits.
+		if strings.Contains(out, "(output truncated)") {
+			t.Fatalf("unexpected truncation note when output fits")
+		}
+	})
+
+	t.Run("body_fits_assets_overflow_assets_dropped_body_intact", func(t *testing.T) {
+		dir := t.TempDir()
+		// Small body, enough assets to exceed the cap when appended.
+		extras := make(map[string]string, 2000)
+		for i := 0; i < 2000; i++ {
+			extras[fmt.Sprintf("asset-%04d-%s", i, strings.Repeat("x", 80))] = "d"
+		}
+		writeSkillWithAssets(t, dir, "s", "---\nname: s\n---\nUNIQUE_BODY_MARKER", extras)
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded[0].Assets) == 0 {
+			t.Skip("assets not discovered on this platform/fs")
+		}
+		out := FormatOutput(loaded[0])
+		// Body must remain COMPLETE and intact.
+		if !strings.Contains(out, "UNIQUE_BODY_MARKER") {
+			t.Fatalf("body content not preserved intact: %q", out)
+		}
+		// Assets dropped entirely — no fragment.
+		if strings.Contains(out, "<skill_assets") {
+			t.Fatalf("assets leaked on overflow: %q", out[len(out)-120:])
+		}
+		// Exactly one </skill> and a note after it.
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		if !strings.HasSuffix(out, "</skill>\n(output truncated)") {
+			t.Fatalf("expected </skill> + note tail, got %q", out[len(out)-60:])
+		}
+	})
+
+	t.Run("body_overflow_truncates_body_assets_omitted", func(t *testing.T) {
+		dir := t.TempDir()
+		// Body alone over the cap; also carry assets to confirm they never appear.
+		writeSkillWithAssets(t, dir, "s",
+			"---\nname: s\n---\n"+strings.Repeat("A", maxSkillOutputSize*2),
+			map[string]string{"a.txt": "x", "b.txt": "y"})
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := FormatOutput(loaded[0])
+		if strings.Contains(out, "<skill_assets") {
+			t.Fatalf("assets leaked while truncating body: %q", out)
+		}
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		if !strings.HasSuffix(out, "\n(output truncated)\n</skill>") {
+			t.Fatalf("expected note + close frame tail, got %q", out[len(out)-60:])
+		}
+		if len(out) > maxSkillOutputSize {
+			t.Fatalf("output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+		}
+		if !utf8.ValidString(out) {
+			t.Fatalf("invalid UTF-8 after truncation")
+		}
+	})
 }
 
 // #5 sanity: loadAssets uses confineSkillPath's returned FileInfo and does not

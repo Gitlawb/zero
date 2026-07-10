@@ -48,87 +48,80 @@ const maxAssetSize = 1 << 20 // 1 MB
 // large assets cannot blow out the model's context window.
 const maxSkillOutputSize = 100 << 10 // 100 KB
 
-// FormatOutput builds the model-facing output for a skill invocation. It wraps
-// the SKILL.md body in <skill> tags (with the skill directory path) and appends
-// a <skill_assets> block listing any additional files (scripts, configs, etc.)
-// discovered in the skill directory alongside SKILL.md. Asset paths are rendered
-// RELATIVE to the skill directory — the absolute install path (which contains
-// the user's home directory) is never sent to the model; dir= already tells the
-// model where the skill lives, and a relative path is stable across machines.
-// When no assets exist the assets block is omitted entirely for backward
-// compatibility. Output is capped at maxSkillOutputSize bytes, truncating on a
-// UTF-8 rune boundary and at a line boundary so the closing tags stay intact.
+// FormatOutput returns the model-facing output for a skill: the SKILL.md body
+// wrapped in <skill> tags, plus a <skill_assets> block listing additional files
+// in the skill directory (omitted when there are none). Output is capped at
+// maxSkillOutputSize bytes; on overflow the body is kept complete and assets
+// are dropped, truncating the body itself only when it alone exceeds the cap.
 func FormatOutput(skill Skill) string {
 	const truncationNote = "\n(output truncated)"
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "<skill name=%q dir=%q>\n", skill.Name, skill.Dir)
-	b.WriteString(skill.Content)
-	b.WriteString("\n</skill>")
+	openTag := fmt.Sprintf("<skill name=%q dir=%q>\n", skill.Name, skill.Dir)
+	var bb strings.Builder
+	bb.WriteString(openTag)
+	bb.WriteString(skill.Content)
+	bb.WriteString("\n</skill>")
+	body := bb.String()
 
-	if len(skill.Assets) > 0 {
-		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "<skill_assets name=%q>\n", skill.Name)
-		for _, asset := range skill.Assets {
-			rel := asset.Name // already skill-relative from loadAssets
-			if rel == "" {
-				// A manual asset without a relative name must never fall back to
-				// asset.Path: that is an absolute, symlink-resolved install path
-				// that contains the user's home directory. Surface the basename
-				// so the asset is still identifiable without leaking the host
-				// absolute path to the model.
-				rel = filepath.Base(asset.Path)
+	if len(body) > maxSkillOutputSize {
+		// Truncate the content only, preserving the open tag and appending the
+		// note plus closing </skill>. The cut lands on a UTF-8 rune and line
+		// boundary and never retreats into the open tag.
+		const closeTag = "\n</skill>"
+		ceiling := maxSkillOutputSize - len(truncationNote) - len(closeTag)
+		contentStart := len(openTag)
+		if ceiling < contentStart {
+			ceiling = contentStart
+		}
+		cut := ceiling
+		if cut > len(body) {
+			cut = len(body)
+		}
+		for cut > contentStart && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		if cut > contentStart {
+			if nl := strings.LastIndexByte(body[contentStart:cut], '\n'); nl >= 0 {
+				cut = contentStart + nl + 1
 			}
-			fmt.Fprintf(&b, "- %s (%s)\n", rel, humanSize(asset.Size))
 		}
-		b.WriteString("</skill_assets>")
+		if cut < contentStart {
+			cut = contentStart
+		}
+		if cut > len(body) {
+			cut = len(body)
+		}
+		return body[:cut] + truncationNote + closeTag
 	}
 
-	output := b.String()
-	if len(output) <= maxSkillOutputSize {
-		return output
+	if len(skill.Assets) == 0 {
+		return body
 	}
-	// Truncate on a UTF-8 rune boundary so we never emit a split multi-byte
-	// rune to the provider, then append the truncation note. The note itself is
-	// ASCII, so it cannot introduce an invalid rune.
-	//
-	// The closing frame ("\n</skill>") is reserved out of the ceiling and ALWAYS
-	// emitted, so a body longer than the cap still leaves the document
-	// well-formed instead of dropping the end tag (the doc promises the closing
-	// tags stay intact). The final output must satisfy
-	// len(output[:cut]) + len(note) + len(closeFrame) <= maxSkillOutputSize, so the
-	// cut ceiling already accounts for the note and frame. The cut is floored at
-	// the opening tag's length so it can never retreat into "<skill ...>\n" — the
-	// bug where a single-line body (no internal newline) collapsed the whole
-	// output to just the opening tag plus the note, erasing every instruction
-	// byte. Line snapping is applied within the body slice ONLY when it keeps at
-	// least one body byte; otherwise the rune-bounded cut is kept so content
-	// survives.
-	const closeFrame = "\n</skill>"
-	openTagLen := len(fmt.Sprintf("<skill name=%q dir=%q>\n", skill.Name, skill.Dir))
-	ceiling := maxSkillOutputSize - len(truncationNote) - len(closeFrame)
-	if ceiling < openTagLen {
-		ceiling = openTagLen
+	assets := renderAssets(skill)
+	if len(body)+len(assets) > maxSkillOutputSize {
+		// Keep the complete body, drop the assets block, and note the truncation.
+		return body + truncationNote
 	}
-	cut := ceiling
-	if cut > len(output) {
-		cut = len(output)
-	}
-	for cut > openTagLen && !utf8.RuneStart(output[cut]) {
-		cut--
-	}
-	if cut > openTagLen {
-		if nl := strings.LastIndexByte(output[openTagLen:cut], '\n'); nl >= 0 {
-			cut = openTagLen + nl + 1
+	return body + assets
+}
+
+// renderAssets builds the <skill_assets> block for a skill, rendering asset
+// paths relative to the skill directory.
+func renderAssets(skill Skill) string {
+	var a strings.Builder
+	a.WriteString("\n\n")
+	fmt.Fprintf(&a, "<skill_assets name=%q>\n", skill.Name)
+	for _, asset := range skill.Assets {
+		rel := asset.Name // already skill-relative from loadAssets
+		if rel == "" {
+			// Surface the basename when no relative name is available; never
+			// fall back to the absolute path, which would leak the home dir.
+			rel = filepath.Base(asset.Path)
 		}
+		fmt.Fprintf(&a, "- %s (%s)\n", rel, humanSize(asset.Size))
 	}
-	if cut < openTagLen {
-		cut = openTagLen
-	}
-	if cut > len(output) {
-		cut = len(output)
-	}
-	return output[:cut] + truncationNote + closeFrame
+	a.WriteString("</skill_assets>")
+	return a.String()
 }
 
 // humanSize formats a byte count as a human-readable string.
