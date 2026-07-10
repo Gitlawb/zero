@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 const windowsUnelevatedSetupMarkerSchemaVersion = 1
@@ -138,9 +141,36 @@ func recordWindowsUnelevatedAppliedPlan(sandboxHome string, applied WindowsUnele
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close windows unelevated setup marker temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := renameWithRetry(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replace windows unelevated setup marker: %w", err)
 	}
 	return nil
+}
+
+func renameWithRetry(src, dst string) error {
+	var err error
+	for i := 0; i < 10; i++ {
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			if os.IsPermission(err) || isWindowsSharingViolation(err) {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+		}
+		break
+	}
+	return err
+}
+
+func isWindowsSharingViolation(err error) bool {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		const ERROR_SHARING_VIOLATION syscall.Errno = 32
+		return errno == ERROR_SHARING_VIOLATION
+	}
+	return false
 }

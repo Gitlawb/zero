@@ -92,14 +92,24 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 	if err != nil {
 		return 0, fmt.Errorf("create world SID: %w", err)
 	}
+	usersSID, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		return 0, fmt.Errorf("create users SID: %w", err)
+	}
+	authUserSID, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		return 0, fmt.Errorf("create authenticated user SID: %w", err)
+	}
 
-	entries := make([]windows.SIDAndAttributes, 0, len(capabilitySIDs)+2)
+	entries := make([]windows.SIDAndAttributes, 0, len(capabilitySIDs)+4)
 	for _, sid := range capabilitySIDs {
 		entries = append(entries, windows.SIDAndAttributes{Sid: sid.sid})
 	}
 	entries = append(entries,
 		windows.SIDAndAttributes{Sid: sidFromBytes(logonSID)},
 		windows.SIDAndAttributes{Sid: worldSID},
+		windows.SIDAndAttributes{Sid: usersSID},
+		windows.SIDAndAttributes{Sid: authUserSID},
 	)
 
 	var restricted windows.Token

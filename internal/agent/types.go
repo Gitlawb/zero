@@ -24,6 +24,12 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModePlan is an interactive, read-only planning mode toggled from
+	// the TUI with /plan. It applies to the CURRENT session (unlike spec-draft,
+	// which drafts in a separate session): the agent may inspect the workspace
+	// and shape the plan with update_plan/ask_user, but no mutating tool is
+	// advertised, so it cannot write files, run shell, or implement while planning.
+	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at

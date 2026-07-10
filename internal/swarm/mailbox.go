@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -322,7 +324,7 @@ func atomicWriteJSON(path string, data any) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("swarm: close temp inbox: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("swarm: commit inbox: %w", err)
 	}
 	return nil
@@ -391,4 +393,31 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// contention (Windows file ops are slow; a coarse sleep starves waiters).
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+func renameWithRetry(src, dst string) error {
+	var err error
+	for i := 0; i < 10; i++ {
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			if os.IsPermission(err) || isWindowsSharingViolation(err) {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+		}
+		break
+	}
+	return err
+}
+
+func isWindowsSharingViolation(err error) bool {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		const ERROR_SHARING_VIOLATION syscall.Errno = 32
+		return errno == ERROR_SHARING_VIOLATION
+	}
+	return false
 }
