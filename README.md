@@ -314,7 +314,22 @@ Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json` (user
 scope — `$XDG_CONFIG_HOME` or `~/.config` on every OS, independent of the
 `config.UserConfigDir()` path used above) and `<cwd>/.zero/plugins/<name>/plugin.json`
 (project scope — resolved from the current working directory, not the repo
-root), and managed with `zero plugins`. A manifest can declare:
+root), and managed with `zero plugins`. Plugin catalogs are registered in
+`~/.config/zero/marketplaces.json` or `<cwd>/.zero/marketplaces.json`:
+
+```bash
+zero plugins marketplace validate ./catalog.json
+zero plugins marketplace add ./catalog.json --allow-unverified
+zero plugins marketplace list
+zero plugins browse lookup --catalog team
+zero plugins install zero.demo@team --yes
+zero plugins disable zero.demo
+zero plugins enable zero.demo
+```
+
+Disabled managed plugins are physically quarantined under
+`<plugins-root>/.disabled/<id>` and remain visible in `zero plugins list` without
+activating. A manifest can declare:
 
 - `tools` — custom tools (`command`, `args`, `inputSchema`, and a
   `permission` of `prompt` or `deny`; `allow` is honored only when manifest tool

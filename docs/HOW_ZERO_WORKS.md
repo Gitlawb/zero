@@ -130,7 +130,7 @@ reading the deeper flows below.
 | `internal/mcp` | MCP server config, client runtime, permission store, and MCP tool registration. |
 | `internal/specialist` / `internal/swarm` | Sub-agent manifests and team/member orchestration exposed as tools. |
 | `internal/localcontrol` / `internal/browser` | Runtime helpers used by config-gated local-control tool wrappers. |
-| `internal/plugins` / `internal/skills` / `internal/hooks` | Extension surfaces loaded into the agent context, tool registry, or tool lifecycle. |
+| `internal/plugins` / `internal/marketplace` / `internal/skills` / `internal/hooks` | Extension surfaces loaded into the agent context, tool registry, or tool lifecycle. The marketplace package validates local-first plugin catalogs and feeds managed installs into the existing plugin runtime. |
 | `internal/streamjson` | Machine-readable protocol for `zero exec --input-format/--output-format stream-json`. |
 
 ## Startup Flow

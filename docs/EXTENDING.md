@@ -278,15 +278,27 @@ Install and manage:
 
 ```bash
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
+zero plugins marketplace add ./catalog.json --allow-unverified
+zero plugins browse review --catalog team
+zero plugins install github-pr-review@team --yes
 zero plugins list
+zero plugins disable github-pr-review
+zero plugins enable github-pr-review
+zero plugins pin github-pr-review --version 1.0.0
+zero plugins unpin github-pr-review
 zero plugins remove github-pr-review    # alias: rm
 ```
 
-A plugin is enabled by being present in the plugins directory and disabled by removing it (or by the user setting `"enabled": false` in its `plugin.json`). Plugins are not enabled or disabled by a CLI subcommand today.
+Marketplace catalogs are local-first. User catalogs are registered in
+`~/.config/zero/marketplaces.json`; project catalogs are registered in
+`./.zero/marketplaces.json`. Unsigned catalogs can be browsed, but adding one
+requires `--allow-unverified`, and installs require `--yes`.
+
+A disabled managed plugin is moved to `<plugins-root>/.disabled/<id>` and its
+`plugins.lock` entry records `enabled:false`. This keeps older Zero versions
+from activating disabled plugin contents by directory presence alone.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
-
-> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above.
 
 ## 7. Configuration locations
 
