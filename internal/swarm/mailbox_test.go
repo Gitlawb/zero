@@ -295,6 +295,7 @@ func TestMailboxConcurrentSends(t *testing.T) {
 			defer wg.Done()
 			if err := mb.Send("team", "bob", Message{From: "a", Body: "concurrent"}); err != nil {
 				failures.Add(1)
+				t.Logf("Send error: %v", err)
 			}
 		}()
 	}
