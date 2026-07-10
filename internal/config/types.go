@@ -440,16 +440,19 @@ type MCPConfig struct {
 }
 
 type MCPServerConfig struct {
-	Type        string            `json:"type,omitempty"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	URL         string            `json:"url,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Auth        string            `json:"auth,omitempty"`
-	OAuth       *MCPOAuthConfig   `json:"oauth,omitempty"`
-	Disabled    bool              `json:"disabled,omitempty"`
-	disabledSet bool
+	Type     string            `json:"type,omitempty"`
+	Command  string            `json:"command,omitempty"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	URL      string            `json:"url,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+	Auth     string            `json:"auth,omitempty"`
+	OAuth    *MCPOAuthConfig   `json:"oauth,omitempty"`
+	Disabled bool              `json:"disabled,omitempty"`
+	// ProjectConfigured marks servers touched by project config. It is runtime
+	// metadata, not persisted config.
+	ProjectConfigured bool `json:"-"`
+	disabledSet       bool
 	// configured is true when the user's config JSON declared an object for
 	// this server at all (i.e. UnmarshalJSON ran for it), regardless of which
 	// fields it set or what values they hold. A built-in default seeded by

@@ -30,6 +30,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.selfCorrect = true
 		case arg == "--no-notify":
 			options.noNotify = true
+		case arg == "--no-completion-gate":
+			options.noCompletionGate = true
 		case arg == "--notify":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -402,6 +404,11 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		// rather than pretend it took effect.
 		return options, false, execUsageError{"--self-correct cannot be combined with --use-spec."}
 	}
+	if options.useSpec && options.noCompletionGate {
+		// Same reasoning as --self-correct above: the spec-draft path never consults
+		// the completion gate, so the flag would be silently ignored.
+		return options, false, execUsageError{"--no-completion-gate cannot be combined with --use-spec."}
+	}
 	if !options.useSpec && options.specModel != "" {
 		return options, false, execUsageError{"--spec-model requires --use-spec."}
 	}
@@ -461,6 +468,49 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 	if next == "" || flagValueLooksLikeOption(next) {
 		return "", index, execUsageError{fmt.Sprintf("%s requires a value", flag)}
 	}
+
+	// Validate specific flag values to prevent consuming positional prompt text
+	switch flag {
+	case "--auto":
+		switch strings.ToLower(next) {
+		case "low", "medium", "high", "member":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", next)}
+		}
+	case "--notify":
+		switch strings.ToLower(next) {
+		case "off", "bell", "notify", "both":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid --notify %q. Expected off, bell, notify, or both.", next)}
+		}
+	case "-o", "--output":
+		switch strings.ToLower(next) {
+		case "text", "json", "stream-json", "debug":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid output format %q. Expected text, json, stream-json, or debug.", next)}
+		}
+	case "-i", "--input":
+		switch strings.ToLower(next) {
+		case "text", "stream-json":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", next)}
+		}
+	case "--reasoning-effort", "--spec-reasoning-effort":
+		switch strings.ToLower(next) {
+		case "low", "medium", "high":
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, or high.", flag, next)}
+		}
+	case "--depth":
+		if _, err := strconv.Atoi(next); err != nil {
+			return "", index, execUsageError{fmt.Sprintf("invalid --depth %q. Expected a non-negative integer.", next)}
+		}
+	case "--max-turns":
+		if _, err := strconv.Atoi(next); err != nil {
+			return "", index, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a positive integer.", next)}
+		}
+	}
+
 	return next, index + 1, nil
 }
 

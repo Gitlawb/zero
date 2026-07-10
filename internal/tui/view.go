@@ -462,10 +462,15 @@ func shortenPath(path string) string {
 // both regular checkouts (.git dir) and worktrees (.git file). Returns "" on any
 // problem — the header simply omits the segment.
 func gitBranch(cwd string) string {
-	if strings.TrimSpace(cwd) == "" {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
 		return ""
 	}
-	gitPath := filepath.Join(cwd, ".git")
+	gitRoot := agent.FindProjectGitRoot(cwd)
+	if gitRoot == "" {
+		return ""
+	}
+	gitPath := filepath.Join(gitRoot, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
 		return ""
@@ -480,6 +485,12 @@ func gitBranch(cwd string) string {
 		dir := strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir: ")
 		if dir == "" {
 			return ""
+		}
+		// In worktree mode the gitdir is often RELATIVE (e.g.
+		// "gitdir: ../.git/worktrees/<name>") — resolve it against the worktree root (gitRoot), not the
+		// process working directory, or HEAD lookup fails and we drop the branch.
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(gitRoot, dir)
 		}
 		headPath = filepath.Join(dir, "HEAD")
 	}

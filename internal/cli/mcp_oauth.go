@@ -86,7 +86,7 @@ func runMCPOAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := store.Save(serverName, token); err != nil {
+	if err := store.SaveForServer(server, token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 
@@ -116,7 +116,7 @@ func runMCPOAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	removed, err := store.Delete(serverName)
+	removed, err := store.DeleteForServerName(serverName)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}

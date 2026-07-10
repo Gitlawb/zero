@@ -110,6 +110,16 @@ type execOptions struct {
 	notifyMode string
 	// noNotify forces ModeOff for this run. Mutually exclusive with notifyMode.
 	noNotify bool
+	// noCompletionGate turns off the headless completion gate
+	// (agent.Options.RequireCompletionSignal) for this run. It exists for
+	// CONVERSATIONAL exec callers — a chat frontend driving exec with an operator
+	// present to reply (e.g. zeroclaw chat). There, a final message that hands
+	// the turn back ("the sandbox blocks network egress, approve it and I'll
+	// continue") is a COMPLETE answer, not an unfinished task, so the gate's
+	// self-report admission check and INCOMPLETE downgrade (exit 4) would only
+	// mislabel honest blocker reports. Default off: plain `zero exec` keeps the
+	// gate, preserving CI/cron semantics.
+	noCompletionGate bool
 	// addDirs holds directories passed via --add-dir that should be allowed as
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
@@ -556,8 +566,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
-		// if the model keeps stalling. The interactive TUI leaves this off.
-		RequireCompletionSignal: true,
+		// if the model keeps stalling. The interactive TUI leaves this off, and
+		// --no-completion-gate lets conversational exec callers (a chat frontend
+		// with an operator present) opt out the same way.
+		RequireCompletionSignal: !options.noCompletionGate,
 		Sandbox:                 sandboxEngine,
 		FileTracker:             fileTracker,
 		Hooks:                   hookDispatcher,

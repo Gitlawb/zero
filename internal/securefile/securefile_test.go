@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestCreateSecretFileRetriesOnPermissionContention(t *testing.T) {
@@ -105,5 +106,35 @@ func TestWrongSecretCannotDecrypt(t *testing.T) {
 	b := NewCrypter(filepath.Join(dir, "b.secret")) // different secret
 	if _, err := b.Open(blob); err == nil {
 		t.Fatal("expected decryption under a different secret to fail")
+	}
+}
+
+func TestCreateSecretFileReclaimsStaleLock(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "k.secret")
+	lockPath := secretPath + ".lock"
+
+	// Create a stale lock file manually
+	if err := os.WriteFile(lockPath, []byte("99999-12345-1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate the lock file's modification time so it is considered stale
+	staleTime := time.Now().Add(-2 * secureLockStaleAfter)
+	if err := os.Chtimes(lockPath, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt to create the secret file; it should detect the stale lock, reclaim it, and succeed
+	secret, err := createSecretFile(secretPath)
+	if err != nil {
+		t.Fatalf("createSecretFile failed to reclaim stale lock: %v", err)
+	}
+	if len(secret) != secretBytes {
+		t.Fatalf("secret length = %d, want %d", len(secret), secretBytes)
+	}
+
+	// The lock file should be removed after completion
+	if _, err := os.Stat(lockPath); err == nil {
+		t.Fatal("expected lock file to be cleaned up after successful acquisition")
 	}
 }

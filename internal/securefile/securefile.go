@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,11 +23,15 @@ const (
 	// secretBytes is the AES-256 key length kept in the per-user secret file.
 	secretBytes = 32
 
-	secretRetryAttempts = 500
-	secretRetryDelay    = 2 * time.Millisecond
+	secretRetryAttempts  = 500
+	secretRetryDelay     = 2 * time.Millisecond
+	secureLockStaleAfter = 10 * time.Second
 )
 
-var openSecretLockFile = os.OpenFile
+var (
+	openSecretLockFile = os.OpenFile
+	secureLockSeq      atomic.Uint64
+)
 
 // Crypter encrypts a blob at rest with AES-256-GCM under a per-user random secret
 // persisted (0600) at secretPath.
@@ -107,12 +112,25 @@ func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 
 func createSecretFile(path string) ([]byte, error) {
 	lockPath := path + ".lock"
+	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), secureLockSeq.Add(1))
 	var lastErr error
 	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
 		lock, err := openSecretLockFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			_ = lock.Close()
-			defer os.Remove(lockPath)
+			if _, werr := lock.WriteString(token); werr != nil {
+				_ = lock.Close()
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("securefile: write secret lock: %w", werr)
+			}
+			if cerr := lock.Close(); cerr != nil {
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("securefile: close secret lock: %w", cerr)
+			}
+			defer func() {
+				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
+					_ = os.Remove(lockPath)
+				}
+			}()
 			if data, rerr := readSecretFileRetry(path); rerr == nil {
 				return data, nil
 			} else if !errors.Is(rerr, os.ErrNotExist) {
@@ -133,12 +151,33 @@ func createSecretFile(path string) ([]byte, error) {
 		// contention/ACL problem is masked by the expected-while-waiting
 		// ErrNotExist once the retries are exhausted.
 		lastErr = err
+
+		// Reclaim a stale lock left by a crashed holder
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > secureLockStaleAfter {
+			if reclaimStaleLock(lockPath, token, secureLockStaleAfter) {
+				continue
+			}
+		}
+
 		if data, rerr := readSecretFileRetry(path); rerr == nil {
 			return data, nil
 		}
 		time.Sleep(secretRetryDelay)
 	}
 	return nil, fmt.Errorf("securefile: timed out waiting for secret %s: %w", path, lastErr)
+}
+
+func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
+	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
+	if err := os.Rename(lockPath, reclaimed); err != nil {
+		return false
+	}
+	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
+		_ = os.Rename(reclaimed, lockPath)
+		return false
+	}
+	_ = os.Remove(reclaimed)
+	return true
 }
 
 func writeNewSecretFile(path string) ([]byte, error) {

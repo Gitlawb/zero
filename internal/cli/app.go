@@ -1347,6 +1347,8 @@ Flags:
       --notify <off|bell|notify|both>
                                     Override notification mode for this run
       --no-notify                   Disable notifications for this run
+      --no-completion-gate          Accept a no-tool-call reply as final without the INCOMPLETE
+                                    downgrade (for conversational callers with an operator present)
 `)
 	return err
 }

@@ -2050,6 +2050,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case askUserRequestMsg:
 		if msg.runID != m.activeRunID {
+			if msg.answer != nil {
+				msg.answer(nil)
+			}
 			return m, nil
 		}
 		// A request with no questions has nothing to answer — resolve it
@@ -2163,6 +2166,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.plan.completeRemaining(m.now())
 		}
 		m.pendingPermission = nil
+		if m.pendingAskUser != nil && m.pendingAskUser.answer != nil {
+			m.pendingAskUser.answer(nil)
+		}
 		m.pendingAskUser = nil
 		liveUsageCount := m.liveUsageCounts[msg.runID]
 		for index, event := range msg.usageEvents {

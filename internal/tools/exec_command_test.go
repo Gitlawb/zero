@@ -422,6 +422,34 @@ func TestStartExecProcessFallsBackAfterPTYStartMutation(t *testing.T) {
 	}
 }
 
+func TestStartExecProcessPTYFallbackPreservesSysProcAttr(t *testing.T) {
+	original := startPTYProcessFunc
+	t.Cleanup(func() { startPTYProcessFunc = original })
+	startPTYProcessFunc = func(command *exec.Cmd, _ *execOutputBuffer) (io.WriteCloser, func(), error) {
+		return nil, nil, errors.New("pty start failed")
+	}
+
+	command := exec.CommandContext(context.Background(), os.Args[0], "--zero-bash-helper", "success")
+	customAttr := &syscall.SysProcAttr{}
+	command.SysProcAttr = customAttr
+
+	output := newExecOutputBuffer()
+	stdin, tty, cleanup, err := startExecProcess(command, output, true)
+	if err != nil {
+		t.Fatalf("startExecProcess fallback failed: %v", err)
+	}
+	if tty {
+		t.Fatal("fallback process must report tty=false")
+	}
+	_ = stdin.Close()
+	_ = command.Wait()
+	cleanup()
+
+	if command.SysProcAttr != customAttr {
+		t.Fatalf("SysProcAttr was not preserved: got %+v, want %+v", command.SysProcAttr, customAttr)
+	}
+}
+
 // TestExecOutputBufferCapsUndrainedData: a session nobody polls must not grow
 // its undrained buffer without bound — a long-lived background process that
 // keeps writing while unpolled previously ran a session's memory into the

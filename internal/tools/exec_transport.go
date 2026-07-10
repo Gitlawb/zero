@@ -3,25 +3,27 @@ package tools
 import (
 	"io"
 	"os/exec"
+	"syscall"
 )
 
 func startExecProcess(command *exec.Cmd, output *execOutputBuffer, ttyRequested bool) (io.WriteCloser, bool, func(), error) {
 	if ttyRequested {
+		origSysProcAttr := command.SysProcAttr
 		if stdin, cleanup, err := startPTYProcessFunc(command, output); err == nil {
 			return stdin, true, cleanup, nil
 		}
-		resetExecCommandForPipeFallback(command)
+		resetExecCommandForPipeFallback(command, origSysProcAttr)
 	}
 	return startPipeProcess(command, output)
 }
 
 var startPTYProcessFunc = startPTYProcess
 
-func resetExecCommandForPipeFallback(command *exec.Cmd) {
+func resetExecCommandForPipeFallback(command *exec.Cmd, origSysProcAttr *syscall.SysProcAttr) {
 	command.Stdin = nil
 	command.Stdout = nil
 	command.Stderr = nil
-	command.SysProcAttr = nil
+	command.SysProcAttr = origSysProcAttr
 	command.Cancel = nil
 	command.WaitDelay = 0
 }

@@ -235,6 +235,13 @@ Servers are merged from user and project configs (project wins on conflicts). To
 - A `--header` value produced by command substitution (`"Authorization=Bearer $(print-token)"`) in a private shell config that you keep out of git.
 - A secret manager that injects the env var your MCP server reads on its own (the `command` and `args` then run inside that environment).
 
+Project MCP config remains supported for shared team servers, but a project layer
+that changes an existing server's target (`url`, `command`, or `args`) does not
+inherit user credentials. Clear or replace `headers`, `env`, or `oauth` explicitly,
+or use a new server name. OAuth tokens are bound to the resolved server identity,
+so changing a server target can require `zero mcp oauth login <server>` again.
+OAuth server names ending in `.<32 hex chars>` are reserved for token storage.
+
 ### As a server — expose Zero's tools to another agent
 
 ```bash

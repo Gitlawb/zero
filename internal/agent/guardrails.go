@@ -183,33 +183,110 @@ var successNegationTails = []string{
 	"reproduce", "spot any", "locate any",
 }
 
-// selfReportedIncompletion returns a short reason when the model's final text
-// admits it guessed or could not meet the objective, else "". Case-insensitive.
-func selfReportedIncompletion(text string) string {
-	lower := strings.ToLower(text)
-	for _, phrase := range selfReportPhrases {
-		if strings.Contains(lower, phrase) {
-			return selfReportReason(phrase)
+// narrativeMarkers flag a sentence as RETELLING a past exchange rather than
+// reporting the outcome of the current objective, so an inability admission in
+// that sentence is about THEN, not NOW. Grounded in a real false positive: a
+// conversational recap ("You asked if I could work autonomously … I was honest
+// that my sandbox had no repo … so I couldn't actually do it at the time") was
+// downgraded to INCOMPLETE on the quoted "i couldn't " stem even though the
+// current turn's objective (summarize where we left off) was fully met. Every
+// marker is second-person or explicitly past-referential, so a first-person
+// admission about the current task ("I couldn't complete the refactor") is
+// never masked.
+var narrativeMarkers = []string{
+	"you asked", "you said", "you wanted", "you mentioned",
+	"we discussed", "we talked", "we covered",
+	"when we last", "last time", "last session", "previous session",
+	"previous conversation", "earlier session", "earlier conversation",
+	"at the time", "back then",
+}
+
+// stripQuoted removes spans enclosed in double quotes (straight or curly) or
+// backticks, so an admission the model merely QUOTES — its own earlier message,
+// a log line, an error string — cannot fire the detector. Only BALANCED spans
+// are removed: an opening delimiter that never closes is kept as literal text,
+// so a stray quote cannot swallow the rest of the message (and with it a
+// genuine admission the detector must see). Single quotes are left alone: they
+// are overwhelmingly apostrophes ("couldn't"), and treating them as quote
+// delimiters would swallow the text between two contractions.
+func stripQuoted(s string) string {
+	var b strings.Builder
+	var span strings.Builder // pending text since the open delimiter, kept if it never closes
+	open := rune(0)
+	for _, r := range s {
+		switch {
+		case open != 0:
+			if (open == '"' && r == '"') || (open == '“' && r == '”') || (open == '`' && r == '`') {
+				open = 0
+				span.Reset()
+				continue
+			}
+			span.WriteRune(r)
+		case r == '"' || r == '“' || r == '`':
+			open = r
+			span.WriteRune(r)
+		default:
+			b.WriteRune(r)
 		}
 	}
-	for _, stem := range inabilityStems {
-		// Scan EVERY occurrence of the stem, not just the first: an earlier
-		// success-negation use ("I could not find any examples, so I could not
-		// implement it") must not mask a later genuine admission with the same stem.
-		for start := 0; ; {
-			rel := strings.Index(lower[start:], stem)
-			if rel < 0 {
-				break
+	b.WriteString(span.String()) // dangling delimiter: restore the span verbatim
+	return b.String()
+}
+
+// admissionSentences splits lowered text into sentence-ish fragments so the
+// detector judges each claim in its own context. Newlines split too (markdown
+// bullets are separate claims); the exact boundaries only need to keep an
+// admission next to its own narrative/negation context, not be grammatical.
+func admissionSentences(lower string) []string {
+	return strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n'
+	})
+}
+
+// selfReportedIncompletion returns a short reason when the model's final text
+// admits it guessed or could not meet the objective, else "". Case-insensitive.
+// Matching is per sentence, after dropping quoted spans, and a sentence that
+// retells a past exchange (narrativeMarkers) is skipped entirely — an admission
+// must be the model's own report about the CURRENT objective, not general
+// language that merely resembles one.
+func selfReportedIncompletion(text string) string {
+	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
+		if containsAny(sentence, narrativeMarkers) {
+			continue
+		}
+		for _, phrase := range selfReportPhrases {
+			if strings.Contains(sentence, phrase) {
+				return selfReportReason(phrase)
 			}
-			abs := start + rel
-			tail := strings.TrimSpace(lower[abs+len(stem):])
-			if !hasAnyPrefix(tail, successNegationTails) {
-				return selfReportReason(strings.TrimSpace(stem) + " …")
+		}
+		for _, stem := range inabilityStems {
+			// Scan EVERY occurrence of the stem, not just the first: an earlier
+			// success-negation use ("I could not find any examples, so I could not
+			// implement it") must not mask a later genuine admission with the same stem.
+			for start := 0; ; {
+				rel := strings.Index(sentence[start:], stem)
+				if rel < 0 {
+					break
+				}
+				abs := start + rel
+				tail := strings.TrimSpace(sentence[abs+len(stem):])
+				if !hasAnyPrefix(tail, successNegationTails) {
+					return selfReportReason(strings.TrimSpace(stem) + " …")
+				}
+				start = abs + len(stem)
 			}
-			start = abs + len(stem)
 		}
 	}
 	return ""
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func selfReportReason(marker string) string {

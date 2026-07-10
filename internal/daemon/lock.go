@@ -52,7 +52,7 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 			}
 			return &fileLock{path: path}, nil
 		}
-		if !errors.Is(err, fs.ErrExist) {
+		if !errors.Is(err, fs.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, err
 		}
 		pid, perr := readPidFile(path)

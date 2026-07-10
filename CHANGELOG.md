@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.3.0](https://github.com/Gitlawb/zero/compare/v0.2.0...v0.3.0) (2026-07-09)
+
+
+### Features
+
+* gate project-scoped hooks, plugins, and MCP servers behind workspace trust ([#529](https://github.com/Gitlawb/zero/issues/529)) ([a880ce8](https://github.com/Gitlawb/zero/commit/a880ce80a6ec72da511fb9bdf6dd69291c72a64b))
+* **modelregistry:** infer reasoning efforts for Hunyuan and vendor-prefixed model ids ([#599](https://github.com/Gitlawb/zero/issues/599)) ([92a92ce](https://github.com/Gitlawb/zero/commit/92a92ceb29dc63f5216ab140ef9a6dd9afe17df8))
+* **providers:** OAuth login profiles and list-first /provider manager ([#560](https://github.com/Gitlawb/zero/issues/560)) ([1655056](https://github.com/Gitlawb/zero/commit/16550569c1be615cfaf244dab25909ec37f6dee6))
+* **tui:** remember recent provider+model selections in /model picker ([#568](https://github.com/Gitlawb/zero/issues/568)) ([d0c4e62](https://github.com/Gitlawb/zero/commit/d0c4e62cd429a0614c15296934c740a08bc0e07b))
+* **tui:** show CLI version on the startup home screen ([#538](https://github.com/Gitlawb/zero/issues/538)) ([fd69233](https://github.com/Gitlawb/zero/commit/fd69233e334f1823a06b5794085a9255b3abdfa8))
+* voice dictation (speech-to-text) ([#557](https://github.com/Gitlawb/zero/issues/557)) ([87158a1](https://github.com/Gitlawb/zero/commit/87158a1c90b4f91fc5f2bb8178ebaf46d7654680))
+
+
+### Bug Fixes
+
+* address bugs found in a multi-agent codebase audit ([#481](https://github.com/Gitlawb/zero/issues/481)) ([008bc9b](https://github.com/Gitlawb/zero/commit/008bc9b3f3ba13c7d4822b9559b020f381ff555b))
+* **agent:** keep tools exposed for max-turn finalization ([#533](https://github.com/Gitlawb/zero/issues/533)) ([3f0503b](https://github.com/Gitlawb/zero/commit/3f0503bc2312ae29d5ade784d8824dc9a3524958))
+* **auth:** persist OpenRouter API key after login ([#595](https://github.com/Gitlawb/zero/issues/595)) ([2a062aa](https://github.com/Gitlawb/zero/commit/2a062aa4014c6cd5e20a57dad4a685f88966f109))
+* bump Go to 1.26.5 for crypto/tls fix (GO-2026-5856) ([#607](https://github.com/Gitlawb/zero/issues/607)) ([a7cfb99](https://github.com/Gitlawb/zero/commit/a7cfb99fed7b88ebc09a2f251cb82864d3c2cade))
+* gitignore Windows sandbox helpers and npm version marker ([#578](https://github.com/Gitlawb/zero/issues/578)) ([25653f6](https://github.com/Gitlawb/zero/commit/25653f686c016f95b81ceb7ff5d5452d37c4d4f3))
+* **mcp:** silence startup warning for unconfigured default servers ([#563](https://github.com/Gitlawb/zero/issues/563)) ([302f58b](https://github.com/Gitlawb/zero/commit/302f58bb5f2a03ec7230354ed4747e4e55c16c50))
+* **mcp:** skip RFC 8414 discovery when OAuth endpoints are preconfigured ([#586](https://github.com/Gitlawb/zero/issues/586)) ([8a52d98](https://github.com/Gitlawb/zero/commit/8a52d98cad7cd0086dee9aede4ce477e432bd385))
+* **modelregistry:** reject oversized models.dev cache responses ([#602](https://github.com/Gitlawb/zero/issues/602)) ([66a6396](https://github.com/Gitlawb/zero/commit/66a63964149fb2f07e646e5f1987627c5cd9ac28))
+* **provider:** stop dropping custom no-auth providers on restart ([#558](https://github.com/Gitlawb/zero/issues/558)) ([ba99fa8](https://github.com/Gitlawb/zero/commit/ba99fa8d487fb28f2700e0ff10b2a25c75303cf7))
+* **sandbox:** Windows-appropriate suggestions when blocking interactive commands ([#414](https://github.com/Gitlawb/zero/issues/414)) ([ba4c007](https://github.com/Gitlawb/zero/commit/ba4c00755dc1c31b3dcca18e50b20f62c6bf5d1f))
+* **tools:** block MSYS and WSL shells under the Windows sandbox ([#587](https://github.com/Gitlawb/zero/issues/587)) ([0666818](https://github.com/Gitlawb/zero/commit/066681855b80e3baf5d07d7397610b25f724e353))
+* **tools:** platform-specific pager suggestions, quote/caret-safe cd detection ([#543](https://github.com/Gitlawb/zero/issues/543)) ([8b248f4](https://github.com/Gitlawb/zero/commit/8b248f4e1198dc86ab332a697fba4cf520823cbd))
+* **tools:** Windows cmd.exe quoting guidance and clipboard escaping fix ([#468](https://github.com/Gitlawb/zero/issues/468)) ([f10ed0c](https://github.com/Gitlawb/zero/commit/f10ed0c893ce6de08923f143d681ba96f0fcfe3a))
+* **tui:** bypass toggleSidebar and toggleMouse global shortcuts when composer is non-empty ([#576](https://github.com/Gitlawb/zero/issues/576)) ([c7346fb](https://github.com/Gitlawb/zero/commit/c7346fbcf01fe7e70ed2fcfccbf9965e5985727b))
+* **tui:** paste protection for Termux char-by-char paste ([#573](https://github.com/Gitlawb/zero/issues/573)) ([8e9149f](https://github.com/Gitlawb/zero/commit/8e9149f1a296bebebf95cae9dd2a7c5156c9dbb6))
+* **tui:** update picker_test for switchProviderModel 4-value return ([#589](https://github.com/Gitlawb/zero/issues/589)) ([8f15650](https://github.com/Gitlawb/zero/commit/8f156506dc92449bd24caa14e36f28477ba00fff))
+* **update:** clearer error on unsupported release platform (android/termux) ([#603](https://github.com/Gitlawb/zero/issues/603)) ([1fc9b2d](https://github.com/Gitlawb/zero/commit/1fc9b2d25c79e089f34cb7b5b6a7f7c7b8233123))
+* **update:** support safe symlink extraction during updates ([#575](https://github.com/Gitlawb/zero/issues/575)) ([ce9cb91](https://github.com/Gitlawb/zero/commit/ce9cb912958a3d9ae0b052bfebb849c28e0e719b))
+* warn about untracked scratch files left behind after a run ([#571](https://github.com/Gitlawb/zero/issues/571)) ([062328b](https://github.com/Gitlawb/zero/commit/062328b632a2d27353a6d47c522bbd22d7282539))
+
+
+### Performance Improvements
+
+* **grep:** stop content scan after head limit ([#601](https://github.com/Gitlawb/zero/issues/601)) ([8a05e64](https://github.com/Gitlawb/zero/commit/8a05e6486f7a63281b869064db03dfc5531e6a04))
+
 ## [0.2.0](https://github.com/Gitlawb/zero/compare/v0.1.0...v0.2.0) (2026-07-06)
 
 

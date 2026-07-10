@@ -163,21 +163,24 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 	// can override any field or disable a default by writing over it.
 	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
 
-	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
-		if path == "" {
-			continue
-		}
-		// Drop the project layer when the workspace is untrusted, so a cloned repo's
-		// ./.zero/config.json cannot register (and spawn) stdio MCP servers. Fail-closed:
-		// only a trusted workspace clears ExcludeProject. Defaults and user config still load.
-		if options.ExcludeProject && path == options.ProjectConfigPath {
-			continue
-		}
-		fileConfig, err := loadConfigFile(path)
+	if options.UserConfigPath != "" {
+		fileConfig, err := loadConfigFile(options.UserConfigPath)
 		if err != nil {
 			return MCPConfig{}, err
 		}
 		mergeMCPConfig(&cfg.MCP, fileConfig.MCP)
+	}
+	// Drop the project layer when the workspace is untrusted, so a cloned repo's
+	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:
+	// only a trusted workspace clears ExcludeProject. Defaults and user config still load.
+	if options.ProjectConfigPath != "" && !options.ExcludeProject {
+		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
+		if err != nil {
+			return MCPConfig{}, err
+		}
+		if err := mergeProjectMCPConfig(&cfg.MCP, fileConfig.MCP); err != nil {
+			return MCPConfig{}, err
+		}
 	}
 	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP)
 	return cfg.MCP, nil
@@ -261,7 +264,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		}
 		mergeProvider(dst, provider)
 	}
-	mergeMCPConfig(&dst.MCP, src.MCP)
+	if err := mergeProjectMCPConfig(&dst.MCP, src.MCP); err != nil {
+		return err
+	}
 	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
@@ -832,63 +837,6 @@ func validateSTTConfig(cfg STTConfig) error {
 		return fmt.Errorf("invalid stt.localServerPort %d: must be between 1 and 65535 (0 uses the default)", cfg.LocalServerPort)
 	}
 	return nil
-}
-
-func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
-	if len(src.Servers) == 0 {
-		return
-	}
-	if dst.Servers == nil {
-		dst.Servers = map[string]MCPServerConfig{}
-	}
-	for name, server := range src.Servers {
-		dst.Servers[name] = mergeMCPServer(dst.Servers[name], server)
-	}
-}
-
-func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig {
-	if strings.TrimSpace(next.Type) != "" {
-		base.Type = next.Type
-	}
-	if strings.TrimSpace(next.Command) != "" {
-		base.Command = next.Command
-	}
-	if next.Args != nil {
-		base.Args = append([]string{}, next.Args...)
-	}
-	if next.Env != nil {
-		base.Env = copyMCPStringMap(next.Env)
-	}
-	if strings.TrimSpace(next.URL) != "" {
-		base.URL = next.URL
-	}
-	if next.Headers != nil {
-		base.Headers = copyMCPStringMap(next.Headers)
-	}
-	if strings.TrimSpace(next.Auth) != "" {
-		base.Auth = next.Auth
-	}
-	if next.OAuth != nil {
-		base.OAuth = next.OAuth
-	}
-	if next.disabledSet || next.Disabled {
-		base.Disabled = next.Disabled
-	}
-	if next.configured {
-		base.configured = true
-	}
-	return base
-}
-
-func copyMCPStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-	copied := make(map[string]string, len(values))
-	for key, value := range values {
-		copied[key] = value
-	}
-	return copied
 }
 
 func hasProviderFields(profile ProviderProfile) bool {

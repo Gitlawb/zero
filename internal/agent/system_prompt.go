@@ -295,7 +295,7 @@ func workspaceContext(cwd string) string {
 	}
 	b.WriteString("</environment>")
 
-	b.WriteString(projectGuidelines(cwd, findProjectGitRoot(cwd)))
+	b.WriteString(projectGuidelines(cwd, FindProjectGitRoot(cwd)))
 	if repoMap := repoMapContext(cwd); repoMap != "" {
 		b.WriteString("\n\n## Repo map\n\n" + repoMap)
 	}
@@ -542,17 +542,17 @@ func resolveDirCaseInsensitive(target, anchor string) (string, bool) {
 	return cur, true
 }
 
-// findProjectGitRoot returns the nearest ancestor of cwd that contains a
+// FindProjectGitRoot returns the nearest ancestor of cwd that contains a
 // .git entry (file or directory). Returns "" when no git root is found, so
 // the caller can fall back to cwd-only lookup.
-func findProjectGitRoot(cwd string) string {
+func FindProjectGitRoot(cwd string) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
 	}
 	cur := cwd
 	for {
-		if hasGitMetadata(cur) {
+		if HasGitMetadata(cur) {
 			return cur
 		}
 		parent := filepath.Dir(cur)
@@ -563,7 +563,7 @@ func findProjectGitRoot(cwd string) string {
 	}
 }
 
-func hasGitMetadata(dir string) bool {
+func HasGitMetadata(dir string) bool {
 	gitPath := filepath.Join(dir, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
@@ -619,7 +619,11 @@ func repoMapContext(cwd string) string {
 // cwd, handling both a regular checkout (.git dir) and a worktree (.git file).
 // Returns "" on any problem — the prompt simply omits the branch segment.
 func gitBranchForPrompt(cwd string) string {
-	gitPath := filepath.Join(cwd, ".git")
+	gitRoot := FindProjectGitRoot(cwd)
+	if gitRoot == "" {
+		return ""
+	}
+	gitPath := filepath.Join(gitRoot, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
 		return ""
@@ -635,10 +639,10 @@ func gitBranchForPrompt(cwd string) string {
 			return ""
 		}
 		// In worktree mode the gitdir is often RELATIVE (e.g.
-		// "gitdir: ../.git/worktrees/<name>") — resolve it against cwd, not the
+		// "gitdir: ../.git/worktrees/<name>") — resolve it against the worktree root (gitRoot), not the
 		// process working directory, or HEAD lookup fails and we drop the branch.
 		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
+			dir = filepath.Join(gitRoot, dir)
 		}
 		headPath = filepath.Join(dir, "HEAD")
 	}

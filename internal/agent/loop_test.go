@@ -2947,6 +2947,24 @@ func TestGitBranchForPromptResolvesRelativeWorktreeGitdir(t *testing.T) {
 	}
 }
 
+func TestGitBranchForPromptInSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	gitdir := filepath.Join(root, ".git")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "sub", "dir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitBranchForPrompt(subdir); got != "main" {
+		t.Fatalf("gitBranchForPrompt in subdirectory = %q, want main", got)
+	}
+}
+
 func TestBuildSystemPromptInjectsWorkspaceContext(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("Always run `make lint` before committing."), 0o644); err != nil {

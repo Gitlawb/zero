@@ -31,6 +31,9 @@ type Server struct {
 	Auth     string
 	OAuth    *OAuthConfig
 	Identity string
+	// ProjectConfigured is true when project config touched this server. Runtime
+	// credential lookup uses it to avoid reusing legacy user tokens by name.
+	ProjectConfigured bool
 	// UnconfiguredDefault is true when this server is one of Zero's built-in
 	// defaults (e.g. keyless Firecrawl) that the user never touched in their
 	// config — no credentials, no overrides. Callers use it to avoid warning
@@ -88,6 +91,7 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		Headers:             copyStringMap(raw.Headers),
 		Auth:                auth,
 		OAuth:               normalizeOAuthConfig(raw.OAuth),
+		ProjectConfigured:   raw.ProjectConfigured,
 		UnconfiguredDefault: config.IsUnconfiguredDefault(name, raw),
 	}
 

@@ -176,8 +176,7 @@ func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definitio
 func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 	// A hook that started but was killed by its deadline (or a cancellation) never
 	// returned a verdict. For a blocking event we must fail CLOSED and veto: a
-	// hung beforeTool policy hook cannot be treated as approval. (A launch failure
-	// below still fails OPEN, so a misconfigured hook doesn't wedge every tool.)
+	// hung beforeTool policy hook cannot be treated as approval.
 	if result.TimedOut {
 		if blocksOn(event) {
 			return AuditBlocked, true
@@ -185,6 +184,9 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 		return AuditError, false
 	}
 	if result.Err != nil {
+		if blocksOn(event) {
+			return AuditBlocked, true
+		}
 		return AuditError, false
 	}
 	if result.ExitCode != 0 {
