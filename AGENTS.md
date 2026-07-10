@@ -336,10 +336,10 @@ That's it. Run `zero` from the repo root and the agent has the team's full instr
 
 If you are an AI coding agent executing tasks in this repository, you **MUST** run all Go code quality and security checks before committing code or completing your task:
 
-1. **Formatting**: Run `go fmt ./...` (or `make fmt`) to format code.
-2. **Vetting**: Run `go vet ./...` (or `make vet`) to check for common mistakes.
-3. **Linting**: Run `golangci-lint run` to inspect code style and quality.
-4. **Vulnerability Scanning**: Run `govulncheck ./...` to check for security vulnerabilities.
+1. **Format & Vet**: Run `go fmt ./...` and `go vet ./...`.
+2. **Lint**: Run `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
+3. **Security**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
 
-If any of these tools (`golangci-lint` or `govulncheck`) are not installed or are unavailable in the path when you attempt to run them, do not ignore the check. You must prompt the user with instructions to install them (e.g., `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` or `go install golang.org/x/vuln/cmd/govulncheck@latest`) and ask for confirmation/action before proceeding.
+If any check fails or cannot be run, do not ignore it. Prompt the user for instructions or setup assistance before proceeding.
+
 

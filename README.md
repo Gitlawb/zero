@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26+" src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
@@ -75,7 +75,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.26+.
+Source builds require Go 1.26.5+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -322,21 +322,21 @@ go run ./cmd/zero-perf-bench
 
 ### Code Quality and Security Checks
 
-Before committing any changes, run all Go code quality and security checks:
+Before committing any changes, ensure all Go code quality and security checks pass. Pinned `go run` commands matching CI constraints can be used directly without prior installation:
 
 1. **Formatting**: Run `go fmt ./...` (or `make fmt`).
 2. **Vetting**: Run `go vet ./...` (or `make vet`).
-3. **Linting**: Run `golangci-lint run`.
-4. **Vulnerability Scan**: Run `govulncheck ./...`.
+3. **Linting**: Run `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
+4. **Vulnerability Scan**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
 
-If `golangci-lint` or `govulncheck` are not installed, install them with:
+If you prefer to install these tools globally on your path, you can run:
 
 ```bash
 # Install golangci-lint
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.12.2
 
 # Install govulncheck
-go install golang.org/x/vuln/cmd/govulncheck@latest
+go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 ```
 
 ### Cross-Compile Examples
