@@ -9,6 +9,7 @@ import (
 
 var expectedCatalogIDs = []string{
 	"gitlawb-opengateway",
+	"aimlapi",
 	"openai",
 	"anthropic",
 	"google",
@@ -69,25 +70,31 @@ func TestAllHasStableUniqueIDs(t *testing.T) {
 	}
 }
 
-func TestRecommendedProviderIsFirstAndUnique(t *testing.T) {
+func TestRecommendedProvidersAreTopOfCatalog(t *testing.T) {
 	descriptors := All()
-	if len(descriptors) == 0 {
-		t.Fatal("All() returned no descriptors")
+	// The recommended providers are badged and pinned to the top of the catalog,
+	// in this order (OpenGateway remains the default; aimlapi.com is also badged).
+	wantTop := []string{"gitlawb-opengateway", "aimlapi"}
+	if len(descriptors) < len(wantTop) {
+		t.Fatalf("All() returned %d descriptors, want at least %d", len(descriptors), len(wantTop))
 	}
-	if !descriptors[0].Recommended {
-		t.Fatalf("All()[0] = %q, want it to be the recommended provider", descriptors[0].ID)
+	for index, id := range wantTop {
+		if descriptors[index].ID != id {
+			t.Fatalf("descriptors[%d] = %q, want %q", index, descriptors[index].ID, id)
+		}
+		if !descriptors[index].Recommended {
+			t.Fatalf("descriptors[%d] (%q) should be recommended", index, id)
+		}
 	}
-	if descriptors[0].ID != "gitlawb-opengateway" {
-		t.Fatalf("recommended provider = %q, want %q", descriptors[0].ID, "gitlawb-opengateway")
-	}
+	// Exactly those are recommended, and they are contiguous at the top.
 	recommended := 0
 	for _, descriptor := range descriptors {
 		if descriptor.Recommended {
 			recommended++
 		}
 	}
-	if recommended != 1 {
-		t.Fatalf("recommended descriptor count = %d, want exactly 1", recommended)
+	if recommended != len(wantTop) {
+		t.Fatalf("recommended descriptor count = %d, want %d", recommended, len(wantTop))
 	}
 }
 

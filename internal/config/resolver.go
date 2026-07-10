@@ -1039,6 +1039,13 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
+	if len(descriptor.CustomHeaders) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
+		merged := copyStringMap(descriptor.CustomHeaders)
+		for key, value := range profile.CustomHeaders {
+			merged[key] = value
+		}
+		profile.CustomHeaders = merged
+	}
 }
 
 func sameBaseURL(left string, right string) bool {

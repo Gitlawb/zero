@@ -1126,6 +1126,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
+	case aimlapiOnboardMsg:
+		return m.applyAimlapiOnboard(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
 	case providerManagerCredsMsg:
@@ -1952,11 +1954,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// advancing even when no run is pending, so the tick loop stays alive while
 		// sidebarHasAgents() holds (and stops the moment the agents/sidebar clear).
 		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
-			if m.sidebarHasAgents() && !m.reducedMotion {
-				m.spinner, _ = m.spinner.Update(msg)
+			// The tick also keeps advancing while the aimlapi.com onboarding sub-flow is
+			// busy (its progress screen is spinner-only), even though no agent run is in
+			// flight, so its shared MiniDot spinner keeps animating.
+			//
+			// Return the FPS-throttled tick that Update hands back — NOT m.spinner.Tick,
+			// which fires immediately and busy-loops the frame at event-loop speed. That
+			// makes the glyph spin far too fast (and burns CPU) on screens that sit here
+			// for a while, e.g. the aimlapi checkout wait. The active-run path below
+			// already does this; this keeps idle animation at the same cadence.
+			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating()) && !m.reducedMotion {
+				var cmd tea.Cmd
+				m.spinner, cmd = m.spinner.Update(msg)
 				m.spinnerPhase++
 				m.spinnerTicking = true
-				return m, m.spinner.Tick
+				return m, cmd
 			}
 			m.spinnerTicking = false
 			return m, nil
@@ -4562,7 +4574,10 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 // loop is already alive, when reduced motion is set, or when there is nothing to
 // animate, so an idle plain session schedules no timer.
 func (m *model) ensureSpinnerTick() tea.Cmd {
-	if m.spinnerTicking || m.reducedMotion || !m.sidebarHasAgents() {
+	if m.spinnerTicking || m.reducedMotion {
+		return nil
+	}
+	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() {
 		return nil
 	}
 	m.spinnerTicking = true

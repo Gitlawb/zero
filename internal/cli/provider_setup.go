@@ -434,7 +434,7 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 		AuthHeader:      strings.TrimSpace(options.authHeader),
 		AuthScheme:      normalizeAuthScheme(options.authScheme),
 		AuthHeaderValue: strings.TrimSpace(options.authHeaderValue),
-		CustomHeaders:   copyProviderHeaders(options.customHeaders),
+		CustomHeaders:   mergeProviderHeaders(descriptor.CustomHeaders, options.customHeaders),
 		Model:           firstNonEmptyCLI(options.model, descriptor.DefaultModel),
 	}
 	return profile, nil
@@ -543,4 +543,18 @@ func copyProviderHeaders(headers map[string]string) map[string]string {
 		copied[key] = value
 	}
 	return copied
+}
+
+func mergeProviderHeaders(base map[string]string, overrides map[string]string) map[string]string {
+	merged := copyProviderHeaders(base)
+	if len(overrides) == 0 {
+		return merged
+	}
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	for key, value := range overrides {
+		merged[key] = value
+	}
+	return merged
 }

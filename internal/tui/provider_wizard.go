@@ -74,6 +74,51 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 	return m, m.providerModelDiscoveryCmd()
 }
 
+// applyProviderWizardAimlapiOnboard routes an async aimlapi.com onboarding result
+// into the wizard's shared sub-flow and reacts to its outcome.
+func (m model) applyProviderWizardAimlapiOnboard(msg aimlapiOnboardMsg) (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard.aimlapi == nil || wizard.aimlapi != msg.state {
+		return m, nil
+	}
+	cmd, outcome := wizard.aimlapi.apply(msg)
+	return m.resolveProviderWizardAimlapi(cmd, outcome)
+}
+
+// handleProviderWizardAimlapiKey delegates a key press to the wizard's aimlapi.com
+// sub-flow and reacts to its outcome.
+func (m model) handleProviderWizardAimlapiKey(msg tea.KeyMsg) (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard.aimlapi == nil {
+		return m, nil
+	}
+	cmd, outcome := wizard.aimlapi.handleKey(msg)
+	return m.resolveProviderWizardAimlapi(cmd, outcome)
+}
+
+// resolveProviderWizardAimlapi lands the sub-flow's outcome on the wizard: on a
+// terminal key it moves the freshly acquired key into the wizard and advances to
+// model selection (reusing the standard finalize); on cancel it backs out.
+func (m model) resolveProviderWizardAimlapi(cmd tea.Cmd, outcome aimlapiOutcome) (model, tea.Cmd) {
+	wizard := m.providerWizard
+	switch outcome {
+	case aimlapiDone:
+		wizard.apiKey = wizard.aimlapi.apiKey
+		wizard.aimlapi = nil
+		wizard.err = ""
+		wizard.step = providerWizardStepModel
+		return m, m.providerModelDiscoveryCmd()
+	case aimlapiCancel:
+		wizard.aimlapi = nil
+		wizard.err = ""
+		wizard.step = providerWizardStepProvider
+		return m, nil
+	}
+	// Keep the shared spinner tick alive whenever the sub-flow just entered a busy
+	// or progress state, so its animated spinner advances during onboarding.
+	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+}
+
 // applyProviderWizardDeviceCode handles phase 1 of device-code login: show the
 // user_code + verification URI, then kick off phase 2 (the token poll). On error
 // the redacted message is surfaced and the login is abandoned.
@@ -300,6 +345,7 @@ const (
 	providerWizardStepManageKey
 	providerWizardStepEndpoint
 	providerWizardStepName
+	providerWizardStepAimlapi
 	providerWizardStepCredential
 	providerWizardStepModel
 	providerWizardStepDone
@@ -379,6 +425,9 @@ type providerWizardState struct {
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
+	// aimlapi holds the shared aimlapi.com onboarding sub-flow while
+	// the wizard is on providerWizardStepAimlapi.
+	aimlapi *aimlapiOnboardState
 	// Manager state (provider_manager.go): the list-first /provider surface.
 	manage           bool
 	manageRows       []providerManagerRow
@@ -453,6 +502,21 @@ func (wizard *providerWizardState) oauthResultMatches(providerID string, attempt
 	return wizard.currentProvider().ID == providerID && wizard.oauthAttemptID == attemptID
 }
 
+// resetAimlapiOnboard drops any in-flight aimlapi.com sub-flow (cancelling a
+// running top-up stream) when the selected provider changes.
+func (wizard *providerWizardState) resetAimlapiOnboard() {
+	if wizard.aimlapi != nil {
+		wizard.aimlapi.cancelStream()
+		wizard.aimlapi = nil
+	}
+}
+
+// enterAimlapi starts the shared aimlapi.com onboarding sub-flow.
+func (wizard *providerWizardState) enterAimlapi() {
+	wizard.aimlapi = newAimlapiOnboard(browser.OpenURL)
+	wizard.step = providerWizardStepAimlapi
+}
+
 func (wizard *providerWizardState) currentModel() providerWizardModel {
 	if wizard == nil {
 		return providerWizardModel{}
@@ -501,6 +565,7 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.modelLoadError = ""
 		wizard.oauthPending = false
 		wizard.oauthErr = ""
+		wizard.resetAimlapiOnboard()
 		wizard.refreshModels()
 	case providerWizardStepModel:
 		wizard.refreshModels()
@@ -556,6 +621,8 @@ func (wizard *providerWizardState) advance() {
 		wizard.err = ""
 		if providerWizardNeedsEndpoint(wizard.currentProvider()) {
 			wizard.step = providerWizardStepEndpoint
+		} else if providerWizardIsAimlapi(wizard.currentProvider()) {
+			wizard.enterAimlapi()
 		} else if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else {
@@ -570,7 +637,9 @@ func (wizard *providerWizardState) advance() {
 		wizard.step = providerWizardStepName
 	case providerWizardStepName:
 		wizard.err = ""
-		if providerWizardNeedsCredential(wizard.currentProvider()) {
+		if providerWizardIsAimlapi(wizard.currentProvider()) {
+			wizard.enterAimlapi()
+		} else if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else {
 			wizard.step = providerWizardStepModel
@@ -618,6 +687,15 @@ func (wizard *providerWizardState) retreat() {
 		wizard.providerSearch = ""
 	case providerWizardStepName:
 		wizard.step = providerWizardStepEndpoint
+	case providerWizardStepAimlapi:
+		wizard.resetAimlapiOnboard()
+		if providerWizardNeedsProfileName(wizard.currentProvider()) {
+			wizard.step = providerWizardStepName
+		} else if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+			wizard.step = providerWizardStepEndpoint
+		} else {
+			wizard.step = providerWizardStepProvider
+		}
 	case providerWizardStepCredential:
 		if providerWizardNeedsProfileName(wizard.currentProvider()) {
 			wizard.step = providerWizardStepName
@@ -627,7 +705,9 @@ func (wizard *providerWizardState) retreat() {
 			wizard.step = providerWizardStepProvider
 		}
 	case providerWizardStepModel:
-		if providerWizardNeedsCredential(wizard.currentProvider()) {
+		if providerWizardIsAimlapi(wizard.currentProvider()) {
+			wizard.step = providerWizardStepProvider
+		} else if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else if providerWizardNeedsEndpoint(wizard.currentProvider()) {
 			wizard.step = providerWizardStepEndpoint
@@ -675,6 +755,10 @@ func sameProviderWizardModels(a, b []providerWizardModel) bool {
 
 func providerWizardNeedsCredential(provider providercatalog.Descriptor) bool {
 	return provider.RequiresAuth && !provider.Local && len(provider.AuthEnvVars) > 0
+}
+
+func providerWizardIsAimlapi(provider providercatalog.Descriptor) bool {
+	return strings.EqualFold(strings.TrimSpace(provider.ID), "aimlapi")
 }
 
 func providerWizardNeedsEndpoint(provider providercatalog.Descriptor) bool {
@@ -812,6 +896,9 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m.advanceProviderWizard()
 		}
 	}
+	if m.providerWizard.step == providerWizardStepAimlapi {
+		return m.handleProviderWizardAimlapiKey(msg)
+	}
 	if m.providerWizard.step == providerWizardStepCredential {
 		switch {
 		case keyIs(msg, tea.KeyEsc):
@@ -893,6 +980,10 @@ func (m model) handleProviderWizardPaste(content string) (model, tea.Cmd) {
 		m.providerWizard.appendBaseURL([]rune(content))
 	case providerWizardStepName:
 		m.providerWizard.appendProfileName([]rune(content))
+	case providerWizardStepAimlapi:
+		if m.providerWizard.aimlapi != nil {
+			m.providerWizard.aimlapi.appendInput(content)
+		}
 	case providerWizardStepCredential:
 		m.providerWizard.appendAPIKey([]rune(content))
 	case providerWizardStepModel:
@@ -1193,10 +1284,12 @@ func (m model) providerWizardOverlay(width int) string {
 	if m.providerWizard == nil {
 		return ""
 	}
-	return m.providerWizard.render(width)
+	return m.providerWizard.render(width, m.spinnerGlyph())
 }
 
-func (wizard *providerWizardState) render(width int) string {
+// render's spinner glyph is used only by the embedded aimlapi.com onboarding
+// sub-view; it is the shared global run spinner (spinnerGlyph()), same as everywhere.
+func (wizard *providerWizardState) render(width int, spinner string) string {
 	if wizard == nil {
 		return ""
 	}
@@ -1233,6 +1326,10 @@ func (wizard *providerWizardState) render(width int) string {
 		lines = append(lines, wizard.renderEndpointStep(innerWidth)...)
 	case providerWizardStepName:
 		lines = append(lines, wizard.renderNameStep(innerWidth)...)
+	case providerWizardStepAimlapi:
+		if wizard.aimlapi != nil {
+			lines = append(lines, wizard.aimlapi.view(innerWidth, spinner)...)
+		}
 	case providerWizardStepCredential:
 		lines = append(lines, wizard.renderCredentialStep(innerWidth)...)
 	case providerWizardStepModel:
@@ -1306,6 +1403,8 @@ func (wizard *providerWizardState) footerText() string {
 		return "Enter continue   ← back   Esc close"
 	case providerWizardStepName:
 		return "Enter/→ continue   ← back   Esc close"
+	case providerWizardStepAimlapi:
+		return "type/↑↓ choose   Enter/→ continue   ← back   Esc close"
 	case providerWizardStepModel:
 		if canRight {
 			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
@@ -1329,7 +1428,7 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 	switch step {
 	case providerWizardStepProvider:
 		target = providerWizardProviderWidth
-	case providerWizardStepModel, providerWizardStepManage:
+	case providerWizardStepModel, providerWizardStepManage, providerWizardStepAimlapi:
 		target = providerWizardModelWidth
 	}
 	target = minInt(target, width)
@@ -1366,6 +1465,12 @@ func providerWizardStepLine(wizard *providerWizardState) string {
 		steps = append(steps,
 			stepLabel{providerWizardStepModel, "3 model"},
 			stepLabel{providerWizardStepDone, "4 ready"},
+		)
+	case providerWizardIsAimlapi(wizard.currentProvider()):
+		steps = append(steps,
+			stepLabel{providerWizardStepAimlapi, "3 connect"},
+			stepLabel{providerWizardStepModel, "4 model"},
+			stepLabel{providerWizardStepDone, "5 ready"},
 		)
 	case providerWizardNeedsEndpoint(wizard.currentProvider()):
 		steps = append(steps,
@@ -1532,10 +1637,7 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	name := provider.Name
-	if provider.Recommended {
-		name = "★ " + name
-	}
+	name := providerRecommendedRowLabel(provider.ID, provider.Name, provider.Recommended)
 	left := marker + surface(zeroTheme.ink).Render(name)
 	if badge := providerWizardBadge(provider); badge != "" {
 		left += surface(zeroTheme.faint).Render("   " + badge)
@@ -1546,10 +1648,30 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 // providerWizardBadge is the faint hint shown next to a provider row. The
 // recommended provider takes precedence over the OAuth hint.
 func providerWizardBadge(provider providercatalog.Descriptor) string {
-	if provider.Recommended {
-		return "(recommended)"
+	if badge := providerRecommendedRowBadge(provider.ID, provider.Recommended); badge != "" {
+		return badge
 	}
 	return providerWizardOAuthBadge(provider)
+}
+
+const aimlapiRecommendedProviderLabel = "(~) aimlapi.com (1000+ models)"
+
+func providerRecommendedRowLabel(id, name string, recommended bool) string {
+	label := displayValue(name, id)
+	if !recommended {
+		return label
+	}
+	if strings.EqualFold(strings.TrimSpace(id), "aimlapi") {
+		return aimlapiRecommendedProviderLabel
+	}
+	return "★ " + label
+}
+
+func providerRecommendedRowBadge(id string, recommended bool) string {
+	if !recommended || strings.EqualFold(strings.TrimSpace(id), "aimlapi") {
+		return ""
+	}
+	return "(recommended)"
 }
 
 // providerWizardOAuthBadge is the faint mode hint shown next to OAuth providers.
@@ -1825,12 +1947,13 @@ func maskedProviderWizardKey(value string) string {
 
 func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string, baseURL string, profileName string) config.ProviderProfile {
 	profile := config.ProviderProfile{
-		Name:         providerWizardDisplayName(provider, baseURL, profileName),
-		ProviderKind: providerWizardProviderKind(provider),
-		CatalogID:    provider.ID,
-		BaseURL:      firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL),
-		APIFormat:    providerWizardAPIFormat(provider),
-		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
+		Name:          providerWizardDisplayName(provider, baseURL, profileName),
+		ProviderKind:  providerWizardProviderKind(provider),
+		CatalogID:     provider.ID,
+		BaseURL:       firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL),
+		APIFormat:     providerWizardAPIFormat(provider),
+		CustomHeaders: copyProviderWizardHeaders(provider.CustomHeaders),
+		Model:         firstProviderDisplayValue(model, provider.DefaultModel),
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		profile.APIKey = apiKey
@@ -1843,6 +1966,17 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		profile.APIKeyEnv = env
 	}
 	return profile
+}
+
+func copyProviderWizardHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	copied := make(map[string]string, len(headers))
+	for key, value := range headers {
+		copied[key] = value
+	}
+	return copied
 }
 
 func providerWizardEndpointError(value string) string {

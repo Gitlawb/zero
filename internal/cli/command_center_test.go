@@ -348,6 +348,34 @@ func TestRunProvidersAddWritesCatalogProfile(t *testing.T) {
 	}
 }
 
+func TestRunProvidersAddAimlapiWritesDefaultHeaders(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	exitCode := runWithDeps([]string{"providers", "add", "aimlapi"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %#v, want one provider", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "aimlapi" ||
+		profile.CatalogID != "aimlapi" ||
+		profile.BaseURL != "https://api.aimlapi.com/v1" ||
+		profile.Model != "anthropic/claude-sonnet-5" ||
+		profile.APIKeyEnv != "AIMLAPI_API_KEY" {
+		t.Fatalf("unexpected provider profile: %#v", profile)
+	}
+	if profile.CustomHeaders["X-AIMLAPI-Partner-ID"] != "part_62yQoGYDq4Yqnrj2R1iGrDNJ" ||
+		profile.CustomHeaders["X-AIMLAPI-Integration-Repo"] != "Gitlawb/zero" {
+		t.Fatalf("missing aimlapi.com default headers: %#v", profile.CustomHeaders)
+	}
+}
+
 func TestRunProvidersAddWritesCustomHeaders(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
