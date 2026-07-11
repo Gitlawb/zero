@@ -14,6 +14,7 @@ This file outlines the project conventions and repository guidelines for coding 
 - Tests live next to the source file (`foo_test.go` next to `foo.go`).
 - Run `make lint` before opening a PR.
 - Never edit files under `third_party/` — those are vendored.
+- Unify functions/methods where possible to prevent codebase inflation. Prefer a single cross-platform function with conditional checks over duplicating helpers per platform.
 
 ## 2. Guidelines for Coding Agents
 
