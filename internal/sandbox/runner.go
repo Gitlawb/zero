@@ -370,8 +370,8 @@ func existingBubblewrapMounts() []string {
 	return mounts
 }
 
-func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend, "")
+func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
+	return sandboxEnvironmentForCommand(nil, policy, backend, workspaceRoot)
 }
 
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
@@ -400,7 +400,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 	if workspaceRoot != "" {
 		overrides = append(overrides, "HOME="+workspaceRoot)
 	}
-	if runtime.GOOS == "windows" {
+	if backend == BackendWindowsRestrictedToken || backend == BackendWindowsElevated {
 		overrides = append(overrides,
 			"COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"),
 			"SystemRoot="+envListValue(env, "SystemRoot", `C:\Windows`),
