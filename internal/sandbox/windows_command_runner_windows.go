@@ -69,7 +69,13 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// this has no in-token fix; preflight blocking and output hints live in
 	// internal/tools/shell_runtime.go.
 	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
-	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs)
+	// A WRITE_RESTRICTED token keeps reads unrestricted so sandboxed commands
+	// can actually launch executables; it is only unsafe when DenyRead paths
+	// are configured, because the kernel skips restricted-SID deny ACEs for
+	// reads under that flag (#612). Profiles with DenyRead keep the fully
+	// restricted token, trading spawn capability for read-deny enforcement.
+	writeRestricted := len(config.PermissionProfile.FileSystem.DenyRead) == 0
+	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs, writeRestricted)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1

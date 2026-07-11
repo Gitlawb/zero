@@ -48,7 +48,7 @@ func (sid windowsLocalSID) close() {
 	}
 }
 
-func createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDStrings []string) (windows.Token, error) {
+func createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDStrings []string, writeRestricted bool) (windows.Token, error) {
 	if len(capabilitySIDStrings) == 0 {
 		return 0, errors.New("windows restricted token requires at least one capability SID")
 	}
@@ -80,10 +80,10 @@ func createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDStrings []string
 		return 0, fmt.Errorf("open process token: %w", err)
 	}
 	defer base.Close()
-	return createWindowsRestrictedTokenFromBase(base, capabilitySIDs)
+	return createWindowsRestrictedTokenFromBase(base, capabilitySIDs, writeRestricted)
 }
 
-func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []windowsLocalSID) (windows.Token, error) {
+func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []windowsLocalSID, writeRestricted bool) (windows.Token, error) {
 	logonSID, err := copyWindowsLogonSID(base)
 	if err != nil {
 		return 0, err
@@ -102,10 +102,28 @@ func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []w
 		windows.SIDAndAttributes{Sid: worldSID},
 	)
 
+	// WRITE_RESTRICTED scopes the restricted-SID check to write-type accesses:
+	// reads use only the normal token identity, so the sandboxed process can
+	// open executables, DLLs, and per-user config the user can read, while
+	// writes still require a restricted-SID match (the workspace write-jail).
+	// Without it the restricted-SID check applies to READS too, and because
+	// default Windows DACLs grant BUILTIN\Users rather than any SID in the
+	// restricted list, the token cannot open ANY executable outside the
+	// ACL-granted write roots — every spawned command dies silently.
+	//
+	// The flag also makes the kernel skip restricted-SID deny ACEs for reads,
+	// which is the DenyRead bypass fixed in #612 — so it is only safe when the
+	// profile has no DenyRead paths. The caller passes writeRestricted=false
+	// whenever DenyRead is configured, keeping #612's enforcement for exactly
+	// the profiles that need it.
+	flags := uint32(windowsDisableMaxPrivilege | windowsLUAToken)
+	if writeRestricted {
+		flags |= windowsWriteRestricted
+	}
 	var restricted windows.Token
 	result, _, callErr := procCreateRestrictedToken.Call(
 		uintptr(base),
-		uintptr(windowsDisableMaxPrivilege|windowsLUAToken),
+		uintptr(flags),
 		0,
 		0,
 		0,
