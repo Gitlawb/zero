@@ -60,20 +60,20 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 		// instead of ignoring unknown parameters — so omit it for every
 		// openai-compatible profile. Official OpenAI keeps the field so
 		// multi-turn sessions still route to a cached-prefix replica.
-		return openai.New(openai.Options{    
-      APIKey:                profile.APIKey,
-      BaseURL:               resolved.baseURL,
-      Model:                 resolved.apiModel,
-      AuthHeader:            profile.AuthHeader,
-      AuthScheme:            profile.AuthScheme,
-      AuthHeaderValue:       profile.AuthHeaderValue,
-      CustomHeaders:         providerio.CopyHeaders(profile.CustomHeaders),
-      OAuthResolver:         options.OAuthResolver,
-      MaxTokens:             resolved.maxOutputTokens,
-      HTTPClient:            options.HTTPClient,
-      UserAgent:             options.UserAgent,
-      ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
-      DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
+		return openai.New(openai.Options{
+			APIKey:                profile.APIKey,
+			BaseURL:               resolved.baseURL,
+			Model:                 resolved.apiModel,
+			AuthHeader:            profile.AuthHeader,
+			AuthScheme:            profile.AuthScheme,
+			AuthHeaderValue:       profile.AuthHeaderValue,
+			CustomHeaders:         providerio.CopyHeaders(profile.CustomHeaders),
+			OAuthResolver:         options.OAuthResolver,
+			MaxTokens:             resolved.maxOutputTokens,
+			HTTPClient:            options.HTTPClient,
+			UserAgent:             options.UserAgent,
+			ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
+			DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
