@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -966,25 +968,29 @@ func regexpQuoteMeta(value string) string {
 }
 
 func scrubSensitiveEnv(env []string) []string {
+	// Secrets not covered by the provider catalog: cloud/VCS credentials and
+	// providers Zero talks to through generic OpenAI-compatible endpoints.
 	sensitiveKeys := []string{
-		"OPENAI_API_KEY",
-		"ANTHROPIC_API_KEY",
-		"GEMINI_API_KEY",
-		"DEEPSEEK_API_KEY",
-		"GROQ_API_KEY",
 		"COHERE_API_KEY",
-		"MISTRAL_API_KEY",
 		"PERPLEXITY_API_KEY",
-		"OPENROUTER_API_KEY",
 		"ANYSCALE_API_KEY",
-		"TOGETHER_API_KEY",
 		"AZURE_OPENAI_API_KEY",
-		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
 		"AWS_SESSION_TOKEN",
-		"GITHUB_TOKEN",
 		"GITLAB_TOKEN",
 		"GH_TOKEN",
+	}
+	for _, descriptor := range providercatalog.All() {
+		for _, key := range descriptor.AuthEnvVars {
+			// AWS_PROFILE and GOOGLE_APPLICATION_CREDENTIALS are pointers
+			// (profile name, key file path), not secrets; scrubbing them
+			// breaks aws/gcloud invocations inside the sandbox without
+			// protecting anything.
+			if key == "AWS_PROFILE" || key == "GOOGLE_APPLICATION_CREDENTIALS" {
+				continue
+			}
+			sensitiveKeys = append(sensitiveKeys, key)
+		}
 	}
 
 	out := make([]string, 0, len(env))

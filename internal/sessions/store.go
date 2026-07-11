@@ -13,8 +13,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const (
@@ -842,7 +843,7 @@ func (store *Store) writeMetadata(session Metadata) error {
 	if err := writeFileSync(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
-	if err := renameWithRetry(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
@@ -905,7 +906,7 @@ func (store *Store) writeFileAtomicSync(path string, content []byte, perm os.Fil
 	if err := writeFileSync(tmp, content, perm); err != nil {
 		return err
 	}
-	if err := renameWithRetry(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -1091,31 +1092,4 @@ func applySpecRecord(session *Metadata, input RecordSpecInput, status SpecStatus
 	if implID := strings.TrimSpace(input.SpecImplSessionID); implID != "" {
 		session.SpecImplSessionID = implID
 	}
-}
-
-func renameWithRetry(src, dst string) error {
-	var err error
-	for i := 0; i < 10; i++ {
-		err = os.Rename(src, dst)
-		if err == nil {
-			return nil
-		}
-		if runtime.GOOS == "windows" {
-			if os.IsPermission(err) || isWindowsSharingViolation(err) {
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-		}
-		break
-	}
-	return err
-}
-
-func isWindowsSharingViolation(err error) bool {
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		const ERROR_SHARING_VIOLATION syscall.Errno = 32
-		return errno == ERROR_SHARING_VIOLATION
-	}
-	return false
 }
