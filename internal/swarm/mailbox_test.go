@@ -360,4 +360,3 @@ func TestMailboxRenameNonRetryableError(t *testing.T) {
 		t.Errorf("expected only 1 attempt for non-retryable error, got %d", attempts)
 	}
 }
-

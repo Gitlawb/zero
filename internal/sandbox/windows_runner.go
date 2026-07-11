@@ -367,8 +367,6 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	}, execRequest), nil
 }
 
-
-
 func upsertEnvList(env []string, values ...string) []string {
 	out := cloneStrings(env)
 	for _, value := range values {

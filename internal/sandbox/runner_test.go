@@ -665,4 +665,3 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		t.Errorf("expected 2 environment variables, got %d: %v", len(scrubbed), scrubbed)
 	}
 }
-
