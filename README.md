@@ -341,8 +341,6 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
 ### Cross-Compile Examples
 
-Cross-compile examples:
-
 ```bash
 go run ./cmd/zero-release build --goos linux --goarch amd64
 go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero.exe
