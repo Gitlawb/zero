@@ -205,7 +205,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap)
+	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap, "")
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
@@ -316,7 +316,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend)
+	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend, "")
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -371,10 +371,10 @@ func existingBubblewrapMounts() []string {
 }
 
 func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend)
+	return sandboxEnvironmentForCommand(nil, policy, backend, "")
 }
 
-func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
+func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. The sandbox
@@ -397,8 +397,15 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
+	if workspaceRoot != "" {
+		overrides = append(overrides, "HOME="+workspaceRoot)
+	}
 	if runtime.GOOS == "windows" {
-		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
+		overrides = append(overrides,
+			"COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"),
+			"SystemRoot="+envListValue(env, "SystemRoot", `C:\Windows`),
+			"WINDIR="+envListValue(env, "WINDIR", `C:\Windows`),
+		)
 	}
 	return upsertEnvList(env, overrides...)
 }
@@ -408,13 +415,6 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string{}, values...)
-}
-
-func firstEnv(key string, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }
 
 func envListValue(env []string, key string, fallback string) string {
