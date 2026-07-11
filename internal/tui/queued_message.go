@@ -2,8 +2,8 @@ package tui
 
 import "strings"
 
-// queuedEditHint replaces the composer placeholder while a message is queued,
-// in the style of openclaude's "Press up to edit queued messages".
+// queuedEditHint replaces the composer placeholder while a message is queued
+// and informs the user they can press up to edit it.
 const queuedEditHint = "Press up to edit queued messages"
 
 func (m model) queueMessage(text string) model {
@@ -25,7 +25,7 @@ func (m model) queueMessage(text string) model {
 
 // popQueuedMessageForEdit moves the queued message back into the composer so
 // it can be edited before the next turn. Queued text lands above whatever is
-// already being typed, mirroring openclaude's press-up flow.
+// already being typed.
 func (m model) popQueuedMessageForEdit() model {
 	if !m.hasQueuedMessage() {
 		return m
