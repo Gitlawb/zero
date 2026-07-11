@@ -1638,7 +1638,10 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	name := providerRecommendedRowLabel(provider.ID, provider.Name, provider.Recommended)
+	name := provider.Name
+	if provider.Recommended {
+		name = "★ " + name
+	}
 	left := marker + surface(zeroTheme.ink).Render(name)
 	if badge := providerWizardBadge(provider); badge != "" {
 		left += surface(zeroTheme.faint).Render("   " + badge)
@@ -1649,30 +1652,10 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 // providerWizardBadge is the faint hint shown next to a provider row. The
 // recommended provider takes precedence over the OAuth hint.
 func providerWizardBadge(provider providercatalog.Descriptor) string {
-	if badge := providerRecommendedRowBadge(provider.ID, provider.Recommended); badge != "" {
-		return badge
+	if provider.Recommended {
+		return "(recommended)"
 	}
 	return providerWizardOAuthBadge(provider)
-}
-
-const aimlapiRecommendedProviderLabel = "(~) aimlapi.com (1000+ models)"
-
-func providerRecommendedRowLabel(id, name string, recommended bool) string {
-	label := displayValue(name, id)
-	if !recommended {
-		return label
-	}
-	if strings.EqualFold(strings.TrimSpace(id), "aimlapi") {
-		return aimlapiRecommendedProviderLabel
-	}
-	return "★ " + label
-}
-
-func providerRecommendedRowBadge(id string, recommended bool) string {
-	if !recommended || strings.EqualFold(strings.TrimSpace(id), "aimlapi") {
-		return ""
-	}
-	return "(recommended)"
 }
 
 // providerWizardOAuthBadge is the faint mode hint shown next to OAuth providers.

@@ -1637,10 +1637,13 @@ func (m model) setupProviderLines(width int, height int) []string {
 			marker = "❯ "
 			style = zeroTheme.accent.Bold(true)
 		}
-		label := providerRecommendedRowLabel(option.ID, option.Name, option.Recommended)
+		label := displayValue(option.Name, option.ID)
+		if option.Recommended {
+			label = "★ " + label
+		}
 		line := marker + style.Render(label)
-		if badge := providerRecommendedRowBadge(option.ID, option.Recommended); badge != "" {
-			line += zeroTheme.faint.Render("  " + badge)
+		if option.Recommended {
+			line += zeroTheme.faint.Render("  (recommended)")
 		}
 		lines = append(lines, padSetupLine(line, rowWidth))
 	}
@@ -1703,9 +1706,9 @@ func setupProviderBlockWidth(terminalWidth int, providers []SetupProviderOption)
 	available := maxInt(24, minInt(terminalWidth-8, 44))
 	target := maxInt(lipgloss.Width("  2/6"), lipgloss.Width("  Choose a provider"))
 	for _, provider := range providers {
-		label := providerRecommendedRowLabel(provider.ID, provider.Name, provider.Recommended)
-		if badge := providerRecommendedRowBadge(provider.ID, provider.Recommended); badge != "" {
-			label += "  " + badge
+		label := displayValue(provider.Name, provider.ID)
+		if provider.Recommended {
+			label = "★ " + label + "  (recommended)"
 		}
 		target = maxInt(target, 2+lipgloss.Width(label))
 	}
