@@ -1749,6 +1749,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next, ok := m.moveComposerVisualCursor(-1); ok {
 				return next, nil
 			}
+			// A queued message takes ↑ priority over history recall: pop it back
+			// into the composer for editing before it sends on the next turn.
+			if m.hasQueuedMessage() && m.pendingSpecReview == nil {
+				return m.popQueuedMessageForEdit(), nil
+			}
 			if m.historyRecallActive() {
 				return m.recallHistory(-1), nil
 			}
@@ -3448,6 +3453,9 @@ func (m model) appendStreamingCursor(lines []string, width int) []string {
 // composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
+	if m.hasQueuedMessage() {
+		input.Placeholder = queuedEditHint
+	}
 	hideInputForSuggestions := m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value()))
 	if hideInputForSuggestions {
 		input.SetValue("")
