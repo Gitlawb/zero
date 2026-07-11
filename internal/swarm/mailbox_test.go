@@ -314,6 +314,9 @@ func TestMailboxConcurrentSends(t *testing.T) {
 }
 
 func TestMailboxRenameRetry(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("renameWithRetry only retries on Windows")
+	}
 	mb := newTestMailbox(t)
 
 	var attempts int
