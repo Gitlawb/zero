@@ -41,7 +41,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 /zero
 /zero.exe
-/zero.exe~
 /zero-windows-command-runner.exe
 /zero-windows-sandbox-setup.exe
 /zero-skills

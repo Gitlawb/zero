@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// Status is a progress phase reported by StreamTopUp through its OnStatus callback.
 type Status string
 
 const (
@@ -18,6 +19,8 @@ const (
 	StatusProvisioningKey Status = "provisioning-key"
 )
 
+// ProvisionedKey is the outcome of a top-up: the (optionally minted) API key plus
+// the inference base URL and model to write into the provider profile.
 type ProvisionedKey struct {
 	APIKey   string
 	APIKeyID string
@@ -30,6 +33,8 @@ const (
 	pollTimeout  = 20 * time.Minute
 )
 
+// ParseAmountUSD parses a dollar string into USD minor units (cents), enforcing the
+// min/max top-up bounds. An empty value yields the default amount.
 func ParseAmountUSD(value string) (int, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

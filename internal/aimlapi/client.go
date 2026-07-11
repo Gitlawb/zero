@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// PaymentMethod selects how a partner-checkout top-up is paid for.
 type PaymentMethod string
 
 const (
@@ -19,6 +20,8 @@ const (
 	PaymentMethodCrypto PaymentMethod = "crypto"
 )
 
+// SessionStatus is the lifecycle state of a partner-checkout session, as reported
+// by the aimlapi.com backend while polling for payment.
 type SessionStatus string
 
 const (
@@ -32,11 +35,14 @@ const (
 	SessionStatusFailed         SessionStatus = "failed"
 )
 
+// AuthResult is the bearer token minted by a passwordless sign-in / sign-up.
 type AuthResult struct {
 	Token string `json:"token"`
 	Exp   int64  `json:"exp"`
 }
 
+// PartnerCheckoutSession is a partner-attributed top-up session; its SessionToken
+// addresses it on later pay/exchange/poll calls.
 type PartnerCheckoutSession struct {
 	ID             string        `json:"id"`
 	SessionToken   string        `json:"sessionToken"`
@@ -49,27 +55,35 @@ type PartnerCheckoutSession struct {
 	ReturnURL      *string       `json:"returnUrl"`
 }
 
+// PaymentSession is the hosted payment-provider checkout; PayURL is the page the
+// user opens to pay.
 type PaymentSession struct {
 	ProviderSessionID string `json:"providerSessionId"`
 	PayURL            string `json:"payUrl"`
 }
 
+// PayResult pairs the hosted checkout with the updated partner-checkout session
+// returned when a top-up payment is initiated.
 type PayResult struct {
 	Checkout        PaymentSession         `json:"checkout"`
 	PartnerCheckout PartnerCheckoutSession `json:"partnerCheckout"`
 }
 
+// ExchangeResult holds the API key minted when a paid session is exchanged.
 type ExchangeResult struct {
 	APIKey   string `json:"apiKey"`
 	APIKeyID string `json:"apiKeyId"`
 }
 
+// APIError is a non-2xx HTTP response from the aimlapi.com API. Status carries the
+// code so callers can branch (e.g. 401 = bad key, 5xx = retryable).
 type APIError struct {
 	Message string
 	Status  int
 	Body    string
 }
 
+// Error renders the method, endpoint, status, and (when present) the response body.
 func (e APIError) Error() string {
 	if strings.TrimSpace(e.Body) != "" {
 		return fmt.Sprintf("%s: HTTP %d: %s", e.Message, e.Status, strings.TrimSpace(e.Body))
@@ -77,6 +91,8 @@ func (e APIError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d", e.Message, e.Status)
 }
 
+// Client talks to the aimlapi.com auth, app, and inference APIs for the onboarding
+// and partner-checkout top-up flows.
 type Client struct {
 	endpoints  Endpoints
 	httpClient *http.Client
@@ -89,6 +105,8 @@ func NewClient(endpoints Endpoints, httpClient *http.Client) *Client {
 	return &Client{endpoints: endpoints, httpClient: httpClient}
 }
 
+// CreateSession opens a partner-checkout session attributed to partnerID; the
+// returned SessionToken addresses it on the pay/exchange/poll calls.
 func (c *Client) CreateSession(ctx context.Context, partnerID string, partnerName string, returnURL string) (PartnerCheckoutSession, error) {
 	body := map[string]any{"partnerId": partnerID}
 	if strings.TrimSpace(partnerName) != "" {
@@ -102,12 +120,16 @@ func (c *Client) CreateSession(ctx context.Context, partnerID string, partnerNam
 	return result, err
 }
 
+// GetSession fetches the current state of a partner-checkout session; used to poll
+// for payment completion.
 func (c *Client) GetSession(ctx context.Context, sessionToken string) (PartnerCheckoutSession, error) {
 	var result PartnerCheckoutSession
 	err := c.request(ctx, http.MethodGet, strings.TrimRight(c.endpoints.AppBaseURL, "/")+"/v3/partner-checkout/sessions/"+urlPathEscape(sessionToken), "", nil, &result)
 	return result, err
 }
 
+// Pay initiates payment for a session and returns the hosted checkout URL.
+// autoTopUp enrolls the account in automatic top-up when the backend supports it.
 func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, amountUSDMinor int, method PaymentMethod, successURL string, cancelURL string, autoTopUp bool) (PayResult, error) {
 	body := map[string]any{
 		"amountUsdMinor": amountUSDMinor,
@@ -130,6 +152,7 @@ func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, am
 	return result, err
 }
 
+// Exchange converts a paid session into a freshly minted API key (new-account flow).
 func (c *Client) Exchange(ctx context.Context, bearer string, sessionToken string) (ExchangeResult, error) {
 	var result ExchangeResult
 	err := c.request(ctx, http.MethodPost, strings.TrimRight(c.endpoints.AppBaseURL, "/")+"/v3/partner-checkout/sessions/"+urlPathEscape(sessionToken)+"/exchange", bearer, nil, &result)
