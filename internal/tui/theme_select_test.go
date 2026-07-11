@@ -277,6 +277,40 @@ func TestNewThemePresetsWired(t *testing.T) {
 	if dune.IsDark {
 		t.Error("theme 'dune' should be marked as light")
 	}
+
+	for _, name := range []string{"neon", "dune"} {
+		if !validThemeMode(name) {
+			t.Errorf("%q should be a valid --theme/ZERO_THEME value", name)
+		}
+	}
+
+	if !contains(themeModes, "neon") || !contains(themeModes, "dune") {
+		t.Errorf("themeModes = %v, want it to include neon and dune (the /theme picker list)", themeModes)
+	}
+}
+
+// The --theme flag and ZERO_THEME both resolve through resolveThemeMode, and
+// applyTheme must actually swap zeroTheme to the resolved preset's own palette,
+// not silently fall back to a built-in.
+func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
+	defer applyTheme(themeDark, true)
+
+	if got := resolveThemeMode("dune", ""); got != themeMode("dune") {
+		t.Fatalf(`resolveThemeMode("dune", "") = %q, want "dune"`, got)
+	}
+	if got := resolveThemeMode("", "neon"); got != themeMode("neon") {
+		t.Fatalf(`resolveThemeMode("", "neon") = %q, want "neon"`, got)
+	}
+
+	applyTheme(themeMode("dune"), true)
+	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, dunePalette.ink) {
+		t.Error("applying \"dune\" did not swap zeroTheme to the dune palette")
+	}
+
+	applyTheme(themeMode("neon"), true)
+	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, neonPalette.ink) {
+		t.Error("applying \"neon\" did not swap zeroTheme to the neon palette")
+	}
 }
 
 func TestExtendedThemeContrastInvariants(t *testing.T) {
