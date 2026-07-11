@@ -2,7 +2,7 @@
 
 Zero is an open-source terminal coding agent. Out of the box it does the obvious things — read, edit, run, search — but the design point of the project is that **every surface is configurable**. This document is the user-facing guide for that configuration.
 
-If you only want to *use* Zero, the [README](README.md) is enough. This page is for the other three jobs:
+If you only want to *use* Zero, the [README](../README.md) is enough. This page is for the other three jobs:
 
 1. Tell the agent about *your* project (drop an `AGENTS.md` in your repo).
 2. Add new specialist sub-agents.
@@ -43,7 +43,7 @@ Tips:
 
 ### Personal guidelines, across every project
 
-For preferences that follow *you*, not a specific repo (tone, tooling habits, workflow), drop a `ZERO.md` in your user config directory: `~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\Roaming\zero\ZERO.md` on Windows — the same directory as `config.json` and your personal specialists. Same format and 8 KiB cap as the project files above, and the same case-insensitive basename match.
+For preferences that follow *you*, not a specific repo (tone, tooling habits, workflow), drop a `ZERO.md` in your user config directory: `~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\zero\ZERO.md` on Windows — the same directory as `config.json` and your personal specialists. Same format and 8 KiB cap as the project files above, and the same case-insensitive basename match.
 
 This file is injected as its own `## User guidelines` section, before the project's `AGENTS.md`/`ZERO.md`, and is labeled as personal preference in the prompt: project guidelines are the later, more specific instruction and take precedence over it when the two conflict.
 
@@ -94,17 +94,17 @@ zero specialist delete api-reviewer --project
 zero specialist path                       # prints the resolved specialists directory
 ```
 
-The full format spec (frontmatter fields, tool scopes, prompt conventions) is in [`docs/SPECIALISTS.md`](docs/SPECIALISTS.md).
+The full format spec (frontmatter fields, tool scopes, prompt conventions) is in [`docs/SPECIALISTS.md`](SPECIALISTS.md).
 
 > **Roadmap.** An in-UI specialist manager (create / edit / delete / preview) is on the backlog. Today you use the `zero specialist` CLI subcommands above.
 
 ## 3. Skills
 
-Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`. Skills are **user-level only** in this version — there's no project-scoped skill directory yet, so anything you want shared with the team goes in `AGENTS.md` (section 1) or as a hook (section 4).
+Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`. Standalone project skill directories are not supported in this version (shared project-wide skills must go in `AGENTS.md` or as a hook). However, project plugins (section 6) may bundle skills, which are merged into the active run.
 
 Discovery root: `$ZERO_SKILLS_DIR` → `$XDG_DATA_HOME/zero/skills` → `~/.local/share/zero/skills/`. A missing directory is fine — Zero just reports "no skills".
 
-```
+```text
 ~/.local/share/zero/skills/
   run-benchmarks/
     SKILL.md
@@ -287,15 +287,15 @@ Plugin commands run with the plugin directory as their working directory. Use re
 
 ## 7. Configuration locations
 
-Three layers, applied in order (later layers override earlier ones):
+Five configuration sources, in precedence order (later sources override earlier ones):
 
-| Layer | Path | Notes |
+| Source | Path / Key | Notes |
 | --- | --- | --- |
 | Built-in defaults | compiled in | Lowest priority. |
 | User config | `~/.config/zero/config.json` | Your machine. Never committed. |
 | Project config | `./.zero/config.json` | The repo. Committed (or not, your call). |
-| CLI flags | `--model`, `--mode`, ... | Highest priority, per-invocation. |
 | Environment | `ZERO_*` | Provider commands, secrets, skills dir override. |
+| CLI flags | `--model`, `--mode`, ... | Highest priority, per-invocation. |
 
 The user config holds things that should follow the user across projects (default provider, default model, theme). The project config holds things the team agreed on (provider catalog, sandbox policies, model restrictions).
 
@@ -308,7 +308,7 @@ A team that wants every contributor's Zero to behave the same way commits:
 - `AGENTS.md` — project conventions, build commands, do-not-edit lists.
 - `.zero/config.json` — provider catalog, default model, allowed tools.
 - `.zero/specialists/api-reviewer.md` — the team's PR-review specialist.
-- `.zero/hooks.json` — block `rm -rf` and `git push --force` on `beforeTool`.
+- `.zero/hooks.json` — block `rm -rf` on `beforeTool`.
 - `.zero/plugins/internal-tooling/` — a plugin that adds the team's internal CLI tools to the agent's toolset.
 
 Each contributor adds only:
@@ -321,7 +321,7 @@ That's it. Run `zero` from the repo root and the agent has the team's full instr
 
 ## 9. Reference
 
-- [README](README.md) — install, quickstart, command reference.
-- [docs/SPECIALISTS.md](docs/SPECIALISTS.md) — full specialist manifest spec.
-- [docs/STREAM_JSON_PROTOCOL.md](docs/STREAM_JSON_PROTOCOL.md) — `zero exec` I/O contract.
-- [docs/INSTALL.md](docs/INSTALL.md) — install from source or release.
+- [README](../README.md) — install, quickstart, command reference.
+- [docs/SPECIALISTS.md](SPECIALISTS.md) — full specialist manifest spec.
+- [docs/STREAM_JSON_PROTOCOL.md](STREAM_JSON_PROTOCOL.md) — `zero exec` I/O contract.
+- [docs/INSTALL.md](INSTALL.md) — install from source or release.
