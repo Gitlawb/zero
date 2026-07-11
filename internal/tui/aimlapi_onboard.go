@@ -649,14 +649,10 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		return nil, aimlapiContinue
 	}
 	if _, err := aimlapi.ParseAmountUSD(s.amount); err != nil {
-		switch {
-		case errors.Is(err, aimlapi.ErrAmountTooLow):
-			s.errText = aimlapi.MsgTopUpTooLow
-		case errors.Is(err, aimlapi.ErrAmountTooHigh):
-			s.errText = aimlapi.MsgTopUpTooHigh
-		default:
-			s.errText = aimlapi.MsgAmountInvalid
-		}
+		// Surface the actual validation error (below-min / above-max / non-numeric),
+		// the same way this sub-flow renders its other errors, instead of a single
+		// catch-all "too low".
+		s.errText = redaction.ErrorMessage(err, redaction.Options{})
 		s.step = aimlapiStepAmountInput
 		s.amountField = 0
 		return nil, aimlapiContinue

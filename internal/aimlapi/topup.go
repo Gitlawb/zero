@@ -30,13 +30,6 @@ const (
 	pollTimeout  = 20 * time.Minute
 )
 
-// Sentinel amount-validation errors so callers can tell an out-of-range amount
-// apart from a non-numeric one and surface the right message.
-var (
-	ErrAmountTooLow  = errors.New("top-up amount is below the minimum")
-	ErrAmountTooHigh = errors.New("top-up amount is above the maximum")
-)
-
 func ParseAmountUSD(value string) (int, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -48,10 +41,10 @@ func ParseAmountUSD(value string) (int, error) {
 	}
 	minor := int(dollars*100 + 0.5)
 	if minor < MinAmountUSDMinor {
-		return 0, fmt.Errorf("%w of $%d", ErrAmountTooLow, MinAmountUSDMinor/100)
+		return 0, fmt.Errorf("minimum top-up is $%d", MinAmountUSDMinor/100)
 	}
 	if minor > MaxAmountUSDMinor {
-		return 0, fmt.Errorf("%w of $%d", ErrAmountTooHigh, MaxAmountUSDMinor/100)
+		return 0, fmt.Errorf("maximum top-up is $%d", MaxAmountUSDMinor/100)
 	}
 	return minor, nil
 }
