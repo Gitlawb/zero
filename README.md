@@ -168,7 +168,8 @@ zero auth login copilot        # opens github.com/login/device, enter the code
 zero --provider copilot --model gpt-4.1
 ```
 
-Zero exchanges the GitHub login for a short-lived Copilot token per request.
+Zero exchanges the GitHub login for a short-lived Copilot token, reusing it
+until it is near expiry or a request receives a 401.
 This uses GitHub's undocumented Copilot API (the same one the editor plugins
 use); it is not an officially supported developer API and may change or break
 without notice, and heavy automated use can trip GitHub's abuse detection.

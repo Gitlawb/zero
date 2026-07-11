@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+const (
+	maxUnflattenIndex             = 10_000
+	maxUnflattenMaterializedSlots = maxUnflattenIndex + 1
+)
+
 // unflattenToolArguments repairs tool-call argument objects that some models emit
 // in STREAMING mode using flattened dotted/bracketed path keys instead of a nested
 // structure. Gemini on the GitHub Copilot endpoint is the known offender: for a
@@ -51,7 +56,8 @@ func unflattenToolArguments(arguments string) string {
 		}
 	}
 
-	built, ok := root.build()
+	remainingSlots := maxUnflattenMaterializedSlots
+	built, ok := root.build(&remainingSlots)
 	if !ok {
 		return arguments
 	}
@@ -99,7 +105,7 @@ func parseFlatKey(key string) (segments []flatSegment, ok bool) {
 			end += i
 			idxStr := key[i+1 : end]
 			idx, err := strconv.Atoi(idxStr)
-			if err != nil || idx < 0 {
+			if err != nil || idx < 0 || idx > maxUnflattenIndex {
 				return nil, false
 			}
 			segments = append(segments, flatSegment{index: idx, isIndex: true})
@@ -195,14 +201,14 @@ func (node *unflattenNode) set(segments []flatSegment, value any) bool {
 
 // build materializes the scratch tree into plain map[string]any / []any values.
 // Array gaps (missing indices) are filled with nil to preserve positions.
-func (node *unflattenNode) build() (any, bool) {
+func (node *unflattenNode) build(remainingSlots *int) (any, bool) {
 	if node.isLeaf {
 		return node.value, true
 	}
 	if node.objChildren != nil {
 		out := make(map[string]any, len(node.objChildren))
 		for key, child := range node.objChildren {
-			built, ok := child.build()
+			built, ok := child.build(remainingSlots)
 			if !ok {
 				return nil, false
 			}
@@ -217,9 +223,14 @@ func (node *unflattenNode) build() (any, bool) {
 				max = idx
 			}
 		}
-		out := make([]any, max+1)
+		slots := max + 1
+		if slots > *remainingSlots {
+			return nil, false
+		}
+		*remainingSlots -= slots
+		out := make([]any, slots)
 		for idx, child := range node.arrChildren {
-			built, ok := child.build()
+			built, ok := child.build(remainingSlots)
 			if !ok {
 				return nil, false
 			}

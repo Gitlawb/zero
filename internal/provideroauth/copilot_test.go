@@ -226,6 +226,12 @@ func TestSetCopilotDynamicHeaders(t *testing.T) {
 			body:          `not json`,
 			wantInitiator: "user",
 		},
+		{
+			name:          "large body preserves final role and vision marker",
+			body:          `{"messages":[{"role":"user","content":"` + strings.Repeat("x", copilotMaxBody) + `"},{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`,
+			wantInitiator: "agent",
+			wantVision:    "true",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -92,4 +92,18 @@ func TestUnflattenToolArguments(t *testing.T) {
 			t.Fatalf("conflicting payload should be untouched, got %s", got)
 		}
 	})
+
+	t.Run("oversized array index returns original", func(t *testing.T) {
+		in := `{"plan[999999999].content":"x"}`
+		if got := unflattenToolArguments(in); got != in {
+			t.Fatalf("oversized index payload should be untouched, got %s", got)
+		}
+	})
+
+	t.Run("cumulative sparse arrays return original", func(t *testing.T) {
+		in := `{"a[10000]":1,"b[10000]":2}`
+		if got := unflattenToolArguments(in); got != in {
+			t.Fatalf("over-budget sparse arrays should be untouched, got %s", got)
+		}
+	})
 }

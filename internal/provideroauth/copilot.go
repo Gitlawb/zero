@@ -152,28 +152,10 @@ func copilotPeekRequest(req *http.Request) (lastRole string, hasImages bool) {
 		return "", false
 	}
 	defer func() { _ = rc.Close() }()
-	data, err := io.ReadAll(io.LimitReader(rc, copilotMaxBody))
-	if err != nil {
+	lastRole, hasImages, ok := inspectCopilotRequest(rc)
+	if !ok {
 		return "", false
 	}
-	var payload struct {
-		Messages []struct {
-			Role string `json:"role"`
-		} `json:"messages"`
-		Input []struct {
-			Role string `json:"role"`
-		} `json:"input"`
-	}
-	_ = json.Unmarshal(data, &payload)
-	if n := len(payload.Messages); n > 0 {
-		lastRole = payload.Messages[n-1].Role
-	} else if n := len(payload.Input); n > 0 {
-		lastRole = payload.Input[n-1].Role
-	}
-	lower := strings.ToLower(string(data))
-	hasImages = strings.Contains(lower, `"image_url"`) ||
-		strings.Contains(lower, `"input_image"`) ||
-		strings.Contains(lower, `"type":"image"`)
 	return lastRole, hasImages
 }
 
@@ -238,8 +220,8 @@ func MintCopilotToken(ctx context.Context, client *http.Client, githubToken stri
 
 // CopilotTokenSource mints and caches the short-lived Copilot bearer, re-minting
 // it from the durable GitHub token when it is missing, near expiry, or after an
-// upstream 401. It is safe for concurrent use. One instance is built per Copilot
-// provider construction (see internal/cli/oauth_provider.go).
+// upstream 401. It is safe for concurrent use and should be retained across
+// provider rebuilds so model/provider switches reuse the minted bearer.
 type CopilotTokenSource struct {
 	// HTTPClient performs the token exchange; nil => a client with a sane timeout.
 	HTTPClient *http.Client

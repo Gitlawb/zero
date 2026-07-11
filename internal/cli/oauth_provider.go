@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -14,23 +17,26 @@ import (
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 )
 
-// oauthLoginForProfile resolves the user's OAuth login for a provider ONCE and
-// returns both a TokenResolver that authenticates model calls with it and the
-// credential-store key it bound to. It returns (nil, "") when no login exists —
-// keeping API-key users free of any per-request store lookups, since the resolver
-// is only attached when a login is present at construction time.
-//
-// The returned key is the single source of truth for "which login is this
-// provider using": callers pass it to providers.Options.OAuthLoginKey so the
-// Codex chatgpt-account-id header reads its account from the exact login that
-// issued the bearer token, instead of doing a second, independent lookup that
-// could select a different login (a backend-rejected mismatch).
-//
-// Candidate login names (profile name, then a catalog-ID fallback, both gated on
-// the profile having no own configured credential) come from the shared
-// ProviderProfile.OAuthLoginCandidates so the runtime resolver, the Codex account
-// resolver, and the onboarding presence check never diverge.
+type oauthLoginResolver struct {
+	mu                     sync.Mutex
+	copilotSources         map[string]copilotTokenSourceEntry
+	activeCopilotKey       string
+	activeCopilotTokenHash [sha256.Size]byte
+}
+
+type copilotTokenSourceEntry struct {
+	source          *provideroauth.CopilotTokenSource
+	githubTokenHash [sha256.Size]byte
+}
+
 func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResolver, string) {
+	return (&oauthLoginResolver{}).loginForProfile(profile)
+}
+
+// loginForProfile resolves the user's OAuth login once and returns both the
+// request resolver and the exact credential-store key it uses. The long-lived
+// receiver retains provider-specific token sources across provider rebuilds.
+func (r *oauthLoginResolver) loginForProfile(profile config.ProviderProfile) (providerio.TokenResolver, string) {
 	candidates := profile.OAuthLoginCandidates()
 	if providercatalog.NormalizeID(profile.CatalogID) == "copilot" {
 		// GitHub Copilot's credential is ALWAYS a durable GitHub login token that
@@ -53,7 +59,7 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 	if err != nil {
 		return nil, ""
 	}
-	_, key, ok := oauth.FirstStored(store, candidates)
+	stored, key, ok := oauth.FirstStored(store, candidates)
 	if !ok {
 		// No login under any candidate (or unreadable/invalid keys) → API-key
 		// auth, no resolver.
@@ -76,12 +82,7 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 	// rest of this provider uses, so a `zero auth login copilot` refresh is
 	// picked up without restarting the agent.
 	if providercatalog.NormalizeID(profile.CatalogID) == "copilot" {
-		source := &provideroauth.CopilotTokenSource{
-			HTTPClient: &http.Client{Timeout: 30 * time.Second},
-			GitHubToken: func(ctx context.Context) (string, error) {
-				return manager.GetFresh(ctx, key)
-			},
-		}
+		source := r.copilotTokenSource(manager, key, stored.AccessToken)
 		resolver := func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
 			bearer, err := source.Bearer(ctx, forceRefresh)
 			if errors.Is(err, oauth.ErrNoToken) {
@@ -95,6 +96,7 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 		}
 		return resolver, key
 	}
+
 	resolver := func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
 		var token string
 		var rerr error
@@ -113,6 +115,42 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 		return "Authorization", "Bearer " + token, true, nil
 	}
 	return resolver, key
+}
+
+func (r *oauthLoginResolver) copilotTokenSource(manager *oauth.Manager, key, githubToken string) *provideroauth.CopilotTokenSource {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tokenHash := sha256.Sum256([]byte(strings.TrimSpace(githubToken)))
+	if r.activeCopilotKey != "" &&
+		(r.activeCopilotKey != key || r.activeCopilotTokenHash != tokenHash) {
+		provideroauth.InvalidateCopilotModelCache()
+	}
+	r.activeCopilotKey = key
+	r.activeCopilotTokenHash = tokenHash
+	if entry, ok := r.copilotSources[key]; ok && entry.githubTokenHash == tokenHash {
+		return entry.source
+	}
+	if r.copilotSources == nil {
+		r.copilotSources = map[string]copilotTokenSourceEntry{}
+	}
+	source := &provideroauth.CopilotTokenSource{
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		GitHubToken: func(ctx context.Context) (string, error) {
+			return manager.GetFresh(ctx, key)
+		},
+	}
+	r.copilotSources[key] = copilotTokenSourceEntry{source: source, githubTokenHash: tokenHash}
+	return source
+}
+
+func (r *oauthLoginResolver) copilotAccountScope(key string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.copilotSources[key]
+	if !ok {
+		return ""
+	}
+	return key + ":" + hex.EncodeToString(entry.githubTokenHash[:])
 }
 
 // copilotLoginCandidates returns the OAuth login names to try for a GitHub
@@ -150,7 +188,7 @@ func copilotLoginCandidates(profile config.ProviderProfile) []string {
 // mai-code-1-flash-picker) to the Responses transport without threading the
 // decision through the TUI. Non-Copilot profiles and the no-login / offline
 // cases are returned unchanged (the factory then defaults to chat-completions).
-func copilotProfileWithAPIFormat(profile config.ProviderProfile, resolver providerio.TokenResolver) config.ProviderProfile {
+func copilotProfileWithAPIFormat(profile config.ProviderProfile, resolver providerio.TokenResolver, accountScope string) config.ProviderProfile {
 	if resolver == nil || providercatalog.NormalizeID(profile.CatalogID) != "copilot" {
 		return profile
 	}
@@ -175,6 +213,6 @@ func copilotProfileWithAPIFormat(profile config.ProviderProfile, resolver provid
 	if base != "" {
 		profile.BaseURL = base
 	}
-	profile.APIFormat = provideroauth.CopilotModelAPIFormat(ctx, &http.Client{Timeout: 10 * time.Second}, bearer, base, profile.Model)
+	profile.APIFormat = provideroauth.CopilotModelAPIFormat(ctx, &http.Client{Timeout: 10 * time.Second}, bearer, base, accountScope, profile.Model)
 	return profile
 }

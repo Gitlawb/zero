@@ -185,9 +185,9 @@ type errorPayload struct {
 // response.output_item.added, the argument deltas, and the final
 // response.output_item.done.
 type toolCallBuilder struct {
-	// ID is the internal correlation key (the Responses `item_id`, e.g. the
-	// long `fc_...` id). It ties output_item.added, the argument deltas, and
-	// output_item.done together — deltas carry only item_id, never call_id.
+	// ID is the internal correlation key returned by toolCallKey: normally an
+	// output-index token, with item_id/item.id/item.call_id as fallbacks. It ties
+	// output_item.added, argument deltas, and output_item.done together.
 	ID string
 	// ExternalID is the id surfaced to the runtime as ToolCallID and echoed
 	// back as `call_id` on replay. It is the stable Responses call_id (Copilot

@@ -112,6 +112,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func defaultAppDeps() appDeps {
+	oauthLogins := &oauthLoginResolver{}
 	return appDeps{
 		getwd:                os.Getwd,
 		stdin:                os.Stdin,
@@ -137,11 +138,11 @@ func defaultAppDeps() appDeps {
 			// Resolve the OAuth login ONCE: the bearer resolver and the login key it
 			// bound must describe the same login (the key is passed on to the Codex
 			// account-header resolver so it never re-selects independently).
-			resolver, loginKey := oauthLoginForProfile(profile)
+			resolver, loginKey := oauthLogins.loginForProfile(profile)
 			// For GitHub Copilot, some models are only reachable via the Responses
 			// API; set profile.APIFormat from the live /models capability map so the
 			// factory routes them correctly. No-op for other providers.
-			profile = copilotProfileWithAPIFormat(profile, resolver)
+			profile = copilotProfileWithAPIFormat(profile, resolver, oauthLogins.copilotAccountScope(loginKey))
 			return providers.New(profile, providers.Options{
 				UserAgent:     userAgent(),
 				OAuthResolver: resolver,

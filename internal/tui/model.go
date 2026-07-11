@@ -78,6 +78,7 @@ type model struct {
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	resolveOAuthDiscovery       func(context.Context, string) (string, map[string]string, string)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
 	// lspManager is created once per session and reused across prompts so gopls (and
@@ -761,6 +762,7 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+	oauthDiscovery := newOAuthDiscoveryCredentialResolver()
 
 	m := model{
 		ctx:                         ctx,
@@ -786,6 +788,7 @@ func newModel(ctx context.Context, options Options) model {
 		newProvider:                 options.NewProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
+		resolveOAuthDiscovery:       oauthDiscovery.resolve,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
 		sessionStore:                sessionStore,

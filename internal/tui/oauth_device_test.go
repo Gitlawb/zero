@@ -2,7 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +14,12 @@ import (
 	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
+
+type oauthDiscoveryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f oauthDiscoveryRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func seedOAuthToken(t *testing.T, providerID, access string) {
 	t.Helper()
@@ -30,9 +40,38 @@ func TestOAuthStoredTokenReadsStoredLogin(t *testing.T) {
 	if got := oauthStoredToken(context.Background(), "xai"); got != "live-grok-token" {
 		t.Fatalf("oauthStoredToken(xai) = %q, want live-grok-token", got)
 	}
+
 	// No login for another provider → empty (no error, no panic).
 	if got := oauthStoredToken(context.Background(), "openrouter"); got != "" {
 		t.Fatalf("oauthStoredToken(openrouter) = %q, want empty", got)
+	}
+}
+
+func TestOAuthDiscoveryCredentialReusesCopilotBearer(t *testing.T) {
+	seedOAuthToken(t, "copilot", "github-token")
+	exchanges := 0
+	resolver := newOAuthDiscoveryCredentialResolver()
+	resolver.copilot.HTTPClient = &http.Client{Transport: oauthDiscoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		exchanges++
+		body := fmt.Sprintf(`{"token":"copilot-token","expires_at":%d}`, time.Now().Add(time.Hour).Unix())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	for range 2 {
+		token, headers, _ := resolver.resolve(t.Context(), "copilot")
+		if token != "copilot-token" {
+			t.Fatalf("resolved token = %q, want copilot-token", token)
+		}
+		if headers["Copilot-Integration-Id"] == "" {
+			t.Fatal("Copilot discovery headers were not applied")
+		}
+	}
+	if exchanges != 1 {
+		t.Fatalf("Copilot token exchanges = %d, want 1", exchanges)
 	}
 }
 

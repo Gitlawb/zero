@@ -34,10 +34,15 @@ func copilotModelsURL(baseURL string) string {
 	return strings.TrimRight(baseURL, "/") + "/models"
 }
 
+type copilotModelCacheEntry struct {
+	formats   map[string]string
+	fetchedAt time.Time
+}
+
 var (
-	copilotModelCacheMu   sync.Mutex
-	copilotModelFormats   map[string]string
-	copilotModelFetchedAt time.Time
+	copilotModelCacheMu         sync.Mutex
+	copilotModelCache           = map[string]copilotModelCacheEntry{}
+	copilotModelCacheGeneration uint64
 )
 
 // CopilotModelAPIFormat reports which transport a GitHub Copilot model must use
@@ -50,15 +55,15 @@ var (
 //
 // bearer is the minted Copilot token (the same value the OAuth resolver returns
 // for the model call). baseURL is the account-specific host derived from that
-// token (empty falls back to the public default). Results are cached
-// process-wide for a short TTL so repeated provider rebuilds — e.g. every
-// `/model` switch — don't re-probe.
-func CopilotModelAPIFormat(ctx context.Context, httpClient *http.Client, bearer, baseURL, model string) string {
+// token (empty falls back to the public default). Results are cached per account
+// host for a short TTL so repeated provider rebuilds — e.g. every `/model`
+// switch — don't re-probe or leak capabilities across accounts.
+func CopilotModelAPIFormat(ctx context.Context, httpClient *http.Client, bearer, baseURL, accountScope, model string) string {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" || strings.TrimSpace(bearer) == "" {
 		return copilotAPIFormatChat
 	}
-	formats := copilotModelFormatMap(ctx, httpClient, bearer, baseURL)
+	formats := copilotModelFormatMap(ctx, httpClient, bearer, baseURL, accountScope)
 	if format, ok := formats[model]; ok {
 		return format
 	}
@@ -69,24 +74,55 @@ func CopilotModelAPIFormat(ctx context.Context, httpClient *http.Client, bearer,
 // caching it when stale. On any fetch error it returns the last good map (or an
 // empty map), so callers degrade to the chat-completions default rather than
 // failing provider construction.
-func copilotModelFormatMap(ctx context.Context, httpClient *http.Client, bearer, baseURL string) map[string]string {
+func copilotModelFormatMap(ctx context.Context, httpClient *http.Client, bearer, baseURL, accountScope string) map[string]string {
+	cacheKey := copilotModelCacheKey(baseURL, accountScope)
 	copilotModelCacheMu.Lock()
-	defer copilotModelCacheMu.Unlock()
-
-	if copilotModelFormats != nil && time.Since(copilotModelFetchedAt) < copilotModelCacheTTL {
-		return copilotModelFormats
+	entry, ok := copilotModelCache[cacheKey]
+	generation := copilotModelCacheGeneration
+	if ok && time.Since(entry.fetchedAt) < copilotModelCacheTTL {
+		copilotModelCacheMu.Unlock()
+		return entry.formats
 	}
+	copilotModelCacheMu.Unlock()
 
 	fetched, err := fetchCopilotModelFormats(ctx, httpClient, bearer, baseURL)
 	if err != nil || len(fetched) == 0 {
-		if copilotModelFormats != nil {
-			return copilotModelFormats
+		copilotModelCacheMu.Lock()
+		entry, ok = copilotModelCache[cacheKey]
+		copilotModelCacheMu.Unlock()
+		if ok {
+			return entry.formats
 		}
 		return map[string]string{}
 	}
-	copilotModelFormats = fetched
-	copilotModelFetchedAt = time.Now()
-	return copilotModelFormats
+
+	copilotModelCacheMu.Lock()
+	defer copilotModelCacheMu.Unlock()
+	if generation != copilotModelCacheGeneration {
+		if entry, ok = copilotModelCache[cacheKey]; ok {
+			return entry.formats
+		}
+		return map[string]string{}
+	}
+	if entry, ok = copilotModelCache[cacheKey]; ok && time.Since(entry.fetchedAt) < copilotModelCacheTTL {
+		return entry.formats
+	}
+	copilotModelCache[cacheKey] = copilotModelCacheEntry{formats: fetched, fetchedAt: time.Now()}
+	return fetched
+}
+
+func copilotModelCacheKey(baseURL, accountScope string) string {
+	return strings.ToLower(strings.TrimRight(copilotModelsURL(baseURL), "/")) + "#" + strings.TrimSpace(accountScope)
+}
+
+// InvalidateCopilotModelCache drops account-scoped model capabilities after the
+// durable GitHub login changes so a new account on the same host cannot inherit
+// the previous account's transport routing.
+func InvalidateCopilotModelCache() {
+	copilotModelCacheMu.Lock()
+	copilotModelCache = map[string]copilotModelCacheEntry{}
+	copilotModelCacheGeneration++
+	copilotModelCacheMu.Unlock()
 }
 
 // fetchCopilotModelFormats GETs /models and derives each model's api-format from

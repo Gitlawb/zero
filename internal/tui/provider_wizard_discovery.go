@@ -102,23 +102,9 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
-		apiKey := pastedKey
-		var extraHeaders map[string]string
-		var oauthBaseURL string
-		if needOAuthToken {
-			if resolved, headers, baseURL := oauthDiscoveryCredential(ctx, providerID); resolved != "" {
-				apiKey = resolved
-				extraHeaders = headers
-				oauthBaseURL = baseURL
-			}
-		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
-		if len(extraHeaders) > 0 {
-			profile.CustomHeaders = extraHeaders
-		}
-		if oauthBaseURL != "" {
-			profile.BaseURL = oauthBaseURL
-		}
+		profile := providerWizardDiscoveryProfile(provider, pastedKey)
+		profile = m.resolveDiscoveryProfile(ctx, providerID, needOAuthToken, profile)
+		apiKey := profile.APIKey
 		models, err := discover(ctx, profile)
 		return providerModelsDiscoveredMsg{providerID: providerID, token: token, models: models, err: err, secrets: []string{apiKey, profile.APIKey}}
 	}

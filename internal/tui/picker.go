@@ -481,23 +481,8 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
-		k := key
-		var extraHeaders map[string]string
-		var oauthBaseURL string
-		if needOAuth {
-			if resolved, headers, baseURL := oauthDiscoveryCredential(ctx, providerID); resolved != "" {
-				k = resolved
-				extraHeaders = headers
-				oauthBaseURL = baseURL
-			}
-		}
-		profile := providerWizardDiscoveryProfile(descriptor, k)
-		if len(extraHeaders) > 0 {
-			profile.CustomHeaders = extraHeaders
-		}
-		if oauthBaseURL != "" {
-			profile.BaseURL = oauthBaseURL
-		}
+		profile := providerWizardDiscoveryProfile(descriptor, key)
+		profile = m.resolveDiscoveryProfile(ctx, providerID, needOAuth, profile)
 		models, err := discover(ctx, profile)
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
 	}
