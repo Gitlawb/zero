@@ -44,17 +44,22 @@ func TestLikelySandboxDeniedIgnoresUnsandboxedFailure(t *testing.T) {
 }
 
 func TestLikelySandboxDeniedDetectsSilentWindowsWrappedFailure(t *testing.T) {
-	plan := zeroSandbox.CommandPlan{
-		Wrapped:       true,
-		TargetBackend: zeroSandbox.BackendWindowsRestrictedToken,
-	}
-	if !likelySandboxDenied(plan, 1, "", "  \n") {
-		t.Fatal("wrapped Windows command failing with empty output must be classified as sandbox denied")
-	}
-	meta := map[string]string{}
-	markLikelySandboxDenial(meta, plan, 1, "")
-	if meta[SandboxLikelyDeniedMeta] != "true" || meta[SandboxDenialKindMeta] != SandboxDenialKindSandbox {
-		t.Fatalf("silent windows denial meta = %#v", meta)
+	for _, backend := range []zeroSandbox.BackendName{
+		zeroSandbox.BackendWindowsRestrictedToken,
+		zeroSandbox.BackendWindowsElevated,
+	} {
+		plan := zeroSandbox.CommandPlan{
+			Wrapped:       true,
+			TargetBackend: backend,
+		}
+		if !likelySandboxDenied(plan, 1, "", "  \n") {
+			t.Fatalf("wrapped Windows command failing with empty output must be classified as sandbox denied (backend %s)", backend)
+		}
+		meta := map[string]string{}
+		markLikelySandboxDenial(meta, plan, 1, "")
+		if meta[SandboxLikelyDeniedMeta] != "true" || meta[SandboxDenialKindMeta] != SandboxDenialKindSandbox {
+			t.Fatalf("silent windows denial meta = %#v (backend %s)", meta, backend)
+		}
 	}
 }
 
