@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -311,3 +312,49 @@ func TestMailboxConcurrentSends(t *testing.T) {
 		t.Fatalf("concurrent sends lost messages: got %d, want %d", len(msgs), n)
 	}
 }
+
+func TestMailboxRenameRetry(t *testing.T) {
+	mb := newTestMailbox(t)
+
+	var attempts int
+	mb.rename = func(src, dst string) error {
+		attempts++
+		if attempts < 3 {
+			// Return a retryable Windows sharing violation error
+			return syscall.Errno(32)
+		}
+		// Then succeed
+		return os.Rename(src, dst)
+	}
+
+	err := mb.Send("team", "alice", Message{Body: "retry-test"})
+	if err != nil {
+		t.Fatalf("expected Send to succeed after retries, got: %v", err)
+	}
+	if attempts < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+}
+
+func TestMailboxRenameNonRetryableError(t *testing.T) {
+	mb := newTestMailbox(t)
+
+	var attempts int
+	expectedErr := errors.New("non-retryable error")
+	mb.rename = func(src, dst string) error {
+		attempts++
+		return expectedErr
+	}
+
+	err := mb.Send("team", "alice", Message{Body: "retry-test"})
+	if err == nil {
+		t.Fatal("expected Send to fail immediately")
+	}
+	if !errors.Is(err, expectedErr) && !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected only 1 attempt for non-retryable error, got %d", attempts)
+	}
+}
+

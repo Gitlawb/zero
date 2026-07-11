@@ -36,6 +36,9 @@ type Mailbox struct {
 	MaxMessages int
 	// LockTimeout bounds how long Send/MarkRead wait for the inbox lock.
 	LockTimeout time.Duration
+
+	// rename is used to override the rename operation in tests.
+	rename func(src, dst string) error
 }
 
 const (
@@ -218,7 +221,7 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 		return fmt.Errorf("%w: %d messages", ErrMailboxFull, len(messages))
 	}
 	messages = append(messages, msg)
-	return atomicWriteJSON(path, messages)
+	return m.atomicWriteJSON(path, messages)
 }
 
 // ReadAndConsume reads the recipient's inbox and marks every previously-unread
@@ -260,7 +263,7 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 		}
 	}
 	if changed {
-		if err := atomicWriteJSON(path, messages); err != nil {
+		if err := m.atomicWriteJSON(path, messages); err != nil {
 			return nil, err
 		}
 	}
@@ -303,7 +306,7 @@ func (m *Mailbox) readLocked(path string) ([]Message, error) {
 
 // atomicWriteJSON writes data as pretty JSON to a sibling temp file (0600) then
 // renames it over path, so a reader never observes a partial write.
-func atomicWriteJSON(path string, data any) error {
+func (m *Mailbox) atomicWriteJSON(path string, data any) error {
 	encoded, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("swarm: encode inbox: %w", err)
@@ -326,7 +329,7 @@ func atomicWriteJSON(path string, data any) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("swarm: close temp inbox: %w", err)
 	}
-	if err := renameWithRetry(tmpName, path); err != nil {
+	if err := m.renameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("swarm: commit inbox: %w", err)
 	}
 	return nil
@@ -398,10 +401,14 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 	}
 }
 
-func renameWithRetry(src, dst string) error {
+func (m *Mailbox) renameWithRetry(src, dst string) error {
 	var err error
 	for i := 0; i < 10; i++ {
-		err = os.Rename(src, dst)
+		rename := m.rename
+		if rename == nil {
+			rename = os.Rename
+		}
+		err = rename(src, dst)
 		if err == nil {
 			return nil
 		}
