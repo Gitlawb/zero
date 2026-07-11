@@ -333,7 +333,7 @@ If you prefer to install these tools globally on your path, you can run:
 
 ```bash
 # Install golangci-lint
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.12.2
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 # Install govulncheck
 go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
