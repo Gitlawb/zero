@@ -374,6 +374,7 @@ func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot strin
 	} else {
 		env = append(env, os.Environ()...)
 	}
+	env = scrubSensitiveEnv(env)
 	env = upsertEnvList(env,
 		"HOME="+workspaceRoot,
 		"PATH="+firstEnv("PATH", defaultPath()),

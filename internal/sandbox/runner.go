@@ -382,6 +382,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		// command env values still replace inherited values below.
 		env = os.Environ()
 	}
+	env = scrubSensitiveEnv(env)
 	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
 		// Preserve standard user tool locations so a bare `python3`/`node`
@@ -962,4 +963,47 @@ func regexpQuoteMeta(value string) string {
 		`$`, `\$`,
 	)
 	return replacer.Replace(value)
+}
+
+func scrubSensitiveEnv(env []string) []string {
+	sensitiveKeys := []string{
+		"OPENAI_API_KEY",
+		"ANTHROPIC_API_KEY",
+		"GEMINI_API_KEY",
+		"DEEPSEEK_API_KEY",
+		"GROQ_API_KEY",
+		"COHERE_API_KEY",
+		"MISTRAL_API_KEY",
+		"PERPLEXITY_API_KEY",
+		"OPENROUTER_API_KEY",
+		"ANYSCALE_API_KEY",
+		"TOGETHER_API_KEY",
+		"AZURE_OPENAI_API_KEY",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"GITHUB_TOKEN",
+		"GITLAB_TOKEN",
+		"GH_TOKEN",
+	}
+
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		drop := false
+		for _, sensitive := range sensitiveKeys {
+			if strings.EqualFold(key, sensitive) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

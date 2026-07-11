@@ -637,3 +637,32 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	}
 	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
 }
+
+func TestScrubSensitiveEnv(t *testing.T) {
+	inputEnv := []string{
+		"PATH=/usr/bin",
+		"OPENAI_API_KEY=sk-proj-12345",
+		"ANTHROPIC_API_KEY=sk-ant-12345",
+		"GEMINI_API_KEY=AIzaSy12345",
+		"DEEPSEEK_API_KEY=ds-12345",
+		"GITHUB_TOKEN=ghp_12345",
+		"AWS_ACCESS_KEY_ID=AKIA12345",
+		"AWS_SECRET_ACCESS_KEY=secret12345",
+		"SAFE_VAR=hello",
+	}
+	scrubbed := scrubSensitiveEnv(inputEnv)
+	expectedMap := map[string]bool{
+		"PATH":     true,
+		"SAFE_VAR": true,
+	}
+	for _, entry := range scrubbed {
+		key, _, _ := strings.Cut(entry, "=")
+		if !expectedMap[key] {
+			t.Errorf("found sensitive/unexpected environment variable: %s", entry)
+		}
+	}
+	if len(scrubbed) != 2 {
+		t.Errorf("expected 2 environment variables, got %d: %v", len(scrubbed), scrubbed)
+	}
+}
+

@@ -28,7 +28,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 			Model:        "gpt-4.1",
 		},
 		Registry:      registry,
-		ContextWindow: 10_000,
+		ContextWindow: 20_000,
 	})
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
@@ -46,8 +46,8 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 	if report.ProviderName != "openai" || report.ModelID != "gpt-4.1" || report.APIModel != "gpt-4.1" {
 		t.Fatalf("provider metadata = %#v", report)
 	}
-	if report.ContextWindow != 10_000 {
-		t.Fatalf("ContextWindow = %d, want 10000", report.ContextWindow)
+	if report.ContextWindow != 20_000 {
+		t.Fatalf("ContextWindow = %d, want 20000", report.ContextWindow)
 	}
 	if report.ProjectGuidelineFile != "AGENTS.md" {
 		t.Fatalf("ProjectGuidelineFile = %q, want AGENTS.md", report.ProjectGuidelineFile)
@@ -59,7 +59,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 		t.Fatalf("UsedTokens = %d, want > 0", report.UsedTokens)
 	}
 	if report.FreeTokens <= 0 {
-		t.Fatalf("FreeTokens = %d, want > 0", report.FreeTokens)
+		t.Fatalf("FreeTokens = %d, UsedTokens = %d, ContextWindow = %d, want > 0", report.FreeTokens, report.UsedTokens, report.ContextWindow)
 	}
 	if report.FreeTokens+report.UsedTokens != report.ContextWindow {
 		t.Fatalf("free + used = %d, want %d", report.FreeTokens+report.UsedTokens, report.ContextWindow)
