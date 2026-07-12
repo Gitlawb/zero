@@ -353,7 +353,7 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
 		}
 	}
-	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,
@@ -982,11 +982,14 @@ func scrubSensitiveEnv(env []string) []string {
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {
-			// AWS_PROFILE and GOOGLE_APPLICATION_CREDENTIALS are pointers
-			// (profile name, key file path), not secrets; scrubbing them
-			// breaks aws/gcloud invocations inside the sandbox without
-			// protecting anything.
-			if key == "AWS_PROFILE" || key == "GOOGLE_APPLICATION_CREDENTIALS" {
+			// AWS_PROFILE is a profile name, not a secret, and scrubbing it
+			// protects nothing: the SDKs fall back to the default profile in
+			// ~/.aws/credentials, which credentialDenyReadPaths blocks at the
+			// filesystem level instead. GOOGLE_APPLICATION_CREDENTIALS IS
+			// scrubbed: it points at a service-account key file at an
+			// arbitrary path, so hiding the pointer complements the deny-read
+			// rule on the file itself.
+			if key == "AWS_PROFILE" {
 				continue
 			}
 			sensitiveKeys = append(sensitiveKeys, key)

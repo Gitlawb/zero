@@ -648,12 +648,18 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"GITHUB_TOKEN=ghp_12345",
 		"AWS_ACCESS_KEY_ID=AKIA12345",
 		"AWS_SECRET_ACCESS_KEY=secret12345",
+		"GOOGLE_API_KEY=AIzaSy67890",
+		"XAI_API_KEY=xai-12345",
+		"HUGGINGFACE_API_KEY=hf_12345",
+		"GOOGLE_APPLICATION_CREDENTIALS=/home/user/sa-key.json",
+		"AWS_PROFILE=staging",
 		"SAFE_VAR=hello",
 	}
 	scrubbed := scrubSensitiveEnv(inputEnv)
 	expectedMap := map[string]bool{
-		"PATH":     true,
-		"SAFE_VAR": true,
+		"PATH":        true,
+		"SAFE_VAR":    true,
+		"AWS_PROFILE": true,
 	}
 	for _, entry := range scrubbed {
 		key, _, _ := strings.Cut(entry, "=")
@@ -661,7 +667,7 @@ func TestScrubSensitiveEnv(t *testing.T) {
 			t.Errorf("found sensitive/unexpected environment variable: %s", entry)
 		}
 	}
-	if len(scrubbed) != 2 {
-		t.Errorf("expected 2 environment variables, got %d: %v", len(scrubbed), scrubbed)
+	if len(scrubbed) != 3 {
+		t.Errorf("expected 3 environment variables, got %d: %v", len(scrubbed), scrubbed)
 	}
 }
