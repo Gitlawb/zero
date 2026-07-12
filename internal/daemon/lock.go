@@ -101,15 +101,13 @@ func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
 	return true
 }
 
-// release removes the lock file. Safe to call once.
+// release removes the lock file. Safe to call once. An already-missing lock
+// file is not an error (lockutil.RemoveLockFile swallows it on every platform).
 func (l *fileLock) release() error {
 	if l == nil || l.path == "" {
 		return nil
 	}
-	if err := lockutil.RemoveLockFile(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return lockutil.RemoveLockFile(l.path)
 }
 
 // readPidFile reads and parses the PID recorded in a lock file.

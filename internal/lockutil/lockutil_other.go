@@ -3,19 +3,38 @@
 package lockutil
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 )
 
-// RestoreLockFile attempts to restore a sidelined lock file on non-Windows platforms.
-// It uses os.Link to fail if the destination already exists.
+// RestoreLockFile restores a sidelined lock file on non-Windows platforms. It
+// uses os.Link so a competing lock created at path in the meantime wins: the
+// link fails with os.ErrExist instead of overwriting it. If the link fails for
+// any other reason (hardlink-incapable filesystems such as FAT or some
+// FUSE/network mounts, ENOSPC, EPERM), it falls back to an O_EXCL copy rather
+// than leaving path missing and the live holder's lock stranded in reclaimed.
+// Once the lock is back at path the restore has succeeded, so a failed cleanup
+// of the sidelined name is not reported as an error; the leftover file is
+// invisible to the lock protocol.
 func RestoreLockFile(reclaimed, path string) error {
-	if err := os.Link(reclaimed, path); err != nil {
+	err := os.Link(reclaimed, path)
+	if err == nil {
+		_ = RemoveLockFile(reclaimed)
+		return nil
+	}
+	if errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return os.Remove(reclaimed)
+	return restoreByCopy(reclaimed, path)
 }
 
-// RemoveLockFile removes a lock file on non-Windows platforms.
+// RemoveLockFile removes a lock file on non-Windows platforms. Removing an
+// already-missing file reports nil, matching the Windows implementation, so
+// callers see one cross-platform contract.
 func RemoveLockFile(path string) error {
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
