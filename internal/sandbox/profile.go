@@ -166,23 +166,22 @@ func credentialDenyReadPaths(policy Policy) []string {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
+	// A failed home lookup only drops the home-based candidates; the
+	// GOOGLE_APPLICATION_CREDENTIALS target must be protected regardless.
+	home, _ := os.UserHomeDir()
 	return credentialDenyReadPathsIn(home, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), policy.AllowRead)
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
 // separated so tests can exercise it against a synthetic home directory.
 func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead []string) []string {
-	if strings.TrimSpace(home) == "" {
-		return nil
-	}
-	candidates := []string{
-		filepath.Join(home, ".aws"),
-		filepath.Join(home, ".config", "gcloud"),
-		filepath.Join(home, ".azure"),
+	var candidates []string
+	if home = strings.TrimSpace(home); home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".aws"),
+			filepath.Join(home, ".config", "gcloud"),
+			filepath.Join(home, ".azure"),
+		)
 	}
 	if target := strings.TrimSpace(googleCredentials); target != "" {
 		candidates = append(candidates, target)

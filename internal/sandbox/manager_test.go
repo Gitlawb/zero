@@ -407,7 +407,14 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
 	}
 
-	if got := credentialDenyReadPathsIn("  ", "", nil); got != nil {
-		t.Errorf("credential deny paths for blank home = %#v, want nil", got)
+	if got := credentialDenyReadPathsIn("  ", "", nil); len(got) != 0 {
+		t.Errorf("credential deny paths for blank home = %#v, want none", got)
+	}
+
+	// The GOOGLE_APPLICATION_CREDENTIALS target stays protected even when no
+	// home directory is resolvable.
+	homeless := credentialDenyReadPathsIn("", keyFile, nil)
+	if !stringSliceContains(homeless, normalizeProfilePaths([]string{keyFile})[0]) {
+		t.Errorf("credential deny paths without home = %#v, want key file included", homeless)
 	}
 }

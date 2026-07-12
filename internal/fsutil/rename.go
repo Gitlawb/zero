@@ -24,7 +24,7 @@ func RenameWithRetry(src, dst string, rename func(src, dst string) error) error 
 			return nil
 		}
 		if runtime.GOOS == "windows" {
-			if os.IsPermission(err) || isWindowsSharingViolation(err) {
+			if os.IsPermission(err) || isWindowsSharingOrLockViolation(err) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
@@ -34,11 +34,12 @@ func RenameWithRetry(src, dst string, rename func(src, dst string) error) error 
 	return err
 }
 
-func isWindowsSharingViolation(err error) bool {
+func isWindowsSharingOrLockViolation(err error) bool {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		const ERROR_SHARING_VIOLATION syscall.Errno = 32
-		return errno == ERROR_SHARING_VIOLATION
+		const ERROR_LOCK_VIOLATION syscall.Errno = 33
+		return errno == ERROR_SHARING_VIOLATION || errno == ERROR_LOCK_VIOLATION
 	}
 	return false
 }

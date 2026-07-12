@@ -14,10 +14,14 @@ func TestRenameWithRetryRetriesOnWindows(t *testing.T) {
 	var attempts int
 	err := RenameWithRetry("src", "dst", func(src, dst string) error {
 		attempts++
-		if attempts < 3 {
+		switch attempts {
+		case 1:
 			return syscall.Errno(32) // ERROR_SHARING_VIOLATION
+		case 2:
+			return syscall.Errno(33) // ERROR_LOCK_VIOLATION
+		default:
+			return nil
 		}
-		return nil
 	})
 	if err != nil {
 		t.Fatalf("expected success after retries, got: %v", err)
