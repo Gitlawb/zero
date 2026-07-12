@@ -23,7 +23,7 @@ func RestoreLockFile(reclaimed, path string) error {
 	if err == nil || errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return restoreByCopy(reclaimed, path)
+	return restoreByCopy(reclaimed, path, moveFileNoReplace)
 }
 
 // moveFileNoReplace renames from to to, failing if to already exists. It calls

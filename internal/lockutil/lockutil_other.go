@@ -26,7 +26,7 @@ func RestoreLockFile(reclaimed, path string) error {
 	if errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return restoreByCopy(reclaimed, path)
+	return restoreByCopy(reclaimed, path, os.Link)
 }
 
 // isReclaimContended reports whether a failed rename-aside of a suspected

@@ -370,17 +370,22 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// Lock held: break it if stale via the atomic rename-with-verify in
 		// lockutil.ReclaimStaleLock (AUDIT-M13), otherwise wait.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			if _, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+			cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
 				info, err := os.Stat(reclaimedPath)
 				return err == nil && time.Since(info.ModTime()) <= lockStaleAfter
-			}); rerr != nil {
+			})
+			if rerr != nil {
 				// Reclaim hit a hard failure: the rename aside failed outright, or a
 				// live holder's lock could not be put back (the lock path may be
 				// missing, so re-acquiring would break mutual exclusion). Fail closed
 				// instead of spinning to the deadline.
 				return nil, fmt.Errorf("swarm: reclaim stale lock: %w", rerr)
 			}
-			continue
+			if cleared {
+				continue // cleared a genuinely stale lock; retry the O_EXCL create now
+			}
+			// Lost the reclaim race (or it was actually fresh) — fall through to the
+			// bounded wait instead of hot-spinning on a reclaim that never wins.
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("swarm: timed out acquiring lock %s", filepath.Base(lockPath))

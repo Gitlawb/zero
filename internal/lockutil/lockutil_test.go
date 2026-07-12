@@ -63,7 +63,7 @@ func TestRestoreByCopy(t *testing.T) {
 	if err := os.WriteFile(reclaimed, []byte("token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := restoreByCopy(reclaimed, path); err != nil {
+	if err := restoreByCopy(reclaimed, path, os.Link); err != nil {
 		t.Fatalf("restoreByCopy failed: %v", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "token" {
@@ -71,6 +71,9 @@ func TestRestoreByCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(reclaimed); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected sidelined lock to be cleaned up after copy: %v", err)
+	}
+	if _, err := os.Stat(reclaimed + ".copy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected staged copy to be cleaned up: %v", err)
 	}
 
 	// 2. Keeps the no-overwrite guarantee: a competing lock at the target wins
@@ -81,7 +84,7 @@ func TestRestoreByCopy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("competing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := restoreByCopy(reclaimed, path); !errors.Is(err, os.ErrExist) {
+	if err := restoreByCopy(reclaimed, path, os.Link); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("expected os.ErrExist when target exists, got: %v", err)
 	}
 	if data, _ := os.ReadFile(path); string(data) != "competing" {
@@ -89,6 +92,9 @@ func TestRestoreByCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(reclaimed); err != nil {
 		t.Fatalf("expected sidelined lock to still exist: %v", err)
+	}
+	if _, err := os.Stat(reclaimed + ".copy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected staged copy to be cleaned up after a failed publish: %v", err)
 	}
 }
 
