@@ -84,10 +84,11 @@ func (s *Store) lockJob(id string) (func(), error) {
 				return err == nil && time.Since(info.ModTime()) <= cronLockStaleAfter
 			})
 			if rerr != nil {
-				// A live holder's lock could not be put back, so the lock path may
-				// be missing; re-acquiring now would break mutual exclusion. Fail
-				// closed instead.
-				return nil, fmt.Errorf("cron: restore reclaimed job lock: %w", rerr)
+				// Reclaim hit a hard failure: the rename aside failed outright, or a
+				// live holder's lock could not be put back (the lock path may be
+				// missing, so re-acquiring would break mutual exclusion). Fail closed
+				// instead of spinning to the deadline.
+				return nil, fmt.Errorf("cron: reclaim stale job lock: %w", rerr)
 			}
 			if cleared {
 				continue // cleared a genuinely stale lock; retry the O_EXCL create now

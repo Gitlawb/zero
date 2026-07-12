@@ -46,6 +46,18 @@ func moveFileNoReplace(from, to string) error {
 	return windows.MoveFileEx(fromPtr, toPtr, 0)
 }
 
+// isReclaimContended reports whether a failed rename-aside of a suspected
+// stale lock means the file was concurrently open or pending deletion (which
+// surfaces as ERROR_SHARING_VIOLATION or ERROR_ACCESS_DENIED on Windows)
+// rather than a hard failure, so ReclaimStaleLock reports a lost race instead
+// of an error. Neither errno satisfies errors.Is(err, os.ErrExist), and
+// ERROR_SHARING_VIOLATION does not satisfy errors.Is(err, os.ErrPermission)
+// either, so the classification compares raw errnos like RemoveLockFile below.
+func isReclaimContended(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno) && (errno == windows.ERROR_SHARING_VIOLATION || errno == windows.ERROR_ACCESS_DENIED)
+}
+
 // RemoveLockFile removes a lock file on Windows, retrying on the sharing
 // violation or access denied errors that are common under heavy concurrent
 // contention. Removing an already-missing file reports nil, matching the

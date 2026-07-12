@@ -29,6 +29,12 @@ func RestoreLockFile(reclaimed, path string) error {
 	return restoreByCopy(reclaimed, path)
 }
 
+// isReclaimContended reports whether a failed rename-aside of a suspected
+// stale lock means it was lost to a racer rather than a hard failure. POSIX
+// rename has no contention errno (a lost race surfaces only as ENOENT, which
+// ReclaimStaleLock already treats as benign), so nothing extra is benign here.
+func isReclaimContended(error) bool { return false }
+
 // RemoveLockFile removes a lock file on non-Windows platforms. Removing an
 // already-missing file reports nil, matching the Windows implementation, so
 // callers see one cross-platform contract.

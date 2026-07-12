@@ -374,10 +374,11 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 				info, err := os.Stat(reclaimedPath)
 				return err == nil && time.Since(info.ModTime()) <= lockStaleAfter
 			}); rerr != nil {
-				// A live holder's lock could not be put back, so the lock path may
-				// be missing; re-acquiring now would break mutual exclusion. Fail
-				// closed instead.
-				return nil, fmt.Errorf("swarm: restore reclaimed lock: %w", rerr)
+				// Reclaim hit a hard failure: the rename aside failed outright, or a
+				// live holder's lock could not be put back (the lock path may be
+				// missing, so re-acquiring would break mutual exclusion). Fail closed
+				// instead of spinning to the deadline.
+				return nil, fmt.Errorf("swarm: reclaim stale lock: %w", rerr)
 			}
 			continue
 		}
