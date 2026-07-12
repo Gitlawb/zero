@@ -56,6 +56,51 @@ func TestNewCreatesOpenAIProviderWithFactoryOptions(t *testing.T) {
 	}
 }
 
+func TestNewUsesMiniMaxCatalogMessagesEndpoints(t *testing.T) {
+	tests := []struct {
+		name      string
+		catalogID string
+		wantURL   string
+	}{
+		{name: "global", catalogID: "minimax", wantURL: "https://api.minimax.io/anthropic/v1/messages"},
+		{name: "china", catalogID: "minimaxi-cn", wantURL: "https://api.minimaxi.com/anthropic/v1/messages"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &captureTransport{
+				responseBody: "data: {\"type\":\"message_stop\"}\n\n",
+			}
+			provider, err := New(config.ProviderProfile{
+				Name:         test.catalogID,
+				CatalogID:    test.catalogID,
+				ProviderKind: config.ProviderKindAnthropicCompat,
+				APIKey:       "sk-minimax",
+				Model:        "MiniMax-M3",
+			}, Options{HTTPClient: &http.Client{Transport: transport}})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion() error = %v", err)
+			}
+			for range stream {
+			}
+
+			if transport.request == nil {
+				t.Fatal("HTTP client was not used")
+			}
+			if got := transport.request.URL.String(); got != test.wantURL {
+				t.Fatalf("request URL = %q, want %q", got, test.wantURL)
+			}
+		})
+	}
+}
+
 func TestNewPassesOpenGatewayHY3ModelThrough(t *testing.T) {
 	transport := &captureTransport{
 		responseBody: "data: [DONE]\n\n",

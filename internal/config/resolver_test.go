@@ -1166,7 +1166,7 @@ func TestResolveAppliesProviderCatalogDefaults(t *testing.T) {
 	if resolved.Provider.ProviderKind != ProviderKindAnthropicCompat {
 		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindAnthropicCompat)
 	}
-	if resolved.Provider.BaseURL != "https://api.minimax.io/anthropic/v1" {
+	if resolved.Provider.BaseURL != "https://api.minimax.io/anthropic" {
 		t.Fatalf("BaseURL = %q, want MiniMax default", resolved.Provider.BaseURL)
 	}
 	if resolved.Provider.Model != "MiniMax-M3" {
@@ -1205,7 +1205,7 @@ func TestResolveAppliesMiniMaxCNCatalogDefaults(t *testing.T) {
 	if resolved.Provider.ProviderKind != ProviderKindAnthropicCompat {
 		t.Fatalf("ProviderKind = %q, want %q", resolved.Provider.ProviderKind, ProviderKindAnthropicCompat)
 	}
-	if resolved.Provider.BaseURL != "https://api.minimaxi.com/anthropic/v1" {
+	if resolved.Provider.BaseURL != "https://api.minimaxi.com/anthropic" {
 		t.Fatalf("BaseURL = %q, want MiniMax CN default", resolved.Provider.BaseURL)
 	}
 	if resolved.Provider.Model != "MiniMax-M3" {
