@@ -367,27 +367,10 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		if !isLockContended(err) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
-		// Lock held: break it if stale, otherwise wait. Reclaim ATOMICALLY via
-		// rename-with-verify. The previous content==content check read the same file
-		// twice microseconds apart, so it was always "unchanged" and gave no
-		// protection — two waiters could both Remove the lock while a third recreated
-		// it via O_EXCL, leaving two live holders. Renaming the file aside means only
-		// one racer wins the rename of a given inode; the moved file's mtime is then
-		// re-checked stale before deletion, and if a holder rotated a fresh lock in
-		// the gap it is renamed back rather than stolen. (AUDIT-M13)
+		// Lock held: break it if stale via the atomic rename-with-verify in
+		// reclaimStaleLock (AUDIT-M13), otherwise wait.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			reclaimed := lockPath + ".stale." + token
-			if os.Rename(lockPath, reclaimed) == nil {
-				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
-					_ = lockutil.RemoveLockFile(reclaimed) // genuinely stale — drop it
-				} else {
-					if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
-						if errors.Is(err, os.ErrExist) {
-							_ = lockutil.RemoveLockFile(reclaimed)
-						}
-					}
-				}
-			}
+			reclaimStaleLock(lockPath, token, lockStaleAfter)
 			continue
 		}
 		if time.Now().After(deadline) {
@@ -397,4 +380,33 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// contention (Windows file ops are slow; a coarse sleep starves waiters).
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// reclaimStaleLock atomically reclaims a stale lock file. Renaming the file
+// aside means only one racer wins the rename of a given inode (the previous
+// content==content check read the same file twice microseconds apart, so it
+// was always "unchanged" and gave no protection: two waiters could both Remove
+// the lock while a third recreated it via O_EXCL, leaving two live holders).
+// The moved file's mtime is then re-checked before deletion, and if a holder
+// rotated a fresh lock in the gap it is restored rather than stolen
+// (AUDIT-M13). Returns true only when a genuinely stale lock was removed.
+// Mirrors internal/cron/lock.go, internal/hooks/lock.go, and
+// internal/oauth/lock.go.
+func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
+	reclaimed := lockPath + ".stale." + token
+	if err := os.Rename(lockPath, reclaimed); err != nil {
+		return false // another racer already moved/removed it, or it vanished
+	}
+	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
+		// Not actually stale anymore: a holder rotated a fresh lock in the gap.
+		// Put it back instead of stealing a live lock.
+		if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				_ = lockutil.RemoveLockFile(reclaimed)
+			}
+		}
+		return false
+	}
+	_ = lockutil.RemoveLockFile(reclaimed) // genuinely stale: drop it
+	return true
 }
