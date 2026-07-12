@@ -41,16 +41,13 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	if pkg.Module != "bin/zero.js" {
 		t.Fatalf("module = %q, want bin/zero.js", pkg.Module)
 	}
-	// Only a postinstall hook (which downloads the prebuilt binary) is allowed.
-	// Repository build scripts (build/prepare/prepack/…) must not ship in the
-	// published package — the tarball has no Go source to build from.
-	if pkg.Scripts["postinstall"] != "node scripts/postinstall.mjs" {
-		t.Fatalf("scripts.postinstall = %q, want node scripts/postinstall.mjs", pkg.Scripts["postinstall"])
-	}
+	// The published package must carry NO lifecycle scripts at all: the native
+	// binary arrives as a platform optionalDependency, with scripts/postinstall.mjs
+	// kept only as a first-run fallback the wrapper invokes itself. Any script
+	// here would resurrect the npm/Bun/pnpm install-script warnings the platform
+	//-package model exists to eliminate (see docs/NPM_PACKAGING.md).
 	for name := range pkg.Scripts {
-		if name != "postinstall" {
-			t.Fatalf("package.json scripts contains %q; only a postinstall hook is allowed (no repository build scripts)", name)
-		}
+		t.Fatalf("package.json scripts contains %q; the published package must have no lifecycle scripts", name)
 	}
 	if pkg.License == "" {
 		t.Fatalf("package.json license is empty; set it (ties to the pending LICENSE file) so npm publish is not unlicensed")
@@ -256,8 +253,143 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("wrapper err = %v, want exit 1; output: %s", err, output)
 	}
-	if !strings.Contains(string(output), "No native binary found next to the npm wrapper") {
+	if !strings.Contains(string(output), "No native binary is available for this install") {
 		t.Fatalf("missing-native output = %q", string(output))
+	}
+}
+
+func TestNodeWrapperPrefersPlatformPackageBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+
+	// A stale downloaded binary next to the wrapper must lose to the platform
+	// package: the platform version is pinned to the wrapper release, the
+	// downloaded copy is whatever a previous fallback fetched.
+	if err := os.WriteFile(filepath.Join(root, "zero"), []byte("#!/usr/bin/env sh\nprintf 'downloaded-zero\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile downloaded fixture: %v", err)
+	}
+
+	platformDir := filepath.Join(root, "node_modules", "@gitlawb", "zero-"+nodePlatformName()+"-"+nodeArchName())
+	if err := os.MkdirAll(platformDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll platform package: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, "package.json"), []byte(`{"name":"@gitlawb/zero"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile platform package.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, "zero"), []byte("#!/usr/bin/env sh\nprintf 'platform-zero'; for arg in \"$@\"; do printf ' %s' \"$arg\"; done; printf '\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile platform binary: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching platform binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != "platform-zero --version" {
+		t.Fatalf("wrapper output = %q, want platform-zero --version", got)
+	}
+}
+
+func TestNodeWrapperFallsBackToDownloadedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	if err := os.WriteFile(filepath.Join(root, "zero"), []byte("#!/usr/bin/env sh\nprintf 'downloaded-zero\\n'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile downloaded fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching downloaded binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != "downloaded-zero" {
+		t.Fatalf("wrapper output = %q, want downloaded-zero", got)
+	}
+}
+
+func TestNodeWrapperRunsFirstRunDownloaderWhenBinaryMissing(t *testing.T) {
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+
+	// Give the fixture the real downloader so the wrapper's first-run path
+	// executes it; ZERO_SKIP_DOWNLOAD keeps the test offline, so the download
+	// "succeeds" without producing a binary and the wrapper must exit 1 with
+	// guidance.
+	scriptsDir := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll scripts: %v", err)
+	}
+	postinstall, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "postinstall.mjs"))
+	if err != nil {
+		t.Fatalf("ReadFile postinstall: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "postinstall.mjs"), postinstall, 0o644); err != nil {
+		t.Fatalf("WriteFile postinstall fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"type":"module","name":"@gitlawb/zero","version":"0.0.0"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile package fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	command.Env = append(command.Env, "ZERO_SKIP_DOWNLOAD=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out on first-run download path: %v; output: %s", ctx.Err(), output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("wrapper err = %v, want exit 1; output: %s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "fetching the native binary from the GitHub Release") {
+		t.Fatalf("output missing fallback download notice: %q", text)
+	}
+	if !strings.Contains(text, "skipping native binary download") {
+		t.Fatalf("output shows the downloader did not run: %q", text)
+	}
+	if !strings.Contains(text, "No native binary is available for this install") {
+		t.Fatalf("output missing guidance: %q", text)
+	}
+}
+
+func nodePlatformName() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "darwin"
+	case "windows":
+		return "win32"
+	default:
+		return runtime.GOOS
+	}
+}
+
+func nodeArchName() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	default:
+		return runtime.GOARCH
 	}
 }
 

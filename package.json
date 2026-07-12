@@ -7,9 +7,6 @@
   "bin": {
     "zero": "bin/zero.js"
   },
-  "scripts": {
-    "postinstall": "node scripts/postinstall.mjs"
-  },
   "files": [
     "bin/zero.js",
     "scripts/postinstall.mjs"

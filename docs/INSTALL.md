@@ -6,8 +6,9 @@ Zero is distributed as:
 - release archives on GitHub Releases
 - source builds with Go 1.25+
 
-The npm package and install scripts download a platform-specific release archive.
-They require a published GitHub Release for the requested version.
+The install scripts download a platform-specific release archive and require a
+published GitHub Release for the requested version. The npm package is
+self-contained: the platform binary installs from the npm registry.
 
 ## npm
 
@@ -16,58 +17,31 @@ npm install -g @gitlawb/zero
 zero
 ```
 
-The package supports Linux, macOS, and Windows on x64 and arm64. It installs the
-`zero` command and downloads the matching release binary during `postinstall`.
+The package supports Linux and macOS on x64 and arm64, and Windows on x64
+(Windows on ARM runs the x64 build under emulation). It installs a small
+`zero` wrapper plus, as an optional dependency, a platform payload with the
+native binary and the bundled browser/terminal control helpers. There are no
+install scripts and nothing is downloaded from outside the npm registry, so
+the install is silent and works identically under npm, Bun, pnpm, and yarn —
+no trust or approval steps. See [NPM_PACKAGING.md](NPM_PACKAGING.md) for the
+package architecture.
 
 Requirements:
 
 - Node.js 18+
-- network access to npm and GitHub Releases
+- network access to npm
 
-## Bun
-
-Bun is "default-secure" and does not run lifecycle scripts of installed
-dependencies (only the installing project's own scripts), so the `postinstall`
-that fetches the Zero binary is silently skipped. The first run then fails with
-`No native binary found next to the npm wrapper`.
-
-The simplest fix is to trust the package after installing, which runs the
-blocked postinstall. This works for project and global installs:
+If the install skipped optional dependencies (`npm install --omit=optional`,
+or a package manager configured to do so), the wrapper falls back to
+downloading the binary from the matching GitHub Release, with checksum
+verification. The fetch is retried on each run until a binary is in place (a
+transient network failure heals itself; an install directory the current user
+cannot write to keeps failing — rerun the install or the command below with
+sufficient permissions). To trigger the fetch manually:
 
 ```bash
-# project install
-bun add @gitlawb/zero
-bun pm trust @gitlawb/zero
-
-# global install
-bun add -g @gitlawb/zero
-bun pm -g trust @gitlawb/zero
+node "$(npm root -g)/@gitlawb/zero/scripts/postinstall.mjs"
 ```
-
-`bun pm untrusted` (or `bun pm -g untrusted`) lists the blocked postinstalls if
-you want to inspect before trusting.
-
-Alternatively, allow the postinstall to run at install time by adding the
-package to your project's `trustedDependencies` before installing:
-
-```json
-{
-  "trustedDependencies": ["@gitlawb/zero"]
-}
-```
-
-```bash
-bun add @gitlawb/zero
-```
-
-On Bun versions that do not have `bun pm trust`, run the installer manually
-after installing:
-
-```bash
-node node_modules/@gitlawb/zero/scripts/postinstall.mjs
-```
-
-Reference: <https://bun.sh/docs/pm/lifecycle>
 
 ## Linux And macOS Script
 
@@ -252,8 +226,7 @@ Supported targets:
 - `linux-arm64`
 - `macos-x64`
 - `macos-arm64`
-- `windows-x64`
-- `windows-arm64`
+- `windows-x64` (Windows on ARM runs this build under emulation)
 
 Each archive must have a matching `.sha256` file. The install scripts download
 both files, verify the checksum, and then copy the binary into the install
