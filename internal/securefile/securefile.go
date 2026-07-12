@@ -200,6 +200,10 @@ func writeNewSecretFile(path string) ([]byte, error) {
 		_ = tmp.Close()
 		return nil, fmt.Errorf("securefile: write secret: %w", werr)
 	}
+	if serr := tmp.Sync(); serr != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("securefile: sync secret: %w", serr)
+	}
 	if cerr := tmp.Close(); cerr != nil {
 		return nil, fmt.Errorf("securefile: write secret: %w", cerr)
 	}

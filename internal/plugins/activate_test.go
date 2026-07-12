@@ -536,3 +536,24 @@ func containsSubstring(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestExpandPluginRootPathRelative(t *testing.T) {
+	pluginDir := "/etc/zero/plugin"
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"./bin/tool.sh", filepath.Join(pluginDir, "./bin/tool.sh")},
+		{"../outside/tool", filepath.Join(pluginDir, "../outside/tool")},
+		{"tool.sh", "tool.sh"},             // bare binary name
+		{"/usr/bin/tool", "/usr/bin/tool"}, // absolute Unix
+		{`C:\bin\tool`, `C:\bin\tool`},     // absolute Windows
+		{"${AGENT_PLUGIN_ROOT}/bin/tool.sh", filepath.FromSlash(pluginDir + "/bin/tool.sh")},
+	}
+	for _, tc := range cases {
+		got := expandPluginRootPath(tc.input, pluginDir)
+		if got != tc.want {
+			t.Errorf("expandPluginRootPath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
