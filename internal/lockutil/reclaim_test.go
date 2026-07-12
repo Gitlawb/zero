@@ -41,13 +41,42 @@ func TestReclaimStaleLock(t *testing.T) {
 	}
 }
 
+// restoreLiveLock's fast path is a single replacing rename, chosen to
+// minimize (not eliminate) the window during which lockPath is absent and
+// open to an unrelated O_EXCL create; see ReclaimStaleLock's doc comment for
+// why that residual race exists. This test pins the resulting behavior: the
+// fast path overwrites a competing file at path rather than detecting it,
+// unlike RestoreLockFile's own no-replace contract.
+func TestRestoreLiveLockFastPathOverwritesCompetingFile(t *testing.T) {
+	dir := t.TempDir()
+	reclaimed := filepath.Join(dir, "lock.stale.tok")
+	path := filepath.Join(dir, "lock")
+
+	if err := os.WriteFile(reclaimed, []byte("original-holder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new-claimant"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreLiveLock(reclaimed, path); err != nil {
+		t.Fatalf("restoreLiveLock failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "original-holder" {
+		t.Fatalf("path = %q, err %v; want the original holder's content restored", data, err)
+	}
+	if _, err := os.Stat(reclaimed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected reclaimed to be consumed by the rename: %v", err)
+	}
+}
+
 func TestReclaimStaleLockFailsClosedOnRestoreError(t *testing.T) {
 	// When both the no-replace restore and its copy fallback fail (only
 	// provokable via the seam; a healthy filesystem cannot produce it), the
 	// caller must receive an error so it fails closed instead of re-acquiring a
 	// missing lock path, and the sidelined file must not leak.
 	restoreLockFile = func(reclaimed, path string) error { return errors.New("restore failed") }
-	defer func() { restoreLockFile = RestoreLockFile }()
+	defer func() { restoreLockFile = restoreLiveLock }()
 
 	lockPath := filepath.Join(t.TempDir(), "lock")
 	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
@@ -67,7 +96,7 @@ func TestReclaimStaleLockDropsSidelinedWhenNewHolderWins(t *testing.T) {
 	// path; that is not an error for the caller, and the sidelined file is
 	// dropped rather than leaked.
 	restoreLockFile = func(reclaimed, path string) error { return os.ErrExist }
-	defer func() { restoreLockFile = RestoreLockFile }()
+	defer func() { restoreLockFile = restoreLiveLock }()
 
 	lockPath := filepath.Join(t.TempDir(), "lock")
 	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
