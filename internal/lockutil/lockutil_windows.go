@@ -58,7 +58,7 @@ func RemoveLockFile(path string) error {
 			return nil
 		}
 		var errno syscall.Errno
-		if errors.As(err, &errno) && (errno == 32 || errno == 5) {
+		if errors.As(err, &errno) && (errno == windows.ERROR_SHARING_VIOLATION || errno == windows.ERROR_ACCESS_DENIED) {
 			time.Sleep(5 * time.Millisecond)
 			continue
 		}

@@ -71,8 +71,8 @@ func TestReclaimStaleLockRemovesDeadHolder(t *testing.T) {
 	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
 		t.Fatalf("write stale lock: %v", err)
 	}
-	if !reclaimStaleLock(path, func(int) bool { return false }) {
-		t.Fatal("reclaimStaleLock must report a genuinely stale (dead-PID) lock reclaimed")
+	if ok, err := reclaimStaleLock(path, func(int) bool { return false }); err != nil || !ok {
+		t.Fatalf("reclaimStaleLock must report a genuinely stale (dead-PID) lock reclaimed (ok=%v err=%v)", ok, err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a reclaimed stale lock must be removed, stat = %v", err)
@@ -87,8 +87,8 @@ func TestReclaimStaleLockRestoresLiveHolder(t *testing.T) {
 	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
-	if reclaimStaleLock(path, func(int) bool { return true }) {
-		t.Fatal("reclaimStaleLock must NOT report a live-PID lock reclaimed")
+	if ok, err := reclaimStaleLock(path, func(int) bool { return true }); err != nil || ok {
+		t.Fatalf("reclaimStaleLock must NOT report a live-PID lock reclaimed (ok=%v err=%v)", ok, err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -67,7 +67,12 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 		// freshly-created lock — leaving both "holding" the single-instance lock.
 		// reclaimStaleLock renames the file aside so only one racer wins the rename,
 		// and restores it if a live holder reacquired in the gap (D6).
-		reclaimStaleLock(path, isAlive)
+		if _, rerr := reclaimStaleLock(path, isAlive); rerr != nil {
+			// A live holder's lock could not be put back, so the lock path may be
+			// missing; re-acquiring now would break the single-instance guarantee.
+			// Fail closed instead.
+			return nil, fmt.Errorf("daemon: restore reclaimed lock: %w", rerr)
+		}
 	}
 	return nil, ErrAlreadyRunning
 }
@@ -82,23 +87,30 @@ var daemonLockSeq atomic.Uint64
 // that PID is still dead. If a new holder reacquired the lock in the gap between the
 // stale check and the rename, the moved file carries that LIVE pid, so it is renamed
 // back rather than stolen. Returns true only when a genuinely stale lock was removed.
-func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
+// A non-nil error means a live holder's lock could not be restored (both the
+// no-replace restore and its copy fallback failed), so the lock path may be
+// missing; the caller must fail closed instead of re-acquiring.
+func reclaimStaleLock(path string, isAlive func(pid int) bool) (bool, error) {
 	reclaimed := fmt.Sprintf("%s.stale.%d-%d", path, os.Getpid(), daemonLockSeq.Add(1))
 	if err := os.Rename(path, reclaimed); err != nil {
-		return false // another racer already moved/removed it, or it vanished
+		return false, nil // another racer already moved/removed it, or it vanished
 	}
 	if pid, err := readPidFile(reclaimed); err == nil && pid > 0 && isAlive(pid) {
 		// A holder reacquired the lock in the gap — its live PID is now in the moved
 		// file. Restore it instead of stealing a live lock; let the caller refuse.
-		if err := lockutil.RestoreLockFile(reclaimed, path); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				_ = lockutil.RemoveLockFile(reclaimed)
+		if rerr := lockutil.RestoreLockFile(reclaimed, path); rerr != nil {
+			// Once the restore has failed the sidelined file has no protocol
+			// function (release only consults the lock path), so drop it rather
+			// than leak it.
+			_ = lockutil.RemoveLockFile(reclaimed)
+			if !errors.Is(rerr, os.ErrExist) {
+				return false, rerr
 			}
 		}
-		return false
+		return false, nil
 	}
 	_ = lockutil.RemoveLockFile(reclaimed)
-	return true
+	return true, nil
 }
 
 // release removes the lock file. Safe to call once. An already-missing lock

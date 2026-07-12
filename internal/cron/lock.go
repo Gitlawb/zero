@@ -79,7 +79,14 @@ func (s *Store) lockJob(id string) (func(), error) {
 		// wins) and restores it if it turns out fresh, so a live lock is never deleted
 		// out from under its holder.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > cronLockStaleAfter {
-			if reclaimStaleLock(lockPath, token, cronLockStaleAfter) {
+			cleared, rerr := reclaimStaleLock(lockPath, token, cronLockStaleAfter)
+			if rerr != nil {
+				// A live holder's lock could not be put back, so the lock path may
+				// be missing; re-acquiring now would break mutual exclusion. Fail
+				// closed instead.
+				return nil, fmt.Errorf("cron: restore reclaimed job lock: %w", rerr)
+			}
+			if cleared {
 				continue // cleared a genuinely stale lock; retry the O_EXCL create now
 			}
 			// Lost the reclaim race (or it was actually fresh) — fall through to the
@@ -99,22 +106,29 @@ func (s *Store) lockJob(id string) (func(), error) {
 // stale check and the rename) it is restored rather than stolen. Returns true only
 // when a genuinely stale lock was removed, so the caller knows it is safe to retry
 // the exclusive create immediately; on a lost race it returns false and the caller
-// falls through to its bounded wait.
-func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
+// falls through to its bounded wait. A non-nil error means a live holder's lock
+// could not be restored (both the no-replace restore and its copy fallback
+// failed), so the lock path may be missing; the caller must fail closed instead
+// of re-acquiring.
+func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) (bool, error) {
 	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
 	if err := os.Rename(lockPath, reclaimed); err != nil {
-		return false // another racer already moved/removed it, or it vanished
+		return false, nil // another racer already moved/removed it, or it vanished
 	}
 	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
 		// Not actually stale anymore — a holder reacquired it in the gap. Put it
 		// back instead of stealing a live lock, and let the caller wait.
-		if err := lockutil.RestoreLockFile(reclaimed, lockPath); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				_ = lockutil.RemoveLockFile(reclaimed)
+		if rerr := lockutil.RestoreLockFile(reclaimed, lockPath); rerr != nil {
+			// Once the restore has failed the sidelined file has no protocol
+			// function (release only consults the lock path), so drop it rather
+			// than leak it.
+			_ = lockutil.RemoveLockFile(reclaimed)
+			if !errors.Is(rerr, os.ErrExist) {
+				return false, rerr
 			}
 		}
-		return false
+		return false, nil
 	}
 	_ = lockutil.RemoveLockFile(reclaimed)
-	return true
+	return true, nil
 }

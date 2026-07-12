@@ -19,8 +19,8 @@ func TestReclaimStaleLock(t *testing.T) {
 	if err := os.Chtimes(lockPath, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if !reclaimStaleLock(lockPath, "tok-a", cronLockStaleAfter) {
-		t.Fatal("a stale lock should be reclaimed")
+	if ok, err := reclaimStaleLock(lockPath, "tok-a", cronLockStaleAfter); err != nil || !ok {
+		t.Fatalf("a stale lock should be reclaimed (ok=%v err=%v)", ok, err)
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("reclaimed stale lock should be gone, stat err=%v", err)
@@ -31,8 +31,8 @@ func TestReclaimStaleLock(t *testing.T) {
 	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if reclaimStaleLock(lockPath, "tok-b", cronLockStaleAfter) {
-		t.Fatal("a fresh lock must not be reclaimed")
+	if ok, err := reclaimStaleLock(lockPath, "tok-b", cronLockStaleAfter); err != nil || ok {
+		t.Fatalf("a fresh lock must not be reclaimed (ok=%v err=%v)", ok, err)
 	}
 	if data, err := os.ReadFile(lockPath); err != nil || string(data) != "live-holder" {
 		t.Fatalf("fresh lock must be left intact, got %q err %v", data, err)
@@ -40,7 +40,7 @@ func TestReclaimStaleLock(t *testing.T) {
 
 	// A missing lock reports no reclaim (nothing to steal).
 	_ = os.Remove(lockPath)
-	if reclaimStaleLock(lockPath, "tok-c", cronLockStaleAfter) {
-		t.Fatal("a missing lock should not report a reclaim")
+	if ok, err := reclaimStaleLock(lockPath, "tok-c", cronLockStaleAfter); err != nil || ok {
+		t.Fatalf("a missing lock should not report a reclaim (ok=%v err=%v)", ok, err)
 	}
 }
