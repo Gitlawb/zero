@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -420,19 +421,67 @@ func TestLoadAssetsCountCapStopsDiscovery(t *testing.T) {
 	}
 }
 
+// maxVisitedEntries bounds total nodes examined: a skill tree with many empty
+// subdirectories (where assets count does not grow) still terminates quickly.
+// This guards against a pathological tree where thousands of dirs are created but
+// no eligible assets are found in any of them (len(assets) stays at 0).
+func TestLoadAssetsVisitedEntriesBudget(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "tree")
+	skillMd := filepath.Join(skillDir, "SKILL.md")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillMd, []byte("---\nname: tree\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create 6000 empty subdirectories — well above maxVisitedEntries=4096 —
+	// each with a SKILL.md (to match locateSkillDir's expectation of a skill
+	// tree) so ReadDir on each sees entries that are not eligible assets.
+	for i := 0; i < 6000; i++ {
+		d := filepath.Join(skillDir, fmt.Sprintf("dir-%04d", i))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	loaded, err := Load(dir)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	// Should complete well under 1 second (bounded traversal).
+	if elapsed > 5*time.Second {
+		t.Fatalf("discovery took %v — visited-entries budget may not be enforced", elapsed)
+	}
+	// No assets expected (all dirs are empty), but the point is termination.
+	if len(loaded[0].Assets) != 0 {
+		t.Fatalf("expected 0 assets in empty-tree skill, got %d", len(loaded[0].Assets))
+	}
+}
+
 // FormatOutput must never exceed maxSkillOutputSize on any overflow path,
 // including the assets-overflow branch where the body is near the cap and the
 // truncation note would otherwise push it over.
 func TestFormatOutputAssetsOverflowStaysUnderHardLimit(t *testing.T) {
-	// Body lands just under maxSkillOutputSize so len(body)+note would exceed
-	// the cap. Assets push the total further over, forcing the assets-overflow
-	// branch into its "make room for the note" sub-path.
-	body := strings.Repeat("A", maxSkillOutputSize-10)
+	// Content lands under maxSkillOutputSize so len(body) < cap (body-overflow
+	// branch is skipped). Assets push the total over the cap, forcing the
+	// assets-overflow branch. body + truncationNote ≤ cap so the note can be
+	// appended without truncating body.
+	bodyContent := strings.Repeat("A", maxSkillOutputSize-80)
 	skill := Skill{
 		Name:    "s",
 		Dir:     "/d",
-		Content: body,
-		Assets:  []Asset{{Name: "a.txt", Path: "/d/a.txt", Size: 1}},
+		Content: bodyContent,
+		Assets: []Asset{
+			{Name: "a.txt", Path: "/d/a.txt", Size: 1},
+			{Name: "b.txt", Path: "/d/b.txt", Size: 2},
+			{Name: "c.txt", Path: "/d/c.txt", Size: 3},
+			{Name: "d.txt", Path: "/d/d.txt", Size: 4},
+		},
 	}
 	out := FormatOutput(skill)
 	if len(out) > maxSkillOutputSize {
@@ -440,6 +489,45 @@ func TestFormatOutputAssetsOverflowStaysUnderHardLimit(t *testing.T) {
 	}
 	if !strings.Contains(out, "(output truncated)") {
 		t.Fatalf("truncation note missing: %q", out[len(out)-60:])
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8 after truncation")
+	}
+	// The body content must be preserved intact (no truncation of body itself)
+	// since len(body) + len(note) ≤ cap.
+	if !strings.Contains(out, "AAAA") {
+		t.Fatalf("body content lost on assets-overflow path")
+	}
+	// Assets block must be dropped entirely — no <skill_assets> fragment.
+	if strings.Contains(out, "<skill_assets") {
+		t.Fatalf("assets block not dropped on overflow: %q", out[len(out)-120:])
+	}
+}
+
+// Body exactly at the hard limit: body = maxSkillOutputSize (openTag + content
+// + closeTag), assets non-empty. Since len(body) > cap is false (equal, not
+// greater), the body-overflow branch is skipped. Assets push the total over →
+// assets-overflow branch. Since len(body) + note > cap, body must be truncated
+// to make room for the note, and the result must stay under the cap.
+func TestFormatOutputBodyExactlyAtCapWithAssets(t *testing.T) {
+	// Compute content length so body (openTag + content + closeTag) is exactly
+	// maxSkillOutputSize.
+	const open = "<skill name=\"s\" dir=\"/d\">\n"
+	const close = "\n</skill>"
+	contentLen := maxSkillOutputSize - len(open) - len(close)
+	bodyContent := strings.Repeat("B", contentLen)
+	skill := Skill{
+		Name:    "s",
+		Dir:     "/d",
+		Content: bodyContent,
+		Assets:  []Asset{{Name: "a.txt", Path: "/d/a.txt", Size: 1}},
+	}
+	out := FormatOutput(skill)
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("body-at-cap output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !strings.Contains(out, "(output truncated)") {
+		t.Fatalf("truncation note missing on body-at-cap path")
 	}
 	if !utf8.ValidString(out) {
 		t.Fatalf("invalid UTF-8 after truncation")

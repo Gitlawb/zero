@@ -2,6 +2,16 @@
 // It is shared by the plugin installer and the skill installer so security
 // properties (skip .git, reject symlinks, skip non-regular files, deterministic
 // sort order) are defined once.
+//
+// On unix (linux/darwin) the traversal is fd-held: the root directory is opened
+// once with O_NOFOLLOW|O_DIRECTORY, entries are enumerated via fstatat against
+// the held fd, and subdirectories are opened with openat(parentFd, name,
+// O_NOFOLLOW|O_DIRECTORY) and recursed with that fd. The directory identity is
+// therefore pinned for the whole traversal — a directory swapped for a symlink
+// after the parent fd was opened cannot redirect the copy or hash outside the
+// source root. On non-unix targets (Plan 9, WASM) the traversal falls back to
+// pathname-based os.ReadDir; Windows uses the open_windows.go helper for file
+// opens and a pathname-based dir walk (no portable openat equivalent).
 package fscopy
 
 import (
@@ -10,60 +20,27 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"sort"
 )
 
 // CopyTree recursively copies regular files and directories from src to dst. It
 // skips the .git directory (clone metadata) and refuses symlinks so a malicious
 // source cannot smuggle a link that escapes the install dir. Copying is pure
 // I/O — it never executes anything it copies.
+//
+// On unix the traversal is fd-held (see the package doc): the root is opened
+// with O_NOFOLLOW|O_DIRECTORY and recursion uses openat against the held parent
+// fd, so a source directory swapped for a symlink mid-traversal cannot redirect
+// the copy outside src. On non-unix the traversal is pathname-based.
 func CopyTree(src string, dst string) error {
-	entries, err := os.ReadDir(src)
+	root, err := noFollowOpenDir(src)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = root.Close() }()
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == ".git" {
-			continue
-		}
-		srcPath := filepath.Join(src, name)
-		dstPath := filepath.Join(dst, name)
-		info, err := os.Lstat(srcPath)
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			// Never recreate a symlink: it could point outside the install dir and
-			// turn a copy into a write/read primitive elsewhere.
-			continue
-		case info.IsDir():
-			// TOCTOU guard: verify the directory was not replaced with a symlink
-			// between the Lstat above and the recursive ReadDir inside CopyTree.
-			dev, ino := dirIdentity(srcPath, info)
-			if err := verifyDirNofollow(srcPath, dev, ino); err != nil {
-				return err
-			}
-			if err := CopyTree(srcPath, dstPath); err != nil {
-				return err
-			}
-		case info.Mode().IsRegular():
-			// CopyFile re-stats the opened file descriptor itself (not this Lstat
-			// result) so there is no TOCTOU window between the check and the read.
-			if err := CopyFile(srcPath, dstPath); err != nil {
-				return err
-			}
-		default:
-			// Skip FIFOs, sockets, devices.
-			continue
-		}
-	}
-	return nil
+	return copyTreeAt(root, dst)
 }
 
 // CopyFile copies a single regular file from src to dst. The source is opened
@@ -71,9 +48,10 @@ func CopyTree(src string, dst string) error {
 // bits come from the fd actually read — a symlink or other file type swapped in
 // after the open cannot be read or mis-classified (no TOCTOU). The destination
 // is created or truncated without following a final symlink (O_NOFOLLOW on
-// unix), so a pre-placed destination symlink cannot redirect the copy outside
-// the install dir. The source's permission bits are applied to the copy so
-// executables stay executable. Copying is pure I/O — it never executes anything.
+// unix, FILE_FLAG_OPEN_REPARSE_POINT on Windows), so a pre-placed destination
+// symlink cannot redirect the copy outside the install dir. The source's
+// permission bits are applied to the copy so executables stay executable.
+// Copying is pure I/O — it never executes anything.
 func CopyFile(src string, dst string) error {
 	in, err := openRegularRead(src)
 	if err != nil {
@@ -112,102 +90,18 @@ func CopyFile(src string, dst string) error {
 // and bytes, so renames, mode flips, size changes, and content edits all change
 // the hash, and the stream is self-delimiting (no two trees collide by shifting
 // bytes across file boundaries).
+//
+// On unix the traversal is fd-held and uses the same openat-based enumeration as
+// CopyTree, so the hashed tree is exactly the tree CopyTree installs.
 func HashTree(root string) (string, error) {
+	dir, err := noFollowOpenDir(root)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = dir.Close() }()
 	hasher := sha256.New()
-	if err := hashTreeInto(hasher, root, root); err != nil {
+	if err := hashTreeAt(hasher, dir, ""); err != nil {
 		return "", err
 	}
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
-func hashTreeInto(hasher io.Writer, root string, dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if name == ".git" {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			// Skipped by CopyTree, so excluded from the hash too.
-			continue
-		case info.IsDir():
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			// Directory header carries a type tag and explicit size 0 so a
-			// directory and a file with the same name cannot collide, and every
-			// entry is self-delimiting.
-			header := fmt.Sprintf("%s\x00dir\x000\x00", filepath.ToSlash(rel))
-			if _, err := io.WriteString(hasher, header); err != nil {
-				return err
-			}
-			// TOCTOU guard: verify the directory was not replaced with a symlink
-			// between the Lstat above and the recursive ReadDir inside hashTreeInto.
-			dev, ino := dirIdentity(path, info)
-			if err := verifyDirNofollow(path, dev, ino); err != nil {
-				return err
-			}
-			if err := hashTreeInto(hasher, root, path); err != nil {
-				return err
-			}
-		case info.Mode().IsRegular():
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			file, err := openRegularRead(path)
-			if err != nil {
-				return err
-			}
-			fileInfo, err := file.Stat()
-			if err != nil {
-				_ = file.Close()
-				return err
-			}
-			if !fileInfo.Mode().IsRegular() {
-				_ = file.Close()
-				return &os.PathError{Op: "hash", Path: path, Err: fmt.Errorf("not a regular file")}
-			}
-			perm := fileInfo.Mode().Perm()
-			// Null-delimited header tags the type, executable state, and exact
-			// byte size; paths cannot contain null bytes, and the size makes each
-			// file's content self-delimiting so two trees cannot collide by
-			// shifting bytes across file boundaries.
-			header := fmt.Sprintf("%s\x00file\x00%04o\x00%d\x00", filepath.ToSlash(rel), perm, fileInfo.Size())
-			if _, err := io.WriteString(hasher, header); err != nil {
-				_ = file.Close()
-				return err
-			}
-			written, err := io.Copy(hasher, file)
-			if err != nil {
-				_ = file.Close()
-				return err
-			}
-			if written != fileInfo.Size() {
-				_ = file.Close()
-				return &os.PathError{Op: "hash", Path: path, Err: fmt.Errorf("file changed while hashing")}
-			}
-			if err := file.Close(); err != nil {
-				return err
-			}
-		default:
-			// FIFOs, sockets, devices: skipped by CopyTree, excluded here.
-			continue
-		}
-	}
-	return nil
 }

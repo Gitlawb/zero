@@ -3,6 +3,7 @@
 package fscopy
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -12,6 +13,13 @@ import (
 // that GENERIC_WRITE (which includes FILE_WRITE_ATTRIBUTES) can trigger on
 // reparse points opened with FILE_FLAG_OPEN_REPARSE_POINT.
 const fileWriteData uint32 = 0x0002
+
+// fileWriteAttributes is the Windows FILE_WRITE_ATTRIBUTES access right
+// (0x0100). It is required for os.File.Chmod on Windows, which calls
+// SetFileInformationByHandle(FileBasicInfo) on the opened handle. Combined with
+// fileWriteData for the existing-regular-file path (step 2) so the handle
+// supports both SetEndOfFile and the subsequent Chmod in CopyFile.
+const fileWriteAttributes uint32 = 0x0100
 
 // openRegularRead opens a regular file for reading without following a final
 // symlink: FILE_FLAG_OPEN_REPARSE_POINT makes CreateFile fail if the path is a
@@ -65,31 +73,37 @@ func openRegularWrite(path string, perm uint32) (*os.File, error) {
 	}
 
 	// Step 2: the file already exists. Open it without following symlinks,
-	// verify it is not a reparse point, then truncate.
+	// verify it is not a reparse point or directory, then truncate.
 	//
-	// Use FILE_WRITE_DATA instead of GENERIC_WRITE: GENERIC_WRITE includes
-	// FILE_WRITE_ATTRIBUTES and other rights that can cause access-denied on
-	// reparse points; FILE_WRITE_DATA alone is sufficient for SetEndOfFile and
-	// succeeds on regular files opened with FILE_FLAG_OPEN_REPARSE_POINT.
-	h, err = syscall.CreateFile(pathp, fileWriteData,
+	// Use FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES: FILE_WRITE_DATA is sufficient
+	// for SetEndOfFile; FILE_WRITE_ATTRIBUTES is needed by os.File.Chmod (used
+	// in CopyFile) which calls SetFileInformationByHandle on the handle. Using
+	// these specific rights instead of GENERIC_WRITE avoids the access-denied
+	// that GENERIC_WRITE triggers on reparse points; reparse points and
+	// directories are rejected explicitly in the post-open verification below.
+	h, err = syscall.CreateFile(pathp, fileWriteData|fileWriteAttributes,
 		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
 		nil, syscall.OPEN_EXISTING, attrs, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 
-	// Post-open verification: confirm the handle is not a reparse point. This
-	// catches a symlink that was swapped in between the caller's Lstat and this
-	// open (the open with FILE_FLAG_OPEN_REPARSE_POINT opened the link itself,
-	// not its target).
+	// Post-open verification: confirm the handle is a regular file — not a
+	// reparse point (symlink) and not a directory. This catches a symlink
+	// swapped in between the caller's Lstat and this open (the open with
+	// FILE_FLAG_OPEN_REPARSE_POINT opened the link itself, not its target),
+	// and also catches a directory left at the destination path. SetEndOfFile
+	// on a directory handle fails with ERROR_INVALID_PARAMETER; rejecting it
+	// here gives a clear "not a regular file" error instead.
 	var info syscall.ByHandleFileInformation
 	if err := syscall.GetFileInformationByHandle(h, &info); err != nil {
 		syscall.CloseHandle(h)
 		return nil, &os.PathError{Op: "stat", Path: path, Err: err}
 	}
-	if info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	if info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		info.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
 		syscall.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: path, Err: syscall.ERROR_FILE_EXISTS}
+		return nil, &os.PathError{Op: "open", Path: path, Err: fmt.Errorf("not a regular file")}
 	}
 
 	// Truncate the existing regular file to zero bytes.

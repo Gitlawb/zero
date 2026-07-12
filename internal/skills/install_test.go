@@ -6,8 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/fscopy"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a
@@ -466,5 +469,76 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	}
 	if info.Hash != installed.Hash {
 		t.Fatalf("Info hash = %q, want %q", info.Hash, installed.Hash)
+	}
+}
+
+// Regression: a symlinked SKILL.md in the source must be rejected by Install
+// before the install completes. The old flow validated via os.ReadFile (follows
+// symlinks) but CopyTree skips symlinks, so a symlinked manifest would pass
+// validation, be skipped on copy, and the installed skill would be missing its
+// manifest. The new flow rejects the symlinked manifest before copy.
+func TestInstallRejectsSymlinkedManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics not portable on non-unix builds")
+	}
+	destDir := t.TempDir()
+	srcDir := t.TempDir()
+	skillDir := filepath.Join(srcDir, "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a real manifest and a symlink to it.
+	real := filepath.Join(skillDir, "real.md")
+	if err := os.WriteFile(real, []byte("---\nname: symlinked\ndescription: t\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillDir, skillFileName)
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{Source: skillDir, Dir: destDir})
+	if err == nil {
+		t.Fatalf("expected Install to reject symlinked SKILL.md, got nil error")
+	}
+
+	// No skill should be installed in destDir.
+	if _, ok := Get(destDir, "symlinked"); ok {
+		t.Fatalf("symlinked skill must not be discoverable after rejected install")
+	}
+	// No lock entry should be written.
+	lock, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if _, exists := lock["symlinked"]; exists {
+		t.Fatalf("lockfile should not contain a rejected symlinked skill")
+	}
+}
+
+// The recorded install hash must equal HashTree(target) after the swap, so
+// skills.lock is reproducible: re-hashing the installed skill yields the same
+// content hash that was recorded at install time.
+func TestInstallHashMatchesTargetAfterSwap(t *testing.T) {
+	destDir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: repro\ndescription: hash repro\n---\nreproducible body\n")
+	result, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	targetHash, err := fscopy.HashTree(filepath.Join(destDir, "repro"))
+	if err != nil {
+		t.Fatalf("HashTree(target): %v", err)
+	}
+	if result.Hash != targetHash {
+		t.Fatalf("install hash %q != post-swap target hash %q", result.Hash, targetHash)
+	}
+	lock, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if lock["repro"].Hash != targetHash {
+		t.Fatalf("lockfile hash %q != target hash %q", lock["repro"].Hash, targetHash)
 	}
 }

@@ -48,11 +48,19 @@ const maxAssetSize = 1 << 20 // 1 MB
 // directory with thousands of tiny files would otherwise be traversed fully
 // (expensive I/O + sort) only to have the <skill_assets> block dropped by
 // FormatOutput when it exceeds maxSkillOutputSize. This cap bounds the
-// discovery cost regardless of the output cap. It is the real bound on
+// discovery cost regardless of the output cap. It is the primary bound on
 // discovery; there is no depth cap that hides installed files because
 // fscopy.CopyTree installs files at any depth and the loader must keep every
 // installed file discoverable.
 const maxAssetCount = 500
+
+// maxVisitedEntries is the total number of filesystem entries (files and
+// directories) that loadAssets will examine. This bounds discovery cost for
+// a tree with many empty or non-eligible directories where len(assets) does
+// not grow despite heavy traversal. It is deliberately generous (real skill
+// trees rarely exceed a few hundred entries) so it never hides a legitimately
+// installed file; the primary bound remains maxAssetCount.
+const maxVisitedEntries = 4096
 
 // maxTraversalDepth is a high safety bound on recursion depth, used only to
 // guard against a pathological cycle. It is deliberately larger than any
@@ -326,9 +334,11 @@ func confineSkillPath(rootReal string, manifestPath string) (string, os.FileInfo
 // skipped. Name is the path relative to the skill directory (so the model never
 // sees the user's home directory); Path is the same relative path, kept absolute
 // relative to skillDir for callers that need to open the file. Discovery
-// recurses without an artificial depth cap so every file fscopy.CopyTree
+// recurses into arbitrarily deep subdirectories so every file fscopy.CopyTree
 // installs (at any depth) stays discoverable (issue #584 — "contents of
-// subdirectories"); the traversal is bounded by maxAssetCount instead.
+// subdirectories"). The traversal is bounded by maxAssetCount (primary) and
+// maxVisitedEntries (total nodes examined), with a high depth safety cap
+// (maxTraversalDepth) to guard against pathological cycles.
 func loadAssets(rootReal string, skillDir string) []Asset {
 	// Resolve the skill dir through symlinks so the relative paths computed
 	// below share a base with the EvalSymlinks-resolved real paths returned by
@@ -339,7 +349,8 @@ func loadAssets(rootReal string, skillDir string) []Asset {
 		relBase = resolved
 	}
 	var assets []Asset
-	appendAssetsRecursive(rootReal, relBase, relBase, &assets, 0)
+	var visited int
+	appendAssetsRecursive(rootReal, relBase, relBase, &assets, 0, &visited)
 	// Deterministic order: sort by the skill-relative name so the <skill_assets>
 	// list is stable across loads regardless of readdir ordering.
 	sort.Slice(assets, func(i, j int) bool { return assets[i].Name < assets[j].Name })
@@ -349,10 +360,13 @@ func loadAssets(rootReal string, skillDir string) []Asset {
 // appendAssetsRecursive walks dir, appending a regular-file Asset for each
 // eligible entry. relBase is the skill directory (the root relative paths are
 // computed against); dir is the current directory being walked; depth is the
-// current recursion depth (0 = skill root), used only to guard against a
-// pathological cycle. Discovery is bounded by maxAssetCount, not by depth, so
-// every file fscopy.CopyTree installs (at any depth) stays discoverable.
-func appendAssetsRecursive(rootReal, relBase, dir string, assets *[]Asset, depth int) {
+// current recursion depth (0 = skill root). visited tracks the total number of
+// filesystem entries examined and is checked against maxVisitedEntries to bound
+// discovery cost even when most examined entries are not eligible assets.
+// Discovery is bounded by maxAssetCount (primary), maxVisitedEntries (total
+// nodes), and maxTraversalDepth (depth safety cap), so a huge skill tree with
+// mostly empty directories cannot stall skill load.
+func appendAssetsRecursive(rootReal, relBase, dir string, assets *[]Asset, depth int, visited *int) {
 	// Stop recursing if we've hit the asset count cap — further entries would
 	// be discarded anyway, so skip the I/O.
 	if len(*assets) >= maxAssetCount {
@@ -374,6 +388,12 @@ func appendAssetsRecursive(rootReal, relBase, dir string, assets *[]Asset, depth
 		if len(*assets) >= maxAssetCount {
 			return
 		}
+		// Stop if we've examined too many entries total — a huge tree with
+		// mostly empty/hidden directories could otherwise stall discovery.
+		if *visited >= maxVisitedEntries {
+			return
+		}
+		*visited++
 		name := entry.Name()
 		// Skip hidden files/dirs (.git, .env, .DS_Store, etc.) at every level.
 		if strings.HasPrefix(name, ".") {
@@ -384,7 +404,7 @@ func appendAssetsRecursive(rootReal, relBase, dir string, assets *[]Asset, depth
 			// Recurse into real subdirectories. A symlink-to-dir is NOT a dir
 			// (entry.IsDir() is false for symlinks), so it falls through to
 			// confineSkillPath, which rejects it via EvalSymlinks + IsRegular.
-			appendAssetsRecursive(rootReal, relBase, candidate, assets, depth+1)
+			appendAssetsRecursive(rootReal, relBase, candidate, assets, depth+1, visited)
 			continue
 		}
 		// Skip SKILL.md (already loaded as Content). Case-insensitive so a
