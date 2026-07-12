@@ -368,9 +368,12 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
 		// Lock held: break it if stale via the atomic rename-with-verify in
-		// reclaimStaleLock (AUDIT-M13), otherwise wait.
+		// lockutil.ReclaimStaleLock (AUDIT-M13), otherwise wait.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			if _, rerr := reclaimStaleLock(lockPath, token, lockStaleAfter); rerr != nil {
+			if _, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+				info, err := os.Stat(reclaimedPath)
+				return err == nil && time.Since(info.ModTime()) <= lockStaleAfter
+			}); rerr != nil {
 				// A live holder's lock could not be put back, so the lock path may
 				// be missing; re-acquiring now would break mutual exclusion. Fail
 				// closed instead.
@@ -385,39 +388,4 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// contention (Windows file ops are slow; a coarse sleep starves waiters).
 		time.Sleep(2 * time.Millisecond)
 	}
-}
-
-// reclaimStaleLock atomically reclaims a stale lock file. Renaming the file
-// aside means only one racer wins the rename of a given inode (the previous
-// content==content check read the same file twice microseconds apart, so it
-// was always "unchanged" and gave no protection: two waiters could both Remove
-// the lock while a third recreated it via O_EXCL, leaving two live holders).
-// The moved file's mtime is then re-checked before deletion, and if a holder
-// rotated a fresh lock in the gap it is restored rather than stolen
-// (AUDIT-M13). Returns true only when a genuinely stale lock was removed. A
-// non-nil error means a live holder's lock could not be restored (both the
-// no-replace restore and its copy fallback failed), so the lock path may be
-// missing; the caller must fail closed instead of re-acquiring. Mirrors
-// internal/cron/lock.go, internal/hooks/lock.go, and internal/oauth/lock.go.
-func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) (bool, error) {
-	reclaimed := lockPath + ".stale." + token
-	if err := os.Rename(lockPath, reclaimed); err != nil {
-		return false, nil // another racer already moved/removed it, or it vanished
-	}
-	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
-		// Not actually stale anymore: a holder rotated a fresh lock in the gap.
-		// Put it back instead of stealing a live lock.
-		if rerr := lockutil.RestoreLockFile(reclaimed, lockPath); rerr != nil {
-			// Once the restore has failed the sidelined file has no protocol
-			// function (release only consults the lock path), so drop it rather
-			// than leak it.
-			_ = lockutil.RemoveLockFile(reclaimed)
-			if !errors.Is(rerr, os.ErrExist) {
-				return false, rerr
-			}
-		}
-		return false, nil
-	}
-	_ = lockutil.RemoveLockFile(reclaimed) // genuinely stale: drop it
-	return true, nil
 }

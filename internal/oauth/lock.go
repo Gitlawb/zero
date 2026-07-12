@@ -71,7 +71,10 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		// reclaimStaleLock renames the file aside (only one rename wins) and restores
 		// it if it turns out fresh, so a live lock is never deleted out from under it.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > fileLockStaleAfter {
-			cleared, rerr := reclaimStaleLock(lockPath, token, fileLockStaleAfter)
+			cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+				info, err := os.Stat(reclaimedPath)
+				return err == nil && time.Since(info.ModTime()) <= fileLockStaleAfter
+			})
 			if rerr != nil {
 				// A live holder's lock could not be put back, so the lock path may
 				// be missing; re-acquiring now would break mutual exclusion. Fail
@@ -89,33 +92,4 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-// reclaimStaleLock atomically reclaims a stale lock file: it renames the lock to a
-// per-acquirer unique name (only one racer can rename a given file), then verifies
-// the moved file is still stale; if a holder reacquired it in the gap it is
-// restored rather than stolen. Returns true only when a genuinely stale lock was
-// removed. A non-nil error means a live holder's lock could not be restored
-// (both the no-replace restore and its copy fallback failed), so the lock path
-// may be missing; the caller must fail closed instead of re-acquiring. Mirrors
-// internal/cron/lock.go and internal/hooks/lock.go.
-func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) (bool, error) {
-	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
-	if err := os.Rename(lockPath, reclaimed); err != nil {
-		return false, nil
-	}
-	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
-		if rerr := lockutil.RestoreLockFile(reclaimed, lockPath); rerr != nil {
-			// Once the restore has failed the sidelined file has no protocol
-			// function (release only consults the lock path), so drop it rather
-			// than leak it.
-			_ = lockutil.RemoveLockFile(reclaimed)
-			if !errors.Is(rerr, os.ErrExist) {
-				return false, rerr
-			}
-		}
-		return false, nil
-	}
-	_ = lockutil.RemoveLockFile(reclaimed)
-	return true, nil
 }

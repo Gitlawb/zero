@@ -279,45 +279,6 @@ func TestAcquireLockDoesNotBreakFreshLock(t *testing.T) {
 	}
 }
 
-func TestReclaimStaleLock(t *testing.T) {
-	// Mirrors the reclaim regression tests in cron, hooks, and oauth.
-	lockPath := filepath.Join(t.TempDir(), "x.lock")
-
-	// A genuinely stale lock (old mtime) is reclaimed and removed.
-	if err := os.WriteFile(lockPath, []byte("crashed-holder"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-2 * lockStaleAfter)
-	if err := os.Chtimes(lockPath, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := reclaimStaleLock(lockPath, "tok-a", lockStaleAfter); err != nil || !ok {
-		t.Fatalf("a stale lock should be reclaimed (ok=%v err=%v)", ok, err)
-	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("reclaimed stale lock should be gone, stat err=%v", err)
-	}
-
-	// A FRESH lock (a holder rotated a new lock in the gap between the caller's
-	// stale check and the rename) must be RESTORED intact, not stolen
-	// (AUDIT-M13).
-	if err := os.WriteFile(lockPath, []byte("live-holder"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := reclaimStaleLock(lockPath, "tok-b", lockStaleAfter); err != nil || ok {
-		t.Fatalf("a fresh lock must not be reclaimed (ok=%v err=%v)", ok, err)
-	}
-	if data, err := os.ReadFile(lockPath); err != nil || string(data) != "live-holder" {
-		t.Fatalf("fresh lock must be left intact, got %q err %v", data, err)
-	}
-
-	// A missing lock reports no reclaim (nothing to steal).
-	_ = os.Remove(lockPath)
-	if ok, err := reclaimStaleLock(lockPath, "tok-c", lockStaleAfter); err != nil || ok {
-		t.Fatalf("a missing lock should not report a reclaim (ok=%v err=%v)", ok, err)
-	}
-}
-
 func TestMailboxConcurrentSends(t *testing.T) {
 	mb := newTestMailbox(t)
 	// High fan-out exercises heavy contention (a lock regression — e.g. a Windows
