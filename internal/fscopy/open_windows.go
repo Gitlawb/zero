@@ -22,13 +22,21 @@ const fileWriteData uint32 = 0x0002
 const fileWriteAttributes uint32 = 0x0100
 
 // openRegularRead opens a regular file for reading without following a final
-// symlink: FILE_FLAG_OPEN_REPARSE_POINT makes CreateFile fail if the path is a
-// symlink, so a path that was stat'd as a regular file cannot be swapped for a
-// link between the check and the open.
+// symlink. FILE_FLAG_OPEN_REPARSE_POINT pins a final-component reparse point as
+// the object opened by CreateFile; the post-open attribute check then rejects
+// it before callers can read through the symlink target.
 func openRegularRead(path string) (*os.File, error) {
-	return openWindows(path, syscall.GENERIC_READ,
+	f, err := openWindows(path, syscall.GENERIC_READ,
 		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
 		syscall.OPEN_EXISTING)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyRegularWindowsHandle(syscall.Handle(f.Fd()), path); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // openRegularWrite creates or truncates a regular file for writing without
@@ -95,15 +103,9 @@ func openRegularWrite(path string, perm uint32) (*os.File, error) {
 	// and also catches a directory left at the destination path. SetEndOfFile
 	// on a directory handle fails with ERROR_INVALID_PARAMETER; rejecting it
 	// here gives a clear "not a regular file" error instead.
-	var info syscall.ByHandleFileInformation
-	if err := syscall.GetFileInformationByHandle(h, &info); err != nil {
+	if err := verifyRegularWindowsHandle(h, path); err != nil {
 		syscall.CloseHandle(h)
-		return nil, &os.PathError{Op: "stat", Path: path, Err: err}
-	}
-	if info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
-		info.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		syscall.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: path, Err: fmt.Errorf("not a regular file")}
+		return nil, err
 	}
 
 	// Truncate the existing regular file to zero bytes.
@@ -113,6 +115,18 @@ func openRegularWrite(path string, perm uint32) (*os.File, error) {
 	}
 
 	return os.NewFile(uintptr(h), path), nil
+}
+
+func verifyRegularWindowsHandle(h syscall.Handle, path string) error {
+	var info syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(h, &info); err != nil {
+		return &os.PathError{Op: "stat", Path: path, Err: err}
+	}
+	if info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		info.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return &os.PathError{Op: "open", Path: path, Err: fmt.Errorf("not a regular file")}
+	}
+	return nil
 }
 
 func openWindows(path string, access, share, disposition uint32) (*os.File, error) {
