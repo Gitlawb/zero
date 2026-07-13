@@ -81,9 +81,11 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 // switches (/new, /resume), which must not leave a stale plan-mode grant (or a
 // stale "restore to" mode) attached to a session other than the one that set it.
 func (m model) exitPlanMode() model {
-	m.permissionMode = agent.PermissionModeAuto
-	if m.permissionModeBeforePlan != "" {
-		m.permissionMode = m.permissionModeBeforePlan
+	if m.permissionMode == agent.PermissionModePlan {
+		m.permissionMode = agent.PermissionModeAuto
+		if m.permissionModeBeforePlan != "" {
+			m.permissionMode = m.permissionModeBeforePlan
+		}
 	}
 	m.permissionModeBeforePlan = ""
 	return m
