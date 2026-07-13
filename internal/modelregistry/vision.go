@@ -58,7 +58,7 @@ func VisionCapableByName(modelID string) bool {
 		strings.Contains(id, "qwen-vl"), strings.Contains(id, "qwenvl"):
 		return true // Qwen VL series are multimodal
 	case strings.Contains(id, "minimax-m3"):
-		return false // MiniMax M3 is text-only (the user confirmed this)
+		return true // MiniMax M3 accepts image input
 	case strings.Contains(id, "llava"), strings.Contains(id, "pixtral"),
 		strings.Contains(id, "internvl"), strings.Contains(id, "minicpm-v"),
 		strings.Contains(id, "moondream"), strings.Contains(id, "bakllava"),

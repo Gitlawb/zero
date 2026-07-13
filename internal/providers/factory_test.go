@@ -56,6 +56,81 @@ func TestNewCreatesOpenAIProviderWithFactoryOptions(t *testing.T) {
 	}
 }
 
+func TestNewUsesMiniMaxCompatibleEndpoints(t *testing.T) {
+	tests := []struct {
+		name         string
+		catalogID    string
+		providerKind config.ProviderKind
+		baseURL      string
+		responseBody string
+		wantURL      string
+	}{
+		{
+			name:         "global Anthropic",
+			catalogID:    "minimax",
+			providerKind: config.ProviderKindAnthropicCompat,
+			responseBody: "data: {\"type\":\"message_stop\"}\n\n",
+			wantURL:      "https://api.minimax.io/anthropic/v1/messages",
+		},
+		{
+			name:         "China Anthropic",
+			catalogID:    "minimaxi-cn",
+			providerKind: config.ProviderKindAnthropicCompat,
+			responseBody: "data: {\"type\":\"message_stop\"}\n\n",
+			wantURL:      "https://api.minimaxi.com/anthropic/v1/messages",
+		},
+		{
+			name:         "global OpenAI",
+			catalogID:    "custom-openai-compatible",
+			providerKind: config.ProviderKindOpenAICompatible,
+			baseURL:      "https://api.minimax.io/v1",
+			responseBody: "data: [DONE]\n\n",
+			wantURL:      "https://api.minimax.io/v1/chat/completions",
+		},
+		{
+			name:         "China OpenAI",
+			catalogID:    "custom-openai-compatible",
+			providerKind: config.ProviderKindOpenAICompatible,
+			baseURL:      "https://api.minimaxi.com/v1",
+			responseBody: "data: [DONE]\n\n",
+			wantURL:      "https://api.minimaxi.com/v1/chat/completions",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &captureTransport{responseBody: test.responseBody}
+			provider, err := New(config.ProviderProfile{
+				Name:         test.name,
+				CatalogID:    test.catalogID,
+				ProviderKind: test.providerKind,
+				BaseURL:      test.baseURL,
+				APIKey:       "sk-minimax",
+				Model:        "MiniMax-M3",
+			}, Options{HTTPClient: &http.Client{Transport: transport}})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion() error = %v", err)
+			}
+			for range stream {
+			}
+
+			if transport.request == nil {
+				t.Fatal("HTTP client was not used")
+			}
+			if got := transport.request.URL.String(); got != test.wantURL {
+				t.Fatalf("request URL = %q, want %q", got, test.wantURL)
+			}
+		})
+	}
+}
+
 func TestNewPassesOpenGatewayHY3ModelThrough(t *testing.T) {
 	transport := &captureTransport{
 		responseBody: "data: [DONE]\n\n",
@@ -215,6 +290,10 @@ func TestParseThinkTagsForProfileUsesConservativeDefaultsAndOverride(t *testing.
 	openAICompatible := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "qwen3-coder:480b"}
 	if !parseThinkTagsForProfile(config.ProviderProfile{}, openAICompatible) {
 		t.Fatal("qwen3 OpenAI-compatible model should parse inline think tags by default")
+	}
+	minimaxM27 := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "MiniMax-M2.7"}
+	if !parseThinkTagsForProfile(config.ProviderProfile{}, minimaxM27) {
+		t.Fatal("MiniMax-M2.7 OpenAI-compatible model should parse inline think tags by default")
 	}
 
 	generic := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "factory-model"}

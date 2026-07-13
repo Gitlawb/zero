@@ -130,12 +130,41 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export LONGCAT_API_KEY=...
+export MINIMAX_API_KEY=...
+export MINIMAXI_API_KEY=...
 ```
 
 To configure Meituan LongCat (LongCat-2.0) directly, run:
 
 ```bash
 zero providers setup longcat --set-active
+```
+
+MiniMax presets use the Anthropic-compatible endpoints for the global and China
+regions:
+
+```bash
+zero providers add minimax --set-active
+zero providers add minimaxi-cn --set-active
+```
+
+To use the OpenAI-compatible endpoints instead, add a custom compatible profile
+for the required region:
+
+```bash
+zero providers add custom-openai-compatible \
+  --name minimax-openai \
+  --model MiniMax-M3 \
+  --base-url https://api.minimax.io/v1 \
+  --api-key-env MINIMAX_API_KEY \
+  --set-active
+
+zero providers add custom-openai-compatible \
+  --name minimax-cn-openai \
+  --model MiniMax-M3 \
+  --base-url https://api.minimaxi.com/v1 \
+  --api-key-env MINIMAXI_API_KEY \
+  --set-active
 ```
 
 For local models, run Ollama or LM Studio and then use `zero setup` or

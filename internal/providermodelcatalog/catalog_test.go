@@ -1,6 +1,7 @@
 package providermodelcatalog
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -39,7 +40,7 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "minimaxi-cn",
-			want:     []string{"MiniMax-M3", "MiniMax-M2.1"},
+			want:     []string{"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.1"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
@@ -89,18 +90,19 @@ func TestModelsAreProviderScoped(t *testing.T) {
 }
 
 func TestModelsDoNotAliasMutableCatalogState(t *testing.T) {
-	descriptor, ok := providercatalog.Get("groq")
+	descriptor, ok := providercatalog.Get("minimax")
 	if !ok {
-		t.Fatal("provider groq missing from catalog")
+		t.Fatal("provider minimax missing from catalog")
 	}
 	first := Models(descriptor)
-	if len(first) == 0 {
-		t.Fatal("expected groq models")
+	if len(first) == 0 || len(first[0].InputModalities) == 0 {
+		t.Fatal("expected MiniMax models with input modalities")
 	}
 	first[0].ID = "mutated"
+	first[0].InputModalities[0] = "mutated"
 
 	second := Models(descriptor)
-	if second[0].ID == "mutated" {
+	if second[0].ID == "mutated" || second[0].InputModalities[0] == "mutated" {
 		t.Fatal("Models returned aliased mutable catalog state")
 	}
 }
@@ -111,6 +113,35 @@ func modelIDs(models []Model) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func TestMiniMaxModelsExposeCurrentCapabilities(t *testing.T) {
+	descriptor, ok := providercatalog.Get("minimax")
+	if !ok {
+		t.Fatal("provider minimax missing from catalog")
+	}
+	models := Models(descriptor)
+	if len(models) < 2 || models[0].ID != "MiniMax-M3" || models[1].ID != "MiniMax-M2.7" {
+		t.Fatalf("MiniMax current models = %#v, want MiniMax-M3 followed by MiniMax-M2.7", modelIDs(models))
+	}
+
+	m3 := models[0]
+	if m3.ContextWindow != 1_000_000 || !m3.ToolCall || !m3.Reasoning {
+		t.Fatalf("MiniMax-M3 capabilities = %#v, want 1M context with tools and reasoning", m3)
+	}
+	if !reflect.DeepEqual(m3.InputModalities, []string{"text", "image", "video"}) ||
+		!reflect.DeepEqual(m3.OutputModalities, []string{"text"}) {
+		t.Fatalf("MiniMax-M3 modalities = input:%#v output:%#v", m3.InputModalities, m3.OutputModalities)
+	}
+
+	m27 := models[1]
+	if m27.ContextWindow != 204_800 || !m27.ToolCall || !m27.Reasoning {
+		t.Fatalf("MiniMax-M2.7 capabilities = %#v, want 204.8K context with tools and reasoning", m27)
+	}
+	if !reflect.DeepEqual(m27.InputModalities, []string{"text"}) ||
+		!reflect.DeepEqual(m27.OutputModalities, []string{"text"}) {
+		t.Fatalf("MiniMax-M2.7 modalities = input:%#v output:%#v", m27.InputModalities, m27.OutputModalities)
+	}
 }
 
 // Pins the contract that MiniMax CN exposes exactly the same model IDs as the

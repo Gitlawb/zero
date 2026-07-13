@@ -127,6 +127,7 @@ func modelMayEmitThinkTags(model string) bool {
 		"glm-z1",
 		"kimi-k2-thinking",
 		"magistral",
+		"minimax-m2",
 		"minimax-m3",
 		"nemotron",
 		"qwen3",

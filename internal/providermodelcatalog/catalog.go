@@ -21,10 +21,33 @@ type Model struct {
 	Source           string
 }
 
+const minimaxModelSource = "https://platform.minimax.io/docs/api-reference/api-overview"
+
 // Shared by both "minimax" and "minimaxi-cn"; Models() rebuilds a fresh slice
 // per call, so the shared backing slice cannot be mutated by callers.
+// Flat cost fields stay unset because MiniMax-M3 pricing is tiered and this
+// catalog model shape cannot represent those tiers without losing information.
 var minimaxCuratedModels = []Model{
-	{ID: "MiniMax-M3", Description: "catalog default"},
+	{
+		ID:               "MiniMax-M3",
+		Description:      "catalog default",
+		ContextWindow:    1_000_000,
+		ToolCall:         true,
+		Reasoning:        true,
+		InputModalities:  []string{"text", "image", "video"},
+		OutputModalities: []string{"text"},
+		Source:           minimaxModelSource,
+	},
+	{
+		ID:               "MiniMax-M2.7",
+		Description:      "agentic coding model",
+		ContextWindow:    204_800,
+		ToolCall:         true,
+		Reasoning:        true,
+		InputModalities:  []string{"text"},
+		OutputModalities: []string{"text"},
+		Source:           minimaxModelSource,
+	},
 	{ID: "MiniMax-M2.1", Description: "agentic coding model"},
 }
 
@@ -222,10 +245,21 @@ func dedupeModels(defaultModel string, models []Model) []Model {
 		if model.Description == "" {
 			model.Description = "catalog model"
 		}
+		model.InputModalities = append([]string{}, model.InputModalities...)
+		model.OutputModalities = append([]string{}, model.OutputModalities...)
+		model.Tags = append([]string{}, model.Tags...)
 		seen[model.ID] = true
 		result = append(result, model)
 	}
-	add(Model{ID: defaultModel, Description: "catalog default"})
+	defaultEntry := Model{ID: defaultModel, Description: "catalog default"}
+	for _, model := range models {
+		if strings.TrimSpace(model.ID) == strings.TrimSpace(defaultModel) {
+			defaultEntry = model
+			defaultEntry.Description = "catalog default"
+			break
+		}
+	}
+	add(defaultEntry)
 	for _, model := range models {
 		add(model)
 	}
