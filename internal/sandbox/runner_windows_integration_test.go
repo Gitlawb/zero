@@ -240,6 +240,8 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		if _, err := os.Stat(programDataMarker); err == nil {
 			_ = os.Remove(programDataMarker)
 			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat ProgramData marker: %v", err)
 		}
 	}
 }
