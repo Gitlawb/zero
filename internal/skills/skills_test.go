@@ -373,16 +373,25 @@ func TestLoadDiscoversAssetsRecursively(t *testing.T) {
 // still be discovered, because fscopy.CopyTree installs files at ANY depth and
 // the loader must keep every installed file discoverable. A depth cap that
 // hides installed assets would make a skill silently appear asset-free while
-// files the skill references exist on disk. This nests an asset 25 levels deep
-// (well past the old maxAssetDepth=8) and confirms it is listed.
+// files the skill references exist on disk. This nests assets two ways and
+// confirms both are listed:
+//   - 25 levels deep (well past the old maxAssetDepth=8).
+//   - 90 levels deep, past the old maxTraversalDepth=64 — which used to make
+//     loadAssets silently drop the asset. Discovery no longer caps depth.
 func TestLoadDiscoversDeeplyNestedAssets(t *testing.T) {
 	dir := t.TempDir()
 	// 25 levels of subdirectories — exceeds any shallow fixed cap, stays well
-	// under maxTraversalDepth and the filesystem PATH_MAX.
-	deep := strings.Repeat("d/", 25) + "leaf.sh"
+	// under the filesystem PATH_MAX.
+	deep25 := strings.Repeat("d/", 25) + "leaf.sh"
+	// 90 levels — past the old maxTraversalDepth=64. Use short path components
+	// so the leaf's absolute path stays under the filesystem PATH_MAX.
+	deep90 := strings.Repeat("d/", 90) + "deep.sh"
 	writeSkillWithAssets(t, dir, "nested",
 		"---\nname: nested\n---\nbody",
-		map[string]string{deep: "#!/bin/sh\necho deep\n"},
+		map[string]string{
+			deep25: "#!/bin/sh\necho deep\n",
+			deep90: "#!/bin/sh\necho deeper\n",
+		},
 	)
 	loaded, err := Load(dir)
 	if err != nil {
@@ -391,14 +400,19 @@ func TestLoadDiscoversDeeplyNestedAssets(t *testing.T) {
 	if len(loaded) != 1 {
 		t.Fatalf("expected 1 skill, got %d", len(loaded))
 	}
-	found := false
+	want := map[string]bool{"leaf.sh": false, "deep.sh": false}
 	for _, a := range loaded[0].Assets {
-		if strings.HasSuffix(filepath.ToSlash(a.Name), "leaf.sh") {
-			found = true
+		s := filepath.ToSlash(a.Name)
+		for suffix := range want {
+			if strings.HasSuffix(s, suffix) {
+				want[suffix] = true
+			}
 		}
 	}
-	if !found {
-		t.Fatalf("deeply nested asset (25 levels) not discovered; Assets=%v", loaded[0].Assets)
+	for suffix, found := range want {
+		if !found {
+			t.Fatalf("deeply nested asset not discovered (%s); Assets=%v", suffix, loaded[0].Assets)
+		}
 	}
 }
 
@@ -716,9 +730,10 @@ func TestFormatOutputTruncationOmitsAssetsBlock(t *testing.T) {
 	// so the rendered listing at the discovery cap exceeds maxSkillOutputSize.
 	// Each line ≈ 280 bytes × 500 assets ≈ 140KB > 100KB cap.
 	// macOS filename limit is 255 bytes, so we use deep subdirectory nesting
-	// to build long relative names.
+	// to build long relative names. 100 levels of "d/" × 500 assets renders
+	// ~105KB, which clears the 100KB cap and triggers the drop-assets branch.
 	extras := make(map[string]string, maxAssetCount+100)
-	deepDir := strings.Repeat("d/", 90) // long relative path using short components
+	deepDir := strings.Repeat("d/", 100) // long relative path using short components
 	for i := 0; i < maxAssetCount+100; i++ {
 		extras[deepDir+fmt.Sprintf("asset-%04d.txt", i)] = "d"
 	}
@@ -732,7 +747,7 @@ func TestFormatOutputTruncationOmitsAssetsBlock(t *testing.T) {
 		t.Fatalf("expected 1 skill, got %d", len(loaded))
 	}
 	if len(loaded[0].Assets) == 0 {
-		t.Skip("assets not discovered on this platform/fs; truncation-omits-assets path untestable here")
+		t.Fatalf("assets at depth 90 not discovered; depth cap may have been reintroduced (Assets=%v)", loaded[0].Assets)
 	}
 	out := FormatOutput(loaded[0])
 
@@ -791,9 +806,10 @@ func TestFormatOutputTruncationPriority(t *testing.T) {
 	t.Run("body_fits_assets_overflow_assets_dropped_body_intact", func(t *testing.T) {
 		dir := t.TempDir()
 		// Small body, enough assets with long relative paths to exceed the cap
-		// when rendered at the discovery cap (maxAssetCount).
+		// when rendered at the discovery cap (maxAssetCount). 100 levels of
+		// "d/" × 500 assets renders ~105KB, clearing the 100KB cap.
 		extras := make(map[string]string, maxAssetCount+100)
-		deepDir := strings.Repeat("d/", 90)
+		deepDir := strings.Repeat("d/", 100)
 		for i := 0; i < maxAssetCount+100; i++ {
 			extras[deepDir+fmt.Sprintf("asset-%04d.txt", i)] = "d"
 		}
@@ -803,7 +819,7 @@ func TestFormatOutputTruncationPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(loaded[0].Assets) == 0 {
-			t.Skip("assets not discovered on this platform/fs")
+			t.Fatalf("assets at depth 90 not discovered; depth cap may have been reintroduced (Assets=%v)", loaded[0].Assets)
 		}
 		out := FormatOutput(loaded[0])
 		// Body must remain COMPLETE and intact.
