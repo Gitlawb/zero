@@ -105,6 +105,7 @@ func (m model) resolveProviderWizardAimlapi(cmd tea.Cmd, outcome aimlapiOutcome)
 	switch outcome {
 	case aimlapiDone:
 		wizard.apiKey = wizard.aimlapi.apiKey
+		wizard.baseURL = wizard.aimlapi.baseURL
 		wizard.aimlapi = nil
 		wizard.err = ""
 		wizard.step = providerWizardStepModel

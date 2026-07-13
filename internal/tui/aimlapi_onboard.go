@@ -2,9 +2,7 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -30,18 +28,18 @@ type aimlapiOnboardState struct {
 	pathCursor int
 	lowCursor  int
 
-	apiKey string // Path A input, and the key that ends up saved
-	email  string
-	code   string
-	amount string
-	model  string
+	apiKey  string // Path A input, and the key that ends up saved
+	email   string
+	code    string
+	amount  string
+	model   string
+	baseURL string // resolved inference endpoint written into the saved profile
 
 	autoTopUp   bool // amount screen "auto top up" toggle; defaults to on
 	amountField int  // amount screen focus: 0 = amount input, 1 = auto top-up toggle
 
-	sessionToken   string // acquired via email code / passwordless; enables top-up
-	newAccount     bool   // Path B sign-up: exchange the paid session into a key
-	signinForTopup bool   // Path A: the email sub-flow is only to fund a top-up
+	sessionToken string // acquired via email code / passwordless; enables top-up
+	newAccount   bool   // Path B sign-up: exchange the paid session into a key
 
 	busy    bool
 	detail  string // checkout / verification URL
@@ -51,6 +49,11 @@ type aimlapiOnboardState struct {
 
 	topupCh     chan aimlapiTopupEvent
 	topupCancel context.CancelFunc
+
+	// opCancel cancels the single in-flight account/key request (balance, check,
+	// code, passwordless, key-mint). Only one runs at a time (input is gated while
+	// busy); it is cancelled when the request completes or the flow is abandoned.
+	opCancel context.CancelFunc
 
 	noOpen      bool
 	openBrowser func(string) error
@@ -80,9 +83,13 @@ const (
 
 func newAimlapiOnboard(openBrowser func(string) error) *aimlapiOnboardState {
 	return &aimlapiOnboardState{
-		step:        aimlapiStepPickPath,
-		amount:      "25",
-		autoTopUp:   true, // default the "auto top up" toggle to on (matches the mockup)
+		step:      aimlapiStepPickPath,
+		amount:    "25",
+		autoTopUp: true, // default the "auto top up" toggle to on (matches the mockup)
+		// Seed the base URL from the resolved endpoints so a staging / custom
+		// AIMLAPI_INFERENCE_URL override is carried into the saved profile for every
+		// path (pasted key or top-up), not silently replaced by the catalog default.
+		baseURL:     aimlapi.ResolveEndpoints().InferenceBaseURL,
 		openBrowser: openBrowser,
 	}
 }
@@ -92,8 +99,7 @@ func newAimlapiOnboard(openBrowser func(string) error) *aimlapiOnboardState {
 type aimlapiMsgKind int
 
 const (
-	aimlapiMsgBalance    aimlapiMsgKind = iota // Path A: validate pasted key
-	aimlapiMsgCheck                            // Path B: does the account exist?
+	aimlapiMsgCheck      aimlapiMsgKind = iota // Path B: does the account exist?
 	aimlapiMsgToken                            // Path B: session from code / passwordless
 	aimlapiMsgKey                              // Path B existing: minted key
 	aimlapiMsgKeyBalance                       // Path B existing: balance of the minted key
@@ -161,19 +167,11 @@ func (s *aimlapiOnboardState) msg(kind aimlapiMsgKind) aimlapiOnboardMsg {
 	return aimlapiOnboardMsg{state: s, gen: s.gen, kind: kind}
 }
 
-func (s *aimlapiOnboardState) balanceCmd(key string) tea.Cmd {
-	m := s.msg(aimlapiMsgBalance)
-	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().GetBalance(context.Background(), key)
-		m.balance, m.err = res, err
-		return m
-	}
-}
-
 func (s *aimlapiOnboardState) keyBalanceCmd(key string) tea.Cmd {
 	m := s.msg(aimlapiMsgKeyBalance)
+	ctx := s.opContext()
 	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().GetBalance(context.Background(), key)
+		res, err := aimlapiOnboardClient().GetBalance(ctx, key)
 		m.balance, m.err = res, err
 		return m
 	}
@@ -181,8 +179,9 @@ func (s *aimlapiOnboardState) keyBalanceCmd(key string) tea.Cmd {
 
 func (s *aimlapiOnboardState) checkAccountCmd(email string) tea.Cmd {
 	m := s.msg(aimlapiMsgCheck)
+	ctx := s.opContext()
 	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().CheckAccount(context.Background(), email)
+		res, err := aimlapiOnboardClient().CheckAccount(ctx, email)
 		m.check, m.err = res, err
 		return m
 	}
@@ -192,8 +191,9 @@ func (s *aimlapiOnboardState) checkAccountCmd(email string) tea.Cmd {
 // happens later once the user types the code; this only requests it.
 func (s *aimlapiOnboardState) sendCodeCmd(email string) tea.Cmd {
 	m := s.msg(aimlapiMsgToken) // token kind reused: no session yet, err-only signal
+	ctx := s.opContext()
 	return func() tea.Msg {
-		err := aimlapiOnboardClient().SendSignInCode(context.Background(), email)
+		err := aimlapiOnboardClient().SendSignInCode(ctx, email)
 		m.err = err
 		m.token = "" // sentinel: code sent, still need verify
 		return m
@@ -202,8 +202,9 @@ func (s *aimlapiOnboardState) sendCodeCmd(email string) tea.Cmd {
 
 func (s *aimlapiOnboardState) verifyCodeCmd(email, code string) tea.Cmd {
 	m := s.msg(aimlapiMsgToken)
+	ctx := s.opContext()
 	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().VerifySignInCode(context.Background(), email, code)
+		res, err := aimlapiOnboardClient().VerifySignInCode(ctx, email, code)
 		m.token, m.err = res.Token, err
 		return m
 	}
@@ -211,8 +212,9 @@ func (s *aimlapiOnboardState) verifyCodeCmd(email, code string) tea.Cmd {
 
 func (s *aimlapiOnboardState) passwordlessCmd(email string) tea.Cmd {
 	m := s.msg(aimlapiMsgToken)
+	ctx := s.opContext()
 	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().CreatePasswordlessAccount(context.Background(), email)
+		res, err := aimlapiOnboardClient().CreatePasswordlessAccount(ctx, email)
 		m.token, m.err = res.Token, err
 		return m
 	}
@@ -220,8 +222,9 @@ func (s *aimlapiOnboardState) passwordlessCmd(email string) tea.Cmd {
 
 func (s *aimlapiOnboardState) createKeyCmd(token string) tea.Cmd {
 	m := s.msg(aimlapiMsgKey)
+	ctx := s.opContext()
 	return func() tea.Msg {
-		res, err := aimlapiOnboardClient().CreateKey(context.Background(), token, "zero CLI")
+		res, err := aimlapiOnboardClient().CreateKey(ctx, token, "zero CLI")
 		m.key, m.err = res, err
 		return m
 	}
@@ -320,8 +323,13 @@ func (s *aimlapiOnboardState) handleKeyInputKey(msg tea.KeyMsg) (tea.Cmd, aimlap
 		if strings.TrimSpace(s.apiKey) == "" {
 			return nil, aimlapiContinue
 		}
-		s.startBusy()
-		return s.balanceCmd(strings.TrimSpace(s.apiKey)), aimlapiContinue
+		// Path A saves the pasted key as-is: no balance read and no in-CLI top-up.
+		// Funding a key requires signing in, and the pasted key need not belong to
+		// whatever account the user would then authenticate as — so offering a
+		// top-up here risks funding the wrong account. A bad key just surfaces on
+		// first use, exactly like every other provider's paste-a-key flow.
+		s.apiKey = strings.TrimSpace(s.apiKey)
+		return s.finishEverythingRuns(), aimlapiContinue
 	case keyText(msg) != "":
 		s.apiKey += keyText(msg)
 		s.errText = ""
@@ -332,11 +340,7 @@ func (s *aimlapiOnboardState) handleKeyInputKey(msg tea.KeyMsg) (tea.Cmd, aimlap
 func (s *aimlapiOnboardState) handleEmailInputKey(msg tea.KeyMsg) (tea.Cmd, aimlapiOutcome) {
 	switch {
 	case keyIs(msg, tea.KeyLeft):
-		if s.signinForTopup {
-			s.step = aimlapiStepLowBalance
-		} else {
-			s.step = aimlapiStepPickPath
-		}
+		s.step = aimlapiStepPickPath
 		s.errText = ""
 	case keyBackspace(msg):
 		s.email = trimLastRune(s.email)
@@ -390,14 +394,8 @@ func (s *aimlapiOnboardState) handleLowBalanceKey(msg tea.KeyMsg) (tea.Cmd, aiml
 		if s.lowCursor == 1 { // skip topping up
 			return s.finishEverythingRuns(), aimlapiContinue
 		}
-		// Top up now.
-		if s.sessionToken == "" {
-			// Path A holds only a key, not a session — sign in by email to fund it.
-			s.signinForTopup = true
-			s.step = aimlapiStepEmailInput
-			s.errText = ""
-			return nil, aimlapiContinue
-		}
+		// Top up now. Low balance is only reachable from Path B existing, where we
+		// already hold a session for the minted key's own account.
 		s.step = aimlapiStepAmountInput
 		s.errText = ""
 	}
@@ -470,8 +468,6 @@ func (s *aimlapiOnboardState) apply(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutc
 		return nil, aimlapiContinue // stale: user moved on
 	}
 	switch msg.kind {
-	case aimlapiMsgBalance:
-		return s.applyBalance(msg)
 	case aimlapiMsgKeyBalance:
 		return s.applyKeyBalance(msg)
 	case aimlapiMsgCheck:
@@ -484,28 +480,6 @@ func (s *aimlapiOnboardState) apply(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutc
 		return s.applyTopup(msg)
 	}
 	return nil, aimlapiContinue
-}
-
-func (s *aimlapiOnboardState) applyBalance(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
-	s.stopBusy()
-	if msg.err != nil {
-		if aimlapiIsUnauthorized(msg.err) {
-			s.apiKey = ""
-			s.errText = aimlapi.MsgAPIKeyInvalid
-			s.step = aimlapiStepKeyInput
-			return nil, aimlapiContinue
-		}
-		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
-		s.step = aimlapiStepKeyInput
-		return nil, aimlapiContinue
-	}
-	s.apiKey = strings.TrimSpace(s.apiKey)
-	if msg.balance.LowBalance {
-		s.lowCursor = 0
-		s.step = aimlapiStepLowBalance
-		return nil, aimlapiContinue
-	}
-	return s.finishEverythingRuns(), aimlapiContinue
 }
 
 func (s *aimlapiOnboardState) applyKeyBalance(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
@@ -528,21 +502,6 @@ func (s *aimlapiOnboardState) applyCheck(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
 		s.step = aimlapiStepEmailInput
 		return nil, aimlapiContinue
-	}
-	if s.signinForTopup {
-		// Path A funding: only an existing account can top up the pasted key.
-		if msg.check.Action != "sign-in" {
-			// The pasted key is valid and still saved; we just can't fund it because
-			// this email has no account. Land on the terminal screen with one coherent
-			// note instead of a green "ready" plus a red error.
-			s.errText = ""
-			s.successLines = []string{aimlapi.MsgEverythingRuns, "", aimlapi.MsgTopUpNoAccount}
-			s.step = aimlapiStepDone
-			return nil, aimlapiContinue
-		}
-		s.newAccount = false
-		s.startBusy()
-		return s.sendCodeCmd(s.email), aimlapiContinue
 	}
 	if msg.check.Action == "sign-in" {
 		s.newAccount = false
@@ -581,12 +540,6 @@ func (s *aimlapiOnboardState) applyToken(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	s.sessionToken = msg.token
 	if s.newAccount {
 		// New account: fund it (top-up will exchange for the key).
-		s.step = aimlapiStepAmountInput
-		s.errText = ""
-		return nil, aimlapiContinue
-	}
-	if s.signinForTopup {
-		// Path A: session obtained only to fund the existing key — go pay.
 		s.step = aimlapiStepAmountInput
 		s.errText = ""
 		return nil, aimlapiContinue
@@ -631,6 +584,9 @@ func (s *aimlapiOnboardState) applyTopup(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	}
 	if strings.TrimSpace(event.result.Model) != "" {
 		s.model = event.result.Model
+	}
+	if strings.TrimSpace(event.result.BaseURL) != "" {
+		s.baseURL = event.result.BaseURL
 	}
 	s.successLines = s.topUpSuccessLines()
 	s.step = aimlapiStepDone
@@ -711,6 +667,26 @@ func (s *aimlapiOnboardState) startBusy() {
 
 func (s *aimlapiOnboardState) stopBusy() {
 	s.busy = false
+	// The result has arrived; release the request's context.
+	s.cancelPendingOp()
+}
+
+// opContext returns a cancellable context for the next account/key request and
+// records its cancel so an abandoned flow (Esc) or the next request can stop the
+// in-flight one. Only one request runs at a time, so replacing the prior cancel
+// is safe.
+func (s *aimlapiOnboardState) opContext() context.Context {
+	s.cancelPendingOp()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.opCancel = cancel
+	return ctx
+}
+
+func (s *aimlapiOnboardState) cancelPendingOp() {
+	if s.opCancel != nil {
+		s.opCancel()
+		s.opCancel = nil
+	}
 }
 
 func (s *aimlapiOnboardState) cancelStream() {
@@ -719,12 +695,9 @@ func (s *aimlapiOnboardState) cancelStream() {
 		s.topupCancel = nil
 	}
 	s.topupCh = nil
+	// Also stop any pending account/key request the user is abandoning.
+	s.cancelPendingOp()
 	s.gen++ // drop any late stream/poll events
-}
-
-func aimlapiIsUnauthorized(err error) bool {
-	var apiErr aimlapi.APIError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized
 }
 
 func aimlapiValidEmail(value string) bool {

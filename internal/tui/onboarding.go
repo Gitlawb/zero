@@ -671,6 +671,7 @@ func (m model) resolveSetupAimlapi(cmd tea.Cmd, outcome aimlapiOutcome) (tea.Mod
 	switch outcome {
 	case aimlapiDone:
 		m.setup.apiKey.SetValue(m.setup.aimlapi.apiKey)
+		m.setup.baseURL = m.setup.aimlapi.baseURL
 		m.setup.aimlapi = nil
 		m.setup.err = ""
 		m.setup.stage = setupStageModel
@@ -1194,6 +1195,13 @@ func (m model) setupCredentialAPIKey(option SetupProviderOption) string {
 }
 
 func (m model) setupBaseURL(option SetupProviderOption) string {
+	// aimlapi.com never shows the endpoint field, but its onboarding resolves the
+	// inference endpoint (honoring an AIMLAPI_INFERENCE_URL override) onto
+	// m.setup.baseURL. Persist that so an override reaches the saved profile instead
+	// of being replaced by the catalog default at save time.
+	if providerWizardIsAimlapi(setupProviderDescriptor(option)) {
+		return strings.TrimSpace(m.setup.baseURL)
+	}
 	if !setupProviderNeedsEndpoint(option) {
 		return ""
 	}

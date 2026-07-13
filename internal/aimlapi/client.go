@@ -129,7 +129,7 @@ func (c *Client) GetSession(ctx context.Context, sessionToken string) (PartnerCh
 }
 
 // Pay initiates payment for a session and returns the hosted checkout URL.
-// autoTopUp enrolls the account in automatic top-up when the backend supports it.
+// autoTopUp enrolls the account in automatic top-up at checkout time.
 func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, amountUSDMinor int, method PaymentMethod, successURL string, cancelURL string, autoTopUp bool) (PayResult, error) {
 	body := map[string]any{
 		"amountUsdMinor": amountUSDMinor,
@@ -141,9 +141,8 @@ func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, am
 	if strings.TrimSpace(cancelURL) != "" {
 		body["cancelUrl"] = strings.TrimSpace(cancelURL)
 	}
-	// Only sent when enabled: the field enrolls the account in automatic top-up.
-	// The gateway ValidationPipe does not whitelist, so it passes through today and
-	// is honoured once the backend adds support (see AIMLAPI-AUTOTOPUP-TZ.md).
+	// Only sent when enabled: enrolls the account in automatic top-up. The backend
+	// honours this field at checkout time.
 	if autoTopUp {
 		body["autoTopUp"] = true
 	}
