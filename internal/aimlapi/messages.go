@@ -5,6 +5,7 @@ package aimlapi
 const (
 	// Path A — existing API key. Pick-path prompt + option labels.
 	MsgAPIKeyInputPrompt = "Enter your aimlapi.com key."
+	MsgAPIKeyInvalid     = "API key is invalid. Please make sure you enter a valid aimlapi.com key."
 	MsgPickPathPrompt    = "Do you have aimlapi.com key?"
 	MsgPickPathHaveKey   = "I already have aimlapi.com key"
 	MsgPickPathHaveHint  = "Proceed to paste the key"

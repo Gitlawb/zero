@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -99,11 +101,12 @@ func newAimlapiOnboard(openBrowser func(string) error) *aimlapiOnboardState {
 type aimlapiMsgKind int
 
 const (
-	aimlapiMsgCheck      aimlapiMsgKind = iota // Path B: does the account exist?
-	aimlapiMsgToken                            // Path B: session from code / passwordless
-	aimlapiMsgKey                              // Path B existing: minted key
-	aimlapiMsgKeyBalance                       // Path B existing: balance of the minted key
-	aimlapiMsgTopup                            // shared: one streamed top-up event
+	aimlapiMsgKeyValidation aimlapiMsgKind = iota // Path A: validate pasted key via balance endpoint
+	aimlapiMsgCheck                               // Path B: does the account exist?
+	aimlapiMsgToken                               // Path B: session from code / passwordless
+	aimlapiMsgKey                                 // Path B existing: minted key
+	aimlapiMsgKeyBalance                          // Path B existing: balance of the minted key
+	aimlapiMsgTopup                               // shared: one streamed top-up event
 )
 
 // aimlapiOnboardMsg carries one async result back to the owning sub-model. The
@@ -173,6 +176,16 @@ func (s *aimlapiOnboardState) keyBalanceCmd(key string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := aimlapiOnboardClient().GetBalance(ctx, key)
 		m.balance, m.err = res, err
+		return m
+	}
+}
+
+func (s *aimlapiOnboardState) keyValidationCmd(key string) tea.Cmd {
+	m := s.msg(aimlapiMsgKeyValidation)
+	ctx := s.opContext()
+	return func() tea.Msg {
+		_, err := aimlapiOnboardClient().GetBalance(ctx, key)
+		m.err = err
 		return m
 	}
 }
@@ -323,13 +336,8 @@ func (s *aimlapiOnboardState) handleKeyInputKey(msg tea.KeyMsg) (tea.Cmd, aimlap
 		if strings.TrimSpace(s.apiKey) == "" {
 			return nil, aimlapiContinue
 		}
-		// Path A saves the pasted key as-is: no balance read and no in-CLI top-up.
-		// Funding a key requires signing in, and the pasted key need not belong to
-		// whatever account the user would then authenticate as — so offering a
-		// top-up here risks funding the wrong account. A bad key just surfaces on
-		// first use, exactly like every other provider's paste-a-key flow.
-		s.apiKey = strings.TrimSpace(s.apiKey)
-		return s.finishEverythingRuns(), aimlapiContinue
+		s.startBusy()
+		return s.keyValidationCmd(strings.TrimSpace(s.apiKey)), aimlapiContinue
 	case keyText(msg) != "":
 		s.apiKey += keyText(msg)
 		s.errText = ""
@@ -468,6 +476,8 @@ func (s *aimlapiOnboardState) apply(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutc
 		return nil, aimlapiContinue // stale: user moved on
 	}
 	switch msg.kind {
+	case aimlapiMsgKeyValidation:
+		return s.applyKeyValidation(msg)
 	case aimlapiMsgKeyBalance:
 		return s.applyKeyBalance(msg)
 	case aimlapiMsgCheck:
@@ -480,6 +490,23 @@ func (s *aimlapiOnboardState) apply(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutc
 		return s.applyTopup(msg)
 	}
 	return nil, aimlapiContinue
+}
+
+func (s *aimlapiOnboardState) applyKeyValidation(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
+	s.stopBusy()
+	if msg.err != nil {
+		if aimlapiIsUnauthorized(msg.err) {
+			s.apiKey = ""
+			s.errText = aimlapi.MsgAPIKeyInvalid
+			s.step = aimlapiStepKeyInput
+			return nil, aimlapiContinue
+		}
+		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+		s.step = aimlapiStepKeyInput
+		return nil, aimlapiContinue
+	}
+	s.apiKey = strings.TrimSpace(s.apiKey)
+	return s.finishEverythingRuns(), aimlapiContinue
 }
 
 func (s *aimlapiOnboardState) applyKeyBalance(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
@@ -702,6 +729,12 @@ func (s *aimlapiOnboardState) cancelStream() {
 
 func aimlapiValidEmail(value string) bool {
 	return aimlapi.ValidEmail(value)
+}
+
+func aimlapiIsUnauthorized(err error) bool {
+	var apiErr aimlapi.APIError
+	return errors.As(err, &apiErr) &&
+		(apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden)
 }
 
 // ---- rendering ------------------------------------------------------------

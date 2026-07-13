@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -148,6 +149,67 @@ func TestAimlapiKeyInputUsesAutomaticVerificationHint(t *testing.T) {
 	view := plainRender(t, strings.Join(state.view(64, ""), "\n"))
 	assertContains(t, view, "Your API key will be hidden and verified automatically.")
 	assertNotContains(t, view, "Pasted keys are hidden")
+}
+
+func TestAimlapiPastedKeyStartsBalanceValidation(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepKeyInput, apiKey: " key_test "}
+
+	cmd, outcome := state.handleKey(testKey(tea.KeyEnter))
+
+	if cmd == nil {
+		t.Fatal("pasted key should start balance validation")
+	}
+	if outcome != aimlapiContinue || !state.busy {
+		t.Fatalf("validation returned outcome=%v busy=%v, want continue/true", outcome, state.busy)
+	}
+}
+
+func TestAimlapiPastedKeyRejectsUnauthorized(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepKeyInput,
+		apiKey: "bad-key",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state: state,
+		kind:  aimlapiMsgKeyValidation,
+		err:   aimlapi.APIError{Status: http.StatusUnauthorized},
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("invalid key returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepKeyInput || state.apiKey != "" {
+		t.Fatalf("invalid key left step=%v key=%q, want key input with cleared key", state.step, state.apiKey)
+	}
+	if state.errText != aimlapi.MsgAPIKeyInvalid {
+		t.Fatalf("error = %q, want %q", state.errText, aimlapi.MsgAPIKeyInvalid)
+	}
+}
+
+func TestAimlapiPastedKeyValidationDoesNotStartLowBalanceFlow(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepKeyInput,
+		apiKey: " key_test ",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state:   state,
+		kind:    aimlapiMsgKeyValidation,
+		balance: aimlapi.BalanceResult{LowBalance: true},
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("valid key returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepDone || state.apiKey != "key_test" {
+		t.Fatalf("valid key left step=%v key=%q, want done with trimmed key", state.step, state.apiKey)
+	}
+	if len(state.successLines) != 1 || state.successLines[0] != aimlapi.MsgEverythingRuns {
+		t.Fatalf("success lines = %#v", state.successLines)
+	}
 }
 
 func TestAimlapiOnboardingKeepsSharedTickAlive(t *testing.T) {
