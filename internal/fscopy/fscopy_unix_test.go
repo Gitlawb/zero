@@ -3,9 +3,12 @@
 package fscopy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestCopyTreePreservesExecutableBit verifies CopyFile preserves the source
@@ -64,5 +67,54 @@ func TestHashTreeSensitiveToExecBit(t *testing.T) {
 	}
 	if got == want {
 		t.Fatalf("exec bit flip did not change hash: got=%s want=%s", got, want)
+	}
+}
+
+// TestCopyFileRejectsFIFOSource verifies openRegularRead does not block when
+// the source path is a FIFO: O_NONBLOCK makes the open return immediately and
+// the fstat rejection refuses it before any blocking read. Copying a skill
+// file that has been swapped for a FIFO would otherwise hang skill/plugin
+// installation indefinitely.
+func TestCopyFileRejectsFIFOSource(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	fifoPath := filepath.Join(src, "fifo")
+	if err := unix.Mkfifo(fifoPath, 0o644); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	err := CopyFile(fifoPath, filepath.Join(dst, "fifo"))
+	if err == nil {
+		t.Fatalf("CopyFile unexpectedly succeeded against a FIFO source")
+	}
+	var perr *os.PathError
+	if !errors.As(err, &perr) {
+		t.Fatalf("CopyFile returned %T, want *os.PathError", err)
+	}
+}
+
+// TestOpenRegularReadAtRejectsFIFO verifies the fd-held open guard: an entry
+// classified as regular by readDirAt's fstatat can be swapped for a FIFO at
+// the openat below, and O_NOFOLLOW does not refuse FIFOs. openRegularReadAt
+// must open nonblocking, fstat the descriptor, and refuse the FIFO before any
+// blocking read — otherwise skill/plugin installation hangs. This drives the
+// real At-based open used by CopyTree and HashTree.
+func TestOpenRegularReadAtRejectsFIFO(t *testing.T) {
+	src := t.TempDir()
+	if err := unix.Mkfifo(filepath.Join(src, "fifo"), 0o644); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	dir, err := noFollowOpenDir(src)
+	if err != nil {
+		t.Fatalf("noFollowOpenDir: %v", err)
+	}
+	defer func() { _ = dir.Close() }()
+	f, err := openRegularReadAt(dir, "fifo")
+	if err == nil {
+		_ = f.Close()
+		t.Fatalf("openRegularReadAt unexpectedly opened a FIFO")
+	}
+	var perr *os.PathError
+	if !errors.As(err, &perr) {
+		t.Fatalf("err = %T, want *os.PathError", err)
 	}
 }

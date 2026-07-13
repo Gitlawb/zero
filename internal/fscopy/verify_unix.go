@@ -107,13 +107,41 @@ func readDirAt(dir *os.File) ([]dirEntryInfo, error) {
 }
 
 // openRegularReadAt opens a regular file named `name` relative to the held
-// parent directory fd, without following a final symlink. The source is then
-// fstat'd on the open descriptor in copyFileAt/hashFileAt so the kind and perm
-// come from the fd actually read (no TOCTOU).
+// parent directory fd, without following a final symlink, and rejects any
+// non-regular descriptor before a blocking read can occur.
+//
+// readDirAt classifies each entry with fstatat and marks regular files as
+// isReg, but that classification and this open are two independent syscalls.
+// A concurrently writable local source can swap the entry for a FIFO in the
+// fstatat→openat window. O_NOFOLLOW refuses a trailing symlink but does NOT
+// reject FIFOs, sockets, or devices, so a plain open would block indefinitely
+// on a FIFO (open of a FIFO read end blocks until a writer opens it). We open
+// with O_NONBLOCK so a FIFO/socket/device returns immediately instead of
+// hanging, then fstat the open descriptor and reject anything that is not a
+// regular file — closing the gap before the later io.Copy. The nonblocking
+// flag is harmless on a regular file and is cleared on the returned *os.File
+// so callers read normally.
 func openRegularReadAt(parent *os.File, name string) (*os.File, error) {
-	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	pfd := int(parent.Fd())
+	fd, err := unix.Openat(pfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "openat", Path: filepath.Join(parent.Name(), name), Err: err}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return nil, &os.PathError{Op: "fstat", Path: filepath.Join(parent.Name(), name), Err: err}
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, &os.PathError{Op: "openat", Path: filepath.Join(parent.Name(), name), Err: fmt.Errorf("not a regular file")}
+	}
+	// Drop O_NONBLOCK so the caller gets ordinary blocking semantics on the
+	// descriptor; the guard above was the only reason it was needed. Cheap and
+	// portable — a no-op equivalent on a regular file that was never nonblocking.
+	if err := unix.SetNonblock(fd, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, &os.PathError{Op: "setnonblock", Path: filepath.Join(parent.Name(), name), Err: err}
 	}
 	return os.NewFile(uintptr(fd), filepath.Join(parent.Name(), name)), nil
 }
