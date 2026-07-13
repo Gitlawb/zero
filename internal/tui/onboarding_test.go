@@ -211,6 +211,27 @@ func TestAimlapiPastedKeyValidationCompletesForValidKey(t *testing.T) {
 	}
 }
 
+func TestAimlapiKeyBalanceLowBalanceOffersTopUp(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:   aimlapiStepProgress,
+		apiKey: "key_minted",
+		busy:   true,
+	}
+
+	_, outcome := state.apply(aimlapiOnboardMsg{
+		state:   state,
+		kind:    aimlapiMsgKeyBalance,
+		balance: aimlapi.BalanceResult{LowBalance: true},
+	})
+
+	if outcome != aimlapiContinue || state.busy {
+		t.Fatalf("low balance returned outcome=%v busy=%v, want continue/false", outcome, state.busy)
+	}
+	if state.step != aimlapiStepLowBalance || state.lowCursor != 0 {
+		t.Fatalf("low balance left step=%v cursor=%d, want low-balance prompt with cursor 0", state.step, state.lowCursor)
+	}
+}
+
 func TestAimlapiOnboardingKeepsSharedTickAlive(t *testing.T) {
 	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
 	m.reducedMotion = false
