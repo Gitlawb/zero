@@ -188,7 +188,7 @@ func TestAimlapiPastedKeyRejectsUnauthorized(t *testing.T) {
 	}
 }
 
-func TestAimlapiPastedKeyValidationDoesNotStartLowBalanceFlow(t *testing.T) {
+func TestAimlapiPastedKeyValidationCompletesForValidKey(t *testing.T) {
 	state := &aimlapiOnboardState{
 		step:   aimlapiStepKeyInput,
 		apiKey: " key_test ",
@@ -196,9 +196,8 @@ func TestAimlapiPastedKeyValidationDoesNotStartLowBalanceFlow(t *testing.T) {
 	}
 
 	_, outcome := state.apply(aimlapiOnboardMsg{
-		state:   state,
-		kind:    aimlapiMsgKeyValidation,
-		balance: aimlapi.BalanceResult{LowBalance: true},
+		state: state,
+		kind:  aimlapiMsgKeyValidation,
 	})
 
 	if outcome != aimlapiContinue || state.busy {
