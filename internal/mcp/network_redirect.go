@@ -11,11 +11,49 @@ import (
 
 const maxMCPRedirects = 10
 
+// mcpDialTimeout bounds establishing the TCP connection to an MCP server.
+const mcpDialTimeout = 10 * time.Second
+
+// mcpDialKeepAlive matches net/http's DefaultTransport dialer so idle
+// connection health checks behave the same as the rest of the process.
+const mcpDialKeepAlive = 30 * time.Second
+
+// mcpTLSHandshakeTimeout bounds completing the TLS handshake once connected.
+const mcpTLSHandshakeTimeout = 10 * time.Second
+
+// mcpResponseHeaderTimeout bounds waiting for response headers after the
+// request has been written. It does not bound reading the response body, so
+// a long-running or streamed tool call is not cut off once the server starts
+// responding.
+const mcpResponseHeaderTimeout = 30 * time.Second
+
+// mcpTransport is the default RoundTripper for MCP HTTP clients. It clones
+// http.DefaultTransport -- preserving proxy-from-environment, HTTP/2
+// negotiation, and idle connection pooling -- and only tightens the
+// connection-establishment timeouts and adds a response-header timeout.
+// Connection setup is bounded here instead of via http.Client.Timeout, so a
+// slow or unreachable server fails fast without capping the total lifetime
+// of a legitimate long-running or streamed tool call.
+var mcpTransport http.RoundTripper = newMCPTransport()
+
+func newMCPTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   mcpDialTimeout,
+		KeepAlive: mcpDialKeepAlive,
+	}).DialContext
+	transport.TLSHandshakeTimeout = mcpTLSHandshakeTimeout
+	transport.ResponseHeaderTimeout = mcpResponseHeaderTimeout
+	return transport
+}
+
 func mcpHTTPClient(server Server, transport http.RoundTripper) *http.Client {
+	if transport == nil {
+		transport = mcpTransport
+	}
 	return &http.Client{
 		Transport:     transport,
 		CheckRedirect: checkMCPRedirect(server),
-		Timeout:       30 * time.Second,
 	}
 }
 

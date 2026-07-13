@@ -392,6 +392,14 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 	}
 }
 
+// sseFinitePostTimeout bounds a single finite POST to the SSE endpoint. The
+// remoteSSEClient's underlying *http.Client carries no timeout of its own
+// because it is shared with openStream's long-lived GET request, which must
+// stay open for the life of the connection. Deriving a bounded context here
+// ensures a stalled POST fails the individual tool call instead of hanging
+// indefinitely on the connection reserved for the open-ended stream.
+const sseFinitePostTimeout = 30 * time.Second
+
 func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (err error) {
 	endpointURL, err := client.currentEndpoint()
 	if err != nil {
@@ -401,7 +409,11 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (er
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+
+	postCtx, cancel := context.WithTimeout(ctx, sseFinitePostTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(postCtx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
 	}
@@ -896,5 +908,5 @@ func oauthHTTPClient(server Server) (*http.Client, error) {
 		httpClient: http.DefaultClient,
 		now:        time.Now,
 	}
-	return mcpHTTPClient(server, newOAuthRoundTripper(http.DefaultTransport, source, server.Name)), nil
+	return mcpHTTPClient(server, newOAuthRoundTripper(mcpTransport, source, server.Name)), nil
 }
