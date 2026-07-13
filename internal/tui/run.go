@@ -57,7 +57,6 @@ func Run(ctx context.Context, options Options) int {
 		initialModel.mouseCapture = true
 	}
 	program = tea.NewProgram(initialModel, programOpts...)
-	initialModel.program = program
 
 	if _, err := program.Run(); err != nil {
 		// Surface the failure: exiting 1 with zero diagnostics left users

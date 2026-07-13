@@ -312,6 +312,11 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 		return agent.PermissionModeAsk
 	case agent.PermissionModeAsk:
 		return agent.PermissionModeAuto
+	case agent.PermissionModePlan:
+		// Plan mode is a deliberate read-only gate entered via /plan; a casual
+		// shift+tab must not silently drop it (that would re-enable file/command
+		// tools without the user ever choosing to exit plan mode).
+		return agent.PermissionModePlan
 	default:
 		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
 		// landing, so toggling never makes an Unsafe session less strict.
