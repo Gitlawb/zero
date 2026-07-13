@@ -96,33 +96,67 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, err
 	}
 
-	manifestPath := filepath.Join(pluginDir, manifestFileName)
-	data, err := os.ReadFile(manifestPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create plugins dir: %w", err)
+	}
+	// Stage the new tree outside the scanned plugins root, but still on the SAME
+	// filesystem (the root's parent directory), so the swap into place is a
+	// single atomic rename and concurrent loaders cannot discover a partial
+	// tree. We copy FIRST and only clear the previous install AFTER the copy
+	// succeeds, so a failed copy (full disk, permission denied) leaves the
+	// previously installed plugin and its lockfile entry completely intact
+	// instead of wiping them and stranding the lockfile pointing at a deleted
+	// directory.
+	// Copy the whole plugin tree (entry scripts, prompts, skills) so the installed
+	// plugin is runnable through activation. Copy DATA only — never execute it.
+	stagingParent := filepath.Dir(filepath.Clean(dir))
+	staging, err := os.MkdirTemp(stagingParent, ".zero-plugin-install-")
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("read %s: %w", manifestFileName, err)
+		return InstallResult{}, fmt.Errorf("create staging dir: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	if err := fscopy.CopyTree(pluginDir, staging); err != nil {
+		return InstallResult{}, fmt.Errorf("copy plugin: %w", err)
+	}
+
+	// Validate the manifest from the STAGING copy — not from the source — so
+	// the parsed plugin and install target describe the bytes that will actually
+	// be installed. This also catches source manifests that were symlinks skipped
+	// by CopyTree.
+	stagingManifest := filepath.Join(staging, manifestFileName)
+	data, err := os.ReadFile(stagingManifest)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("staged %s missing (source may contain only symlinks): %w", manifestFileName, err)
 	}
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return InstallResult{}, fmt.Errorf("parse %s: %w", manifestFileName, err)
+		return InstallResult{}, fmt.Errorf("parse staged %s: %w", manifestFileName, err)
 	}
 
 	// Validate against the same schema the loader uses. The install target id is
-	// derived from the (validated) manifest id, so it is safe as a directory name.
+	// derived from the staged, validated manifest id, so it is safe as a directory
+	// name.
 	parsed, err := ParseManifest(raw, ParseManifestOptions{
 		Source:       SourceUser,
 		Root:         dir,
-		PluginDir:    filepath.Join(dir, "pending"),
-		ManifestPath: manifestPath,
+		PluginDir:    staging,
+		ManifestPath: stagingManifest,
 	})
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("invalid plugin manifest: %w", err)
 	}
 	id := parsed.ID
 
-	// Hash the SAME filtered tree that copyTree installs (not just the manifest),
-	// so a change to any installed file — a tool script, prompt, or bundled skill —
+	// Hash the staging tree — the actual installed content — not the source.
+	// This ensures the recorded hash matches what is on disk after the swap, so
+	// a change to any installed file (a tool script, prompt, or bundled skill)
 	// is reflected in the lock hash and reported as an update.
-	hash, err := fscopy.HashTree(pluginDir)
+	hash, err := fscopy.HashTree(staging)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("hash plugin: %w", err)
 	}
@@ -137,22 +171,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create plugins dir: %w", err)
-	}
-	// Stage the new tree outside the scanned plugins root, but still on the SAME
-	// filesystem (the root's parent directory), so the swap into place is a
-	// single atomic rename and concurrent loaders cannot discover a partial
-	// tree. We copy FIRST and only clear the previous install AFTER the copy
-	// succeeds, so a failed copy (full disk, permission denied) leaves the
-	// previously installed plugin and its lockfile entry completely intact
-	// instead of wiping them and stranding the lockfile pointing at a deleted
-	// directory.
-	// Copy the whole plugin tree (entry scripts, prompts, skills) so the installed
-	// plugin is runnable through activation. Copy DATA only — never execute it.
-	if err := copyAndSwapIntoPlace(pluginDir, filepath.Dir(filepath.Clean(dir)), target); err != nil {
+	if err := swapStagedPluginIntoPlace(staging, target); err != nil {
 		return InstallResult{}, err
 	}
+	committed = true
 
 	lock[id] = LockEntry{Source: source, Hash: hash}
 	if err := writeLock(dir, lock); err != nil {
@@ -190,6 +212,16 @@ func copyAndSwapIntoPlace(src, dirParent, target string) error {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("copy plugin: %w", err)
 	}
+	return swapStagedPluginIntoPlace(staging, target)
+}
+
+// swapStagedPluginIntoPlace atomically renames a prepared staging dir into the
+// final target. The staging tree must already be fully copied and validated by
+// the caller. When a previous install exists at target it is moved aside, the
+// new tree swapped in, and the old one dropped only after the swap succeeds — so
+// a failed rename rolls the previous install back and the failure leaves it
+// intact rather than stranding the lockfile pointing at a deleted directory.
+func swapStagedPluginIntoPlace(staging, target string) error {
 	// No existing install: a plain rename is already atomic.
 	if _, err := os.Stat(target); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {

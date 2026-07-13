@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/fscopy"
 )
 
 // initGitPluginRepo creates a real local git repo holding a plugin and returns a
@@ -114,6 +116,44 @@ func TestInstallCopiesLocalPluginAndRecordsHash(t *testing.T) {
 	}
 	if entries["zero.demo"].Hash != result.Hash || entries["zero.demo"].Source != canonicalSource(src) {
 		t.Fatalf("lockfile entry unexpected: %#v", entries["zero.demo"])
+	}
+	installedHash, err := fscopy.HashTree(filepath.Join(destDir, "zero.demo"))
+	if err != nil {
+		t.Fatalf("hash installed plugin: %v", err)
+	}
+	if result.Hash != installedHash {
+		t.Fatalf("result hash %q does not match installed tree hash %q", result.Hash, installedHash)
+	}
+}
+
+func TestInstallRejectsSymlinkedManifestSkippedByCopy(t *testing.T) {
+	destDir := t.TempDir()
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realManifestDir := t.TempDir()
+	realManifest := filepath.Join(realManifestDir, manifestFileName)
+	data, err := json.MarshalIndent(validManifest(), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realManifest, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realManifest, filepath.Join(src, manifestFileName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err = Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+	if err == nil {
+		t.Fatalf("expected symlinked manifest skipped by copy to fail install")
+	}
+	if !strings.Contains(err.Error(), "staged plugin.json missing") {
+		t.Fatalf("error = %v, want staged manifest missing", err)
+	}
+	if entries, _ := os.ReadDir(destDir); len(entries) != 0 {
+		t.Fatalf("failed install must not write into dest, found: %#v", entries)
 	}
 }
 
