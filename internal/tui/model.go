@@ -28,6 +28,7 @@ import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Gitlawb/zero/internal/planmode"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
@@ -5400,8 +5401,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
-		if runOptions.systemPrompt != "" {
+		switch {
+		case runOptions.systemPrompt != "":
 			options.SystemPrompt = runOptions.systemPrompt
+		case options.PermissionMode == agent.PermissionModePlan:
+			// Plan mode is toggled via /plan on the normal submit path (not a
+			// dedicated run-launch command like /spec), so there is no call site
+			// to pass planmode.DraftSystemPrompt through runOptions: set it here
+			// from the active permission mode instead.
+			options.SystemPrompt = planmode.DraftSystemPrompt
 		}
 		if runOptions.transientSystemPrompt != "" {
 			options.TransientSystemPrompt = runOptions.transientSystemPrompt
