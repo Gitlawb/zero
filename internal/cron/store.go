@@ -99,27 +99,35 @@ func (s *Store) Add(job Job) (Job, error) {
 		job.Status = StatusActive
 	}
 	job.CreatedAt = s.now().UTC()
-	id, err := s.allocID()
+	id, err := s.reserveID()
 	if err != nil {
 		return Job{}, err
 	}
 	job.ID = id
-	if err := s.writeJob(job); err != nil {
+	if err := s.writeReservedJob(job); err != nil {
 		return Job{}, err
 	}
 	return job, nil
 }
 
-func (s *Store) allocID() (string, error) {
+func (s *Store) reserveID() (string, error) {
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		return "", fmt.Errorf("create cron store root: %w", err)
+	}
 	base := s.now().UTC().Format("20060102-150405")
 	for n := 0; n < 100; n++ {
 		id := base
 		if n > 0 {
 			id = fmt.Sprintf("%s-%d", base, n)
 		}
-		if _, err := os.Stat(filepath.Join(s.root, id)); errors.Is(err, os.ErrNotExist) {
+		err := os.Mkdir(s.jobDir(id), 0o700)
+		if err == nil {
 			return id, nil
 		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return "", fmt.Errorf("reserve cron job id %q: %w", id, err)
 	}
 	return "", errors.New("could not allocate a unique cron job id")
 }
@@ -127,7 +135,7 @@ func (s *Store) allocID() (string, error) {
 func (s *Store) jobDir(id string) string { return filepath.Join(s.root, id) }
 
 // validID rejects ids that could escape the store root (path separators or
-// traversal). allocID-generated timestamp ids always pass; this guards
+// traversal). reserveID-generated timestamp ids always pass; this guards
 // externally-supplied ids (get/update/remove/append).
 func validID(id string) bool {
 	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\`) && filepath.Base(id) == id
@@ -148,6 +156,16 @@ func (s *Store) writeJob(job Job) error {
 	}
 	if err := fsutil.RenameWithRetry(tmp, filepath.Join(dir, "metadata.json"), nil); err != nil {
 		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) writeReservedJob(job Job) error {
+	if err := s.writeJob(job); err != nil {
+		if cleanupErr := os.RemoveAll(s.jobDir(job.ID)); cleanupErr != nil {
+			return errors.Join(err, fmt.Errorf("remove failed cron job reservation: %w", cleanupErr))
+		}
 		return err
 	}
 	return nil

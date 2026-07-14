@@ -2,9 +2,11 @@ package cron
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -71,6 +73,73 @@ func TestStoreAddListGetRemove(t *testing.T) {
 	}
 	if _, err := s.Get(added.ID); err == nil {
 		t.Fatal("Get of removed id must error")
+	}
+}
+
+func TestStoreAddReservesUniqueIDsAcrossConcurrentStores(t *testing.T) {
+	root := t.TempDir()
+	now := func() time.Time { return time.Unix(1000, 0).UTC() }
+	const adds = 32
+
+	start := make(chan struct{})
+	results := make(chan Job, adds)
+	errs := make(chan error, adds)
+	var wg sync.WaitGroup
+	for i := 0; i < adds; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			store := NewStore(StoreOptions{RootDir: root, Now: now})
+			<-start
+			job, err := store.Add(Job{Expr: "* * * * *", Prompt: fmt.Sprintf("job-%d", index)})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- job
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent Add: %v", err)
+	}
+	seen := make(map[string]struct{}, adds)
+	reader := NewStore(StoreOptions{RootDir: root, Now: now})
+	for job := range results {
+		if _, duplicate := seen[job.ID]; duplicate {
+			t.Errorf("concurrent Add returned duplicate ID %q", job.ID)
+		}
+		seen[job.ID] = struct{}{}
+		persisted, err := reader.Get(job.ID)
+		if err != nil {
+			t.Errorf("Get(%q): %v", job.ID, err)
+			continue
+		}
+		if persisted.Prompt != job.Prompt {
+			t.Errorf("Get(%q).Prompt = %q, want %q", job.ID, persisted.Prompt, job.Prompt)
+		}
+	}
+	if len(seen) != adds {
+		t.Fatalf("unique jobs = %d, want %d", len(seen), adds)
+	}
+}
+
+func TestWriteReservedJobRemovesReservationOnFailure(t *testing.T) {
+	store := newTestStore(t)
+	job := Job{ID: "reserved", Expr: "* * * * *", Prompt: "job"}
+	if err := os.MkdirAll(filepath.Join(store.jobDir(job.ID), "metadata.json.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.writeReservedJob(job); err == nil {
+		t.Fatal("writeReservedJob error = nil, want metadata write failure")
+	}
+	if _, err := os.Stat(store.jobDir(job.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed reservation still exists: %v", err)
 	}
 }
 
