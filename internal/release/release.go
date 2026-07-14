@@ -675,9 +675,9 @@ func smokeVersion(ctx context.Context, binaryPath string, version string) error 
 		}
 		return fmt.Errorf("smoke release binary: %s", output)
 	}
-	expected := "zero " + version
-	if output != expected {
-		return fmt.Errorf("expected %s --version to print %s, got %s", filepath.Base(binaryPath), expected, output)
+	expected := "version: " + version
+	if !strings.HasSuffix(output, expected) {
+		return fmt.Errorf("expected %s --version to end with %s, got %s", filepath.Base(binaryPath), expected, output)
 	}
 	return nil
 }
