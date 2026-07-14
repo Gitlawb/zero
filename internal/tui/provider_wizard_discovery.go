@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,16 +137,14 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 	}
 	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
 		if descriptorErr == nil {
-			return config.ProviderProfile{
-				Name:          descriptor.ID,
-				CatalogID:     descriptor.ID,
-				ProviderKind:  providerWizardProviderKind(descriptor),
-				BaseURL:       descriptor.DefaultBaseURL,
-				APIKeyEnv:     "AIMLAPI_API_KEY",
-				APIFormat:     providerWizardAPIFormat(descriptor),
-				Model:         descriptor.DefaultModel,
-				CustomHeaders: maps.Clone(descriptor.CustomHeaders),
-			}, key, true
+			profile := providerWizardProfile(
+				descriptor,
+				descriptor.DefaultModel,
+				"",
+				aimlapi.ResolveEndpoints().InferenceBaseURL,
+				"",
+			)
+			return profile, key, true
 		}
 	}
 	return config.ProviderProfile{}, "", false
@@ -168,10 +165,18 @@ func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
 	wizard.aimlapiExistingGen++
 	gen := wizard.aimlapiExistingGen
 	key := wizard.aimlapiRuntimeKey
+	endpoints := aimlapi.ResolveEndpoints()
+	if baseURL := strings.TrimSpace(wizard.aimlapiExistingProfile.BaseURL); baseURL != "" {
+		endpoints.InferenceBaseURL = baseURL
+	} else if descriptor, ok := providercatalog.Get("aimlapi"); ok {
+		// An empty stored BaseURL means the catalog endpoint. Pin it explicitly so
+		// a process-wide inference override cannot redirect this saved key.
+		endpoints.InferenceBaseURL = descriptor.DefaultBaseURL
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+	wizard.aimlapiExistingCancel = cancel
 	cmd := func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
-		defer cancel()
-		balance, err := aimlapiOnboardClient().GetBalance(ctx, key)
+		balance, err := aimlapi.NewClient(endpoints, nil).GetBalance(ctx, key)
 		return aimlapiExistingBalanceMsg{wizard: wizard, gen: gen, balance: balance, err: err}
 	}
 	return m, tea.Batch(cmd, m.ensureSpinnerTick())
@@ -181,6 +186,10 @@ func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model
 	wizard := m.providerWizard
 	if wizard == nil || wizard != msg.wizard || wizard.step != providerWizardStepAimlapiConfigured || msg.gen != wizard.aimlapiExistingGen {
 		return m, nil
+	}
+	if wizard.aimlapiExistingCancel != nil {
+		wizard.aimlapiExistingCancel()
+		wizard.aimlapiExistingCancel = nil
 	}
 	wizard.aimlapiExistingBusy = false
 	if msg.err != nil {

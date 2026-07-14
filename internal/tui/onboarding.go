@@ -164,6 +164,9 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// The aimlapi.com sub-flow owns all of its keys; Ctrl+C still quits.
 	if m.setup.stage == setupStageAimlapi {
 		if keyCtrl(msg, 'c') {
+			if m.setup.aimlapi != nil {
+				m.setup.aimlapi.cancelStream()
+			}
 			return m, tea.Quit
 		}
 		return m.handleSetupAimlapiKey(msg)
@@ -1217,7 +1220,10 @@ func (m model) setupBaseURL(option SetupProviderOption) string {
 	// m.setup.baseURL. Persist that so an override reaches the saved profile instead
 	// of being replaced by the catalog default at save time.
 	if providerWizardIsAimlapi(setupProviderDescriptor(option)) {
-		return strings.TrimSpace(m.setup.baseURL)
+		if baseURL := strings.TrimSpace(m.setup.baseURL); baseURL != "" {
+			return baseURL
+		}
+		return strings.TrimSpace(aimlapi.ResolveEndpoints().InferenceBaseURL)
 	}
 	if !setupProviderNeedsEndpoint(option) {
 		return ""

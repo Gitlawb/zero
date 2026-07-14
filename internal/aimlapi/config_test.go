@@ -17,6 +17,25 @@ func TestResolveEndpointsDefaults(t *testing.T) {
 	}
 }
 
+func TestResolvedPartnerHeaderUsesEnvironmentOverrideWithoutDuplicates(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_override")
+
+	headers := WithResolvedPartnerHeader(map[string]string{
+		"x-aimlapi-partner-id":       "part_catalog",
+		"X-AIMLAPI-Integration-Repo": "Gitlawb/zero",
+	})
+
+	if got := headers[PartnerHeaderName]; got != "part_override" {
+		t.Fatalf("partner header = %q, want part_override", got)
+	}
+	if _, ok := headers["x-aimlapi-partner-id"]; ok {
+		t.Fatalf("case-insensitive partner header was duplicated: %#v", headers)
+	}
+	if got := headers["X-AIMLAPI-Integration-Repo"]; got != "Gitlawb/zero" {
+		t.Fatalf("unrelated header changed: %#v", headers)
+	}
+}
+
 func TestBuildPartnerReturnURL(t *testing.T) {
 	t.Setenv("AIMLAPI_RETURN_URL", "")
 	// The frontend base (the web app the flow was opened from) is returned as-is,

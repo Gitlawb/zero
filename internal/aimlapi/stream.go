@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -57,7 +56,7 @@ const (
 func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKey, error) {
 	endpoints := ResolveEndpoints()
 	client := NewClient(endpoints, options.HTTPClient)
-	partnerID := firstNonEmpty(options.PartnerID, os.Getenv("AIMLAPI_PARTNER_ID"), DefaultPartnerID)
+	partnerID := ResolvePartnerID(options.PartnerID)
 	partnerName := firstNonEmpty(options.PartnerName, DefaultPartnerName)
 	method := options.Method
 	if method != PaymentMethodCrypto {
@@ -97,7 +96,7 @@ func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKe
 	paidToken := sessionToken
 	if phase <= phasePoll {
 		status(options.OnStatus, StatusWaitingPayment, "")
-		paid, err := pollUntilPaid(ctx, client, sessionToken)
+		paid, err := pollUntilPaid(ctx, client, sessionToken, options.OnSession)
 		if err != nil {
 			return ProvisionedKey{}, err
 		}
@@ -223,7 +222,7 @@ type StreamTopUpByKeyOptions struct {
 func StreamTopUpByKey(ctx context.Context, options StreamTopUpByKeyOptions) (ProvisionedKey, error) {
 	endpoints := ResolveEndpoints()
 	client := NewClient(endpoints, options.HTTPClient)
-	partnerID := firstNonEmpty(options.PartnerID, os.Getenv("AIMLAPI_PARTNER_ID"), DefaultPartnerID)
+	partnerID := ResolvePartnerID(options.PartnerID)
 	partnerName := firstNonEmpty(options.PartnerName, DefaultPartnerName)
 	amount, err := ParseAmountUSD(options.AmountUSD)
 	if err != nil {
@@ -266,7 +265,7 @@ func StreamTopUpByKey(ctx context.Context, options StreamTopUpByKeyOptions) (Pro
 
 	if phase <= phasePoll {
 		status(options.OnStatus, StatusWaitingPayment, "")
-		if _, err := pollUntilPaid(ctx, client, sessionToken); err != nil {
+		if _, err := pollUntilPaid(ctx, client, sessionToken, options.OnSession); err != nil {
 			return ProvisionedKey{}, err
 		}
 	}

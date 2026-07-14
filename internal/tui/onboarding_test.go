@@ -144,6 +144,39 @@ func TestAimlapiEverythingReadyBackReturnsToProviderList(t *testing.T) {
 	}
 }
 
+func TestSetupAimlapiCtrlCCancelsInFlightCheckout(t *testing.T) {
+	cancelled := false
+	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
+	m.setup.stage = setupStageAimlapi
+	m.setup.aimlapi = &aimlapiOnboardState{
+		step:        aimlapiStepProgress,
+		topupCancel: func() { cancelled = true },
+	}
+
+	_, cmd := m.Update(testKeyCtrl('c'))
+	if !cancelled {
+		t.Fatal("Ctrl+C did not cancel the in-flight AIMLAPI checkout")
+	}
+	if cmd == nil {
+		t.Fatal("Ctrl+C should still quit after cancelling the checkout")
+	}
+}
+
+func TestSetupAimlapiEnvKeyUsesResolvedInferenceEndpoint(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "env-secret")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "https://staging.example.test/v1")
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{{
+			ID: "aimlapi", Name: "aimlapi.com", EnvVar: "AIMLAPI_API_KEY", RequiresAuth: true,
+		}},
+	}})
+
+	if got := m.setupBaseURL(m.setupProvider()); got != "https://staging.example.test/v1" {
+		t.Fatalf("setup base URL = %q, want resolved override", got)
+	}
+}
+
 func TestAimlapiKeyInputUsesAutomaticVerificationHint(t *testing.T) {
 	state := &aimlapiOnboardState{step: aimlapiStepKeyInput}
 	view := plainRender(t, strings.Join(state.view(64, ""), "\n"))

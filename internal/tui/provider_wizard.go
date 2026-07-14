@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
@@ -429,6 +430,7 @@ type providerWizardState struct {
 	aimlapiRuntimeKey       string
 	aimlapiExistingBusy     bool
 	aimlapiExistingGen      int
+	aimlapiExistingCancel   context.CancelFunc
 	oauthMode               bool
 	oauthPending            bool
 	oauthAttemptID          int
@@ -532,6 +534,10 @@ func (wizard *providerWizardState) enterAimlapi() {
 }
 
 func (wizard *providerWizardState) clearAimlapiExisting() {
+	if wizard.aimlapiExistingCancel != nil {
+		wizard.aimlapiExistingCancel()
+		wizard.aimlapiExistingCancel = nil
+	}
 	wizard.aimlapiExistingProfile = config.ProviderProfile{}
 	wizard.aimlapiRuntimeKey = ""
 	wizard.aimlapiExistingBusy = false
@@ -2050,6 +2056,9 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 	// bake them in either — otherwise attribution leaks to an arbitrary host.
 	if sameProviderBaseURL(resolvedBaseURL, provider.DefaultBaseURL) {
 		profile.CustomHeaders = maps.Clone(provider.CustomHeaders)
+		if providerWizardIsAimlapi(provider) {
+			profile.CustomHeaders = aimlapi.WithResolvedPartnerHeader(profile.CustomHeaders)
+		}
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		profile.APIKey = apiKey

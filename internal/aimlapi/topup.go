@@ -73,7 +73,7 @@ func NewPaymentSessionID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (PartnerCheckoutSession, error) {
+func pollUntilPaid(ctx context.Context, client *Client, sessionToken string, onSession func(string)) (PartnerCheckoutSession, error) {
 	deadline := time.Now().Add(pollTimeout)
 	for time.Now().Before(deadline) {
 		session, err := client.GetSession(ctx, sessionToken)
@@ -101,6 +101,10 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (Pa
 		case SessionStatusExchanged:
 			return PartnerCheckoutSession{}, fmt.Errorf("session was already exchanged; rotate the key from the aimlapi.com dashboard")
 		case SessionStatusCancelled, SessionStatusExpired, SessionStatusFailed:
+			// The checkout cannot recover from these states. Drop the retained token
+			// (and the TUI's paired by-key idempotency ID) now so the very next retry
+			// creates a fresh payment intent.
+			reportSession(onSession, "")
 			return PartnerCheckoutSession{}, fmt.Errorf("payment %s; re-run the top-up to try again", session.Status)
 		default:
 			if err := sleepContext(ctx, pollInterval); err != nil {

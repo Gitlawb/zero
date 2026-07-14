@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -1284,6 +1287,87 @@ func TestExistingAimlapiConfigurationUsesEnvWithoutCapturingLiteral(t *testing.T
 	}
 	if profile.APIKeyEnv != "AIMLAPI_API_KEY" || profile.APIKey != "" || profile.APIKeyStored {
 		t.Fatalf("env credential source was not preserved: %+v", profile)
+	}
+}
+
+func TestExistingAimlapiEnvironmentFallbackUsesResolvedEndpoint(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "aimlapi-env-secret")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "https://staging.example.test/v1")
+
+	profile, runtimeKey, ok := (model{}).existingAimlapiConfiguration()
+	if !ok || runtimeKey != "aimlapi-env-secret" {
+		t.Fatalf("configuration = (%+v, %q, %v)", profile, runtimeKey, ok)
+	}
+	if profile.BaseURL != "https://staging.example.test/v1" {
+		t.Fatalf("BaseURL = %q, want resolved override", profile.BaseURL)
+	}
+	if profile.APIKeyEnv != "AIMLAPI_API_KEY" || profile.APIKey != "" {
+		t.Fatalf("credential source changed: %+v", profile)
+	}
+	if len(profile.CustomHeaders) != 0 {
+		t.Fatalf("catalog headers leaked to custom endpoint: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestExistingAimlapiBalanceUsesProfileEndpointAndCancelsOnAbandon(t *testing.T) {
+	started := make(chan struct{})
+	done := make(chan struct{})
+	canonical := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(done)
+	}))
+	defer canonical.Close()
+	override := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("production profile key was sent to process override: %s", r.URL)
+	}))
+	defer override.Close()
+	t.Setenv("AIMLAPI_INFERENCE_URL", override.URL)
+
+	wizard := &providerWizardState{
+		step: providerWizardStepAimlapiConfigured,
+		aimlapiExistingProfile: config.ProviderProfile{
+			Name: "aimlapi", CatalogID: "aimlapi", BaseURL: canonical.URL,
+		},
+		aimlapiRuntimeKey: "production-secret",
+	}
+	m := model{ctx: context.Background(), providerWizard: wizard}
+	_, cmd := m.checkExistingAimlapiBalance()
+	result := make(chan tea.Msg, 1)
+	go func() { result <- execCmd(cmd) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("profile endpoint did not receive the balance request")
+	}
+	wizard.clearAimlapiExisting()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("abandoning the preflight did not cancel the balance request")
+	}
+	select {
+	case <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled balance command did not return")
+	}
+}
+
+func TestProviderWizardAimlapiPartnerOverrideOnlyOnCanonicalEndpoint(t *testing.T) {
+	provider, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_override")
+
+	canonical := providerWizardProfile(provider, provider.DefaultModel, "", provider.DefaultBaseURL, "")
+	if got := canonical.CustomHeaders[aimlapi.PartnerHeaderName]; got != "part_override" {
+		t.Fatalf("canonical partner header = %q, want part_override", got)
+	}
+	custom := providerWizardProfile(provider, provider.DefaultModel, "", "https://staging.example.test/v1", "")
+	if len(custom.CustomHeaders) != 0 {
+		t.Fatalf("partner headers leaked to custom endpoint: %#v", custom.CustomHeaders)
 	}
 }
 

@@ -151,6 +151,29 @@ func TestStreamTopUpResumePendingPaymentPollsNeverRepays(t *testing.T) {
 	}
 }
 
+func TestStreamTopUpPollingDeadSessionClearsRetainedToken(t *testing.T) {
+	rs := &resumeServer{t: t, statuses: []string{"pending_payment", "expired"}}
+	server := httptest.NewServer(rs.handler())
+	defer server.Close()
+	t.Setenv("AIMLAPI_APP_URL", server.URL)
+
+	seen := []string{}
+	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
+		SessionToken:       "bearer",
+		ResumeSessionToken: "pc_tok",
+		AmountUSD:          "20",
+		Exchange:           true,
+		NoOpen:             true,
+		OnSession:          func(token string) { seen = append(seen, token) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "payment expired") {
+		t.Fatalf("err = %v, want expired payment error", err)
+	}
+	if len(seen) == 0 || seen[len(seen)-1] != "" {
+		t.Fatalf("OnSession events = %#v, want terminal clear", seen)
+	}
+}
+
 func TestStreamTopUpResumeExchangedReturnsRecoveryError(t *testing.T) {
 	rs := &resumeServer{t: t, statuses: []string{"exchanged"}}
 	server := httptest.NewServer(rs.handler())

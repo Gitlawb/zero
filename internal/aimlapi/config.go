@@ -21,6 +21,7 @@ type Endpoints struct {
 const (
 	DefaultPartnerID   = "part_62yQoGYDq4Yqnrj2R1iGrDNJ"
 	DefaultPartnerName = "Gitlawb"
+	PartnerHeaderName  = "X-AIMLAPI-Partner-ID"
 	// DefaultReturnURL is the https fallback the browser is sent to after the
 	// checkout / OAuth consent finishes when no frontend base is known. It must be
 	// a real web page the browser can open — NOT a custom scheme like
@@ -43,6 +44,33 @@ func ResolveEndpoints() Endpoints {
 		PayBaseURL:          envOrDefault("AIMLAPI_PAY_URL", "https://pay.aimlapi.com"),
 		VerificationBaseURL: envOrDefault("AIMLAPI_VERIFICATION_BASE_URL", "https://aimlapi.com/app"),
 	}
+}
+
+// ResolvePartnerID applies the same explicit-option, environment, and default
+// precedence everywhere partner attribution is used. Keeping checkout creation
+// and saved inference profiles on one resolver prevents them from attributing
+// the same user to different partners.
+func ResolvePartnerID(explicit string) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	return envOrDefault("AIMLAPI_PARTNER_ID", DefaultPartnerID)
+}
+
+// WithResolvedPartnerHeader returns a copy with the effective partner ID set.
+// Header matching is case-insensitive so an existing spelling is replaced rather
+// than duplicated. Callers remain responsible for applying catalog attribution
+// only to the canonical AIMLAPI endpoint.
+func WithResolvedPartnerHeader(headers map[string]string) map[string]string {
+	resolved := make(map[string]string, len(headers)+1)
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), PartnerHeaderName) {
+			continue
+		}
+		resolved[key] = value
+	}
+	resolved[PartnerHeaderName] = ResolvePartnerID("")
+	return resolved
 }
 
 func BuildPartnerCheckoutReturnURLs(appBaseURL string, sessionToken string) (successURL string, cancelURL string) {

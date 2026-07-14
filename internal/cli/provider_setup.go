@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providerhealth"
@@ -429,6 +430,9 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 	var catalogHeaders map[string]string
 	if sameProviderSetupBaseURL(baseURL, descriptor.DefaultBaseURL) {
 		catalogHeaders = descriptor.CustomHeaders
+		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
+			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
+		}
 	}
 	profile := config.ProviderProfile{
 		Name:            name,

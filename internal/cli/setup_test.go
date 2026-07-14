@@ -227,6 +227,27 @@ func TestSaveSetupProviderAimlapiEnvReferenceAndOverrideHeaders(t *testing.T) {
 	}
 }
 
+func TestSaveSetupProviderAimlapiUsesResolvedPartnerOverride(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_override")
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "aimlapi",
+		BaseURL:   "https://api.aimlapi.com/v1",
+		Model:     "anthropic/claude-sonnet-5",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+	if got := result.Provider.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("runtime partner header = %q, want part_override", got)
+	}
+	if got := readFileConfig(t, configPath).Providers[0].CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("persisted partner header = %q, want part_override", got)
+	}
+}
+
 func TestSaveSetupProviderStoresCustomEndpointSelection(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 
