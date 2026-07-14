@@ -378,16 +378,38 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	home := t.TempDir()
 	awsDir := filepath.Join(home, ".aws")
 	gcloudDir := filepath.Join(home, ".config", "gcloud")
-	if err := mkdirAll(awsDir, gcloudDir); err != nil {
+	zeroDir := filepath.Join(home, "config", "zero")
+	if err := mkdirAll(awsDir, gcloudDir, zeroDir); err != nil {
 		t.Fatal(err)
 	}
 	keyFile := filepath.Join(home, "sa-key.json")
-	if err := os.WriteFile(keyFile, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
+	oauthOverride := filepath.Join(home, "custom-oauth.json")
+	mcpOverride := filepath.Join(home, "custom-mcp-oauth.json")
+	zeroFiles := []string{
+		filepath.Join(zeroDir, "config.json"),
+		filepath.Join(zeroDir, "credentials.json"),
+		filepath.Join(zeroDir, "credentials.enc"),
+		filepath.Join(zeroDir, "credentials.enc.secret"),
+		filepath.Join(zeroDir, "oauth-tokens.json"),
+		filepath.Join(zeroDir, "oauth-tokens.json.secret"),
+		filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
+	}
+	for _, path := range append([]string{keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...) {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	paths := credentialDenyReadPathsIn(home, keyFile, nil)
-	for _, want := range normalizeProfilePaths([]string{awsDir, gcloudDir, keyFile}) {
+	options := credentialPathOptions{
+		Home:              home,
+		GoogleCredentials: keyFile,
+		ZeroConfigDir:     filepath.Join(home, "config"),
+		OAuthTokens:       oauthOverride,
+		MCPOAuthTokens:    mcpOverride,
+	}
+	paths := credentialDenyReadPathsIn(options, nil)
+	wantPaths := append([]string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...)
+	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
 		}
@@ -399,22 +421,49 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	// An explicit AllowRead entry covering a store is an opt-out.
-	optedOut := credentialDenyReadPathsIn(home, keyFile, []string{awsDir})
+	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir})
 	if stringSliceContains(optedOut, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut)
+	}
+	for _, zeroFile := range normalizeProfilePaths(zeroFiles) {
+		if stringSliceContains(optedOut, zeroFile) {
+			t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop %q", optedOut, zeroFile)
+		}
 	}
 	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
 	}
 
-	if got := credentialDenyReadPathsIn("  ", "", nil); len(got) != 0 {
+	if got := credentialDenyReadPathsIn(credentialPathOptions{}, nil); len(got) != 0 {
 		t.Errorf("credential deny paths for blank home = %#v, want none", got)
 	}
 
 	// The GOOGLE_APPLICATION_CREDENTIALS target stays protected even when no
 	// home directory is resolvable.
-	homeless := credentialDenyReadPathsIn("", keyFile, nil)
+	homeless := credentialDenyReadPathsIn(credentialPathOptions{GoogleCredentials: keyFile}, nil)
 	if !stringSliceContains(homeless, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths without home = %#v, want key file included", homeless)
+	}
+}
+
+func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	zeroDir := filepath.Join(configHome, "zero")
+	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(zeroDir, "oauth-tokens.json")
+	if err := os.WriteFile(secret, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{secret})[0]
+	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want Zero credential file %q", profile.FileSystem.DenyRead, want)
 	}
 }

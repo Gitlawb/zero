@@ -148,9 +148,9 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
-// credential stores (~/.aws, ~/.config/gcloud, ~/.azure, and the file
-// GOOGLE_APPLICATION_CREDENTIALS points to) so sandboxed commands cannot read
-// cloud secrets under the read-all workspace posture. Two deliberate limits:
+// cloud credential stores, the file GOOGLE_APPLICATION_CREDENTIALS points to,
+// and Zero's own config/token/key files so sandboxed commands cannot read
+// secrets under the read-all workspace posture. Two deliberate limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
@@ -166,25 +166,57 @@ func credentialDenyReadPaths(policy Policy) []string {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	// A failed home lookup only drops the home-based candidates; the
-	// GOOGLE_APPLICATION_CREDENTIALS target must be protected regardless.
+	// Failed home/config lookups only drop their derived candidates; explicit
+	// credential-file overrides must be protected regardless.
 	home, _ := os.UserHomeDir()
-	return credentialDenyReadPathsIn(home, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), policy.AllowRead)
+	configDir, _ := zeroUserConfigDir()
+	return credentialDenyReadPathsIn(credentialPathOptions{
+		Home:              home,
+		GoogleCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+		ZeroConfigDir:     configDir,
+		OAuthTokens:       os.Getenv("ZERO_OAUTH_TOKENS_PATH"),
+		MCPOAuthTokens:    os.Getenv("ZERO_MCP_OAUTH_TOKENS_PATH"),
+	}, policy.AllowRead)
+}
+
+type credentialPathOptions struct {
+	Home              string
+	GoogleCredentials string
+	ZeroConfigDir     string
+	OAuthTokens       string
+	MCPOAuthTokens    string
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
 // separated so tests can exercise it against a synthetic home directory.
-func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead []string) []string {
+func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string) []string {
 	var candidates []string
-	if home = strings.TrimSpace(home); home != "" {
+	if home := strings.TrimSpace(options.Home); home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".config", "gcloud"),
 			filepath.Join(home, ".azure"),
 		)
 	}
-	if target := strings.TrimSpace(googleCredentials); target != "" {
+	if target := strings.TrimSpace(options.GoogleCredentials); target != "" {
 		candidates = append(candidates, target)
+	}
+	if configDir := strings.TrimSpace(options.ZeroConfigDir); configDir != "" {
+		zeroDir := filepath.Join(configDir, "zero")
+		candidates = append(candidates,
+			filepath.Join(zeroDir, "config.json"),
+			filepath.Join(zeroDir, "credentials.json"),
+			filepath.Join(zeroDir, "credentials.enc"),
+			filepath.Join(zeroDir, "credentials.enc.secret"),
+			filepath.Join(zeroDir, "oauth-tokens.json"),
+			filepath.Join(zeroDir, "oauth-tokens.json.secret"),
+			filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
+		)
+	}
+	for _, tokenPath := range []string{options.OAuthTokens, options.MCPOAuthTokens} {
+		if tokenPath = strings.TrimSpace(tokenPath); tokenPath != "" {
+			candidates = append(candidates, tokenPath, tokenPath+".secret")
+		}
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -205,6 +237,23 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead 
 		}
 	}
 	return out
+}
+
+// zeroUserConfigDir mirrors config.UserConfigDir without importing config
+// (config depends on sandbox). Zero deliberately uses ~/.config on macOS and
+// os.UserConfigDir everywhere else.
+func zeroUserConfigDir() (string, error) {
+	if runtime.GOOS != "darwin" {
+		return os.UserConfigDir()
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return xdg, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config"), nil
 }
 
 // userGitConfigReadPaths returns the user's global git config FILES so a
