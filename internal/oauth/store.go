@@ -106,10 +106,23 @@ type KeyringClient interface {
 	Delete(service, account string) (bool, error)
 }
 
-// Keyring storage stores the whole token blob under one fixed entry.
+// Keyring storage splits the token blob into one keyring entry per token key,
+// plus a small index entry listing which keys exist. A single combined entry
+// (the original design) grows with every additional provider/MCP login and,
+// on macOS, add-generic-password now goes through `security -i`'s line-based
+// command parser (see internal/keyring), which caps a single write at 4095
+// bytes; three or more logged-in providers routinely exceeds that. Splitting
+// by key bounds each write to one token, which stays well under the cap
+// regardless of how many providers are logged in.
 const (
 	keyringService = "zero"
-	keyringAccount = "oauth-tokens"
+	// keyringLegacyAccount held the whole blob as one entry in the original
+	// design. New writes never use it; it is only read once, to migrate
+	// existing installs into the per-key format.
+	keyringLegacyAccount = "oauth-tokens"
+	// keyringIndexAccount holds a JSON array of the token keys that currently
+	// have their own keyring entry, since KeyringClient has no "list" operation.
+	keyringIndexAccount = "oauth-tokens-index"
 )
 
 // Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
@@ -203,7 +216,7 @@ func NewStore(options StoreOptions) (*Store, error) {
 		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
 			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 		}
-		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
+		return &Store{blob: keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount, lockPath: lockPath}, now: now}, nil
 	default:
 		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\", \"encrypted-file\", or \"keyring\")", storage)
 	}
@@ -431,19 +444,70 @@ func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
 
 func (b fileBlob) location() string { return b.path }
 
-// keyringBlob persists the blob in the OS keyring as a single base64 entry
-// (base64 keeps the multi-line JSON a single, control-character-free value).
+// keyringBlob persists tokens in the OS keyring as one base64 entry per token
+// key (account = key), plus an index entry listing which keys exist (base64
+// keeps every value a single, control-character-free string; see keyringService
+// for why a single combined entry doesn't work). read/write still present the
+// same whole-blob shape (a marshaled storeFile) that Store expects, fanning it
+// out to/in from the individual entries internally.
 type keyringBlob struct {
 	kr      KeyringClient
 	service string
-	account string
+	// legacyAccount is the pre-migration whole-blob entry; read only, to pick up
+	// tokens saved by older versions the first time this runs.
+	legacyAccount string
+	indexAccount  string
 	// lockPath, when set, is a cross-process lock file serializing the keyring's
 	// read-modify-write so concurrent processes don't clobber each other's tokens.
 	lockPath string
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
-	enc, ok, err := b.kr.Get(b.service, b.account)
+	indexEnc, ok, err := b.kr.Get(b.service, b.indexAccount)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return b.readLegacy()
+	}
+	keys, err := decodeKeyIndex(indexEnc)
+	if err != nil {
+		return nil, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
+	}
+	tokens := make(map[string]Token, len(keys))
+	for _, key := range keys {
+		enc, ok, err := b.kr.Get(b.service, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			// Index and entries fell out of sync (e.g. a killed process between
+			// writing an entry and updating the index); skip rather than fail the
+			// whole read, since the next Save/Delete will reconcile the index.
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+		if err != nil {
+			return nil, false, fmt.Errorf("oauth: decode keyring token entry %q: %w", key, err)
+		}
+		var token Token
+		if err := json.Unmarshal(raw, &token); err != nil {
+			return nil, false, fmt.Errorf("oauth: invalid keyring token entry %q: %w", key, err)
+		}
+		tokens[key] = token
+	}
+	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+// readLegacy reads the pre-migration whole-blob entry, for installs that
+// haven't written since upgrading. The next write() migrates them: it writes
+// per-key entries and an index, then deletes this entry.
+func (b keyringBlob) readLegacy() ([]byte, bool, error) {
+	enc, ok, err := b.kr.Get(b.service, b.legacyAccount)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
@@ -455,7 +519,70 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 }
 
 func (b keyringBlob) write(data []byte) error {
-	return b.kr.Set(b.service, b.account, base64.StdEncoding.EncodeToString(data))
+	var state storeFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
+	}
+	priorKeys, err := b.indexedKeys()
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(state.Tokens))
+	for key, token := range state.Tokens {
+		raw, err := json.Marshal(token)
+		if err != nil {
+			return err
+		}
+		if err := b.kr.Set(b.service, key, base64.StdEncoding.EncodeToString(raw)); err != nil {
+			return err
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	indexData, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(indexData)); err != nil {
+		return err
+	}
+	for _, key := range priorKeys {
+		if _, ok := state.Tokens[key]; !ok {
+			if _, err := b.kr.Delete(b.service, key); err != nil {
+				return err
+			}
+		}
+	}
+	// The index now exists and is authoritative; drop the legacy entry so a
+	// future read never falls back to it.
+	_, _ = b.kr.Delete(b.service, b.legacyAccount)
+	return nil
+}
+
+// indexedKeys returns the keys currently listed in the index, or nil if there
+// is no index yet (first write, or still on the legacy format).
+func (b keyringBlob) indexedKeys() ([]string, error) {
+	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
+	if err != nil || !ok {
+		return nil, err
+	}
+	keys, err := decodeKeyIndex(enc)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
+	}
+	return keys, nil
+}
+
+func decodeKeyIndex(enc string) ([]string, error) {
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 // withLock serializes the keyring's read-modify-write. Store.mu covers the
@@ -473,7 +600,7 @@ func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 	return fn()
 }
 
-func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.account }
+func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.indexAccount }
 
 // FormatStatuses renders a human-readable status table without leaking token
 // material.
