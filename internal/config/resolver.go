@@ -1042,6 +1042,20 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if len(descriptor.CustomHeaders) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		merged := copyStringMap(descriptor.CustomHeaders)
 		for key, value := range profile.CustomHeaders {
+			// Header names are case-insensitive. Preserve the catalog spelling while
+			// replacing its value so request construction cannot see two colliding
+			// map entries whose eventual winner depends on iteration order.
+			existingKey := ""
+			for candidate := range merged {
+				if strings.EqualFold(candidate, key) {
+					existingKey = candidate
+					break
+				}
+			}
+			if existingKey != "" {
+				merged[existingKey] = value
+				continue
+			}
 			merged[key] = value
 		}
 		profile.CustomHeaders = merged

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 func TestResolveAppliesLayerPrecedence(t *testing.T) {
@@ -1371,6 +1372,28 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 	}
 	if profile.ParseThinkTags == nil || !*profile.ParseThinkTags {
 		t.Fatalf("ParseThinkTags = %#v, want true", profile.ParseThinkTags)
+	}
+}
+
+func TestApplyCatalogDescriptorFoldsCustomHeadersCaseInsensitively(t *testing.T) {
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: descriptor.DefaultBaseURL,
+		CustomHeaders: map[string]string{
+			"x-aimlapi-partner-id": "part_override",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	if got := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("canonical header value = %q, want override", got)
+	}
+	if _, duplicate := profile.CustomHeaders["x-aimlapi-partner-id"]; duplicate {
+		t.Fatalf("case-colliding header survived merge: %#v", profile.CustomHeaders)
 	}
 }
 

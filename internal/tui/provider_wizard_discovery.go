@@ -95,6 +95,7 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 // usable saved profile is used. A bare AIMLAPI_API_KEY is represented as an env
 // profile so choosing it never snapshots the secret into the credential store.
 func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, bool) {
+	descriptor, descriptorErr := providercatalog.Require("aimlapi")
 	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
 	activeName := strings.TrimSpace(m.providerProfile.Name)
 	if activeName != "" {
@@ -113,6 +114,13 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 		if !aimlapiProfile(persisted) {
 			continue
 		}
+		// The guided balance/top-up client talks to AIMLAPI's production account
+		// API. Never send a credential saved for a proxy, staging service, or other
+		// custom inference endpoint to that API. Such profiles remain available to
+		// the normal provider runtime; they are simply ineligible for this preflight.
+		if descriptorErr != nil || (strings.TrimSpace(persisted.BaseURL) != "" && !sameProviderBaseURL(persisted.BaseURL, descriptor.DefaultBaseURL)) {
+			continue
+		}
 		resolved := persisted
 		if strings.TrimSpace(resolved.APIKey) == "" && strings.TrimSpace(resolved.APIKeyEnv) != "" {
 			resolved.APIKey = strings.TrimSpace(os.Getenv(resolved.APIKeyEnv))
@@ -129,8 +137,7 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 		}
 	}
 	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
-		descriptor, err := providercatalog.Require("aimlapi")
-		if err == nil {
+		if descriptorErr == nil {
 			return config.ProviderProfile{
 				Name:          descriptor.ID,
 				CatalogID:     descriptor.ID,

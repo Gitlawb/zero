@@ -258,7 +258,7 @@ func TestAimlapiKeyBalanceLowBalanceOffersTopUp(t *testing.T) {
 }
 
 func TestAimlapiTopUpFailureRetainsSessionForRetry(t *testing.T) {
-	state := &aimlapiOnboardState{step: aimlapiStepProgress}
+	state := &aimlapiOnboardState{step: aimlapiStepProgress, paymentSessionID: "payment-live"}
 	state.applyTopup(aimlapiOnboardMsg{
 		topupOK: true,
 		topup:   aimlapiTopupEvent{session: "pcs_resume", hasSession: true},
@@ -269,6 +269,30 @@ func TestAimlapiTopUpFailureRetainsSessionForRetry(t *testing.T) {
 	})
 	if state.resumeSessionToken != "pcs_resume" {
 		t.Fatalf("resume token = %q, want retained session", state.resumeSessionToken)
+	}
+	if state.paymentSessionID != "payment-live" {
+		t.Fatalf("payment session id = %q, want retained live id", state.paymentSessionID)
+	}
+	if state.step != aimlapiStepAmountInput {
+		t.Fatalf("step = %v, want retryable amount input", state.step)
+	}
+}
+
+func TestAimlapiTerminalTopUpDropsByKeyIdempotencyID(t *testing.T) {
+	state := &aimlapiOnboardState{
+		step:               aimlapiStepProgress,
+		resumeSessionToken: "pcs_old",
+		paymentSessionID:   "payment-old",
+	}
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup: aimlapiTopupEvent{
+			done: true, err: errors.New("checkout expired"), session: "", hasSession: true,
+		},
+	})
+
+	if state.resumeSessionToken != "" || state.paymentSessionID != "" {
+		t.Fatalf("terminal checkout retained session ids: resume=%q payment=%q", state.resumeSessionToken, state.paymentSessionID)
 	}
 	if state.step != aimlapiStepAmountInput {
 		t.Fatalf("step = %v, want retryable amount input", state.step)

@@ -648,12 +648,18 @@ func (s *aimlapiOnboardState) applyTopup(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 		return nil, aimlapiContinue
 	}
 	event := msg.topup
-	if !event.done {
-		if event.hasSession {
-			// Retain (or, on "", drop) the live partner-checkout token so a retry
-			// resumes this session rather than opening a second checkout.
-			s.resumeSessionToken = event.session
+	if event.hasSession {
+		// Retain (or, on "", drop) the live partner-checkout token so a retry
+		// resumes this session rather than opening a second checkout.
+		s.resumeSessionToken = event.session
+		if strings.TrimSpace(event.session) == "" {
+			// An empty token marks a terminal checkout. Its by-key idempotency ID
+			// belongs to that dead session too; reusing it would return or reject
+			// the old checkout instead of allowing a fresh payment attempt.
+			s.paymentSessionID = ""
 		}
+	}
+	if !event.done {
 		if strings.TrimSpace(event.detail) != "" {
 			s.detail = event.detail
 		}

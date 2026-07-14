@@ -1314,6 +1314,21 @@ func TestExistingAimlapiConfigurationResolvesStoredKey(t *testing.T) {
 	}
 }
 
+func TestExistingAimlapiConfigurationSkipsCustomEndpointCredential(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "")
+	m := model{savedProviders: []config.ProviderProfile{{
+		Name:      "aimlapi-staging",
+		CatalogID: "aimlapi",
+		BaseURL:   "https://staging.example.test/v1",
+		APIKey:    "staging-secret",
+	}}}
+
+	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
+	if ok || profile.Name != "" || runtimeKey != "" {
+		t.Fatalf("custom endpoint credential entered production preflight: (%+v, %q, %v)", profile, runtimeKey, ok)
+	}
+}
+
 func TestAdvanceAimlapiWithExistingCredentialShowsConfiguredPreflight(t *testing.T) {
 	t.Setenv("AIMLAPI_API_KEY", "aimlapi-env-secret")
 	provider, err := providercatalog.Require("aimlapi")
