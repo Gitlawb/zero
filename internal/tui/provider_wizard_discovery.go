@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,9 +131,16 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
 		descriptor, err := providercatalog.Require("aimlapi")
 		if err == nil {
-			profile := providerWizardProfile(descriptor, descriptor.DefaultModel, "", "", "")
-			profile.Name = descriptor.ID
-			return profile, key, true
+			return config.ProviderProfile{
+				Name:          descriptor.ID,
+				CatalogID:     descriptor.ID,
+				ProviderKind:  providerWizardProviderKind(descriptor),
+				BaseURL:       descriptor.DefaultBaseURL,
+				APIKeyEnv:     "AIMLAPI_API_KEY",
+				APIFormat:     providerWizardAPIFormat(descriptor),
+				Model:         descriptor.DefaultModel,
+				CustomHeaders: maps.Clone(descriptor.CustomHeaders),
+			}, key, true
 		}
 	}
 	return config.ProviderProfile{}, "", false
