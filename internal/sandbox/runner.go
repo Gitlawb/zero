@@ -1033,6 +1033,11 @@ func normalizeSensitiveEnvKeys(keys []string) []string {
 	seen := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
 		key = strings.TrimSpace(key)
+		// A misconfigured value like "COMPANY_LLM_SECRET=..." would never
+		// match a real env key during scrubbing; keep only the name part.
+		if name, _, found := strings.Cut(key, "="); found {
+			key = strings.TrimSpace(name)
+		}
 		folded := strings.ToUpper(key)
 		if key == "" {
 			continue

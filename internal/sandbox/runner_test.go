@@ -660,7 +660,7 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"AWS_PROFILE=staging",
 		"SAFE_VAR=hello",
 	}
-	scrubbed := scrubSensitiveEnv(inputEnv, " COMPANY_LLM_SECRET ", "company_llm_secret", "")
+	scrubbed := scrubSensitiveEnv(inputEnv, " COMPANY_LLM_SECRET ", "company_llm_secret", "GITHUB_TOKEN=ghp_pasted-assignment", "=", "")
 	expected := map[string]string{
 		"PATH":                     "/usr/bin",
 		"SAFE_VAR":                 "hello",
