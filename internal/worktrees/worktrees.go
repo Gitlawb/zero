@@ -128,6 +128,23 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("create git worktree: %s", message)
 	}
+	// Lock the worktree so Clean's mtime+dirty staleness heuristic (which
+	// cannot tell "abandoned" apart from "clean but waiting on a model,
+	// network, or user for a long time") never force-removes a worktree zero
+	// itself is still using. entry.locked already makes Clean skip a worktree
+	// a human locked by hand; locking here extends that same protection to
+	// the worktrees zero creates.
+	lockResult, err := runGit(ctx, repoRoot, "worktree", "lock", "--reason", "zero: active task worktree", target)
+	if err != nil {
+		return Result{}, fmt.Errorf("lock git worktree: %w", err)
+	}
+	if lockResult.ExitCode != 0 {
+		message := strings.TrimSpace(firstNonEmpty(lockResult.Stderr, lockResult.Stdout))
+		if message == "" {
+			message = fmt.Sprintf("git worktree lock exited with code %d", lockResult.ExitCode)
+		}
+		return Result{}, fmt.Errorf("lock git worktree: %s", message)
+	}
 	return result, nil
 }
 
@@ -472,17 +489,21 @@ func worktreeIsStale(root string, cutoff time.Time) bool {
 	return stale && walkErr == nil
 }
 
-// worktreeIsDirty reports whether a worktree has uncommitted or untracked
-// changes, via `git status --porcelain` run inside it. A task can hold a
-// worktree with live, unpushed work while it waits on a model, network, or
-// user for far longer than the staleness window, without writing to the tree
-// again in that time; mtime alone can't distinguish that from an abandoned
-// one, but a dirty working tree still can.
+// worktreeIsDirty reports whether a worktree has uncommitted, untracked, or
+// ignored changes, via `git status --porcelain --ignored` run inside it. A
+// task can hold a worktree with live, unpushed work while it waits on a
+// model, network, or user for far longer than the staleness window, without
+// writing to the tree again in that time; mtime alone can't distinguish that
+// from an abandoned one, but a dirty working tree still can. --ignored is
+// included because files matched by .gitignore (credentials, generated
+// drafts, task artifacts) are real data a task can leave behind; without it,
+// plain `git status --porcelain` reports a worktree holding only such files
+// as clean, and Clean would force-remove it and silently discard them.
 //
 // An inspection failure fails closed, treating it as dirty rather than clean:
 // an incomplete check must not authorize a forced removal.
 func worktreeIsDirty(ctx context.Context, runGit GitRunner, path string) bool {
-	output, err := gitOutput(ctx, runGit, path, "status", "--porcelain")
+	output, err := gitOutput(ctx, runGit, path, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return true
 	}

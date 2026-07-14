@@ -52,6 +52,7 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 			{Stdout: "main\n"},
 			{Stdout: "abc1234\n"},
 			{},
+			{},
 		},
 	}
 
@@ -77,6 +78,12 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	}
 	if got := runner.commandLine(3); got != "git worktree add --detach "+result.Path+" HEAD" {
 		t.Fatalf("git worktree command = %q", got)
+	}
+	// Prepare must lock every worktree it creates: this is what makes
+	// entry.locked inside Clean protect zero's own worktrees, not just ones a
+	// human locked by hand (see TestCleanSkipsLockedZeroOwnedWorktree).
+	if got := runner.commandLine(4); got != "git worktree lock --reason zero: active task worktree "+result.Path {
+		t.Fatalf("git worktree lock command = %q", got)
 	}
 }
 
@@ -305,7 +312,7 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 	if runner.commandLine(1) != "git worktree list --porcelain" {
 		t.Errorf("call 1 = %q", runner.commandLine(1))
 	}
-	expectedStatusCall := "git status --porcelain"
+	expectedStatusCall := "git status --porcelain --ignored"
 	if runner.commandLine(2) != expectedStatusCall {
 		t.Errorf("call 2 = %q, want %q", runner.commandLine(2), expectedStatusCall)
 	}
@@ -477,6 +484,138 @@ func TestCleanSkipsLockedWorktree(t *testing.T) {
 		if len(call.args) > 0 && call.args[0] == "remove" {
 			t.Fatalf("Clean removed a locked worktree: %v", call.args)
 		}
+	}
+}
+
+// A worktree zero created and locked at Prepare time (see the "worktree lock"
+// call added there) must survive Clean even though it looks idle-but-clean: a
+// task can finish committing and then sit waiting on a model, network, or
+// user for far longer than the staleness window without touching the tree
+// again, and mtime alone can't distinguish that from an abandoned worktree.
+// Before this fix, Prepare never locked its own worktrees, so entry.locked
+// only ever protected worktrees a human locked by hand.
+func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
+	tempDir := t.TempDir()
+	baseDir := filepath.Join(tempDir, "zero-worktrees")
+	repoRoot := filepath.Join(tempDir, "repo")
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
+
+	idlePath := filepath.Join(repoDir, "idle-task")
+	if err := os.MkdirAll(idlePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	twoDaysAgo := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(idlePath, twoDaysAgo, twoDaysAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: repoRoot},
+			{Stdout: "worktree " + idlePath + "\nlocked zero: active task worktree\n"},
+			{ExitCode: 0}, // worktree prune
+		},
+	}
+
+	if err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
+		t.Fatalf("Clean failed: %v", err)
+	}
+
+	for _, call := range runner.calls {
+		if len(call.args) > 0 && (call.args[0] == "remove" || call.args[0] == "status") {
+			t.Fatalf("Clean touched a locked zero-owned worktree: %v", call.args)
+		}
+	}
+}
+
+// A worktree whose only content is matched by .gitignore (credentials,
+// generated drafts, task artifacts) must still block force-removal: plain
+// `git status --porcelain` reports such a worktree as clean, but
+// worktreeIsDirty now also passes --ignored, so Clean must treat it as dirty.
+func TestCleanSkipsWorktreeWithOnlyIgnoredFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	baseDir := filepath.Join(tempDir, "zero-worktrees")
+	repoRoot := filepath.Join(tempDir, "repo")
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
+
+	ignoredOnlyPath := filepath.Join(repoDir, "ignored-only-task")
+	if err := os.MkdirAll(ignoredOnlyPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	twoDaysAgo := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(ignoredOnlyPath, twoDaysAgo, twoDaysAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: repoRoot},
+			{Stdout: "worktree " + ignoredOnlyPath + "\n"},
+			{Stdout: "!! ignored-data\n"}, // status --porcelain --ignored: ignored file present
+			{ExitCode: 0},                 // worktree prune
+		},
+	}
+
+	if err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
+		t.Fatalf("Clean failed: %v", err)
+	}
+
+	for i, call := range runner.calls {
+		if i == 2 {
+			want := "status --porcelain --ignored"
+			if got := strings.Join(call.args, " "); got != want {
+				t.Fatalf("status call args = %q, want %q", got, want)
+			}
+		}
+		if len(call.args) > 0 && call.args[0] == "remove" {
+			t.Fatalf("Clean removed a worktree with only ignored files: %v", call.args)
+		}
+	}
+}
+
+// worktreeIsDirty must count files matched by .gitignore as dirty content: a
+// worktree holding only ignored task data (credentials, generated drafts) has
+// nothing to show in plain `git status --porcelain` and would otherwise pass
+// as clean and be force-removed by Clean's staleness heuristic. This exercises
+// the real git binary rather than the fake runner, so it also verifies
+// --ignored actually changes git's answer, not just the command we send.
+func TestWorktreeIsDirtyCountsIgnoredFilesAsDirty(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "--quiet")
+	run("config", "user.email", "zero@example.com")
+	run("config", "user.name", "zero")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("ignored-data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".gitignore")
+	run("commit", "--quiet", "-m", "initial")
+
+	if worktreeIsDirty(context.Background(), defaultRunGit, dir) {
+		t.Fatal("expected a clean worktree with no ignored files present to report clean")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "ignored-data"), []byte("secret task artifact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !worktreeIsDirty(context.Background(), defaultRunGit, dir) {
+		t.Fatal("expected an ignored-but-present file to count as dirty")
 	}
 }
 
