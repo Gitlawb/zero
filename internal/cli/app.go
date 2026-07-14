@@ -339,7 +339,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return 0
 			}
 		}
-		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+		if _, err := fmt.Fprintf(stdout, "%s\n\nversion: %s\n", tui.Wordmark(stdout), version); err != nil {
 			return 1
 		}
 		return 0

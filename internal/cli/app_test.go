@@ -41,8 +41,14 @@ func TestRunPrintsVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
-	if got := stdout.String(); got != "zero dev\n" {
-		t.Fatalf("expected version output, got %q", got)
+	wantWordmark := "███████╗███████╗██████╗  ██████╗ \n" +
+		"╚══███╔╝██╔════╝██╔══██╗██╔═══██╗\n" +
+		"  ███╔╝ █████╗  ██████╔╝██║   ██║\n" +
+		" ███╔╝  ██╔══╝  ██╔══██╗██║   ██║\n" +
+		"███████╗███████╗██║  ██║╚██████╔╝\n" +
+		"╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ \n"
+	if got, want := stdout.String(), wantWordmark+"\nversion: dev\n"; got != want {
+		t.Fatalf("expected version output %q, got %q", want, got)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
