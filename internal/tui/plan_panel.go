@@ -188,6 +188,12 @@ func (s *planPanelState) markIncompleteRemaining(now time.Time) {
 			// completed/failed: preserve.
 		}
 	}
+	// When every step is now terminal (e.g. a single-step plan failed), stamp
+	// completedAt so the finished panel ages out like completeRemaining() does.
+	// Leave it unset while pending steps remain — the run is not finished.
+	if s.isComplete() && s.completedAt.IsZero() {
+		s.completedAt = now
+	}
 }
 
 func (s *planPanelState) completeRemaining(now time.Time) {

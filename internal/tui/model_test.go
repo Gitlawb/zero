@@ -1364,14 +1364,11 @@ func TestAgentResponseCompletesStuckPlan(t *testing.T) {
 		if next.plan.isComplete() {
 			t.Fatal("incomplete turn must not force-complete the plan")
 		}
-		foundFailed := false
-		for _, step := range next.plan.steps {
-			if step.status == "failed" {
-				foundFailed = true
-			}
+		if next.plan.steps[1].status != "failed" {
+			t.Fatalf("expected the active step to be marked failed, got %+v", next.plan.steps)
 		}
-		if !foundFailed {
-			t.Fatalf("expected a failed plan step, got %+v", next.plan.steps)
+		if next.plan.steps[2].status != "pending" {
+			t.Fatalf("expected the remaining pending step untouched, got %+v", next.plan.steps)
 		}
 	})
 

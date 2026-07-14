@@ -35,16 +35,21 @@ const (
 	EventProviderUsage      EventType = "provider_usage"
 	EventUsage              EventType = EventProviderUsage
 	EventError              EventType = "error"
-	EventSessionCheckpoint  EventType = "session_checkpoint"
-	EventSessionRewind      EventType = "session_rewind"
-	EventCompaction         EventType = "session_compaction"
-	EventSessionFork        EventType = "session_fork"
-	EventSessionChild       EventType = "session_child"
-	EventSpecialistStart    EventType = "specialist_start"
-	EventSpecialistStop     EventType = "specialist_stop"
-	EventSpecDraft          EventType = "spec_draft"
-	EventSpecApproved       EventType = "spec_approved"
-	EventSpecRejected       EventType = "spec_rejected"
+	// EventRunIncomplete records a run that stopped with work clearly unfinished
+	// (plan stall, mid-step stop, max-turns cutoff) without a provider/tool error.
+	// Distinct from EventError so TUI resume replays it as a system notice, not a
+	// hard failure.
+	EventRunIncomplete     EventType = "run_incomplete"
+	EventSessionCheckpoint EventType = "session_checkpoint"
+	EventSessionRewind     EventType = "session_rewind"
+	EventCompaction        EventType = "session_compaction"
+	EventSessionFork       EventType = "session_fork"
+	EventSessionChild      EventType = "session_child"
+	EventSpecialistStart   EventType = "specialist_start"
+	EventSpecialistStop    EventType = "specialist_stop"
+	EventSpecDraft         EventType = "spec_draft"
+	EventSpecApproved      EventType = "spec_approved"
+	EventSpecRejected      EventType = "spec_rejected"
 )
 
 type SessionKind string

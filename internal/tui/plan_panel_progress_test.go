@@ -67,6 +67,22 @@ func TestPlanMarkIncompleteRemaining(t *testing.T) {
 	if s.isComplete() {
 		t.Fatal("incomplete run must not mark the plan complete")
 	}
+	if !s.completedAt.IsZero() {
+		t.Fatal("completedAt must stay unset while pending steps remain")
+	}
+
+	t.Run("terminal single-step plan stamps completedAt", func(t *testing.T) {
+		s := planPanelState{steps: []planStep{
+			{content: "only step", status: "in_progress", startedAt: started},
+		}}
+		s.markIncompleteRemaining(now)
+		if !s.isComplete() {
+			t.Fatal("single failed step should be terminal")
+		}
+		if s.completedAt != now {
+			t.Fatalf("completedAt = %v, want %v", s.completedAt, now)
+		}
+	})
 }
 
 // TestPlanCompleteRemaining: force-completing a stuck plan flips every

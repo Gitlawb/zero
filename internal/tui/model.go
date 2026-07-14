@@ -5182,8 +5182,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			rows = append(rows, transcriptRow{kind: rowSystem, text: "Run incomplete: " + incompleteReason})
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type:    sessions.EventError,
-				Payload: map[string]any{"message": "incomplete: " + incompleteReason},
+				Type:    sessions.EventRunIncomplete,
+				Payload: map[string]any{"message": incompleteReason},
 			})
 		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{

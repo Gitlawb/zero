@@ -606,6 +606,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if message := payloadString(payload, "message"); message != "" {
 				rows = append(rows, transcriptRow{kind: rowError, text: message})
 			}
+		case sessions.EventRunIncomplete:
+			if message := payloadString(payload, "message"); message != "" {
+				rows = append(rows, transcriptRow{kind: rowSystem, text: "Run incomplete: " + message})
+			}
 		case sessions.EventCompaction:
 			if summary := payloadString(payload, "summary"); summary != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: summary})

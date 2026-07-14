@@ -7,6 +7,19 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
+func TestHydrationRunIncompleteIsSystemNotice(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventRunIncomplete,
+		Payload: json.RawMessage(`{"message":"your message ended mid-step"}`),
+	}})
+	if len(rows) != 1 || rows[0].kind != rowSystem {
+		t.Fatalf("run_incomplete must replay as a system row, got %#v", rows)
+	}
+	if rows[0].text != "Run incomplete: your message ended mid-step" {
+		t.Fatalf("unexpected replay text: %q", rows[0].text)
+	}
+}
+
 func TestHydrationKeepsFailedTaskWithoutSpecialist(t *testing.T) {
 	ev := func(typ sessions.EventType, payload string) sessions.Event {
 		return sessions.Event{Type: typ, Payload: json.RawMessage(payload)}
