@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -460,6 +461,13 @@ func (m model) setupStages() []setupStage {
 	}
 	stages = append(stages, setupStageProvider)
 	if setupProviderIsAimlapi(m.setupProvider()) {
+		// Preserve the catalog's normal env-credential path in first-run setup.
+		// A ready AIMLAPI_API_KEY needs no guided identity flow: model discovery
+		// resolves it at runtime and saveSetupProvider persists APIKeyEnv, not the
+		// materialized secret. /provider owns the richer balance/top-up preflight.
+		if setupAimlapiEnvKey() != "" {
+			return append(stages, setupStageModel, setupStageSafety, setupStageReady)
+		}
 		stages = append(stages, setupStageAimlapi, setupStageModel, setupStageSafety, setupStageReady)
 		return stages
 	}
@@ -468,6 +476,10 @@ func (m model) setupStages() []setupStage {
 	}
 	stages = append(stages, setupStageCredentials, setupStageModel, setupStageSafety, setupStageReady)
 	return stages
+}
+
+func setupAimlapiEnvKey() string {
+	return strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY"))
 }
 
 func setupProviderIsAimlapi(option SetupProviderOption) bool {

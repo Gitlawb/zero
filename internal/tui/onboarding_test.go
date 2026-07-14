@@ -368,12 +368,16 @@ func TestAimlapiAutoTopUpRendersOnOff(t *testing.T) {
 }
 
 func TestAimlapiPickPathShowsNewUserFirstAndRoutesSelections(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "already-configured")
 	state := &aimlapiOnboardState{step: aimlapiStepPickPath}
 	view := plainRender(t, strings.Join(state.viewPickPath(64), "\n"))
 	newUserIndex := strings.Index(view, aimlapi.MsgPickPathNewUser)
 	haveKeyIndex := strings.Index(view, aimlapi.MsgPickPathHaveKey)
 	if newUserIndex < 0 || haveKeyIndex < 0 || newUserIndex >= haveKeyIndex {
 		t.Fatalf("new-user option should precede have-key option:\n%s", view)
+	}
+	if strings.Contains(view, "Use AIMLAPI_API_KEY") {
+		t.Fatalf("existing env credentials belong to /provider preflight, not onboarding:\n%s", view)
 	}
 
 	state.pathCursor = 0
@@ -386,6 +390,34 @@ func TestAimlapiPickPathShowsNewUserFirstAndRoutesSelections(t *testing.T) {
 	state.handlePickPathKey(testKey(tea.KeyEnter))
 	if state.step != aimlapiStepKeyInput {
 		t.Fatalf("second option routes to %v, want key input", state.step)
+	}
+}
+
+func TestFirstRunAimlapiEnvSkipsGuidedOnboarding(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "env-runtime-secret")
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{{
+			ID: "aimlapi", Name: "aimlapi.com", DefaultModel: "anthropic/claude-sonnet-5",
+		}},
+	}})
+	m.setup.stage = setupStageProvider
+	m.setup.selected = 0
+
+	updated, cmd := m.advanceSetup()
+	next := updated.(model)
+	if next.setup.stage != setupStageModel {
+		t.Fatalf("stage = %v, want model selection", next.setup.stage)
+	}
+	if next.setup.aimlapi != nil {
+		t.Fatal("env credential should not create the guided onboarding state")
+	}
+	if cmd == nil {
+		t.Fatal("env credential should start authenticated model discovery")
+	}
+	profile := providerWizardDiscoveryProfile(setupProviderDescriptor(next.setupProvider()), "")
+	if profile.APIKey != "env-runtime-secret" || profile.APIKeyEnv != "AIMLAPI_API_KEY" {
+		t.Fatalf("discovery profile did not preserve env credential: %+v", profile)
 	}
 }
 

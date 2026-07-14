@@ -11,7 +11,6 @@ const (
 	MsgPickPathHaveHint  = "Proceed to paste the key"
 	MsgPickPathNewUser   = "I am a new user"
 	MsgPickPathNewHint   = "One click set up"
-
 	// Path B — email.
 	MsgEnterEmail   = "Enter your email.\nTo access aimlapi.com dashboard."
 	MsgEmailInvalid = "Email format is incorrect."

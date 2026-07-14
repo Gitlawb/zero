@@ -341,8 +341,9 @@ func (s *aimlapiOnboardState) handleKey(msg tea.KeyMsg) (tea.Cmd, aimlapiOutcome
 	return nil, aimlapiContinue
 }
 
-// handlePickPathKey drives the key/email picker: the two onboarding options
-// (paste an existing key, or go through email).
+// handlePickPathKey drives new configuration: create an account or paste a key.
+// Reusing an already configured/env credential is a /provider preflight, not a
+// third onboarding identity path.
 func (s *aimlapiOnboardState) handlePickPathKey(msg tea.KeyMsg) (tea.Cmd, aimlapiOutcome) {
 	switch {
 	case keyIs(msg, tea.KeyUp) || keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
