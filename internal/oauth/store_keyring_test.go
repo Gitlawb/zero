@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -49,13 +51,17 @@ func TestStoreKeyringBackendRoundTrip(t *testing.T) {
 		t.Fatalf("Load = %#v", got)
 	}
 
-	// The blob is stored base64-encoded, so the raw JSON field names never appear.
-	raw := kr.data[keyringService+"/"+keyringAccount]
+	// The token lives under its own entry (account = key), not one combined
+	// blob, and is base64-encoded so the raw JSON field names never appear.
+	raw := kr.data[keyringService+"/"+ProviderKey("demo")]
 	if raw == "" {
-		t.Fatal("nothing stored in keyring")
+		t.Fatal("nothing stored under the token's own keyring entry")
 	}
 	if strings.Contains(raw, "access_token") {
-		t.Fatalf("keyring blob is not encoded: %s", raw)
+		t.Fatalf("keyring entry is not encoded: %s", raw)
+	}
+	if raw := kr.data[keyringService+"/"+keyringLegacyAccount]; raw != "" {
+		t.Fatalf("legacy combined entry should not be written by new code: %s", raw)
 	}
 
 	removed, err := s.Delete(ProviderKey("demo"))
@@ -64,6 +70,104 @@ func TestStoreKeyringBackendRoundTrip(t *testing.T) {
 	}
 	if _, ok, _ := s.Load(ProviderKey("demo")); ok {
 		t.Fatal("token still present after delete")
+	}
+	// Delete must also drop the now-unused entry, not just remove it from the
+	// index, or a stale keyring item accumulates for every logout.
+	if _, ok := kr.data[keyringService+"/"+ProviderKey("demo")]; ok {
+		t.Fatal("deleted token's keyring entry was not removed")
+	}
+}
+
+// TestStoreKeyringManyProvidersStayUnderEntryLimit is the regression test for
+// the bug this backend originally shipped with: every provider's tokens were
+// combined into one keyring entry, and on macOS that entry is written through
+// `security -i`, whose command parser caps a single write around 4KB. Three or
+// more logged-in providers routinely exceeded it, so Set() would start failing
+// for every provider, not just the one pushing it over. Splitting into one
+// entry per key bounds each individual write to a single token regardless of
+// how many providers are logged in.
+func TestStoreKeyringManyProvidersStayUnderEntryLimit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A realistically large single token: JWT-shaped access/ID tokens plus an
+	// opaque refresh token, comparable to what OIDC providers actually issue.
+	big := Token{
+		AccessToken:  "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 60) + ".sig",
+		RefreshToken: "rt_" + strings.Repeat("x", 80),
+		TokenType:    "Bearer",
+		Scopes:       []string{"openid", "profile", "email", "offline_access"},
+		Account:      "user@example.com",
+		IDToken:      "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 70) + ".sig",
+	}
+	providers := []string{"anthropic", "openai", "minimax", "zai", "google"}
+	for _, name := range providers {
+		if err := s.Save(ProviderKey(name), big); err != nil {
+			t.Fatalf("Save(%s): %v", name, err)
+		}
+	}
+	// Each individual keyring value must stay small even with 5 providers
+	// logged in: no entry aggregates more than one provider's tokens.
+	const singleTokenCeiling = 3000 // generous margin under the ~4095-byte line cap
+	for k, v := range kr.data {
+		if len(v) > singleTokenCeiling {
+			t.Fatalf("keyring entry %q is %d bytes, want < %d (aggregation regression)", k, len(v), singleTokenCeiling)
+		}
+	}
+	for _, name := range providers {
+		got, ok, err := s.Load(ProviderKey(name))
+		if err != nil || !ok {
+			t.Fatalf("Load(%s): ok=%v err=%v", name, ok, err)
+		}
+		if got.AccessToken != big.AccessToken {
+			t.Fatalf("Load(%s) = %#v", name, got)
+		}
+	}
+}
+
+// TestStoreKeyringMigratesLegacyCombinedEntry ensures installs upgrading from
+// the original single-blob format keep reading their existing tokens, and get
+// migrated to per-key entries (with the legacy entry removed) the next time
+// anything is saved.
+func TestStoreKeyringMigratesLegacyCombinedEntry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("demo"): {AccessToken: "legacy-a", RefreshToken: "legacy-r"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Load(ProviderKey("demo"))
+	if err != nil || !ok {
+		t.Fatalf("Load legacy token: ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != "legacy-a" {
+		t.Fatalf("Load = %#v", got)
+	}
+
+	// Saving a second provider must migrate: the legacy entry is dropped, and
+	// both tokens end up as their own entries.
+	if err := s.Save(ProviderKey("other"), Token{AccessToken: "other-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy combined entry should be removed after migration")
+	}
+	for _, name := range []string{"demo", "other"} {
+		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
+			t.Fatalf("Load(%s) after migration: ok=%v err=%v", name, ok, err)
+		}
 	}
 }
 
