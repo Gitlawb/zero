@@ -444,11 +444,11 @@ var dunePalette = palette{
 	muted:     "#473e32",
 	faint:     "#554a3a",
 	faintest:  "#655648",
-	accent:    "#8f5215",
+	accent:    "#7c4712", // darkened from #8f5215 for AA on selBg (was 4.00:1, now 4.90:1)
 	green:     "#38572a",
-	red:       "#963328",
+	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling (true 6.57:1, 256 7.86:1)
 	amber:     "#6d4600",
-	blue:      "#3d6a9e",
+	blue:      "#2f5680", // darkened from #3d6a9e for AA on selBg (was 3.61:1, now 4.90:1)
 	gitAdd:    "#38572a",
 	gitDel:    "#963328",
 	addBg:     "#dcecd0",

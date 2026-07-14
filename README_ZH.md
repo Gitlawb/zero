@@ -252,7 +252,7 @@ zero update           检查更新版本
 | 控制 | 效果 |
 |---|---|
 | `NO_COLOR=<任意值>` | 禁用颜色输出 |
-| `ZERO_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`solarized-light`） |
+| `ZERO_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`neon`、`solarized-light`、`dune`） |
 | `--theme <名称>` | 从 CLI 选择 TUI 主题（相同名称） |
 | `/theme` | 在 TUI 中打开主题选择器（实时预览；`/theme <名称>` 直接切换） |
 | `ZERO_NO_FADE=1` | 禁用流式淡入动画 |

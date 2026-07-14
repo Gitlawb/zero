@@ -2,10 +2,12 @@
 
 Zero's TUI ships a set of built-in color themes. Pick one with `--theme <name>`,
 the `ZERO_THEME` environment variable, or the `/theme <name>` command while
-running (no argument shows the active theme). `auto` (the default) follows the
-terminal's detected background.
+running. `auto` (the default) follows the terminal's detected background.
 
-Run `/theme` with no argument to list the registered names.
+Run `/theme` with no argument to open a picker: move through the list to
+live-preview each theme, press Enter to apply the highlighted one, or Esc to
+cancel and restore the previously active theme. Run `/theme list` to print
+the active theme and the registered names without opening the picker.
 
 ## Dune (`dune`)
 
