@@ -269,7 +269,18 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	// Through blob.withLock, like Save/Delete: the keyring backend's read is
+	// several separate Get calls (index, then each entry), not one atomic
+	// snapshot, so an unlocked Load can run concurrently with another
+	// process's Save/Delete mid write and observe a torn state (e.g. an index
+	// already updated but an entry not yet written). The lock keeps this read
+	// from overlapping any other process's read-modify-write cycle.
+	var state storeFile
+	err := s.blob.withLock(s.now, func() error {
+		var readErr error
+		state, readErr = s.readState()
+		return readErr
+	})
 	if err != nil {
 		return Token{}, false, err
 	}
@@ -305,7 +316,14 @@ func (s *Store) Delete(key string) (bool, error) {
 func (s *Store) Status(prefix string) ([]Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readState()
+	// Same reasoning as Load: run the read under blob.withLock so it can't
+	// observe another process's Save/Delete mid write.
+	var state storeFile
+	err := s.blob.withLock(s.now, func() error {
+		var readErr error
+		state, readErr = s.readState()
+		return readErr
+	})
 	if err != nil {
 		return nil, err
 	}

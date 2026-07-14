@@ -171,6 +171,56 @@ func TestStoreKeyringMigratesLegacyCombinedEntry(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringSkipsIndexedKeyMissingItsEntry covers read()'s recovery from
+// an index/entry desync: a key listed in the index whose own entry is
+// missing (e.g. a process killed between writing the entry and updating the
+// index, or between updating the index and deleting a removed entry). read()
+// must skip that key rather than fail the whole read, since the next
+// Save/Delete reconciles the index against what's actually there.
+func TestStoreKeyringSkipsIndexedKeyMissingItsEntry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+
+	present := Token{AccessToken: "present-a", RefreshToken: "present-r"}
+	raw, err := json.Marshal(present)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+ProviderKey("present")] = base64.StdEncoding.EncodeToString(raw)
+
+	// The index references both keys, but "missing"'s own entry was never
+	// written (or was already deleted) — the desync this test targets.
+	index, err := json.Marshal([]string{ProviderKey("missing"), ProviderKey("present")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(index)
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := s.Load(ProviderKey("missing")); err != nil || ok {
+		t.Fatalf("Load(missing): ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+	got, ok, err := s.Load(ProviderKey("present"))
+	if err != nil || !ok {
+		t.Fatalf("Load(present): ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != present.AccessToken {
+		t.Fatalf("Load(present) = %#v", got)
+	}
+
+	statuses, err := s.Status("")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].Key != ProviderKey("present") {
+		t.Fatalf("Status = %#v, want only the present key", statuses)
+	}
+}
+
 func TestNewStoreStorageSelection(t *testing.T) {
 	// Unknown storage is rejected (fail closed).
 	if _, err := NewStore(StoreOptions{Storage: "bogus"}); err == nil {
