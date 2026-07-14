@@ -153,6 +153,65 @@ func TestRunWorktreesPrepareRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestRunWorktreesRelease(t *testing.T) {
+	worktreeDir := t.TempDir()
+	var releasedPath string
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", worktreeDir}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releasedPath = path
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if releasedPath != worktreeDir {
+		t.Fatalf("released path = %q, want %q", releasedPath, worktreeDir)
+	}
+	if !strings.Contains(stdout.String(), worktreeDir) {
+		t.Fatalf("expected confirmation output to mention path, got %q", stdout.String())
+	}
+}
+
+func TestRunWorktreesReleaseRequiresPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(context.Context, worktrees.Options, string) error {
+			t.Fatal("releaseWorktree should not be called without a path")
+			return nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "requires a worktree path") {
+		t.Fatalf("expected missing-path error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesReleaseReportsErrors(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "/no/such/worktree"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(context.Context, worktrees.Options, string) error {
+			return errors.New("unlock git worktree: not a valid worktree")
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "not a valid worktree") {
+		t.Fatalf("expected underlying error, got %q", stderr.String())
+	}
+}
+
 func TestRunVerifyTextAndJSON(t *testing.T) {
 	cwd := t.TempDir()
 	plan := verify.Plan{Root: cwd, Checks: []verify.Check{{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}}}}
@@ -618,6 +677,48 @@ func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "hello") {
 		t.Fatalf("expected provider output, got %q", stdout.String())
+	}
+}
+
+func TestRunExecWorktreeReleasesLockAfterRun(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	var releasedPath string
+	releaseCalls := 0
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234"}, nil
+		},
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releaseCalls++
+			releasedPath = path
+			return nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	// A `zero exec --worktree` run is the only user of the worktree it prepares:
+	// its own process created it and is now exiting, so it must release the
+	// Prepare lock itself rather than leaving it locked forever (unlike `zero
+	// worktrees prepare`, which hands the path to a longer-lived external
+	// caller and has no such end-of-life signal to act on).
+	if releaseCalls != 1 {
+		t.Fatalf("releaseWorktree call count = %d, want 1", releaseCalls)
+	}
+	if releasedPath != worktreeDir {
+		t.Fatalf("released path = %q, want %q", releasedPath, worktreeDir)
 	}
 }
 

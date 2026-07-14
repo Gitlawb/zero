@@ -63,6 +63,9 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
+	if command == "release" {
+		return runWorktreesRelease(args, stdout, stderr, deps)
+	}
 	if command != "prepare" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees command %q", command))
 	}
@@ -97,6 +100,43 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintln(stdout, formatWorktreeResult(safeResult)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+// runWorktreesRelease unlocks a worktree `zero worktrees prepare` created, so
+// Zero's automatic Clean pass can reclaim it once it goes stale. Prepare locks
+// every worktree it creates and nothing else in that command's own lifetime
+// unlocks it (its process exits right after printing the path, long before
+// whatever external caller actually finishes using the worktree), so that
+// caller is responsible for running this once it is done.
+func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	var path string
+	for _, arg := range args {
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			if err := writeWorktreesHelp(stdout); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		case strings.HasPrefix(arg, "-"):
+			return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees release flag %q", arg))
+		default:
+			if path != "" {
+				return writeExecUsageError(stderr, "worktree path was provided more than once")
+			}
+			path = arg
+		}
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return writeExecUsageError(stderr, "worktrees release requires a worktree path")
+	}
+	if err := deps.releaseWorktree(context.Background(), worktrees.Options{}, path); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if _, err := fmt.Fprintf(stdout, "released %s\n", path); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -786,8 +826,13 @@ func formatCommitResult(result zerogit.CommitResult) string {
 func writeWorktreesHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero worktrees prepare [flags] [name]
+  zero worktrees release <path>
 
 Prepares an isolated git worktree for a Zero task.
+
+prepare locks the worktree it creates so Zero's automatic cleanup never
+removes it out from under you. release unlocks a worktree prepare created,
+once you are done with it, so cleanup can reclaim it later if it goes stale.
 
 Flags:
       --name <name>       Worktree name; defaults to a timestamped task name

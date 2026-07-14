@@ -87,6 +87,34 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	}
 }
 
+func TestReleaseUnlocksWorktree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task-a")
+	runner := &fakeRunner{results: []CommandResult{{}}}
+
+	if err := Release(context.Background(), Options{RunGit: runner.Run}, path); err != nil {
+		t.Fatalf("Release returned error: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected exactly one git call, got %#v", runner.calls)
+	}
+	if runner.calls[0].dir != path {
+		t.Fatalf("git worktree unlock dir = %q, want %q", runner.calls[0].dir, path)
+	}
+	if got := runner.commandLine(0); got != "git worktree unlock "+path {
+		t.Fatalf("git worktree unlock command = %q", got)
+	}
+}
+
+func TestReleasePropagatesGitFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task-a")
+	runner := &fakeRunner{results: []CommandResult{{ExitCode: 1, Stderr: "fatal: not a working tree"}}}
+
+	err := Release(context.Background(), Options{RunGit: runner.Run}, path)
+	if err == nil || !strings.Contains(err.Error(), "not a working tree") {
+		t.Fatalf("Release error = %v, want it to surface the git failure", err)
+	}
+}
+
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	root := t.TempDir()
 	base := t.TempDir()

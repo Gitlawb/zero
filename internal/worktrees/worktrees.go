@@ -148,6 +148,25 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 	return result, nil
 }
 
+// Release unlocks a worktree that Prepare locked, via `git worktree unlock`,
+// making it eligible for Clean's staleness check again. Zero itself only
+// knows a worktree's use is over when its own process created it and is now
+// exiting (zero exec --worktree calls this via defer); zero worktrees
+// prepare hands the path to an external caller with no defined end-of-life,
+// so that caller must run `zero worktrees release <path>` itself once done.
+// Until it does, the worktree stays locked and Clean will never touch it,
+// which is the safe default over silently guessing at liveness from mtimes.
+func Release(ctx context.Context, options Options, path string) error {
+	runGit := options.RunGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	if _, err := gitOutput(ctx, runGit, path, "worktree", "unlock", path); err != nil {
+		return fmt.Errorf("unlock git worktree: %w", err)
+	}
+	return nil
+}
+
 func DefaultBaseDir(env map[string]string) (string, error) {
 	if runtime.GOOS == "windows" {
 		if localAppData := strings.TrimSpace(envValue(env, "LOCALAPPDATA")); localAppData != "" {

@@ -204,6 +204,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
 		workspaceRoot = preparedWorktree.Path
+		// This run's own process is the only user of the worktree it just
+		// created or reused, so its lifetime is bound to this function: release
+		// the Prepare lock once it returns so Clean can reclaim the worktree
+		// later if it goes stale. (zero worktrees prepare hands the path to an
+		// external, longer-lived caller instead, so it can't release this way —
+		// that caller must run `zero worktrees release` itself when done.)
+		defer func() {
+			_ = deps.releaseWorktree(context.Background(), worktrees.Options{}, preparedWorktree.Path)
+		}()
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
