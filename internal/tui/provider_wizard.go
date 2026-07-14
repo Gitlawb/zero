@@ -347,6 +347,7 @@ const (
 	providerWizardStepManageKey
 	providerWizardStepEndpoint
 	providerWizardStepName
+	providerWizardStepAimlapiConfigured
 	providerWizardStepAimlapi
 	providerWizardStepCredential
 	providerWizardStepModel
@@ -419,10 +420,19 @@ type providerWizardState struct {
 	// Manage-key step: shown when the selected provider already has a stored key.
 	manageKeyCursor    int
 	manageProviderName string
-	oauthMode          bool
-	oauthPending       bool
-	oauthAttemptID     int
-	oauthErr           string
+	// aimlapiExistingProfile is the persisted credential source selected by the
+	// "Use existing configuration" preflight. aimlapiRuntimeKey is resolved only
+	// for balance/top-up/model requests; it must never replace APIKeyEnv or an
+	// APIKeyStored marker when the profile is saved again.
+	aimlapiConfiguredCursor int
+	aimlapiExistingProfile  config.ProviderProfile
+	aimlapiRuntimeKey       string
+	aimlapiExistingBusy     bool
+	aimlapiExistingGen      int
+	oauthMode               bool
+	oauthPending            bool
+	oauthAttemptID          int
+	oauthErr                string
 	// Device-code login (RFC 8628) state while an OAuth login is in flight.
 	oauthDevice           bool
 	deviceUserCode        string
@@ -511,12 +521,21 @@ func (wizard *providerWizardState) resetAimlapiOnboard() {
 		wizard.aimlapi.cancelStream()
 		wizard.aimlapi = nil
 	}
+	wizard.clearAimlapiExisting()
 }
 
 // enterAimlapi starts the shared aimlapi.com onboarding sub-flow.
 func (wizard *providerWizardState) enterAimlapi() {
+	wizard.clearAimlapiExisting()
 	wizard.aimlapi = newAimlapiOnboard(browser.OpenURL)
 	wizard.step = providerWizardStepAimlapi
+}
+
+func (wizard *providerWizardState) clearAimlapiExisting() {
+	wizard.aimlapiExistingProfile = config.ProviderProfile{}
+	wizard.aimlapiRuntimeKey = ""
+	wizard.aimlapiExistingBusy = false
+	wizard.aimlapiConfiguredCursor = 0
 }
 
 func (wizard *providerWizardState) currentModel() providerWizardModel {
@@ -708,7 +727,11 @@ func (wizard *providerWizardState) retreat() {
 		}
 	case providerWizardStepModel:
 		if providerWizardIsAimlapi(wizard.currentProvider()) {
-			wizard.step = providerWizardStepProvider
+			if aimlapiProfile(wizard.aimlapiExistingProfile) {
+				wizard.step = providerWizardStepAimlapiConfigured
+			} else {
+				wizard.step = providerWizardStepProvider
+			}
 		} else if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else if providerWizardNeedsEndpoint(wizard.currentProvider()) {
@@ -799,6 +822,10 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		wizard.oauthDevice = false
 		wizard.deviceUserCode = ""
 		wizard.deviceVerificationURI = ""
+		// This branch preempts the aimlapi.com key delegation below, so cancel the
+		// embedded sub-flow here too — otherwise its in-flight CreateKey/checkout
+		// keeps running against a background context and mints a key we discard.
+		wizard.resetAimlapiOnboard()
 		wizard.err = ""
 		wizard.oauthErr = ""
 		wizard.step = providerWizardStepManage
@@ -900,6 +927,31 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	}
 	if m.providerWizard.step == providerWizardStepAimlapi {
 		return m.handleProviderWizardAimlapiKey(msg)
+	}
+	if m.providerWizard.step == providerWizardStepAimlapiConfigured {
+		if m.providerWizard.aimlapiExistingBusy {
+			if keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft) {
+				m.providerWizard.aimlapiExistingGen++
+				m.providerWizard.aimlapiExistingBusy = false
+				m.providerWizard.step = providerWizardStepProvider
+			}
+			return m, nil
+		}
+		switch {
+		case keyIs(msg, tea.KeyEsc):
+			m.providerWizard = nil
+		case keyIs(msg, tea.KeyLeft):
+			m.providerWizard.clearAimlapiExisting()
+			m.providerWizard.step = providerWizardStepProvider
+		case keyIs(msg, tea.KeyUp) || keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
+			m.providerWizard.aimlapiConfiguredCursor = (m.providerWizard.aimlapiConfiguredCursor + 1) % 2
+		case keyIs(msg, tea.KeyEnter) || keyIs(msg, tea.KeyRight):
+			if m.providerWizard.aimlapiConfiguredCursor == 0 {
+				return m.checkExistingAimlapiBalance()
+			}
+			m.providerWizard.enterAimlapi()
+		}
+		return m, nil
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
 		switch {
@@ -1175,6 +1227,18 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	modelChoice := wizard.currentModel()
 	profile := providerWizardProfile(provider, modelChoice.ID, wizard.apiKey, wizard.baseURL, wizard.profileName)
 	runtimeProfile := providerWizardRuntimeProfile(profile)
+	usingExistingAimlapi := aimlapiProfile(wizard.aimlapiExistingProfile)
+	preserveExistingCredentialReference := false
+	if usingExistingAimlapi {
+		// Preserve the configured credential source exactly. The resolved key is
+		// runtime-only and must not turn APIKeyEnv or APIKeyStored into a captured
+		// secret merely because the user changed models or topped up.
+		profile = wizard.aimlapiExistingProfile
+		profile.Model = modelChoice.ID
+		runtimeProfile = profile
+		runtimeProfile.APIKey = wizard.aimlapiRuntimeKey
+		preserveExistingCredentialReference = strings.TrimSpace(profile.APIKeyEnv) != "" || profile.APIKeyStored
+	}
 
 	// Build and persist into LOCALS first, committing live state only once BOTH
 	// succeed. A persist failure (read-only config, disk full) must not leave the
@@ -1195,7 +1259,9 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		// store before persisting, so config.json never holds the cleartext. The
 		// provider was already built above from runtimeProfile, which has the key.
 		secret := profile.APIKey
-		profile = config.SecureProviderProfile(profile, m.userConfigPath)
+		if !preserveExistingCredentialReference {
+			profile = config.SecureProviderProfile(profile, m.userConfigPath)
+		}
 		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
@@ -1328,6 +1394,8 @@ func (wizard *providerWizardState) render(width int, spinner string) string {
 		lines = append(lines, wizard.renderEndpointStep(innerWidth)...)
 	case providerWizardStepName:
 		lines = append(lines, wizard.renderNameStep(innerWidth)...)
+	case providerWizardStepAimlapiConfigured:
+		lines = append(lines, wizard.renderAimlapiConfiguredStep(innerWidth, spinner)...)
 	case providerWizardStepAimlapi:
 		if wizard.aimlapi != nil {
 			lines = append(lines, wizard.aimlapi.view(innerWidth, spinner)...)
@@ -1405,6 +1473,8 @@ func (wizard *providerWizardState) footerText() string {
 		return "Enter continue   ← back   Esc close"
 	case providerWizardStepName:
 		return "Enter/→ continue   ← back   Esc close"
+	case providerWizardStepAimlapiConfigured:
+		return "↑/↓ move   Enter/→ select   ← back   Esc close"
 	case providerWizardStepAimlapi:
 		return "type/↑↓ choose   Enter/→ continue   ← back   Esc close"
 	case providerWizardStepModel:
@@ -1430,7 +1500,7 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 	switch step {
 	case providerWizardStepProvider:
 		target = providerWizardProviderWidth
-	case providerWizardStepModel, providerWizardStepManage, providerWizardStepAimlapi:
+	case providerWizardStepModel, providerWizardStepManage, providerWizardStepAimlapi, providerWizardStepAimlapiConfigured:
 		target = providerWizardModelWidth
 	}
 	target = minInt(target, width)
@@ -1469,8 +1539,12 @@ func providerWizardStepLine(wizard *providerWizardState) string {
 			stepLabel{providerWizardStepDone, "4 ready"},
 		)
 	case providerWizardIsAimlapi(wizard.currentProvider()):
+		connectStep := providerWizardStepAimlapi
+		if aimlapiProfile(wizard.aimlapiExistingProfile) {
+			connectStep = providerWizardStepAimlapiConfigured
+		}
 		steps = append(steps,
-			stepLabel{providerWizardStepAimlapi, "3 connect"},
+			stepLabel{connectStep, "3 connect"},
 			stepLabel{providerWizardStepModel, "4 model"},
 			stepLabel{providerWizardStepDone, "5 ready"},
 		)
@@ -1514,6 +1588,36 @@ func (wizard *providerWizardState) renderMethodStep(width int) []string {
 		}
 		lines = append(lines, fitStyledLine(marker+surface(zeroTheme.ink).Render(option.label), width))
 		lines = append(lines, fitStyledLine("    "+zeroTheme.faint.Render(option.subtitle), width))
+	}
+	return lines
+}
+
+func (wizard *providerWizardState) renderAimlapiConfiguredStep(width int, spinner string) []string {
+	profileName := strings.TrimSpace(wizard.aimlapiExistingProfile.Name)
+	if profileName == "" {
+		profileName = "aimlapi"
+	}
+	lines := []string{zeroTheme.accent.Render("aimlapi.com is already configured")}
+	if wizard.aimlapiExistingBusy {
+		glyph := strings.TrimSpace(spinner)
+		if glyph == "" {
+			glyph = "•"
+		}
+		return append(lines, "", zeroTheme.faint.Render(glyph+" checking balance"))
+	}
+	options := []struct{ label, hint string }{
+		{"Use existing configuration", profileName},
+		{"Configure again", "New user or another API key"},
+	}
+	for index, option := range options {
+		marker := "  "
+		style := zeroTheme.ink
+		if index == wizard.aimlapiConfiguredCursor {
+			marker = "❯ "
+			style = zeroTheme.accent.Bold(true)
+		}
+		lines = append(lines, marker+style.Render(option.label))
+		lines = append(lines, "    "+zeroTheme.faint.Render(option.hint))
 	}
 	return lines
 }
@@ -1931,14 +2035,21 @@ func maskedProviderWizardKey(value string) string {
 }
 
 func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string, baseURL string, profileName string) config.ProviderProfile {
+	resolvedBaseURL := firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL)
 	profile := config.ProviderProfile{
-		Name:          providerWizardDisplayName(provider, baseURL, profileName),
-		ProviderKind:  providerWizardProviderKind(provider),
-		CatalogID:     provider.ID,
-		BaseURL:       firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL),
-		APIFormat:     providerWizardAPIFormat(provider),
-		CustomHeaders: maps.Clone(provider.CustomHeaders),
-		Model:         firstProviderDisplayValue(model, provider.DefaultModel),
+		Name:         providerWizardDisplayName(provider, baseURL, profileName),
+		ProviderKind: providerWizardProviderKind(provider),
+		CatalogID:    provider.ID,
+		BaseURL:      resolvedBaseURL,
+		APIFormat:    providerWizardAPIFormat(provider),
+		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
+	}
+	// Catalog custom headers (e.g. aimlapi.com's partner attribution) belong to the
+	// catalog endpoint: the resolver only applies them when the base URL is the
+	// default, so a profile built against a staging/proxy/custom override must not
+	// bake them in either — otherwise attribution leaks to an arbitrary host.
+	if sameProviderBaseURL(resolvedBaseURL, provider.DefaultBaseURL) {
+		profile.CustomHeaders = maps.Clone(provider.CustomHeaders)
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		profile.APIKey = apiKey
@@ -1951,6 +2062,16 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		profile.APIKeyEnv = env
 	}
 	return profile
+}
+
+// sameProviderBaseURL reports whether two base URLs address the same endpoint,
+// normalizing case and a trailing slash — mirroring the resolver's sameBaseURL so
+// the wizard bakes catalog headers on exactly the endpoints the resolver would.
+func sameProviderBaseURL(left string, right string) bool {
+	return strings.EqualFold(
+		strings.TrimRight(strings.TrimSpace(left), "/"),
+		strings.TrimRight(strings.TrimSpace(right), "/"),
+	)
 }
 
 func providerWizardEndpointError(value string) string {

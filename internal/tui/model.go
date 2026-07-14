@@ -1128,6 +1128,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case aimlapiOnboardMsg:
 		return m.applyAimlapiOnboard(msg)
+	case aimlapiExistingBalanceMsg:
+		return m.applyExistingAimlapiBalance(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
 	case providerManagerCredsMsg:

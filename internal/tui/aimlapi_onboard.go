@@ -169,7 +169,7 @@ func (m model) aimlapiOnboardAnimating() bool {
 	if aimlapiStateAnimating(m.setup.aimlapi) {
 		return true
 	}
-	return m.providerWizard != nil && aimlapiStateAnimating(m.providerWizard.aimlapi)
+	return m.providerWizard != nil && (m.providerWizard.aimlapiExistingBusy || aimlapiStateAnimating(m.providerWizard.aimlapi))
 }
 
 func aimlapiStateAnimating(s *aimlapiOnboardState) bool {

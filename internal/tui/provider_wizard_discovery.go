@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
+	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -22,6 +25,13 @@ type providerModelsDiscoveredMsg struct {
 	// secrets are redacted from any surfaced error (e.g. a resolved OAuth token
 	// used to authenticate discovery, which must never be logged or shown).
 	secrets []string
+}
+
+type aimlapiExistingBalanceMsg struct {
+	wizard  *providerWizardState
+	gen     int
+	balance aimlapi.BalanceResult
+	err     error
 }
 
 func (m model) advanceProviderWizard() (model, tea.Cmd) {
@@ -43,6 +53,18 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	// A non-OAuth provider that already has a key in the credential store: offer
 	// keep/replace/remove before re-entering credentials.
 	if m.providerWizard.step == providerWizardStepProvider && !m.providerWizard.oauthMode {
+		if providerWizardIsAimlapi(m.providerWizard.currentProvider()) {
+			if profile, runtimeKey, ok := m.existingAimlapiConfiguration(); ok {
+				m.providerWizard.aimlapiExistingProfile = profile
+				m.providerWizard.aimlapiRuntimeKey = runtimeKey
+				m.providerWizard.aimlapiConfiguredCursor = 0
+				m.providerWizard.err = ""
+				m.providerWizard.step = providerWizardStepAimlapiConfigured
+				return m, nil
+			}
+			m.providerWizard.enterAimlapi()
+			return m, nil
+		}
 		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share
 			// the same CatalogID — matching on CatalogID would block creating a
@@ -65,6 +87,113 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		return m, m.providerModelDiscoveryCmd()
 	}
 	return m, nil
+}
+
+// existingAimlapiConfiguration returns a usable persisted credential source and
+// its current runtime key. The active aimlapi profile wins; otherwise the first
+// usable saved profile is used. A bare AIMLAPI_API_KEY is represented as an env
+// profile so choosing it never snapshots the secret into the credential store.
+func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, bool) {
+	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
+	activeName := strings.TrimSpace(m.providerProfile.Name)
+	if activeName != "" {
+		for index, profile := range profiles {
+			if strings.EqualFold(strings.TrimSpace(profile.Name), activeName) && aimlapiProfile(profile) {
+				profiles[0], profiles[index] = profiles[index], profiles[0]
+				break
+			}
+		}
+	}
+	var store config.APIKeyGetter
+	if strings.TrimSpace(m.userConfigPath) != "" {
+		store, _ = config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath))
+	}
+	for _, persisted := range profiles {
+		if !aimlapiProfile(persisted) {
+			continue
+		}
+		resolved := persisted
+		if strings.TrimSpace(resolved.APIKey) == "" && strings.TrimSpace(resolved.APIKeyEnv) != "" {
+			resolved.APIKey = strings.TrimSpace(os.Getenv(resolved.APIKeyEnv))
+		}
+		resolved = config.ApplyStoredAPIKey(resolved, store)
+		if key := strings.TrimSpace(resolved.APIKey); key != "" {
+			// ResolvedConfig materializes APIKeyEnv into APIKey for runtime use.
+			// Strip that materialized value (and any loaded stored key) from the
+			// persisted copy so finalization retains the reference, not the secret.
+			if strings.TrimSpace(persisted.APIKeyEnv) != "" || persisted.APIKeyStored {
+				persisted.APIKey = ""
+			}
+			return persisted, key, true
+		}
+	}
+	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
+		descriptor, err := providercatalog.Require("aimlapi")
+		if err == nil {
+			return config.ProviderProfile{
+				Name:         descriptor.ID,
+				CatalogID:    descriptor.ID,
+				ProviderKind: providerWizardProviderKind(descriptor),
+				BaseURL:      descriptor.DefaultBaseURL,
+				APIKeyEnv:    "AIMLAPI_API_KEY",
+				APIFormat:    providerWizardAPIFormat(descriptor),
+				Model:        descriptor.DefaultModel,
+			}, key, true
+		}
+	}
+	return config.ProviderProfile{}, "", false
+}
+
+func aimlapiProfile(profile config.ProviderProfile) bool {
+	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "aimlapi") ||
+		strings.EqualFold(strings.TrimSpace(profile.Name), "aimlapi")
+}
+
+func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard.step != providerWizardStepAimlapiConfigured || wizard.aimlapiExistingBusy {
+		return m, nil
+	}
+	wizard.aimlapiExistingBusy = true
+	wizard.err = ""
+	wizard.aimlapiExistingGen++
+	gen := wizard.aimlapiExistingGen
+	key := wizard.aimlapiRuntimeKey
+	cmd := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
+		defer cancel()
+		balance, err := aimlapiOnboardClient().GetBalance(ctx, key)
+		return aimlapiExistingBalanceMsg{wizard: wizard, gen: gen, balance: balance, err: err}
+	}
+	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+}
+
+func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil || wizard != msg.wizard || wizard.step != providerWizardStepAimlapiConfigured || msg.gen != wizard.aimlapiExistingGen {
+		return m, nil
+	}
+	wizard.aimlapiExistingBusy = false
+	if msg.err != nil {
+		if aimlapiIsUnauthorized(msg.err) {
+			wizard.err = "The existing AIMLAPI API key is invalid. Choose Configure again."
+		} else {
+			wizard.err = redaction.ErrorMessage(msg.err, redaction.Options{ExtraSecretValues: []string{wizard.aimlapiRuntimeKey}})
+		}
+		return m, nil
+	}
+	wizard.apiKey = wizard.aimlapiRuntimeKey
+	if msg.balance.LowBalance {
+		state := newAimlapiOnboard(browser.OpenURL)
+		state.apiKey = wizard.aimlapiRuntimeKey
+		state.byKey = true
+		state.step = aimlapiStepLowBalance
+		wizard.aimlapi = state
+		wizard.step = providerWizardStepAimlapi
+		return m, nil
+	}
+	wizard.step = providerWizardStepModel
+	return m, m.providerModelDiscoveryCmd()
 }
 
 func (m model) providerModelDiscoveryCmd() tea.Cmd {
