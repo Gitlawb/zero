@@ -2647,6 +2647,98 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 	}
 }
 
+func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	now := base
+	m := model{
+		now:                   func() time.Time { return now },
+		terminalFocused:       true,
+		lastCharTime:          base,
+		composerCursorVisible: true,
+	}
+
+	// Each iteration simulates a keystroke (refreshing lastCharTime) followed by
+	// a blink tick within the typing-idle threshold: cursor must stay solid
+	// rather than toggling off, however many ticks land.
+	for i := 0; i < 3; i++ {
+		now = now.Add(200 * time.Millisecond)
+		m.lastCharTime = now
+		updated, _ := m.Update(composerBlinkMsg{})
+		m = updated.(model)
+		if !m.composerCursorVisible {
+			t.Fatalf("tick %d: expected cursor to stay visible while typing, got hidden", i)
+		}
+	}
+}
+
+func TestComposerBlinkHiddenWhileUnfocused(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		lastCharTime:          base.Add(-time.Hour), // long idle, irrelevant while unfocused
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+
+	for i := 0; i < 3; i++ {
+		updated, _ = m.Update(composerBlinkMsg{})
+		m = updated.(model)
+		if m.composerCursorVisible {
+			t.Fatalf("tick %d: expected cursor to stay hidden while unfocused, got visible", i)
+		}
+	}
+}
+
+func TestComposerBlinkResumesAfterRefocusAndIdle(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		lastCharTime:          base.Add(-time.Hour), // stale: well past the idle threshold
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if !m.terminalFocused {
+		t.Fatal("expected terminalFocused to be true after FocusMsg")
+	}
+
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	first := m.composerCursorVisible
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	second := m.composerCursorVisible
+	if first == second {
+		t.Fatalf("expected blink to toggle once idle+focused, got %v then %v", first, second)
+	}
+}
+
+func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		terminalFocused:       true,
+		lastCharTime:          base.Add(-time.Hour),
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	if m.composerCursorVisible {
+		t.Fatal("expected cursor to toggle off on first idle+focused tick")
+	}
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected cursor to toggle back on on second idle+focused tick")
+	}
+}
+
 func TestScrimViewportLine(t *testing.T) {
 	// Blank lines are left untouched (no scrim).
 	if got := scrimViewportLine("   ", 10); got != "   " {

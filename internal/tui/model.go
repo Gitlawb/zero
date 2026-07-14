@@ -199,8 +199,13 @@ type model struct {
 	// lastKeyTime tracks every keypress timestamp for burst calculation.
 	lastKeyTime time.Time
 	// burstCount counts consecutive keypresses within 100ms (paste mode).
-	burstCount    int
-	queuedMessage string
+	burstCount int
+	// terminalFocused tracks whether the terminal window currently has focus, per
+	// tea.FocusMsg/tea.BlurMsg. Defaults to true since many terminals/multiplexers
+	// never send focus events at all, and defaulting to "unfocused" would wrongly
+	// hide the cursor for those users.
+	terminalFocused bool
+	queuedMessage   string
 	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
 	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
 	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
@@ -770,6 +775,7 @@ func newModel(ctx context.Context, options Options) model {
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
+		terminalFocused:             true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
 		projectConfigPath:           options.ProjectConfigPath,
@@ -880,6 +886,11 @@ const (
 
 // composerCursorBlinkInterval is the on/off period of the composer text cursor.
 const composerCursorBlinkInterval = 530 * time.Millisecond
+
+// composerTypingIdleThreshold is how long a typing pause must last before the
+// cursor resumes blinking; comfortably above normal inter-keystroke gaps
+// (~150-300ms) so it won't flicker mid-sentence.
+const composerTypingIdleThreshold = 500 * time.Millisecond
 
 // composerBlinkMsg toggles the composer cursor's visibility each tick. The custom
 // composer render draws its own cursor (not textinput's), so it drives its own
@@ -1074,7 +1085,14 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
-		m.composerCursorVisible = !m.composerCursorVisible
+		switch {
+		case !m.terminalFocused:
+			m.composerCursorVisible = false // hidden while unfocused
+		case m.now().Sub(m.lastCharTime) < composerTypingIdleThreshold:
+			m.composerCursorVisible = true // solid while actively typing
+		default:
+			m.composerCursorVisible = !m.composerCursorVisible // idle + focused: blink as before
+		}
 		return m, composerBlinkCmd()
 	case tea.BackgroundColorMsg:
 		// Terminal background-color reply (from Init's RequestBackgroundColor). In
@@ -1870,11 +1888,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recomputeSuggestions()
 		return m, cmd
 	case tea.FocusMsg:
+		m.terminalFocused = true
 		if m.notifier != nil {
 			m.notifier.SetFocused(true)
 		}
 		return m, nil
 	case tea.BlurMsg:
+		m.terminalFocused = false
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
@@ -2541,7 +2561,11 @@ func (m model) View() tea.View {
 	if m.altScreen {
 		view.BackgroundColor = zeroTheme.bgPanel
 	}
-	view.ReportFocus = m.notifier != nil
+	// Always requested, independent of the notifier: the composer cursor's
+	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
+	// regardless of notification config. A standard, widely supported DEC
+	// private mode (CSI ?1004h) that unsupported terminals silently ignore.
+	view.ReportFocus = true
 	// Voice mode's Space-hold gesture needs key-release events (Kitty protocol).
 	// Request them only while voice mode is on — the renderer re-sends the request
 	// only when the value changes, so gating this costs nothing (§10).
