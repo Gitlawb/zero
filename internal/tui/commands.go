@@ -54,7 +54,6 @@ const (
 	commandGoal
 	commandVoice
 	commandSTTModel
-	commandPets
 	commandUnknown
 )
 
@@ -114,9 +113,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/plan",
-		usage:       "/plan [status|on|off]",
+		usage:       "/plan [open|off]",
 		group:       commandGroupSession,
-		description: "Show plan status, or enter/exit read-only planning mode.",
+		description: "Toggle plan mode, or open the plan file / exit.",
 		kind:        commandPlan,
 	},
 	{
@@ -361,14 +360,6 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupMeta,
 		description: "Show available commands.",
 		kind:        commandHelp,
-	},
-	{
-		name:        "/pets",
-		aliases:     []string{"/pet"},
-		usage:       "/pets [name|off]",
-		group:       commandGroupMeta,
-		description: "Choose, preview, or hide a terminal companion.",
-		kind:        commandPets,
 	},
 	{
 		name:        "/doctor",
