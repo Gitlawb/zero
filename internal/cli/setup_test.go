@@ -200,6 +200,33 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	}
 }
 
+func TestSaveSetupProviderAimlapiEnvReferenceAndOverrideHeaders(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "aimlapi",
+		BaseURL:   "https://staging.example/v1",
+		Model:     "anthropic/claude-sonnet-5",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+	if result.Provider.APIKey != "" || result.Provider.APIKeyEnv != "AIMLAPI_API_KEY" {
+		t.Fatalf("runtime profile did not retain AIMLAPI_API_KEY reference: %+v", result.Provider)
+	}
+	if len(result.Provider.CustomHeaders) != 0 {
+		t.Fatalf("catalog headers leaked to first-run override: %#v", result.Provider.CustomHeaders)
+	}
+	persisted := readFileConfig(t, configPath).Providers[0]
+	if persisted.APIKey != "" || persisted.APIKeyEnv != "AIMLAPI_API_KEY" || persisted.APIKeyStored {
+		t.Fatalf("persisted credential source changed: %+v", persisted)
+	}
+	if len(persisted.CustomHeaders) != 0 {
+		t.Fatalf("persisted override contains catalog headers: %#v", persisted.CustomHeaders)
+	}
+}
+
 func TestSaveSetupProviderStoresCustomEndpointSelection(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 

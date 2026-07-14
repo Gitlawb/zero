@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -424,20 +425,34 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 	if apiKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
 		apiKeyEnv = descriptor.AuthEnvVars[0]
 	}
+	baseURL := firstNonEmptyCLI(options.baseURL, descriptor.DefaultBaseURL)
+	var catalogHeaders map[string]string
+	if sameProviderSetupBaseURL(baseURL, descriptor.DefaultBaseURL) {
+		catalogHeaders = descriptor.CustomHeaders
+	}
 	profile := config.ProviderProfile{
 		Name:            name,
 		ProviderKind:    providerKindForDescriptor(descriptor),
 		CatalogID:       descriptor.ID,
-		BaseURL:         firstNonEmptyCLI(options.baseURL, descriptor.DefaultBaseURL),
+		BaseURL:         baseURL,
 		APIKeyEnv:       apiKeyEnv,
 		APIFormat:       firstAPIFormat(descriptor),
 		AuthHeader:      strings.TrimSpace(options.authHeader),
 		AuthScheme:      normalizeAuthScheme(options.authScheme),
 		AuthHeaderValue: strings.TrimSpace(options.authHeaderValue),
-		CustomHeaders:   mergeProviderHeaders(descriptor.CustomHeaders, options.customHeaders),
-		Model:           firstNonEmptyCLI(options.model, descriptor.DefaultModel),
+		// Catalog attribution belongs only to the catalog endpoint. Explicit
+		// user headers still apply to an override/staging/proxy endpoint.
+		CustomHeaders: mergeProviderHeaders(catalogHeaders, options.customHeaders),
+		Model:         firstNonEmptyCLI(options.model, descriptor.DefaultModel),
 	}
 	return profile, nil
+}
+
+func sameProviderSetupBaseURL(left string, right string) bool {
+	return strings.EqualFold(
+		strings.TrimRight(strings.TrimSpace(left), "/"),
+		strings.TrimRight(strings.TrimSpace(right), "/"),
+	)
 }
 
 func selectProviderForCheck(resolved config.ResolvedConfig, name string) (config.ProviderProfile, error) {
@@ -554,7 +569,33 @@ func mergeProviderHeaders(base map[string]string, overrides map[string]string) m
 		merged = map[string]string{}
 	}
 	for key, value := range overrides {
+		// HTTP header names are case-insensitive and request construction
+		// canonicalizes them (http.Header.Set), so an override that differs from a
+		// base key only in case must replace that key's value in place — otherwise
+		// both survive as distinct map entries and race non-deterministically at
+		// build time. Keep the existing spelling (the catalog's, which the resolver
+		// re-merges verbatim); only a genuinely new header is added as typed.
+		if existing, ok := headerKeyFold(merged, key); ok {
+			merged[existing] = value
+			continue
+		}
 		merged[key] = value
 	}
 	return merged
+}
+
+// headerKeyFold returns the key in headers whose canonical HTTP form matches key,
+// so a case-insensitive override lands on the existing entry instead of adding a
+// colliding duplicate.
+func headerKeyFold(headers map[string]string, key string) (string, bool) {
+	if _, ok := headers[key]; ok {
+		return key, true
+	}
+	canonical := http.CanonicalHeaderKey(key)
+	for existing := range headers {
+		if http.CanonicalHeaderKey(existing) == canonical {
+			return existing, true
+		}
+	}
+	return "", false
 }

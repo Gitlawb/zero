@@ -376,6 +376,55 @@ func TestRunProvidersAddAimlapiWritesDefaultHeaders(t *testing.T) {
 	}
 }
 
+func TestRunProvidersAddAimlapiMixedCaseHeaderOverride(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	// A differently-cased override must replace the catalog header in place, not
+	// leave both spellings behind to race when request construction canonicalizes.
+	exitCode := runWithDeps([]string{
+		"providers", "add", "aimlapi",
+		"--header", "x-aimlapi-partner-id=part_override",
+	}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	profile := readFileConfig(t, configPath).Providers[0]
+	if _, ok := profile.CustomHeaders["x-aimlapi-partner-id"]; ok {
+		t.Fatalf("lowercase override left a duplicate key: %#v", profile.CustomHeaders)
+	}
+	if profile.CustomHeaders["X-AIMLAPI-Partner-ID"] != "part_override" {
+		t.Fatalf("override did not win on the canonical key: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestRunProvidersAddAimlapiOverrideDropsCatalogHeaders(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	exitCode := runWithDeps([]string{
+		"providers", "add", "aimlapi",
+		"--base-url", "https://staging.example/v1",
+		"--header", "X-Environment=staging",
+	}, &stdout, &stderr, providerSetupDeps(configPath))
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	profile := readFileConfig(t, configPath).Providers[0]
+	if _, ok := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; ok {
+		t.Fatalf("partner attribution leaked to overridden endpoint: %#v", profile.CustomHeaders)
+	}
+	if _, ok := profile.CustomHeaders["X-AIMLAPI-Integration-Repo"]; ok {
+		t.Fatalf("integration attribution leaked to overridden endpoint: %#v", profile.CustomHeaders)
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("explicit user header was dropped: %#v", profile.CustomHeaders)
+	}
+}
+
 func TestRunProvidersAddWritesCustomHeaders(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
