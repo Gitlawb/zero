@@ -14,18 +14,22 @@ type EngineOptions struct {
 	Store         *GrantStore
 	Backend       Backend
 	Scope         *Scope
+	// SensitiveEnvKeys adds config-derived credential variable names to the
+	// catalog and namespace secrets scrubbed from sandboxed commands.
+	SensitiveEnvKeys []string
 }
 
 type Engine struct {
-	workspaceRoot   string
-	policy          Policy
-	store           *GrantStore
-	backend         Backend
-	scope           *Scope
-	sessionGrants   *memoryGrantSet
-	sessionProfiles *permissionProfileGrantSet
-	turnProfiles    *permissionProfileGrantSet
-	commandPrefixes *commandPrefixGrantSet
+	workspaceRoot    string
+	policy           Policy
+	store            *GrantStore
+	backend          Backend
+	scope            *Scope
+	sensitiveEnvKeys []string
+	sessionGrants    *memoryGrantSet
+	sessionProfiles  *permissionProfileGrantSet
+	turnProfiles     *permissionProfileGrantSet
+	commandPrefixes  *commandPrefixGrantSet
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -49,15 +53,16 @@ func NewEngine(options EngineOptions) *Engine {
 		scope = newScopeBestEffort(workspaceRoot)
 	}
 	return &Engine{
-		workspaceRoot:   workspaceRoot,
-		policy:          policy,
-		store:           options.Store,
-		backend:         options.Backend,
-		scope:           scope,
-		sessionGrants:   newMemoryGrantSet(),
-		sessionProfiles: newPermissionProfileGrantSet(),
-		turnProfiles:    newPermissionProfileGrantSet(),
-		commandPrefixes: newCommandPrefixGrantSet(),
+		workspaceRoot:    workspaceRoot,
+		policy:           policy,
+		store:            options.Store,
+		backend:          options.Backend,
+		scope:            scope,
+		sensitiveEnvKeys: normalizeSensitiveEnvKeys(options.SensitiveEnvKeys),
+		sessionGrants:    newMemoryGrantSet(),
+		sessionProfiles:  newPermissionProfileGrantSet(),
+		turnProfiles:     newPermissionProfileGrantSet(),
+		commandPrefixes:  newCommandPrefixGrantSet(),
 	}
 }
 

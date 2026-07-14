@@ -815,12 +815,26 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 	policy := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox)
 	backend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Store:         store,
-		Backend:       backend,
-		Scope:         scope,
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           policy,
+		Store:            store,
+		Backend:          backend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	}), nil
+}
+
+func providerSensitiveEnvKeys(resolved config.ResolvedConfig) []string {
+	keys := make([]string, 0, len(resolved.Providers)+1)
+	for _, profile := range resolved.Providers {
+		if key := strings.TrimSpace(profile.APIKeyEnv); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if key := strings.TrimSpace(resolved.Provider.APIKeyEnv); key != "" {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto

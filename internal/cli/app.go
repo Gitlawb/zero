@@ -755,11 +755,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
-		Store:         sandboxStore,
-		Backend:       sandboxBackend,
-		Scope:         scope,
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
+		Store:            sandboxStore,
+		Backend:          sandboxBackend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
