@@ -177,6 +177,47 @@ func TestRunWorktreesRelease(t *testing.T) {
 	}
 }
 
+func TestRunWorktreesReleaseNormalizesRelativePath(t *testing.T) {
+	// git worktree unlock matches against the path git recorded when the
+	// worktree was created, so a relative argument (resolved against
+	// whatever directory the caller happens to be running `zero` from) can
+	// fail to match. Chdir into a known directory and pass a relative
+	// argument to confirm it reaches releaseWorktree as an absolute path.
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	worktreeDir := filepath.Join(parent, "task-a")
+	if err := os.Mkdir(worktreeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(parent); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	var releasedPath string
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "task-a"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releasedPath = path
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if releasedPath != worktreeDir {
+		t.Fatalf("released path = %q, want absolute %q", releasedPath, worktreeDir)
+	}
+}
+
 func TestRunWorktreesReleaseRequiresPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -133,7 +134,16 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 	if path == "" {
 		return writeExecUsageError(stderr, "worktrees release requires a worktree path")
 	}
-	if err := deps.releaseWorktree(context.Background(), worktrees.Options{}, path); err != nil {
+	// git worktree unlock matches against the path git recorded when the
+	// worktree was created, so a relative argument here (resolved against
+	// whatever directory the caller happens to be running in, not
+	// necessarily the worktree's own) can fail to match. Resolve to absolute
+	// up front so the unlock target is unambiguous regardless of cwd.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if err := deps.releaseWorktree(context.Background(), worktrees.Options{}, absPath); err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 	if _, err := fmt.Fprintf(stdout, "released %s\n", path); err != nil {

@@ -89,6 +89,9 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 
 func TestReleaseUnlocksWorktree(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "task-a")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runner := &fakeRunner{results: []CommandResult{{}}}
 
 	if err := Release(context.Background(), Options{RunGit: runner.Run}, path); err != nil {
@@ -105,8 +108,34 @@ func TestReleaseUnlocksWorktree(t *testing.T) {
 	}
 }
 
+func TestReleaseFallsBackToCwdWhenWorktreeDirMissing(t *testing.T) {
+	// A caller who deletes a locked worktree directory by hand instead of
+	// releasing it first leaves path itself gone; Release must still be able
+	// to run `git worktree unlock` (from the main repo, via options.Cwd) so
+	// the orphaned lock can be cleared and the entry later pruned.
+	missingPath := filepath.Join(t.TempDir(), "already-deleted")
+	repoRoot := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{{}}}
+
+	if err := Release(context.Background(), Options{RunGit: runner.Run, Cwd: repoRoot}, missingPath); err != nil {
+		t.Fatalf("Release returned error: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected exactly one git call, got %#v", runner.calls)
+	}
+	if runner.calls[0].dir != repoRoot {
+		t.Fatalf("git worktree unlock dir = %q, want fallback to Cwd %q", runner.calls[0].dir, repoRoot)
+	}
+	if got := runner.commandLine(0); got != "git worktree unlock "+missingPath {
+		t.Fatalf("git worktree unlock command = %q, want the original path as the unlock target", got)
+	}
+}
+
 func TestReleasePropagatesGitFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "task-a")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runner := &fakeRunner{results: []CommandResult{{ExitCode: 1, Stderr: "fatal: not a working tree"}}}
 
 	err := Release(context.Background(), Options{RunGit: runner.Run}, path)
@@ -391,6 +420,56 @@ func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "in use") {
 		t.Errorf("error = %q, want it to include the git failure message", err.Error())
+	}
+}
+
+func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
+	tempDir := t.TempDir()
+	baseDir := filepath.Join(tempDir, "zero-worktrees")
+	repoRoot := filepath.Join(tempDir, "repo")
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
+
+	stalePathA := filepath.Join(repoDir, "stale-task-a")
+	stalePathB := filepath.Join(repoDir, "stale-task-b")
+	for _, path := range []string{stalePathA, stalePathB} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	twoDaysAgo := time.Now().Add(-48 * time.Hour)
+	for _, path := range []string{stalePathA, stalePathB} {
+		if err := os.Chtimes(path, twoDaysAgo, twoDaysAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: repoRoot},
+			{Stdout: "worktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
+			{ExitCode: 0},                                             // status --porcelain <stalePathA> (clean)
+			{ExitCode: 1, Stderr: "fatal: unable to remove worktree A"}, // remove stalePathA
+			{ExitCode: 0},                                             // status --porcelain <stalePathB> (clean)
+			{ExitCode: 1, Stderr: "fatal: unable to remove worktree B"}, // remove stalePathB
+			{ExitCode: 0},                                             // final prune
+		},
+	}
+
+	err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour)
+	if err == nil {
+		t.Fatal("expected Clean to report both failed removals")
+	}
+	// Both failures must survive in the returned error, not just the last one
+	// to occur — overwriting lastErr instead of joining would silently drop
+	// worktree A's failure once worktree B's removal is also attempted.
+	if !strings.Contains(err.Error(), "unable to remove worktree A") {
+		t.Errorf("error = %q, missing worktree A's failure", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unable to remove worktree B") {
+		t.Errorf("error = %q, missing worktree B's failure", err.Error())
 	}
 }
 

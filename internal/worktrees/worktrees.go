@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -161,7 +162,18 @@ func Release(ctx context.Context, options Options, path string) error {
 	if runGit == nil {
 		runGit = defaultRunGit
 	}
-	if _, err := gitOutput(ctx, runGit, path, "worktree", "unlock", path); err != nil {
+	// git needs a working directory that still exists to run in. path itself
+	// normally works (it's the worktree being unlocked), but if a caller
+	// manually deleted a locked worktree directory instead of releasing it
+	// first, path is gone; fall back to options.Cwd (the main repo) so the
+	// leaked, now-orphaned lock can still be unlocked and later pruned.
+	dir := path
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if cwd, cwdErr := resolveCwd(options.Cwd); cwdErr == nil {
+			dir = cwd
+		}
+	}
+	if _, err := gitOutput(ctx, runGit, dir, "worktree", "unlock", path); err != nil {
 		return fmt.Errorf("unlock git worktree: %w", err)
 	}
 	return nil
@@ -423,7 +435,10 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 			// invocation, so checking only the returned error would silently
 			// treat a failed removal (busy, permission denied) as success.
 			if _, err := gitOutput(ctx, runGit, repoRoot, "worktree", "remove", "--force", entry.path); err != nil {
-				lastErr = fmt.Errorf("remove worktree %s: %w", entry.path, err)
+				// errors.Join, not a plain overwrite: multiple stale worktrees can
+				// fail removal in the same Clean pass (locking, permissions), and
+				// only reporting the last one would hide the others from the caller.
+				lastErr = errors.Join(lastErr, fmt.Errorf("remove worktree %s: %w", entry.path, err))
 			}
 		}
 	}
