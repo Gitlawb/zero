@@ -75,6 +75,22 @@ type ExchangeResult struct {
 	APIKeyID string `json:"apiKeyId"`
 }
 
+// TopUpByKeyRequest funds a partner-checkout session with the API key that owns
+// the account (Path A / env key), instead of an email session.
+type TopUpByKeyRequest struct {
+	SessionToken     string
+	AmountUSDMinor   int
+	PaymentSessionID string // idempotency: same id → same checkout, never a second charge
+	AutoTopUp        bool   // enroll the account in automatic top-up at checkout (card, saved off-session)
+	SuccessURL       string
+	CancelURL        string
+}
+
+// TopUpByKeyResult is the hosted checkout returned by TopUpByKey.
+type TopUpByKeyResult struct {
+	Checkout PaymentSession `json:"checkout"`
+}
+
 // APIError is a non-2xx HTTP response from the aimlapi.com API. Status carries the
 // code so callers can branch (e.g. 401 = bad key, 5xx = retryable).
 type APIError struct {
@@ -156,6 +172,41 @@ func (c *Client) Exchange(ctx context.Context, bearer string, sessionToken strin
 	var result ExchangeResult
 	err := c.request(ctx, http.MethodPost, strings.TrimRight(c.endpoints.AppBaseURL, "/")+"/v3/partner-checkout/sessions/"+urlPathEscape(sessionToken)+"/exchange", bearer, nil, &result)
 	return result, err
+}
+
+// TopUpByKey funds a partner-checkout session using the raw API key that owns the
+// account (Path A / env key), returning the hosted checkout. It binds the session
+// to the key's account server-side, so no email session is needed and no key is
+// exchanged. req.PaymentSessionID makes a retry idempotent (same id → same
+// checkout, never a second charge).
+func (c *Client) TopUpByKey(ctx context.Context, apiKey string, req TopUpByKeyRequest) (TopUpByKeyResult, error) {
+	body := map[string]any{
+		"sessionToken":     req.SessionToken,
+		"amountUsdMinor":   req.AmountUSDMinor,
+		"paymentSessionId": req.PaymentSessionID,
+	}
+	if req.AutoTopUp {
+		body["autoTopUp"] = true
+	}
+	if strings.TrimSpace(req.SuccessURL) != "" {
+		body["successUrl"] = strings.TrimSpace(req.SuccessURL)
+	}
+	if strings.TrimSpace(req.CancelURL) != "" {
+		body["cancelUrl"] = strings.TrimSpace(req.CancelURL)
+	}
+	var result TopUpByKeyResult
+	err := c.request(ctx, http.MethodPost, c.billingV2URL("/billing/topup"), apiKey, body, &result)
+	return result, err
+}
+
+// billingV2URL builds a v2 billing API URL from the inference base. The top-up
+// endpoint lives next to the balance endpoint on the API gateway, one version up
+// (".../v1" → ".../v2/billing/..."), so it re-anchors the version while keeping any
+// host/prefix an override supplied.
+func (c *Client) billingV2URL(path string) string {
+	base := strings.TrimRight(strings.TrimSpace(c.endpoints.InferenceBaseURL), "/")
+	base = strings.TrimSuffix(base, "/v1")
+	return strings.TrimRight(base, "/") + "/v2" + path
 }
 
 func (c *Client) request(ctx context.Context, method string, endpoint string, bearer string, body any, out any) error {

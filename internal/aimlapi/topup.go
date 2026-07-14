@@ -2,6 +2,7 @@ package aimlapi
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -58,6 +59,20 @@ func ParseAmountUSD(value string) (int, error) {
 	return minor, nil
 }
 
+// NewPaymentSessionID returns a random UUIDv4-shaped idempotency id for a top-up.
+// The caller generates it once per top-up intent and reuses it on retry so the
+// backend (and Stripe) coalesce retries onto the same checkout instead of a
+// second charge.
+func NewPaymentSessionID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
 func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (PartnerCheckoutSession, error) {
 	deadline := time.Now().Add(pollTimeout)
 	for time.Now().Before(deadline) {
@@ -94,6 +109,43 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string) (Pa
 		}
 	}
 	return PartnerCheckoutSession{}, fmt.Errorf("timed out waiting for payment; re-run once the payment clears")
+}
+
+// pollUntilExchangeSettled follows an exchange claim that was already in flight
+// when a retry resumed the session. Exchange is single-flight and the raw key is
+// returned only to the winning request, so issuing Exchange again is never safe.
+// Once the claim completes, direct the user to the dashboard recovery path.
+func pollUntilExchangeSettled(ctx context.Context, client *Client, sessionToken string) error {
+	deadline := time.Now().Add(pollTimeout)
+	for time.Now().Before(deadline) {
+		session, err := client.GetSession(ctx, sessionToken)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			var apiErr APIError
+			if errors.As(err, &apiErr) && apiErr.Status < 500 {
+				return err
+			}
+			if err := sleepContext(ctx, pollInterval); err != nil {
+				return err
+			}
+			continue
+		}
+		switch session.Status {
+		case SessionStatusExchanged:
+			return fmt.Errorf("session was already exchanged; rotate the key from the aimlapi.com dashboard")
+		case SessionStatusExchanging:
+			if err := sleepContext(ctx, pollInterval); err != nil {
+				return err
+			}
+		case SessionStatusCancelled, SessionStatusExpired, SessionStatusFailed:
+			return fmt.Errorf("key provisioning %s; rotate the key from the aimlapi.com dashboard", session.Status)
+		default:
+			return fmt.Errorf("key provisioning returned to %s; re-run the top-up", session.Status)
+		}
+	}
+	return fmt.Errorf("timed out waiting for key provisioning; retry to check the same session")
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
