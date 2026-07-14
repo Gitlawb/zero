@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -616,6 +618,142 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 		}
 	}
 	return branch == "main" || branch == "master"
+}
+
+// DefaultBranchOptions resolves whether a branch is the repository's
+// default/protected branch.
+type DefaultBranchOptions struct {
+	Cwd    string
+	Remote string
+	Branch string // empty resolves the current branch
+	RunGit Runner
+}
+
+// IsDefaultBranch reports whether options.Branch (or, if empty, the current
+// branch) is the repository's default/protected branch, using the same check
+// Push already applies before refusing to push straight to it. It returns the
+// resolved branch name alongside the bool so callers that left Branch empty
+// don't need a second lookup.
+func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, string, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return false, "", err
+	}
+	runGit, _ := resolveRunners(options.RunGit, nil)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false, "", fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	branch := strings.TrimSpace(options.Branch)
+	if branch == "" {
+		branch, err = gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return false, "", fmt.Errorf("resolve current branch: %w", err)
+		}
+	}
+	remote := strings.TrimSpace(options.Remote)
+	if remote == "" {
+		remote = "origin"
+	}
+	return isDefaultBranch(ctx, runGit, root, remote, branch), branch, nil
+}
+
+// BranchOptions configures creating and checking out a new local branch.
+type BranchOptions struct {
+	Cwd    string
+	Name   string // full branch name, e.g. "alice/fix-typo"
+	DryRun bool
+	RunGit Runner
+}
+
+// BranchResult reports the branch that was (or, in dry-run, would be) created.
+type BranchResult struct {
+	Branch string `json:"branch"`
+}
+
+// CreateBranch checks out a new local branch named options.Name off the
+// current HEAD. DryRun previews the resolved name without mutating the
+// repository, matching the DryRun convention used by Commit and Push.
+func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return BranchResult{}, err
+	}
+	runGit, _ := resolveRunners(options.RunGit, nil)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return BranchResult{}, fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	name := strings.TrimSpace(options.Name)
+	if name == "" {
+		return BranchResult{}, fmt.Errorf("branch name required")
+	}
+	if options.DryRun {
+		return BranchResult{Branch: name}, nil
+	}
+	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name); err != nil {
+		return BranchResult{}, fmt.Errorf("create branch %q: %w", name, err)
+	}
+	return BranchResult{Branch: name}, nil
+}
+
+// CurrentGitUser resolves an identity to prefix generated branch names with:
+// git config user.name, falling back to the OS account username, falling
+// back to the literal "user" so BuildBranchName always gets a non-empty
+// input.
+func CurrentGitUser(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	if name, err := gitOutput(ctx, runGit, cwd, "config", "user.name"); err == nil && name != "" {
+		return name
+	}
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "user"
+}
+
+// slugComponentRe matches runs of characters not allowed in a branch-name
+// component, so SlugifyBranchComponent can collapse them to a single hyphen.
+var slugComponentRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+// maxSlugComponentLen caps a single branch-name component so generated names
+// stay short and readable, matching the "username/feature-name" convention
+// rather than sprawling into a full sentence.
+const maxSlugComponentLen = 40
+
+// SlugifyBranchComponent lowercases s and collapses any run of non
+// alphanumeric characters into a single hyphen, trimming leading/trailing
+// hyphens and capping length so the result is a safe, short branch-name
+// component.
+func SlugifyBranchComponent(s string) string {
+	slug := slugComponentRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "-")
+	slug = strings.Trim(slug, "-")
+	if len(slug) > maxSlugComponentLen {
+		slug = strings.Trim(slug[:maxSlugComponentLen], "-")
+	}
+	return slug
+}
+
+// BuildBranchName composes a "<user>/<slug>" branch name from a git identity
+// and a short feature slug (the convention used across Gitlawb tooling).
+// Empty or unsafe inputs fall back to "user" and "changes" respectively so
+// the result is always a valid, non-empty branch name.
+func BuildBranchName(gitUser, slug string) string {
+	userSlug := SlugifyBranchComponent(gitUser)
+	if userSlug == "" {
+		userSlug = "user"
+	}
+	featureSlug := SlugifyBranchComponent(slug)
+	if featureSlug == "" {
+		featureSlug = "changes"
+	}
+	return userSlug + "/" + featureSlug
 }
 
 type PROptions struct {

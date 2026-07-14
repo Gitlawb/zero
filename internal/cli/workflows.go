@@ -958,9 +958,15 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	branch, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.yes, options.dryRun, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
 		Remote:                 options.remote,
+		Branch:                 branch,
 		Force:                  options.force,
 		DryRun:                 options.dryRun,
 		AllowPushDefaultBranch: options.yes,
@@ -1010,6 +1016,11 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	branch, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.yes, false, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
 	if !options.json {
 		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
 			return exitCrash
@@ -1018,6 +1029,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
 		Remote:                 options.remote,
+		Branch:                 branch,
 		Force:                  options.force,
 		AllowPushDefaultBranch: options.yes,
 	})
@@ -1099,4 +1111,101 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 		return "", fmt.Errorf("provider returned empty commit message")
 	}
 	return msg, nil
+}
+
+// ensureFeatureBranch is the branch-naming step `zero changes push`/`pr` run
+// before pushing: pushing straight to the default branch is refused deeper in
+// zerogit.Push, so rather than surface that as a dead end, create and switch
+// to a conventionally named "<user>/<slug>" branch first. It returns the
+// branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
+// (zerogit.Push already treats an empty Branch that way). allowDefaultBranch
+// (the --yes flag) and dryRun both opt out via that "" return, leaving Push's
+// own guard/preview behavior on the default branch unaffected.
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, allowDefaultBranch bool, dryRun bool, deps appDeps) (string, error) {
+	if allowDefaultBranch || dryRun {
+		return "", nil
+	}
+
+	isDefault, currentBranch, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot})
+	if err != nil {
+		return "", err
+	}
+	if !isDefault {
+		return currentBranch, nil
+	}
+
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect changes: %w", err)
+	}
+
+	slug := fallbackBranchSlug(summary)
+	if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
+		if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
+			if !jsonMode {
+				fmt.Fprintln(stdout, "Generating branch name using LLM...")
+			}
+			genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			generated, genErr := generateAutoBranchSlug(genCtx, provider, resolved.Provider.Model, redactChangeSummary(summary))
+			cancel()
+			if genErr == nil && generated != "" {
+				slug = generated
+			}
+		}
+	}
+
+	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
+	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name})
+	if err != nil {
+		return "", fmt.Errorf("failed to create branch: %w", err)
+	}
+	if !jsonMode {
+		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
+	}
+	return result.Branch, nil
+}
+
+// fallbackBranchSlug derives a deterministic branch-name slug from a change
+// summary without calling an LLM, so ensureFeatureBranch still works when no
+// provider is configured.
+func fallbackBranchSlug(summary zerogit.ChangeSummary) string {
+	switch len(summary.Files) {
+	case 0:
+		return "changes"
+	case 1:
+		return zerogit.SlugifyBranchComponent(filepath.Base(summary.Files[0].Path))
+	default:
+		return fmt.Sprintf("update-%d-files", len(summary.Files))
+	}
+}
+
+// generateAutoBranchSlug asks the model for a short kebab-case slug
+// describing the diff, mirroring generateAutoCommitMessage's prompt shape.
+func generateAutoBranchSlug(ctx context.Context, provider zeroruntime.Provider, model string, summary zerogit.ChangeSummary) (string, error) {
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString("Analyze the following git diff and generate a short git branch name slug for it.\n")
+	promptBuilder.WriteString("The slug must be 2 to 5 lowercase words separated by hyphens (kebab-case), using only letters, digits, and hyphens, with no prefix like \"feature/\" or \"fix/\" and no surrounding quotes.\n")
+	promptBuilder.WriteString("Output ONLY the raw slug text, nothing else.\n\n")
+	promptBuilder.WriteString("Git Diff:\n")
+	promptBuilder.WriteString(summary.Diff)
+
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: promptBuilder.String()},
+		},
+	}
+	stream, err := provider.StreamCompletion(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	collected := zeroruntime.CollectStream(ctx, stream)
+	if collected.Error != "" {
+		return "", fmt.Errorf("%s", collected.Error)
+	}
+
+	slug := zerogit.SlugifyBranchComponent(collected.Text)
+	if slug == "" {
+		return "", fmt.Errorf("provider returned empty branch slug")
+	}
+	return slug, nil
 }

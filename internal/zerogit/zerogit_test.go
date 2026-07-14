@@ -727,3 +727,151 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateBranch(t *testing.T) {
+	t.Run("HappyPath", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "Switched to a new branch 'alice/fix-typo'\n"},
+		}}
+
+		result, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			Name:   "alice/fix-typo",
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("CreateBranch returned error: %v", err)
+		}
+		if result.Branch != "alice/fix-typo" {
+			t.Fatalf("unexpected branch: %#v", result)
+		}
+		if got := runner.commandLine(1); got != "git checkout -b alice/fix-typo" {
+			t.Fatalf("unexpected checkout command: %q", got)
+		}
+	})
+
+	t.Run("DryRunDoesNotCheckout", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+		}}
+
+		result, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			Name:   "alice/fix-typo",
+			DryRun: true,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("CreateBranch returned error: %v", err)
+		}
+		if result.Branch != "alice/fix-typo" {
+			t.Fatalf("unexpected branch: %#v", result)
+		}
+		if len(runner.calls) != 1 {
+			t.Fatalf("expected only the toplevel lookup call, got %d calls", len(runner.calls))
+		}
+	})
+
+	t.Run("RequiresName", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+		}}
+
+		_, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err == nil {
+			t.Fatal("expected error for empty branch name, got nil")
+		}
+	})
+}
+
+func TestIsDefaultBranch(t *testing.T) {
+	t.Run("ResolvesCurrentBranchAndFallsBackToHeuristic", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "main\n"},
+			{}, // ls-remote --symref (no match → heuristic fallback)
+		}}
+
+		isDefault, branch, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("IsDefaultBranch returned error: %v", err)
+		}
+		if !isDefault || branch != "main" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q", isDefault, branch)
+		}
+	})
+
+	t.Run("ExplicitNonDefaultBranch", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{}, // ls-remote --symref (no match → heuristic fallback)
+		}}
+
+		isDefault, branch, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			Branch: "feat/some-feature",
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("IsDefaultBranch returned error: %v", err)
+		}
+		if isDefault || branch != "feat/some-feature" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q", isDefault, branch)
+		}
+	})
+}
+
+func TestCurrentGitUser(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: "Alex Example\n"},
+	}}
+
+	if got := CurrentGitUser(context.Background(), root, runner.Run); got != "Alex Example" {
+		t.Fatalf("CurrentGitUser = %q, want %q", got, "Alex Example")
+	}
+	if got := runner.commandLine(0); got != "git config user.name" {
+		t.Fatalf("unexpected command: %q", got)
+	}
+}
+
+func TestSlugifyBranchComponent(t *testing.T) {
+	cases := map[string]string{
+		"Fix Typo In README":      "fix-typo-in-readme",
+		"  leading/trailing  --":  "leading-trailing",
+		"already-kebab-case":      "already-kebab-case",
+		"":                        "",
+		"UPPER_CASE_with--dashes": "upper-case-with-dashes",
+	}
+	for input, want := range cases {
+		if got := SlugifyBranchComponent(input); got != want {
+			t.Errorf("SlugifyBranchComponent(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	long := strings.Repeat("a", 60)
+	if got := SlugifyBranchComponent(long); len(got) > maxSlugComponentLen {
+		t.Fatalf("SlugifyBranchComponent did not cap length: got %d chars", len(got))
+	}
+}
+
+func TestBuildBranchName(t *testing.T) {
+	if got := BuildBranchName("Alice", "Fix Typo"); got != "alice/fix-typo" {
+		t.Fatalf("BuildBranchName = %q, want %q", got, "alice/fix-typo")
+	}
+	if got := BuildBranchName("", ""); got != "user/changes" {
+		t.Fatalf("BuildBranchName with empty inputs = %q, want %q", got, "user/changes")
+	}
+}

@@ -91,6 +91,9 @@ type appDeps struct {
 	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
 	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
 	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
+	createBranch           func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
+	isDefaultBranch        func(context.Context, zerogit.DefaultBranchOptions) (bool, string, error)
+	currentGitUser         func(context.Context, string) string
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -198,11 +201,16 @@ func defaultAppDeps() appDeps {
 		commitChanges:    zerogit.Commit,
 		pushChanges:      zerogit.Push,
 		createPR:         zerogit.CreatePR,
-		runTUI:           tui.Run,
-		runEditor:        openEditor,
-		checkUpdate:      update.Check,
-		applyUpdate:      update.Apply,
-		now:              time.Now,
+		createBranch:     zerogit.CreateBranch,
+		isDefaultBranch:  zerogit.IsDefaultBranch,
+		currentGitUser: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentGitUser(ctx, cwd, nil)
+		},
+		runTUI:      tui.Run,
+		runEditor:   openEditor,
+		checkUpdate: update.Check,
+		applyUpdate: update.Apply,
+		now:         time.Now,
 	}
 }
 
@@ -561,6 +569,15 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.createPR == nil {
 		deps.createPR = defaults.createPR
+	}
+	if deps.createBranch == nil {
+		deps.createBranch = defaults.createBranch
+	}
+	if deps.isDefaultBranch == nil {
+		deps.isDefaultBranch = defaults.isDefaultBranch
+	}
+	if deps.currentGitUser == nil {
+		deps.currentGitUser = defaults.currentGitUser
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
