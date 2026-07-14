@@ -1098,11 +1098,6 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	tool, toolFound := registry.Get(call.Name)
 	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
 		modeName := string(permissionMode)
-		if permissionMode == PermissionModePlan {
-			modeName = "plan"
-		} else {
-			modeName = "spec-draft"
-		}
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
