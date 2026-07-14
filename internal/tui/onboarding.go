@@ -80,6 +80,11 @@ type aimlapiTopupEvent struct {
 	done   bool
 	result aimlapi.ProvisionedKey
 	err    error
+
+	// session carries the live partner-checkout session token (empty string means
+	// "drop the retained token"); hasSession distinguishes it from a status update.
+	session    string
+	hasSession bool
 }
 
 // setupOAuthMsg carries the result of a first-run browser OAuth login.

@@ -52,6 +52,19 @@ type aimlapiOnboardState struct {
 	topupCh     chan aimlapiTopupEvent
 	topupCancel context.CancelFunc
 
+	// resumeSessionToken is the partner-checkout session token of the last top-up
+	// attempt. It is retained across a failure so a retry resumes that session
+	// (recovering a paid-but-unexchanged key, never re-charging) instead of opening
+	// a second checkout; cleared once the session is dead or the top-up succeeds.
+	resumeSessionToken string
+
+	// byKey routes the top-up through the API-key-bound flow (Path A pasted key /
+	// AIMLAPI_API_KEY) instead of the email session: the top-up funds the account
+	// that owns apiKey, with no exchange. paymentSessionID is that flow's idempotency
+	// handle, generated once and reused on retry so a re-issued pay never double-charges.
+	byKey            bool
+	paymentSessionID string
+
 	// opCancel cancels the single in-flight account/key request (balance, check,
 	// code, passwordless, key-mint). Only one runs at a time (input is gated while
 	// busy); it is cancelled when the request completes or the flow is abandoned.
@@ -180,12 +193,16 @@ func (s *aimlapiOnboardState) keyBalanceCmd(key string) tea.Cmd {
 	}
 }
 
+// keyValidationCmd validates a pasted/env key (Path A) via GetBalance, capturing
+// both the error and the balance. A low balance can now be topped up safely with
+// the key itself — the by-key checkout binds the top-up to this key's own account —
+// so applyKeyValidation offers the optional top-up chooser instead of discarding it.
 func (s *aimlapiOnboardState) keyValidationCmd(key string) tea.Cmd {
 	m := s.msg(aimlapiMsgKeyValidation)
 	ctx := s.opContext()
 	return func() tea.Msg {
-		_, err := aimlapiOnboardClient().GetBalance(ctx, key)
-		m.err = err
+		res, err := aimlapiOnboardClient().GetBalance(ctx, key)
+		m.balance, m.err = res, err
 		return m
 	}
 }
@@ -250,7 +267,28 @@ func startAimlapiStreamTopUp(ctx context.Context, options aimlapi.StreamTopUpOpt
 		opts.OnStatus = func(_ aimlapi.Status, detail string) {
 			ch <- aimlapiTopupEvent{detail: detail}
 		}
+		opts.OnSession = func(token string) {
+			ch <- aimlapiTopupEvent{session: token, hasSession: true}
+		}
 		result, err := aimlapi.StreamTopUp(ctx, opts)
+		ch <- aimlapiTopupEvent{done: true, result: result, err: err}
+	}()
+	return ch
+}
+
+// startAimlapiStreamTopUpByKey runs the API-key-bound top-up (Path A / env key)
+// and streams the same progress events, so applyTopup handles both flows uniformly.
+func startAimlapiStreamTopUpByKey(ctx context.Context, options aimlapi.StreamTopUpByKeyOptions) chan aimlapiTopupEvent {
+	ch := make(chan aimlapiTopupEvent, 16)
+	go func() {
+		opts := options
+		opts.OnStatus = func(_ aimlapi.Status, detail string) {
+			ch <- aimlapiTopupEvent{detail: detail}
+		}
+		opts.OnSession = func(token string) {
+			ch <- aimlapiTopupEvent{session: token, hasSession: true}
+		}
+		result, err := aimlapi.StreamTopUpByKey(ctx, opts)
 		ch <- aimlapiTopupEvent{done: true, result: result, err: err}
 	}()
 	return ch
@@ -402,8 +440,9 @@ func (s *aimlapiOnboardState) handleLowBalanceKey(msg tea.KeyMsg) (tea.Cmd, aiml
 		if s.lowCursor == 1 { // skip topping up
 			return s.finishEverythingRuns(), aimlapiContinue
 		}
-		// Top up now. Low balance is only reachable from Path B existing, where we
-		// already hold a session for the minted key's own account.
+		// Top up now, against the account that owns the key: Path B existing (email
+		// session) or Path A (byKey, bound to the pasted/env key). startTopUp routes
+		// to the right flow.
 		s.step = aimlapiStepAmountInput
 		s.errText = ""
 	}
@@ -506,6 +545,14 @@ func (s *aimlapiOnboardState) applyKeyValidation(msg aimlapiOnboardMsg) (tea.Cmd
 		return nil, aimlapiContinue
 	}
 	s.apiKey = strings.TrimSpace(s.apiKey)
+	// A valid key with a low balance can fund its own account via the by-key
+	// checkout (bound to this key), so offer the optional top-up chooser.
+	if msg.balance.LowBalance {
+		s.byKey = true
+		s.lowCursor = 0
+		s.step = aimlapiStepLowBalance
+		return nil, aimlapiContinue
+	}
 	return s.finishEverythingRuns(), aimlapiContinue
 }
 
@@ -601,6 +648,11 @@ func (s *aimlapiOnboardState) applyTopup(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	}
 	event := msg.topup
 	if !event.done {
+		if event.hasSession {
+			// Retain (or, on "", drop) the live partner-checkout token so a retry
+			// resumes this session rather than opening a second checkout.
+			s.resumeSessionToken = event.session
+		}
 		if strings.TrimSpace(event.detail) != "" {
 			s.detail = event.detail
 		}
@@ -608,11 +660,17 @@ func (s *aimlapiOnboardState) applyTopup(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	}
 	s.cancelStream()
 	if event.err != nil {
+		// Keep resumeSessionToken: the next startTopUp resumes this session (poll a
+		// pending payment / recover a paid-but-unexchanged key) instead of charging
+		// again.
 		s.errText = aimlapi.MsgTopUpFailed
 		s.step = aimlapiStepAmountInput
 		s.amountField = 0
 		return nil, aimlapiContinue
 	}
+	// Top-up completed; nothing left to resume or re-fund idempotently.
+	s.resumeSessionToken = ""
+	s.paymentSessionID = ""
 	if s.newAccount {
 		s.apiKey = event.result.APIKey
 	}
@@ -654,15 +712,41 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 	s.step = aimlapiStepProgress
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	s.topupCancel = cancel
-	s.topupCh = startAimlapiStreamTopUp(ctx, aimlapi.StreamTopUpOptions{
-		SessionToken: s.sessionToken,
-		AmountUSD:    s.amount,
-		Method:       aimlapi.PaymentMethodCard,
-		AutoTopUp:    s.autoTopUp,
-		Exchange:     s.newAccount,
-		OpenBrowser:  s.openBrowser,
-		NoOpen:       s.noOpen,
-	})
+	if s.byKey {
+		// Path A / env key: fund the account bound to apiKey. Generate the
+		// idempotency id once and keep it, so a retry re-issues the same pay.
+		if strings.TrimSpace(s.paymentSessionID) == "" {
+			id, err := aimlapi.NewPaymentSessionID()
+			if err != nil {
+				cancel()
+				s.errText = aimlapi.MsgTopUpFailed
+				s.step = aimlapiStepAmountInput
+				s.amountField = 0
+				return nil, aimlapiContinue
+			}
+			s.paymentSessionID = id
+		}
+		s.topupCh = startAimlapiStreamTopUpByKey(ctx, aimlapi.StreamTopUpByKeyOptions{
+			APIKey:             s.apiKey,
+			AmountUSD:          s.amount,
+			AutoTopUp:          s.autoTopUp,
+			ResumeSessionToken: s.resumeSessionToken,
+			PaymentSessionID:   s.paymentSessionID,
+			OpenBrowser:        s.openBrowser,
+			NoOpen:             s.noOpen,
+		})
+	} else {
+		s.topupCh = startAimlapiStreamTopUp(ctx, aimlapi.StreamTopUpOptions{
+			SessionToken:       s.sessionToken,
+			ResumeSessionToken: s.resumeSessionToken,
+			AmountUSD:          s.amount,
+			Method:             aimlapi.PaymentMethodCard,
+			AutoTopUp:          s.autoTopUp,
+			Exchange:           s.newAccount,
+			OpenBrowser:        s.openBrowser,
+			NoOpen:             s.noOpen,
+		})
+	}
 	return waitForAimlapiTopupEvent(s, gen, s.topupCh), aimlapiContinue
 }
 

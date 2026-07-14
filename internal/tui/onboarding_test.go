@@ -259,6 +259,24 @@ func TestAimlapiKeyBalanceLowBalanceOffersTopUp(t *testing.T) {
 	}
 }
 
+func TestAimlapiTopUpFailureRetainsSessionForRetry(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepProgress}
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup:   aimlapiTopupEvent{session: "pcs_resume", hasSession: true},
+	})
+	state.applyTopup(aimlapiOnboardMsg{
+		topupOK: true,
+		topup:   aimlapiTopupEvent{done: true, err: errors.New("lost response")},
+	})
+	if state.resumeSessionToken != "pcs_resume" {
+		t.Fatalf("resume token = %q, want retained session", state.resumeSessionToken)
+	}
+	if state.step != aimlapiStepAmountInput {
+		t.Fatalf("step = %v, want retryable amount input", state.step)
+	}
+}
+
 func TestAimlapiOnboardingKeepsSharedTickAlive(t *testing.T) {
 	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
 	m.reducedMotion = false
