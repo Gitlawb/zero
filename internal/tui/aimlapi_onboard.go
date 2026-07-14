@@ -546,8 +546,15 @@ func (s *aimlapiOnboardState) applyToken(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 	s.stopBusy()
 	if msg.err != nil {
 		if wasVerifying {
-			// A wrong 6-digit code — re-prompt with the spec wording.
-			s.errText = aimlapi.MsgCodeIncorrect
+			// Stay on the code screen so the user can retry, but only claim the
+			// code was wrong for the backend's actual rejection. A timeout, 429,
+			// 5xx, or dropped connection keeps the code they typed valid, so surface
+			// the real error instead of sending them to re-enter a good code.
+			if aimlapiIsInvalidCode(msg.err) {
+				s.errText = aimlapi.MsgCodeIncorrect
+			} else {
+				s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+			}
 			s.step = aimlapiStepCodeInput
 			return nil, aimlapiContinue
 		}
@@ -735,6 +742,15 @@ func aimlapiIsUnauthorized(err error) bool {
 	var apiErr aimlapi.APIError
 	return errors.As(err, &apiErr) &&
 		(apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden)
+}
+
+// aimlapiIsInvalidCode reports whether err is the backend rejecting the sign-in
+// code itself. The backend contract uses 400 for "Invalid or expired code";
+// every other status (including auth, throttling and service failures) must be
+// surfaced as itself instead of being mislabeled as user input.
+func aimlapiIsInvalidCode(err error) bool {
+	var apiErr aimlapi.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest
 }
 
 // ---- rendering ------------------------------------------------------------

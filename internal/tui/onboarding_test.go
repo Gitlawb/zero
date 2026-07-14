@@ -188,6 +188,33 @@ func TestAimlapiPastedKeyRejectsUnauthorized(t *testing.T) {
 	}
 }
 
+func TestAimlapiVerifyCodeLabelsOnlyBadRequestAsIncorrect(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		wantIncorrect bool
+	}{
+		{name: "invalid code", err: aimlapi.APIError{Status: http.StatusBadRequest}, wantIncorrect: true},
+		{name: "unauthorized", err: aimlapi.APIError{Status: http.StatusUnauthorized}},
+		{name: "forbidden", err: aimlapi.APIError{Status: http.StatusForbidden}},
+		{name: "throttled", err: aimlapi.APIError{Status: http.StatusTooManyRequests}},
+		{name: "server failure", err: aimlapi.APIError{Status: http.StatusInternalServerError}},
+		{name: "network failure", err: errors.New("connection reset")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &aimlapiOnboardState{step: aimlapiStepCodeInput, code: "123456", busy: true}
+			state.applyToken(aimlapiOnboardMsg{err: tt.err})
+			if got := state.errText == aimlapi.MsgCodeIncorrect; got != tt.wantIncorrect {
+				t.Fatalf("incorrect-code label = %v, error text %q", got, state.errText)
+			}
+			if state.step != aimlapiStepCodeInput || state.code != "123456" {
+				t.Fatalf("verification retry lost its screen/code: step=%v code=%q", state.step, state.code)
+			}
+		})
+	}
+}
+
 func TestAimlapiPastedKeyValidationCompletesForValidKey(t *testing.T) {
 	state := &aimlapiOnboardState{
 		step:   aimlapiStepKeyInput,
