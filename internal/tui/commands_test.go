@@ -49,7 +49,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"  /model [list|id] - Show or switch the active model.",
 		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
 		"session:",
-		"  /plan - Show planning mode status.",
+		"  /plan [open|off] - Toggle plan mode, or open the plan file / exit.",
 		"runtime:",
 		"  /permissions - Show the active permission mode and sandbox grants.",
 		"  /debug (/debug-mode) - Show debug mode status.",
