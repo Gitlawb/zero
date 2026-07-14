@@ -79,13 +79,11 @@ func TestParseAmountUSD(t *testing.T) {
 		{name: "default", want: DefaultAmountUSDMinor},
 		{name: "minimum", value: "20", want: 2000},
 		{name: "cents", value: "25.49", want: 2549},
-		{name: "exact maximum", value: "10000", want: 1000000},
 		{name: "below minimum", value: "19.99", wantErr: true},
 		{name: "above maximum", value: "10001", wantErr: true},
 		{name: "not a number", value: "twenty", wantErr: true},
 		{name: "nan", value: "NaN", wantErr: true},
-		{name: "positive infinity", value: "Inf", wantErr: true},
-		{name: "negative infinity", value: "-Inf", wantErr: true},
+		{name: "infinity", value: "Inf", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

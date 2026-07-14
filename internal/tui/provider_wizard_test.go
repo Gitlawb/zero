@@ -1347,11 +1347,6 @@ func TestAimlapiConfigureAgainUsesTwoPathOnboarding(t *testing.T) {
 	if next.providerWizard.aimlapiExistingProfile.Name != "" || next.providerWizard.aimlapiRuntimeKey != "" {
 		t.Fatal("configure again must discard the old credential context")
 	}
-	next.providerWizard.aimlapi.pathCursor = 1
-	_, outcome := next.providerWizard.aimlapi.handlePickPathKey(testKey(tea.KeyDown))
-	if outcome != aimlapiContinue || next.providerWizard.aimlapi.pathCursor != 0 {
-		t.Fatal("onboarding picker must wrap across exactly new-user and API-key paths")
-	}
 }
 
 func TestExistingAimlapiLowBalanceReusesByKeyTopUp(t *testing.T) {

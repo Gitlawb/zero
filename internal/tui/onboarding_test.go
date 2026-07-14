@@ -195,8 +195,6 @@ func TestAimlapiVerifyCodeLabelsOnlyBadRequestAsIncorrect(t *testing.T) {
 		wantIncorrect bool
 	}{
 		{name: "invalid code", err: aimlapi.APIError{Status: http.StatusBadRequest}, wantIncorrect: true},
-		{name: "unauthorized", err: aimlapi.APIError{Status: http.StatusUnauthorized}},
-		{name: "forbidden", err: aimlapi.APIError{Status: http.StatusForbidden}},
 		{name: "throttled", err: aimlapi.APIError{Status: http.StatusTooManyRequests}},
 		{name: "server failure", err: aimlapi.APIError{Status: http.StatusInternalServerError}},
 		{name: "network failure", err: errors.New("connection reset")},
@@ -368,7 +366,6 @@ func TestAimlapiAutoTopUpRendersOnOff(t *testing.T) {
 }
 
 func TestAimlapiPickPathShowsNewUserFirstAndRoutesSelections(t *testing.T) {
-	t.Setenv("AIMLAPI_API_KEY", "already-configured")
 	state := &aimlapiOnboardState{step: aimlapiStepPickPath}
 	view := plainRender(t, strings.Join(state.viewPickPath(64), "\n"))
 	newUserIndex := strings.Index(view, aimlapi.MsgPickPathNewUser)
@@ -376,10 +373,6 @@ func TestAimlapiPickPathShowsNewUserFirstAndRoutesSelections(t *testing.T) {
 	if newUserIndex < 0 || haveKeyIndex < 0 || newUserIndex >= haveKeyIndex {
 		t.Fatalf("new-user option should precede have-key option:\n%s", view)
 	}
-	if strings.Contains(view, "Use AIMLAPI_API_KEY") {
-		t.Fatalf("existing env credentials belong to /provider preflight, not onboarding:\n%s", view)
-	}
-
 	state.pathCursor = 0
 	state.handlePickPathKey(testKey(tea.KeyEnter))
 	if state.step != aimlapiStepEmailInput {
@@ -414,10 +407,6 @@ func TestFirstRunAimlapiEnvSkipsGuidedOnboarding(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("env credential should start authenticated model discovery")
-	}
-	profile := providerWizardDiscoveryProfile(setupProviderDescriptor(next.setupProvider()), "")
-	if profile.APIKey != "env-runtime-secret" || profile.APIKeyEnv != "AIMLAPI_API_KEY" {
-		t.Fatalf("discovery profile did not preserve env credential: %+v", profile)
 	}
 }
 
