@@ -416,6 +416,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// counted toward the runaway cap so we stop before burning maxTurns.
 			if guards.observeTurn(collected) {
 				result.FinalAnswer = noOutputStopAnswer(result.Turns)
+				if guards.pendingPlanItems() {
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after non-productive turns while plan items remained"
+				}
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
@@ -429,10 +433,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				})
 				continue
 			}
-			// Completion gate (headless): a turn with text but no tool call is the
-			// model's final answer ONLY when the work is actually done. Default off
-			// (RequireCompletionSignal), so interactive runs stay byte-identical.
-			if options.RequireCompletionSignal {
+			// Completion gate: a turn with text but no tool call is the model's
+			// final answer ONLY when the work is actually done. Headless exec opts in
+			// via RequireCompletionSignal; interactive runs also apply the gate while
+			// update_plan still has pending/in_progress items so a plan cannot stall
+			// silently after the first step is marked active.
+			planPending := guards.pendingPlanItems()
+			if options.RequireCompletionSignal || planPending {
 				// (1) Self-report downgrade (strongest, unambiguous): the model's own
 				// final message admits it guessed / could not meet the objective. Checked
 				// FIRST so an admitted-impossible task is downgraded immediately (no wasted
@@ -455,7 +462,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// false-fail a completed run with stale bookkeeping) — fall through to the
 				// acceptance check / success.
 				cue := endsWithContinuationCue(collected.Text)
-				planPending := guards.pendingPlanItems()
 				if cue || planPending {
 					if continueNudges < maxContinueNudges {
 						continueNudges++

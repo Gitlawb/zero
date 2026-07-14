@@ -30,6 +30,16 @@ func reasoningTurn(content string) []zeroruntime.StreamEvent {
 	}
 }
 
+// multiReasoningTurn streams several reasoning chunks inside ONE provider turn.
+func multiReasoningTurn(chunks ...string) []zeroruntime.StreamEvent {
+	events := make([]zeroruntime.StreamEvent, 0, len(chunks)+1)
+	for _, chunk := range chunks {
+		events = append(events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventReasoning, Content: chunk})
+	}
+	events = append(events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	return events
+}
+
 // toolTurn produces a turn that calls a named tool with the given args JSON.
 func toolTurn(callID string, toolName string, args string) []zeroruntime.StreamEvent {
 	return []zeroruntime.StreamEvent{
@@ -106,6 +116,95 @@ func TestRunResetsEmptyTurnCounterOnVisibleOutput(t *testing.T) {
 	}
 	if result.FinalAnswer != "here is real progress" {
 		t.Fatalf("expected the visible text as final answer, got %q", result.FinalAnswer)
+	}
+}
+
+func TestRunStopsReasoningOnlyTurnsWhilePlanPending(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		toolTurn("plan", "update_plan", `{"plan":[{"content":"step 1","status":"in_progress"},{"content":"step 2","status":"pending"}]}`),
+		reasoningTurn("thinking 1"),
+		reasoningTurn("thinking 2"),
+		reasoningTurn("thinking 3"),
+		textTurn("should never reach here"),
+	}}
+
+	result, err := Run(context.Background(), "multi-step task", provider, Options{
+		Registry: registry,
+		MaxTurns: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != maxEmptyTurns+1 {
+		t.Fatalf("expected %d turns (1 plan + %d reasoning-only stalls), got %d", maxEmptyTurns+1, maxEmptyTurns, len(provider.requests))
+	}
+	if !result.Incomplete {
+		t.Fatalf("expected Incomplete=true after reasoning-only stall with pending plan, got false")
+	}
+	if !strings.Contains(result.FinalAnswer, noOutputStopMarker) {
+		t.Fatalf("expected no-output stop answer, got %q", result.FinalAnswer)
+	}
+}
+
+func TestRunMultiChunkReasoningCountsAsOneNonProductiveTurnWhilePlanPending(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		toolTurn("plan", "update_plan", `{"plan":[{"content":"step 1","status":"in_progress"},{"content":"step 2","status":"pending"}]}`),
+		multiReasoningTurn("chunk-1 ", "chunk-2 ", "chunk-3 ", "chunk-4 ", "chunk-5 "),
+		multiReasoningTurn("more-1 ", "more-2 ", "more-3 "),
+		multiReasoningTurn("final-1 ", "final-2 "),
+		textTurn("should never reach here"),
+	}}
+
+	result, err := Run(context.Background(), "multi-step task", provider, Options{
+		Registry: registry,
+		MaxTurns: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != maxEmptyTurns+1 {
+		t.Fatalf("expected %d turns (1 plan + %d multi-chunk reasoning stalls), got %d",
+			maxEmptyTurns+1, maxEmptyTurns, len(provider.requests))
+	}
+	if !result.Incomplete {
+		t.Fatalf("expected Incomplete=true, got false")
+	}
+}
+
+func TestRunReasoningThenToolCallSucceedsWithPendingPlan(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, root+"/notes.txt", "alpha")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewUpdatePlanTool())
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		toolTurn("plan", "update_plan", `{"plan":[{"content":"step 1","status":"in_progress"},{"content":"step 2","status":"pending"}]}`),
+		multiReasoningTurn("thinking ", "more thinking "),
+		toolTurn("read", "read_file", `{"path":"notes.txt"}`),
+		toolTurn("plan2", "update_plan", `{"plan":[{"content":"step 1","status":"completed"},{"content":"step 2","status":"completed"}]}`),
+		textTurn("Both steps are done."),
+	}}
+
+	result, err := Run(context.Background(), "multi-step task", provider, Options{
+		Registry: registry,
+		MaxTurns: 12,
+		Cwd:      root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Incomplete {
+		t.Fatalf("run should succeed after productive tool call, got Incomplete (%q)", result.IncompleteReason)
+	}
+	if result.FinalAnswer != "Both steps are done." {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
 	}
 }
 
@@ -293,7 +392,7 @@ func TestRunDoesNotInjectNotCalledReminderWhenPlanUsed(t *testing.T) {
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
-			toolTurn("call-1", "update_plan", `{"plan":[{"content":"step one"}]}`),
+			toolTurn("call-1", "update_plan", `{"plan":[{"content":"step one","status":"completed"}]}`),
 			toolTurn("call-2", "read_file", `{"path":"notes.txt"}`),
 			textTurn("done"),
 		},
@@ -329,6 +428,12 @@ func TestRunInjectsStalePlanReminderAfterManyToolCalls(t *testing.T) {
 	for i := 0; i < staleToolCallThreshold+2; i++ {
 		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
 	}
+	// The plan-aware completion gate re-prompts up to maxContinueNudges when the
+	// model stops with text while plan items remain; supply those turns before
+	// the final answer.
+	for i := 0; i < maxContinueNudges; i++ {
+		turns = append(turns, textTurn("done."))
+	}
 	turns = append(turns, textTurn("done"))
 
 	provider := &mockProvider{turns: turns}
@@ -362,6 +467,9 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 	// must fire once for the interval, not on every subsequent turn.
 	for i := 0; i < staleToolCallThreshold*2; i++ {
 		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
+	}
+	for i := 0; i < maxContinueNudges; i++ {
+		turns = append(turns, textTurn("done."))
 	}
 	turns = append(turns, textTurn("done"))
 

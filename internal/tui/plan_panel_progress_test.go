@@ -49,6 +49,26 @@ func TestPlanReconcileClearsStaleCompletion(t *testing.T) {
 	}
 }
 
+func TestPlanMarkIncompleteRemaining(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	started := now.Add(-time.Minute)
+	s := planPanelState{steps: []planStep{
+		{content: "a", status: "completed", startedAt: started, completedAt: now.Add(-30 * time.Second)},
+		{content: "b", status: "in_progress", startedAt: started},
+		{content: "c", status: "pending"},
+	}}
+	s.markIncompleteRemaining(now)
+	if s.steps[1].status != "failed" || s.steps[1].completedAt != now {
+		t.Fatalf("in_progress step should be failed: %+v", s.steps[1])
+	}
+	if s.steps[2].status != "pending" {
+		t.Fatalf("pending step should stay pending, got %q", s.steps[2].status)
+	}
+	if s.isComplete() {
+		t.Fatal("incomplete run must not mark the plan complete")
+	}
+}
+
 // TestPlanCompleteRemaining: force-completing a stuck plan flips every
 // non-terminal step to completed, backfills timestamps, preserves a failed step,
 // and is a clean no-op on empty / already-complete plans.

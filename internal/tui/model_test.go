@@ -1351,6 +1351,30 @@ func TestAgentResponseCompletesStuckPlan(t *testing.T) {
 		}
 	})
 
+	t.Run("incomplete turn marks the active plan step failed", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		updated, _ := m.Update(agentResponseMsg{
+			runID: 7, incomplete: true, incompleteReason: "your message ended mid-step",
+			rows: []transcriptRow{{kind: rowAssistant, text: "stalled", final: true}},
+		})
+		next := updated.(model)
+		if next.plan.isComplete() {
+			t.Fatal("incomplete turn must not force-complete the plan")
+		}
+		foundFailed := false
+		for _, step := range next.plan.steps {
+			if step.status == "failed" {
+				foundFailed = true
+			}
+		}
+		if !foundFailed {
+			t.Fatalf("expected a failed plan step, got %+v", next.plan.steps)
+		}
+	})
+
 	t.Run("errored turn leaves the plan incomplete", func(t *testing.T) {
 		m := newModel(context.Background(), Options{})
 		m.pending = true

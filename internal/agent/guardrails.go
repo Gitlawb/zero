@@ -508,9 +508,19 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 	hasVisibleText := strings.TrimSpace(collected.Text) != ""
 	hasReasoning := collected.HasReasoning || len(collected.ReasoningBlocks) > 0
 
-	if hasToolCalls || hasVisibleText || hasReasoning {
+	productive := hasToolCalls || hasVisibleText
+	switch {
+	case productive:
 		state.emptyTurns = 0
-	} else {
+	case hasReasoning && state.planItemsPending > 0:
+		// Reasoning alone does not prove progress while plan steps remain — weaker
+		// models (e.g. HY3 via OpenAI-compatible gateways) can stream long
+		// reasoning-only turns without tools or visible text, burning the turn
+		// budget while the plan panel stays on the first in_progress step.
+		state.emptyTurns++
+	case hasReasoning:
+		state.emptyTurns = 0
+	default:
 		state.emptyTurns++
 	}
 	if hasToolCalls && !hasVisibleText {

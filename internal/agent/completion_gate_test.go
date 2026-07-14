@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -126,9 +127,107 @@ func TestCompletionGateContinuesOnCueThenSucceeds(t *testing.T) {
 	}
 }
 
-// With the gate OFF (the interactive/TUI default), a continuation-cue turn is
-// accepted as the final answer exactly as before — guaranteeing no behavior
-// change for non-headless callers.
+// Issue #666: the plan-aware gate applies even when RequireCompletionSignal is
+// off (interactive/TUI). A model that creates a plan then stalls on a
+// continuation-cue text turn must be re-prompted and eventually INCOMPLETE, not
+// accepted as success while the plan panel stays on step one.
+func TestPlanPendingGateAppliesWithoutRequireCompletionSignal(t *testing.T) {
+	cue := "Now I need to configure the SSH server. Let me check the current SSH configuration:"
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		planTurn("in_progress", "pending", "pending"),
+		textTurn(cue), textTurn(cue), textTurn(cue), textTurn(cue), textTurn(cue),
+	}}
+
+	result, err := Run(context.Background(), "set up a git server", provider, Options{
+		Registry: registry,
+		MaxTurns: 10,
+		// RequireCompletionSignal deliberately off — interactive/TUI default.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Incomplete {
+		t.Fatalf("expected Incomplete=true (plan stalled without headless gate), got false; final=%q turns=%d", result.FinalAnswer, result.Turns)
+	}
+	if len(provider.requests) != 1+maxContinueNudges+1 {
+		t.Fatalf("expected %d provider turns (1 plan + %d nudges + 1 final), got %d",
+			1+maxContinueNudges+1, maxContinueNudges, len(provider.requests))
+	}
+	if !someRequestContains(provider.requests, continueNudgeMarker) {
+		t.Fatalf("expected a continue nudge (%q) to be injected", continueNudgeMarker)
+	}
+}
+
+// A pending plan must nudge non-colon continuation announcements too — not only
+// colon-terminated cues — so the first mid-step text turn cannot finalize while
+// steps remain. A later clean final answer is accepted after the bounded nudges.
+func TestPlanPendingNudgesNonColonContinuationText(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	midStep := "Let me inspect the configuration."
+	final := "Provider profiles are loaded from config and merged with defaults."
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		planTurn("in_progress", "pending", "pending"),
+		textTurn(midStep),
+		textTurn(final), textTurn(final), textTurn(final), textTurn(final),
+	}}
+
+	result, err := Run(context.Background(), "inspect and configure", provider, Options{
+		Registry: registry,
+		MaxTurns: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Incomplete {
+		t.Fatalf("expected success after nudge + final answer, got Incomplete (%q)", result.IncompleteReason)
+	}
+	if result.FinalAnswer != final {
+		t.Fatalf("final answer = %q, want %q", result.FinalAnswer, final)
+	}
+	if len(provider.requests) != 1+1+maxContinueNudges {
+		t.Fatalf("expected %d turns (plan + mid-step + %d nudged finals), got %d",
+			1+1+maxContinueNudges, maxContinueNudges, len(provider.requests))
+	}
+	if !someRequestContains(provider.requests, continueNudgeMarker) {
+		t.Fatalf("expected a continue nudge after the mid-step text with pending plan")
+	}
+}
+
+// After bounded nudges, a confident final answer with stale plan bookkeeping must
+// still succeed on the interactive/TUI path (no infinite loop, no false incomplete).
+func TestPlanPendingAcceptsFinalAnswerAfterBoundedNudgesWithoutHeadlessGate(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	done := "All provider profiles are documented above."
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		planTurn("in_progress", "pending"),
+		textTurn(done), textTurn(done), textTurn(done), textTurn(done),
+	}}
+
+	result, err := Run(context.Background(), "explain provider loading", provider, Options{
+		Registry: registry,
+		MaxTurns: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Incomplete {
+		t.Fatalf("stale plan alone must not force Incomplete on TUI path; reason=%q", result.IncompleteReason)
+	}
+	if result.FinalAnswer != done {
+		t.Fatalf("final answer = %q, want %q", result.FinalAnswer, done)
+	}
+	if !someRequestContains(provider.requests, continueNudgeMarker) {
+		t.Fatalf("expected at least one continue nudge before accepting completion")
+	}
+}
+
+// With the gate OFF and NO pending plan, a continuation-cue turn is still
+// accepted as the final answer — no behavior change for short single-step tasks.
 func TestCompletionGateOffPreservesLegacyBehavior(t *testing.T) {
 	cue := "Let me check the config:"
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
@@ -174,6 +273,44 @@ func TestContinuationCueMatching(t *testing.T) {
 		if got := endsWithContinuationCue(c.text); got != c.cue {
 			t.Errorf("endsWithContinuationCue(%q) = %v, want %v", c.text, got, c.cue)
 		}
+	}
+}
+
+// Cancellation during a plan-pending stall must return immediately without extra
+// nudges or incomplete synthesis.
+func TestRunCancellationDuringPlanPendingStopsImmediately(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := Run(ctx, "do work", cancelMidStreamProvider{cancel: cancel}, Options{
+		Registry: registry,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+// Repeated identical update_plan calls must still hit the max-turns ceiling rather
+// than looping silently forever.
+func TestRunRepeatedIdenticalUpdatePlanHitsMaxTurns(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	same := toolTurn("plan", "update_plan", `{"plan":[{"content":"step","status":"in_progress"}]}`)
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{same, same, same, textTurn("halted summary")}}
+
+	result, err := Run(context.Background(), "keep planning", provider, Options{
+		Registry: registry,
+		MaxTurns: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MaxTurns=3 tool turns, then finalAnswerAfterMaxTurns issues one more request.
+	if len(provider.requests) != 4 {
+		t.Fatalf("expected 3 tool turns + 1 max-turns final-answer call, got %d", len(provider.requests))
+	}
+	if result.FinalAnswer == "" {
+		t.Fatal("expected a max-turns final answer")
 	}
 }
 

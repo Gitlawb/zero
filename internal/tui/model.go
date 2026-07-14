@@ -510,6 +510,11 @@ type agentResponseMsg struct {
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
+	// incomplete reports a run the agent marked unfinished (plan stall, mid-step
+	// stop, max-turns cutoff under the completion gate). Surfaced to the user
+	// instead of force-completing the plan panel.
+	incomplete       bool
+	incompleteReason string
 	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
@@ -2166,7 +2171,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// reconcile it to complete here. Read pendingAskUser/pendingPermission
 		// BEFORE the reset below clears them, and skip spec-draft reviews — those
 		// are legitimate mid-plan err==nil yields where the plan is NOT done.
-		if msg.err == nil && msg.specReview == nil &&
+		if msg.incomplete {
+			m.plan.markIncompleteRemaining(m.now())
+		} else if msg.err == nil && msg.specReview == nil &&
 			m.pendingAskUser == nil && m.pendingPermission == nil {
 			m.plan.completeRemaining(m.now())
 		}
@@ -2250,7 +2257,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// default first-message title, generate a concise one in the background
 		// (one-shot per session). A failed turn is skipped — there's nothing to name.
 		var titleCmd, recapCmd tea.Cmd
-		if msg.err == nil {
+		if msg.err == nil && !msg.incomplete {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
 			// Post-turn recap (gated on the recaps preference): one short sentence
 			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
@@ -5168,6 +5175,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if notice := result.TruncationNotice(); notice != "" {
 			rows = append(rows, transcriptRow{kind: rowSystem, text: notice})
 		}
+		incompleteReason := result.IncompleteReason
+		if result.Incomplete {
+			if incompleteReason == "" {
+				incompleteReason = "run stopped with work unfinished"
+			}
+			rows = append(rows, transcriptRow{kind: rowSystem, text: "Run incomplete: " + incompleteReason})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventError,
+				Payload: map[string]any{"message": "incomplete: " + incompleteReason},
+			})
+		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
 			Type: sessions.EventMessage,
 			Payload: map[string]any{
@@ -5175,7 +5193,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{
+			runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID,
+			sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft,
+			incomplete: result.Incomplete, incompleteReason: incompleteReason,
+		}
 	}
 }
 

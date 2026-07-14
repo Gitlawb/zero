@@ -166,6 +166,30 @@ func (s planPanelState) isComplete() bool {
 // invoke this ONLY when the run genuinely finished (no error, no mid-plan yield
 // for ask_user/permission/spec-review), since it asserts the remaining work was
 // actually done.
+// markIncompleteRemaining marks the active plan step failed when a run stopped
+// with work clearly unfinished (Result.Incomplete). Pending steps stay pending so
+// the panel shows what was never reached; in_progress becomes failed with a
+// completion timestamp. No-op on empty or already-terminal plans.
+func (s *planPanelState) markIncompleteRemaining(now time.Time) {
+	if len(s.steps) == 0 || s.isComplete() {
+		return
+	}
+	for i := range s.steps {
+		switch s.steps[i].status {
+		case "in_progress":
+			s.steps[i].status = "failed"
+			if s.steps[i].startedAt.IsZero() {
+				s.steps[i].startedAt = now
+			}
+			s.steps[i].completedAt = now
+		case "pending":
+			// Leave pending — shows remaining work that was not attempted.
+		default:
+			// completed/failed: preserve.
+		}
+	}
+}
+
 func (s *planPanelState) completeRemaining(now time.Time) {
 	if len(s.steps) == 0 || s.isComplete() {
 		return

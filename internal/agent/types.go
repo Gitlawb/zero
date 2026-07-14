@@ -296,13 +296,13 @@ type Options struct {
 
 	// RequireCompletionSignal gates run completion for HEADLESS exec. Without it,
 	// any assistant turn that produces text but no tool call is accepted as the
-	// final answer. With it, a no-tool-call turn is NOT treated as "done" while
-	// work clearly remains — pending update_plan items, or a message that ends on a
-	// continuation cue ("…Let me check the config:"). The loop then nudges the
-	// model to continue instead, bounded by maxContinueNudges (and still by
-	// MaxTurns and the run deadline); if the model keeps stalling, the run
-	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. Default
-	// false leaves the loop byte-identical, so the interactive TUI is unaffected.
+	// final answer — except while update_plan still has pending/in_progress items,
+	// when the plan-aware completion gate always applies (interactive and headless).
+	// With RequireCompletionSignal, a no-tool-call turn is also gated on
+	// continuation cues ("…Let me check the config:"). The loop nudges the model to
+	// continue instead, bounded by maxContinueNudges (and still by MaxTurns and the
+	// run deadline); if the model keeps stalling, the run finalizes as INCOMPLETE
+	// (Result.Incomplete) rather than success.
 	RequireCompletionSignal bool
 
 	runPermissions *permissionRunState
