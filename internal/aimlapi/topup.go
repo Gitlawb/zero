@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,10 @@ func ParseAmountUSD(value string) (int, error) {
 		return DefaultAmountUSDMinor, nil
 	}
 	dollars, err := strconv.ParseFloat(value, 64)
-	if err != nil || dollars <= 0 {
+	// NaN/±Inf parse without error and slip past the min/max comparisons below
+	// (every ordered comparison with NaN is false), so reject them explicitly
+	// before the cents conversion turns them into a garbage minor-unit amount.
+	if err != nil || math.IsNaN(dollars) || math.IsInf(dollars, 0) || dollars <= 0 {
 		return 0, fmt.Errorf("invalid amount %q; pass a positive USD amount", value)
 	}
 	minor := int(dollars*100 + 0.5)
