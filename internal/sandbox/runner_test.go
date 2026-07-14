@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -656,18 +657,20 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"SAFE_VAR=hello",
 	}
 	scrubbed := scrubSensitiveEnv(inputEnv)
-	expectedMap := map[string]bool{
-		"PATH":        true,
-		"SAFE_VAR":    true,
-		"AWS_PROFILE": true,
+	expected := map[string]string{
+		"PATH":        "/usr/bin",
+		"SAFE_VAR":    "hello",
+		"AWS_PROFILE": "staging",
 	}
+	actual := make(map[string]string, len(scrubbed))
 	for _, entry := range scrubbed {
-		key, _, _ := strings.Cut(entry, "=")
-		if !expectedMap[key] {
-			t.Errorf("found sensitive/unexpected environment variable: %s", entry)
+		key, value, _ := strings.Cut(entry, "=")
+		if _, dup := actual[key]; dup {
+			t.Errorf("duplicate key %q in scrubbed env: %v", key, scrubbed)
 		}
+		actual[key] = value
 	}
-	if len(scrubbed) != 3 {
-		t.Errorf("expected 3 environment variables, got %d: %v", len(scrubbed), scrubbed)
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("scrubSensitiveEnv() = %v, want %v", actual, expected)
 	}
 }

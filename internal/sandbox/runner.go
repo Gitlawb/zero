@@ -979,6 +979,8 @@ func scrubSensitiveEnv(env []string) []string {
 		"AWS_SESSION_TOKEN",
 		"GITLAB_TOKEN",
 		"GH_TOKEN",
+		"ZERO_WEBSEARCH_API_KEY",
+		"ZERO_DAEMON_REMOTE_TOKEN",
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {
