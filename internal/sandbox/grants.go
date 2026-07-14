@@ -600,7 +600,7 @@ func (store *GrantStore) writeState(state grantFile) error {
 	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, store.filePath); err != nil {
+	if err := renameWithRetry(tempPath, store.filePath); err != nil {
 		_ = os.Remove(tempPath)
 		return err
 	}

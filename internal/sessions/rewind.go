@@ -290,7 +290,7 @@ func (store *Store) writeFileAtomic(path string, content []byte, mode uint32) er
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameWithRetry(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
