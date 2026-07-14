@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1315,11 +1316,13 @@ func TestExistingAimlapiConfigurationResolvesStoredKey(t *testing.T) {
 
 func TestAdvanceAimlapiWithExistingCredentialShowsConfiguredPreflight(t *testing.T) {
 	t.Setenv("AIMLAPI_API_KEY", "aimlapi-env-secret")
+	provider, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := model{providerWizard: &providerWizardState{
-		step: providerWizardStepProvider,
-		providers: []providercatalog.Descriptor{{
-			ID: "aimlapi", Name: "aimlapi.com", Transport: providercatalog.TransportOpenAICompatible,
-		}},
+		step:      providerWizardStepProvider,
+		providers: []providercatalog.Descriptor{provider},
 	}}
 
 	next, _ := m.advanceProviderWizard()
@@ -1328,6 +1331,9 @@ func TestAdvanceAimlapiWithExistingCredentialShowsConfiguredPreflight(t *testing
 	}
 	if next.providerWizard.aimlapiExistingProfile.APIKeyEnv != "AIMLAPI_API_KEY" {
 		t.Fatalf("profile = %+v", next.providerWizard.aimlapiExistingProfile)
+	}
+	if !maps.Equal(next.providerWizard.aimlapiExistingProfile.CustomHeaders, provider.CustomHeaders) {
+		t.Fatalf("catalog headers were not preserved: %#v", next.providerWizard.aimlapiExistingProfile.CustomHeaders)
 	}
 }
 
@@ -1381,6 +1387,7 @@ func TestApplyExistingAimlapiPreservesEnvCredentialSource(t *testing.T) {
 	}
 	provider := providercatalog.Descriptor{
 		ID: "aimlapi", Name: "aimlapi.com", Transport: providercatalog.TransportOpenAICompatible,
+		CustomHeaders: map[string]string{"X-AIMLAPI-Partner-ID": "partner"},
 	}
 	m := model{
 		userConfigPath: configPath,
@@ -1392,6 +1399,7 @@ func TestApplyExistingAimlapiPreservesEnvCredentialSource(t *testing.T) {
 			modelSource:   "live",
 			aimlapiExistingProfile: config.ProviderProfile{
 				Name: "aimlapi", CatalogID: "aimlapi", APIKeyEnv: "AIMLAPI_API_KEY", Model: "model/old",
+				CustomHeaders: maps.Clone(provider.CustomHeaders),
 			},
 			aimlapiRuntimeKey: "runtime-secret",
 		},
@@ -1411,6 +1419,9 @@ func TestApplyExistingAimlapiPreservesEnvCredentialSource(t *testing.T) {
 	}
 	if got.Model != "model/new" {
 		t.Fatalf("model = %q, want model/new", got.Model)
+	}
+	if !maps.Equal(got.CustomHeaders, provider.CustomHeaders) {
+		t.Fatalf("custom headers changed: %#v", got.CustomHeaders)
 	}
 }
 

@@ -130,15 +130,9 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 	if key := strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY")); key != "" {
 		descriptor, err := providercatalog.Require("aimlapi")
 		if err == nil {
-			return config.ProviderProfile{
-				Name:         descriptor.ID,
-				CatalogID:    descriptor.ID,
-				ProviderKind: providerWizardProviderKind(descriptor),
-				BaseURL:      descriptor.DefaultBaseURL,
-				APIKeyEnv:    "AIMLAPI_API_KEY",
-				APIFormat:    providerWizardAPIFormat(descriptor),
-				Model:        descriptor.DefaultModel,
-			}, key, true
+			profile := providerWizardProfile(descriptor, descriptor.DefaultModel, "", "", "")
+			profile.Name = descriptor.ID
+			return profile, key, true
 		}
 	}
 	return config.ProviderProfile{}, "", false
@@ -183,6 +177,7 @@ func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model
 		return m, nil
 	}
 	wizard.apiKey = wizard.aimlapiRuntimeKey
+	wizard.baseURL = wizard.aimlapiExistingProfile.BaseURL
 	if msg.balance.LowBalance {
 		state := newAimlapiOnboard(browser.OpenURL)
 		state.apiKey = wizard.aimlapiRuntimeKey
@@ -225,6 +220,7 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	wizard.discoveryToken++
 	token := wizard.discoveryToken
 	providerID := provider.ID
+	baseURL := wizard.baseURL
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
@@ -234,7 +230,7 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 				apiKey = resolved
 			}
 		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		profile := providerWizardDiscoveryProfile(provider, apiKey, baseURL)
 		models, err := discover(ctx, profile)
 		return providerModelsDiscoveredMsg{providerID: providerID, token: token, models: models, err: err, secrets: []string{apiKey, profile.APIKey}}
 	}
@@ -294,8 +290,8 @@ func providerWizardModelsSource(models []providermodeldiscovery.Model) string {
 	return ""
 }
 
-func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string) config.ProviderProfile {
-	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey, "", "")
+func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string, baseURL string) config.ProviderProfile {
+	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey, baseURL, "")
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}

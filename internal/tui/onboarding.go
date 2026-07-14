@@ -948,7 +948,7 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 				apiKey = resolved
 			}
 		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		profile := providerWizardDiscoveryProfile(provider, apiKey, m.setupBaseURL(option))
 		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)
 		models, err := discover(ctx, profile)
 		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: secrets, models: models, err: err}

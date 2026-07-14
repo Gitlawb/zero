@@ -932,7 +932,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.providerWizard.aimlapiExistingBusy {
 			if keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft) {
 				m.providerWizard.aimlapiExistingGen++
-				m.providerWizard.aimlapiExistingBusy = false
+				m.providerWizard.clearAimlapiExisting()
 				m.providerWizard.step = providerWizardStepProvider
 			}
 			return m, nil
