@@ -1373,7 +1373,7 @@ func setupAtOAuthList(t *testing.T) model {
 		Visible: true,
 		Providers: []SetupProviderOption{
 			{ID: "openrouter", Name: "OpenRouter", RequiresAuth: true, EnvVar: "OPENROUTER_API_KEY"},
-			{ID: "xai", Name: "xAI", DefaultModel: "grok-4", RequiresAuth: true, EnvVar: "XAI_API_KEY"},
+			{ID: "xai", Name: "xAI", DefaultModel: "grok-4.5", RequiresAuth: true, EnvVar: "XAI_API_KEY"},
 		},
 	}})
 	m.width = 100
