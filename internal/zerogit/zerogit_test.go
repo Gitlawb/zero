@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -733,6 +734,7 @@ func TestCreateBranch(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
+			{ExitCode: 1}, // rev-parse --verify: no local branch by that name yet
 			{Stdout: "Switched to a new branch 'alice/fix-typo'\n"},
 		}}
 
@@ -747,8 +749,53 @@ func TestCreateBranch(t *testing.T) {
 		if result.Branch != "alice/fix-typo" {
 			t.Fatalf("unexpected branch: %#v", result)
 		}
-		if got := runner.commandLine(1); got != "git checkout -b alice/fix-typo" {
+		if got := runner.commandLine(1); got != "git rev-parse --verify --quiet refs/heads/alice/fix-typo" {
+			t.Fatalf("unexpected existence-check command: %q", got)
+		}
+		if got := runner.commandLine(2); got != "git checkout -b alice/fix-typo" {
 			t.Fatalf("unexpected checkout command: %q", got)
+		}
+	})
+
+	t.Run("ChecksOutExistingBranchInsteadOfFailing", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "abc1234\n"}, // rev-parse --verify: branch already exists locally
+			{Stdout: "Switched to branch 'alice/fix-typo'\n"},
+		}}
+
+		result, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			Name:   "alice/fix-typo",
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("CreateBranch returned error: %v", err)
+		}
+		if result.Branch != "alice/fix-typo" {
+			t.Fatalf("unexpected branch: %#v", result)
+		}
+		if got := runner.commandLine(2); got != "git checkout alice/fix-typo" {
+			t.Fatalf("expected a plain checkout of the existing branch, got %q", got)
+		}
+	})
+
+	t.Run("PropagatesCheckoutFailureForNewBranch", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{ExitCode: 1}, // rev-parse --verify: no local branch by that name yet
+			{ExitCode: 128, Stderr: "fatal: unable to write new index file"},
+		}}
+
+		_, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			Name:   "alice/fix-typo",
+			RunGit: runner.Run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "unable to write new index file") {
+			t.Fatalf("expected wrapped checkout failure, got %v", err)
 		}
 	})
 
@@ -844,6 +891,36 @@ func TestCurrentGitUser(t *testing.T) {
 	}
 	if got := runner.commandLine(0); got != "git config user.name" {
 		t.Fatalf("unexpected command: %q", got)
+	}
+}
+
+// TestCurrentGitUserFallsBackToOSUsername covers the second of CurrentGitUser's
+// three fallback tiers: when `git config user.name` fails or returns nothing,
+// it falls back to the OS account username. The third tier (the literal
+// "user") only triggers when os/user.Current itself fails, which isn't
+// practical to force here without adding an injectable seam for it solely for
+// this coverage gap.
+func TestCurrentGitUserFallsBackToOSUsername(t *testing.T) {
+	root := t.TempDir()
+	want, err := user.Current()
+	if err != nil || want.Username == "" {
+		t.Skip("no OS user available to compare against in this environment")
+	}
+
+	cases := map[string][]CommandResult{
+		"ConfigCommandErrors": {{ExitCode: 1, Stderr: "fatal: unable to read config"}},
+		"ConfigCommandEmpty":  {{Stdout: ""}},
+	}
+	for name, results := range cases {
+		t.Run(name, func(t *testing.T) {
+			runner := &fakeRunner{results: results}
+			if got := CurrentGitUser(context.Background(), root, runner.Run); got != want.Username {
+				t.Fatalf("CurrentGitUser = %q, want OS username %q", got, want.Username)
+			}
+			if got := runner.commandLine(0); got != "git config user.name" {
+				t.Fatalf("unexpected command: %q", got)
+			}
+		})
 	}
 }
 

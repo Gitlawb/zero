@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -606,8 +607,16 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}, nil
 }
 
+// isDefaultBranchRemoteLookupTimeout bounds the ls-remote HEAD-symref check
+// below, so a caller passing context.Background() (as ensureFeatureBranch
+// does) can't stall push/pr indefinitely on a slow or unreachable remote; the
+// local main/master fallback below covers the timeout case.
+const isDefaultBranchRemoteLookupTimeout = 5 * time.Second
+
 func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) bool {
-	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
+	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
+	defer cancel()
+	if out, err := gitOutput(lookupCtx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
@@ -695,6 +704,16 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 		return BranchResult{}, fmt.Errorf("branch name required")
 	}
 	if options.DryRun {
+		return BranchResult{Branch: name}, nil
+	}
+	// A repeated run (e.g. the same diff producing the same slug, or a retry
+	// after a prior push under this name) can target a branch that already
+	// exists locally. `checkout -b` would fail on that collision, so check
+	// first and check it out directly instead of erroring.
+	if _, err := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name); err == nil {
+		if _, err := gitOutput(ctx, runGit, root, "checkout", name); err != nil {
+			return BranchResult{}, fmt.Errorf("checkout existing branch %q: %w", name, err)
+		}
 		return BranchResult{Branch: name}, nil
 	}
 	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name); err != nil {

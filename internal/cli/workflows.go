@@ -1203,9 +1203,25 @@ func generateAutoBranchSlug(ctx context.Context, provider zeroruntime.Provider, 
 		return "", fmt.Errorf("%s", collected.Error)
 	}
 
-	slug := zerogit.SlugifyBranchComponent(collected.Text)
+	slug := zerogit.SlugifyBranchComponent(firstNonEmptyBranchSlugLine(collected.Text))
 	if slug == "" {
 		return "", fmt.Errorf("provider returned empty branch slug")
 	}
 	return slug, nil
+}
+
+// firstNonEmptyBranchSlugLine picks the actual slug out of a model response
+// that didn't follow the "output only the raw slug" instruction exactly —
+// preamble/trailing blank lines or a model wrapping its answer in quotes.
+// SlugifyBranchComponent alone would fold that whole response, quotes and
+// all, into one long slug instead of just the intended words.
+func firstNonEmptyBranchSlugLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.Trim(strings.TrimSpace(line), `"'`)
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }

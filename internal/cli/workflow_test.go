@@ -1204,6 +1204,42 @@ func TestEnsureFeatureBranchUsesLLMSlugWhenProviderConfigured(t *testing.T) {
 	}
 }
 
+func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
+	cwd := t.TempDir()
+	// The prompt asks the model for "ONLY the raw slug text," but models don't
+	// always comply: this response wraps the actual slug in quotes with a
+	// blank line first. Slugifying the whole response verbatim would fold that
+	// noise into the branch name instead of just "add-login-page".
+	mockProv := &mockCommitMsgProvider{response: "\n\"add login page\"\n"}
+	var createdName string
+
+	branch, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, false, false, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, error) {
+			return true, "main", nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return mockProv, nil
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createdName = options.Name
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if branch != "someone/add-login-page" || createdName != "someone/add-login-page" {
+		t.Fatalf("unexpected branch: got %q (created %q)", branch, createdName)
+	}
+}
+
 func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false
@@ -1286,6 +1322,49 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 	}
 	if pushedBranch != "someone/readme-md" {
 		t.Fatalf("expected push to target the newly created branch, got %q", pushedBranch)
+	}
+	if !strings.Contains(stdout.String(), "Created branch someone/readme-md") {
+		t.Fatalf("expected branch-creation message in stdout, got %q", stdout.String())
+	}
+}
+
+func TestRunChangesPRCreatesFeatureBranchWhenOnDefault(t *testing.T) {
+	cwd := t.TempDir()
+	var pushedBranch string
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "pr", "--fill"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, error) {
+			return true, "main", nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			pushedBranch = options.Branch
+			return zerogit.PushResult{Remote: "origin", Branch: options.Branch}, nil
+		},
+		createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+			return zerogit.PRResult{Output: "https://example.invalid/pr/1"}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	// runChangesPR hardcodes dryRun=false into ensureFeatureBranch (unlike push,
+	// which forwards options.dryRun), so it always creates and forwards the
+	// branch on the default branch, with no --dry-run bypass to verify here.
+	if pushedBranch != "someone/readme-md" {
+		t.Fatalf("expected pushChanges to target the newly created branch, got %q", pushedBranch)
 	}
 	if !strings.Contains(stdout.String(), "Created branch someone/readme-md") {
 		t.Fatalf("expected branch-creation message in stdout, got %q", stdout.String())
