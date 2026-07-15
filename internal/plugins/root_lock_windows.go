@@ -57,13 +57,20 @@ func recoverStalePluginRootLock(lockPath string) bool {
 			if processAlive(pid) {
 				return false
 			}
-			return os.Remove(lockPath) == nil
+			return removeRecoveredPluginRootLock(lockPath)
 		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		return true
 	}
 	if time.Since(info.ModTime()) < pluginRootLockStaleAge {
 		return false
 	}
-	return os.Remove(lockPath) == nil
+	return removeRecoveredPluginRootLock(lockPath)
+}
+
+func removeRecoveredPluginRootLock(lockPath string) bool {
+	err := os.Remove(lockPath)
+	return err == nil || errors.Is(err, os.ErrNotExist)
 }
 
 func processAlive(pid int) bool {
