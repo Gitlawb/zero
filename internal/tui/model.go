@@ -1221,6 +1221,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !keyIs(msg, tea.KeyEnter) {
 			m.lastCharTime = now
 		}
+		// Enter the solid-while-typing state right away: only composerBlinkMsg
+		// evaluates the typing threshold, so if the blink phase had just hidden
+		// the caret, the typed character would render caret-less for up to a
+		// full tick before the timer catches up.
+		m.composerCursorVisible = true
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
@@ -1889,12 +1894,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tea.FocusMsg:
 		m.terminalFocused = true
+		// Sync the caret with focus immediately: leaving it to the next
+		// composerBlinkMsg tick can keep it hidden for up to a tick after the
+		// terminal regains focus (and, on blur below, leave it visible in an
+		// unfocused terminal for the same window).
+		m.composerCursorVisible = true
 		if m.notifier != nil {
 			m.notifier.SetFocused(true)
 		}
 		return m, nil
 	case tea.BlurMsg:
 		m.terminalFocused = false
+		m.composerCursorVisible = false
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
@@ -3499,7 +3510,7 @@ func (m model) composerLine(width int) string {
 	}
 	if argumentHint != "" {
 		input.SetWidth(0)
-		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint), width)
+		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint, m.composerCursorVisible), width)
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
@@ -3775,16 +3786,23 @@ func composerCursorForVisualColumn(state composerState, segment composerVisualLi
 	return segment.end
 }
 
-func commandArgumentHintComposerLine(input textinput.Model, argumentHint string) string {
+func commandArgumentHintComposerLine(input textinput.Model, argumentHint string, cursorVisible bool) string {
 	hintRunes := []rune(argumentHint)
 	if len(hintRunes) == 0 {
 		return input.View()
 	}
 	displayValue := strings.TrimRightFunc(input.Value(), unicode.IsSpace)
+	// This alternate composer path must follow the same caret contract as
+	// renderComposerInput: hidden while the terminal is unfocused and blinking
+	// per composerCursorVisible, not a permanently painted cursor cell.
+	cursor := zeroTheme.faint.Render(string(hintRunes[0]))
+	if cursorVisible {
+		cursor = composerCursor(cursor)
+	}
 	return zeroTheme.userPrompt.Render(input.Prompt) +
 		zeroTheme.ink.Inline(true).Render(displayValue) +
 		zeroTheme.faint.Render(" ") +
-		composerCursor(zeroTheme.faint.Render(string(hintRunes[0]))) +
+		cursor +
 		zeroTheme.faint.Render(string(hintRunes[1:]))
 }
 

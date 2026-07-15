@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -2736,6 +2737,59 @@ func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
 	m = updated.(model)
 	if !m.composerCursorVisible {
 		t.Fatal("expected cursor to toggle back on on second idle+focused tick")
+	}
+}
+
+func TestComposerCursorShowsImmediatelyOnKeypress(t *testing.T) {
+	// The blink phase may have just hidden the caret when the user starts
+	// typing; the typed character must render with a caret immediately, not
+	// after the next composerBlinkMsg tick evaluates the typing threshold.
+	m := newModel(context.Background(), Options{})
+	m.terminalFocused = true
+	m.composerCursorVisible = false
+
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after a keypress, before any blink tick")
+	}
+}
+
+func TestComposerCursorSyncsImmediatelyOnFocusChange(t *testing.T) {
+	// Focus transitions must apply the caret contract synchronously: a blur
+	// with no blink tick yet must not leave a visible caret in an unfocused
+	// terminal, and a refocus must not leave the caret hidden for a tick.
+	m := model{composerCursorVisible: true, terminalFocused: true}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	if m.composerCursorVisible {
+		t.Fatal("expected caret hidden immediately after BlurMsg, before any blink tick")
+	}
+
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after FocusMsg, before any blink tick")
+	}
+}
+
+func TestCommandArgumentHintFollowsCursorVisibility(t *testing.T) {
+	// The argument-hint composer line is an alternate render path that used to
+	// paint its caret cell unconditionally, ignoring focus and blink state.
+	input := textinput.New()
+	input.SetValue("/rewind ")
+
+	visible := commandArgumentHintComposerLine(input, "hint", true)
+	hidden := commandArgumentHintComposerLine(input, "hint", false)
+	if visible == hidden {
+		t.Fatal("expected the rendered hint line to differ between visible and hidden caret states")
+	}
+	if want := composerCursor(zeroTheme.faint.Render("h")); !strings.Contains(visible, want) {
+		t.Fatalf("expected visible-caret render to contain the styled cursor cell, got %q", visible)
+	}
+	if got := hidden; strings.Contains(got, composerCursor(zeroTheme.faint.Render("h"))) {
+		t.Fatalf("expected hidden-caret render to drop the styled cursor cell, got %q", got)
 	}
 }
 
