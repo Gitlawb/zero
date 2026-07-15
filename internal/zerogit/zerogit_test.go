@@ -530,7 +530,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
-			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
+			{Stdout: "origin\n"},                                   // config branch.feat/some-feature.remote
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
@@ -557,7 +557,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
-			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
+			{Stdout: "origin\n"},                                   // config branch.feat/some-feature.remote
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
@@ -644,7 +644,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
-			{ExitCode: 1, Stderr: "error: no such section"}, // config lookup fails
+			{ExitCode: 1, Stderr: "error: no such section"},        // config lookup fails
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
@@ -917,8 +917,8 @@ func TestIsDefaultBranch(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
-			{ExitCode: 1},                     // config lookup fails → origin
-			{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+			{ExitCode: 1},                           // config lookup fails → origin
+			{ExitCode: 128, Stderr: "fatal:"},       // ls-remote fails
 			{Stdout: "refs/remotes/origin/trunk\n"}, // local record: default is trunk
 		}}
 
