@@ -350,6 +350,7 @@ func TestActivateResolvesManifestRelativeSkillRoot(t *testing.T) {
 }
 
 func TestNewSkillToolSurfacesPluginSkillInList(t *testing.T) {
+	isolateAgentsHome(t)
 	defaultDir := t.TempDir()
 	writeTestSkill(t, defaultDir, "core-skill", "core body")
 	pluginRoot := t.TempDir()
@@ -384,6 +385,7 @@ func TestNewSkillToolSurfacesPluginSkillInList(t *testing.T) {
 }
 
 func TestMergeSkillRootsListsPluginSkillInAgentList(t *testing.T) {
+	isolateAgentsHome(t)
 	defaultDir := t.TempDir()
 	writeTestSkill(t, defaultDir, "core-skill", "core")
 
@@ -404,6 +406,9 @@ func TestMergeSkillRootsListsPluginSkillInAgentList(t *testing.T) {
 }
 
 func TestMergedSkillsRecordsDuplicatesWithoutCrashing(t *testing.T) {
+	// Isolate AgentsDir so a host ~/.agents/skills cannot add extra collisions.
+	isolateAgentsHome(t)
+
 	defaultDir := t.TempDir()
 	writeTestSkill(t, defaultDir, "shared", "default copy")
 
@@ -423,6 +428,90 @@ func TestMergedSkillsRecordsDuplicatesWithoutCrashing(t *testing.T) {
 	}
 	if len(dups) != 1 || dups[0].Name != "shared" {
 		t.Fatalf("expected one recorded duplicate for 'shared', got %#v", dups)
+	}
+}
+
+// isolateAgentsHome points HOME/USERPROFILE at an empty temp home so AgentsDir
+// does not pick up the developer's real ~/.agents/skills during unit tests.
+func isolateAgentsHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+func TestMergedSkillsIncludesAgentsWithoutPlugins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSkill(t, agents, "agents-skill", "from agents")
+
+	defaultDir := t.TempDir()
+	listed, dups := MergedSkills(defaultDir, nil)
+	if len(dups) != 0 {
+		t.Fatalf("unexpected dups: %#v", dups)
+	}
+	if len(listed) != 1 || listed[0].Name != "agents-skill" {
+		t.Fatalf("agents skill should surface with no plugins, got %#v", listed)
+	}
+}
+
+func TestMergedSkillsPriorityPrimaryAgentsPlugins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	primary := t.TempDir()
+	pluginRoot := t.TempDir()
+	writeTestSkill(t, primary, "shared", "primary body")
+	writeTestSkill(t, agents, "shared", "agents body")
+	writeTestSkill(t, agents, "agents-plugin", "agents body")
+	writeTestSkill(t, pluginRoot, "shared", "plugin body")
+	writeTestSkill(t, pluginRoot, "agents-plugin", "plugin body")
+	writeTestSkill(t, pluginRoot, "plugin-only", "plugin only")
+
+	listed, dups := MergedSkills(primary, []string{pluginRoot})
+	byName := map[string]string{}
+	for _, skill := range listed {
+		// Content is stripped by MergedSkills; use path origin instead.
+		byName[skill.Name] = skill.Path
+	}
+	if !strings.Contains(byName["shared"], primary) {
+		t.Fatalf("primary should win shared, path=%q", byName["shared"])
+	}
+	if !strings.Contains(byName["agents-plugin"], agents) {
+		t.Fatalf("agents should win over plugin for agents-plugin, path=%q", byName["agents-plugin"])
+	}
+	if !strings.Contains(byName["plugin-only"], pluginRoot) {
+		t.Fatalf("plugin-only missing, path=%q", byName["plugin-only"])
+	}
+	if len(dups) < 2 {
+		t.Fatalf("expected cross-layer dups, got %#v", dups)
+	}
+}
+
+func TestNewSkillToolLoadsAgentsSkillWithoutPluginRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSkill(t, agents, "agents-skill", "agents body")
+
+	tool := NewSkillTool(t.TempDir(), nil)
+	got := tool.Run(context.Background(), map[string]any{"name": "agents-skill"})
+	if got.Status != tools.StatusOK || !strings.Contains(got.Output, "agents body") {
+		t.Fatalf("expected agents skill body with zero plugin roots, got %q (%s)", got.Status, got.Output)
 	}
 }
 

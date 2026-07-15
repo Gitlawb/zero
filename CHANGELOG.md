@@ -127,6 +127,9 @@ tagged. Until then, source builds report the version `dev`.
 ## [Unreleased]
 
 ### Added
+- Shared multi-agent skills discovery: when present, `~/.agents/skills` is searched after the primary
+  Zero skills dir (and before plugin skill roots). `zero skills list` / `info` and the runtime `skill`
+  tool share one multi-root discovery path; install/remove still target only the Zero skills directory.
 - `SECURITY.md` with a private vulnerability-reporting path, `CODE_OF_CONDUCT.md`, this changelog, and
   GitHub issue/PR templates.
 - Interactive `/theme` picker: bare `/theme` opens a popup that live-previews each palette as you move

@@ -733,9 +733,10 @@ flowchart TD
 - **Skills** are instruction packs the model can load on demand.
 - **Specialists** are sub-agents callable through the `Task` tool.
 - **MCP servers** contribute external tools.
-- **Plugins** can add tools, hooks, and skill roots. Bootstrap merges plugin skill
-  roots into the runtime skill tool and prompt-visible skill list; the base
-  `internal/skills` scanner still scans one root at a time.
+- **Plugins** can add tools, hooks, and skill roots. Bootstrap always registers a
+  multi-root skill tool: primary Zero skills dir, optional `~/.agents/skills`,
+  then plugin skill roots (earlier wins). `internal/skills` owns that merge via
+  `LoadFromRoots` / `DiscoveryRoots`; single-root `Load` remains for install/write.
 - **Hooks** can observe or block tool lifecycle events.
 
 ## End-to-End Data Flow

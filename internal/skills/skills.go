@@ -32,6 +32,9 @@ const skillFileName = "SKILL.md"
 // explicit ZERO_SKILLS_DIR override wins; otherwise it is
 // $XDG_DATA_HOME/zero/skills or ~/.local/share/zero/skills. The directory is
 // NOT created — a missing directory simply yields no skills.
+//
+// DefaultDir is the primary write root for install/remove/lock. Runtime discovery
+// also considers AgentsDir and plugin skill roots via DiscoveryRoots / LoadFromRoots.
 func DefaultDir(env map[string]string) string {
 	if override := strings.TrimSpace(envValue(env, "ZERO_SKILLS_DIR")); override != "" {
 		return override
@@ -56,6 +59,66 @@ func DefaultDir(env map[string]string) string {
 	return filepath.Join(base, "zero", "skills")
 }
 
+// AgentsDir returns ~/.agents/skills when that path exists and is a directory.
+// It is a shared, read-only multi-agent skills root (Zero, Hermes, Claude Code,
+// etc.) and is never the target of install/remove/lock. Missing, non-directory,
+// or unresolvable home yields "" with no error and no directory creation.
+//
+// Home resolution matches other packages: HOME, then USERPROFILE, then
+// os.UserHomeDir(). ZERO_SKILLS_DIR is intentionally ignored — agents is a
+// pure convention path, not a Zero-specific override.
+func AgentsDir(env map[string]string) string {
+	home := strings.TrimSpace(firstNonEmpty(
+		envValue(env, "HOME"),
+		envValue(env, "USERPROFILE"),
+	))
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(userHome) == "" {
+			return ""
+		}
+		home = userHome
+	}
+	dir := filepath.Join(home, ".agents", "skills")
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
+// DiscoveryRoots returns ordered skill roots for runtime discovery: primary
+// DefaultDir, optional AgentsDir when present, then pluginRoots. Empty strings
+// are omitted. Earlier entries win on name clashes.
+func DiscoveryRoots(env map[string]string, pluginRoots []string) []string {
+	return collectRoots(DefaultDir(env), AgentsDir(env), pluginRoots)
+}
+
+// collectRoots assembles ordered non-empty skill roots. primary is typically
+// DefaultDir (or an injected test dir); agents is typically AgentsDir's result.
+func collectRoots(primary string, agents string, pluginRoots []string) []string {
+	roots := make([]string, 0, 2+len(pluginRoots))
+	if primary = strings.TrimSpace(primary); primary != "" {
+		roots = append(roots, primary)
+	}
+	if agents = strings.TrimSpace(agents); agents != "" {
+		roots = append(roots, agents)
+	}
+	for _, root := range pluginRoots {
+		if root = strings.TrimSpace(root); root != "" {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// GlobalRoots returns discovery roots for management CLI list/info: an explicit
+// primary write/root dir (usually skillsDir / DefaultDir) plus AgentsDir when
+// present. Plugin roots are excluded from management UX.
+func GlobalRoots(primary string) []string {
+	return collectRoots(primary, AgentsDir(nil), nil)
+}
+
 // DuplicateName records two skills that resolved to the same frontmatter name.
 // Winner is the SKILL.md path of the skill that was kept (the one in the
 // lexicographically-first directory); Loser is the path that was dropped.
@@ -77,12 +140,67 @@ type DuplicateName struct {
 // winner regardless of sort stability. Use Duplicates to surface a warning about
 // any such collisions.
 //
-// NOTE: Load scans one root. Agent startup merges plugin-declared skill roots
-// separately during plugin activation, so the runtime skill surface can include
-// both the default directory and skills bundled by active plugins.
+// NOTE: Load scans one root. Runtime discovery uses LoadFromRoots /
+// DiscoveryRoots (primary DefaultDir, optional ~/.agents/skills, then plugin
+// skill roots). Prefer those multi-root helpers for agent/CLI discovery; keep
+// Load for single-dir install/write call sites.
 func Load(dir string) ([]Skill, error) {
 	skills, _, err := load(dir)
 	return skills, err
+}
+
+// LoadFromRoots loads and merges skills from the provided directories (earlier
+// entries win on name clashes). Missing and empty roots are skipped. Intra-root
+// and cross-root collisions are reported as DuplicateName. A root that fails to
+// load for a non-missing reason is skipped rather than failing the whole merge,
+// matching the previous plugin-merge behaviour.
+func LoadFromRoots(dirs []string) ([]Skill, []DuplicateName, error) {
+	merged := make([]Skill, 0)
+	duplicates := []DuplicateName{}
+	byName := map[string]int{}
+
+	for _, dir := range dirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		loaded, rootDups, err := load(dir)
+		if err != nil {
+			// Fail open per root: one bad directory must not hide the rest.
+			continue
+		}
+		duplicates = append(duplicates, rootDups...)
+		for _, skill := range loaded {
+			if winnerIdx, clash := byName[skill.Name]; clash {
+				duplicates = append(duplicates, DuplicateName{
+					Name:   skill.Name,
+					Winner: merged[winnerIdx].Path,
+					Loser:  skill.Path,
+				})
+				continue
+			}
+			byName[skill.Name] = len(merged)
+			merged = append(merged, skill)
+		}
+	}
+
+	sort.Slice(merged, func(left int, right int) bool {
+		return merged[left].Name < merged[right].Name
+	})
+	return merged, duplicates, nil
+}
+
+// ListFromRoots is like LoadFromRoots but strips Content (like List).
+func ListFromRoots(dirs []string) ([]Skill, []DuplicateName, error) {
+	loaded, dups, err := LoadFromRoots(dirs)
+	if err != nil {
+		return nil, dups, err
+	}
+	listed := make([]Skill, 0, len(loaded))
+	for _, skill := range loaded {
+		skill.Content = ""
+		listed = append(listed, skill)
+	}
+	return listed, dups, nil
 }
 
 // Duplicates returns the duplicate-name collisions Load resolved by the
@@ -281,7 +399,7 @@ func splitFrontmatter(normalized string) (string, string, bool) {
 // Matching is case-insensitive on the key; the first occurrence wins.
 func frontmatterValue(frontmatter string, key string) string {
 	prefix := strings.ToLower(key) + ":"
-	for _, line := range strings.Split(frontmatter, "\n") {
+	for line := range strings.SplitSeq(frontmatter, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
 			value := strings.TrimSpace(trimmed[len(prefix):])
@@ -296,4 +414,13 @@ func envValue(env map[string]string, key string) string {
 		return env[key]
 	}
 	return os.Getenv(key)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -69,6 +69,11 @@ func TestActivatePluginsRegistersToolAndCollectsHooks(t *testing.T) {
 }
 
 func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
+	// Isolate host ~/.agents/skills so it cannot interfere with this test.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
 	pluginDir := t.TempDir()
 	skillDir := filepath.Join(pluginDir, "skills", "demo-skill")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -105,6 +110,42 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	res := skillTool.Run(context.Background(), map[string]any{"name": "demo-skill"})
 	if res.Status != tools.StatusOK {
 		t.Fatalf("plugin skill not resolvable via the agent skill tool: %q (%s)", res.Status, res.Output)
+	}
+}
+
+func TestActivatePluginsAlwaysRegistersMultiRootSkillTool(t *testing.T) {
+	// Even with zero plugins / zero plugin skill roots, activation must overlay
+	// the multi-root skill tool so ~/.agents/skills is loadable on bare runs.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(agents, "agents-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: agents-skill\n---\nagents body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewSkillTool(t.TempDir())) // core single-dir tool
+	var stderr bytes.Buffer
+	workspace := t.TempDir()
+	activation := activatePlugins(workspace, registry, fakePluginDeps(t, nil), &stderr, workspace)
+	if len(activation.skillRoots) != 0 {
+		t.Fatalf("expected no plugin skill roots, got %#v", activation.skillRoots)
+	}
+	skillTool, ok := registry.Get("skill")
+	if !ok {
+		t.Fatal("skill tool missing after activation")
+	}
+	res := skillTool.Run(context.Background(), map[string]any{"name": "agents-skill"})
+	if res.Status != tools.StatusOK || !bytes.Contains([]byte(res.Output), []byte("agents body")) {
+		t.Fatalf("agents skill must load with zero plugin roots: %q (%s)", res.Status, res.Output)
 	}
 }
 

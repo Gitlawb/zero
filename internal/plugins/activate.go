@@ -271,72 +271,55 @@ func skillSearchRoot(path string) string {
 // recognize a manifest path that points at the file rather than the directory.
 const skillFileName = "SKILL.md"
 
-// MergedSkills loads the default skills directory plus the supplied plugin skill
-// roots and returns one merged, name-deduplicated list (Content stripped, like
-// skills.List) alongside the duplicate-name collisions across all roots. Earlier
-// roots win a name clash, matching skills.Load's first-wins rule; the default dir
-// is always considered first so a user skill shadows a same-named plugin skill.
-// A bad root simply yields no skills rather than failing the merge.
+// MergedSkills loads the default skills directory, the shared ~/.agents/skills
+// root when present, plus the supplied plugin skill roots and returns one
+// merged, name-deduplicated list (Content stripped, like skills.List) alongside
+// the duplicate-name collisions across all roots. Earlier roots win a name
+// clash, matching skills.Load's first-wins rule; the default dir is always
+// considered first so a user skill shadows agents and plugins. A bad root simply
+// yields no skills rather than failing the merge.
 func MergedSkills(defaultDir string, pluginRoots []string) ([]skills.Skill, []skills.DuplicateName) {
 	return mergeSkills(defaultDir, pluginRoots, false)
 }
 
-// mergeSkills merges the default skills dir and plugin roots into one sorted,
-// name-deduplicated list. keepContent retains each skill's body (skills.Load)
-// versus stripping it (skills.List). Roots are considered in order with the
-// default dir first, so an earlier root wins a name clash; collisions are recorded
-// rather than crashing, preserving the skills package's Duplicates behaviour.
+// mergeSkills merges the primary skills dir, optional ~/.agents/skills, and
+// plugin roots into one sorted, name-deduplicated list via skills.LoadFromRoots /
+// ListFromRoots. keepContent retains each skill's body versus stripping it.
+// Roots are considered in order with the default dir first, so an earlier root
+// wins a name clash; collisions are recorded rather than crashing.
 func mergeSkills(defaultDir string, pluginRoots []string, keepContent bool) ([]skills.Skill, []skills.DuplicateName) {
-	merged := []skills.Skill{}
-	dups := []skills.DuplicateName{}
-	byName := map[string]skills.Skill{}
-
-	roots := append([]string{defaultDir}, pluginRoots...)
-	for _, root := range roots {
-		if strings.TrimSpace(root) == "" {
-			continue
-		}
-		var loaded []skills.Skill
-		var err error
-		if keepContent {
-			loaded, err = skills.Load(root)
-		} else {
-			loaded, err = skills.List(root)
-		}
-		if err != nil {
-			continue
-		}
-		for _, skill := range loaded {
-			if winner, clash := byName[skill.Name]; clash {
-				dups = append(dups, skills.DuplicateName{Name: skill.Name, Winner: winner.Path, Loser: skill.Path})
-				continue
-			}
-			byName[skill.Name] = skill
-			merged = append(merged, skill)
+	// Keep defaultDir injectable for tests rather than always calling DefaultDir.
+	roots := skills.GlobalRoots(defaultDir)
+	// GlobalRoots already includes AgentsDir; append plugin roots only.
+	for _, root := range pluginRoots {
+		if root = strings.TrimSpace(root); root != "" {
+			roots = append(roots, root)
 		}
 	}
-
-	sort.Slice(merged, func(left int, right int) bool {
-		return merged[left].Name < merged[right].Name
-	})
+	if keepContent {
+		merged, dups, _ := skills.LoadFromRoots(roots)
+		return merged, dups
+	}
+	merged, dups, _ := skills.ListFromRoots(roots)
 	return merged, dups
 }
 
 // skillTool is a drop-in replacement for the core skill tool that resolves a
-// named skill across the default skills directory PLUS the plugin skill roots, so
-// plugin-declared skills surface in the agent's skill list. It keeps the core
-// tool's name, schema, and read-only/allow safety so registering it simply
-// overlays plugin skills onto the existing surface.
+// named skill across the default skills directory, the shared ~/.agents/skills
+// root, and plugin skill roots, so agents- and plugin-declared skills surface in
+// the agent's skill list. It keeps the core tool's name, schema, and
+// read-only/allow safety so registering it simply overlays multi-root discovery
+// onto the existing surface.
 type skillTool struct {
 	defaultDir  string
 	pluginRoots []string
 }
 
-// NewSkillTool builds the plugin-aware skill tool. defaultDir is the standard
+// NewSkillTool builds the multi-root skill tool. defaultDir is the standard
 // skills directory (skills.DefaultDir); pluginRoots are the plugin skill search
-// roots from an ActivationResult. The returned tool merges both, deterministically
-// deduplicating by name (default dir wins a clash) and listing all available
-// skills when an unknown name is requested.
+// roots from an ActivationResult. The returned tool merges primary + agents +
+// plugins, deterministically deduplicating by name (default dir wins a clash)
+// and listing all available skills when an unknown name is requested.
 func NewSkillTool(defaultDir string, pluginRoots []string) tools.Tool {
 	return skillTool{defaultDir: defaultDir, pluginRoots: append([]string{}, pluginRoots...)}
 }
@@ -345,7 +328,7 @@ func (tool skillTool) Name() string { return "skill" }
 
 func (tool skillTool) Description() string {
 	return "Load a named Zero skill and return its instructions as the tool output. " +
-		"Skills are reusable, on-demand instruction sets (including any contributed by plugins). " +
+		"Skills are reusable, on-demand instruction sets (including shared ~/.agents/skills and any contributed by plugins). " +
 		"Call this when a relevant skill exists; an unknown name returns the list of available skills."
 }
 
