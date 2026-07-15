@@ -457,11 +457,28 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	if r := wcagRatio(t, q(neon.red), q(neon.delBg)); r < 4.5 {
 		t.Errorf("neon: red on delBg = %.2f < 4.5 after quantization", r)
 	}
-	// faintest line numbers over addBg are only asserted in truecolor (see
-	// TestExtendedThemeContrastInvariants): the darkest green cube entry,
-	// #005f00, is already too bright against quantized faintest for 4.5:1, so
-	// an AA quantized pair and a green-identified band are mutually exclusive
-	// on the xterm cube. The band identity wins; the pair still clears 2.9:1.
+	// The two rendered diff-content pairs a 256-color terminal actually
+	// shows: line numbers (faintest on addBg/delBg) and highlighted changed
+	// spans (addInk/delInk on their word bands).
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"faintest on addBg", neon.faintest, neon.addBg},
+		{"faintest on delBg", neon.faintest, neon.delBg},
+		{"addInk on addBgWord", neon.addInk, neon.addBgWord},
+		{"delInk on delBgWord", neon.delInk, neon.delBgWord},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("neon: %s = %.2f < 4.5 after quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	// Error-card borders are non-text UI components: they need 3:1 against
+	// the panel (WCAG 1.4.11) to be distinguishable at all, in both truecolor
+	// and 256-color renderings.
+	if r := wcagRatio(t, neon.cardErr, neon.panel); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0", r)
+	}
+	if r := wcagRatio(t, q(neon.cardErr), q(neon.panel)); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0 after quantization", r)
+	}
 }
 
 func mustR(t *testing.T, hex string) uint32 {

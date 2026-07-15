@@ -343,7 +343,7 @@ var neonPalette = palette{
 	ink:       "#c9ffd2",
 	muted:     "#80db8f",
 	faint:     "#6eca7d",
-	faintest:  "#58af69",
+	faintest:  "#74c468", // brightened from #58af69 so line numbers quantize to #87d75f and stay AA on the xterm-green addBg (#005f00); still dimmer than faint, keeping the ramp monotonic
 	accent:    "#00e5c8",
 	green:     "#39ff6a",
 	red:       "#ff4d6d",
@@ -357,11 +357,11 @@ var neonPalette = palette{
 	delBgWord: "#74202e", // quantizes to xterm red #870000 (see addBgWord)
 	permBg:    "#2a2a0c",
 	selBg:     "#123a1e",
-	addInk:    "#c8ffcf",
+	addInk:    "#ecffdc", // quantizes to #ffffd7, which keeps AA on addBgWord's xterm #008700 (the old #c8ffcf quantized to #d7ffd7 at 4.29:1)
 	delInk:    "#ffd0d6",
 	onAccent:  "#001410",
 	cardRun:   "#1f8a6e",
-	cardErr:   "#8a2f42",
+	cardErr:   "#9a4042", // raised from #8a2f42 for the 3:1 non-text border threshold against the panel (2.43:1 before), holding after xterm-256 quantization too
 	cardPerm:  "#8a8a1f",
 }
 
