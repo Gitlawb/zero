@@ -74,6 +74,9 @@ func (c *Client) SendSignInCode(ctx context.Context, email string) error {
 func (c *Client) VerifySignInCode(ctx context.Context, email string, code string) (AuthResult, error) {
 	var result AuthResult
 	err := c.request(ctx, http.MethodPost, c.authURL("/v1/auth/sign-in/code/verify"), "", map[string]any{"email": email, "code": code}, &result)
+	if err == nil && strings.TrimSpace(result.Token) == "" {
+		err = fmt.Errorf("aimlapi.com did not return an auth token")
+	}
 	return result, err
 }
 
@@ -82,6 +85,9 @@ func (c *Client) VerifySignInCode(ctx context.Context, email string, code string
 func (c *Client) CreatePasswordlessAccount(ctx context.Context, email string) (AuthResult, error) {
 	var result AuthResult
 	err := c.request(ctx, http.MethodPost, c.authURL("/v1/auth/account/passwordless"), "", map[string]any{"email": email}, &result)
+	if err == nil && strings.TrimSpace(result.Token) == "" {
+		err = fmt.Errorf("aimlapi.com did not return an auth token")
+	}
 	return result, err
 }
 

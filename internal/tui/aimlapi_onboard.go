@@ -64,6 +64,11 @@ type aimlapiOnboardState struct {
 	// handle, generated once and reused on retry so a re-issued pay never double-charges.
 	byKey            bool
 	paymentSessionID string
+	// payment intent attributes bind resumable checkout state to the normalized
+	// amount and auto-top-up selection that created it. Changing either starts a
+	// fresh intent instead of silently reusing the old checkout.
+	paymentAmountUSDMinor int
+	paymentAutoTopUp      bool
 
 	// opCancel cancels the single in-flight account/key request (balance, check,
 	// code, passwordless, key-mint). Only one runs at a time (input is gated while
@@ -578,15 +583,22 @@ func (s *aimlapiOnboardState) applyCheck(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 		s.step = aimlapiStepEmailInput
 		return nil, aimlapiContinue
 	}
-	if msg.check.Action == "sign-in" {
+	switch msg.check.Action {
+	case "sign-in":
 		s.newAccount = false
 		s.startBusy()
 		return s.sendCodeCmd(s.email), aimlapiContinue
+	case "sign-up":
+		// No account yet: passwordless sign-up, then fund via top-up (min $20).
+		s.newAccount = true
+		s.startBusy()
+		return s.passwordlessCmd(s.email), aimlapiContinue
+	default:
+		s.newAccount = false
+		s.errText = aimlapi.MsgAccountActionInvalid
+		s.step = aimlapiStepEmailInput
+		return nil, aimlapiContinue
 	}
-	// No account yet: passwordless sign-up, then fund via top-up (min $20).
-	s.newAccount = true
-	s.startBusy()
-	return s.passwordlessCmd(s.email), aimlapiContinue
 }
 
 func (s *aimlapiOnboardState) applyToken(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
@@ -703,7 +715,8 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		s.amountField = 0
 		return nil, aimlapiContinue
 	}
-	if _, err := aimlapi.ParseAmountUSD(s.amount); err != nil {
+	amountUSDMinor, err := aimlapi.ParseAmountUSD(s.amount)
+	if err != nil {
 		// Surface the actual validation error (below-min / above-max / non-numeric),
 		// the same way this sub-flow renders its other errors, instead of a single
 		// catch-all "too low".
@@ -712,6 +725,8 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		s.amountField = 0
 		return nil, aimlapiContinue
 	}
+	s.prepareTopUpIntent(amountUSDMinor)
+	normalizedAmount := formatUSDMinor(amountUSDMinor)
 	s.gen++
 	gen := s.gen
 	s.detail = ""
@@ -735,7 +750,7 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		}
 		s.topupCh = startAimlapiStreamTopUpByKey(ctx, aimlapi.StreamTopUpByKeyOptions{
 			APIKey:             s.apiKey,
-			AmountUSD:          s.amount,
+			AmountUSD:          normalizedAmount,
 			InferenceBaseURL:   s.baseURL,
 			AutoTopUp:          s.autoTopUp,
 			ResumeSessionToken: s.resumeSessionToken,
@@ -747,7 +762,7 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		s.topupCh = startAimlapiStreamTopUp(ctx, aimlapi.StreamTopUpOptions{
 			SessionToken:       s.sessionToken,
 			ResumeSessionToken: s.resumeSessionToken,
-			AmountUSD:          s.amount,
+			AmountUSD:          normalizedAmount,
 			InferenceBaseURL:   s.baseURL,
 			Method:             aimlapi.PaymentMethodCard,
 			AutoTopUp:          s.autoTopUp,
@@ -757,6 +772,20 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		})
 	}
 	return waitForAimlapiTopupEvent(s, gen, s.topupCh), aimlapiContinue
+}
+
+func (s *aimlapiOnboardState) prepareTopUpIntent(amountUSDMinor int) {
+	if s.paymentAmountUSDMinor != 0 &&
+		(s.paymentAmountUSDMinor != amountUSDMinor || s.paymentAutoTopUp != s.autoTopUp) {
+		s.resumeSessionToken = ""
+		s.paymentSessionID = ""
+	}
+	s.paymentAmountUSDMinor = amountUSDMinor
+	s.paymentAutoTopUp = s.autoTopUp
+}
+
+func formatUSDMinor(amount int) string {
+	return fmt.Sprintf("%d.%02d", amount/100, amount%100)
 }
 
 // finishEverythingRuns lands on the terminal "Everything is ready" screen with the
@@ -788,7 +817,7 @@ func (s *aimlapiOnboardState) safeErrorMessage(err error) string {
 // magic-link note follows the balance line after a blank spacer row; an existing
 // key just gets the top-up confirmation.
 func (s *aimlapiOnboardState) topUpSuccessLines() []string {
-	amount := fmt.Sprintf(aimlapi.MsgTopUpAddedFmt, strings.TrimSpace(s.amount))
+	amount := fmt.Sprintf(aimlapi.MsgTopUpAddedFmt, formatUSDMinor(s.paymentAmountUSDMinor))
 	if s.newAccount {
 		return []string{
 			aimlapi.MsgTopUpSuccess,

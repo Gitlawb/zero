@@ -230,6 +230,60 @@ func TestPollUntilPaidTerminal4xxClearsRetainedToken(t *testing.T) {
 	}
 }
 
+func TestResumeHelpersClearOnlyRejectedSessions(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		wantClear bool
+	}{
+		{name: "terminal 4xx", status: http.StatusNotFound, wantClear: true},
+		{name: "retryable 5xx", status: http.StatusServiceUnavailable, wantClear: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "session lookup failed", test.status)
+			}))
+			defer server.Close()
+			client := NewClient(Endpoints{AppBaseURL: server.URL}, server.Client())
+
+			for _, flow := range []struct {
+				name    string
+				resolve func(func(string)) error
+			}{
+				{
+					name: "session bearer",
+					resolve: func(onSession func(string)) error {
+						_, _, err := resolveTopupSession(context.Background(), client, StreamTopUpOptions{
+							ResumeSessionToken: "pc_rejected", OnSession: onSession,
+						}, DefaultPartnerID, DefaultPartnerName, Endpoints{})
+						return err
+					},
+				},
+				{
+					name: "api key",
+					resolve: func(onSession func(string)) error {
+						_, _, err := resolveByKeySession(context.Background(), client, StreamTopUpByKeyOptions{
+							ResumeSessionToken: "pc_rejected", OnSession: onSession,
+						}, DefaultPartnerID, DefaultPartnerName, Endpoints{})
+						return err
+					},
+				},
+			} {
+				t.Run(flow.name, func(t *testing.T) {
+					seen := "retained"
+					if err := flow.resolve(func(token string) { seen = token }); err == nil {
+						t.Fatal("resolve error = nil")
+					}
+					if cleared := seen == ""; cleared != test.wantClear {
+						t.Fatalf("session cleared = %v, want %v", cleared, test.wantClear)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestStreamTopUpResumeExchangedReturnsRecoveryError(t *testing.T) {
 	rs := &resumeServer{t: t, statuses: []string{"exchanged"}}
 	server := httptest.NewServer(rs.handler())

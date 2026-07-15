@@ -346,6 +346,58 @@ func TestAimlapiTopUpFailureRetainsSessionForRetry(t *testing.T) {
 	}
 }
 
+func TestAimlapiRejectsUnknownAccountAction(t *testing.T) {
+	state := &aimlapiOnboardState{step: aimlapiStepProgress, email: "user@example.com", busy: true}
+	cmd, outcome := state.applyCheck(aimlapiOnboardMsg{check: aimlapi.CheckResult{Action: "future-action"}})
+
+	if cmd != nil || outcome != aimlapiContinue {
+		t.Fatalf("unknown action returned cmd=%v outcome=%v", cmd != nil, outcome)
+	}
+	if state.step != aimlapiStepEmailInput || state.newAccount || state.busy {
+		t.Fatalf("unknown action state = step %v new=%v busy=%v", state.step, state.newAccount, state.busy)
+	}
+	if state.errText != aimlapi.MsgAccountActionInvalid {
+		t.Fatalf("error = %q", state.errText)
+	}
+}
+
+func TestAimlapiChangedTopUpIntentDropsRetainedCheckout(t *testing.T) {
+	tests := []struct {
+		name      string
+		amount    int
+		autoTopUp bool
+		wantDrop  bool
+	}{
+		{name: "same intent", amount: 2500, autoTopUp: true, wantDrop: false},
+		{name: "changed amount", amount: 5000, autoTopUp: true, wantDrop: true},
+		{name: "changed auto top-up", amount: 2500, autoTopUp: false, wantDrop: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &aimlapiOnboardState{
+				resumeSessionToken:    "pcs_old",
+				paymentSessionID:      "payment-old",
+				paymentAmountUSDMinor: 2500,
+				paymentAutoTopUp:      true,
+				autoTopUp:             test.autoTopUp,
+			}
+			state.prepareTopUpIntent(test.amount)
+			dropped := state.resumeSessionToken == "" && state.paymentSessionID == ""
+			if dropped != test.wantDrop {
+				t.Fatalf("checkout dropped = %v, want %v", dropped, test.wantDrop)
+			}
+		})
+	}
+}
+
+func TestAimlapiTopUpSuccessShowsChargedCentAmount(t *testing.T) {
+	state := &aimlapiOnboardState{amount: "20.999", paymentAmountUSDMinor: 2100}
+	lines := state.topUpSuccessLines()
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "$21.00 has been added") || strings.Contains(got, "20.999") {
+		t.Fatalf("success lines do not show normalized charge: %q", got)
+	}
+}
+
 func TestAimlapiTerminalTopUpDropsByKeyIdempotencyID(t *testing.T) {
 	state := &aimlapiOnboardState{
 		step:               aimlapiStepProgress,

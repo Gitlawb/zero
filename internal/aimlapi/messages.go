@@ -12,8 +12,9 @@ const (
 	MsgPickPathNewUser   = "I am a new user"
 	MsgPickPathNewHint   = "One click set up"
 	// Path B — email.
-	MsgEnterEmail   = "Enter your email.\nTo access aimlapi.com dashboard."
-	MsgEmailInvalid = "Email format is incorrect."
+	MsgEnterEmail           = "Enter your email.\nTo access aimlapi.com dashboard."
+	MsgEmailInvalid         = "Email format is incorrect."
+	MsgAccountActionInvalid = "aimlapi.com returned an unsupported account action. Please try again."
 	// %s = email
 	MsgCodeSent      = "We sent a 6-digit code to %s.\nEnter it below to continue."
 	MsgCodeIncorrect = "Code you've entered is incorrect."

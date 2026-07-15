@@ -159,6 +159,9 @@ func resolveTopupSession(ctx context.Context, client *Client, options StreamTopU
 	}
 	session, err := client.GetSession(ctx, resume)
 	if err != nil {
+		if isTerminalSessionAPIError(err) {
+			reportSession(options.OnSession, "")
+		}
 		return "", phasePay, err
 	}
 	switch session.Status {
@@ -297,6 +300,9 @@ func resolveByKeySession(ctx context.Context, client *Client, options StreamTopU
 	}
 	session, err := client.GetSession(ctx, resume)
 	if err != nil {
+		if isTerminalSessionAPIError(err) {
+			reportSession(options.OnSession, "")
+		}
 		return "", phasePay, err
 	}
 	switch session.Status {

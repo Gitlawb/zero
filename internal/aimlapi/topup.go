@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -86,8 +87,7 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string, onS
 			// A 4xx API response is terminal. Everything else — a 5xx or a transient
 			// transport error (non-APIError, e.g. a dropped connection during the
 			// wait) — is retried until the poll deadline.
-			var apiErr APIError
-			if errors.As(err, &apiErr) && apiErr.Status < 500 {
+			if isTerminalSessionAPIError(err) {
 				reportSession(onSession, "")
 				return PartnerCheckoutSession{}, err
 			}
@@ -114,6 +114,11 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string, onS
 		}
 	}
 	return PartnerCheckoutSession{}, fmt.Errorf("timed out waiting for payment; re-run once the payment clears")
+}
+
+func isTerminalSessionAPIError(err error) bool {
+	var apiErr APIError
+	return errors.As(err, &apiErr) && apiErr.Status >= http.StatusBadRequest && apiErr.Status < http.StatusInternalServerError
 }
 
 // pollUntilExchangeSettled follows an exchange claim that was already in flight

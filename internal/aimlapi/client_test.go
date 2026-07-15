@@ -52,6 +52,42 @@ func TestCreateKeyRejectsEmptyKeyResponse(t *testing.T) {
 	}
 }
 
+func TestAuthMethodsRejectEmptyTokenResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":""}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(Endpoints{AuthBaseURL: server.URL}, server.Client())
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "verify sign-in code",
+			call: func() error {
+				_, err := client.VerifySignInCode(context.Background(), "user@example.com", "123456")
+				return err
+			},
+		},
+		{
+			name: "create passwordless account",
+			call: func() error {
+				_, err := client.CreatePasswordlessAccount(context.Background(), "user@example.com")
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); err == nil {
+				t.Fatal("accepted a response without an auth token")
+			}
+		})
+	}
+}
+
 func TestClientReturnsTypedAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "invalid key", http.StatusUnauthorized)
