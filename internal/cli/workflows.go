@@ -523,14 +523,19 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	if command != "commit" && options.message != "" {
 		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
 	}
-	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
-		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
+	if command != "commit" && options.hasMessage {
+		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
 	}
 	if command == "commit" && options.hasMessage && options.auto {
 		return options, false, execUsageError{"cannot specify both --message and --auto"}
 	}
 	if command != "commit" && command != "push" && options.dryRun {
 		return options, false, execUsageError{"--dry-run is only valid with commit or push"}
+	}
+	// --auto on push/pr is the explicit opt-in for LLM branch naming (see
+	// ensureFeatureBranch); on commit it opts into the LLM commit message.
+	if command != "commit" && command != "push" && command != "pr" && options.auto {
+		return options, false, execUsageError{"--auto is only valid with commit, push, or pr"}
 	}
 	if command != "inspect" && options.baseRef != "" {
 		return options, false, execUsageError{"--base is only valid with `zero changes inspect`"}
@@ -839,8 +844,7 @@ Flags:
       --fill              Automatically populate PR title and body from commits
       --draft             Create PR as a draft
       --yes               Confirm pushing to a default/protected branch
-  -a, --auto              Auto-generate commit message using LLM (use --dry-run to preview)
-      --dry-run           Preview commit metadata without mutating git state
+  -a, --auto              Use the LLM: commit generates the message, push/pr name the auto-created branch (sends the diff to the provider)
       --json              Print JSON output
   -h, --help              Show this help
 `)
@@ -863,14 +867,14 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.yes, options.dryRun, deps)
+	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
-		Remote:                 options.remote,
+		Remote:                 firstNonEmptyString(options.remote, remote),
 		Branch:                 branch,
 		Force:                  options.force,
 		DryRun:                 options.dryRun,
@@ -921,7 +925,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.yes, false, deps)
+	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -933,7 +937,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
-		Remote:                 options.remote,
+		Remote:                 firstNonEmptyString(options.remote, remote),
 		Branch:                 branch,
 		Force:                  options.force,
 		AllowPushDefaultBranch: options.yes,
@@ -1023,38 +1027,60 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // zerogit.Push, so rather than surface that as a dead end, create and switch
 // to a conventionally named "<user>/<slug>" branch first. It returns the
 // branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
-// (zerogit.Push already treats an empty Branch that way). allowDefaultBranch
-// (the --yes flag) and dryRun both opt out via that "" return, leaving Push's
-// own guard/preview behavior on the default branch unaffected.
-func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, allowDefaultBranch bool, dryRun bool, deps appDeps) (string, error) {
+// (zerogit.Push already treats an empty Branch that way), plus the remote the
+// preflight resolved (requestedRemote, then the original branch's configured
+// upstream, then "origin"). Callers must pass that remote to Push: a freshly
+// created branch has no tracking configuration, so Push's own fallback would
+// silently retarget "origin" even when the work came from a branch tracking
+// a different remote. allowDefaultBranch (the --yes flag) and dryRun both opt
+// out via the "" return, leaving Push's own guard/preview behavior on the
+// default branch unaffected.
+//
+// autoNaming gates the LLM naming path (--auto): these commands were
+// git-only, and sending the change diff to a configured provider on every
+// default-branch push would silently export source code nobody asked to
+// share. Without the opt-in the name comes from deterministic local
+// information only.
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, deps appDeps) (string, string, error) {
 	if allowDefaultBranch || dryRun {
-		return "", nil
+		return "", strings.TrimSpace(requestedRemote), nil
 	}
 
-	isDefault, currentBranch, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot})
+	isDefault, currentBranch, remote, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: requestedRemote})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !isDefault {
-		return currentBranch, nil
+		return currentBranch, remote, nil
 	}
 
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
 	if err != nil {
-		return "", fmt.Errorf("failed to inspect changes: %w", err)
+		return "", "", fmt.Errorf("failed to inspect changes: %w", err)
 	}
 
 	slug := fallbackBranchSlug(summary)
-	if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
-		if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
-			if !jsonMode {
-				fmt.Fprintln(stdout, "Generating branch name using LLM...")
-			}
-			genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-			generated, genErr := generateAutoBranchSlug(genCtx, provider, resolved.Provider.Model, redactChangeSummary(summary))
-			cancel()
-			if genErr == nil && generated != "" {
-				slug = generated
+	if len(summary.Files) == 0 {
+		// The ordinary sequence is `changes commit` then `changes push`, so
+		// the working tree here is clean and the diff-derived fallback would
+		// always be the meaningless "changes". Name the branch from the
+		// commit that is about to be pushed instead.
+		if subject := deps.headCommitSubject(ctx, workspaceRoot); subject != "" {
+			slug = zerogit.SlugifyBranchComponent(subject)
+		}
+	}
+	if autoNaming && strings.TrimSpace(summary.Diff) != "" {
+		if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
+			if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
+				if !jsonMode {
+					fmt.Fprintln(stdout, "Generating branch name using LLM...")
+				}
+				genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				generated, genErr := generateAutoBranchSlug(genCtx, provider, resolved.Provider.Model, redactChangeSummary(summary))
+				cancel()
+				if genErr == nil && generated != "" {
+					slug = generated
+				}
 			}
 		}
 	}
@@ -1062,12 +1088,12 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
 	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name})
 	if err != nil {
-		return "", fmt.Errorf("failed to create branch: %w", err)
+		return "", "", fmt.Errorf("failed to create branch: %w", err)
 	}
 	if !jsonMode {
 		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
 	}
-	return result.Branch, nil
+	return result.Branch, remote, nil
 }
 
 // fallbackBranchSlug derives a deterministic branch-name slug from a change

@@ -90,8 +90,9 @@ type appDeps struct {
 	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
 	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
 	createBranch           func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
-	isDefaultBranch        func(context.Context, zerogit.DefaultBranchOptions) (bool, string, error)
+	isDefaultBranch        func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
 	currentGitUser         func(context.Context, string) string
+	headCommitSubject      func(context.Context, string) string
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -202,6 +203,9 @@ func defaultAppDeps() appDeps {
 		isDefaultBranch:  zerogit.IsDefaultBranch,
 		currentGitUser: func(ctx context.Context, cwd string) string {
 			return zerogit.CurrentGitUser(ctx, cwd, nil)
+		},
+		headCommitSubject: func(ctx context.Context, cwd string) string {
+			return zerogit.HeadCommitSubject(ctx, cwd, nil)
 		},
 		runTUI:      tui.Run,
 		runEditor:   openEditor,
@@ -572,6 +576,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.currentGitUser == nil {
 		deps.currentGitUser = defaults.currentGitUser
+	}
+	if deps.headCommitSubject == nil {
+		deps.headCommitSubject = defaults.headCommitSubject
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI

@@ -581,7 +581,11 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}
 
 	if !options.AllowPushDefaultBranch {
-		if isDefaultBranch(ctx, runGit, root, remote, branch) {
+		isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
+		if err != nil {
+			return PushResult{}, fmt.Errorf("cannot verify %q is not the default/protected branch: %w; use --yes to override", branch, err)
+		}
+		if isDefault {
 			return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
 		}
 	}
@@ -613,7 +617,13 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 // local main/master fallback below covers the timeout case.
 const isDefaultBranchRemoteLookupTimeout = 5 * time.Second
 
-func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) bool {
+func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) (bool, error) {
+	// The conventional default names count without consulting the remote.
+	// This is the safe direction (it can only block a push, never permit
+	// one), and it keeps the guard meaningful with no network at all.
+	if branch == "main" || branch == "master" {
+		return true, nil
+	}
 	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
 	defer cancel()
 	if out, err := gitOutput(lookupCtx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
@@ -622,11 +632,24 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
 				symref := strings.TrimPrefix(line, "ref: refs/heads/")
 				symref = strings.TrimSuffix(symref, "\tHEAD")
-				return branch == symref
+				return branch == symref, nil
 			}
 		}
 	}
-	return branch == "main" || branch == "master"
+	// The remote lookup failed (unreachable, slow, or gave no symref): fall
+	// back to the local record of the remote's default branch, written by
+	// clone or `git remote set-head`. It needs no network, so a slow remote
+	// cannot degrade the answer.
+	if out, err := gitOutput(ctx, runGit, dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"); ok && name != "" {
+			return branch == name, nil
+		}
+	}
+	// Fail closed: before this, a lookup timeout silently downgraded the
+	// check to the main/master name heuristic, so a repository whose default
+	// is trunk/develop lost the confirmation guard exactly when the remote
+	// was slow.
+	return false, fmt.Errorf("default branch for remote %q is unknown (remote lookup failed and no local refs/remotes/%s/HEAD record exists; run `git remote set-head %s --auto` to record it)", remote, remote, remote)
 }
 
 // DefaultBranchOptions resolves whether a branch is the repository's
@@ -641,18 +664,22 @@ type DefaultBranchOptions struct {
 // IsDefaultBranch reports whether options.Branch (or, if empty, the current
 // branch) is the repository's default/protected branch, using the same check
 // Push already applies before refusing to push straight to it. It returns the
-// resolved branch name alongside the bool so callers that left Branch empty
-// don't need a second lookup.
-func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, string, error) {
+// resolved branch name and remote alongside the bool so callers that left
+// them empty don't need a second lookup: the remote is resolved exactly the
+// way Push resolves it (explicit option, then the branch's configured
+// upstream, then "origin"), so a caller can thread the same remote through a
+// later Push instead of letting a freshly created branch with no tracking
+// configuration silently fall back to "origin".
+func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, string, string, error) {
 	cwd, err := resolveCwd(options.Cwd)
 	if err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 	runGit, _ := resolveRunners(options.RunGit, nil)
 
 	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return false, "", fmt.Errorf("not a git repository: %w", err)
+		return false, "", "", fmt.Errorf("not a git repository: %w", err)
 	}
 	root = filepath.Clean(root)
 
@@ -660,14 +687,22 @@ func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, s
 	if branch == "" {
 		branch, err = gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
-			return false, "", fmt.Errorf("resolve current branch: %w", err)
+			return false, "", "", fmt.Errorf("resolve current branch: %w", err)
 		}
 	}
 	remote := strings.TrimSpace(options.Remote)
 	if remote == "" {
-		remote = "origin"
+		if upstream, err := gitOutput(ctx, runGit, root, "config", "branch."+branch+".remote"); err == nil && upstream != "" {
+			remote = upstream
+		} else {
+			remote = "origin"
+		}
 	}
-	return isDefaultBranch(ctx, runGit, root, remote, branch), branch, nil
+	isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
+	if err != nil {
+		return false, branch, remote, err
+	}
+	return isDefault, branch, remote, nil
 }
 
 // BranchOptions configures creating and checking out a new local branch.
@@ -706,20 +741,40 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 	if options.DryRun {
 		return BranchResult{Branch: name}, nil
 	}
-	// A repeated run (e.g. the same diff producing the same slug, or a retry
-	// after a prior push under this name) can target a branch that already
-	// exists locally. `checkout -b` would fail on that collision, so check
-	// first and check it out directly instead of erroring.
-	if _, err := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name); err == nil {
-		if _, err := gitOutput(ctx, runGit, root, "checkout", name); err != nil {
-			return BranchResult{}, fmt.Errorf("checkout existing branch %q: %w", name, err)
+	// A repeated run (the same diff producing the same slug, or a low-entropy
+	// fallback name) can collide with a branch that already exists locally.
+	// Never check that existing ref out: its history may be entirely
+	// unrelated to the current work (an old push under the same name), and
+	// switching to it would publish the stale branch while leaving the new
+	// commit behind on the default branch. Pick a unique suffixed name off
+	// the current HEAD instead, and fail visibly when the namespace is
+	// exhausted rather than guess.
+	base := name
+	for suffix := 2; ; suffix++ {
+		if _, err := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name); err != nil {
+			break
 		}
-		return BranchResult{Branch: name}, nil
+		if suffix > 9 {
+			return BranchResult{}, fmt.Errorf("branch %q already exists (as do %s-2 through %s-9); delete the stale branches or create one explicitly with `git checkout -b`", base, base, base)
+		}
+		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
 	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name); err != nil {
 		return BranchResult{}, fmt.Errorf("create branch %q: %w", name, err)
 	}
 	return BranchResult{Branch: name}, nil
+}
+
+// HeadCommitSubject returns the subject line of the HEAD commit, or "" when
+// it cannot be resolved (empty repository, not a git directory). Callers use
+// it to name the branch for a push that follows a commit, where the working
+// tree is already clean and a diff-based name would be empty.
+func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	if subject, err := gitOutput(ctx, runGit, cwd, "log", "-1", "--format=%s"); err == nil {
+		return strings.TrimSpace(subject)
+	}
+	return ""
 }
 
 // CurrentGitUser resolves an identity to prefix generated branch names with:
