@@ -567,9 +567,13 @@ func TestStoreFileLoadToleratesCrashedWriterLock(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Load waited on the write lock (%v); reads must be lock-free", elapsed)
 	}
+	statusStart := time.Now()
 	statuses, err := s.Status("")
 	if err != nil || len(statuses) != 1 {
 		t.Fatalf("Status behind a crashed writer's lock: %v (%d entries)", err, len(statuses))
+	}
+	if elapsed := time.Since(statusStart); elapsed > 2*time.Second {
+		t.Fatalf("Status waited on the write lock (%v); reads must be lock-free", elapsed)
 	}
 }
 
