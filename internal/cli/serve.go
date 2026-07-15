@@ -94,15 +94,20 @@ func buildServeScope(workspaceRoot string, addDirs []string) (tools.PathScope, e
 	}
 	roots := make([]string, 0, 1+len(addDirs))
 	workspaceRoot = filepath.Clean(workspaceRoot)
-	if absolute, err := filepath.Abs(workspaceRoot); err == nil {
-		workspaceRoot = filepath.Clean(absolute)
+	if abs, err := filepath.Abs(workspaceRoot); err == nil {
+		workspaceRoot = abs
 	}
+
+	// Keep lexical absolute paths in roots so path checks stay aligned with the
+	// un-evaluated WorkspaceRoot used when Scope is nil. Symlink-resolved forms
+	// are only keys for duplicate detection.
+	workspaceResolved := workspaceRoot
 	if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
-		workspaceRoot = resolved
+		workspaceResolved = resolved
 	}
 	roots = append(roots, workspaceRoot)
 
-	seen := map[string]struct{}{workspaceRoot: {}}
+	seen := map[string]struct{}{workspaceResolved: {}}
 	for _, dir := range addDirs {
 		trimmed := strings.TrimSpace(dir)
 		if trimmed == "" {
@@ -112,7 +117,6 @@ func buildServeScope(workspaceRoot string, addDirs []string) (tools.PathScope, e
 		if err != nil {
 			return nil, execUsageError{fmt.Sprintf("--add-dir %q: %v", trimmed, err)}
 		}
-		absolute = filepath.Clean(absolute)
 		info, err := os.Stat(absolute)
 		if err != nil {
 			return nil, execUsageError{fmt.Sprintf("--add-dir %q: %v", trimmed, err)}
@@ -120,13 +124,15 @@ func buildServeScope(workspaceRoot string, addDirs []string) (tools.PathScope, e
 		if !info.IsDir() {
 			return nil, execUsageError{fmt.Sprintf("--add-dir %q is not a directory", trimmed)}
 		}
-		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-			absolute = resolved
+
+		resolved := absolute
+		if r, err := filepath.EvalSymlinks(absolute); err == nil {
+			resolved = r
 		}
-		if _, ok := seen[absolute]; ok {
+		if _, ok := seen[resolved]; ok {
 			continue
 		}
-		seen[absolute] = struct{}{}
+		seen[resolved] = struct{}{}
 		roots = append(roots, absolute)
 	}
 	return serveRootsScope(roots), nil

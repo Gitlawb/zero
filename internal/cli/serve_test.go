@@ -157,6 +157,45 @@ func TestBuildServeScopeNilWithoutExtras(t *testing.T) {
 	}
 }
 
+func TestBuildServeScopeKeepsLexicalPaths(t *testing.T) {
+	base := t.TempDir()
+	realWorkspace := filepath.Join(base, "real-workspace")
+	realExtra := filepath.Join(base, "real-extra")
+	for _, dir := range []string{realWorkspace, realExtra} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linkWorkspace := filepath.Join(base, "link-workspace")
+	linkExtra := filepath.Join(base, "link-extra")
+	if err := os.Symlink(realWorkspace, linkWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realExtra, linkExtra); err != nil {
+		t.Fatal(err)
+	}
+
+	scope, err := buildServeScope(linkWorkspace, []string{linkExtra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope == nil {
+		t.Fatal("expected non-nil scope")
+	}
+	roots := scope.Roots()
+	wantWorkspace, err := filepath.Abs(linkWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantExtra, err := filepath.Abs(linkExtra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 2 || roots[0] != wantWorkspace || roots[1] != wantExtra {
+		t.Fatalf("roots=%v want [%q %q]", roots, wantWorkspace, wantExtra)
+	}
+}
+
 func serveMCPInput(t *testing.T) []byte {
 	t.Helper()
 
