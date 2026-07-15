@@ -125,7 +125,7 @@ func isTerminalSessionAPIError(err error) bool {
 // when a retry resumed the session. Exchange is single-flight and the raw key is
 // returned only to the winning request, so issuing Exchange again is never safe.
 // Once the claim completes, direct the user to the dashboard recovery path.
-func pollUntilExchangeSettled(ctx context.Context, client *Client, sessionToken string) error {
+func pollUntilExchangeSettled(ctx context.Context, client *Client, sessionToken string, onSession func(string)) error {
 	deadline := time.Now().Add(pollTimeout)
 	for time.Now().Before(deadline) {
 		session, err := client.GetSession(ctx, sessionToken)
@@ -133,8 +133,8 @@ func pollUntilExchangeSettled(ctx context.Context, client *Client, sessionToken 
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			var apiErr APIError
-			if errors.As(err, &apiErr) && apiErr.Status < 500 {
+			if isTerminalSessionAPIError(err) {
+				reportSession(onSession, "")
 				return err
 			}
 			if err := sleepContext(ctx, pollInterval); err != nil {
@@ -150,6 +150,7 @@ func pollUntilExchangeSettled(ctx context.Context, client *Client, sessionToken 
 				return err
 			}
 		case SessionStatusCancelled, SessionStatusExpired, SessionStatusFailed:
+			reportSession(onSession, "")
 			return fmt.Errorf("key provisioning %s; rotate the key from the aimlapi.com dashboard", session.Status)
 		default:
 			return fmt.Errorf("key provisioning returned to %s; re-run the top-up", session.Status)

@@ -96,6 +96,45 @@ func TestStreamTopUpByKeyPinsValidatedInferenceEndpoint(t *testing.T) {
 	}
 }
 
+func TestStreamTopUpEmailRetrySendsStablePaymentSessionID(t *testing.T) {
+	getCalls := 0
+	var paymentSessionID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/partner-checkout/sessions/"):
+			status := SessionStatusPendingAuth
+			if getCalls > 0 {
+				status = SessionStatusPaid
+			}
+			getCalls++
+			_ = json.NewEncoder(w).Encode(PartnerCheckoutSession{SessionToken: "pcs_retry", Status: status})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pay"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			paymentSessionID, _ = body["paymentSessionId"].(string)
+			_ = json.NewEncoder(w).Encode(PayResult{Checkout: PaymentSession{PayURL: "https://pay/checkout"}})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("AIMLAPI_APP_URL", server.URL)
+
+	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
+		SessionToken:       "bearer",
+		ResumeSessionToken: "pcs_retry",
+		PaymentSessionID:   "payment-stable",
+		AmountUSD:          "20",
+		NoOpen:             true,
+	})
+	if err != nil {
+		t.Fatalf("StreamTopUp() error = %v", err)
+	}
+	if paymentSessionID != "payment-stable" {
+		t.Fatalf("paymentSessionId = %q, want stable retry id", paymentSessionID)
+	}
+}
+
 // resumeServer is a partner-checkout backend fake that fails the test if the
 // re-charging endpoints (create-session / pay) are ever hit, and serves a
 // scripted GetSession status sequence so a resume can be driven deterministically.
@@ -143,6 +182,7 @@ func TestStreamTopUpResumePaidExchangesWithoutRecharge(t *testing.T) {
 	result, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,
@@ -174,6 +214,7 @@ func TestStreamTopUpResumePendingPaymentPollsNeverRepays(t *testing.T) {
 	result, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,
@@ -199,6 +240,7 @@ func TestStreamTopUpPollingDeadSessionClearsRetainedToken(t *testing.T) {
 	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,
@@ -227,6 +269,39 @@ func TestPollUntilPaidTerminal4xxClearsRetainedToken(t *testing.T) {
 	}
 	if seen != "" {
 		t.Fatalf("retained session = %q, want cleared", seen)
+	}
+}
+
+func TestPollUntilExchangeSettledClearsDeadSession(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		status     SessionStatus
+	}{
+		{name: "terminal API rejection", statusCode: http.StatusNotFound},
+		{name: "expired exchange claim", status: SessionStatusExpired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if test.statusCode != 0 {
+					http.Error(w, "session rejected", test.statusCode)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(PartnerCheckoutSession{SessionToken: "pcs_dead", Status: test.status})
+			}))
+			defer server.Close()
+
+			seen := "retained"
+			err := pollUntilExchangeSettled(context.Background(), NewClient(Endpoints{AppBaseURL: server.URL}, server.Client()), "pcs_dead", func(token string) {
+				seen = token
+			})
+			if err == nil {
+				t.Fatal("pollUntilExchangeSettled() error = nil")
+			}
+			if seen != "" {
+				t.Fatalf("retained session = %q, want cleared", seen)
+			}
+		})
 	}
 }
 
@@ -293,6 +368,7 @@ func TestStreamTopUpResumeExchangedReturnsRecoveryError(t *testing.T) {
 	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,
@@ -314,6 +390,7 @@ func TestStreamTopUpResumeExchangingPollsWithoutSecondExchange(t *testing.T) {
 	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,
@@ -338,6 +415,7 @@ func TestStreamTopUpPollObservesExchangingWithoutSecondExchange(t *testing.T) {
 	_, err := StreamTopUp(context.Background(), StreamTopUpOptions{
 		SessionToken:       "bearer",
 		ResumeSessionToken: "pc_tok",
+		PaymentSessionID:   "payment-1",
 		AmountUSD:          "20",
 		Exchange:           true,
 		NoOpen:             true,

@@ -970,6 +970,9 @@ func (m model) noBlockingModal() bool {
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
+	if m.providerWizard != nil {
+		m.providerWizard.resetAimlapiOnboard()
+	}
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()

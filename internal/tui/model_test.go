@@ -1964,6 +1964,35 @@ func TestCtrlCRequiresSecondPressToExit(t *testing.T) {
 	}
 }
 
+func TestConfirmedCtrlCCancelsProviderAimlapiOnboarding(t *testing.T) {
+	cancelled := false
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepAimlapi,
+		aimlapi: &aimlapiOnboardState{
+			topupCancel: func() { cancelled = true },
+		},
+	}
+
+	updated, _ := m.Update(testKeyCtrl('c'))
+	next := updated.(model)
+	if cancelled {
+		t.Fatal("first Ctrl+C should only arm exit confirmation")
+	}
+
+	updated, cmd := next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if !cancelled {
+		t.Fatal("confirmed Ctrl+C did not cancel AIMLAPI onboarding")
+	}
+	if next.providerWizard.aimlapi != nil {
+		t.Fatal("confirmed Ctrl+C retained AIMLAPI onboarding state")
+	}
+	if cmd == nil {
+		t.Fatal("confirmed Ctrl+C should return quit command")
+	}
+}
+
 func TestCtrlCExitConfirmationDisarmsOnInterveningKey(t *testing.T) {
 	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
 

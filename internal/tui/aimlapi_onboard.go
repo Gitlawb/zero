@@ -734,20 +734,22 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 	s.step = aimlapiStepProgress
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	s.topupCancel = cancel
-	if s.byKey {
-		// Path A / env key: fund the account bound to apiKey. Generate the
-		// idempotency id once and keep it, so a retry re-issues the same pay.
-		if strings.TrimSpace(s.paymentSessionID) == "" {
-			id, err := aimlapi.NewPaymentSessionID()
-			if err != nil {
-				cancel()
-				s.errText = aimlapi.MsgTopUpFailed
-				s.step = aimlapiStepAmountInput
-				s.amountField = 0
-				return nil, aimlapiContinue
-			}
-			s.paymentSessionID = id
+	// Both checkout paths use the same intent id. Retain it across ambiguous
+	// failures, and replace it only when the amount/auto-top-up intent changes or
+	// the backend reports that the prior session is dead.
+	if strings.TrimSpace(s.paymentSessionID) == "" {
+		id, err := aimlapi.NewPaymentSessionID()
+		if err != nil {
+			cancel()
+			s.errText = aimlapi.MsgTopUpFailed
+			s.step = aimlapiStepAmountInput
+			s.amountField = 0
+			return nil, aimlapiContinue
 		}
+		s.paymentSessionID = id
+	}
+	if s.byKey {
+		// Path A / env key: fund the account bound to apiKey.
 		s.topupCh = startAimlapiStreamTopUpByKey(ctx, aimlapi.StreamTopUpByKeyOptions{
 			APIKey:             s.apiKey,
 			AmountUSD:          normalizedAmount,
@@ -762,6 +764,7 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		s.topupCh = startAimlapiStreamTopUp(ctx, aimlapi.StreamTopUpOptions{
 			SessionToken:       s.sessionToken,
 			ResumeSessionToken: s.resumeSessionToken,
+			PaymentSessionID:   s.paymentSessionID,
 			AmountUSD:          normalizedAmount,
 			InferenceBaseURL:   s.baseURL,
 			Method:             aimlapi.PaymentMethodCard,

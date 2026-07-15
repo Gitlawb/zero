@@ -1413,6 +1413,33 @@ func TestApplyCatalogDescriptorUsesAimlapiPartnerEnvironmentOverride(t *testing.
 	}
 }
 
+func TestApplyCatalogDescriptorStripsAimlapiAttributionFromRetargetedProfile(t *testing.T) {
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"x-aimlapi-partner-id":          "persisted-partner",
+			"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+			"X-AIMLAPI-Integration-Version": "zero",
+			"X-Environment":                 "staging",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-aimlapi-") {
+			t.Fatalf("catalog attribution survived retargeting: %#v", profile.CustomHeaders)
+		}
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+}
+
 func TestResolveProviderProfileParseThinkTagsFalseAlias(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",

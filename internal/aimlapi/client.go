@@ -146,10 +146,11 @@ func (c *Client) GetSession(ctx context.Context, sessionToken string) (PartnerCh
 
 // Pay initiates payment for a session and returns the hosted checkout URL.
 // autoTopUp enrolls the account in automatic top-up at checkout time.
-func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, amountUSDMinor int, method PaymentMethod, successURL string, cancelURL string, autoTopUp bool) (PayResult, error) {
+func (c *Client) Pay(ctx context.Context, bearer string, sessionToken string, amountUSDMinor int, paymentSessionID string, method PaymentMethod, successURL string, cancelURL string, autoTopUp bool) (PayResult, error) {
 	body := map[string]any{
-		"amountUsdMinor": amountUSDMinor,
-		"method":         method,
+		"amountUsdMinor":   amountUSDMinor,
+		"paymentSessionId": paymentSessionID,
+		"method":           method,
 	}
 	if strings.TrimSpace(successURL) != "" {
 		body["successUrl"] = strings.TrimSpace(successURL)

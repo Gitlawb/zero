@@ -31,6 +31,9 @@ type StreamTopUpOptions struct {
 	// of opening a new one, so a retry after an ambiguous failure (a lost Pay/
 	// Exchange response) can never double-charge or strand an already-paid session.
 	ResumeSessionToken string
+	// PaymentSessionID is generated once per amount/auto-top-up intent and reused
+	// on retry so an ambiguous Pay response cannot create a second checkout.
+	PaymentSessionID string
 
 	HTTPClient  *http.Client
 	OpenBrowser func(string) error
@@ -75,6 +78,9 @@ func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKe
 	if strings.TrimSpace(options.SessionToken) == "" {
 		return ProvisionedKey{}, fmt.Errorf("a session is required to top up")
 	}
+	if strings.TrimSpace(options.PaymentSessionID) == "" {
+		return ProvisionedKey{}, fmt.Errorf("a payment session id is required to top up")
+	}
 
 	status(options.OnStatus, StatusCreatingSession, "")
 	sessionToken, phase, err := resolveTopupSession(ctx, client, options, partnerID, partnerName, endpoints)
@@ -88,7 +94,7 @@ func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKe
 	if phase <= phasePay {
 		successURL, cancelURL := BuildPartnerCheckoutReturnURLs(endpoints.PayBaseURL, sessionToken)
 		status(options.OnStatus, StatusOpeningCheckout, "")
-		pay, err := client.Pay(ctx, options.SessionToken, sessionToken, amount, method, successURL, cancelURL, options.AutoTopUp)
+		pay, err := client.Pay(ctx, options.SessionToken, sessionToken, amount, options.PaymentSessionID, method, successURL, cancelURL, options.AutoTopUp)
 		if err != nil {
 			return ProvisionedKey{}, err
 		}
@@ -122,7 +128,7 @@ func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKe
 	if options.Exchange {
 		status(options.OnStatus, StatusProvisioningKey, "")
 		if phase == phaseWaitExchange {
-			return ProvisionedKey{}, pollUntilExchangeSettled(ctx, client, sessionToken)
+			return ProvisionedKey{}, pollUntilExchangeSettled(ctx, client, sessionToken, options.OnSession)
 		}
 		exchange, err := client.Exchange(ctx, options.SessionToken, paidToken)
 		if err != nil {

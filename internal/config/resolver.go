@@ -1040,7 +1040,8 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
-	if len(descriptor.CustomHeaders) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
+	canonicalCatalogEndpoint := !explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+	if len(descriptor.CustomHeaders) > 0 && canonicalCatalogEndpoint {
 		catalogHeaders := descriptor.CustomHeaders
 		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
 			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
@@ -1064,6 +1065,19 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 			merged[key] = value
 		}
 		profile.CustomHeaders = merged
+	} else if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") && !canonicalCatalogEndpoint {
+		// AIMLAPI attribution is owned by the catalog endpoint. A profile can retain
+		// those generated headers after its base URL is edited; strip their names
+		// before sending requests to an arbitrary staging/proxy host while preserving
+		// unrelated headers explicitly supplied by the user.
+		for profileKey := range profile.CustomHeaders {
+			for catalogKey := range descriptor.CustomHeaders {
+				if strings.EqualFold(profileKey, catalogKey) {
+					delete(profile.CustomHeaders, profileKey)
+					break
+				}
+			}
+		}
 	}
 }
 
