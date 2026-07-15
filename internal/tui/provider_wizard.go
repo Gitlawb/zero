@@ -1599,10 +1599,6 @@ func (wizard *providerWizardState) renderMethodStep(width int) []string {
 }
 
 func (wizard *providerWizardState) renderAimlapiConfiguredStep(width int, spinner string) []string {
-	profileName := strings.TrimSpace(wizard.aimlapiExistingProfile.Name)
-	if profileName == "" {
-		profileName = "aimlapi"
-	}
 	lines := []string{zeroTheme.accent.Render("aimlapi.com is already configured")}
 	if wizard.aimlapiExistingBusy {
 		glyph := strings.TrimSpace(spinner)
@@ -1612,8 +1608,8 @@ func (wizard *providerWizardState) renderAimlapiConfiguredStep(width int, spinne
 		return append(lines, "", zeroTheme.faint.Render(glyph+" checking balance"))
 	}
 	options := []struct{ label, hint string }{
-		{"Use existing configuration", profileName},
-		{"Configure again", "New user or another API key"},
+		{"Use existing configuration", "Continue with your saved API key"},
+		{"Configure again", "Set up a new key or switch accounts"},
 	}
 	for index, option := range options {
 		marker := "  "
