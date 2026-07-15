@@ -50,15 +50,18 @@ func recoverStalePluginRootLock(lockPath string) bool {
 	if err != nil {
 		return errors.Is(err, os.ErrNotExist)
 	}
-	if time.Since(info.ModTime()) < pluginRootLockStaleAge {
-		return false
-	}
 	data, err := os.ReadFile(lockPath)
 	if err == nil {
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if pid > 0 && processAlive(pid) {
-			return false
+		if pid > 0 {
+			if processAlive(pid) {
+				return false
+			}
+			return os.Remove(lockPath) == nil
 		}
+	}
+	if time.Since(info.ModTime()) < pluginRootLockStaleAge {
+		return false
 	}
 	return os.Remove(lockPath) == nil
 }
@@ -66,6 +69,9 @@ func recoverStalePluginRootLock(lockPath string) bool {
 func processAlive(pid int) bool {
 	handle, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return true
+		}
 		return false
 	}
 	defer syscall.CloseHandle(handle)

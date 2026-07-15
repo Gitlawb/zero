@@ -391,7 +391,7 @@ func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, a
 		return endpointSafetyError{message: "provider connectivity URL is unsafe: localhost hosts are blocked"}
 	}
 	if addr, err := netip.ParseAddr(normalized); err == nil {
-		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
+		if reason := blockedAddrReason(addr); reason != "" && (!allowLoopbackOrPrivate || (!addr.IsLoopback() && !addr.IsPrivate())) {
 			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 		}
 		return nil
@@ -407,7 +407,7 @@ func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver, a
 		return endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
 	}
 	for _, addr := range addrs {
-		if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
+		if reason := blockedAddrReason(addr); reason != "" && (!allowLoopbackOrPrivate || (!addr.IsLoopback() && !addr.IsPrivate())) {
 			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 		}
 	}
@@ -529,7 +529,7 @@ func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(contex
 			return nil, err
 		}
 		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
-			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
+			if reason := blockedAddrReason(addr); reason != "" && (!allowLoopbackOrPrivate || (!addr.IsLoopback() && !addr.IsPrivate())) {
 				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 			}
 			return dialer.DialContext(ctx, network, address)
@@ -542,7 +542,7 @@ func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(contex
 			return nil, endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
 		}
 		for _, addr := range addrs {
-			if reason := blockedAddrReason(addr); reason != "" && !(allowLoopbackOrPrivate && (addr.IsLoopback() || addr.IsPrivate())) {
+			if reason := blockedAddrReason(addr); reason != "" && (!allowLoopbackOrPrivate || (!addr.IsLoopback() && !addr.IsPrivate())) {
 				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 			}
 		}

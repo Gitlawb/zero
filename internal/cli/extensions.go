@@ -587,19 +587,19 @@ func writePluginsHelp(w io.Writer) error {
   zero plugins <command>
 
 Commands:
-  list                 List local Zero plugins
-  browse [query]       Browse marketplace plugins
-  install <id[@catalog]> Install a marketplace plugin
-  info <id[@catalog]>  Show marketplace plugin info
-  update [id]          Update marketplace-managed plugins
-  verify <id>          Verify installed plugin integrity
-  add <git-url|path>   Install a plugin (manifest-validated, pinned in plugins.lock)
-  remove <id>          Remove an installed plugin and its lockfile entry
-  enable <id>          Enable a quarantined plugin
-  disable <id>         Disable a plugin by moving it to .disabled
-  pin <id>             Pin a marketplace-managed plugin
-  unpin <id>           Unpin a marketplace-managed plugin
-  marketplace          Manage plugin catalogs
+  list                       List local Zero plugins
+  browse [query]             Browse marketplace plugins
+  install <id[@catalog]>     Install a marketplace plugin
+  info <id[@catalog]>        Show marketplace plugin info
+  update [id]                Update marketplace-managed plugins
+  verify <id>                Verify installed plugin integrity
+  add <git-url|path>         Install a plugin (manifest-validated, pinned in plugins.lock)
+  remove <id>                Remove an installed plugin and its lockfile entry
+  enable <id>                Enable a quarantined plugin
+  disable <id>               Disable a plugin by moving it to .disabled
+  pin <id>                   Pin a marketplace-managed plugin
+  unpin <id>                 Unpin a marketplace-managed plugin
+  marketplace                Manage plugin catalogs
 `)
 	return err
 }

@@ -184,20 +184,22 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyUp):
-		if m.setup.stage == setupStageMethod {
+		switch m.setup.stage {
+		case setupStageMethod:
 			m.moveSetupMethod(-1)
-		} else if m.setup.stage == setupStageProvider {
+		case setupStageProvider:
 			m.moveSetupProvider(-1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(-1)
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyDown):
-		if m.setup.stage == setupStageMethod {
+		switch m.setup.stage {
+		case setupStageMethod:
 			m.moveSetupMethod(1)
-		} else if m.setup.stage == setupStageProvider {
+		case setupStageProvider:
 			m.moveSetupProvider(1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(1)
 		}
 		return m, nil
@@ -245,15 +247,17 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "k":
-		if m.setup.stage == setupStageProvider {
+		switch m.setup.stage {
+		case setupStageProvider:
 			m.moveSetupProvider(-1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(-1)
 		}
 	case "j":
-		if m.setup.stage == setupStageProvider {
+		switch m.setup.stage {
+		case setupStageProvider:
 			m.moveSetupProvider(1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(1)
 		}
 	}
@@ -322,16 +326,18 @@ func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case mouseWheelUp(msg):
 		m.clearMouseSelection()
-		if m.setup.stage == setupStageProvider {
+		switch m.setup.stage {
+		case setupStageProvider:
 			m.moveSetupProvider(-1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(-1)
 		}
 	case mouseWheelDown(msg):
 		m.clearMouseSelection()
-		if m.setup.stage == setupStageProvider {
+		switch m.setup.stage {
+		case setupStageProvider:
 			m.moveSetupProvider(1)
-		} else if m.setup.stage == setupStageModel {
+		case setupStageModel:
 			m.moveSetupModel(1)
 		}
 	}

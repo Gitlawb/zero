@@ -33,10 +33,6 @@ type marketplaceCommandOptions struct {
 	refresh         bool
 }
 
-func runPluginMarketplace(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runPluginMarketplaceWithContext(context.Background(), args, stdout, stderr, deps)
-}
-
 func runPluginMarketplaceWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if ctx == nil {
 		ctx = context.Background()
@@ -65,10 +61,6 @@ func runPluginMarketplaceWithContext(ctx context.Context, args []string, stdout 
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown marketplace subcommand %q", args[0]))
 	}
-}
-
-func runPluginBrowse(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runPluginBrowseWithContext(context.Background(), args, stdout, stderr, deps)
 }
 
 func runPluginBrowseWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -135,10 +127,6 @@ func runPluginBrowseWithContext(ctx context.Context, args []string, stdout io.Wr
 		return exitCrash
 	}
 	return exitSuccess
-}
-
-func runPluginMarketplaceInstall(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runPluginMarketplaceInstallWithContext(context.Background(), args, stdout, stderr, deps)
 }
 
 func runPluginMarketplaceInstallWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -241,10 +229,6 @@ func runPluginMarketplaceInstallWithContext(ctx context.Context, args []string, 
 	return exitSuccess
 }
 
-func runPluginMarketplaceInfo(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runPluginMarketplaceInfoWithContext(context.Background(), args, stdout, stderr, deps)
-}
-
 func runPluginMarketplaceInfoWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if ctx == nil {
 		ctx = context.Background()
@@ -295,10 +279,6 @@ func runPluginMarketplaceInfoWithContext(ctx context.Context, args []string, std
 		return exitCrash
 	}
 	return exitSuccess
-}
-
-func runPluginMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runPluginMarketplaceUpdateWithContext(context.Background(), args, stdout, stderr, deps)
 }
 
 func runPluginMarketplaceUpdateWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -591,10 +571,6 @@ func runMarketplaceValidate(args []string, stdout io.Writer, stderr io.Writer) i
 	return exitSuccess
 }
 
-func runMarketplaceAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runMarketplaceAddWithContext(context.Background(), args, stdout, stderr, deps)
-}
-
 func runMarketplaceAddWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if ctx == nil {
 		ctx = context.Background()
@@ -765,10 +741,6 @@ func runMarketplaceRemove(args []string, stdout io.Writer, stderr io.Writer, dep
 		return exitCrash
 	}
 	return exitSuccess
-}
-
-func runMarketplaceUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	return runMarketplaceUpdateWithContext(context.Background(), args, stdout, stderr, deps)
 }
 
 func runMarketplaceUpdateWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

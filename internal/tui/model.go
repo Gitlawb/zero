@@ -2997,10 +2997,6 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 	}
 }
 
-func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
-	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
-}
-
 func (m model) scrollableTranscriptLayoutView(header string, body transcriptBodyLayout, footer string, width int, overlay string) string {
 	frame := m.scrollableTranscriptFrame(header, footer)
 	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()

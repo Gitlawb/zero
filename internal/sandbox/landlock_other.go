@@ -4,7 +4,7 @@ package sandbox
 
 import "errors"
 
-var ErrLandlockUnsupported = errors.New("Landlock is only supported on Linux")
+var ErrLandlockUnsupported = errors.New("landlock is only supported on Linux")
 
 func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string) error {
 	return ErrLandlockUnsupported

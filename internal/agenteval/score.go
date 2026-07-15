@@ -125,9 +125,7 @@ func Score(suite Suite, input ScoreInput) Report {
 	if len(task.RequiredTraceEvents) > 0 {
 		report.Results = append(report.Results, scoreTraceEvents(task.RequiredTraceEvents, input))
 	}
-	for _, result := range unknownCommandResults(input.CommandResults, seenCommands, input) {
-		report.Results = append(report.Results, result)
-	}
+	report.Results = append(report.Results, unknownCommandResults(input.CommandResults, seenCommands, input)...)
 	report.finishSummary()
 	return report
 }

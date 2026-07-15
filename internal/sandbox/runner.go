@@ -361,17 +361,6 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 	}
 }
 
-func existingBubblewrapMounts() []string {
-	candidates := []string{"/bin", "/usr", "/lib", "/lib64", "/sbin", "/etc"}
-	mounts := []string{}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			mounts = append(mounts, candidate)
-		}
-	}
-	return mounts
-}
-
 func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
 	return sandboxEnvironmentForCommand(nil, policy, backend, workspaceRoot)
 }
@@ -764,13 +753,6 @@ func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
 	return out
 }
 
-// denyWriteRules returns seatbelt deny clauses for the policy's resolved
-// DenyWrite paths: a (subpath ...) clause for a directory, a (literal ...) clause
-// for a single file. Empty when DenyWrite is unset.
-func denyWriteRules(policy Policy) []string {
-	return denyWriteRulesFromPaths(resolvePolicyPaths(policy.DenyWrite))
-}
-
 func denyWriteRulesFromPaths(paths []string) []string {
 	return denySeatbeltPathRules("file-write*", paths)
 }
@@ -796,11 +778,6 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 		}
 	}
 	return out
-}
-
-// networkRuleFor returns the seatbelt network clause for a policy.
-func networkRuleFor(policy Policy) string {
-	return networkRuleForProfile(NetworkPolicy{Mode: policy.Network})
 }
 
 func networkRuleForProfile(network NetworkPolicy) string {

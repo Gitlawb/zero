@@ -228,7 +228,7 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 		return false
 	}
 	backend := engine.backend
-	if !(backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation) {
+	if !backend.Available || backend.Executable == "" || !backend.CommandWrapping || !backend.NativeIsolation {
 		return false
 	}
 	// On Windows the command is only actually wrapped once `zero sandbox setup`
