@@ -237,6 +237,17 @@ func TestPrepareRejectsWorktreeLockedByAnotherRun(t *testing.T) {
 	}
 }
 
+// physicalTestPath resolves a test directory to its physical spelling
+// (symlinks and Windows 8.3 short names), matching how git records paths.
+func physicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", path, err)
+	}
+	return resolved
+}
+
 // TestPrepareValidatesRequestBeforeCleanup pins the order of validation and
 // the automatic stale-worktree pruning: a rejected request (an invalid
 // --name) must not have destructive cleanup side effects before it reports
@@ -244,7 +255,11 @@ func TestPrepareRejectsWorktreeLockedByAnotherRun(t *testing.T) {
 // worktree IS pruned once a valid request runs.
 func TestPrepareValidatesRequestBeforeCleanup(t *testing.T) {
 	ctx := context.Background()
-	repo := t.TempDir()
+	// Canonicalize both roots up front: git records worktree paths in
+	// physical spelling, so a lexically different spelling of the same
+	// directory (macOS /var vs /private/var, Windows 8.3 short names on CI
+	// runners) would make Clean's containment check skip the entry.
+	repo := physicalTestPath(t, t.TempDir())
 	mustGit := func(args ...string) string {
 		t.Helper()
 		out, err := gitOutput(ctx, defaultRunGit, repo, args...)
@@ -257,7 +272,7 @@ func TestPrepareValidatesRequestBeforeCleanup(t *testing.T) {
 	mustGit("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-m", "seed")
 	toplevel := filepath.Clean(mustGit("rev-parse", "--show-toplevel"))
 
-	base := t.TempDir()
+	base := physicalTestPath(t, t.TempDir())
 	staleDir := filepath.Join(base, "zero-worktree-"+repoKey(toplevel), "stale-task")
 	if err := os.MkdirAll(filepath.Dir(staleDir), 0o700); err != nil {
 		t.Fatal(err)
