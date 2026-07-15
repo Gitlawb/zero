@@ -238,7 +238,7 @@ func writeCommand(t *testing.T, script commandScript) string {
 }
 
 // psSingleQuote escapes a value for interpolation inside a PowerShell
-// single-quoted string literal, where a literal quote is written as ''.
+// single-quoted string literal, where a literal quote is doubled.
 func psSingleQuote(value string) string {
 	return strings.ReplaceAll(value, "'", "''")
 }
