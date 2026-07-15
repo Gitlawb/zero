@@ -63,6 +63,14 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// do it once here, before any early return, so both the bracketed-paste
 	// and right-click-paste paths are covered uniformly.
 	m = m.disarmCancelConfirmation()
+	// Same immediate-input transition as the keypress hook: text entering the
+	// composer must land the caret in its solid-while-typing state right away
+	// and refresh the typing timestamp. Without this, a paste right after the
+	// blink phase hid the caret leaves the newly populated composer caret-less
+	// until the next 530ms tick, and the stale timestamp makes that tick
+	// toggle instead of going solid.
+	m.lastCharTime = m.now()
+	m.composerCursorVisible = true
 	if content == "" {
 		// Empty text clipboard — the user may have pasted a screenshot.
 		// Probe the OS clipboard for image content asynchronously.

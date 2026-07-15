@@ -2774,6 +2774,27 @@ func TestComposerCursorSyncsImmediatelyOnFocusChange(t *testing.T) {
 	}
 }
 
+func TestComposerCursorShowsImmediatelyOnPaste(t *testing.T) {
+	// A paste is the same immediate-input transition as a keypress: if the
+	// blink phase had just hidden the caret, the freshly pasted composer must
+	// render with a solid caret right away, and the typing timestamp must be
+	// refreshed so the next blink tick holds solid instead of toggling off a
+	// stale idle state.
+	m := newModel(context.Background(), Options{})
+	m.terminalFocused = true
+	m.composerCursorVisible = false
+	m.lastCharTime = time.Now().Add(-time.Hour) // stale: well past the idle threshold
+
+	updated, _ := m.Update(tea.PasteMsg{Content: "pasted text"})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after a paste, before any blink tick")
+	}
+	if time.Since(m.lastCharTime) > time.Minute {
+		t.Fatalf("expected the paste to refresh lastCharTime, still %v old", time.Since(m.lastCharTime))
+	}
+}
+
 func TestCommandArgumentHintFollowsCursorVisibility(t *testing.T) {
 	// The argument-hint composer line is an alternate render path that used to
 	// paint its caret cell unconditionally, ignoring focus and blink state.
