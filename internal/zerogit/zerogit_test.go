@@ -531,7 +531,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
 			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
-			{},                   // ls-remote --symref (no match → falls through)
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
 
@@ -558,7 +558,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
 			{Stdout: "origin\n"}, // config branch.feat/some-feature.remote
-			{},                   // ls-remote --symref (no match)
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
 
@@ -645,7 +645,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "feat/some-feature\n"},
 			{ExitCode: 1, Stderr: "error: no such section"}, // config lookup fails
-			{}, // ls-remote --symref (no match)
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
 		}}
 
@@ -757,12 +757,18 @@ func TestCreateBranch(t *testing.T) {
 		}
 	})
 
-	t.Run("ChecksOutExistingBranchInsteadOfFailing", func(t *testing.T) {
+	t.Run("SuffixesNameInsteadOfCheckingOutExistingBranch", func(t *testing.T) {
+		// An existing branch under the generated name may hold entirely
+		// unrelated history (an earlier push under the same low-entropy
+		// name). Checking it out would publish that stale branch and leave
+		// the new commit behind on the default branch, so CreateBranch must
+		// pick a fresh suffixed name at the current HEAD instead.
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
-			{Stdout: "abc1234\n"}, // rev-parse --verify: branch already exists locally
-			{Stdout: "Switched to branch 'alice/fix-typo'\n"},
+			{Stdout: "abc1234\n"}, // rev-parse --verify: alice/fix-typo already exists
+			{ExitCode: 1},         // rev-parse --verify: alice/fix-typo-2 is free
+			{Stdout: "Switched to a new branch 'alice/fix-typo-2'\n"},
 		}}
 
 		result, err := CreateBranch(context.Background(), BranchOptions{
@@ -773,11 +779,29 @@ func TestCreateBranch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateBranch returned error: %v", err)
 		}
-		if result.Branch != "alice/fix-typo" {
+		if result.Branch != "alice/fix-typo-2" {
 			t.Fatalf("unexpected branch: %#v", result)
 		}
-		if got := runner.commandLine(2); got != "git checkout alice/fix-typo" {
-			t.Fatalf("expected a plain checkout of the existing branch, got %q", got)
+		if got := runner.commandLine(3); got != "git checkout -b alice/fix-typo-2" {
+			t.Fatalf("expected a fresh suffixed branch, got %q", got)
+		}
+	})
+
+	t.Run("FailsVisiblyWhenSuffixNamespaceExhausted", func(t *testing.T) {
+		root := t.TempDir()
+		results := []CommandResult{{Stdout: root + "\n"}}
+		for i := 0; i < 9; i++ {
+			results = append(results, CommandResult{Stdout: "abc1234\n"}) // every candidate exists
+		}
+		runner := &fakeRunner{results: results}
+
+		_, err := CreateBranch(context.Background(), BranchOptions{
+			Cwd:    root,
+			Name:   "alice/fix-typo",
+			RunGit: runner.Run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("expected a visible exhaustion error, got %v", err)
 		}
 	})
 
@@ -839,34 +863,39 @@ func TestCreateBranch(t *testing.T) {
 }
 
 func TestIsDefaultBranch(t *testing.T) {
-	t.Run("ResolvesCurrentBranchAndFallsBackToHeuristic", func(t *testing.T) {
+	t.Run("ResolvesCurrentBranchByConventionalName", func(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "main\n"},
-			{}, // ls-remote --symref (no match → heuristic fallback)
+			{ExitCode: 1}, // config branch.main.remote unset → origin
 		}}
 
-		isDefault, branch, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
 			Cwd:    root,
 			RunGit: runner.Run,
 		})
 		if err != nil {
 			t.Fatalf("IsDefaultBranch returned error: %v", err)
 		}
-		if !isDefault || branch != "main" {
-			t.Fatalf("unexpected result: isDefault=%v branch=%q", isDefault, branch)
+		if !isDefault || branch != "main" || remote != "origin" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
 		}
 	})
 
-	t.Run("ExplicitNonDefaultBranch", func(t *testing.T) {
+	t.Run("ResolvesRemoteFromBranchUpstream", func(t *testing.T) {
+		// A fork setup where the current branch tracks "upstream" must
+		// resolve and report that remote, not "origin": callers thread it
+		// into Push so a freshly created feature branch (which has no
+		// tracking configuration yet) still targets the right remote.
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
-			{}, // ls-remote --symref (no match → heuristic fallback)
+			{Stdout: "upstream\n"}, // config branch.feat/some-feature.remote
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref against upstream
 		}}
 
-		isDefault, branch, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
 			Cwd:    root,
 			Branch: "feat/some-feature",
 			RunGit: runner.Run,
@@ -874,8 +903,58 @@ func TestIsDefaultBranch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("IsDefaultBranch returned error: %v", err)
 		}
-		if isDefault || branch != "feat/some-feature" {
-			t.Fatalf("unexpected result: isDefault=%v branch=%q", isDefault, branch)
+		if isDefault || branch != "feat/some-feature" || remote != "upstream" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
+		}
+		if got := runner.commandLine(2); got != "git ls-remote --symref upstream HEAD" {
+			t.Fatalf("expected lookup against the resolved remote, got %q", got)
+		}
+	})
+
+	t.Run("FallsBackToLocalRemoteHeadRecord", func(t *testing.T) {
+		// When the remote lookup fails (offline, slow), the local
+		// refs/remotes/<remote>/HEAD record answers without a network.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{ExitCode: 1},                     // config lookup fails → origin
+			{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+			{Stdout: "refs/remotes/origin/trunk\n"}, // local record: default is trunk
+		}}
+
+		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			Branch: "trunk",
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("IsDefaultBranch returned error: %v", err)
+		}
+		if !isDefault || branch != "trunk" || remote != "origin" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
+		}
+	})
+
+	t.Run("FailsClosedWhenDefaultBranchUnknown", func(t *testing.T) {
+		// Before this, a lookup timeout silently downgraded the check to the
+		// main/master name heuristic, so a repository whose default is trunk
+		// lost the confirmation guard exactly when the remote was slow. An
+		// unknown default must now surface as an error, not as "not default".
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{ExitCode: 1},                     // config lookup fails → origin
+			{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+			{ExitCode: 1},                     // no local refs/remotes/origin/HEAD record
+		}}
+
+		_, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			Branch: "trunk",
+			RunGit: runner.Run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "default branch for remote") {
+			t.Fatalf("expected fail-closed error, got %v", err)
 		}
 	})
 }
