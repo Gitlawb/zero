@@ -1266,9 +1266,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.armLeader()
 		}
 		// Emacs Ctrl+P / Ctrl+N move selection in open menus. Runs before the
-		// switch so menus win over global Ctrl+P (plan toggle) and remapped
-		// Ctrl+N bindings (e.g. toggleSidebar), while idle Ctrl+N still reaches
-		// those remapped cases below.
+		// switch so menus win over global Ctrl+P (plan toggle). Idle Ctrl+P
+		// falls through to that binding; idle Ctrl+N is a reserved no-op so it
+		// never reaches remapped configurable bindings (e.g. toggleSidebar).
 		if !m.transcriptDetailed && (keyCtrl(msg, 'p') || keyCtrl(msg, 'n')) {
 			delta := 1
 			if keyCtrl(msg, 'p') {
@@ -1276,6 +1276,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if next, cmd, ok := m.moveModalSelection(delta); ok {
 				return next, cmd
+			}
+			if keyCtrl(msg, 'n') {
+				return m, nil
 			}
 		}
 		switch {

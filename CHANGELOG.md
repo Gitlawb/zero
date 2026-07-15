@@ -136,7 +136,8 @@ tagged. Until then, source builds report the version `dev`.
   timeout cancel a pending leader chord.
 - **Emacs-style menu navigation:** `Ctrl+P` / `Ctrl+N` move previous / next in pickers, slash/file
   suggestions, permission prompts, ask-user option lists, and provider/MCP wizard lists (same as ↑/↓).
-  Idle `Ctrl+P` still toggles the plan panel when no menu is open.
+  Idle `Ctrl+P` still toggles the plan panel when no menu is open; idle `Ctrl+N` is a reserved no-op
+  (does not fire remapped global bindings).
 - `SECURITY.md` with a private vulnerability-reporting path, `CODE_OF_CONDUCT.md`, this changelog, and
   GitHub issue/PR templates.
 - Interactive `/theme` picker: bare `/theme` opens a popup that live-previews each palette as you move
