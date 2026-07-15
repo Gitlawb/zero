@@ -15,6 +15,6 @@ func processAlive(pid int) bool {
 	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
 		return false
 	}
-	const stillActive = 259 // STATUS_PENDING
+	const stillActive = 259 // STILL_ACTIVE
 	return code == stillActive
 }

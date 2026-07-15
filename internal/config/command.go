@@ -69,6 +69,14 @@ func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, 
 
 	select {
 	case err := <-done:
+		if errors.Is(err, exec.ErrWaitDelay) {
+			// The process exited but a background descendant kept the
+			// inherited stdout/stderr pipes open past WaitDelay. Treat this
+			// like a timeout so the tree is actually terminated instead of
+			// leaking that descendant.
+			proc.Terminate()
+			return stdout.Bytes(), stderr.Bytes(), errProviderCommandTimeout
+		}
 		return stdout.Bytes(), stderr.Bytes(), err
 	case <-timer.C:
 		proc.Terminate()

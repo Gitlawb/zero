@@ -7,12 +7,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func configureCommandProcess(cmd *exec.Cmd) {}
+// configureCommandProcess starts the process suspended so it can be
+// assigned to the job object before its main thread (and therefore any
+// code it runs) executes. Without this, a fast command can spawn and
+// detach a descendant before AssignProcessToJobObject runs, letting that
+// descendant escape the job and survive termination.
+func configureCommandProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
+}
 
 // commandProcess tracks a started provider command so its entire process
 // tree can be terminated on timeout. It prefers a job object: taskkill /T
@@ -28,7 +36,11 @@ func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
 	if cmd.Process == nil {
 		return proc
 	}
-	job, err := createKillOnCloseJob()
+	// The main thread is suspended (see configureCommandProcess); resume it
+	// once we're done attaching, however that turns out.
+	defer resumeMainThread(cmd.Process.Pid)
+
+	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return proc
 	}
@@ -46,21 +58,28 @@ func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
 	return proc
 }
 
-func createKillOnCloseJob() (windows.Handle, error) {
-	job, err := windows.CreateJobObject(nil, nil)
+// resumeMainThread resumes the (assumed suspended) primary thread of pid.
+// It's a no-op if the thread can't be found or is already running.
+func resumeMainThread(pid int) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
 	if err != nil {
-		return 0, err
+		return
 	}
-	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-		},
+	defer func() { _ = windows.CloseHandle(snapshot) }()
+
+	var entry windows.ThreadEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	for err := windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != uint32(pid) {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			continue
+		}
+		_, _ = windows.ResumeThread(thread)
+		_ = windows.CloseHandle(thread)
 	}
-	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
-		_ = windows.CloseHandle(job)
-		return 0, err
-	}
-	return job, nil
 }
 
 func (p *commandProcess) Terminate() {
@@ -77,8 +96,11 @@ func (p *commandProcess) Terminate() {
 	_ = p.cmd.Process.Kill()
 }
 
-// Close releases the job handle; KILL_ON_JOB_CLOSE reaps any process still
-// assigned to the job.
+// Close releases the job handle without touching any still-running
+// descendants: the job carries no KILL_ON_JOB_CLOSE limit, so on the
+// success path a provider command's detached helpers keep running exactly
+// as they did before job objects were introduced. Descendant termination
+// happens explicitly via Terminate, called only on timeout/error.
 func (p *commandProcess) Close() {
 	if p.job == 0 {
 		return

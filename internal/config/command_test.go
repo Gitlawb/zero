@@ -90,6 +90,34 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 	assertProcessTerminated(t, pidFile)
 }
 
+// TestLoadProviderCommandTerminatesBackgroundChild covers a command that
+// exits immediately but leaves a detached child holding the inherited
+// stdout/stderr pipes open (e.g. `sleep 600 & exit`). cmd.Wait() only
+// unblocks once WaitDelay elapses, and that path must still terminate the
+// leftover child instead of just returning and leaking it.
+func TestLoadProviderCommandTerminatesBackgroundChild(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bg.pid")
+	command := writeCommand(t, commandScript{
+		Stdout:                 `{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}`,
+		BackgroundSleepSeconds: 10,
+		BackgroundPidFile:      pidFile,
+	})
+
+	start := time.Now()
+	_, err := LoadProviderCommand(command)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("LoadProviderCommand() error = nil, want error from WaitDelay-bounded wait")
+	}
+	if !strings.Contains(err.Error(), "timed out after 5s") {
+		t.Fatalf("error = %q, want timeout", err.Error())
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("returned after %s, want well under the 5s provider-command timeout since WaitDelay (1s) should trigger termination", elapsed)
+	}
+	assertProcessTerminated(t, pidFile)
+}
+
 func assertProcessTerminated(t *testing.T, pidFile string) {
 	t.Helper()
 
@@ -144,6 +172,13 @@ type commandScript struct {
 	ExitCode     int
 	SleepSeconds int
 	PidFile      string
+
+	// BackgroundSleepSeconds, if set, spawns a detached child that keeps the
+	// inherited stdout/stderr handles open well after the script itself
+	// exits, simulating a `sleep 600 & exit` style command. BackgroundPidFile
+	// records the detached child's PID.
+	BackgroundSleepSeconds int
+	BackgroundPidFile      string
 }
 
 func writeCommand(t *testing.T, script commandScript) string {
@@ -156,7 +191,7 @@ func writeCommand(t *testing.T, script commandScript) string {
 		if script.SleepSeconds > 0 {
 			sleep := "Start-Sleep -Seconds " + itoa(script.SleepSeconds)
 			if script.PidFile != "" {
-				sleep = "Set-Content -Path '" + script.PidFile + "' -Value $PID -Encoding Ascii; " + sleep
+				sleep = "Set-Content -Path '" + psSingleQuote(script.PidFile) + "' -Value $PID -Encoding Ascii; " + sleep
 			}
 			lines = append(lines, "powershell -NoProfile -Command \""+sleep+"\"")
 		}
@@ -165,6 +200,10 @@ func writeCommand(t *testing.T, script commandScript) string {
 		}
 		if script.Stderr != "" {
 			lines = append(lines, "echo "+script.Stderr+" 1>&2")
+		}
+		if script.BackgroundSleepSeconds > 0 {
+			bgSleep := "Set-Content -Path '" + psSingleQuote(script.BackgroundPidFile) + "' -Value $PID -Encoding Ascii; Start-Sleep -Seconds " + itoa(script.BackgroundSleepSeconds)
+			lines = append(lines, "start /B powershell -NoProfile -Command \""+bgSleep+"\"")
 		}
 		lines = append(lines, "exit /b "+itoa(script.ExitCode))
 		if err := os.WriteFile(path, []byte(strings.Join(lines, "\r\n")), 0o700); err != nil {
@@ -177,7 +216,7 @@ func writeCommand(t *testing.T, script commandScript) string {
 	lines := []string{"#!/bin/sh"}
 	if script.SleepSeconds > 0 {
 		if script.PidFile != "" {
-			lines = append(lines, "echo $$ > '"+script.PidFile+"'")
+			lines = append(lines, "echo $$ > '"+shSingleQuote(script.PidFile)+"'")
 		}
 		lines = append(lines, "sleep "+itoa(script.SleepSeconds))
 	}
@@ -187,11 +226,28 @@ func writeCommand(t *testing.T, script commandScript) string {
 	if script.Stderr != "" {
 		lines = append(lines, "printf '%s\\n' '"+script.Stderr+"' >&2")
 	}
+	if script.BackgroundSleepSeconds > 0 {
+		lines = append(lines, "sleep "+itoa(script.BackgroundSleepSeconds)+" &")
+		lines = append(lines, "echo $! > '"+shSingleQuote(script.BackgroundPidFile)+"'")
+	}
 	lines = append(lines, "exit "+itoa(script.ExitCode))
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o700); err != nil {
 		t.Fatalf("write command: %v", err)
 	}
 	return path
+}
+
+// psSingleQuote escapes a value for interpolation inside a PowerShell
+// single-quoted string literal, where a literal quote is written as ''.
+func psSingleQuote(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
+}
+
+// shSingleQuote escapes a value for interpolation inside a POSIX shell
+// single-quoted string literal, where a literal quote must close the
+// quoted section, emit an escaped quote, then reopen it.
+func shSingleQuote(value string) string {
+	return strings.ReplaceAll(value, "'", `'\''`)
 }
 
 func itoa(value int) string {
