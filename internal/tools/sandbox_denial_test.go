@@ -42,3 +42,53 @@ func TestLikelySandboxDeniedIgnoresUnsandboxedFailure(t *testing.T) {
 		t.Fatal("unsandboxed command output must not be classified as a sandbox denial")
 	}
 }
+
+func TestLikelySandboxDeniedDetectsSilentWindowsWrappedFailure(t *testing.T) {
+	for _, backend := range []zeroSandbox.BackendName{
+		zeroSandbox.BackendWindowsRestrictedToken,
+		zeroSandbox.BackendWindowsElevated,
+	} {
+		plan := zeroSandbox.CommandPlan{
+			Wrapped:       true,
+			TargetBackend: backend,
+		}
+		if !likelySandboxDenied(plan, 1, "", "  \n") {
+			t.Fatalf("wrapped Windows command failing with empty output must be classified as sandbox denied (backend %s)", backend)
+		}
+		meta := map[string]string{}
+		markLikelySandboxDenial(meta, plan, 1, "")
+		if meta[SandboxLikelyDeniedMeta] != "true" || meta[SandboxDenialKindMeta] != SandboxDenialKindSandbox {
+			t.Fatalf("silent windows denial meta = %#v (backend %s)", meta, backend)
+		}
+	}
+}
+
+func TestLikelySandboxDeniedIgnoresSilentWindowsWrappedSuccess(t *testing.T) {
+	plan := zeroSandbox.CommandPlan{
+		Wrapped:       true,
+		TargetBackend: zeroSandbox.BackendWindowsRestrictedToken,
+	}
+	if likelySandboxDenied(plan, 0, "") {
+		t.Fatal("wrapped Windows command exiting 0 with empty output must not be classified as sandbox denied")
+	}
+}
+
+func TestLikelySandboxDeniedIgnoresSilentFailureOnOtherBackends(t *testing.T) {
+	plan := zeroSandbox.CommandPlan{
+		Wrapped:       true,
+		TargetBackend: zeroSandbox.BackendLinuxBwrap,
+	}
+	if likelySandboxDenied(plan, 1, "") {
+		t.Fatal("silent nonzero exit on non-Windows backends must not be classified as sandbox denied")
+	}
+}
+
+func TestLikelySandboxDeniedIgnoresSilentWindowsFailureWithOutput(t *testing.T) {
+	plan := zeroSandbox.CommandPlan{
+		Wrapped:       true,
+		TargetBackend: zeroSandbox.BackendWindowsRestrictedToken,
+	}
+	if likelySandboxDenied(plan, 1, "fatal: not a git repository") {
+		t.Fatal("a wrapped Windows command that produced unrelated output must not be classified as sandbox denied")
+	}
+}

@@ -483,6 +483,14 @@ func TestTUISandboxSetupCommandGatedToWindowsNativeBackend(t *testing.T) {
 }
 
 func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
+	// Point HOME at an empty directory so the default credential-store
+	// deny-read entries (which depend on what exists in the real home, e.g.
+	// ~/.aws on the macOS CI image) cannot leak host paths into the golden
+	// comparison.
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("USERPROFILE", emptyHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 	store := newSandboxTestStore(t)
 	workspace := t.TempDir()
 	deps := appDeps{

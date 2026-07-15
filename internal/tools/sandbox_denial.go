@@ -66,7 +66,34 @@ func sandboxDenialKind(plan zeroSandbox.CommandPlan, exitCode int, sections ...s
 	if plan.TargetBackend == zeroSandbox.BackendLinuxBwrap && exitCode == 128+31 {
 		return SandboxDenialKindSandbox, "seccomp"
 	}
+	// Windows restricted-token failures are often SILENT: a spawn the token
+	// cannot satisfy (executable or DLL unreadable under the restricted-SID
+	// check, MSYS runtime init death, loader status 0xC0000135/0xC0000142)
+	// produces a nonzero exit with no output at all, so none of the keyword
+	// heuristics above can ever fire. Treat "wrapped Windows command failed
+	// without writing a single byte" as a likely sandbox denial so the caller
+	// offers the unsandboxed-retry prompt instead of surfacing a bare
+	// "command completed with no output". A command that legitimately fails
+	// silently (findstr with no match, for one) costs one extra approval
+	// prompt; the inverse misclassification silently strands the whole
+	// session, so the trade goes to prompting.
+	if windowsWrappedBackend(plan.TargetBackend) && sectionsEmpty(sections...) {
+		return SandboxDenialKindSandbox, "no output from sandboxed command"
+	}
 	return "", ""
+}
+
+func windowsWrappedBackend(backend zeroSandbox.BackendName) bool {
+	return backend == zeroSandbox.BackendWindowsRestrictedToken || backend == zeroSandbox.BackendWindowsElevated
+}
+
+func sectionsEmpty(sections ...string) bool {
+	for _, section := range sections {
+		if strings.TrimSpace(section) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func networkDeniedBySandbox(plan zeroSandbox.CommandPlan) bool {

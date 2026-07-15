@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -205,7 +207,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap)
+	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap, "")
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
@@ -316,7 +318,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend)
+	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend, "")
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -351,7 +353,7 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
 		}
 	}
-	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,
@@ -370,11 +372,11 @@ func existingBubblewrapMounts() []string {
 	return mounts
 }
 
-func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend)
+func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
+	return sandboxEnvironmentForCommand(nil, policy, backend, workspaceRoot)
 }
 
-func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
+func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. The sandbox
@@ -382,6 +384,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		// command env values still replace inherited values below.
 		env = os.Environ()
 	}
+	env = scrubSensitiveEnv(env)
 	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
 		// Preserve standard user tool locations so a bare `python3`/`node`
@@ -396,8 +399,15 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
-	if runtime.GOOS == "windows" {
-		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
+	if workspaceRoot != "" {
+		overrides = append(overrides, "HOME="+workspaceRoot)
+	}
+	if backend == BackendWindowsRestrictedToken || backend == BackendWindowsElevated {
+		overrides = append(overrides,
+			"COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"),
+			"SystemRoot="+envListValue(env, "SystemRoot", `C:\Windows`),
+			"WINDIR="+envListValue(env, "WINDIR", `C:\Windows`),
+		)
 	}
 	return upsertEnvList(env, overrides...)
 }
@@ -407,13 +417,6 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string{}, values...)
-}
-
-func firstEnv(key string, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }
 
 func envListValue(env []string, key string, fallback string) string {
@@ -962,4 +965,56 @@ func regexpQuoteMeta(value string) string {
 		`$`, `\$`,
 	)
 	return replacer.Replace(value)
+}
+
+func scrubSensitiveEnv(env []string) []string {
+	// Secrets not covered by the provider catalog: cloud/VCS credentials and
+	// providers Zero talks to through generic OpenAI-compatible endpoints.
+	sensitiveKeys := []string{
+		"COHERE_API_KEY",
+		"PERPLEXITY_API_KEY",
+		"ANYSCALE_API_KEY",
+		"AZURE_OPENAI_API_KEY",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"GITLAB_TOKEN",
+		"GH_TOKEN",
+		"ZERO_WEBSEARCH_API_KEY",
+		"ZERO_DAEMON_REMOTE_TOKEN",
+	}
+	for _, descriptor := range providercatalog.All() {
+		for _, key := range descriptor.AuthEnvVars {
+			// AWS_PROFILE is a profile name, not a secret, and scrubbing it
+			// protects nothing: the SDKs fall back to the default profile in
+			// ~/.aws/credentials, which credentialDenyReadPaths blocks at the
+			// filesystem level instead. GOOGLE_APPLICATION_CREDENTIALS IS
+			// scrubbed: it points at a service-account key file at an
+			// arbitrary path, so hiding the pointer complements the deny-read
+			// rule on the file itself.
+			if key == "AWS_PROFILE" {
+				continue
+			}
+			sensitiveKeys = append(sensitiveKeys, key)
+		}
+	}
+
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		drop := false
+		for _, sensitive := range sensitiveKeys {
+			if strings.EqualFold(key, sensitive) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

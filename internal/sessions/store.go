@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const (
@@ -841,7 +843,7 @@ func (store *Store) writeMetadata(session Metadata) error {
 	if err := writeFileSync(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
@@ -904,7 +906,7 @@ func (store *Store) writeFileAtomicSync(path string, content []byte, perm os.Fil
 	if err := writeFileSync(tmp, content, perm); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

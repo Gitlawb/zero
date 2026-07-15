@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const (
@@ -144,7 +146,11 @@ func (s *Store) writeJob(job Job) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "metadata.json"))
+	if err := fsutil.RenameWithRetry(tmp, filepath.Join(dir, "metadata.json"), nil); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Get(id string) (Job, error) {

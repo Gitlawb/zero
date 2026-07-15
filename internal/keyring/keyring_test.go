@@ -50,6 +50,52 @@ func attrValue(args []string, attr string) string {
 
 func key(service, account string) string { return service + "\x00" + account }
 
+// splitSecurityLine mirrors split_line in Apple's SecurityTool so the fake
+// parses `security -i` command lines the way the real tool does: whitespace
+// separates arguments, double or single quotes group one, and a backslash
+// escapes the next character both inside and outside quotes.
+func splitSecurityLine(line string) []string {
+	var args []string
+	var cur strings.Builder
+	inArg, escaped := false, false
+	quote := byte(0)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case escaped:
+			cur.WriteByte(c)
+			escaped = false
+		case c == '\\':
+			escaped = true
+			inArg = true
+		case quote != 0:
+			if c != quote {
+				cur.WriteByte(c)
+				continue
+			}
+			args = append(args, cur.String())
+			cur.Reset()
+			inArg, quote = false, 0
+		case c == '"' || c == '\'':
+			quote = c
+			inArg = true
+		case c == ' ' || c == '\t':
+			if inArg {
+				args = append(args, cur.String())
+				cur.Reset()
+				inArg = false
+			}
+		default:
+			cur.WriteByte(c)
+			inArg = true
+		}
+	}
+	if inArg {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
 func (f *fakeKeyring) run(_ context.Context, name string, stdin []byte, args ...string) ([]byte, error) {
 	f.lastStdin = string(stdin)
 	f.lastArgs = append([]string{name}, args...)
@@ -58,10 +104,19 @@ func (f *fakeKeyring) run(_ context.Context, name string, stdin []byte, args ...
 	}
 	switch f.goos {
 	case "darwin":
-		svc, acct := flagValue(args, "-s"), flagValue(args, "-a")
-		switch args[0] {
+		cmdArgs := args
+		if args[0] == "-i" {
+			// Interactive mode: the command arrives as one line on stdin.
+			line, _, _ := strings.Cut(string(stdin), "\n")
+			cmdArgs = splitSecurityLine(line)
+			if len(cmdArgs) == 0 {
+				return nil, fakeExit{1}
+			}
+		}
+		svc, acct := flagValue(cmdArgs, "-s"), flagValue(cmdArgs, "-a")
+		switch cmdArgs[0] {
 		case "add-generic-password":
-			f.data[key(svc, acct)] = flagValue(args, "-w")
+			f.data[key(svc, acct)] = flagValue(cmdArgs, "-w")
 			return nil, nil
 		case "find-generic-password":
 			if v, ok := f.data[key(svc, acct)]; ok {
@@ -126,6 +181,112 @@ func TestKeyringRoundTripDarwin(t *testing.T) {
 	}
 	if _, ok, _ := k.Get("zero", "tokens"); ok {
 		t.Fatal("token should be gone after delete")
+	}
+}
+
+func TestKeyringRoundTripDarwinUsesStdin(t *testing.T) {
+	f := newFake("darwin")
+	k := f.keyring()
+	if err := k.Set("zero", "tokens", "blob-CCC"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	// The secret must travel via stdin, never the argument vector: the write
+	// goes through `security -i`, whose whole command line (secret included)
+	// arrives on stdin while argv carries only the -i flag.
+	wantStdin := "add-generic-password -U -s \"zero\" -a \"tokens\" -w \"blob-CCC\"\n"
+	if f.lastStdin != wantStdin {
+		t.Fatalf("secret not sent via stdin correctly: stdin=%q, want=%q", f.lastStdin, wantStdin)
+	}
+	wantArgs := []string{"security", "-i"}
+	if len(f.lastArgs) != len(wantArgs) || f.lastArgs[0] != wantArgs[0] || f.lastArgs[1] != wantArgs[1] {
+		t.Fatalf("argv = %v, want %v", f.lastArgs, wantArgs)
+	}
+	got, ok, err := k.Get("zero", "tokens")
+	if err != nil || !ok || got != "blob-CCC" {
+		t.Fatalf("Get = %q ok=%v err=%v", got, ok, err)
+	}
+	existed, err := k.Delete("zero", "tokens")
+	if err != nil || !existed {
+		t.Fatalf("Delete: existed=%v err=%v", existed, err)
+	}
+}
+
+// TestKeyringSetRejectsMultilineSecretOnDarwin guards against silently
+// truncating a secret containing a newline: `security -i` reads one command
+// per line, so an embedded newline would split the write into two garbage
+// commands. Set must reject this before ever invoking security, not store a
+// corrupted value.
+func TestKeyringSetRejectsMultilineSecretOnDarwin(t *testing.T) {
+	for _, secret := range []string{"line1\nline2", "line1\r\nline2", "trailing\n"} {
+		f := newFake("darwin")
+		k := f.keyring()
+		if err := k.Set("zero", "tokens", secret); err == nil {
+			t.Fatalf("Set(%q) = nil error, want rejection of the embedded newline", secret)
+		}
+		if f.lastArgs != nil {
+			t.Fatalf("Set(%q) should be rejected before invoking security, got args=%v", secret, f.lastArgs)
+		}
+	}
+}
+
+// TestKeyringDarwinQuotesSpecialCharacters proves the quoting survives the
+// real tool's parser: the fake tokenizes stdin with a faithful mirror of
+// SecurityTool's split_line, so a secret full of quotes, backslashes, and
+// spaces must round-trip unchanged.
+func TestKeyringDarwinQuotesSpecialCharacters(t *testing.T) {
+	for _, secret := range []string{
+		`spa ced`,
+		`quo"te`,
+		`back\slash`,
+		`sin'gle`,
+		`mi"x'ed \" \\ end\`,
+		` leading and trailing `,
+	} {
+		f := newFake("darwin")
+		k := f.keyring()
+		if err := k.Set("zero", "tokens", secret); err != nil {
+			t.Fatalf("Set(%q): %v", secret, err)
+		}
+		got, ok, err := k.Get("zero", "tokens")
+		if err != nil || !ok || got != secret {
+			t.Fatalf("Get after Set(%q) = %q ok=%v err=%v", secret, got, ok, err)
+		}
+	}
+}
+
+// TestKeyringSetRejectsOversizedSecretOnDarwin guards the `security -i` line
+// budget: MAX_LINE_LEN is 4096 bytes, and an overlong line would be split and
+// executed as two garbage commands. A payload comfortably under the budget
+// must succeed; one over it must be rejected before invoking security.
+func TestKeyringSetRejectsOversizedSecretOnDarwin(t *testing.T) {
+	f := newFake("darwin")
+	k := f.keyring()
+	if err := k.Set("zero", "tokens", strings.Repeat("a", 4000)); err != nil {
+		t.Fatalf("Set(4000 bytes): %v", err)
+	}
+	f = newFake("darwin")
+	k = f.keyring()
+	if err := k.Set("zero", "tokens", strings.Repeat("a", 5000)); err == nil {
+		t.Fatal("Set(5000 bytes) = nil error, want rejection of the oversized line")
+	}
+	if f.lastArgs != nil {
+		t.Fatalf("oversized Set should be rejected before invoking security, got args=%v", f.lastArgs)
+	}
+}
+
+// TestKeyringSetAllowsMultilineSecretOnLinux confirms the newline restriction
+// is macOS-specific: secret-tool reads the whole stdin payload as the secret,
+// with no line-based prompt to corrupt an embedded newline.
+func TestKeyringSetAllowsMultilineSecretOnLinux(t *testing.T) {
+	f := newFake("linux")
+	k := f.keyring()
+	secret := "line1\nline2"
+	if err := k.Set("zero", "tokens", secret); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, ok, err := k.Get("zero", "tokens")
+	if err != nil || !ok || got != secret {
+		t.Fatalf("Get = %q ok=%v err=%v, want %q", got, ok, err, secret)
 	}
 }
 

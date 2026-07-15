@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -636,4 +637,40 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
 	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
+}
+
+func TestScrubSensitiveEnv(t *testing.T) {
+	inputEnv := []string{
+		"PATH=/usr/bin",
+		"OPENAI_API_KEY=sk-proj-12345",
+		"ANTHROPIC_API_KEY=sk-ant-12345",
+		"GEMINI_API_KEY=AIzaSy12345",
+		"DEEPSEEK_API_KEY=ds-12345",
+		"GITHUB_TOKEN=ghp_12345",
+		"AWS_ACCESS_KEY_ID=AKIA12345",
+		"AWS_SECRET_ACCESS_KEY=secret12345",
+		"GOOGLE_API_KEY=AIzaSy67890",
+		"XAI_API_KEY=xai-12345",
+		"HUGGINGFACE_API_KEY=hf_12345",
+		"GOOGLE_APPLICATION_CREDENTIALS=/home/user/sa-key.json",
+		"AWS_PROFILE=staging",
+		"SAFE_VAR=hello",
+	}
+	scrubbed := scrubSensitiveEnv(inputEnv)
+	expected := map[string]string{
+		"PATH":        "/usr/bin",
+		"SAFE_VAR":    "hello",
+		"AWS_PROFILE": "staging",
+	}
+	actual := make(map[string]string, len(scrubbed))
+	for _, entry := range scrubbed {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, dup := actual[key]; dup {
+			t.Errorf("duplicate key %q in scrubbed env: %v", key, scrubbed)
+		}
+		actual[key] = value
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("scrubSensitiveEnv() = %v, want %v", actual, expected)
+	}
 }
