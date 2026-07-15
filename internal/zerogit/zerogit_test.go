@@ -665,6 +665,28 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("unexpected push command: %q", got)
 		}
 	})
+
+	t.Run("FailsWhenDefaultBranchCannotBeVerified", func(t *testing.T) {
+		// Push's own fail-closed path: the remote lookup fails and no local
+		// refs/remotes/<remote>/HEAD record exists, so Push must refuse with
+		// guidance instead of pushing an unverifiable branch.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "feat/some-feature\n"},
+			{Stdout: "origin\n"},              // config branch.feat/some-feature.remote
+			{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+			{ExitCode: 1},                     // no local refs/remotes/origin/HEAD record
+		}}
+
+		_, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "use --yes to override") {
+			t.Fatalf("expected fail-closed error, got %v", err)
+		}
+	})
 }
 
 func TestCreatePRCommandConstruction(t *testing.T) {
