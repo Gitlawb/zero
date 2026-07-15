@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -121,7 +122,7 @@ func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	loadOptions := plugins.LoadOptions{Cwd: cwd, ExcludeProject: options.user}
 	result, err := plugins.SetEnabledByID(loadOptions, pluginID, !disabled)
 	if err != nil {
-		if strings.Contains(err.Error(), "is not installed") {
+		if errors.Is(err, plugins.ErrNotInstalled) {
 			return writeExecUsageError(stderr, err.Error())
 		}
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)

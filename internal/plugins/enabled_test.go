@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,5 +115,8 @@ func TestSetEnabledByIDMissingPlugin(t *testing.T) {
 	_, err := SetEnabledByID(LoadOptions{Roots: []Root{{Source: SourceUser, Path: t.TempDir()}}}, "missing", false)
 	if err == nil {
 		t.Fatal("expected missing plugin error")
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("error = %v, want ErrNotInstalled", err)
 	}
 }
