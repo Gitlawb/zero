@@ -111,6 +111,32 @@ func TestSetEnabledByIDRespectsUserOnlyFilter(t *testing.T) {
 	}
 }
 
+func TestSetEnabledPreservesManifestMode(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "demo")
+	writePluginManifest(t, pluginDir, map[string]any{
+		"schemaVersion": 1,
+		"id":            "zero.demo",
+		"name":          "Demo",
+		"version":       "1.0.0",
+	})
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+	if err := os.Chmod(manifestPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetEnabled(manifestPath, false); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	info, err := os.Stat(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("mode = %04o, want 0644", got)
+	}
+}
+
 func TestSetEnabledByIDMissingPlugin(t *testing.T) {
 	_, err := SetEnabledByID(LoadOptions{Roots: []Root{{Source: SourceUser, Path: t.TempDir()}}}, "missing", false)
 	if err == nil {

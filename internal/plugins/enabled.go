@@ -79,8 +79,12 @@ func SetEnabled(manifestPath string, enabled bool) (changed bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(resolved); statErr == nil {
+		mode = info.Mode().Perm()
+	}
 	tempPath := fmt.Sprintf("%s.tmp-%d-%d", resolved, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(tempPath, append(data, '\n'), mode); err != nil {
 		return false, err
 	}
 	if err := os.Rename(tempPath, resolved); err != nil {
