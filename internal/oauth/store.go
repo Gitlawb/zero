@@ -210,9 +210,12 @@ func NewStore(options StoreOptions) (*Store, error) {
 			kr = osKeyring
 		}
 		// Serialize the keyring's read-modify-write across processes with a lock
-		// file beside where the file backend would live. Best-effort: if no config
-		// location resolves, fall back to in-process serialization only.
-		lockPath := ""
+		// file beside where the file backend would live. Cross-process exclusion
+		// must not silently disappear when no config location resolves (withLock
+		// would be a no-op and a concurrent save could delete another process's
+		// newly written entry), so fall back to the OS temp directory, which
+		// always exists, rather than to in-process serialization only.
+		lockPath := filepath.Join(os.TempDir(), "zero-oauth-keyring.lockfile")
 		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
 			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 		}
@@ -269,14 +272,15 @@ func (s *Store) Load(key string) (Token, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Through blob.withLock, like Save/Delete: the keyring backend's read is
-	// several separate Get calls (index, then each entry), not one atomic
-	// snapshot, so an unlocked Load can run concurrently with another
-	// process's Save/Delete mid write and observe a torn state (e.g. an index
-	// already updated but an entry not yet written). The lock keeps this read
-	// from overlapping any other process's read-modify-write cycle.
+	// Through blob.withReadLock: the keyring backend's read is several
+	// separate Get calls (index, then each entry), not one atomic snapshot,
+	// so an unguarded Load could run concurrently with another process's
+	// Save/Delete mid write and observe a torn state. The file backend's
+	// withReadLock is a no-op: its writes are atomic renames, so lock-free
+	// reads keep their crash tolerance (a crashed writer's fresh lock file
+	// must not block reads of the last complete file).
 	var state storeFile
-	err := s.blob.withLock(s.now, func() error {
+	err := s.blob.withReadLock(s.now, func() error {
 		var readErr error
 		state, readErr = s.readState()
 		return readErr
@@ -316,10 +320,11 @@ func (s *Store) Delete(key string) (bool, error) {
 func (s *Store) Status(prefix string) ([]Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Same reasoning as Load: run the read under blob.withLock so it can't
-	// observe another process's Save/Delete mid write.
+	// Same reasoning as Load: run the read under blob.withReadLock so the
+	// keyring's multi-entry read can't observe another process's Save/Delete
+	// mid write, while file-backend reads stay lock-free.
 	var state storeFile
-	err := s.blob.withLock(s.now, func() error {
+	err := s.blob.withReadLock(s.now, func() error {
 		var readErr error
 		state, readErr = s.readState()
 		return readErr
@@ -417,6 +422,13 @@ type blobStore interface {
 	// (a lock file for the file backend; none for the keyring, which is the
 	// authoritative store and is serialized within the process by Store.mu).
 	withLock(now func() time.Time, fn func() error) error
+	// withReadLock guards a read-only pass. The file backend's writes are
+	// atomic renames, so its reads stay lock-free: a crashed writer's fresh
+	// lock file must not turn into ~30s of read failures when the last
+	// complete file is perfectly readable. The keyring backend's read is
+	// several separate Get calls (index, then each entry), not one atomic
+	// snapshot, so it takes the same cross-process lock as its writes.
+	withReadLock(now func() time.Time, fn func() error) error
 	// location is a human-readable identifier for diagnostics/errors.
 	location() string
 }
@@ -460,6 +472,14 @@ func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
 	return fn()
 }
 
+// withReadLock is deliberately lock-free: write() replaces the file with an
+// atomic rename, so a reader always sees a complete file, and a crashed
+// writer's leftover lock file must not turn readable state into ~30 seconds
+// of Load/Status failures while the stale threshold runs out.
+func (b fileBlob) withReadLock(now func() time.Time, fn func() error) error {
+	return fn()
+}
+
 func (b fileBlob) location() string { return b.path }
 
 // keyringBlob persists tokens in the OS keyring as one base64 entry per token
@@ -481,16 +501,12 @@ type keyringBlob struct {
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
-	indexEnc, ok, err := b.kr.Get(b.service, b.indexAccount)
+	keys, ok, _, err := b.readKeyIndex()
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok {
 		return b.readLegacy()
-	}
-	keys, err := decodeKeyIndex(indexEnc)
-	if err != nil {
-		return nil, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
 	}
 	tokens := make(map[string]Token, len(keys))
 	for _, key := range keys {
@@ -536,34 +552,87 @@ func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 	return data, true, nil
 }
 
+// write replaces the keyring's token entries with state, ordered so that
+// every interruption boundary leaves a recoverable store. The invariant is
+// that any token entry existing in the keyring at any instant is listed in
+// the published index: the union index is published before entries are
+// written, entries are deleted before the index shrinks, and the index
+// header is only updated after the chunks it references exist. A crash at
+// any step therefore leaves either an index over-listing keys whose entries
+// are missing (read() already skips those) or entries that a later
+// read/write can still see and reconcile, never an invisible credential
+// stranded in the OS keychain.
 func (b keyringBlob) write(data []byte) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
 	}
-	priorKeys, err := b.indexedKeys()
+	priorKeys, indexExisted, priorChunks, err := b.readKeyIndex()
 	if err != nil {
 		return err
 	}
+	prior := make(map[string]bool, len(priorKeys))
+	for _, key := range priorKeys {
+		prior[key] = true
+	}
+
+	// An older binary running alongside this one still reads and writes only
+	// the legacy combined entry. If that entry exists even though the index
+	// has already been published, it was recreated by such a binary after
+	// migration: merge any key the indexed schema has never seen before the
+	// legacy entry is deleted below, or that binary's freshly saved token
+	// would be silently lost. Keys already in the prior index are not merged;
+	// their absence from state means this write deliberately removed them.
+	if indexExisted {
+		if legacyData, ok, legacyErr := b.readLegacy(); legacyErr == nil && ok {
+			var legacyState storeFile
+			if json.Unmarshal(legacyData, &legacyState) == nil {
+				for key, token := range legacyState.Tokens {
+					if _, exists := state.Tokens[key]; exists || prior[key] || ValidateKey(key) != nil {
+						continue
+					}
+					state.Tokens[key] = token
+				}
+			}
+		}
+	}
+
 	keys := make([]string, 0, len(state.Tokens))
-	for key, token := range state.Tokens {
-		raw, err := json.Marshal(token)
+	for key := range state.Tokens {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// 1. Publish the union of the prior and new key sets first, so every
+	// entry that exists at any point during this update is indexed.
+	union := keys
+	if len(priorKeys) > 0 {
+		merged := make(map[string]bool, len(keys)+len(priorKeys))
+		for _, key := range append(append([]string{}, keys...), priorKeys...) {
+			merged[key] = true
+		}
+		union = make([]string, 0, len(merged))
+		for key := range merged {
+			union = append(union, key)
+		}
+		sort.Strings(union)
+	}
+	unionChunks, err := b.writeKeyIndex(union, priorChunks)
+	if err != nil {
+		return err
+	}
+	// 2. Write each token entry.
+	for _, key := range keys {
+		raw, err := json.Marshal(state.Tokens[key])
 		if err != nil {
 			return err
 		}
 		if err := b.kr.Set(b.service, key, base64.StdEncoding.EncodeToString(raw)); err != nil {
 			return err
 		}
-		keys = append(keys, key)
 	}
-	sort.Strings(keys)
-	indexData, err := json.Marshal(keys)
-	if err != nil {
-		return err
-	}
-	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(indexData)); err != nil {
-		return err
-	}
+	// 3. Delete removed entries while the union index still lists them, so a
+	// failed Delete leaves a visible (re-deletable) entry, never an orphan.
 	for _, key := range priorKeys {
 		if _, ok := state.Tokens[key]; !ok {
 			if _, err := b.kr.Delete(b.service, key); err != nil {
@@ -571,41 +640,154 @@ func (b keyringBlob) write(data []byte) error {
 			}
 		}
 	}
+	// 4. Shrink the index to the exact new key set.
+	if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
+		return err
+	}
 	// The index now exists and is authoritative; drop the legacy entry so a
-	// future read never falls back to it.
+	// future read never falls back to it (its fresh writes were merged above).
 	_, _ = b.kr.Delete(b.service, b.legacyAccount)
 	return nil
 }
 
-// indexedKeys returns the keys currently listed in the index, or nil if there
-// is no index yet (first write, or still on the legacy format).
-func (b keyringBlob) indexedKeys() ([]string, error) {
-	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
-	if err != nil || !ok {
-		return nil, err
-	}
-	keys, err := decodeKeyIndex(enc)
-	if err != nil {
-		return nil, fmt.Errorf("oauth: decode keyring token index: %w", err)
-	}
-	return keys, nil
+// maxKeyringIndexChunkBytes bounds one index chunk's raw JSON payload so its
+// base64 encoding plus command framing stays well under the macOS
+// `security -i` 4095-byte line cap (see internal/keyring): 2700 raw bytes
+// expand to 3600 base64 bytes, leaving ~490 bytes for the add-generic-password
+// syntax, service, and account. The old single-entry index hit that cap at
+// roughly 22 maximum-length keys even when every token was tiny.
+const maxKeyringIndexChunkBytes = 2700
+
+// keyIndexHeader is chunk 0 of the key index. Chunks 1..Chunks-1 live under
+// "<indexAccount>-<n>" as plain JSON string arrays. The pre-chunking format
+// (a bare JSON array at indexAccount) is still read transparently.
+type keyIndexHeader struct {
+	Version int      `json:"v"`
+	Chunks  int      `json:"chunks"`
+	Keys    []string `json:"keys"`
 }
 
-func decodeKeyIndex(enc string) ([]string, error) {
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
-	if err != nil {
-		return nil, err
-	}
-	var keys []string
-	if err := json.Unmarshal(data, &keys); err != nil {
-		return nil, err
-	}
-	return keys, nil
+func (b keyringBlob) chunkAccount(index int) string {
+	return fmt.Sprintf("%s-%d", b.indexAccount, index)
 }
+
+// readKeyIndex returns the indexed keys, whether an index exists at all, and
+// how many chunk entries it currently occupies. A chunk listed by the header
+// but missing from the keyring (a torn write) is skipped, mirroring how
+// read() skips an indexed key whose entry is missing.
+func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
+	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	if !ok {
+		return nil, false, 0, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, "[") {
+		var keys []string
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
+		}
+		return keys, true, 1, nil
+	}
+	var header keyIndexHeader
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
+	}
+	keys := header.Keys
+	for i := 1; i < header.Chunks; i++ {
+		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
+		if err != nil {
+			return nil, false, 0, err
+		}
+		if !ok {
+			continue
+		}
+		chunkRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(chunkEnc))
+		if err != nil {
+			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+		}
+		var more []string
+		if err := json.Unmarshal(chunkRaw, &more); err != nil {
+			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+		}
+		keys = append(keys, more...)
+	}
+	chunks := header.Chunks
+	if chunks < 1 {
+		chunks = 1
+	}
+	return keys, true, chunks, nil
+}
+
+// writeKeyIndex persists keys as a chunked index and reports how many chunk
+// entries it used. Continuation chunks are written before the header that
+// references them, so the authoritative chunk 0 never advertises a chunk that
+// does not exist yet; stale chunks from a previously larger index are removed
+// only after the header stops referencing them (best-effort: an unreferenced
+// chunk is never read).
+func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) {
+	chunks := chunkIndexKeys(keys)
+	for i := 1; i < len(chunks); i++ {
+		chunkData, err := json.Marshal(chunks[i])
+		if err != nil {
+			return 0, err
+		}
+		if err := b.kr.Set(b.service, b.chunkAccount(i), base64.StdEncoding.EncodeToString(chunkData)); err != nil {
+			return 0, err
+		}
+	}
+	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: len(chunks), Keys: chunks[0]})
+	if err != nil {
+		return 0, err
+	}
+	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
+		return 0, err
+	}
+	for i := len(chunks); i < priorChunks; i++ {
+		_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
+	}
+	return len(chunks), nil
+}
+
+// chunkIndexKeys packs keys into chunks whose marshaled JSON stays under
+// maxKeyringIndexChunkBytes. Always returns at least one (possibly empty)
+// chunk.
+func chunkIndexKeys(keys []string) [][]string {
+	chunks := [][]string{{}}
+	size := 0
+	for _, key := range keys {
+		// Per-key JSON cost: quotes, comma, and headroom for escaping.
+		cost := len(key) + 8
+		if size+cost > maxKeyringIndexChunkBytes && len(chunks[len(chunks)-1]) > 0 {
+			chunks = append(chunks, []string{})
+			size = 0
+		}
+		chunks[len(chunks)-1] = append(chunks[len(chunks)-1], key)
+		size += cost
+	}
+	return chunks
+}
+
+// fileLockRefreshInterval is how often a held keyring lock's mtime is
+// refreshed while its critical section runs. It must stay comfortably under
+// fileLockStaleAfter (30s): one external keyring command may legitimately
+// take up to its 10s timeout and a multi-entry pass runs several, so without
+// refreshing, a healthy slow holder would look stale and another process
+// could reclaim the live lock and resume the token-loss race the lock
+// exists to prevent. A var so tests can shorten it.
+var fileLockRefreshInterval = 10 * time.Second
 
 // withLock serializes the keyring's read-modify-write. Store.mu covers the
 // in-process case; lockPath (when set) adds cross-process exclusion so two
 // processes can't both read the blob, modify, and write — dropping a token.
+// While fn runs, the lock file's mtime is refreshed so the stale-reclaim
+// threshold only ever expires for a genuinely crashed holder.
 func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 	if b.lockPath == "" {
 		return fn()
@@ -615,7 +797,30 @@ func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 		return err
 	}
 	defer unlock()
-	return fn()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(fileLockRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				at := now()
+				_ = os.Chtimes(b.lockPath, at, at)
+			}
+		}
+	}()
+	err = fn()
+	close(stop)
+	<-done
+	return err
+}
+
+func (b keyringBlob) withReadLock(now func() time.Time, fn func() error) error {
+	return b.withLock(now, fn)
 }
 
 func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.indexAccount }
