@@ -240,10 +240,13 @@ OAuth server names ending in `.<32 hex chars>` are reserved for token storage.
 
 ```bash
 zero serve --mcp
+zero serve --mcp -C /path/to/workspace
+zero serve --mcp --add-dir /path/to/extra
 ```
 
 The server speaks MCP over stdio. Configure it from the receiving side as a `stdio` server whose command is `zero serve --mcp`.
 
+`-C/--cwd` sets the workspace root exposed as MCP resources and used by core tools. `--add-dir` (repeatable) widens that resource/tool scope beyond the workspace without granting the sandbox temp roots used by interactive runs.
 ## 6. Plugins
 
 A plugin is a self-contained directory that bundles tools, hooks, and skills for one capability. Plugins live at:
