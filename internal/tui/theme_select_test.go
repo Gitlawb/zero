@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -361,6 +362,106 @@ func TestExtendedThemeContrastInvariants(t *testing.T) {
 			t.Errorf("%s: red on delBg contrast %.2f < 4.5", name, r)
 		}
 	}
+}
+
+// hexChannels splits a #rrggbb token into its 8-bit channels.
+func hexChannels(t *testing.T, hexColor string) (int, int, int) {
+	t.Helper()
+	h := strings.TrimPrefix(hexColor, "#")
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil || len(h) != 6 {
+		t.Fatalf("bad hex %q", hexColor)
+	}
+	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff)
+}
+
+// xterm256Hex returns the nearest xterm-256 color (the 6x6x6 cube plus the
+// 24-step grayscale ramp, by squared RGB distance): how a terminal without
+// truecolor support downsamples the palette's hex tokens before rendering.
+func xterm256Hex(t *testing.T, hexColor string) string {
+	t.Helper()
+	r, g, b := hexChannels(t, hexColor)
+	levels := []int{0, 95, 135, 175, 215, 255}
+	bestR, bestG, bestB := 0, 0, 0
+	bestDistance := math.MaxFloat64
+	try := func(cr, cg, cb int) {
+		d := float64((r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb))
+		if d < bestDistance {
+			bestDistance, bestR, bestG, bestB = d, cr, cg, cb
+		}
+	}
+	for _, cr := range levels {
+		for _, cg := range levels {
+			for _, cb := range levels {
+				try(cr, cg, cb)
+			}
+		}
+	}
+	for i := 0; i < 24; i++ {
+		gray := 8 + 10*i
+		try(gray, gray, gray)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", bestR, bestG, bestB)
+}
+
+// Hex-level AA does not guarantee the rendered pairs hold on a 256-color
+// terminal, which quantizes every token to its nearest xterm entry first.
+// Guard the pairs that regressed: Dune's selected-row affordances (accent
+// caret/favorite star and blue local-model dot over selBg via onSel) and
+// Neon's diff bands, whose previous values all quantized to the same grays.
+func TestExtendedThemeANSI256Contrast(t *testing.T) {
+	palettes := map[string]palette{}
+	for _, entry := range themeRegistry {
+		palettes[entry.Name] = entry.Palette
+	}
+	q := func(hexColor string) string { return xterm256Hex(t, hexColor) }
+
+	dune := palettes["dune"]
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"accent on selBg", dune.accent, dune.selBg},
+		{"blue on selBg", dune.blue, dune.selBg},
+		{"faintest on selBg", dune.faintest, dune.selBg},
+		{"ink on selBg", dune.ink, dune.selBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("dune: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+
+	neon := palettes["neon"]
+	greenish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return g > r && g > b
+	}
+	reddish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return r > g && r > b
+	}
+	if q(neon.addBg) == q(neon.delBg) || !greenish(q(neon.addBg)) || !reddish(q(neon.delBg)) {
+		t.Errorf("neon: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
+			neon.addBg, q(neon.addBg), neon.delBg, q(neon.delBg))
+	}
+	if q(neon.addBgWord) == q(neon.delBgWord) || !greenish(q(neon.addBgWord)) || !reddish(q(neon.delBgWord)) {
+		t.Errorf("neon: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
+			neon.addBgWord, q(neon.addBgWord), neon.delBgWord, q(neon.delBgWord))
+	}
+	if q(neon.addBgWord) == q(neon.addBg) {
+		t.Errorf("neon: changed span is indistinguishable from its add row after quantization (both %s)", q(neon.addBg))
+	}
+	if q(neon.delBgWord) == q(neon.delBg) {
+		t.Errorf("neon: changed span is indistinguishable from its del row after quantization (both %s)", q(neon.delBg))
+	}
+	if r := wcagRatio(t, q(neon.green), q(neon.addBg)); r < 4.5 {
+		t.Errorf("neon: green on addBg = %.2f < 4.5 after quantization", r)
+	}
+	if r := wcagRatio(t, q(neon.red), q(neon.delBg)); r < 4.5 {
+		t.Errorf("neon: red on delBg = %.2f < 4.5 after quantization", r)
+	}
+	// faintest line numbers over addBg are only asserted in truecolor (see
+	// TestExtendedThemeContrastInvariants): the darkest green cube entry,
+	// #005f00, is already too bright against quantized faintest for 4.5:1, so
+	// an AA quantized pair and a green-identified band are mutually exclusive
+	// on the xterm cube. The band identity wins; the pair still clears 2.9:1.
 }
 
 func mustR(t *testing.T, hex string) uint32 {

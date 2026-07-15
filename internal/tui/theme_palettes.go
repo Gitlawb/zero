@@ -351,10 +351,10 @@ var neonPalette = palette{
 	blue:      "#22e0ff",
 	gitAdd:    "#4fdc6a",
 	gitDel:    "#ff6f80",
-	addBg:     "#0e2c14",
-	delBg:     "#2c0f16",
-	addBgWord: "#1c5b2c",
-	delBgWord: "#5c2130",
+	addBg:     "#083c10", // quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals
+	delBg:     "#3c0810", // quantizes to xterm red #5f0000 (see addBg)
+	addBgWord: "#147828", // quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
+	delBgWord: "#74202e", // quantizes to xterm red #870000 (see addBgWord)
 	permBg:    "#2a2a0c",
 	selBg:     "#123a1e",
 	addInk:    "#c8ffcf",
@@ -444,7 +444,7 @@ var dunePalette = palette{
 	muted:     "#473e32",
 	faint:     "#554a3a",
 	faintest:  "#655648",
-	accent:    "#7c4712", // darkened from #8f5215 for AA on selBg (was 4.00:1, now 4.90:1)
+	accent:    "#724028", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg; the previous #7c4712 quantized to #875f00 at 3.81:1)
 	green:     "#38572a",
 	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling (true 6.57:1, 256 7.86:1)
 	amber:     "#6d4600",

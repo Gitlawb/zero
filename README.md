@@ -350,6 +350,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 - [Install](docs/INSTALL.md)
 - [Update flow](docs/UPDATE.md)
+- [Themes](docs/THEMES.md)
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md)
 - [Specialists](docs/SPECIALISTS.md)
 - [GitHub Action](docs/GITHUB_ACTION.md)

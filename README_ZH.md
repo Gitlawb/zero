@@ -279,6 +279,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 - [安装](docs/INSTALL.md)
 - [更新流程](docs/UPDATE.md)
+- [主题](docs/THEMES.md)
 - [Stream-JSON 协议](docs/STREAM_JSON_PROTOCOL.md)
 - [专家](docs/SPECIALISTS.md)
 - [GitHub Action](docs/GITHUB_ACTION.md)
