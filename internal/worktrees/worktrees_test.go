@@ -450,11 +450,11 @@ func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
 		results: []CommandResult{
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
-			{ExitCode: 0},                                             // status --porcelain <stalePathA> (clean)
+			{ExitCode: 0}, // status --porcelain <stalePathA> (clean)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree A"}, // remove stalePathA
-			{ExitCode: 0},                                             // status --porcelain <stalePathB> (clean)
+			{ExitCode: 0}, // status --porcelain <stalePathB> (clean)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree B"}, // remove stalePathB
-			{ExitCode: 0},                                             // final prune
+			{ExitCode: 0}, // final prune
 		},
 	}
 
