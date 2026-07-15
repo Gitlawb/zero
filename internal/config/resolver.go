@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -1040,7 +1041,11 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
 	if len(descriptor.CustomHeaders) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
-		merged := copyStringMap(descriptor.CustomHeaders)
+		catalogHeaders := descriptor.CustomHeaders
+		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
+			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
+		}
+		merged := copyStringMap(catalogHeaders)
 		for key, value := range profile.CustomHeaders {
 			// Header names are case-insensitive. Preserve the catalog spelling while
 			// replacing its value so request construction cannot see two colliding

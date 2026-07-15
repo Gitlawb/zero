@@ -88,6 +88,7 @@ func pollUntilPaid(ctx context.Context, client *Client, sessionToken string, onS
 			// wait) — is retried until the poll deadline.
 			var apiErr APIError
 			if errors.As(err, &apiErr) && apiErr.Status < 500 {
+				reportSession(onSession, "")
 				return PartnerCheckoutSession{}, err
 			}
 			if err := sleepContext(ctx, pollInterval); err != nil {

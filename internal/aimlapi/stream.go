@@ -16,13 +16,16 @@ import (
 type StreamTopUpOptions struct {
 	SessionToken string // user session bearer (required)
 	AmountUSD    string // dollars; parsed via ParseAmountUSD (min $20)
-	Method       PaymentMethod
-	AutoTopUp    bool // enroll the account in automatic top-up at checkout time
-	Exchange     bool // exchange the paid session into a new key (new accounts)
-	Model        string
-	PartnerID    string
-	PartnerName  string
-	NoOpen       bool
+	// InferenceBaseURL pins key-bound billing and the returned provider profile to
+	// the endpoint that validated the credential. Empty uses ResolveEndpoints.
+	InferenceBaseURL string
+	Method           PaymentMethod
+	AutoTopUp        bool // enroll the account in automatic top-up at checkout time
+	Exchange         bool // exchange the paid session into a new key (new accounts)
+	Model            string
+	PartnerID        string
+	PartnerName      string
+	NoOpen           bool
 
 	// ResumeSessionToken, when set, resumes that partner-checkout session instead
 	// of opening a new one, so a retry after an ambiguous failure (a lost Pay/
@@ -55,6 +58,9 @@ const (
 // OnStatus.
 func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKey, error) {
 	endpoints := ResolveEndpoints()
+	if baseURL := strings.TrimSpace(options.InferenceBaseURL); baseURL != "" {
+		endpoints.InferenceBaseURL = baseURL
+	}
 	client := NewClient(endpoints, options.HTTPClient)
 	partnerID := ResolvePartnerID(options.PartnerID)
 	partnerName := firstNonEmpty(options.PartnerName, DefaultPartnerName)
@@ -197,12 +203,13 @@ func announceCheckout(onStatus func(Status, string), open func(string) error, no
 // needs no email session and never exchanges a key — the caller already holds one,
 // so it only funds the wallet: create-session → pay-by-key → wait-for-payment.
 type StreamTopUpByKeyOptions struct {
-	APIKey      string // raw key that owns the account (required)
-	AmountUSD   string // dollars; parsed via ParseAmountUSD (min $20)
-	AutoTopUp   bool   // enroll the account in automatic top-up at checkout time
-	PartnerID   string
-	PartnerName string
-	NoOpen      bool
+	APIKey           string // raw key that owns the account (required)
+	AmountUSD        string // dollars; parsed via ParseAmountUSD (min $20)
+	InferenceBaseURL string // validated key endpoint; empty uses ResolveEndpoints
+	AutoTopUp        bool   // enroll the account in automatic top-up at checkout time
+	PartnerID        string
+	PartnerName      string
+	NoOpen           bool
 
 	// ResumeSessionToken resumes an existing partner-checkout session instead of
 	// opening a new one. PaymentSessionID is the idempotency handle carried across
@@ -221,6 +228,9 @@ type StreamTopUpByKeyOptions struct {
 // pasted/env key is unchanged, only the balance grows.
 func StreamTopUpByKey(ctx context.Context, options StreamTopUpByKeyOptions) (ProvisionedKey, error) {
 	endpoints := ResolveEndpoints()
+	if baseURL := strings.TrimSpace(options.InferenceBaseURL); baseURL != "" {
+		endpoints.InferenceBaseURL = baseURL
+	}
 	client := NewClient(endpoints, options.HTTPClient)
 	partnerID := ResolvePartnerID(options.PartnerID)
 	partnerName := firstNonEmpty(options.PartnerName, DefaultPartnerName)

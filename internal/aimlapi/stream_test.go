@@ -58,6 +58,44 @@ func TestStreamTopUpByKeyFundsWithoutExchange(t *testing.T) {
 	}
 }
 
+func TestStreamTopUpByKeyPinsValidatedInferenceEndpoint(t *testing.T) {
+	validatedCalls := 0
+	validated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/partner-checkout/sessions"):
+			_ = json.NewEncoder(w).Encode(PartnerCheckoutSession{SessionToken: "pcs_tok", Status: SessionStatusPendingAuth})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v2/billing/topup"):
+			validatedCalls++
+			_ = json.NewEncoder(w).Encode(TopUpByKeyResult{Checkout: PaymentSession{PayURL: "https://pay/checkout"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/partner-checkout/sessions/"):
+			_ = json.NewEncoder(w).Encode(PartnerCheckoutSession{SessionToken: "pcs_tok", Status: SessionStatusPaid})
+		default:
+			t.Errorf("unexpected validated-endpoint request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer validated.Close()
+	override := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("validated key leaked to process override: %s %s", r.Method, r.URL.Path)
+	}))
+	defer override.Close()
+	t.Setenv("AIMLAPI_APP_URL", validated.URL)
+	t.Setenv("AIMLAPI_INFERENCE_URL", override.URL)
+
+	_, err := StreamTopUpByKey(context.Background(), StreamTopUpByKeyOptions{
+		APIKey:           "production-key",
+		AmountUSD:        "20",
+		InferenceBaseURL: validated.URL,
+		PaymentSessionID: "payment-1",
+		OpenBrowser:      func(string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("StreamTopUpByKey() error = %v", err)
+	}
+	if validatedCalls != 1 {
+		t.Fatalf("validated endpoint top-up calls = %d, want 1", validatedCalls)
+	}
+}
+
 // resumeServer is a partner-checkout backend fake that fails the test if the
 // re-charging endpoints (create-session / pay) are ever hit, and serves a
 // scripted GetSession status sequence so a resume can be driven deterministically.
@@ -171,6 +209,24 @@ func TestStreamTopUpPollingDeadSessionClearsRetainedToken(t *testing.T) {
 	}
 	if len(seen) == 0 || seen[len(seen)-1] != "" {
 		t.Fatalf("OnSession events = %#v, want terminal clear", seen)
+	}
+}
+
+func TestPollUntilPaidTerminal4xxClearsRetainedToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "session rejected", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	seen := "retained"
+	_, err := pollUntilPaid(context.Background(), NewClient(Endpoints{AppBaseURL: server.URL}, server.Client()), "pc_missing", func(token string) {
+		seen = token
+	})
+	if err == nil {
+		t.Fatal("pollUntilPaid() error = nil, want terminal 4xx")
+	}
+	if seen != "" {
+		t.Fatalf("retained session = %q, want cleared", seen)
 	}
 }
 

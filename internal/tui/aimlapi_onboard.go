@@ -541,7 +541,7 @@ func (s *aimlapiOnboardState) applyKeyValidation(msg aimlapiOnboardMsg) (tea.Cmd
 			s.step = aimlapiStepKeyInput
 			return nil, aimlapiContinue
 		}
-		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+		s.errText = s.safeErrorMessage(msg.err)
 		s.step = aimlapiStepKeyInput
 		return nil, aimlapiContinue
 	}
@@ -574,7 +574,7 @@ func (s *aimlapiOnboardState) applyKeyBalance(msg aimlapiOnboardMsg) (tea.Cmd, a
 func (s *aimlapiOnboardState) applyCheck(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
 	s.stopBusy()
 	if msg.err != nil {
-		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+		s.errText = s.safeErrorMessage(msg.err)
 		s.step = aimlapiStepEmailInput
 		return nil, aimlapiContinue
 	}
@@ -601,13 +601,13 @@ func (s *aimlapiOnboardState) applyToken(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 			if aimlapiIsInvalidCode(msg.err) {
 				s.errText = aimlapi.MsgCodeIncorrect
 			} else {
-				s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+				s.errText = s.safeErrorMessage(msg.err)
 			}
 			s.step = aimlapiStepCodeInput
 			return nil, aimlapiContinue
 		}
 		// send-code or passwordless sign-up failed — back to the email prompt.
-		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+		s.errText = s.safeErrorMessage(msg.err)
 		s.step = aimlapiStepEmailInput
 		return nil, aimlapiContinue
 	}
@@ -634,7 +634,7 @@ func (s *aimlapiOnboardState) applyToken(msg aimlapiOnboardMsg) (tea.Cmd, aimlap
 func (s *aimlapiOnboardState) applyKey(msg aimlapiOnboardMsg) (tea.Cmd, aimlapiOutcome) {
 	s.stopBusy()
 	if msg.err != nil {
-		s.errText = redaction.ErrorMessage(msg.err, redaction.Options{})
+		s.errText = s.safeErrorMessage(msg.err)
 		s.step = aimlapiStepEmailInput
 		return nil, aimlapiContinue
 	}
@@ -736,6 +736,7 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 		s.topupCh = startAimlapiStreamTopUpByKey(ctx, aimlapi.StreamTopUpByKeyOptions{
 			APIKey:             s.apiKey,
 			AmountUSD:          s.amount,
+			InferenceBaseURL:   s.baseURL,
 			AutoTopUp:          s.autoTopUp,
 			ResumeSessionToken: s.resumeSessionToken,
 			PaymentSessionID:   s.paymentSessionID,
@@ -747,6 +748,7 @@ func (s *aimlapiOnboardState) startTopUp() (tea.Cmd, aimlapiOutcome) {
 			SessionToken:       s.sessionToken,
 			ResumeSessionToken: s.resumeSessionToken,
 			AmountUSD:          s.amount,
+			InferenceBaseURL:   s.baseURL,
 			Method:             aimlapi.PaymentMethodCard,
 			AutoTopUp:          s.autoTopUp,
 			Exchange:           s.newAccount,
@@ -763,6 +765,23 @@ func (s *aimlapiOnboardState) finishEverythingRuns() tea.Cmd {
 	s.successLines = []string{aimlapi.MsgEverythingRuns}
 	s.step = aimlapiStepDone
 	return nil
+}
+
+// safeErrorMessage strips server-controlled API response bodies before display
+// and redacts every credential that can be active in the onboarding state. This
+// keeps echoed keys, verification codes, and session bearers out of terminal
+// scrollback while retaining the operation and HTTP status for diagnosis.
+func (s *aimlapiOnboardState) safeErrorMessage(err error) string {
+	var apiErr aimlapi.APIError
+	if errors.As(err, &apiErr) {
+		err = aimlapi.APIError{Message: apiErr.Message, Status: apiErr.Status}
+	}
+	return redaction.ErrorMessage(err, redaction.Options{ExtraSecretValues: []string{
+		s.apiKey,
+		s.email,
+		s.code,
+		s.sessionToken,
+	}})
 }
 
 // topUpSuccessLines builds the terminal "done" body. For a new account the

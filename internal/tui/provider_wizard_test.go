@@ -1457,7 +1457,8 @@ func TestAimlapiConfigureAgainUsesTwoPathOnboarding(t *testing.T) {
 func TestExistingAimlapiLowBalanceReusesByKeyTopUp(t *testing.T) {
 	wizard := &providerWizardState{
 		step:                   providerWizardStepAimlapiConfigured,
-		aimlapiExistingProfile: config.ProviderProfile{Name: "aimlapi", CatalogID: "aimlapi", APIKeyEnv: "AIMLAPI_API_KEY"},
+		baseURL:                "https://validated.example.test/v1",
+		aimlapiExistingProfile: config.ProviderProfile{Name: "aimlapi", CatalogID: "aimlapi", BaseURL: "https://validated.example.test/v1", APIKeyEnv: "AIMLAPI_API_KEY"},
 		aimlapiRuntimeKey:      "secret",
 		aimlapiExistingBusy:    true,
 		aimlapiExistingGen:     4,
@@ -1475,6 +1476,9 @@ func TestExistingAimlapiLowBalanceReusesByKeyTopUp(t *testing.T) {
 	}
 	if !next.providerWizard.aimlapi.byKey || next.providerWizard.aimlapi.step != aimlapiStepLowBalance || next.providerWizard.aimlapi.apiKey != "secret" {
 		t.Fatalf("top-up state = %+v", next.providerWizard.aimlapi)
+	}
+	if next.providerWizard.aimlapi.baseURL != "https://validated.example.test/v1" {
+		t.Fatalf("top-up endpoint = %q, want validated endpoint", next.providerWizard.aimlapi.baseURL)
 	}
 }
 

@@ -197,6 +197,41 @@ func TestAimlapiPastedKeyStartsBalanceValidation(t *testing.T) {
 	}
 }
 
+func TestAimlapiOnboardingErrorsStripBodiesAndRedactActiveSecrets(t *testing.T) {
+	const (
+		apiKey = "sk-super-secret"
+		code   = "654321"
+		bearer = "session-super-secret"
+		body   = "server echoed sk-super-secret 654321 session-super-secret"
+	)
+	newState := func(step aimlapiOnboardStep) *aimlapiOnboardState {
+		return &aimlapiOnboardState{step: step, apiKey: apiKey, code: code, sessionToken: bearer, busy: true}
+	}
+	err := aimlapi.APIError{Message: "onboarding request failed", Status: http.StatusInternalServerError, Body: body}
+	tests := []struct {
+		name  string
+		state *aimlapiOnboardState
+		apply func(*aimlapiOnboardState)
+	}{
+		{name: "key validation", state: newState(aimlapiStepKeyInput), apply: func(s *aimlapiOnboardState) { s.applyKeyValidation(aimlapiOnboardMsg{err: err}) }},
+		{name: "account check", state: newState(aimlapiStepEmailInput), apply: func(s *aimlapiOnboardState) { s.applyCheck(aimlapiOnboardMsg{err: err}) }},
+		{name: "code verification", state: newState(aimlapiStepCodeInput), apply: func(s *aimlapiOnboardState) { s.applyToken(aimlapiOnboardMsg{err: err}) }},
+		{name: "key mint", state: newState(aimlapiStepEmailInput), apply: func(s *aimlapiOnboardState) { s.applyKey(aimlapiOnboardMsg{err: err}) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.apply(test.state)
+			if strings.Contains(test.state.errText, body) || strings.Contains(test.state.errText, apiKey) ||
+				strings.Contains(test.state.errText, code) || strings.Contains(test.state.errText, bearer) {
+				t.Fatalf("credential leaked in error: %q", test.state.errText)
+			}
+			if !strings.Contains(test.state.errText, "HTTP 500") {
+				t.Fatalf("safe status missing from error: %q", test.state.errText)
+			}
+		})
+	}
+}
+
 func TestAimlapiPastedKeyRejectsUnauthorized(t *testing.T) {
 	state := &aimlapiOnboardState{
 		step:   aimlapiStepKeyInput,

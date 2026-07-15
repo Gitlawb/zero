@@ -173,6 +173,7 @@ func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
 		// a process-wide inference override cannot redirect this saved key.
 		endpoints.InferenceBaseURL = descriptor.DefaultBaseURL
 	}
+	wizard.baseURL = endpoints.InferenceBaseURL
 	ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 	wizard.aimlapiExistingCancel = cancel
 	cmd := func() tea.Msg {
@@ -201,10 +202,10 @@ func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model
 		return m, nil
 	}
 	wizard.apiKey = wizard.aimlapiRuntimeKey
-	wizard.baseURL = wizard.aimlapiExistingProfile.BaseURL
 	if msg.balance.LowBalance {
 		state := newAimlapiOnboard(browser.OpenURL)
 		state.apiKey = wizard.aimlapiRuntimeKey
+		state.baseURL = wizard.baseURL
 		state.byKey = true
 		state.step = aimlapiStepLowBalance
 		wizard.aimlapi = state

@@ -1376,6 +1376,7 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 }
 
 func TestApplyCatalogDescriptorFoldsCustomHeadersCaseInsensitively(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_env")
 	descriptor, err := providercatalog.Require("aimlapi")
 	if err != nil {
 		t.Fatal(err)
@@ -1394,6 +1395,21 @@ func TestApplyCatalogDescriptorFoldsCustomHeadersCaseInsensitively(t *testing.T)
 	}
 	if _, duplicate := profile.CustomHeaders["x-aimlapi-partner-id"]; duplicate {
 		t.Fatalf("case-colliding header survived merge: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestApplyCatalogDescriptorUsesAimlapiPartnerEnvironmentOverride(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_env")
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{BaseURL: descriptor.DefaultBaseURL}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	if got := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_env" {
+		t.Fatalf("partner header = %q, want part_env", got)
 	}
 }
 
