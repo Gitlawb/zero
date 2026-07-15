@@ -1,13 +1,10 @@
 package tui
 
 import (
-	"io"
-	"os"
 	"strings"
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/term"
 )
 
 const (
@@ -141,37 +138,16 @@ func zeroWordmarkLines() []string {
 }
 
 // Wordmark renders the brand ASCII art shown on the TUI's empty state, for
-// reuse outside the TUI (e.g. `zero --version`). w decides whether color is
-// applied: lipgloss.Style.Render doesn't check isatty on its own, so without
-// this gate every `zero --version > file` or `| grep` would carry raw ANSI.
-func Wordmark(w io.Writer) string {
-	lines := zeroWordmarkPlainLines()
-	if wordmarkColorEnabled(w) {
-		lines = zeroWordmarkLines()
-	}
-	return strings.Join(lines, "\n")
-}
-
-func zeroWordmarkPlainLines() []string {
+// reuse outside the TUI (e.g. `zero --version`). It is deliberately
+// uncolored: only newModel resolves --theme/ZERO_THEME, so painting the
+// global palette here would ignore a selected light theme and be unreadable
+// on light terminals. The terminal's default foreground works everywhere.
+func Wordmark() string {
 	lines := make([]string, 0, minInt(len(zeroWordmarkPrefixLines), len(zeroWordmarkOLines)))
 	for index := 0; index < len(zeroWordmarkPrefixLines) && index < len(zeroWordmarkOLines); index++ {
 		lines = append(lines, zeroWordmarkPrefixLines[index]+zeroWordmarkOLines[index])
 	}
-	return lines
-}
-
-// wordmarkColorEnabled honors NO_COLOR and requires w to be a real terminal,
-// matching the no-color.org handling already applied to the interactive TUI
-// in run.go.
-func wordmarkColorEnabled(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(f.Fd())
+	return strings.Join(lines, "\n")
 }
 
 func borderedBlock(width int, lines []string) string {

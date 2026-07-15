@@ -42,6 +42,7 @@ import (
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/charmbracelet/x/term"
 )
 
 var version = "dev"
@@ -339,7 +340,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return 0
 			}
 		}
-		if _, err := fmt.Fprintf(stdout, "%s\n\nversion: %s\n", tui.Wordmark(stdout), version); err != nil {
+		// Pipes and redirects keep the machine-readable contract exactly as it
+		// was: a single "zero <version>" line. Scripts, command substitutions,
+		// and the NPM wrapper smoke check all parse that record, so the banner
+		// is strictly a TTY affordance.
+		if !stdoutIsTerminal(stdout) {
+			if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+				return 1
+			}
+			return 0
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n\nzero %s\n", tui.Wordmark(), version); err != nil {
 			return 1
 		}
 		return 0
@@ -1113,6 +1124,17 @@ func closeSpecialistRuntime(stderr io.Writer, runtime *agentToolRuntime) {
 			_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
 		}
 	}
+}
+
+// stdoutIsTerminal reports whether w is an interactive terminal. Tests pass
+// bytes.Buffer writers and pipes/redirects fail term.IsTerminal, so both take
+// the machine-readable path.
+func stdoutIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(f.Fd())
 }
 
 func writeAppError(stderr io.Writer, message string, exitCode int) int {

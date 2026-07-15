@@ -41,14 +41,37 @@ func TestRunPrintsVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
-	wantWordmark := "███████╗███████╗██████╗  ██████╗ \n" +
-		"╚══███╔╝██╔════╝██╔══██╗██╔═══██╗\n" +
-		"  ███╔╝ █████╗  ██████╔╝██║   ██║\n" +
-		" ███╔╝  ██╔══╝  ██╔══██╗██║   ██║\n" +
-		"███████╗███████╗██║  ██║╚██████╔╝\n" +
-		"╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ \n"
-	if got, want := stdout.String(), wantWordmark+"\nversion: dev\n"; got != want {
-		t.Fatalf("expected version output %q, got %q", want, got)
+	// Non-terminal stdout keeps the machine-readable contract: exactly one
+	// "zero <version>" record, no wordmark banner, no ANSI.
+	if got := stdout.String(); got != "zero dev\n" {
+		t.Fatalf("expected version output, got %q", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+// TestRunVersionRedirectedFile covers the `zero --version > file` path: stdout
+// is a real *os.File but not a terminal, so the single-line contract must hold.
+func TestRunVersionRedirectedFile(t *testing.T) {
+	stdout, err := os.CreateTemp(t.TempDir(), "version-stdout")
+	if err != nil {
+		t.Fatalf("create temp stdout: %v", err)
+	}
+	defer stdout.Close()
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"--version"}, stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	content, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatalf("read temp stdout: %v", err)
+	}
+	if got := string(content); got != "zero dev\n" {
+		t.Fatalf("expected version output, got %q", got)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
