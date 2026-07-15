@@ -3,8 +3,11 @@ package oauth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeKR is an in-memory KeyringClient for exercising the keyring backend
@@ -221,6 +224,258 @@ func TestStoreKeyringSkipsIndexedKeyMissingItsEntry(t *testing.T) {
 	}
 }
 
+// failingKR wraps fakeKR and fails the Nth mutating operation (Set/Delete),
+// for exercising every interruption boundary of the multi-step write.
+type failingKR struct {
+	*fakeKR
+	failAt int // 1-based mutating-operation number to fail; 0 disables
+	ops    int
+}
+
+func (f *failingKR) Set(service, account, secret string) error {
+	f.ops++
+	if f.failAt != 0 && f.ops == f.failAt {
+		return errKRInjected
+	}
+	return f.fakeKR.Set(service, account, secret)
+}
+
+func (f *failingKR) Delete(service, account string) (bool, error) {
+	f.ops++
+	if f.failAt != 0 && f.ops == f.failAt {
+		return false, errKRInjected
+	}
+	return f.fakeKR.Delete(service, account)
+}
+
+var errKRInjected = errKR("injected keyring failure")
+
+type errKR string
+
+func (e errKR) Error() string { return string(e) }
+
+// indexedKeysOf parses the (possibly chunked) index in kr and returns every
+// listed key.
+func indexedKeysOf(t *testing.T, kr *fakeKR) map[string]bool {
+	t.Helper()
+	blob := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+	keys, _, _, err := blob.readKeyIndex()
+	if err != nil {
+		t.Fatalf("readKeyIndex: %v", err)
+	}
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out
+}
+
+// TestStoreKeyringIndexStaysUnderEntryLimit is the regression test for the
+// index itself hitting the same macOS `security -i` line cap the per-token
+// split fixed for token entries: with enough maximum-length keys, a single
+// index entry base64-expands past 4095 bytes even when every token is tiny.
+// The index must therefore be bounded per entry (chunked) like everything
+// else, and still round-trip.
+func TestStoreKeyringIndexStaysUnderEntryLimit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 40 keys near ValidateKey's cap: an unchunked index of these would
+	// serialize to ~5.5KB before base64.
+	names := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		names = append(names, strings.Repeat("p", 100)+"-"+strings.Repeat("0123456789", 2)+string(rune('a'+i%26))+string(rune('a'+i/26)))
+	}
+	for _, name := range names {
+		if err := s.Save(ProviderKey(name), Token{AccessToken: "a"}); err != nil {
+			t.Fatalf("Save(%s): %v", name, err)
+		}
+	}
+	// Every keyring value, index entries included, must stay under the cap
+	// with generous framing margin.
+	const entryCeiling = 3800
+	for k, v := range kr.data {
+		if len(v) > entryCeiling {
+			t.Fatalf("keyring entry %q is %d bytes, want <= %d (index cap regression)", k, len(v), entryCeiling)
+		}
+	}
+	// The index actually chunked (otherwise the ceiling check proves nothing).
+	if _, ok := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; !ok {
+		t.Fatal("expected the index to split into continuation chunks")
+	}
+	for _, name := range names {
+		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
+			t.Fatalf("Load(%s): ok=%v err=%v", name, ok, err)
+		}
+	}
+	// Shrinking back to one token must also shrink the index and drop the
+	// stale continuation chunks.
+	for _, name := range names[1:] {
+		if _, err := s.Delete(ProviderKey(name)); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringIndexAccount+"-1"]; ok {
+		t.Fatal("stale index continuation chunk left behind after shrink")
+	}
+}
+
+// TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens drives a write
+// through an injected failure at every mutating operation in turn and checks
+// the recoverable-store invariant at each boundary: every token entry present
+// in the keyring is listed in the published index (so no credential is ever
+// stranded invisibly), and a subsequent unimpeded write fully reconciles.
+func TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for failAt := 1; ; failAt++ {
+		kr := &failingKR{fakeKR: newFakeKR()}
+		s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Seed two tokens cleanly, then fail the Nth mutating operation of a
+		// write that both adds a token and (via the later delete pass of a
+		// Delete call) removes one.
+		if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+			t.Fatal(err)
+		}
+		kr.ops = 0
+		kr.failAt = failAt
+		saveErr := s.Save(ProviderKey("gamma"), Token{AccessToken: "c"})
+		opsUsed := kr.ops
+		kr.failAt = 0
+
+		// Invariant at the interruption boundary: nothing invisible.
+		indexed := indexedKeysOf(t, kr.fakeKR)
+		for entry := range kr.data {
+			account := strings.TrimPrefix(entry, keyringService+"/")
+			if account == keyringIndexAccount || strings.HasPrefix(account, keyringIndexAccount+"-") || account == keyringLegacyAccount {
+				continue
+			}
+			if !indexed[account] {
+				t.Fatalf("failAt=%d: token entry %q exists but is not listed in the index (invisible credential)", failAt, account)
+			}
+		}
+
+		// A later unimpeded write must reconcile completely.
+		if err := s.Save(ProviderKey("gamma"), Token{AccessToken: "c"}); err != nil {
+			t.Fatalf("failAt=%d: reconciling Save: %v", failAt, err)
+		}
+		for _, name := range []string{"alpha", "beta", "gamma"} {
+			if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
+				t.Fatalf("failAt=%d: Load(%s) after reconcile: ok=%v err=%v", failAt, name, ok, err)
+			}
+		}
+		// saveErr itself is not asserted: most boundaries surface the injected
+		// failure, but the final legacy-entry delete is deliberately
+		// best-effort, so its failure is swallowed by design. The invariant
+		// and the reconcile above are the actual contract.
+		_ = saveErr
+		if opsUsed < failAt {
+			// The write used fewer mutating ops than failAt, so the injection
+			// never fired and every boundary has been covered.
+			break
+		}
+	}
+}
+
+// TestStoreKeyringDeleteInterruptionsLeaveNoInvisibleTokens is the Delete
+// counterpart: a logout interrupted at any boundary must not leave a
+// logged-out credential invisibly resident in the OS keychain (the index is
+// only shrunk after the entry deletion), and a repeated delete reconciles.
+func TestStoreKeyringDeleteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for failAt := 1; ; failAt++ {
+		kr := &failingKR{fakeKR: newFakeKR()}
+		s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+			t.Fatal(err)
+		}
+		kr.ops = 0
+		kr.failAt = failAt
+		_, _ = s.Delete(ProviderKey("beta"))
+		opsUsed := kr.ops
+		kr.failAt = 0
+
+		indexed := indexedKeysOf(t, kr.fakeKR)
+		for entry := range kr.data {
+			account := strings.TrimPrefix(entry, keyringService+"/")
+			if account == keyringIndexAccount || strings.HasPrefix(account, keyringIndexAccount+"-") || account == keyringLegacyAccount {
+				continue
+			}
+			if !indexed[account] {
+				t.Fatalf("failAt=%d: token entry %q exists but is not listed in the index (invisible credential)", failAt, account)
+			}
+		}
+
+		// Retrying the delete must fully reconcile: beta gone from both the
+		// index and the keyring, alpha intact.
+		if _, err := s.Delete(ProviderKey("beta")); err != nil {
+			t.Fatalf("failAt=%d: reconciling Delete: %v", failAt, err)
+		}
+		if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; ok {
+			t.Fatalf("failAt=%d: logged-out credential still resident after reconcile", failAt)
+		}
+		if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok {
+			t.Fatalf("failAt=%d: Load(alpha): ok=%v err=%v", failAt, ok, err)
+		}
+		if opsUsed < failAt {
+			break
+		}
+	}
+}
+
+// TestStoreKeyringMergesFreshLegacyWriteFromOldBinary covers the mixed-version
+// window: after migration to the indexed format, an old binary still running
+// can save a token into the legacy combined entry. The next new-binary write
+// must merge that fresh token instead of deleting the legacy entry over it.
+func TestStoreKeyringMergesFreshLegacyWriteFromOldBinary(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An old binary saves token "carol" through the legacy combined entry.
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("carol"): {AccessToken: "c", RefreshToken: "cr"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// The next new-binary save must keep carol, not silently lose it.
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha", "beta", "carol"} {
+		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
+			t.Fatalf("Load(%s): ok=%v err=%v (fresh legacy write lost)", name, ok, err)
+		}
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy entry should be removed once its fresh writes are merged")
+	}
+}
+
 func TestNewStoreStorageSelection(t *testing.T) {
 	// Unknown storage is rejected (fail closed).
 	if _, err := NewStore(StoreOptions{Storage: "bogus"}); err == nil {
@@ -244,6 +499,77 @@ func TestNewStoreStorageSelection(t *testing.T) {
 	}
 	if strings.HasPrefix(fileStore.FilePath(), "keyring:") {
 		t.Fatalf("default backend should be file, got %q", fileStore.FilePath())
+	}
+}
+
+// TestStoreKeyringWithLockRefreshesLease guards the stale-reclaim race: one
+// keyring command can take up to 10s and a multi-entry pass runs several, so
+// a lock held for a legitimately slow operation can outlive the fixed 30s
+// stale threshold. withLock must keep the lock file's mtime fresh while its
+// critical section runs, so only a genuinely crashed holder ever looks stale.
+func TestStoreKeyringWithLockRefreshesLease(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "oauth-keyring.lockfile")
+	blob := keyringBlob{kr: newFakeKR(), service: "zero-test", indexAccount: "idx", lockPath: lockPath}
+
+	previous := fileLockRefreshInterval
+	fileLockRefreshInterval = 20 * time.Millisecond
+	defer func() { fileLockRefreshInterval = previous }()
+
+	var first, second time.Time
+	err := blob.withLock(time.Now, func() error {
+		info, err := os.Stat(lockPath)
+		if err != nil {
+			return err
+		}
+		first = info.ModTime()
+		time.Sleep(150 * time.Millisecond)
+		info, err = os.Stat(lockPath)
+		if err != nil {
+			return err
+		}
+		second = info.ModTime()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withLock: %v", err)
+	}
+	if !second.After(first) {
+		t.Fatalf("lock mtime was not refreshed during the critical section: %v then %v", first, second)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock file not released: %v", err)
+	}
+}
+
+// TestStoreFileLoadToleratesCrashedWriterLock: file-backend reads must stay
+// lock-free. A writer that crashed after taking the lock leaves a fresh lock
+// file behind; the store file itself is always complete (writes are atomic
+// renames), so Load must read it rather than waiting out the lock and
+// failing for the ~30 seconds the stale threshold takes to expire.
+func TestStoreFileLoadToleratesCrashedWriterLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	s, err := NewStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("demo"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the crashed writer: a fresh, never-released lock file.
+	if err := os.WriteFile(path+".lockfile", []byte("someone-else"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	got, ok, err := s.Load(ProviderKey("demo"))
+	if err != nil || !ok || got.AccessToken != "a" {
+		t.Fatalf("Load behind a crashed writer's lock: ok=%v err=%v token=%#v", ok, err, got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Load waited on the write lock (%v); reads must be lock-free", elapsed)
+	}
+	statuses, err := s.Status("")
+	if err != nil || len(statuses) != 1 {
+		t.Fatalf("Status behind a crashed writer's lock: %v (%d entries)", err, len(statuses))
 	}
 }
 
