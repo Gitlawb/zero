@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -331,5 +332,64 @@ func TestRunMCPPermissionsHelpDoesNotOpenStore(t *testing.T) {
 				t.Fatalf("expected help output, got %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunPluginsEnableDisable(t *testing.T) {
+	cwd := t.TempDir()
+	pluginDir := filepath.Join(cwd, ".zero", "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+	if err := os.WriteFile(manifestPath, []byte(`{
+  "schemaVersion": 1,
+  "id": "zero.demo",
+  "name": "Demo",
+  "version": "1.0.0"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"plugins", "disable", "zero.demo", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("disable exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	var disablePayload plugins.SetEnabledResult
+	if err := json.Unmarshal(stdout.Bytes(), &disablePayload); err != nil {
+		t.Fatalf("decode disable JSON: %v\n%s", err, stdout.String())
+	}
+	if disablePayload.ID != "zero.demo" || disablePayload.Enabled || !disablePayload.Changed {
+		t.Fatalf("unexpected disable payload: %#v", disablePayload)
+	}
+
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"enabled": false`) {
+		t.Fatalf("manifest not disabled: %s", raw)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "enable", "zero.demo"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("enable exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "is now enabled") {
+		t.Fatalf("enable output: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "enable", "missing-plugin"}, &stdout, &stderr, deps)
+	if exitCode != exitUsage {
+		t.Fatalf("missing plugin exit=%d want %d stderr=%s", exitCode, exitUsage, stderr.String())
 	}
 }
