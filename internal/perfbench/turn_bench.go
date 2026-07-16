@@ -135,7 +135,7 @@ type TurnBenchResult struct {
 	BuildCheckedTasks   int                     `json:"buildCheckedTasks"`
 	BuildPassedTasks    int                     `json:"buildPassedTasks"`
 	CorrectnessPassRate float64                 `json:"correctnessPassRate"`
-	BuildPassRate       float64                 `json:"buildPassRate,omitempty"`
+	BuildPassRate       float64                 `json:"buildPassRate"`
 	CorrectnessClasses  []string                `json:"correctnessClasses,omitempty"`
 	BuildOnlyClasses    []string                `json:"buildOnlyClasses,omitempty"`
 	LatencyOnlyClasses  []string                `json:"latencyOnlyClasses,omitempty"`
@@ -243,6 +243,13 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 				})
 			}
 			if outcome.Err != nil {
+				// A crashed run must not look like a normal sample that's merely
+				// absent — surface it as a warning so a run that died every
+				// iteration can't pass as "fewer measurements."
+				result.Warnings = append(result.Warnings, Warning{
+					Metric:  "run",
+					Message: fmt.Sprintf("task %s: %v", task.ID, outcome.Err),
+				})
 				passedForTask = false
 				continue
 			}
@@ -530,7 +537,6 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		start := time.Now()
 		runErr := cmd.Run()
 		wallMs := float64(time.Since(start).Microseconds()) / 1000
-		_ = runErr
 
 		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
 		outcome := TurnTaskOutcome{WallMs: wallMs}
@@ -538,6 +544,12 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 			outcome.VerifyErr = fmt.Sprintf("agent run_end exit code %d", exitCode)
 		} else if !haveExit {
 			detail := strings.TrimSpace(errBuf.String())
+			// If the process never produced a run_end event, the actual failure
+			// is in runErr (binary missing, exec permission denied, etc.) —
+			// prefer it over the generic fallback so the real reason survives.
+			if detail == "" && runErr != nil {
+				detail = runErr.Error()
+			}
 			if detail == "" {
 				detail = "missing terminal run_end event"
 			}
