@@ -636,13 +636,16 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 			}
 		}
 	}
-	// The remote lookup failed (unreachable, slow, or gave no symref): fall
-	// back to the local record of the remote's default branch, written by
-	// clone or `git remote set-head`. It needs no network, so a slow remote
-	// cannot degrade the answer.
+	// The remote lookup failed (unreachable, slow, or gave no symref): the
+	// local refs/remotes/<remote>/HEAD record, written by clone or `git remote
+	// set-head`, is only a cache. Trust it to *block* a push (a positive match
+	// proves branch is the recorded default) but never to *clear* the guard. If
+	// the server renamed its default (main -> trunk) the stale record still
+	// names main, so a mismatch here is not evidence that pushing trunk is safe;
+	// fall through to the fail-closed error below instead of returning false.
 	if out, err := gitOutput(ctx, runGit, dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
-		if name, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"); ok && name != "" {
-			return branch == name, nil
+		if name, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"); ok && name == branch {
+			return true, nil
 		}
 	}
 	// Fail closed: before this, a lookup timeout silently downgraded the
