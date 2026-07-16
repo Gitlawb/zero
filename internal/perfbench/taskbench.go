@@ -29,6 +29,14 @@ type TaskSet struct {
 	Name        string      `json:"name,omitempty"`
 	Description string      `json:"description,omitempty"`
 	Tasks       []BenchTask `json:"tasks"`
+	// BuildOnlyClasses lists task classes whose verificationCommand is a
+	// non-positive build check (e.g. refactor's `go build ./...`): it proves the
+	// edit compiles, not that the refactor achieved its goal. The turn benchmark
+	// reports these separately from correctness oracles so a build-pass cannot be
+	// misread as a correctness pass. Classes with a verificationCommand that are
+	// NOT listed here are treated as correctness classes; classes whose tasks
+	// carry no verificationCommand are latency-only regardless of this list.
+	BuildOnlyClasses []string `json:"buildOnlyClasses,omitempty"`
 }
 
 // BenchTask is one benchmark task. WorkspaceFixture is the relative path of the

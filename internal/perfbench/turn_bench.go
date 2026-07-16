@@ -20,7 +20,14 @@ import (
 
 // TurnSchemaVersion is the schema version of a published turn-benchmark result.
 // Bump when the TurnBenchResult shape changes so consumers can detect drift.
-const TurnSchemaVersion = 1
+//
+// v2 splits pass/fail into three oracle tiers so the report cannot be misread as
+// a blanket correctness verdict: tasksVerified/tasksPassed/correctnessPassRate
+// cover only the positive-oracle classes (edit/fix); buildCheckedTasks/
+// buildPassedTasks/buildPassRate cover the non-positive build-check classes
+// (refactor); latencyOnlyTasks covers the no-oracle classes (nav/longproc/
+// longctx/parallel). tasksAttempted is still every task run.
+const TurnSchemaVersion = 2
 
 // TurnRunner runs one benchmark task and reports its outcome plus the captured
 // per-turn trace. A non-nil Err means the run failed to execute (process crash);
@@ -80,31 +87,64 @@ type LatencySource struct {
 }
 
 // ClassSummary is the per-class (task group) roll-up.
+//
+// Passed is the count that passed THIS class's oracle: a correctness pass for
+// edit/fix, a build pass for refactor, and always 0 for the no-oracle classes
+// (nav/longproc/longctx/parallel). Verified is how many tasks in the class
+// carry an oracle (correctness or build); LatencyOnly is how many carry none.
+// A latency-only class therefore reports Passed=0, Verified=0, LatencyOnly=Tasks.
 type ClassSummary struct {
-	Tasks      int                `json:"tasks"`
-	Passed     int                `json:"passed"`
-	WallMs     NumericStats       `json:"wallMs"`
-	SpanTotals map[string]float64 `json:"spanTotals"`
+	Tasks       int                `json:"tasks"`
+	Verified    int                `json:"verified"`
+	Passed      int                `json:"passed"`
+	LatencyOnly int                `json:"latencyOnly"`
+	WallMs      NumericStats       `json:"wallMs"`
+	SpanTotals  map[string]float64 `json:"spanTotals"`
 }
 
 // TurnBenchResult is the publishable turn-benchmark record.
+//
+// Pass/fail is split into three oracle tiers so it cannot be misread as a
+// blanket correctness verdict:
+//   - Correctness (tasksVerified / tasksPassed / correctnessPassRate): tasks
+//     with a positive oracle (edit/fix). This is the only pass rate that can
+//     move with model quality.
+//   - Build-only (buildCheckedTasks / buildPassedTasks / buildPassRate): tasks
+//     whose oracle is a non-positive build check (refactor `go build`). A pass
+//     means it compiles, not that the refactor is correct.
+//   - Latency-only (latencyOnlyTasks): tasks with no oracle (nav/longproc/
+//     longctx/parallel). They ran for latency and span attribution only and are
+//     excluded from every pass rate.
+//
+// tasksAttempted is still the total number of tasks run across all three tiers.
+// The tier class lists are echoed so a consumer can see exactly which classes
+// each rate is computed over.
 type TurnBenchResult struct {
-	SchemaVersion  int                     `json:"schemaVersion"`
-	Suite          string                  `json:"suite"`
-	Model          string                  `json:"model"`
-	Mode           string                  `json:"mode,omitempty"`
-	SelfCorrect    bool                    `json:"selfCorrect"`
-	Version        string                  `json:"version,omitempty"`
-	Commit         string                  `json:"commit,omitempty"`
-	Date           string                  `json:"date"`
-	TasksAttempted int                     `json:"tasksAttempted"`
-	TasksPassed    int                     `json:"tasksPassed"`
-	Iterations     int                     `json:"iterations"`
-	PerSpan        map[string]SpanStats    `json:"perSpan"`
-	TopLatency     []LatencySource         `json:"topLatency"`
-	PerClass       map[string]ClassSummary `json:"perClass"`
-	Totals         TurnBenchTotals         `json:"totals"`
-	Warnings       []Warning               `json:"warnings,omitempty"`
+	SchemaVersion       int                     `json:"schemaVersion"`
+	Suite               string                  `json:"suite"`
+	Model               string                  `json:"model"`
+	Mode                string                  `json:"mode,omitempty"`
+	SelfCorrect         bool                    `json:"selfCorrect"`
+	Version             string                  `json:"version,omitempty"`
+	Commit              string                  `json:"commit,omitempty"`
+	Date                string                  `json:"date"`
+	TasksAttempted      int                     `json:"tasksAttempted"`
+	TasksVerified       int                     `json:"tasksVerified"`
+	TasksPassed         int                     `json:"tasksPassed"`
+	LatencyOnlyTasks    int                     `json:"latencyOnlyTasks"`
+	BuildCheckedTasks   int                     `json:"buildCheckedTasks"`
+	BuildPassedTasks    int                     `json:"buildPassedTasks"`
+	CorrectnessPassRate float64                 `json:"correctnessPassRate"`
+	BuildPassRate       float64                 `json:"buildPassRate,omitempty"`
+	CorrectnessClasses  []string                `json:"correctnessClasses,omitempty"`
+	BuildOnlyClasses    []string                `json:"buildOnlyClasses,omitempty"`
+	LatencyOnlyClasses  []string                `json:"latencyOnlyClasses,omitempty"`
+	Iterations          int                     `json:"iterations"`
+	PerSpan             map[string]SpanStats    `json:"perSpan"`
+	TopLatency          []LatencySource         `json:"topLatency"`
+	PerClass            map[string]ClassSummary `json:"perClass"`
+	Totals              TurnBenchTotals         `json:"totals"`
+	Warnings            []Warning               `json:"warnings,omitempty"`
 }
 
 // TurnBenchTotals aggregates token and count totals across the whole run.
@@ -148,8 +188,24 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	classWalls := map[string][]float64{}
 	classSpanTotals := map[string]map[string]float64{}
 	classTasks := map[string]int{}
+	classVerified := map[string]int{}
 	classPassed := map[string]int{}
+	classLatencyOnly := map[string]int{}
+	correctnessClasses := map[string]bool{}
+	buildOnlyClasses := map[string]bool{}
+	latencyOnlyClasses := map[string]bool{}
 	var totals TurnBenchTotals
+
+	// A class is build-only when the manifest declares it in BuildOnlyClasses.
+	// A task's tier is then decided per-task: no verificationCommand => latency-
+	// only; otherwise build-only if its class is declared, else correctness. The
+	// latency-only tier is always driven by oracle presence, never by the
+	// declared list, so a declared build-only class with a missing oracle still
+	// counts as latency-only rather than silently passing on exit 0.
+	buildOnly := map[string]bool{}
+	for _, c := range set.BuildOnlyClasses {
+		buildOnly[strings.TrimSpace(c)] = true
+	}
 
 	result := TurnBenchResult{
 		SchemaVersion: TurnSchemaVersion,
@@ -223,9 +279,33 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 			}
 		}
 		result.TasksAttempted++
-		if passedForTask {
-			result.TasksPassed++
-			classPassed[class]++
+
+		// Classify the task into an oracle tier and update only that tier's
+		// counters. A latency-only task (no verificationCommand) is never counted
+		// in any pass rate even when the runner reports Passed — an exit-0
+		// read-only run proves the turn ran, not that the answer was right.
+		hasOracle := len(task.VerificationCommand) > 0
+		switch {
+		case !hasOracle:
+			result.LatencyOnlyTasks++
+			classLatencyOnly[class]++
+			latencyOnlyClasses[class] = true
+		case buildOnly[class]:
+			result.BuildCheckedTasks++
+			classVerified[class]++
+			buildOnlyClasses[class] = true
+			if passedForTask {
+				result.BuildPassedTasks++
+				classPassed[class]++
+			}
+		default:
+			result.TasksVerified++
+			classVerified[class]++
+			correctnessClasses[class] = true
+			if passedForTask {
+				result.TasksPassed++
+				classPassed[class]++
+			}
 		}
 	}
 
@@ -240,14 +320,42 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 			wallStats = SummarizeSamples(walls)
 		}
 		result.PerClass[class] = ClassSummary{
-			Tasks:      classTasks[class],
-			Passed:     classPassed[class],
-			WallMs:     wallStats,
-			SpanTotals: classSpanTotals[class],
+			Tasks:       classTasks[class],
+			Verified:    classVerified[class],
+			Passed:      classPassed[class],
+			LatencyOnly: classLatencyOnly[class],
+			WallMs:      wallStats,
+			SpanTotals:  classSpanTotals[class],
 		}
 	}
+	result.CorrectnessClasses = sortedSetKeys(correctnessClasses)
+	result.BuildOnlyClasses = sortedSetKeys(buildOnlyClasses)
+	result.LatencyOnlyClasses = sortedSetKeys(latencyOnlyClasses)
+	result.CorrectnessPassRate = passRate(result.TasksPassed, result.TasksVerified)
+	result.BuildPassRate = passRate(result.BuildPassedTasks, result.BuildCheckedTasks)
 	result.Totals = totals
 	return result, nil
+}
+
+// passRate is passed/total rounded to the benchmark's metric precision, or 0
+// when the denominator is zero (no tasks in that tier were run).
+func passRate(passed, total int) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return RoundMetric(float64(passed) / float64(total))
+}
+
+func sortedSetKeys(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func summarizeSpan(samples []float64) SpanStats {
@@ -315,7 +423,15 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 	lines := []string{
 		"Zero turn benchmark: " + displayOrUnknown(result.Suite),
 		"model: " + displayOrUnknown(result.Model),
-		fmt.Sprintf("tasks: %d/%d passed across %d iteration(s)", result.TasksPassed, result.TasksAttempted, result.Iterations),
+		// The headline separates the three oracle tiers so an exit-0 read-only
+		// task can never inflate a "pass rate" that reads as correctness:
+		// correctness (positive oracle, edit/fix), build (non-positive `go build`,
+		// refactor), and latency-only (no oracle, nav/longproc/longctx/parallel).
+		fmt.Sprintf("tasks: %d total | correctness %d/%d (%.0f%%) | build %d/%d (%.0f%%) | latency-only %d | %d iter",
+			result.TasksAttempted,
+			result.TasksPassed, result.TasksVerified, result.CorrectnessPassRate*100,
+			result.BuildPassedTasks, result.BuildCheckedTasks, result.BuildPassRate*100,
+			result.LatencyOnlyTasks, result.Iterations),
 	}
 	if result.Mode != "" {
 		lines = append(lines, "mode: "+result.Mode)
@@ -333,9 +449,28 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 	for _, class := range sortedClasses(result.PerClass) {
 		summary := result.PerClass[class]
 		median := FormatMetric(summary.WallMs.Median, "ms")
-		lines = append(lines, fmt.Sprintf("  [%s] %d/%d passed, wall median %s", class, summary.Passed, summary.Tasks, median))
+		tier := classTier(result, class)
+		lines = append(lines, fmt.Sprintf("  [%s/%s] %d/%d passed, %d latency-only, wall median %s",
+			class, tier, summary.Passed, summary.Verified, summary.LatencyOnly, median))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// classTier returns the oracle tier label a class was classified into, so the
+// per-class roll-up states explicitly which oracle (if any) its "passed" count
+// is measured against.
+func classTier(result TurnBenchResult, class string) string {
+	for _, c := range result.BuildOnlyClasses {
+		if c == class {
+			return "build"
+		}
+	}
+	for _, c := range result.LatencyOnlyClasses {
+		if c == class {
+			return "latency"
+		}
+	}
+	return "correctness"
 }
 
 func sortedClasses(perClass map[string]ClassSummary) []string {
@@ -435,8 +570,13 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 				outcome.VerifyErr = strings.TrimSpace(vOutcome.Detail)
 				return outcome
 			}
+			// A positive oracle (grep/test/build) passed: this is the only path
+			// that sets Passed. A task with no verificationCommand is latency-only
+			// (read-only nav/longproc/longctx/parallel): its exit 0 proves the turn
+			// ran, not that the answer was right, so it never reports Passed and the
+			// harness counts it in latencyOnlyTasks rather than any pass rate.
+			outcome.Passed = true
 		}
-		outcome.Passed = true
 		return outcome
 	}
 }

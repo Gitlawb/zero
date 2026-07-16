@@ -284,18 +284,38 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// conversation-state duplication.
 		forwardedVisibleText := false
 		forwardingOpts := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
-		if options.OnText != nil {
+		// Install text/reasoning forwarding handlers whenever EITHER a user
+		// callback OR a trace recorder is set. A headless traced run (e.g. `zero
+		// exec --trace`) sets Trace but no OnText/OnReasoning; without these
+		// handlers the stream is still collected, but FirstTokenAt would never
+		// stamp and the trace would lose its TTFT signal. The trace recorder's
+		// stamp methods are nil-safe, but we guard on `trace != nil` so a run with
+		// a user callback but no recorder still works. forwardedVisibleText stays
+		// tied to the USER callback only, preserving the stall-retry semantics
+		// (a trace-only handler forwards nothing the user would see duplicated).
+		rec := options.Trace
+		onText := options.OnText
+		if onText != nil || rec != nil {
 			forwardingOpts.OnText = func(s string) {
-				forwardedVisibleText = true
-				options.Trace.StampFirstVisibleEvent()
-				options.Trace.StampFirstToken()
-				options.OnText(s)
+				if rec != nil {
+					rec.StampFirstVisibleEvent()
+					rec.StampFirstToken()
+				}
+				if onText != nil {
+					forwardedVisibleText = true
+					onText(s)
+				}
 			}
 		}
-		if options.OnReasoning != nil {
+		onReasoning := options.OnReasoning
+		if onReasoning != nil || rec != nil {
 			forwardingOpts.OnReasoning = func(s string) {
-				options.Trace.StampFirstToken()
-				options.OnReasoning(s)
+				if rec != nil {
+					rec.StampFirstToken()
+				}
+				if onReasoning != nil {
+					onReasoning(s)
+				}
 			}
 		}
 		if options.OnToolCallStart != nil {

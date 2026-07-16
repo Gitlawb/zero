@@ -1,7 +1,8 @@
 {
   "id": "zero-baseline-turn",
   "name": "Zero per-turn baseline (Phase 0)",
-  "description": "Latency-only baseline: measures where a turn spends wall time, not task correctness. Read-only tasks (nav, longproc, longctx, parallel) carry no verification oracle by design — a zero-exit does not prove the answer was right, only that the turn ran. Edit/fix/refactor oracles are intentionally lightweight (substring grep or `go build`) so the suite stays a latency probe; do not read pass/fail as a correctness verdict.",
+  "description": "Latency-first baseline: measures where a turn spends wall time, with pass/fail reported per oracle tier so it cannot be misread as a blanket correctness verdict. Read-only classes (nav, longproc, longctx, parallel) carry no verification oracle — a zero-exit only proves the turn ran, so they count as latency-only and never in any pass rate. Correctness classes (edit, fix) carry a positive oracle (substring grep or a scoped `go test`) and are the only tasks in correctnessPassRate. Build-only classes (refactor) carry `go build ./...`, which proves the edit compiles but not that the refactor achieved its goal, so they are reported as buildPassRate and excluded from correctnessPassRate.",
+  "buildOnlyClasses": ["refactor"],
   "tasks": [
     {"id": "nav-01", "name": "list repo files", "class": "nav", "prompt": "List the files in this repository and report their count. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
     {"id": "nav-02", "name": "find a function", "class": "nav", "prompt": "Find the function named 'greet' and report the file and line it is defined on. Do not modify anything.", "workspaceFixture": "../testdata/nav"},

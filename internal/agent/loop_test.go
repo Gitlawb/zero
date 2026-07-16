@@ -3488,6 +3488,13 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	if tr.StartedAt.IsZero() {
 		t.Fatal("tracing wrapper did not Start the recorder")
 	}
+	// FirstTokenAt must stamp even though no OnText/OnReasoning user callback is
+	// set: a headless traced run (e.g. `zero exec --trace`) sets Trace but no UI
+	// callbacks, so the loop installs trace-only forwarding handlers to capture
+	// TTFT. Without them FirstTokenAt stays zero and the trace loses its signal.
+	if tr.FirstTokenAt.IsZero() {
+		t.Fatal("FirstTokenAt not stamped for a traced run with no OnText/OnReasoning callbacks")
+	}
 	if got := tr.Counter(trace.CounterInputTokens); got != 100 {
 		t.Fatalf("input token counter = %d, want 100", got)
 	}

@@ -39,9 +39,26 @@ spent.
 **Coverage** is the fraction of wall covered by the union of all span
 intervals (capped at 1.0) — the honest "≥95% of wall accounted for" metric. A
 run with `coverage < 0.95` has uninstrumented gaps, not an inflated attribution.
-Note that the suite is **latency-only** (see the manifest `description`): the
-top-three ranking is about latency, and pass/fail oracles are intentionally
-lightweight; do not read them as a correctness verdict.
+
+### Pass/fail is reported per oracle tier
+
+Pass/fail is split into three tiers so it cannot be misread as a blanket
+correctness verdict (see `MANIFEST.md` for the class breakdown):
+
+- **Correctness** (`tasksVerified` / `tasksPassed` / `correctnessPassRate`):
+  tasks with a positive oracle — edit's substring grep, fix's scoped `go test`.
+  This is the only pass rate that can move with model quality.
+- **Build-only** (`buildCheckedTasks` / `buildPassedTasks` / `buildPassRate`):
+  refactor's `go build ./...`, which proves the edit compiles but not that the
+  refactor achieved its goal. Reported separately, never in `correctnessPassRate`.
+- **Latency-only** (`latencyOnlyTasks`): the read-only classes (nav, longproc,
+  longctx, parallel) carry no oracle — an exit 0 only proves the turn ran. They
+  contribute to latency and span attribution and are excluded from every pass
+  rate.
+
+`tasksAttempted` is still the total across all three tiers. The tier class lists
+are echoed in the report so a consumer can see exactly which classes each rate
+is computed over.
 
 ## What to commit
 

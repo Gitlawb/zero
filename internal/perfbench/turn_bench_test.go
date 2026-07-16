@@ -54,15 +54,18 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	set := TaskSet{
 		ID: "fake-suite",
 		Tasks: []BenchTask{
-			{ID: "t1", Class: "nav", Prompt: "p1"},
-			{ID: "t2", Class: "nav", Prompt: "p2"},
-			{ID: "t3", Class: "edit", Prompt: "p3"},
+			{ID: "t1", Class: "nav", Prompt: "p1"},                                             // latency-only
+			{ID: "t2", Class: "nav", Prompt: "p2"},                                             // latency-only
+			{ID: "t3", Class: "edit", Prompt: "p3", VerificationCommand: []string{"true"}},     // correctness
+			{ID: "t4", Class: "refactor", Prompt: "p4", VerificationCommand: []string{"true"}}, // build-only
 		},
+		BuildOnlyClasses: []string{"refactor"},
 	}
 	canned := map[string]*trace.TurnTrace{
 		"t1": cannedTrace(100, 10, 1000),
 		"t2": cannedTrace(300, 10, 1000),
 		"t3": cannedTrace(200, 50, 2000),
+		"t4": cannedTrace(150, 20, 1500),
 	}
 	cfg := TurnBenchConfig{
 		Model:      "fake-model",
@@ -74,8 +77,33 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurnBench: %v", err)
 	}
-	if result.TasksAttempted != 3 || result.TasksPassed != 3 {
-		t.Fatalf("attempted=%d passed=%d, want 3/3", result.TasksAttempted, result.TasksPassed)
+	// 4 tasks attempted; the tier split is 2 latency-only, 1 correctness, 1 build.
+	if result.TasksAttempted != 4 {
+		t.Fatalf("attempted=%d, want 4", result.TasksAttempted)
+	}
+	if result.TasksVerified != 1 || result.TasksPassed != 1 {
+		t.Fatalf("correctness verified=%d passed=%d, want 1/1", result.TasksVerified, result.TasksPassed)
+	}
+	if result.LatencyOnlyTasks != 2 {
+		t.Fatalf("latencyOnly=%d, want 2", result.LatencyOnlyTasks)
+	}
+	if result.BuildCheckedTasks != 1 || result.BuildPassedTasks != 1 {
+		t.Fatalf("build checked=%d passed=%d, want 1/1", result.BuildCheckedTasks, result.BuildPassedTasks)
+	}
+	if result.CorrectnessPassRate != 1.0 {
+		t.Fatalf("correctnessPassRate=%v, want 1.0", result.CorrectnessPassRate)
+	}
+	if result.BuildPassRate != 1.0 {
+		t.Fatalf("buildPassRate=%v, want 1.0", result.BuildPassRate)
+	}
+	if len(result.CorrectnessClasses) != 1 || result.CorrectnessClasses[0] != "edit" {
+		t.Fatalf("correctnessClasses=%v, want [edit]", result.CorrectnessClasses)
+	}
+	if len(result.BuildOnlyClasses) != 1 || result.BuildOnlyClasses[0] != "refactor" {
+		t.Fatalf("buildOnlyClasses=%v, want [refactor]", result.BuildOnlyClasses)
+	}
+	if len(result.LatencyOnlyClasses) != 1 || result.LatencyOnlyClasses[0] != "nav" {
+		t.Fatalf("latencyOnlyClasses=%v, want [nav]", result.LatencyOnlyClasses)
 	}
 	if result.SchemaVersion != TurnSchemaVersion {
 		t.Fatalf("schemaVersion = %d, want %d", result.SchemaVersion, TurnSchemaVersion)
@@ -84,21 +112,21 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		t.Fatalf("date = %q", result.Date)
 	}
 
-	// Per-span: generation appears in all three (100+300+200=600ms), tool in all
-	// three (10+10+50=70ms). Count must equal the number of tasks * iterations.
+	// Per-span: generation appears in all four (100+300+200+150=750ms), tool in
+	// all four (10+10+50+20=90ms). Count must equal the number of tasks * iterations.
 	gen := result.PerSpan[trace.SpanGeneration]
-	if gen.Count != 3 {
-		t.Fatalf("generation count = %d, want 3", gen.Count)
+	if gen.Count != 4 {
+		t.Fatalf("generation count = %d, want 4", gen.Count)
 	}
-	if gen.TotalMs != 600 {
-		t.Fatalf("generation totalMs = %v, want 600", gen.TotalMs)
+	if gen.TotalMs != 750 {
+		t.Fatalf("generation totalMs = %v, want 750", gen.TotalMs)
 	}
 	tool := result.PerSpan[trace.SpanToolExecution]
-	if tool.TotalMs != 70 {
-		t.Fatalf("tool totalMs = %v, want 70", tool.TotalMs)
+	if tool.TotalMs != 90 {
+		t.Fatalf("tool totalMs = %v, want 90", tool.TotalMs)
 	}
 
-	// Top latency: generation (600) ranks above tool (70). Exactly two spans
+	// Top latency: generation (750) ranks above tool (90). Exactly two spans
 	// here, so both appear and generation is first.
 	if len(result.TopLatency) != 2 || result.TopLatency[0].Span != trace.SpanGeneration {
 		t.Fatalf("topLatency = %+v", result.TopLatency)
@@ -107,28 +135,69 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		t.Fatalf("top latency not ranked by share: %+v", result.TopLatency)
 	}
 
-	// Totals: 3 model requests, 3 tool calls, input tokens 1000+1000+2000=4000.
-	if result.Totals.ModelRequests != 3 {
-		t.Fatalf("modelRequests = %d, want 3", result.Totals.ModelRequests)
+	// Totals: 4 model requests, 4 tool calls, input tokens 1000+1000+2000+1500=5500.
+	if result.Totals.ModelRequests != 4 {
+		t.Fatalf("modelRequests = %d, want 4", result.Totals.ModelRequests)
 	}
-	if result.Totals.ToolCalls != 3 {
-		t.Fatalf("toolCalls = %d, want 3", result.Totals.ToolCalls)
+	if result.Totals.ToolCalls != 4 {
+		t.Fatalf("toolCalls = %d, want 4", result.Totals.ToolCalls)
 	}
-	if result.Totals.InputTokens != 4000 {
-		t.Fatalf("inputTokens = %d, want 4000", result.Totals.InputTokens)
+	if result.Totals.InputTokens != 5500 {
+		t.Fatalf("inputTokens = %d, want 5500", result.Totals.InputTokens)
 	}
-	if result.Totals.OutputTokens != 2000 {
-		t.Fatalf("outputTokens = %d, want 2000", result.Totals.OutputTokens)
+	if result.Totals.OutputTokens != 2750 {
+		t.Fatalf("outputTokens = %d, want 2750", result.Totals.OutputTokens)
 	}
 
-	// Per-class: nav has two tasks, edit has one; both fully passed.
+	// Per-class tier roll-up: nav is latency-only (0 verified, 2 latency-only),
+	// edit is correctness (1/1 verified passed), refactor is build (1/1 passed).
 	nav := result.PerClass["nav"]
-	if nav.Tasks != 2 || nav.Passed != 2 {
+	if nav.Tasks != 2 || nav.Verified != 0 || nav.Passed != 0 || nav.LatencyOnly != 2 {
 		t.Fatalf("nav class = %+v", nav)
 	}
 	edit := result.PerClass["edit"]
-	if edit.Tasks != 1 || edit.Passed != 1 {
+	if edit.Tasks != 1 || edit.Verified != 1 || edit.Passed != 1 || edit.LatencyOnly != 0 {
 		t.Fatalf("edit class = %+v", edit)
+	}
+	refactor := result.PerClass["refactor"]
+	if refactor.Tasks != 1 || refactor.Verified != 1 || refactor.Passed != 1 || refactor.LatencyOnly != 0 {
+		t.Fatalf("refactor class = %+v", refactor)
+	}
+}
+
+// TestRunTurnBenchLatencyOnlyNeverPassed asserts the honesty gate: a task with
+// no verificationCommand reports Passed=true from the (stub) runner, yet the
+// harness counts it ONLY in latencyOnlyTasks — never in tasksPassed or any pass
+// rate — so an exit-0 read-only run cannot inflate a correctness number.
+func TestRunTurnBenchLatencyOnlyNeverPassed(t *testing.T) {
+	set := TaskSet{
+		ID: "lo-suite",
+		Tasks: []BenchTask{
+			{ID: "n1", Class: "nav", Prompt: "p"}, // no oracle — runner still says Passed=true
+		},
+	}
+	cfg := TurnBenchConfig{
+		Model:  "fake-model",
+		Runner: fakeTurnRunner(map[string]*trace.TurnTrace{"n1": cannedTrace(50, 5, 100)}),
+		Now:    func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksPassed != 0 || result.TasksVerified != 0 {
+		t.Fatalf("latency-only leaked into pass: passed=%d verified=%d, want 0/0",
+			result.TasksPassed, result.TasksVerified)
+	}
+	if result.CorrectnessPassRate != 0 || result.BuildPassRate != 0 {
+		t.Fatalf("pass rates should be 0 with no oracle tasks: c=%v b=%v",
+			result.CorrectnessPassRate, result.BuildPassRate)
+	}
+	if result.LatencyOnlyTasks != 1 {
+		t.Fatalf("latencyOnlyTasks=%d, want 1", result.LatencyOnlyTasks)
+	}
+	if result.PerClass["nav"].Passed != 0 || result.PerClass["nav"].LatencyOnly != 1 {
+		t.Fatalf("nav class = %+v, want passed=0 latencyOnly=1", result.PerClass["nav"])
 	}
 }
 
@@ -196,7 +265,9 @@ func TestTopLatencySourcesRanksByTotalAndCapsTopN(t *testing.T) {
 }
 
 func TestWriteTurnBenchJSONRoundTrip(t *testing.T) {
-	set := TaskSet{ID: "json-suite", Tasks: []BenchTask{{ID: "t1", Class: "nav", Prompt: "p1"}}}
+	set := TaskSet{ID: "json-suite", Tasks: []BenchTask{
+		{ID: "t1", Class: "edit", Prompt: "p1", VerificationCommand: []string{"true"}},
+	}}
 	canned := map[string]*trace.TurnTrace{"t1": cannedTrace(150, 20, 800)}
 	result, err := RunTurnBench(context.Background(), set, TurnBenchConfig{
 		Model:  "fake-model",
@@ -214,8 +285,15 @@ func TestWriteTurnBenchJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if decoded.SchemaVersion != TurnSchemaVersion || decoded.TasksPassed != 1 {
-		t.Fatalf("decoded = %+v", decoded)
+	if decoded.SchemaVersion != TurnSchemaVersion {
+		t.Fatalf("schemaVersion = %d, want %d", decoded.SchemaVersion, TurnSchemaVersion)
+	}
+	if decoded.TasksVerified != 1 || decoded.TasksPassed != 1 || decoded.LatencyOnlyTasks != 0 {
+		t.Fatalf("decoded tier counts = verified=%d passed=%d latency=%d, want 1/1/0",
+			decoded.TasksVerified, decoded.TasksPassed, decoded.LatencyOnlyTasks)
+	}
+	if decoded.CorrectnessPassRate != 1.0 {
+		t.Fatalf("decoded correctnessPassRate = %v, want 1.0", decoded.CorrectnessPassRate)
 	}
 	if decoded.PerSpan[trace.SpanGeneration].TotalMs != 150 {
 		t.Fatalf("decoded generation totalMs = %v, want 150", decoded.PerSpan[trace.SpanGeneration].TotalMs)
