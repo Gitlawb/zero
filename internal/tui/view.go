@@ -958,6 +958,9 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 }
 
 func modelPickerItemDetail(item pickerItem) string {
+	if item.Toggle {
+		return ""
+	}
 	parts := []string{}
 	value := strings.TrimSpace(item.Value)
 	label := strings.TrimSpace(item.Label)

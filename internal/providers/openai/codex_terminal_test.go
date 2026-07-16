@@ -20,8 +20,8 @@ func TestToolCallKeyOutputIndexZero(t *testing.T) {
 	if got := p.toolCallKey(&responsesEvent{}); got != "" {
 		t.Errorf("absent output_index + no item_id → %q, want empty", got)
 	}
-	if got := p.toolCallKey(&responsesEvent{ItemID: "call_x", OutputIndex: &zero}); got != "call_x" {
-		t.Errorf("item_id should take precedence → %q", got)
+	if got := p.toolCallKey(&responsesEvent{ItemID: "call_x", OutputIndex: &zero}); got != "output-0" {
+		t.Errorf("output_index should take precedence → %q", got)
 	}
 }
 

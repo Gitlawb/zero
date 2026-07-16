@@ -564,6 +564,81 @@ func TestIsCodexCatalog(t *testing.T) {
 	}
 }
 
+func TestNewRoutesCopilotResponsesModelToResponsesEndpoint(t *testing.T) {
+	// A Copilot profile whose model must use the Responses API carries
+	// APIFormat "responses" (set by cli/app.go from the live /models map). The
+	// factory must route it to the Copilot Responses provider, which targets
+	// {baseURL}/responses and injects the editor identity headers — not the
+	// chat-completions endpoint (which would 400 for these models).
+	transport := &captureTransport{
+		responseBody: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n",
+	}
+	provider, err := New(config.ProviderProfile{
+		Name:      "copilot",
+		CatalogID: "copilot",
+		BaseURL:   "https://api.githubcopilot.com",
+		Model:     "gpt-5.4-mini",
+		APIFormat: "responses",
+		APIKey:    "copilot-token",
+	}, Options{
+		HTTPClient: &http.Client{Transport: transport},
+		UserAgent:  "zero-factory-test",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+	if transport.request == nil {
+		t.Fatal("HTTP client was not used")
+	}
+	if !strings.HasSuffix(transport.request.URL.Path, "/responses") {
+		t.Fatalf("request URL path = %q, want .../responses", transport.request.URL.Path)
+	}
+	if got := transport.request.Header.Get("Copilot-Integration-Id"); got != "vscode-chat" {
+		t.Fatalf("Copilot-Integration-Id = %q, want vscode-chat", got)
+	}
+	if got := transport.request.Header.Get("Editor-Version"); got == "" {
+		t.Fatal("Editor-Version header missing on Copilot Responses request")
+	}
+}
+
+func TestNewRoutesCopilotChatModelToChatCompletions(t *testing.T) {
+	// A Copilot chat model (APIFormat unset / "chat-completions") stays on the
+	// chat-completions endpoint with the editor headers applied.
+	transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
+	provider, err := New(config.ProviderProfile{
+		Name:      "copilot",
+		CatalogID: "copilot",
+		BaseURL:   "https://api.githubcopilot.com",
+		Model:     "gpt-4.1",
+		APIKey:    "copilot-token",
+	}, Options{HTTPClient: &http.Client{Transport: transport}, UserAgent: "zero-factory-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+	if !strings.HasSuffix(transport.request.URL.Path, "/chat/completions") {
+		t.Fatalf("request URL path = %q, want .../chat/completions", transport.request.URL.Path)
+	}
+	if got := transport.request.Header.Get("Copilot-Integration-Id"); got != "vscode-chat" {
+		t.Fatalf("Copilot-Integration-Id = %q, want vscode-chat", got)
+	}
+}
+
 type captureTransport struct {
 	request      *http.Request
 	requestBody  string

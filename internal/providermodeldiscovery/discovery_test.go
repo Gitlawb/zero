@@ -133,6 +133,80 @@ func TestDiscoverOpenAICompatibleModelsRejectsUnsupportedProviders(t *testing.T)
 	}
 }
 
+func TestDiscoverOpenAICompatibleModelsFiltersUnusableEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Mirrors GitHub Copilot's /models schema: chat- and responses-capable
+		// models are usable by Zero and kept; an endpoint set with neither (e.g.
+		// embeddings-only) is dropped so it never reaches the picker.
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "chat-only", "supported_endpoints": ["/chat/completions"]},
+				{"id": "chat-and-responses", "supported_endpoints": ["/responses", "/chat/completions"]},
+				{"id": "responses-only", "supported_endpoints": ["/responses", "ws:/responses"]},
+				{"id": "embeddings-only", "supported_endpoints": ["/embeddings"]},
+				{"id": "no-endpoints-field"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	models, err := Discover(context.Background(), config.ProviderProfile{
+		Name:         "copilot",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		APIKey:       "token",
+	}, Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	got := modelIDs(models)
+	want := []string{"chat-and-responses", "chat-only", "no-endpoints-field", "responses-only"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %#v, want %#v (responses-capable kept, embeddings-only dropped)", got, want)
+	}
+}
+
+func TestDiscoverOpenAICompatibleModelsCapturesModelPickerEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// GitHub Copilot's /models carries model_picker_enabled: true for the
+		// curated, latest models and false for snapshots/legacy. Providers that omit
+		// the field (last row) must stay Recommended=false.
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "gpt-5.5", "name": "GPT-5.5", "model_picker_enabled": true},
+				{"id": "gpt-4o-2024-05-13", "name": "GPT-4o", "model_picker_enabled": false},
+				{"id": "no-flag", "name": "No Flag"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	models, err := Discover(context.Background(), config.ProviderProfile{
+		Name:         "copilot",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		APIKey:       "token",
+	}, Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	got := map[string]bool{}
+	for _, model := range models {
+		got[model.ID] = model.Recommended
+	}
+	if !got["gpt-5.5"] {
+		t.Errorf("gpt-5.5 Recommended = false, want true")
+	}
+	if got["gpt-4o-2024-05-13"] {
+		t.Errorf("gpt-4o-2024-05-13 Recommended = true, want false (snapshot)")
+	}
+	if got["no-flag"] {
+		t.Errorf("no-flag Recommended = true, want false (field absent)")
+	}
+}
+
 func TestDiscoverAnthropicCompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	const apiKey = "sk-ant-secret"
 	var gotPath string

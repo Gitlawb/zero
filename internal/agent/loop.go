@@ -862,12 +862,20 @@ func recoverableToolArguments(arguments string) (first string, ok bool) {
 // A genuinely malformed payload (bad/truncated first object, or non-JSON trailing
 // garbage) still returns the real parse error; a standard single-object payload
 // decodes exactly as before.
+//
+// It also repairs flattened dotted/bracketed argument keys (e.g. Gemini's
+// streaming `{"plan[0].content":"x"}`) back into the nested structure the tool
+// schema expects; see unflattenToolArguments. Normal payloads are untouched.
 func decodeToolArguments(arguments string, v any) error {
+	candidate := arguments
 	if first, ok := recoverableToolArguments(arguments); ok {
-		return json.Unmarshal([]byte(first), v)
+		candidate = first
 	}
-	// Not cleanly recoverable — surface the genuine parse error.
-	return json.Unmarshal([]byte(arguments), v)
+	// Un-flatten only rewrites payloads whose keys carry nested paths; every other
+	// payload is returned byte-for-byte, so this preserves the genuine parse error
+	// for a non-recoverable payload below.
+	candidate = unflattenToolArguments(candidate)
+	return json.Unmarshal([]byte(candidate), v)
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {

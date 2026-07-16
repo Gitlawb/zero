@@ -99,12 +99,50 @@ var builtinOAuthPresets = map[string]providerPreset{
 		Scopes:                []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
 		Flow:                  FlowLoopback,
 	},
+	// GitHub Copilot uses the same public OAuth client identity the Copilot
+	// editor plugins ship (client_id Iv1.b507a08c87ecfe98). The device-code
+	// grant against github.com yields a durable GitHub user token (scope
+	// read:user, no refresh token); that token is NOT sent to the model
+	// endpoint directly. The runtime exchanges it at
+	// api.github.com/copilot_internal/v2/token for a short-lived Copilot token
+	// (~30 min) which is the bearer for api.githubcopilot.com — see
+	// internal/provideroauth/copilot.go. Device flow is the only path
+	// (the plugin client has no loopback redirect registration).
+	//
+	// CAVEATS: this is an UNDOCUMENTED, reverse-engineered use of GitHub's
+	// Copilot API. It is not a supported developer API, may change or break
+	// without notice, and bulk/automated use can trigger GitHub's abuse
+	// detection and suspend Copilot access. Requires an active Copilot
+	// subscription (individual, business, or enterprise).
+	"copilot": {
+		ClientID:                    "Iv1.b507a08c87ecfe98",
+		DeviceAuthorizationEndpoint: "https://github.com/login/device/code",
+		TokenEndpoint:               "https://github.com/login/oauth/access_token",
+		Scopes:                      []string{"read:user"},
+		Flow:                        FlowDevice,
+	},
 }
 
 // lookupOAuthPreset returns the baked-in preset for a provider name (if any).
 func lookupOAuthPreset(name string) (providerPreset, bool) {
 	preset, ok := builtinOAuthPresets[strings.ToLower(strings.TrimSpace(name))]
 	return preset, ok
+}
+
+// PresetPrefersDeviceFlow reports whether the baked-in preset for a provider
+// defaults to the RFC 8628 device-code flow — i.e. device code is its natural (or
+// only) login path. A UI consults this to show the device-code screen (with the
+// user_code) instead of the loopback/browser screen for such providers, notably
+// GitHub Copilot whose OAuth client has no loopback redirect registered at all
+// (its preset carries no AuthorizationEndpoint). Presets are read regardless of
+// the ZERO_OAUTH_ALLOW_PRESETS opt-in because this is a UI capability probe, not
+// use of the preset's client identity to obtain a credential.
+func PresetPrefersDeviceFlow(name string) bool {
+	preset, ok := lookupOAuthPreset(name)
+	if !ok {
+		return false
+	}
+	return preset.Flow == FlowDevice
 }
 
 // presetsAllowed reports whether baked-in OAuth presets may supply defaults. They

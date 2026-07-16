@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -46,7 +47,17 @@ type pickerItem struct {
 	Remote        bool
 	Local         bool
 	Favorite      bool
+	// Secondary marks a model hidden from the picker's curated default view (a
+	// snapshot, embedding, or legacy model the provider did not recommend). It is
+	// revealed by the expander row or by typing a search query.
+	Secondary bool
+	// Toggle marks the synthetic "show more / show fewer" row; choosing it flips
+	// the picker's expanded state instead of selecting a model.
+	Toggle bool
 }
+
+// modelPickerExpandValue is the sentinel Value on the expander row.
+const modelPickerExpandValue = "__zero_model_picker_toggle__"
 
 // commandPicker is a generic single-select overlay reused by /model and /effort
 // (invoked with no argument). It owns only list state; the chosen
@@ -61,6 +72,9 @@ type commandPicker struct {
 	// loading marks a picker still fetching its rows (e.g. the STT model list from
 	// GitHub): the overlay shows a "fetching…" line instead of "no matching items".
 	loading bool
+	// expanded reveals Secondary items (snapshots/legacy) in the curated model
+	// picker. Ignored by pickers whose items carry no Secondary flag.
+	expanded bool
 }
 
 func (p *commandPicker) move(delta int) {
@@ -104,7 +118,7 @@ func (p *commandPicker) applyQuery() {
 	}
 	query := strings.ToLower(strings.TrimSpace(p.query))
 	if query == "" {
-		p.items = append([]pickerItem{}, source...)
+		p.items = p.collapsedBaseItems()
 		p.selected = clampInt(p.selected, 0, maxInt(0, len(p.items)-1))
 		return
 	}
@@ -157,6 +171,41 @@ func (p *commandPicker) applyQuery() {
 	}
 	p.items = filtered
 	p.selected = 0
+}
+
+// collapsedBaseItems is the unfiltered (no search query) view. When the picker
+// carries curation (at least one Secondary item), it shows only the curated
+// models plus a trailing expander row; when expanded it shows every model plus a
+// "show fewer" row. Pickers without any Secondary item are returned unchanged, so
+// non-model pickers and providers that expose no curation flag are unaffected.
+func (p *commandPicker) collapsedBaseItems() []pickerItem {
+	source := p.allItems
+	if len(source) == 0 {
+		source = p.items
+	}
+	hidden := 0
+	for _, item := range source {
+		if item.Secondary {
+			hidden++
+		}
+	}
+	if hidden == 0 {
+		return append([]pickerItem{}, source...)
+	}
+	out := make([]pickerItem, 0, len(source)+1)
+	for _, item := range source {
+		if item.Secondary && !p.expanded {
+			continue
+		}
+		out = append(out, item)
+	}
+	toggle := pickerItem{Value: modelPickerExpandValue, Toggle: true}
+	if p.expanded {
+		toggle.Label = "▴ Show fewer models"
+	} else {
+		toggle.Label = fmt.Sprintf("▾ Show %d more (snapshots & legacy)", hidden)
+	}
+	return append(out, toggle)
 }
 
 // scorePickerItem ranks an item against a lowercased query; lower is better, and
@@ -231,7 +280,10 @@ func (m model) newModelPicker() *commandPicker {
 	if len(items) == 0 {
 		return nil
 	}
-	return &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
+	picker := &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
+	// Collapse to the curated default (recommended models + expander) on open.
+	picker.applyQuery()
+	return picker
 }
 
 // newSkillPicker lists the installed skills for browse-and-run: type to filter,
@@ -287,11 +339,26 @@ func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, act
 	var raw []pickerItem
 	switch {
 	case hasDescriptor && len(m.modelPickerLiveByProvider[descriptor.ID]) > 0:
-		for _, model := range m.modelPickerLiveByProvider[descriptor.ID] {
+		live := m.modelPickerLiveByProvider[descriptor.ID]
+		// Only apply the curated default when the provider actually recommends
+		// something; otherwise every model would be hidden. Providers that expose no
+		// curation flag (Recommended always false) fall through and list everything.
+		anyRecommended := false
+		for _, model := range live {
+			if model.Recommended {
+				anyRecommended = true
+				break
+			}
+		}
+		for _, model := range live {
 			if strings.TrimSpace(model.ID) == "" {
 				continue
 			}
-			raw = append(raw, discoveredModelPickerItem(descriptor, model, group))
+			item := discoveredModelPickerItem(descriptor, model, group)
+			if anyRecommended && !model.Recommended {
+				item.Secondary = true
+			}
+			raw = append(raw, item)
 		}
 	case hasDescriptor && descriptor.Local:
 		// Local providers (e.g. Ollama) only have the models you've actually pulled.
@@ -414,13 +481,9 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
-		k := key
-		if needOAuth {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				k = resolved
-			}
-		}
-		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
+		profile := providerWizardDiscoveryProfile(descriptor, key)
+		profile = m.resolveDiscoveryProfile(ctx, providerID, needOAuth, profile)
+		models, err := discover(ctx, profile)
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
 	}
 }
@@ -483,6 +546,7 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 		}
 		item.Group = "Recent"
 		item.Favorite = m.favoriteModels[item.Value]
+		item.Secondary = false
 		result = append(result, item)
 		seen[key] = true
 	}
@@ -836,11 +900,13 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	if m.picker != nil && m.picker.kind == pickerModel {
 		selectedValue := ""
 		query := m.picker.query
+		expanded := m.picker.expanded
 		if item, ok := m.picker.current(); ok {
 			selectedValue = item.Value
 		}
 		m.picker = m.newModelPicker()
 		if m.picker != nil {
+			m.picker.expanded = expanded
 			m.picker.query = query
 			m.picker.applyQuery()
 			m.selectPickerValue(selectedValue)
@@ -854,7 +920,7 @@ func (m model) toggleModelFavorite() model {
 		return m
 	}
 	item, ok := m.picker.current()
-	if !ok || strings.TrimSpace(item.Value) == "" {
+	if !ok || strings.TrimSpace(item.Value) == "" || item.Toggle {
 		return m
 	}
 	if m.favoriteModels == nil {

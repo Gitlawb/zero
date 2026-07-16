@@ -186,6 +186,59 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	assertContains(t, loaded, "Live Cloud A")
 }
 
+func TestModelPickerCuratesRecommendedByDefault(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "copilot",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "copilot",
+			CatalogID: "copilot",
+			BaseURL:   "https://api.githubcopilot.com",
+		},
+	})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"copilot": {
+			{ID: "gpt-5.5", Description: "GPT-5.5", Recommended: true},
+			{ID: "mai-code-1-flash-picker", Description: "MAI-Code-1-Flash", Recommended: true},
+			{ID: "gpt-4o-2024-05-13", Description: "GPT-4o", Recommended: false},
+			{ID: "gpt-4", Description: "GPT-4", Recommended: false},
+		},
+	}
+	m.picker = m.newModelPicker()
+	if m.picker == nil {
+		t.Fatal("expected model picker")
+	}
+
+	// Collapsed default: recommended models visible, snapshots/legacy hidden, and a
+	// single expander row present.
+	if pickerIndex(m.picker.items, "gpt-5.5") < 0 || pickerIndex(m.picker.items, "mai-code-1-flash-picker") < 0 {
+		t.Fatalf("recommended models missing from collapsed view: %#v", pickerValues(m.picker.items))
+	}
+	if pickerIndex(m.picker.items, "gpt-4o-2024-05-13") >= 0 || pickerIndex(m.picker.items, "gpt-4") >= 0 {
+		t.Fatalf("snapshot/legacy models should be hidden by default: %#v", pickerValues(m.picker.items))
+	}
+	if pickerIndex(m.picker.items, modelPickerExpandValue) < 0 {
+		t.Fatalf("expected an expander row in collapsed view: %#v", pickerValues(m.picker.items))
+	}
+
+	// Expanded: every model visible.
+	m.picker.expanded = true
+	m.picker.applyQuery()
+	if pickerIndex(m.picker.items, "gpt-4o-2024-05-13") < 0 || pickerIndex(m.picker.items, "gpt-4") < 0 {
+		t.Fatalf("expanded view should reveal hidden models: %#v", pickerValues(m.picker.items))
+	}
+
+	// A search query reveals hidden models without expanding, and drops the toggle.
+	m.picker.expanded = false
+	m.picker.query = "gpt-4o-2024"
+	m.picker.applyQuery()
+	if pickerIndex(m.picker.items, "gpt-4o-2024-05-13") < 0 {
+		t.Fatalf("search should surface hidden snapshot: %#v", pickerValues(m.picker.items))
+	}
+	if pickerIndex(m.picker.items, modelPickerExpandValue) >= 0 {
+		t.Fatalf("expander row should not appear while searching: %#v", pickerValues(m.picker.items))
+	}
+}
+
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "ollama-cloud",

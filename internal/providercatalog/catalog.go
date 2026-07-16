@@ -137,6 +137,21 @@ var descriptors = []Descriptor{
 	anthropicCompat("minimaxi-cn", "MiniMax CN", "https://api.minimaxi.com/anthropic", "MiniMax-M3", []string{"MINIMAXI_API_KEY"}, "minimax cn", "minimax-cn"),
 	openAICompat("mistral", "Mistral", "https://api.mistral.ai/v1", "mistral-large-latest", []string{"MISTRAL_API_KEY"}),
 	openAICompat("github", "GitHub Models", "https://models.inference.ai.azure.com", "openai/gpt-4.1", []string{"GITHUB_TOKEN"}, "github-models"),
+	// GitHub Copilot — a Copilot subscription (individual/business/enterprise)
+	// used as a model provider. The device-code OAuth login yields a GitHub
+	// user token that the runtime exchanges for a short-lived Copilot token
+	// (see internal/provideroauth/copilot.go); the Copilot backend at
+	// api.githubcopilot.com speaks the OpenAI chat-completions API but requires
+	// editor headers (Copilot-Integration-Id, Editor-Version, ...) which the
+	// provider factory injects. AuthEnvVars is empty (OAuth device login is the
+	// only way in); RequiresAuth is forced true so catalog consumers know an
+	// interactive login is needed first. This uses GitHub's UNDOCUMENTED Copilot
+	// API and may break without notice.
+	func() Descriptor {
+		d := openAICompat("copilot", "GitHub Copilot", "https://api.githubcopilot.com", "gpt-4.1", nil, "github-copilot", "copilot-chat")
+		d.RequiresAuth = true
+		return oauthProvider(d, false, true)
+	}(),
 	transportDescriptor("bedrock", "Amazon Bedrock", TransportBedrock, "https://bedrock-runtime.${AWS_REGION}.amazonaws.com", "anthropic.claude-3-5-sonnet-20241022-v2:0", []string{"AWS_ACCESS_KEY_ID", "AWS_PROFILE"}, []APIFormat{APIFormatBedrockConverse}, true),
 	transportDescriptor("vertex", "Vertex AI", TransportVertex, "https://aiplatform.googleapis.com", "gemini-2.5-pro", []string{"GOOGLE_APPLICATION_CREDENTIALS"}, []APIFormat{APIFormatVertexGenerateContent}, true),
 	oauthProvider(openAICompat("xai", "xAI", "https://api.x.ai/v1", "grok-4", []string{"XAI_API_KEY"}), false, true),

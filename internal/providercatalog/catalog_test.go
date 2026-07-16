@@ -29,6 +29,7 @@ var expectedCatalogIDs = []string{
 	"minimaxi-cn",
 	"mistral",
 	"github",
+	"copilot",
 	"bedrock",
 	"vertex",
 	"xai",
@@ -293,7 +294,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "copilot", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
@@ -352,7 +353,7 @@ func TestReturnedDescriptorsAreCopies(t *testing.T) {
 
 func TestOAuthProviderClassification(t *testing.T) {
 	oauthIDs := descriptorIDs(OAuthProviders())
-	if want := []string{"openrouter", "huggingface", "chatgpt", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
+	if want := []string{"openrouter", "huggingface", "chatgpt", "copilot", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {

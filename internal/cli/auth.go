@@ -422,7 +422,34 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return exitCrash
 		}
 	}
+	// GitHub Copilot gates some models (e.g. Claude, Grok on certain plans)
+	// behind a per-account policy the user must accept once before they surface
+	// in discovery and accept requests — the editor plugins do this on login.
+	// Mirror that: best-effort enable the gated models so `zero` sees the full
+	// catalog immediately. Never fail the login for this.
+	if strings.EqualFold(provider, "copilot") {
+		enableCopilotModelsAfterLogin(context.Background(), manager, provider, stdout)
+	}
 	return exitSuccess
+}
+
+// enableCopilotModelsAfterLogin unlocks any policy-gated Copilot models for the
+// freshly logged-in account. It reads the durable GitHub token just stored and
+// asks the Copilot backend to enable each gated model. Best-effort: any error is
+// reported as a note and otherwise ignored.
+func enableCopilotModelsAfterLogin(ctx context.Context, manager *oauth.Manager, provider string, stdout io.Writer) {
+	githubToken, err := manager.GetFresh(ctx, oauth.ProviderKey(provider))
+	if err != nil || strings.TrimSpace(githubToken) == "" {
+		return
+	}
+	enabled, err := provideroauth.EnableCopilotModels(ctx, &http.Client{Timeout: 30 * time.Second}, githubToken)
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "Note: could not auto-enable gated Copilot models (%s); enable them in your Copilot settings if a model is missing.\n", redaction.ErrorMessage(err, redaction.Options{}))
+		return
+	}
+	if len(enabled) > 0 {
+		_, _ = fmt.Fprintf(stdout, "Enabled %d additional Copilot model(s): %s\n", len(enabled), strings.Join(enabled, ", "))
+	}
 }
 
 func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -597,6 +624,9 @@ works out of the box. "xai" ('zero auth login xai') uses a built-in preset that 
 off by default — enable it with ZERO_OAUTH_ALLOW_PRESETS=1, or set the
 ZERO_OAUTH_XAI_* vars yourself. "chatgpt" ('zero auth login chatgpt' or
 'zero auth chatgpt') uses a fixed-port loopback flow against the Codex backend.
+"copilot" ('zero auth login copilot') uses the device-code flow against GitHub
+and needs an active Copilot subscription; it uses GitHub's undocumented Copilot
+API, which may change without notice.
 Any preset field is overridable via the env vars below. For a custom provider named <name>, set:
   ZERO_OAUTH_<NAME>_CLIENT_ID       (required)
   ZERO_OAUTH_<NAME>_CLIENT_SECRET   (optional)

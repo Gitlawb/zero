@@ -842,6 +842,131 @@ func TestCodexProviderParsesResponsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestCodexProviderCorrelatesToolCallByOutputIndex(t *testing.T) {
+	// Copilot's /responses rotates a fresh (encrypted) item_id on every event
+	// but keeps output_index and call_id stable. Keying correlation on item_id
+	// would split one call across several builders and drop its arguments, so
+	// the provider must key on output_index. On replay the echo must carry the
+	// stable call_id on `call_id` and OMIT `id` (Copilot rejects a non-fc id).
+	addedItemID := "rot_added_00000000000000000000"
+	deltaItemID := "rot_delta_11111111111111111111"
+	doneItemID := "rot_done_222222222222222222222"
+	callID := "call_stable_abc123"
+
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"`+addedItemID+`","call_id":"`+callID+`","name":"get_weather"}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"`+deltaItemID+`","output_index":2,"delta":"{\"loc\":"}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"`+deltaItemID+`","output_index":2,"delta":"\"SF\"}"}`,
+		`{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"`+doneItemID+`","call_id":"`+callID+`","name":"get_weather"}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":3,"output_tokens":2}}}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "weather in SF?"}},
+		Tools: []zeroruntime.ToolDefinition{
+			{Name: "get_weather", Parameters: map[string]any{"type": "object"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var starts, deltas, ends int
+	var startName, endName string
+	var ids, fragments []string
+	for ev := range stream {
+		switch ev.Type {
+		case zeroruntime.StreamEventToolCallStart:
+			starts++
+			startName = ev.ToolName
+			ids = append(ids, ev.ToolCallID)
+		case zeroruntime.StreamEventToolCallDelta:
+			deltas++
+			ids = append(ids, ev.ToolCallID)
+			fragments = append(fragments, ev.ArgumentsFragment)
+		case zeroruntime.StreamEventToolCallEnd:
+			ends++
+			endName = ev.ToolName
+			ids = append(ids, ev.ToolCallID)
+		case zeroruntime.StreamEventError:
+			t.Fatalf("unexpected error event: %q", ev.Error)
+		}
+	}
+	// A single coherent call: one start, both deltas, one end (not multiple
+	// builders from the rotating item_ids).
+	if starts != 1 || startName != "get_weather" {
+		t.Fatalf("tool-call-start count=%d name=%q, want 1 get_weather", starts, startName)
+	}
+	if deltas != 2 {
+		t.Fatalf("tool-call-delta count=%d, want 2 (args must accumulate on one builder)", deltas)
+	}
+	if joined := strings.Join(fragments, ""); joined != `{"loc":"SF"}` {
+		t.Fatalf("accumulated arguments = %q, want %q", joined, `{"loc":"SF"}`)
+	}
+	if ends != 1 || endName != "get_weather" {
+		t.Fatalf("tool-call-end count=%d name=%q, want 1 get_weather", ends, endName)
+	}
+	// Every event carries the stable, <=64-char call_id, not a rotating item_id.
+	for i, id := range ids {
+		if id != callID {
+			t.Fatalf("tool-call event %d ToolCallID = %q, want stable call_id %q", i, id, callID)
+		}
+	}
+
+	// Replay: function_call must echo call_id and OMIT id; output uses call_id.
+	var rec2 codexRequest
+	srv2 := newCodexTestServer(t, &rec2)
+	defer srv2.Close()
+	provider2, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv2.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream2, err := provider2.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: "weather in SF?"},
+			{
+				Role:      zeroruntime.MessageRoleAssistant,
+				ToolCalls: []zeroruntime.ToolCall{{ID: callID, Name: "get_weather", Arguments: `{"loc":"SF"}`}},
+			},
+			{Role: zeroruntime.MessageRoleTool, ToolCallID: callID, Content: "72F"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream2)
+
+	input, _ := rec2.body["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("body.input has %d items, want 3: %#v", len(input), rec2.body["input"])
+	}
+	functionCall, _ := input[1].(map[string]any)
+	if functionCall["type"] != "function_call" {
+		t.Fatalf("body.input[1] = %#v, want type=function_call", functionCall)
+	}
+	if _, hasID := functionCall["id"]; hasID {
+		t.Fatalf("body.input[1] must OMIT id (Copilot rotates/rejects it), got id=%#v", functionCall["id"])
+	}
+	if functionCall["call_id"] != callID {
+		t.Fatalf("body.input[1].call_id = %#v, want %q", functionCall["call_id"], callID)
+	}
+	functionOutput, _ := input[2].(map[string]any)
+	if functionOutput["call_id"] != callID {
+		t.Fatalf("body.input[2].call_id = %#v, want %q", functionOutput["call_id"], callID)
+	}
+}
+
 func TestCodexProviderSendsAssistantToolCallsAsInputItems(t *testing.T) {
 	// When the runtime replays a prior assistant turn that issued a tool
 	// call, the Codex provider must serialize the turn as BOTH the

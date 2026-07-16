@@ -110,6 +110,12 @@ type PreferencesConfig struct {
 	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// DefaultPermissionMode persists the launch permission mode for the interactive
+	// TUI: "ask" (default), "auto", or "unsafe" (yolo — auto-approves every action
+	// and unlocks the "!" shell escape). Empty = unset (defaults to ask). An
+	// explicit `zero --skip-permissions-unsafe` launch still overrides this, and
+	// the internal spec-draft/member-auto modes are intentionally not settable here.
+	DefaultPermissionMode string `json:"defaultPermissionMode,omitempty"`
 }
 
 // RecentModelEntry is one provider-qualified model selection recorded in

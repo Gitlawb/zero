@@ -664,8 +664,10 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 			descriptor := m.setupProviderDescriptor()
 			if descriptor.OAuth {
 				// Headless/SSH boxes can't open a browser — use device code there
-				// by default (the user can also force it with "d" from the list).
-				if descriptor.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+				// by default. Providers whose OAuth preset only offers the device
+				// flow (e.g. GitHub Copilot, no loopback redirect) always use device
+				// code, even on a desktop. The user can also force it with "d".
+				if descriptor.OAuthDeviceFlow && (oauthPreferDeviceFlow() || oauth.PresetPrefersDeviceFlow(descriptor.ID)) {
 					return m.startSetupDeviceLogin(descriptor)
 				}
 				m.setup.oauthPending = true
@@ -829,13 +831,9 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
-		apiKey := pastedKey
-		if needOAuthToken {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				apiKey = resolved
-			}
-		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		profile := providerWizardDiscoveryProfile(provider, pastedKey)
+		profile = m.resolveDiscoveryProfile(ctx, providerID, needOAuthToken, profile)
+		apiKey := profile.APIKey
 		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)
 		models, err := discover(ctx, profile)
 		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: secrets, models: models, err: err}
