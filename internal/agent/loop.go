@@ -209,9 +209,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
 		// the messages, so computing it before compaction is safe.
-		promptBuildSpan := options.Trace.Span(trace.SpanPromptBuild)
+		toolPartitionSpan := options.Trace.Span(trace.SpanToolPartition)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
-		promptBuildSpan.End()
+		toolPartitionSpan.End()
 
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
@@ -285,10 +285,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		forwardedVisibleText := false
 		forwardingOpts := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
 		if options.OnText != nil {
-			forwardingOpts.OnText = func(s string) { forwardedVisibleText = true; options.OnText(s) }
+			forwardingOpts.OnText = func(s string) {
+				forwardedVisibleText = true
+				options.Trace.StampFirstVisibleEvent()
+				options.Trace.StampFirstToken()
+				options.OnText(s)
+			}
 		}
 		if options.OnReasoning != nil {
-			forwardingOpts.OnReasoning = func(s string) { options.OnReasoning(s) }
+			forwardingOpts.OnReasoning = func(s string) {
+				options.Trace.StampFirstToken()
+				options.OnReasoning(s)
+			}
 		}
 		if options.OnToolCallStart != nil {
 			forwardingOpts.OnToolCallStart = func(id, name string) { options.OnToolCallStart(id, name) }

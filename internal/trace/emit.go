@@ -17,12 +17,15 @@ type Sink interface {
 }
 
 // WriteNDJSON emits the trace as newline-delimited JSON compatible with the
-// internal/agenteval trace contract: one object per line, each carrying a
-// "type" and (for spans/counters) a "name" so ParseTraceEventKeys keys them.
+// internal/agenteval trace contract: one object per line carrying a "type"
+// and (for spans/counters) a "name" so ParseTraceEventKeys keys them.
 //
 // The first line is a "trace" summary (name "run"), followed by one "span"
-// line per span and one "counter" line per counter. Spans and counters are
-// emitted in stable (sorted) order for deterministic output.
+// line per span occurrence and one "counter" line per counter. Span lines
+// carry the wall interval (start/end), inclusive duration, exclusive
+// duration, and parent — the data the harness needs to rank latency sources
+// without double-counting nested/concurrent work. Spans are emitted in stable
+// (name, then start) order for deterministic output; counters are sorted.
 func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 	if w == nil {
 		return nil
@@ -46,19 +49,36 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 		"completed_at":     formatTime(t.CompletedAt),
 		"wall_ms":          ms(t.WallDuration()),
 		"attributed_ms":    ms(t.AttributedDuration()),
+		"coverage":         round3(t.Coverage()),
 		"attribution":      round3(t.AttributionRatio()),
 	}); err != nil {
 		return err
 	}
 
 	spans := append([]Span(nil), t.Spans...)
-	sort.Slice(spans, func(i, j int) bool { return spans[i].Name < spans[j].Name })
+	sort.SliceStable(spans, func(i, j int) bool {
+		if spans[i].Name != spans[j].Name {
+			return spans[i].Name < spans[j].Name
+		}
+		return spans[i].Start.Before(spans[j].Start)
+	})
 	for _, span := range spans {
-		if err := enc.Encode(map[string]any{
-			"type":        "span",
-			"name":        span.Name,
-			"duration_ms": ms(span.Duration),
-		}); err != nil {
+		obj := map[string]any{
+			"type":         "span",
+			"name":         span.Name,
+			"duration_ms":  ms(span.Duration),
+			"exclusive_ms": ms(span.Exclusive),
+		}
+		if !span.Start.IsZero() {
+			obj["start"] = formatTime(span.Start)
+		}
+		if !span.End.IsZero() {
+			obj["end"] = formatTime(span.End)
+		}
+		if span.Parent != "" {
+			obj["parent"] = span.Parent
+		}
+		if err := enc.Encode(obj); err != nil {
 			return err
 		}
 	}
@@ -78,64 +98,63 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 }
 
 // WriteText emits a human-readable trace: a header, one line per span with its
-// share of wall time, a totals line, then counters. The first write error is
-// returned; remaining writes are skipped so a failing sink surfaces promptly
-// instead of being silently dropped.
+// exclusive time and share of wall, a coverage line, then counters. It returns
+// the first write error encountered so a failing sink (e.g. a full disk) is not
+// silently swallowed.
 func WriteText(w io.Writer, t *TurnTrace) error {
 	if w == nil || t == nil {
 		return nil
 	}
 	wall := t.WallDuration()
-	var p textPrinter
-	p.printf(w, "trace run=%s session=%s profile=%s\n", t.RunID, t.SessionID, t.Profile)
-	p.printf(w, "  started=%s completed=%s wall=%s\n", formatTime(t.StartedAt), formatTime(t.CompletedAt), wall)
+	var firstErr error
+	write := func(format string, args ...any) {
+		if firstErr != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			firstErr = err
+		}
+	}
+	write("trace run=%s session=%s profile=%s\n", t.RunID, t.SessionID, t.Profile)
+	write("  started=%s completed=%s wall=%s\n", formatTime(t.StartedAt), formatTime(t.CompletedAt), wall)
+	write("  attributed=%s coverage=%.1f%%\n", t.AttributedDuration(), t.Coverage()*100)
 	if !t.FirstVisibleEventAt.IsZero() {
-		p.printf(w, "  first_visible_event=%s (+%s)\n", formatTime(t.FirstVisibleEventAt), t.FirstVisibleEventAt.Sub(t.StartedAt))
+		write("  first_visible_event=%s (+%s)\n", formatTime(t.FirstVisibleEventAt), t.FirstVisibleEventAt.Sub(t.StartedAt))
 	}
 	if !t.FirstUsefulActionAt.IsZero() {
-		p.printf(w, "  first_useful_action=%s (+%s)\n", formatTime(t.FirstUsefulActionAt), t.FirstUsefulActionAt.Sub(t.StartedAt))
+		write("  first_useful_action=%s (+%s)\n", formatTime(t.FirstUsefulActionAt), t.FirstUsefulActionAt.Sub(t.StartedAt))
 	}
 	if !t.FirstTokenAt.IsZero() {
-		p.printf(w, "  first_token=%s (+%s)\n", formatTime(t.FirstTokenAt), t.FirstTokenAt.Sub(t.StartedAt))
+		write("  first_token=%s (+%s)\n", formatTime(t.FirstTokenAt), t.FirstTokenAt.Sub(t.StartedAt))
 	}
 
 	spans := append([]Span(nil), t.Spans...)
-	sort.Slice(spans, func(i, j int) bool { return spans[i].Name < spans[j].Name })
-	p.println(w, "spans:")
+	sort.SliceStable(spans, func(i, j int) bool {
+		if spans[i].Name != spans[j].Name {
+			return spans[i].Name < spans[j].Name
+		}
+		return spans[i].Start.Before(spans[j].Start)
+	})
+	write("spans:\n")
 	for _, span := range spans {
 		share := 0.0
 		if wall > 0 {
-			share = float64(span.Duration) / float64(wall)
+			share = float64(span.Exclusive) / float64(wall)
 		}
-		p.printf(w, "  %-18s %10s  %5.1f%%\n", span.Name, span.Duration, share*100)
+		parent := ""
+		if span.Parent != "" {
+			parent = " [" + span.Parent + "]"
+		}
+		write("  %-18s %10s excl=%-10s %5.1f%%%s\n", span.Name, span.Duration, span.Exclusive, share*100, parent)
 	}
-	p.printf(w, "  %-18s %10s  %5.1f%%\n", "attributed", t.AttributedDuration(), t.AttributionRatio()*100)
 
 	counters := append([]Counter(nil), t.Counters...)
 	sort.Slice(counters, func(i, j int) bool { return counters[i].Name < counters[j].Name })
-	p.println(w, "counters:")
+	write("counters:\n")
 	for _, c := range counters {
-		p.printf(w, "  %-22s %d\n", c.Name, c.Value)
+		write("  %-22s %d\n", c.Name, c.Value)
 	}
-	return p.err
-}
-
-// textPrinter remembers the first write error so a stream of fprintf/fprintln
-// calls can short-circuit after the sink fails, then report it once.
-type textPrinter struct{ err error }
-
-func (p *textPrinter) printf(w io.Writer, format string, args ...any) {
-	if p.err != nil {
-		return
-	}
-	_, p.err = fmt.Fprintf(w, format, args...)
-}
-
-func (p *textPrinter) println(w io.Writer, s string) {
-	if p.err != nil {
-		return
-	}
-	_, p.err = fmt.Fprintln(w, s)
+	return firstErr
 }
 
 // NDJSONSink adapts an io.Writer as a Sink emitting NDJSON.

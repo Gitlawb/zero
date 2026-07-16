@@ -25,9 +25,10 @@ const TaskSchemaVersion = 1
 // ZERO must satisfy. The set is recorded by ID with every result so a published
 // number is traceable to the exact tasks that produced it.
 type TaskSet struct {
-	ID    string      `json:"id"`
-	Name  string      `json:"name,omitempty"`
-	Tasks []BenchTask `json:"tasks"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Tasks       []BenchTask `json:"tasks"`
 }
 
 // BenchTask is one benchmark task. WorkspaceFixture is the relative path of the

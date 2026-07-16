@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -12,9 +13,15 @@ import (
 // A nil *Recorder is valid to call: the no-op helpers below route every
 // stamp through a nil check so callers can write `options.Trace.Start()`
 // unconditionally and pay nothing when tracing is off.
+//
+// Spans are stored as occurrences (one entry per stamp) with their wall
+// interval. Parent/child nesting and exclusive time are derived at Finish by
+// interval containment, so concurrent (provider_connect inside generation) and
+// nested (permission_wait inside tool_execution) spans are not double-counted.
 type Recorder struct {
 	mu                  sync.Mutex
 	tr                  TurnTrace
+	cursor              time.Time // synthesis cursor for RecordSpan (no real interval)
 	started             bool
 	finished            bool
 	firstTokenStamped   bool
@@ -56,14 +63,15 @@ type SpanHandle struct {
 	once     sync.Once
 }
 
-// End commits the span's elapsed duration to the recorder. Durations
-// accumulate by name so repeated stamps of the same span add together.
+// End commits the span's wall interval to the recorder. Each stamp is its own
+// occurrence (spans are not merged by name); exclusive time is derived at
+// Finish from the recorded intervals.
 func (s *SpanHandle) End() {
 	if s == nil || s.recorder == nil {
 		return
 	}
 	s.once.Do(func() {
-		s.recorder.addSpan(s.name, time.Since(s.start))
+		s.recorder.addOccurrence(s.name, s.start, time.Now())
 	})
 }
 
@@ -79,14 +87,31 @@ func (r *Recorder) Span(name string) *SpanHandle {
 	return &SpanHandle{recorder: r, name: name, start: time.Now()}
 }
 
-// RecordSpan commits an already-measured duration to name, accumulating with
-// any prior value. Use this when the caller already holds a start time (for
-// example, a span that began before the recorder existed).
+// RecordSpan commits an already-measured duration to name as a synthesized
+// sequential occurrence. Use this when the caller already holds a duration
+// (for example, in tests) rather than a live interval; production code uses
+// Span/End, which record the real wall interval. Synthesized occurrences
+// chain from the recorder's StartedAt (or a moving cursor) so coverage and
+// exclusive math remain consistent. Each stamp is its own entry.
 func (r *Recorder) RecordSpan(name string, d time.Duration) {
 	if r == nil {
 		return
 	}
-	r.addSpan(name, d)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
+	start := r.cursor
+	if start.IsZero() {
+		start = r.tr.StartedAt
+	}
+	if start.IsZero() {
+		start = time.Now()
+	}
+	end := start.Add(d)
+	r.cursor = end
+	r.tr.Spans = append(r.tr.Spans, Span{Name: name, Start: start, End: end, Duration: d})
 }
 
 // Counter adds n to the named counter, accumulating across calls.
@@ -147,7 +172,8 @@ func (r *Recorder) StampFirstUsefulAction() {
 	r.tr.FirstUsefulActionAt = time.Now()
 }
 
-// Finish stamps CompletedAt and returns a snapshot of the trace. Calling
+// Finish stamps CompletedAt, derives each span's parent (by interval
+// containment) and exclusive time, and returns a snapshot of the trace. Calling
 // Finish more than once returns the same snapshot.
 func (r *Recorder) Finish() *TurnTrace {
 	if r == nil {
@@ -158,6 +184,7 @@ func (r *Recorder) Finish() *TurnTrace {
 	if !r.finished {
 		r.finished = true
 		r.tr.CompletedAt = time.Now()
+		deriveNesting(r.tr.Spans)
 	}
 	snap := r.tr
 	// Copy the slices so callers cannot mutate the recorder's state.
@@ -166,20 +193,18 @@ func (r *Recorder) Finish() *TurnTrace {
 	return &snap
 }
 
-// addSpan accumulates d into the named span, merging with an existing entry.
-func (r *Recorder) addSpan(name string, d time.Duration) {
+// addOccurrence appends a span occurrence with its wall interval.
+func (r *Recorder) addOccurrence(name string, start, end time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.finished {
 		return
 	}
-	for i := range r.tr.Spans {
-		if r.tr.Spans[i].Name == name {
-			r.tr.Spans[i].Duration += d
-			return
-		}
+	d := end.Sub(start)
+	if d < 0 {
+		d = 0
 	}
-	r.tr.Spans = append(r.tr.Spans, Span{Name: name, Duration: d})
+	r.tr.Spans = append(r.tr.Spans, Span{Name: name, Start: start, End: end, Duration: d})
 }
 
 func (r *Recorder) addCounterLocked(name string, n int64) {
@@ -190,4 +215,98 @@ func (r *Recorder) addCounterLocked(name string, n int64) {
 		}
 	}
 	r.tr.Counters = append(r.tr.Counters, Counter{Name: name, Value: n})
+}
+
+// interval is a half-open [start, end) wall window used for containment and
+// coverage math.
+type interval struct{ start, end time.Time }
+
+// deriveNesting computes each span's parent (the tightest span whose interval
+// contains it) and its exclusive time (duration minus the union of its direct
+// children's intervals). Spans without a usable interval are left top-level
+// with exclusive = duration. This is O(n²) in the span count, which is tiny
+// (a handful to a few dozen per run), and runs once at Finish.
+func deriveNesting(spans []Span) {
+	parent := make([]int, len(spans))
+	for i := range parent {
+		parent[i] = -1
+	}
+	for i, a := range spans {
+		if a.Start.IsZero() || a.End.IsZero() {
+			continue
+		}
+		bestIdx := -1
+		bestDur := time.Duration(0)
+		for j, b := range spans {
+			if i == j || b.Start.IsZero() || b.End.IsZero() {
+				continue
+			}
+			// b contains a when a starts at/after b and ends at/before b.
+			if !a.Start.Before(b.Start) && !a.End.After(b.End) {
+				bd := b.End.Sub(b.Start)
+				if bestIdx == -1 || bd < bestDur {
+					bestIdx = j
+					bestDur = bd
+				}
+			}
+		}
+		parent[i] = bestIdx
+	}
+	for i := range spans {
+		if spans[i].Start.IsZero() || spans[i].End.IsZero() {
+			spans[i].Exclusive = spans[i].Duration
+			continue
+		}
+		var children []interval
+		for j := range spans {
+			if parent[j] == i {
+				children = append(children, interval{spans[j].Start, spans[j].End})
+			}
+		}
+		exclusive := spans[i].Duration - unionOf(children)
+		if exclusive < 0 {
+			exclusive = 0
+		}
+		spans[i].Exclusive = exclusive
+		if parent[i] != -1 {
+			spans[i].Parent = spans[parent[i]].Name
+		}
+	}
+}
+
+// unionIntervalDuration returns the total wall time covered by the union of
+// all span intervals (used for Coverage). Spans without a usable interval are
+// skipped.
+func unionIntervalDuration(spans []Span) time.Duration {
+	var intervals []interval
+	for _, s := range spans {
+		if s.Start.IsZero() || s.End.IsZero() || s.End.Before(s.Start) {
+			continue
+		}
+		intervals = append(intervals, interval{s.Start, s.End})
+	}
+	return unionOf(intervals)
+}
+
+// unionOf returns the total duration covered by the union of the intervals.
+func unionOf(intervals []interval) time.Duration {
+	if len(intervals) == 0 {
+		return 0
+	}
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start.Before(intervals[j].start) })
+	var total time.Duration
+	cur := intervals[0]
+	for _, iv := range intervals[1:] {
+		if !iv.start.After(cur.end) {
+			// overlap or touch: extend the current window.
+			if iv.end.After(cur.end) {
+				cur.end = iv.end
+			}
+			continue
+		}
+		total += cur.end.Sub(cur.start)
+		cur = iv
+	}
+	total += cur.end.Sub(cur.start)
+	return total
 }

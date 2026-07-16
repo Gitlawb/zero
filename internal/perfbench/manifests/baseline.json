@@ -1,6 +1,7 @@
 {
   "id": "zero-baseline-turn",
   "name": "Zero per-turn baseline (Phase 0)",
+  "description": "Latency-only baseline: measures where a turn spends wall time, not task correctness. Read-only tasks (nav, longproc, longctx, parallel) carry no verification oracle by design — a zero-exit does not prove the answer was right, only that the turn ran. Edit/fix/refactor oracles are intentionally lightweight (substring grep or `go build`) so the suite stays a latency probe; do not read pass/fail as a correctness verdict.",
   "tasks": [
     {"id": "nav-01", "name": "list repo files", "class": "nav", "prompt": "List the files in this repository and report their count. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
     {"id": "nav-02", "name": "find a function", "class": "nav", "prompt": "Find the function named 'greet' and report the file and line it is defined on. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
@@ -30,13 +31,13 @@
     {"id": "fix-04", "name": "truncated read", "class": "fix", "prompt": "In bugs.go ReadFirst returns only a single character instead of the full content; fix it to return the whole string.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestReadFirstReturnsFullContent", "./..."]},
     {"id": "fix-05", "name": "swapped args", "class": "fix", "prompt": "In bugs.go Divide swaps its operands; fix the order so Divide(10,2) returns 5.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestDivideOrder", "./..."]},
     {"id": "fix-06", "name": "missing return", "class": "fix", "prompt": "In bugs.go Classify is missing a return for the high case; add it so Classify(500) returns \"high\".", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestClassifyHigh", "./..."]},
-    {"id": "fix-07", "name": "wrong format verb", "class": "fix", "prompt": "In bugs.go Label uses the %d format verb for a string; fix it to use %s.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestLabelUsesString", "./..."]},
+    {"id": "fix-07", "name": "wrong label prefix", "class": "fix", "prompt": "In bugs.go Label returns 'admin-<name>' but the test expects 'user-<name>'; change the prefix from 'admin-' to 'user-'.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestLabelUsesString", "./..."]},
     {"id": "fix-08", "name": "race on counter", "class": "fix", "prompt": "In bugs.go the global counter is incremented without synchronization; guard it with a mutex.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-race", "-run", "TestCounterRace", "./..."]},
 
     {"id": "refactor-01", "name": "extract helper", "class": "refactor", "prompt": "Extract the duplicated greeting logic into a single helper function and call it from both sites.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
     {"id": "refactor-02", "name": "split a file", "class": "refactor", "prompt": "Split main.go into two files: one for Config, one for the rest, keeping the package building.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
     {"id": "refactor-03", "name": "rename package", "class": "refactor", "prompt": "Rename the package from app to zeroapp everywhere and keep it building.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-04", "name": "introduce a type", "class": "refactor", "prompt": "Introduce a named type for the map[string]int used in stats.go and update its users.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
+    {"id": "refactor-04", "name": "introduce a type", "class": "refactor", "prompt": "Introduce a named type for the map[string]int used in main.go and update its users.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
     {"id": "refactor-05", "name": "inline a wrapper", "class": "refactor", "prompt": "Inline the thin wrapper function into its single caller and remove it.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
     {"id": "refactor-06", "name": "consolidate errors", "class": "refactor", "prompt": "Consolidate the repeated error-construction blocks into a single helper.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
 

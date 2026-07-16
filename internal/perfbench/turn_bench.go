@@ -69,8 +69,10 @@ type SpanStats struct {
 }
 
 // LatencySource is one of the top controllable latency sources, ranked by total
-// attributed time across the whole run. Share is its fraction of total attributed
-// span time (not wall time — spans overlap, so shares need not sum to 1).
+// exclusive time across the whole run. Share is its fraction of total exclusive
+// span time. Because exclusive time subtracts nested children, concurrent and
+// nested spans no longer double-count, so shares of the top sources sum to ~1
+// for a well-instrumented run.
 type LatencySource struct {
 	Span    string  `json:"span"`
 	TotalMs float64 `json:"totalMs"`
@@ -201,7 +203,15 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 			if outcome.Trace != nil {
 				aggregateTotals(&totals, outcome.Trace)
 				for _, span := range outcome.Trace.Spans {
-					ms := float64(span.Duration.Microseconds()) / 1000
+					// Rank by exclusive time (duration minus nested children) so
+					// concurrent/nested spans do not double-count: provider_connect
+					// inside generation and permission_wait inside tool_execution
+					// each contribute their own exclusive time, not their parent's.
+					d := span.Exclusive
+					if d <= 0 {
+						d = span.Duration
+					}
+					ms := float64(d.Microseconds()) / 1000
 					perSpanSamples[span.Name] = append(perSpanSamples[span.Name], ms)
 					if classSpanTotals[class] == nil {
 						classSpanTotals[class] = map[string]float64{}

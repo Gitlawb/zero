@@ -69,10 +69,10 @@ func Classify(n int) string {
 	return ""
 }
 
-// Label returns a display label for the given name. BUG: uses the %d format
-// verb for a string, producing the wrong text.
+// Label returns a display label for the given name. BUG: uses the wrong prefix
+// ("admin-" instead of "user-"), producing the wrong text.
 func Label(name string) string {
-	return fmt.Sprintf("user-%d", name)
+	return fmt.Sprintf("admin-%s", name)
 }
 
 // counter is a shared, unsynchronized counter. BUG: Inc is not goroutine-safe.

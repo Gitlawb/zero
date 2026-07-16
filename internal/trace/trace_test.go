@@ -28,8 +28,10 @@ func TestRecorderSpanAccumulates(t *testing.T) {
 	if got < 3*time.Millisecond {
 		t.Fatalf("generation span did not accumulate across stamps; got %v", got)
 	}
-	if len(tr.Spans) != 1 {
-		t.Fatalf("expected one generation span entry, got %d", len(tr.Spans))
+	// Spans are stored as occurrences (one entry per stamp), not merged by name,
+	// so the recorder can derive parent/child nesting by interval containment.
+	if len(tr.Spans) != 2 {
+		t.Fatalf("expected two generation span occurrences, got %d", len(tr.Spans))
 	}
 }
 
@@ -171,12 +173,11 @@ func TestContextNilRecorder(t *testing.T) {
 func TestWriteNDJSONMatchesAgentevalContract(t *testing.T) {
 	r := NewRecorder("s1", "r1", "cold")
 	r.Start()
-	r.RecordSpan(SpanPromptBuild, 10*time.Millisecond)
+	r.RecordSpan(SpanToolPartition, 10*time.Millisecond)
 	r.RecordSpan(SpanGeneration, 50*time.Millisecond)
 	r.RecordSpan(SpanToolExecution, 5*time.Millisecond)
 	r.RecordSpan(SpanPermissionWait, 1*time.Millisecond)
 	r.RecordSpan(SpanCompaction, 2*time.Millisecond)
-	r.RecordSpan(SpanPersistence, 1*time.Millisecond)
 	r.RecordSpan(SpanProviderConnect, 8*time.Millisecond)
 	r.Counter(CounterModelRequests, 2)
 	r.Counter(CounterToolCalls, 3)
@@ -198,7 +199,7 @@ func TestWriteNDJSONMatchesAgentevalContract(t *testing.T) {
 	keys := agenteval.ParseTraceEventKeys(stdout)
 	want := map[string]bool{
 		"trace:run":                       true,
-		"span:" + SpanPromptBuild:         true,
+		"span:" + SpanToolPartition:       true,
 		"span:" + SpanGeneration:          true,
 		"span:" + SpanToolExecution:       true,
 		"span:" + SpanProviderConnect:     true,
@@ -261,32 +262,78 @@ func (errWriter) Write(p []byte) (int, error) { return 0, errors.New("write fail
 func TestAttributionRatio(t *testing.T) {
 	r := NewRecorder("s", "r", "")
 	r.Start()
+	// Two sequential, non-overlapping spans (RecordSpan synthesizes them
+	// back-to-back from the cursor) so neither contains the other: both are
+	// top-level and AttributedDuration is their sum with no double-counting.
 	r.RecordSpan(SpanGeneration, 10*time.Millisecond)
 	r.RecordSpan(SpanToolExecution, 10*time.Millisecond)
 	tr := r.Finish()
 
-	// Attributed time is the deterministic sum of recorded span durations; it
+	// Attributed time is the deterministic sum of top-level span durations; it
 	// does not depend on wall-clock timing.
 	if want := 20 * time.Millisecond; tr.AttributedDuration() != want {
 		t.Fatalf("attributed = %v, want %v", tr.AttributedDuration(), want)
 	}
 
-	// AttributionRatio is attributed / wall. The spans are synthetic durations
-	// with no real delay, so wall is on the order of microseconds and the ratio
-	// can legitimately exceed 1.0 (overlapping parallel spans push it above 1.0
-	// in real runs too). Assert the contract — ratio == attributed/wall — rather
-	// than a fixed bound, so the test is clock-independent.
-	wall := tr.WallDuration()
-	if wall <= 0 {
-		// Clock granularity collapsed the run to zero wall; the ratio is defined 0.
-		if got := tr.AttributionRatio(); got != 0 {
-			t.Fatalf("ratio with zero wall = %v, want 0", got)
-		}
-		return
+	// AttributionRatio is Coverage — the fraction of wall covered by the union
+	// of span intervals, capped at 1.0. It never exceeds 1 (no double-counting
+	// of overlapping/nested spans), and equals Coverage by definition.
+	if got := tr.AttributionRatio(); got > 1 {
+		t.Fatalf("attribution ratio = %v, must never exceed 1", got)
 	}
-	wantRatio := float64(tr.AttributedDuration()) / float64(wall)
-	if got := tr.AttributionRatio(); got != wantRatio {
-		t.Fatalf("ratio = %v, want %v (attributed/wall)", got, wantRatio)
+	if got := tr.AttributionRatio(); got != tr.Coverage() {
+		t.Fatalf("attribution ratio = %v, want Coverage() = %v", got, tr.Coverage())
+	}
+}
+
+func TestCoverageExcludesDoubleCountAndCaps(t *testing.T) {
+	// A nested span (provider_connect inside generation) must NOT push coverage
+	// above 1, and the parent's exclusive time must subtract the child's interval.
+	r := NewRecorder("s", "r", "")
+	r.Start()
+	// Synthesize a containing generation interval of 100ms, then a provider_connect
+	// recorded after it so its interval sits fully inside generation's.
+	gen := r.Span(SpanGeneration)
+	time.Sleep(2 * time.Millisecond)
+	// Record a provider_connect that starts after generation started and ends
+	// before generation ends: nested, so it is the child of generation.
+	pc := r.Span(SpanProviderConnect)
+	time.Sleep(1 * time.Millisecond)
+	pc.End()
+	gen.End()
+	tr := r.Finish()
+
+	var genExclusive, pcExclusive time.Duration
+	var genParent, pcParent string
+	for _, s := range tr.Spans {
+		switch s.Name {
+		case SpanGeneration:
+			genExclusive = s.Exclusive
+			genParent = s.Parent
+		case SpanProviderConnect:
+			pcExclusive = s.Exclusive
+			pcParent = s.Parent
+		}
+	}
+	// provider_connect has no children, so its exclusive time equals its own
+	// duration and is positive.
+	if pcExclusive <= 0 {
+		t.Fatalf("provider_connect exclusive = %v, want > 0", pcExclusive)
+	}
+	if pcParent != SpanGeneration {
+		t.Fatalf("provider_connect parent = %q, want %q (nested by interval containment)", pcParent, SpanGeneration)
+	}
+	if genParent != "" {
+		t.Fatalf("generation should be top-level, got parent %q", genParent)
+	}
+	// generation's exclusive time must be its duration minus provider_connect's
+	// interval, not its full duration.
+	if genExclusive >= tr.Span(SpanGeneration) {
+		t.Fatalf("generation exclusive = %v should be less than its inclusive %v (child subtracted)",
+			genExclusive, tr.Span(SpanGeneration))
+	}
+	if tr.Coverage() > 1 {
+		t.Fatalf("coverage = %v, must never exceed 1 even with nested spans", tr.Coverage())
 	}
 }
 
@@ -317,7 +364,7 @@ func contains(slice []string, s string) bool {
 func TestReadNDJSONRoundTrip(t *testing.T) {
 	r := NewRecorder("s1", "r1", "cold")
 	r.Start()
-	r.RecordSpan(SpanPromptBuild, 10*time.Millisecond)
+	r.RecordSpan(SpanToolPartition, 10*time.Millisecond)
 	r.RecordSpan(SpanGeneration, 50*time.Millisecond)
 	r.RecordSpan(SpanGeneration, 5*time.Millisecond) // accumulates to 55ms
 	r.Counter(CounterModelRequests, 3)
@@ -350,5 +397,23 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	}
 	if parsed.FirstTokenAt.IsZero() {
 		t.Fatal("first_token_at lost in round-trip")
+	}
+}
+
+func TestReadNDJSONRejectsNonTrace(t *testing.T) {
+	// A file with content but no type:trace header is never a valid empty trace.
+	if _, err := ReadNDJSON(strings.NewReader("not json at all\n")); err == nil {
+		t.Fatal("expected error for non-JSON input with no trace header")
+	}
+	if _, err := ReadNDJSON(strings.NewReader(`{"type":"span","name":"generation","duration_ms":5}` + "\n")); err == nil {
+		t.Fatal("expected error for span lines with no preceding trace header")
+	}
+}
+
+func TestReadNDJSONRejectsHeaderOnly(t *testing.T) {
+	// A header with no recoverable spans/counters is corrupt/truncated, not empty.
+	header := `{"type":"trace","name":"run","session_id":"s","run_id":"r"}` + "\n"
+	if _, err := ReadNDJSON(strings.NewReader(header)); err == nil {
+		t.Fatal("expected error for a trace header with no spans or counters")
 	}
 }

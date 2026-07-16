@@ -8,25 +8,35 @@
 // The emitted NDJSON is compatible with internal/agenteval's trace contract:
 // one JSON object per line carrying a "type" (and usually "name") field, so
 // agenteval.ParseTraceEventKeys / MissingTraceEvents can validate a run.
+//
+// Attribution model. Each stamp records a wall interval [start, end]. Spans
+// that run concurrently or are nested (e.g. provider_connect inside generation,
+// permission_wait inside tool_execution) are NOT summed into each other. The
+// recorder derives a parent for each span by interval containment and computes
+// per-span exclusive time (duration minus the union of its children's
+// intervals). AttributedDuration is the sum of top-level (non-nested) spans —
+// the time accounted for without double-counting. Coverage is the fraction of
+// wall covered by the union of all span intervals; it is the honest "≥95% of
+// wall accounted for" metric and never exceeds 1.
 package trace
 
 import "time"
 
 // Span names. These are the "name" keys emitted in the NDJSON event stream
 // (e.g. {"type":"span","name":"generation","duration_ms":123.4}) and the
-// single source of truth for what a run's wall time is attributed to.
+// vocabulary a run's wall time is attributed to. Only names that are actually
+// stamped appear here: phases without a real stamp are omitted so readers do
+// not trust empty categories. RequiredEventKeys lists the subset guaranteed in
+// any successful model turn; OptionalEventKeys lists the rest.
 const (
-	SpanPromptBuild     = "prompt_build"
-	SpanProviderConnect = "provider_connect"
-	SpanProviderQueue   = "provider_queue"
-	SpanGeneration      = "generation"
-	SpanToolQueue       = "tool_queue"
-	SpanToolExecution   = "tool_execution"
-	SpanPermissionWait  = "permission_wait"
-	SpanProcessWait     = "process_wait"
-	SpanVerification    = "verification"
-	SpanCompaction      = "compaction"
-	SpanPersistence     = "persistence"
+	SpanToolPartition   = "tool_partition"   // partitioning the tool set for the prompt
+	SpanProviderConnect = "provider_connect" // client.Do in the provider seam
+	SpanProviderQueue   = "provider_queue"   // pre-send OAuth/token resolve
+	SpanGeneration      = "generation"       // streaming a model completion
+	SpanToolExecution   = "tool_execution"   // executing tool calls
+	SpanPermissionWait  = "permission_wait"  // waiting on a permission prompt
+	SpanVerification    = "verification"     // self-correct verify pass
+	SpanCompaction      = "compaction"       // context compaction
 )
 
 // Counter names. Emitted as {"type":"counter","name":"tool_calls","value":7}.
@@ -45,12 +55,22 @@ const (
 	CounterOutputTokens      = "output_tokens"
 )
 
-// Span is a named duration attributed to part of a run. Spans accumulate by
-// name: stamping the same name twice (e.g. prompt_build across turns) adds to
-// the existing entry rather than creating a duplicate.
+// Span is one named wall interval attributed to part of a run. Each stamp is
+// its own entry (spans are not merged by name): a run that streams two model
+// completions has two generation entries, which lets the recorder derive
+// parent/child nesting by interval containment and compute exclusive time.
+//
+// Duration is the inclusive wall time (End - Start). Exclusive is Duration
+// minus the union of this span's children's intervals — the time uniquely
+// attributable to this phase rather than to a nested sub-phase. Parent is the
+// name of the tightest containing span, or "" for a top-level span.
 type Span struct {
-	Name     string        `json:"name"`
-	Duration time.Duration `json:"duration"`
+	Name      string        `json:"name"`
+	Start     time.Time     `json:"start,omitempty"`
+	End       time.Time     `json:"end,omitempty"`
+	Duration  time.Duration `json:"duration"`
+	Parent    string        `json:"parent,omitempty"`
+	Exclusive time.Duration `json:"exclusive,omitempty"`
 }
 
 // Counter is a named integer accumulated during a run (counts and token totals).
@@ -82,39 +102,81 @@ func (t *TurnTrace) WallDuration() time.Duration {
 	return t.CompletedAt.Sub(t.StartedAt)
 }
 
-// AttributedDuration is the sum of all span durations. A run is considered
-// well-attributed when this is >= 95% of WallDuration.
+// AttributedDuration is the sum of top-level (non-nested) span durations — the
+// wall time accounted for without double-counting nested or concurrent sub-
+// phases. For a well-instrumented sequential run this is close to WallDuration
+// (gaps are uninstrumented regions); it does not inflate from nested children.
 func (t *TurnTrace) AttributedDuration() time.Duration {
 	if t == nil {
 		return 0
 	}
 	var total time.Duration
 	for _, span := range t.Spans {
-		total += span.Duration
+		if span.Parent == "" {
+			total += span.Duration
+		}
 	}
 	return total
 }
 
-// AttributionRatio is AttributedDuration / WallDuration, or 0 when unattributable.
-func (t *TurnTrace) AttributionRatio() float64 {
+// Coverage is the fraction of WallDuration covered by the union of all span
+// intervals, capped at 1.0. This is the honest "what fraction of wall time did
+// we account for" metric: overlapping or nested spans do not push it above 1.
+// Returns 0 when wall is zero or no span has a usable interval.
+func (t *TurnTrace) Coverage() float64 {
+	if t == nil {
+		return 0
+	}
 	wall := t.WallDuration()
 	if wall <= 0 {
 		return 0
 	}
-	return float64(t.AttributedDuration()) / float64(wall)
+	union := unionIntervalDuration(t.Spans)
+	if union <= 0 {
+		return 0
+	}
+	ratio := float64(union) / float64(wall)
+	if ratio > 1 {
+		ratio = 1
+	}
+	return ratio
 }
 
-// Span returns the duration recorded for name, or zero if absent.
+// AttributionRatio is Coverage — the fraction of wall covered by span
+// intervals. A run is considered well-attributed when this is >= 0.95. It
+// never exceeds 1, so it is a sound denominator for "share of attributed time".
+func (t *TurnTrace) AttributionRatio() float64 {
+	return t.Coverage()
+}
+
+// Span returns the total inclusive duration recorded for name across all its
+// occurrences, or zero if absent.
 func (t *TurnTrace) Span(name string) time.Duration {
 	if t == nil {
 		return 0
 	}
+	var total time.Duration
 	for _, span := range t.Spans {
 		if span.Name == name {
-			return span.Duration
+			total += span.Duration
 		}
 	}
-	return 0
+	return total
+}
+
+// Exclusive returns the total exclusive duration recorded for name across all
+// its occurrences (each occurrence's Duration minus its children), or zero.
+func (t *TurnTrace) Exclusive(name string) time.Duration {
+	if t == nil {
+		return 0
+	}
+	var total time.Duration
+	for _, span := range t.Spans {
+		if span.Name == name {
+			total += span.Exclusive
+		}
+	}
+	return total
 }
 
 // Counter returns the value recorded for name, or zero if absent.
@@ -130,23 +192,42 @@ func (t *TurnTrace) Counter(name string) int64 {
 	return 0
 }
 
-// RequiredEventKeys is the set of span/counter event keys a traced run is
-// expected to emit. Tests assert via agenteval.MissingTraceEvents that a run
-// produces all of these. Generation spans are only produced when the run
-// reaches a model request, so callers may trim this list for short circuits.
+// RequiredEventKeys is the set of span/counter event keys guaranteed in any
+// successful single-turn traced run, regardless of provider or auth path.
+// Tests assert via agenteval.MissingTraceEvents that a run produces all of
+// these. Phases that are conditional (tools, permission, compaction,
+// verification) are in OptionalEventKeys, not here, so a healthy short trace
+// does not false-fail.
 func RequiredEventKeys() []string {
 	return []string{
-		"span:" + SpanPromptBuild,
+		"span:" + SpanToolPartition,
 		"span:" + SpanGeneration,
-		"span:" + SpanToolExecution,
-		"span:" + SpanPermissionWait,
-		"span:" + SpanCompaction,
-		"span:" + SpanPersistence,
 		"span:" + SpanProviderConnect,
 		"counter:" + CounterModelRequests,
-		"counter:" + CounterToolCalls,
 		"counter:" + CounterInputTokens,
 		"counter:" + CounterOutputTokens,
 		"trace:run",
+	}
+}
+
+// OptionalEventKeys are event keys a traced run MAY emit depending on what the
+// run does (it may call no tools, need no permission, never compact, etc.).
+// Callers must not treat their absence as a failure.
+func OptionalEventKeys() []string {
+	return []string{
+		"span:" + SpanProviderQueue,
+		"span:" + SpanToolExecution,
+		"span:" + SpanPermissionWait,
+		"span:" + SpanCompaction,
+		"span:" + SpanVerification,
+		"counter:" + CounterToolCalls,
+		"counter:" + CounterCachedInputTokens,
+		"counter:" + CounterRetryCount,
+		"counter:" + CounterReconnectCount,
+		"counter:" + CounterCompactionCount,
+		"counter:" + CounterCompletionNudges,
+		"counter:" + CounterAcceptanceChecks,
+		"counter:" + CounterPollingTurn,
+		"counter:" + CounterModelSwitches,
 	}
 }
