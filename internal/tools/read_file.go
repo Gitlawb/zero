@@ -39,6 +39,8 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 				AdditionalProperties: false,
 			},
 			safety: readOnlySafety("Reads file contents without modifying files."),
+			// ThreadSafe=false: may update FileTracker session state on read.
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,

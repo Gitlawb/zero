@@ -34,6 +34,8 @@ func NewRequestPermissionsTool() Tool {
 				Permission: PermissionAllow,
 				Reason:     "Requests a user permission decision but does not read, write, run commands, or use the network.",
 			},
+			// Interactive permission escalation.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 	}
 }

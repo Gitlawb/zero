@@ -465,6 +465,8 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 				AdditionalProperties: false,
 			},
 			safety: promptSafety(SideEffectShell, "Shell commands can read, write, or execute programs."),
+			// PTY/shell session — never concurrent.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: processResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -717,6 +719,8 @@ func NewWriteStdinTool(manager *execSessionManager) Tool {
 				Reason:          "Sending stdin can drive an existing shell process beyond the original command; empty polling and Ctrl-C interrupts are allowed automatically.",
 				AdvertiseInAuto: true,
 			},
+			// Writes to a retained process stdin — process interaction.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: processResourceKeys},
 		},
 		manager: manager,
 	}

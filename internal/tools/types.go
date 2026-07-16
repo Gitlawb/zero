@@ -143,10 +143,11 @@ type PrePermissionRejecter interface {
 }
 
 type baseTool struct {
-	name        string
-	description string
-	parameters  Schema
-	safety      Safety
+	name         string
+	description  string
+	parameters   Schema
+	safety       Safety
+	capabilities ToolCapabilities // zero value = EffectUnknown, not thread-safe
 }
 
 func (tool baseTool) Name() string {

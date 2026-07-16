@@ -52,6 +52,8 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 				AdditionalProperties: false,
 			},
 			safety: promptSafety(SideEffectShell, "Shell commands can read, write, or execute programs."),
+			// Shell can mutate workspace and external state; never concurrent.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: directoryResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
