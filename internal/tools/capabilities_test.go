@@ -213,10 +213,12 @@ func TestApplyPatchResourceKeysFromDiffAndCwd(t *testing.T) {
 		"patch": patch,
 		"cwd":   "pkg",
 	})
+	// Diff paths must be joined under cwd so the same basename under different
+	// cwds does not collide for the future conflict planner.
 	want := map[string]bool{
-		ResourceKeyDirectory + "pkg": true,
-		ResourceKeyFile + "old.go":   true,
-		ResourceKeyFile + "new.go":   true,
+		ResourceKeyDirectory + "pkg":   true,
+		ResourceKeyFile + "pkg/old.go": true,
+		ResourceKeyFile + "pkg/new.go": true,
 	}
 	for _, k := range keys {
 		if !want[k] {
@@ -226,6 +228,30 @@ func TestApplyPatchResourceKeysFromDiffAndCwd(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing keys %v from %v", want, keys)
+	}
+}
+
+func TestDeclaredMutatorThreadSafeIsReportedByCatalogValidation(t *testing.T) {
+	// Runtime CapabilitiesOf clears ThreadSafe on mutators; catalog validation
+	// must still see the raw declaration so miswired constructors fail the gate.
+	tool := deferredCapableTool{baseTool: baseTool{
+		name: "bad_writer",
+		capabilities: ToolCapabilities{
+			Effect:     EffectWorkspaceWrite,
+			ThreadSafe: true,
+		},
+	}}
+	declared := declaredCapabilitiesOf(tool)
+	if !declared.ThreadSafe || declared.Effect != EffectWorkspaceWrite {
+		t.Fatalf("declared = %+v, want raw WorkspaceWrite+ThreadSafe", declared)
+	}
+	problems := ValidateCapabilities(tool.Name(), declared)
+	if len(problems) == 0 {
+		t.Fatal("expected ValidateCapabilities to reject raw WorkspaceWrite+ThreadSafe")
+	}
+	// Runtime view stays safe.
+	if CapabilitiesOf(tool).ThreadSafe {
+		t.Fatal("runtime CapabilitiesOf must still clear ThreadSafe")
 	}
 }
 

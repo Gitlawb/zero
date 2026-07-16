@@ -101,10 +101,25 @@ func CapabilitiesOf(tool Tool) ToolCapabilities {
 	return UnknownCapabilities()
 }
 
-// (baseTool).Capabilities exposes the capabilities field set at construction.
+// (baseTool).Capabilities exposes the capabilities field set at construction,
+// normalized so ThreadSafe cannot surface on non-ReadOnly effects.
 // Tools that embed baseTool inherit this method.
 func (tool baseTool) Capabilities() ToolCapabilities {
 	return normalizeCapabilities(tool.capabilities)
+}
+
+// declaredCapabilities returns the constructor-set metadata without runtime
+// normalization. Catalog validation uses this so a mis-declared
+// ThreadSafe=true on a mutator is still reported even though CapabilitiesOf
+// clears it for callers.
+func (tool baseTool) declaredCapabilities() ToolCapabilities {
+	return tool.capabilities
+}
+
+// declaredCapabilityProvider is implemented by tools that can report their
+// raw constructor metadata (baseTool embedders).
+type declaredCapabilityProvider interface {
+	declaredCapabilities() ToolCapabilities
 }
 
 // Registry.Capabilities looks up a registered tool's capabilities by name.

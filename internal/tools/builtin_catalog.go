@@ -52,23 +52,43 @@ func BuiltinCatalog(workspaceRoot string) []Tool {
 // Duplicate builtin names are always rejected: ResourceKeys is a function and
 // cannot be compared, so partial metadata comparison would miss conflict-scope
 // drift between two same-name tools.
+//
+// Validation uses constructor-declared capabilities (before ThreadSafe
+// normalization) so a mutator wired with ThreadSafe=true is still reported.
+// Runtime callers continue to use CapabilitiesOf, which normalizes.
 func ValidateBuiltinCatalog(workspaceRoot string) []string {
 	var problems []string
 	seen := map[string]struct{}{}
 	for _, tool := range BuiltinCatalog(workspaceRoot) {
 		name := tool.Name()
-		caps := CapabilitiesOf(tool)
 		if _, ok := seen[name]; ok {
 			problems = append(problems, name+": duplicate builtin name in catalog")
 			continue
 		}
 		seen[name] = struct{}{}
-		if caps.Effect == EffectUnknown {
+
+		// Runtime view: must not remain Unknown after normalization.
+		runtimeCaps := CapabilitiesOf(tool)
+		if runtimeCaps.Effect == EffectUnknown {
 			problems = append(problems, name+": built-in tool remains EffectUnknown (metadata required)")
 		}
-		// Validate raw constructor declaration as well as normalized form so a
-		// mis-set ThreadSafe on a mutator is still reported.
-		problems = append(problems, ValidateCapabilities(name, caps)...)
+
+		// Declaration view: catch invalid ThreadSafe on mutators that
+		// CapabilitiesOf would silently clear.
+		declared := declaredCapabilitiesOf(tool)
+		problems = append(problems, ValidateCapabilities(name, declared)...)
 	}
 	return problems
+}
+
+// declaredCapabilitiesOf returns constructor metadata when available; otherwise
+// falls back to CapabilitiesOf (already normalized).
+func declaredCapabilitiesOf(tool Tool) ToolCapabilities {
+	if tool == nil {
+		return UnknownCapabilities()
+	}
+	if d, ok := tool.(declaredCapabilityProvider); ok {
+		return d.declaredCapabilities()
+	}
+	return CapabilitiesOf(tool)
 }

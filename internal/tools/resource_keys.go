@@ -95,15 +95,7 @@ func endpointResourceKeys(args map[string]any) []string {
 // sessionResourceKeys extracts a session: key from session / session_id args.
 // Numeric session ids (JSON numbers) are coerced to strings.
 func sessionResourceKeys(args map[string]any) []string {
-	id := firstStringArg(args, "session", "session_id", "sessionId")
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil
-	}
-	if len(id) > 128 {
-		id = id[:128]
-	}
-	return []string{ResourceKeySession + id}
+	return scopedIDResourceKeys(ResourceKeySession, args, "session", "session_id", "sessionId")
 }
 
 // processResourceKeys extracts process: keys for retained process / terminal
@@ -111,15 +103,22 @@ func sessionResourceKeys(args map[string]any) []string {
 // write_stdin (integer session_id) and terminal_session (string session)
 // both produce keys.
 func processResourceKeys(args map[string]any) []string {
-	id := firstStringArg(args, "session", "session_id", "sessionId", "process_id", "pid", "id")
-	id = strings.TrimSpace(id)
+	return scopedIDResourceKeys(ResourceKeyProcess, args,
+		"session", "session_id", "sessionId", "process_id", "pid", "id")
+}
+
+// scopedIDResourceKeys is the shared extract/trim/bound/prefix path for
+// session- and process-scoped resource keys.
+func scopedIDResourceKeys(prefix string, args map[string]any, keys ...string) []string {
+	id := strings.TrimSpace(firstStringArg(args, keys...))
 	if id == "" {
 		return nil
 	}
+	// Never put free-form content in keys — IDs only, bounded length.
 	if len(id) > 128 {
 		id = id[:128]
 	}
-	return []string{ResourceKeyProcess + id}
+	return []string{prefix + id}
 }
 
 // workspaceResourceKeys returns a single workspace: root marker when the call
@@ -155,15 +154,19 @@ func multiFileResourceKeys(args map[string]any) []string {
 
 // applyPatchResourceKeys derives conflict keys for apply_patch: the cwd as a
 // directory key, optional path/paths args, plus any +++/--- file paths
-// parseable from the unified diff. Falls back to workspace:root when nothing
+// parseable from the unified diff. Relative diff paths are joined under cwd
+// so the same file under different cwd values does not collide (e.g. cwd=pkg
+// + +++ b/new.go → file:pkg/new.go). Falls back to workspace:root when nothing
 // is available so a patch call is never "keyless" for the future conflict planner.
 func applyPatchResourceKeys(args map[string]any) []string {
 	var keys []string
 	keys = append(keys, directoryResourceKeys(args)...)
 	keys = append(keys, multiFileResourceKeys(args)...)
+	cwd := firstStringArg(args, "cwd", "workdir")
 	patch := firstStringArg(args, "patch", "diff")
 	for _, p := range pathsFromUnifiedDiff(patch) {
-		if n := NormalizeResourcePath(p); n != "" {
+		joined := joinUnderResourceCwd(cwd, p)
+		if n := NormalizeResourcePath(joined); n != "" {
 			keys = append(keys, ResourceKeyFile+n)
 		}
 	}
@@ -172,6 +175,26 @@ func applyPatchResourceKeys(args map[string]any) []string {
 		return workspaceResourceKeys(args)
 	}
 	return keys
+}
+
+// joinUnderResourceCwd joins a relative path under cwd for resource keys only.
+// Absolute paths are left unchanged. Empty cwd or "." leaves rel as-is.
+// Never touches the filesystem.
+func joinUnderResourceCwd(cwd, rel string) string {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return ""
+	}
+	// Absolute (Unix or Windows) paths are already workspace-rooted or outside;
+	// do not re-prefix.
+	if filepath.IsAbs(rel) {
+		return rel
+	}
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" || cwd == "." {
+		return rel
+	}
+	return filepath.ToSlash(filepath.Join(cwd, rel))
 }
 
 // pathsFromUnifiedDiff extracts a/ and b/ file paths from unified-diff headers.
