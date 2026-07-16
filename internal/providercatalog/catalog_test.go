@@ -17,7 +17,6 @@ var expectedCatalogIDs = []string{
 	"ollama",
 	"lmstudio",
 	"openrouter",
-	"aimlapi",
 	"huggingface",
 	"chatgpt",
 	"groq",
@@ -116,14 +115,14 @@ func TestAIMLAPIDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Require(aimlapi) error = %v", err)
 	}
-	if descriptor.Name != "AI/ML API" {
-		t.Fatalf("Name = %q, want AI/ML API", descriptor.Name)
+	if descriptor.Name != "aimlapi.com" {
+		t.Fatalf("Name = %q, want aimlapi.com", descriptor.Name)
 	}
 	if descriptor.DefaultBaseURL != "https://api.aimlapi.com/v1" {
-		t.Fatalf("DefaultBaseURL = %q, want AI/ML API endpoint", descriptor.DefaultBaseURL)
+		t.Fatalf("DefaultBaseURL = %q, want aimlapi.com endpoint", descriptor.DefaultBaseURL)
 	}
-	if descriptor.DefaultModel != "openai/gpt-5-chat" {
-		t.Fatalf("DefaultModel = %q, want openai/gpt-5-chat", descriptor.DefaultModel)
+	if descriptor.DefaultModel != "anthropic/claude-sonnet-5" {
+		t.Fatalf("DefaultModel = %q, want anthropic/claude-sonnet-5", descriptor.DefaultModel)
 	}
 	if descriptor.Transport != TransportOpenAICompatible {
 		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
@@ -323,7 +322,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "aimlapi", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

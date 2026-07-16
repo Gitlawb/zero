@@ -34,7 +34,7 @@ const (
 
 var ErrUnknownProvider = errors.New("unknown provider")
 
-// AIMLAPIID is the provider catalog identifier for the AI/ML API preset.
+// AIMLAPIID is the provider catalog identifier for the aimlapi.com preset.
 const AIMLAPIID = "aimlapi"
 
 type Descriptor struct {
@@ -116,7 +116,6 @@ var descriptors = []Descriptor{
 	localOpenAI("ollama", "Ollama Local", "http://localhost:11434/v1", "llama3.1", "ollama local"),
 	localOpenAI("lmstudio", "LM Studio", "http://localhost:1234/v1", "local-model", "lm-studio", "lm studio"),
 	oauthProvider(openAICompat("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4.1", []string{"OPENROUTER_API_KEY"}), true, false),
-	openAICompat(AIMLAPIID, "AI/ML API", "https://api.aimlapi.com/v1", "openai/gpt-5-chat", []string{"AIMLAPI_API_KEY"}, "aiml api", "ai/ml api"),
 	// Hugging Face Inference Providers — OpenAI-compatible router at
 	// https://router.huggingface.co/v1 exposes hundreds of OSS models. OAuth
 	// requires a one-time app registration at huggingface.co/settings/applications/new
@@ -309,7 +308,7 @@ func google(id string, name string, baseURL string, model string, env []string, 
 }
 
 func aimlapi() Descriptor {
-	descriptor := openAICompat("aimlapi", "aimlapi.com", "https://api.aimlapi.com/v1", "anthropic/claude-sonnet-5", []string{"AIMLAPI_API_KEY"}, "aimlapi.com", "aimlapi", "ai ml api")
+	descriptor := openAICompat(AIMLAPIID, "aimlapi.com", "https://api.aimlapi.com/v1", "anthropic/claude-sonnet-5", []string{"AIMLAPI_API_KEY"}, "aimlapi", "aiml api", "ai/ml api", "ai ml api")
 	descriptor.CustomHeaders = map[string]string{
 		"X-AIMLAPI-Partner-ID":          "part_62yQoGYDq4Yqnrj2R1iGrDNJ",
 		"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
