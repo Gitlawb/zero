@@ -57,7 +57,7 @@ type webFetchBlockedPrefix struct {
 }
 
 type webFetchEmbeddedIPv4Prefix struct {
-	prefix     netip.Prefix
+	prefix    netip.Prefix
 	byteOffset int
 }
 
@@ -132,7 +132,7 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 						Default:     "auto",
 					},
 				},
-				Required:             []string{"url"},
+				Required: []string{"url"},
 				AdditionalProperties: false,
 			},
 			safety: Safety{
@@ -152,15 +152,12 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 }
 
 func (tool webFetchTool) RejectBeforePermission(args map[string]any) (Result, bool) {
-	rawURL, err := stringArg(args, "url", "", true)
+	_, err := stringArg(args, "url", "", true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
 	}
 	if _, err := intArg(args, "max_bytes", defaultWebFetchMaxBytes, 1, maxWebFetchMaxBytes); err != nil {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
-	}
-	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
-		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error()), true
 	}
 	return Result{}, false
 }
@@ -193,9 +190,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	default:
 		return errorResult(`Error: Invalid arguments for web_fetch: format must be "auto", "raw", or "markdown".`)
 	}
-	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
-		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
-	}
+
 
 	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)
 	if err != nil {
@@ -224,6 +219,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 		finalURL = redactWebFetchURL(response.Request.URL)
 	}
 	contentType := redactWebFetchText(response.Header.Get("Content-Type"))
+
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _, _ := readWebFetchBody(response.Body, min(maxBytes, webFetchErrorBodyLimit))
 		message := fmt.Sprintf("Error fetching URL: HTTP %s", webFetchStatusLine(response))
@@ -266,7 +262,7 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 		"Bytes: " + strconv.Itoa(len(body)),
 	}
 	if converted {
-		headers = append(headers, "Converted: html -> markdown (pass format: \"raw\" for the original HTML)")
+		headers = append(headers, `Converted: html -> markdown (pass format: "raw" for the original HTML)`)
 	}
 	output := strings.Join(append(headers, "", body), "\n")
 
@@ -311,7 +307,7 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 	}
 
 	dialer := &net.Dialer{Timeout: webFetchTimeout, KeepAlive: 30 * time.Second}
-	transport.Proxy = nil
+	transport.Proxy = http.ProxyFromEnvironment
 	transport.DialContext = webFetchSafeDialContext(resolver, dialer)
 	transport.DialTLSContext = nil
 	return transport
@@ -319,6 +315,16 @@ func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchReso
 
 func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		// ponytail: forward proxy on loopback — this is the proxy address, not the endpoint
+		for _, s := range []string{"https", "http"} {
+			if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: s, Host: "x"}}); proxyURL != nil {
+				if h, p, err := net.SplitHostPort(address); err == nil {
+					if proxyURL.Hostname() == h && (proxyURL.Port() == "" || proxyURL.Port() == p) {
+						return dialer.DialContext(ctx, network, address)
+					}
+				}
+			}
+		}
 		pinnedAddress, err := webFetchSafeDialAddress(ctx, resolver, address)
 		if err != nil {
 			return nil, err
@@ -384,17 +390,6 @@ func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchRe
 	return parsed, nil
 }
 
-func validateWebFetchURLBeforePermission(rawURL string) error {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return fmt.Errorf("url is required")
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return err
-	}
-	return validateParsedWebFetchURLBeforePermission(parsed)
-}
 
 func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver webFetchResolver) error {
 	if err := validateParsedWebFetchURLBeforePermission(parsed); err != nil {
