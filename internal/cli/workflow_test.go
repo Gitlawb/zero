@@ -808,7 +808,7 @@ func TestEnsureFeatureBranchCreatesBranchOffDefaultWithoutProvider(t *testing.T)
 	cwd := t.TempDir()
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -837,7 +837,7 @@ func TestEnsureFeatureBranchUsesLLMSlugWhenProviderConfigured(t *testing.T) {
 	mockProv := &mockCommitMsgProvider{response: "add login page"}
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -873,7 +873,7 @@ func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
 	mockProv := &mockCommitMsgProvider{response: "\n\"add login page\"\n"}
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -904,7 +904,7 @@ func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return false, "feat/existing", "origin", nil
 		},
@@ -935,7 +935,7 @@ func TestEnsureFeatureBranchSkipsWhenAllowDefaultOrDryRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cwd := t.TempDir()
-			branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", tc.allowDefaultBranch, tc.dryRun, false, appDeps{
+			branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", tc.allowDefaultBranch, tc.dryRun, false, 0, appDeps{
 				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 					t.Fatal("isDefaultBranch should not be called")
 					return false, "", "", nil
@@ -959,7 +959,7 @@ func TestEnsureFeatureBranchNamesFromHeadCommitAfterCommit(t *testing.T) {
 	cwd := t.TempDir()
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -991,7 +991,7 @@ func TestEnsureFeatureBranchDoesNotCallProviderWithoutAuto(t *testing.T) {
 	// cause the change diff to be uploaded for naming unless --auto opts in.
 	cwd := t.TempDir()
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, appDeps{
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1015,6 +1015,38 @@ func TestEnsureFeatureBranchDoesNotCallProviderWithoutAuto(t *testing.T) {
 	}
 	if branch != "someone/login-go" {
 		t.Fatalf("expected the deterministic local name, got %q", branch)
+	}
+}
+
+func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
+	// --diff-bytes caps how much of the diff Inspect returns; with --auto that
+	// diff is embedded in the provider request, so the cap must reach Inspect
+	// or a user bounding the proprietary source sent for LLM naming would still
+	// upload the complete diff.
+	cwd := t.TempDir()
+	var gotMaxDiffBytes int
+
+	_, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 4096, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			gotMaxDiffBytes = options.MaxDiffBytes
+			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if gotMaxDiffBytes != 4096 {
+		t.Fatalf("expected MaxDiffBytes 4096 threaded into Inspect, got %d", gotMaxDiffBytes)
 	}
 }
 

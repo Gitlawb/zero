@@ -867,7 +867,7 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, deps)
+	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, options.maxDiffBytes, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -925,7 +925,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, deps)
+	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -1040,8 +1040,10 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // git-only, and sending the change diff to a configured provider on every
 // default-branch push would silently export source code nobody asked to
 // share. Without the opt-in the name comes from deterministic local
-// information only.
-func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, deps appDeps) (string, string, error) {
+// information only. maxDiffBytes caps the diff Inspect returns, so a user who
+// passed --diff-bytes to bound the proprietary source sent for LLM naming has
+// that cap honored here just as the commit path does.
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, error) {
 	if allowDefaultBranch || dryRun {
 		return "", strings.TrimSpace(requestedRemote), nil
 	}
@@ -1054,7 +1056,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return currentBranch, remote, nil
 	}
 
-	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to inspect changes: %w", err)
 	}
