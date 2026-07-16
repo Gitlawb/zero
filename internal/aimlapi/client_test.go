@@ -105,6 +105,30 @@ func TestClientReturnsTypedAPIError(t *testing.T) {
 	}
 }
 
+func TestTypedResponseRejectsEmptySuccessBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClient(Endpoints{InferenceBaseURL: server.URL}, server.Client())
+	if _, err := client.GetBalance(context.Background(), "key"); err == nil {
+		t.Fatal("GetBalance accepted an empty successful response")
+	}
+}
+
+func TestBodylessOperationAcceptsEmptySuccessBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClient(Endpoints{AuthBaseURL: server.URL}, server.Client())
+	if err := client.SendSignInCode(context.Background(), "user@example.com"); err != nil {
+		t.Fatalf("SendSignInCode() error = %v", err)
+	}
+}
+
 func TestParseAmountUSD(t *testing.T) {
 	tests := []struct {
 		name    string

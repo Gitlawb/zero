@@ -58,6 +58,34 @@ func TestStreamTopUpByKeyFundsWithoutExchange(t *testing.T) {
 	}
 }
 
+func TestValidatedCheckoutURLRequiresAbsoluteHTTPS(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{name: "https", value: " https://pay.example.test/checkout?id=1 ", want: "https://pay.example.test/checkout?id=1"},
+		{name: "empty", wantErr: true},
+		{name: "relative", value: "/checkout", wantErr: true},
+		{name: "http", value: "http://pay.example.test/checkout", wantErr: true},
+		{name: "file", value: "file:///tmp/checkout", wantErr: true},
+		{name: "custom protocol", value: "wallet://checkout/123", wantErr: true},
+		{name: "userinfo", value: "https://token@pay.example.test/checkout", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validatedCheckoutURL(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validatedCheckoutURL(%q) error = %v", test.value, err)
+			}
+			if got != test.want {
+				t.Fatalf("validatedCheckoutURL(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestStreamTopUpByKeyPinsValidatedInferenceEndpoint(t *testing.T) {
 	validatedCalls := 0
 	validated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

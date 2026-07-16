@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -98,9 +99,9 @@ func StreamTopUp(ctx context.Context, options StreamTopUpOptions) (ProvisionedKe
 		if err != nil {
 			return ProvisionedKey{}, err
 		}
-		checkoutURL := strings.TrimSpace(pay.Checkout.PayURL)
-		if checkoutURL == "" {
-			return ProvisionedKey{}, fmt.Errorf("payment provider did not return a checkout URL")
+		checkoutURL, err := validatedCheckoutURL(pay.Checkout.PayURL)
+		if err != nil {
+			return ProvisionedKey{}, err
 		}
 		announceCheckout(options.OnStatus, options.OpenBrowser, options.NoOpen, checkoutURL)
 	}
@@ -207,6 +208,15 @@ func announceCheckout(onStatus func(Status, string), open func(string) error, no
 	status(onStatus, StatusOpeningCheckout, checkoutURL)
 }
 
+func validatedCheckoutURL(value string) (string, error) {
+	checkoutURL := strings.TrimSpace(value)
+	parsed, err := url.Parse(checkoutURL)
+	if err != nil || !parsed.IsAbs() || !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" || parsed.User != nil {
+		return "", fmt.Errorf("payment provider did not return a valid HTTPS checkout URL")
+	}
+	return checkoutURL, nil
+}
+
 // StreamTopUpByKeyOptions drives a top-up funded with the API key that already
 // owns the account (Path A pasted key, or AIMLAPI_API_KEY). Unlike StreamTopUp it
 // needs no email session and never exchanges a key — the caller already holds one,
@@ -275,9 +285,9 @@ func StreamTopUpByKey(ctx context.Context, options StreamTopUpByKeyOptions) (Pro
 		if err != nil {
 			return ProvisionedKey{}, err
 		}
-		checkoutURL := strings.TrimSpace(pay.Checkout.PayURL)
-		if checkoutURL == "" {
-			return ProvisionedKey{}, fmt.Errorf("payment provider did not return a checkout URL")
+		checkoutURL, err := validatedCheckoutURL(pay.Checkout.PayURL)
+		if err != nil {
+			return ProvisionedKey{}, err
 		}
 		announceCheckout(options.OnStatus, options.OpenBrowser, options.NoOpen, checkoutURL)
 	}

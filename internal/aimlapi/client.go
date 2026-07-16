@@ -242,8 +242,11 @@ func (c *Client) request(ctx context.Context, method string, endpoint string, be
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return APIError{Message: method + " " + endpoint, Status: response.StatusCode, Body: string(text)}
 	}
-	if out == nil || len(text) == 0 {
+	if out == nil {
 		return nil
+	}
+	if len(bytes.TrimSpace(text)) == 0 {
+		return APIError{Message: method + " " + endpoint + " returned empty body", Status: response.StatusCode}
 	}
 	if err := json.Unmarshal(text, out); err != nil {
 		return APIError{Message: method + " " + endpoint + " returned non-JSON body", Status: response.StatusCode, Body: string(text)}
