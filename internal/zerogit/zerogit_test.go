@@ -979,6 +979,30 @@ func TestIsDefaultBranch(t *testing.T) {
 			t.Fatalf("expected fail-closed error, got %v", err)
 		}
 	})
+
+	t.Run("StaleCachedRemoteHeadDoesNotClearGuard", func(t *testing.T) {
+		// The server renamed its default from main to trunk, but the local
+		// refs/remotes/origin/HEAD cache still names main. With the live lookup
+		// failing, a cache that does not match the branch is not evidence the
+		// branch is unprotected: the check must fail closed, not report "trunk
+		// is not the default" and let the push through without --yes.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{ExitCode: 1},                          // config lookup fails → origin
+			{ExitCode: 128, Stderr: "fatal:"},      // ls-remote fails
+			{Stdout: "refs/remotes/origin/main\n"}, // stale cache: still says main
+		}}
+
+		_, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			Branch: "trunk",
+			RunGit: runner.Run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "default branch for remote") {
+			t.Fatalf("expected fail-closed error on stale cache mismatch, got %v", err)
+		}
+	})
 }
 
 func TestCurrentGitUser(t *testing.T) {
