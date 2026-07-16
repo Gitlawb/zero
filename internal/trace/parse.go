@@ -97,6 +97,25 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 			}
 			name, _ := obj["name"].(string)
 			t.Counters = append(t.Counters, Counter{Name: name, Value: parseInt64(obj["value"])})
+		case "prefix_hash":
+			if !sawTraceHeader {
+				return nil, errors.New("parse trace: not a valid NDJSON trace (no type:trace header)")
+			}
+			// Round-trip the seven prefix-hash fields. Missing fields are
+			// accepted as empty strings (a partially-written trace from a
+			// crashed emitter must not fatal a parse). The decoder tolerates
+			// any shape the encoder produced and the seven keys are the
+			// contract — adding a new field is non-breaking; renaming one
+			// requires a schema version bump.
+			t.PrefixHashes = append(t.PrefixHashes, PrefixHash{
+				BaseInstructionsHash:   stringField(obj, "base_instructions"),
+				ConfirmationPolicyHash: stringField(obj, "confirmation_policy"),
+				ProjectContextHash:     stringField(obj, "project_context"),
+				SkillsHash:             stringField(obj, "skills"),
+				ToolsHash:              stringField(obj, "tools"),
+				SchemaHash:             stringField(obj, "schema"),
+				CompletePrefixHash:     stringField(obj, "complete_prefix"),
+			})
 		default:
 			// Unknown event type: tolerate (forward-compat) but only after a
 			// header has been seen.
@@ -117,12 +136,21 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 	if !sawTraceHeader {
 		return nil, errors.New("parse trace: non-empty input had no type:trace header")
 	}
-	if len(t.Spans) == 0 && len(t.Counters) == 0 {
-		return nil, errors.New("parse trace: header present but no spans or counters recovered (corrupt or truncated)")
+	if len(t.Spans) == 0 && len(t.Counters) == 0 && len(t.PrefixHashes) == 0 {
+		return nil, errors.New("parse trace: header present but no spans, counters, or prefix hashes recovered (corrupt or truncated)")
 	}
 	return t, nil
 }
 
+// stringField returns obj[key] as a string, or "" if the key is missing or
+// the value is not a string. JSON-marshaled trace events always emit
+// string fields as JSON strings, so the type assertion is the right
+// narrowing; a missing key produces an empty hash, which is what the
+// encoder would have produced for the absent value.
+func stringField(obj map[string]any, key string) string {
+	s, _ := obj[key].(string)
+	return s
+}
 func parseTime(v any) time.Time {
 	s, _ := v.(string)
 	if s == "" {

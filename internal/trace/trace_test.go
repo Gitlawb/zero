@@ -370,6 +370,27 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	r.Counter(CounterModelRequests, 3)
 	r.Counter(CounterToolCalls, 7)
 	r.StampFirstToken()
+	// Two prefix_hash events so the round-trip test covers the third
+	// event type. Insertion order is preserved by the parser (no sort
+	// is applied on read or write).
+	r.EmitPrefixHash(PrefixHash{
+		BaseInstructionsHash:   "b1",
+		ConfirmationPolicyHash: "c1",
+		ProjectContextHash:     "p1",
+		SkillsHash:             "s1",
+		ToolsHash:              "t1",
+		SchemaHash:             "x1",
+		CompletePrefixHash:     "complete1",
+	})
+	r.EmitPrefixHash(PrefixHash{
+		BaseInstructionsHash:   "b2",
+		ConfirmationPolicyHash: "c2",
+		ProjectContextHash:     "p2",
+		SkillsHash:             "s2",
+		ToolsHash:              "t2",
+		SchemaHash:             "x2",
+		CompletePrefixHash:     "complete2",
+	})
 	original := r.Finish()
 
 	var buf bytes.Buffer
@@ -398,6 +419,20 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	if parsed.FirstTokenAt.IsZero() {
 		t.Fatal("first_token_at lost in round-trip")
 	}
+	// prefix_hash round-trip: two events, in insertion order, with all
+	// seven sub-hash fields preserved exactly.
+	if len(parsed.PrefixHashes) != 2 {
+		t.Fatalf("expected 2 prefix_hash events after round-trip, got %d", len(parsed.PrefixHashes))
+	}
+	if parsed.PrefixHashes[0].CompletePrefixHash != "complete1" || parsed.PrefixHashes[1].CompletePrefixHash != "complete2" {
+		t.Fatalf("prefix_hash insertion order lost: got %+v want [complete1, complete2]", parsed.PrefixHashes)
+	}
+	if parsed.PrefixHashes[0].BaseInstructionsHash != "b1" || parsed.PrefixHashes[0].SchemaHash != "x1" {
+		t.Fatalf("prefix_hash sub-hashes lost on first event: got %+v", parsed.PrefixHashes[0])
+	}
+	if parsed.PrefixHashes[1].BaseInstructionsHash != "b2" || parsed.PrefixHashes[1].SchemaHash != "x2" {
+		t.Fatalf("prefix_hash sub-hashes lost on second event: got %+v", parsed.PrefixHashes[1])
+	}
 }
 
 func TestReadNDJSONRejectsNonTrace(t *testing.T) {
@@ -411,10 +446,12 @@ func TestReadNDJSONRejectsNonTrace(t *testing.T) {
 }
 
 func TestReadNDJSONRejectsHeaderOnly(t *testing.T) {
-	// A header with no recoverable spans/counters is corrupt/truncated, not empty.
+	// A header with no recoverable spans, counters, or prefix hashes is
+	// corrupt/truncated, not empty. prefix_hash is now a third valid
+	// event type, so a header with only prefix_hash events is accepted.
 	header := `{"type":"trace","name":"run","session_id":"s","run_id":"r"}` + "\n"
 	if _, err := ReadNDJSON(strings.NewReader(header)); err == nil {
-		t.Fatal("expected error for a trace header with no spans or counters")
+		t.Fatal("expected error for a trace header with no spans, counters, or prefix hashes")
 	}
 }
 

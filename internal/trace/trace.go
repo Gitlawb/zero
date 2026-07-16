@@ -82,16 +82,52 @@ type Counter struct {
 // TurnTrace is the finished record for one agent.Run. It is the value
 // emitters serialize; it is not mutated after Finish returns a snapshot.
 type TurnTrace struct {
-	SessionID           string    `json:"session_id"`
-	RunID               string    `json:"run_id"`
-	Profile             string    `json:"profile,omitempty"`
-	StartedAt           time.Time `json:"started_at"`
-	FirstVisibleEventAt time.Time `json:"first_visible_event_at,omitempty"`
-	FirstUsefulActionAt time.Time `json:"first_useful_action_at,omitempty"`
-	FirstTokenAt        time.Time `json:"first_token_at,omitempty"`
-	CompletedAt         time.Time `json:"completed_at"`
-	Spans               []Span    `json:"spans"`
-	Counters            []Counter `json:"counters"`
+	SessionID           string       `json:"session_id"`
+	RunID               string       `json:"run_id"`
+	Profile             string       `json:"profile,omitempty"`
+	StartedAt           time.Time    `json:"started_at"`
+	FirstVisibleEventAt time.Time    `json:"first_visible_event_at,omitempty"`
+	FirstUsefulActionAt time.Time    `json:"first_useful_action_at,omitempty"`
+	FirstTokenAt        time.Time    `json:"first_token_at,omitempty"`
+	CompletedAt         time.Time    `json:"completed_at"`
+	Spans               []Span       `json:"spans"`
+	Counters            []Counter    `json:"counters"`
+	PrefixHashes        []PrefixHash `json:"prefix_hashes,omitempty"`
+}
+
+// PrefixHash is one fingerprint of the prompt prefix emitted by an agent run.
+// The seven fields decompose the cacheable part of the request so a downstream
+// observer can detect which sub-component drifted turn-over-turn:
+// base_instructions (the embedded core system prompt), confirmation_policy,
+// project_context (AGENTS.md / ZERO.md chain), skills, tools, schema (tool
+// JSON schemas), and complete_prefix (SHA-256 of the canonical concatenation
+// of the other six). All hashes are hex-encoded SHA-256.
+//
+// Scope: the fingerprint covers 4 of 11 sections of buildSystemPrompt. The
+// seven sections NOT covered — modelPromptAddendum, sessionRuntimeContext,
+// approvedCommandPrefixContext, workspaceSeedContext, userGuidelines,
+// specialistDelegationContext, responseStyleContext — fire only for
+// non-default Options. For default Options (the common case), the four
+// captured substrings are the full prompt and the fingerprint is accurate.
+//
+// A run with a stable CompletePrefix across turns means the four captured
+// sub-components are byte-identical. A run where CompletePrefix changes
+// names the captured sub-component that drifted, but does NOT rule out
+// drift in the seven uncaptured sections. modelPromptAddendum in particular
+// changes on a model switch (a model_switches counter the trace already
+// emits), so a consumer correlating CompletePrefix stability with
+// cached_input_tokens must cross-check the model_switches counter to
+// disambiguate "no drift" from "drift in an uncaptured section." The fields
+// are emitted as a "prefix_hash" event in the NDJSON trace (see
+// WriteNDJSON).
+type PrefixHash struct {
+	BaseInstructionsHash   string `json:"base_instructions"`
+	ConfirmationPolicyHash string `json:"confirmation_policy"`
+	ProjectContextHash     string `json:"project_context"`
+	SkillsHash             string `json:"skills"`
+	ToolsHash              string `json:"tools"`
+	SchemaHash             string `json:"schema"`
+	CompletePrefixHash     string `json:"complete_prefix"`
 }
 
 // WallDuration is the total traced wall time of the run.
@@ -229,5 +265,6 @@ func OptionalEventKeys() []string {
 		"counter:" + CounterAcceptanceChecks,
 		"counter:" + CounterPollingTurn,
 		"counter:" + CounterModelSwitches,
+		"event:prefix_hash",
 	}
 }

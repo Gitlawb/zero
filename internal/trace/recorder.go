@@ -172,6 +172,22 @@ func (r *Recorder) StampFirstUsefulAction() {
 	r.tr.FirstUsefulActionAt = time.Now()
 }
 
+// EmitPrefixHash records one prompt-prefix fingerprint on the trace. Multiple
+// calls are allowed within a run (one per turn, typically) and accumulate in
+// order. The first call after Finish is a no-op; later calls are also no-ops
+// because the trace has been sealed.
+func (r *Recorder) EmitPrefixHash(p PrefixHash) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
+	r.tr.PrefixHashes = append(r.tr.PrefixHashes, p)
+}
+
 // Finish stamps CompletedAt, derives each span's parent (by interval
 // containment) and exclusive time, and returns a snapshot of the trace. Calling
 // Finish more than once returns the same snapshot.
@@ -190,6 +206,7 @@ func (r *Recorder) Finish() *TurnTrace {
 	// Copy the slices so callers cannot mutate the recorder's state.
 	snap.Spans = append([]Span(nil), r.tr.Spans...)
 	snap.Counters = append([]Counter(nil), r.tr.Counters...)
+	snap.PrefixHashes = append([]PrefixHash(nil), r.tr.PrefixHashes...)
 	return &snap
 }
 

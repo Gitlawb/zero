@@ -213,6 +213,26 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
 
+		// Prompt-prefix fingerprint: hash the seven cacheable sub-components
+		// of this turn's request (system prompt sections, project context,
+		// skills, partitioned tool list, tool schemas) and emit one trace
+		// event. Stable across turns => cacheable. Drift in any sub-hash
+		// names the sub-component that broke the cache for this turn. The
+		// computation is pure and cheap (seven SHA-256s of small strings)
+		// and is a no-op when tracing is off.
+		if options.Trace != nil {
+			fp := ComputePrefixFingerprint(options, exposed)
+			options.Trace.EmitPrefixHash(trace.PrefixHash{
+				BaseInstructionsHash:   fp.BaseInstructionsHash,
+				ConfirmationPolicyHash: fp.ConfirmationPolicyHash,
+				ProjectContextHash:     fp.ProjectContextHash,
+				SkillsHash:             fp.SkillsHash,
+				ToolsHash:              fp.ToolsHash,
+				SchemaHash:             fp.SchemaHash,
+				CompletePrefixHash:     fp.CompletePrefixHash,
+			})
+		}
+
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
 		// request. A no-op when ContextWindow == 0 (compaction disabled).
