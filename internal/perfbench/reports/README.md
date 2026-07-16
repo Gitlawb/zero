@@ -60,6 +60,14 @@ correctness verdict (see `MANIFEST.md` for the class breakdown):
 are echoed in the report so a consumer can see exactly which classes each rate
 is computed over.
 
+> **Do not average the tier pass rates. Do not report a single "pass rate".**
+> `correctnessPassRate` and `buildPassRate` measure different things over
+> different task sets and must never be combined — a weighted or arithmetic
+> mean of the two is a number that means nothing. The schema offers no
+> headline pass rate on purpose: a consumer must name the tier it is reporting
+> (`correctness`, `build`, or `latency-only`) and quote that tier's fields. A
+> read-only run that exits 0 is a latency sample, not a pass.
+
 ## What to commit
 
 Commit the manifest and fixtures (`manifests/`, `../testdata/`), not a generated

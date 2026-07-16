@@ -394,3 +394,62 @@ func approxEqual(a, b, tol float64) bool {
 	}
 	return d < tol
 }
+
+// TestCopyFixtureIsolatesSourceFromMutation asserts the property that lets a
+// mutating task run twice (or across iterations) without poisoning the next
+// sample: the runner operates on a per-invocation copy, so mutating the copy
+// leaves the checked-in source fixture byte-identical. This is verified by
+// reading the code today; a test makes it durable against future refactors of
+// the runner's isolation path.
+func TestCopyFixtureIsolatesSourceFromMutation(t *testing.T) {
+	src, err := os.MkdirTemp("", "zero-fixture-src-*")
+	if err != nil {
+		t.Fatalf("mkdtemp src: %v", err)
+	}
+	defer os.RemoveAll(src)
+	orig := "package main\n\nfunc main() {}\n"
+	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte(orig), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "sub", "a.go"), []byte("package sub\n"), 0o644); err != nil {
+		t.Fatalf("write sub: %v", err)
+	}
+
+	// Snapshot the source tree before any mutation of the copy.
+	wantMain, err := os.ReadFile(filepath.Join(src, "main.go"))
+	if err != nil {
+		t.Fatalf("read source main.go: %v", err)
+	}
+
+	copyDir, err := copyFixture(src)
+	if err != nil {
+		t.Fatalf("copyFixture: %v", err)
+	}
+	defer os.RemoveAll(copyDir)
+
+	// The copy must be a real copy, not a symlink/alias of the source, and
+	// mutating it must not touch the source.
+	if copyDir == src {
+		t.Fatalf("copyFixture returned the source dir, not a copy: %s", copyDir)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, "main.go"), []byte("package main\n\n// mutated\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("mutate copy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, "new.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("add file to copy: %v", err)
+	}
+
+	gotMain, err := os.ReadFile(filepath.Join(src, "main.go"))
+	if err != nil {
+		t.Fatalf("re-read source main.go: %v", err)
+	}
+	if string(gotMain) != string(wantMain) {
+		t.Fatalf("source fixture mutated by copy: got %q, want %q", gotMain, wantMain)
+	}
+	if _, err := os.Stat(filepath.Join(src, "new.go")); !os.IsNotExist(err) {
+		t.Fatalf("file added to copy appeared in source: %v", err)
+	}
+}
