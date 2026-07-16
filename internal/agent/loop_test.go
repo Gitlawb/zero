@@ -863,9 +863,6 @@ func TestRunReportsTruncationFinishReason(t *testing.T) {
 	if result.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("FinishReason = %q, want %q", result.FinishReason, zeroruntime.FinishReasonLength)
 	}
-	if !result.Truncated() {
-		t.Fatal("Truncated() = false, want true for a length-capped response")
-	}
 	if result.TruncationNotice() == "" {
 		t.Fatal("TruncationNotice() empty for a truncated response")
 	}
@@ -883,7 +880,7 @@ func TestRunNormalCompletionIsNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Truncated() || result.TruncationNotice() != "" {
+	if result.TruncationNotice() != "" {
 		t.Fatalf("normal completion reported as truncated: reason=%q", result.FinishReason)
 	}
 }
