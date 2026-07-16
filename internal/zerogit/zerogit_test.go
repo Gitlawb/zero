@@ -1005,6 +1005,37 @@ func TestIsDefaultBranch(t *testing.T) {
 	})
 }
 
+func TestCommitsAhead(t *testing.T) {
+	t.Run("CountsCommitsAheadOfRemoteDefault", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: "3\n"},
+		}}
+		count, err := CommitsAhead(context.Background(), root, "origin", "main", runner.Run)
+		if err != nil {
+			t.Fatalf("CommitsAhead returned error: %v", err)
+		}
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		if got := runner.commandLine(0); got != "git rev-list --count origin/main..HEAD" {
+			t.Fatalf("unexpected command: %q", got)
+		}
+	})
+
+	t.Run("ReturnsErrorWhenRemoteTrackingRefMissing", func(t *testing.T) {
+		// A never-fetched remote-tracking ref makes rev-list fail; the caller
+		// treats that as "cannot tell" and proceeds rather than block a push.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{ExitCode: 128, Stderr: "fatal: ambiguous argument 'origin/main..HEAD'"},
+		}}
+		if _, err := CommitsAhead(context.Background(), root, "origin", "main", runner.Run); err == nil {
+			t.Fatal("expected an error when the remote-tracking ref is missing")
+		}
+	})
+}
+
 func TestCurrentGitUser(t *testing.T) {
 	root := t.TempDir()
 	runner := &fakeRunner{results: []CommandResult{

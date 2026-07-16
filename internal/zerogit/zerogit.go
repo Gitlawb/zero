@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -778,6 +779,27 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 		return strings.TrimSpace(subject)
 	}
 	return ""
+}
+
+// CommitsAhead reports how many commits HEAD is ahead of the remote-tracking
+// ref <remote>/<branch>. Auto-branching runs this before creating and pushing
+// a feature branch off the default branch: a clean, up-to-date default branch
+// (or one carrying only uncommitted edits) has nothing to publish, so the
+// caller can refuse rather than push an empty comparison. It returns an error
+// when the count cannot be determined (for example the remote-tracking ref was
+// never fetched); callers treat that as "cannot tell" and proceed rather than
+// block a legitimate first push.
+func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", remote+"/"+branch+"..HEAD")
+	if err != nil {
+		return 0, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse commit count %q: %w", out, err)
+	}
+	return count, nil
 }
 
 // CurrentGitUser resolves an identity to prefix generated branch names with:

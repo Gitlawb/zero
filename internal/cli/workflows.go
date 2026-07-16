@@ -1056,6 +1056,19 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return currentBranch, remote, nil
 	}
 
+	// Branching off the default branch only makes sense when HEAD carries a
+	// commit that is not already on the remote default branch. A clean,
+	// up-to-date default branch would otherwise publish a feature branch at the
+	// exact default tip, and a branch carrying only uncommitted edits would push
+	// the unchanged HEAD while leaving the edits local; changes pr then leaves
+	// the empty branch behind before the host rejects the empty comparison.
+	// Only refuse when we can prove there is nothing to publish: an error here
+	// (for example the remote-tracking ref was never fetched) means we cannot
+	// tell, so proceed rather than block a legitimate first push.
+	if ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch); aheadErr == nil && ahead == 0 {
+		return "", "", fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
+	}
+
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to inspect changes: %w", err)

@@ -812,6 +812,7 @@ func TestEnsureFeatureBranchCreatesBranchOffDefaultWithoutProvider(t *testing.T)
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
@@ -841,6 +842,7 @@ func TestEnsureFeatureBranchUsesLLMSlugWhenProviderConfigured(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
 		},
@@ -877,6 +879,7 @@ func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
 		},
@@ -963,6 +966,7 @@ func TestEnsureFeatureBranchNamesFromHeadCommitAfterCommit(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{}, nil // clean tree: commit already made
 		},
@@ -995,6 +999,7 @@ func TestEnsureFeatureBranchDoesNotCallProviderWithoutAuto(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
 		},
@@ -1030,6 +1035,7 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			gotMaxDiffBytes = options.MaxDiffBytes
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
@@ -1050,6 +1056,71 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 	}
 }
 
+func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
+	// On a clean, up-to-date default branch (or one carrying only uncommitted
+	// edits) HEAD is not ahead of the remote default, so a push would publish
+	// nothing. ensureFeatureBranch must refuse instead of creating and pushing
+	// an empty feature branch.
+	cwd := t.TempDir()
+	createBranchCalled := false
+
+	_, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 0, nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			t.Fatal("inspectChanges should not run when there is nothing to publish")
+			return zerogit.ChangeSummary{}, nil
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no changes to publish") {
+		t.Fatalf("expected a no-changes-to-publish error, got %v", err)
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called when nothing is publishable")
+	}
+}
+
+func TestEnsureFeatureBranchProceedsWhenAheadCountUnknown(t *testing.T) {
+	// A missing remote-tracking ref (never fetched) means the ahead count
+	// cannot be determined; that must not block a legitimate first push.
+	cwd := t.TempDir()
+	var createdName string
+
+	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 0, errors.New("unknown revision origin/main")
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createdName = options.Name
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if branch != "someone/readme-md" || createdName != "someone/readme-md" {
+		t.Fatalf("expected branch creation to proceed, got %q (created %q)", branch, createdName)
+	}
+}
+
 func TestRunChangesPushUsesResolvedRemoteForNewBranch(t *testing.T) {
 	// In a fork setup the original branch tracks a non-origin remote. The
 	// freshly created feature branch has no tracking configuration, so the
@@ -1064,6 +1135,7 @@ func TestRunChangesPushUsesResolvedRemoteForNewBranch(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "upstream", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
@@ -1098,6 +1170,7 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
@@ -1135,6 +1208,7 @@ func TestRunChangesPRCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
