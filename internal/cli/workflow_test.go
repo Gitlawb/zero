@@ -1243,6 +1243,79 @@ func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
 	}
 }
 
+func TestExtractBranchSlug(t *testing.T) {
+	// The prompt asks for "ONLY the raw slug", but models add a preamble line,
+	// wrap the answer in a code fence, or quote a multi-word phrase. The real
+	// slug must be recovered rather than slugified whole (which would turn a
+	// preamble into the branch name) or dropped (a bare fence line slugifies to
+	// nothing).
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"RawSlug", "add-login-page", "add-login-page"},
+		{"Preamble", "Here is a suggested branch name:\nadd-login-page", "add-login-page"},
+		{"CodeFence", "```\nadd-login-page\n```", "add-login-page"},
+		{"FencedWithLanguage", "```text\nadd-login-page\n```", "add-login-page"},
+		{"QuotedPhrase", "\n\"add login page\"\n", "add login page"},
+		{"EmptyResponse", "   \n\n  ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractBranchSlug(tc.in); got != tc.want {
+				t.Fatalf("extractBranchSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
+	// End-to-end: a preamble line or a code fence around the slug must still
+	// yield the intended branch name, not one derived from the preamble or a
+	// silent fallback when the fence line slugifies to nothing.
+	for _, tc := range []struct {
+		name     string
+		response string
+	}{
+		{"Preamble", "Here is a suggested branch name:\nadd-login-page"},
+		{"CodeFence", "```\nadd-login-page\n```"},
+		{"FencedWithLanguage", "```text\nadd-login-page\n```"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			mockProv := &mockCommitMsgProvider{response: tc.response}
+			var createdName string
+
+			branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
+				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+					return true, "main", "origin", nil
+				},
+				commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+				inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+					return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
+				},
+				resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+					return mockProv, nil
+				},
+				currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+				createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+					createdName = options.Name
+					return zerogit.BranchResult{Branch: options.Name}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("ensureFeatureBranch returned error: %v", err)
+			}
+			if branch != "someone/add-login-page" || createdName != "someone/add-login-page" {
+				t.Fatalf("unexpected branch: got %q (created %q)", branch, createdName)
+			}
+		})
+	}
+}
+
 func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false

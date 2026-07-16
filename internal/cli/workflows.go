@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -1244,25 +1245,44 @@ func generateAutoBranchSlug(ctx context.Context, provider zeroruntime.Provider, 
 		return "", fmt.Errorf("%s", collected.Error)
 	}
 
-	slug := zerogit.SlugifyBranchComponent(firstNonEmptyBranchSlugLine(collected.Text))
+	slug := zerogit.SlugifyBranchComponent(extractBranchSlug(collected.Text))
 	if slug == "" {
 		return "", fmt.Errorf("provider returned empty branch slug")
 	}
 	return slug, nil
 }
 
-// firstNonEmptyBranchSlugLine picks the actual slug out of a model response
-// that didn't follow the "output only the raw slug" instruction exactly —
-// preamble/trailing blank lines or a model wrapping its answer in quotes.
-// SlugifyBranchComponent alone would fold that whole response, quotes and
-// all, into one long slug instead of just the intended words.
-func firstNonEmptyBranchSlugLine(text string) string {
+// slugLineRe matches a line that already reads as a kebab-case slug (letters,
+// digits, and internal single hyphens only). extractBranchSlug prefers such a
+// line so a preamble sentence is never mistaken for the slug.
+var slugLineRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+
+// extractBranchSlug pulls the intended slug out of a model response that didn't
+// follow the "output only the raw slug" instruction exactly. It drops Markdown
+// code-fence lines, then prefers a line that already looks like a kebab-case
+// slug: that skips a leading preamble such as "Here is a suggested branch
+// name:" in favor of the "add-login-page" line that follows it, and it unwraps
+// a fenced reply whose only real content is the slug. When no line is already
+// slug-shaped it falls back to the first non-fence, non-empty line (trimmed of
+// surrounding quotes) so a plain multi-word "add login page" reply still
+// slugifies correctly rather than being returned verbatim.
+func extractBranchSlug(text string) string {
+	fallback := ""
 	for _, line := range strings.Split(text, "\n") {
-		line = strings.Trim(strings.TrimSpace(line), `"'`)
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+		line = strings.TrimSpace(strings.Trim(line, `"'`))
+		if line == "" {
+			continue
+		}
+		if slugLineRe.MatchString(line) {
 			return line
 		}
+		if fallback == "" {
+			fallback = line
+		}
 	}
-	return ""
+	return fallback
 }
