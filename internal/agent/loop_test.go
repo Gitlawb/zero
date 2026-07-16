@@ -15,6 +15,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -3459,5 +3460,68 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(captured.Output), "redacted") {
 		t.Errorf("clean output should not get a reminder, got %q", captured.Output)
+	}
+}
+
+// TestRunTracingWrapperStampsUsage verifies the per-turn tracing setup in Run:
+// a wired recorder is Started, OnUsage is wrapped so it still forwards to the
+// caller's callback AND stamps token counters, and the run completes.
+func TestRunTracingWrapperStampsUsage(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	onUsageCalls := 0
+	rec := trace.NewRecorder("tracing-session", "run-1", "test")
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "tracing-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Trace:        rec,
+		OnUsage:      func(Usage) { onUsageCalls++ },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tr := rec.Finish()
+	if tr.StartedAt.IsZero() {
+		t.Fatal("tracing wrapper did not Start the recorder")
+	}
+	if got := tr.Counter(trace.CounterInputTokens); got != 100 {
+		t.Fatalf("input token counter = %d, want 100", got)
+	}
+	if got := tr.Counter(trace.CounterCachedInputTokens); got != 20 {
+		t.Fatalf("cached input token counter = %d, want 20", got)
+	}
+	if got := tr.Counter(trace.CounterOutputTokens); got != 40 {
+		t.Fatalf("output token counter = %d, want 40", got)
+	}
+	if onUsageCalls == 0 {
+		t.Fatal("wrapped OnUsage did not forward to the caller's callback")
+	}
+}
+
+// TestRunNilTraceForwardsUsage verifies a nil recorder leaves the loop
+// byte-identical: OnUsage is not wrapped, so the caller's callback still fires
+// and nothing panics.
+func TestRunNilTraceForwardsUsage(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 7}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	onUsageCalls := 0
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "nil-trace-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		OnUsage:      func(Usage) { onUsageCalls++ },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if onUsageCalls == 0 {
+		t.Fatal("OnUsage not forwarded when Trace is nil")
 	}
 }

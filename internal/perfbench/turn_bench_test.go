@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -279,7 +280,11 @@ func TestLoadBaselineManifest(t *testing.T) {
 			t.Fatalf("class %q has zero tasks", class)
 		}
 	}
-	// Every task must have a prompt and a workspace fixture pointing under testdata.
+	// Every task must have a prompt and a workspace fixture pointing under testdata,
+	// and that fixture must actually exist on disk — a manifest referencing a
+	// missing fixture would make every task in its class error out at run time, so
+	// catch it at load time instead.
+	seen := map[string]bool{}
 	for _, task := range set.Tasks {
 		if strings.TrimSpace(task.Prompt) == "" {
 			t.Fatalf("task %q has empty prompt", task.ID)
@@ -289,6 +294,17 @@ func TestLoadBaselineManifest(t *testing.T) {
 		}
 		if !strings.Contains(task.WorkspaceFixture, "testdata") {
 			t.Fatalf("task %q fixture %q not under testdata", task.ID, task.WorkspaceFixture)
+		}
+		if seen[task.WorkspaceFixture] {
+			continue
+		}
+		seen[task.WorkspaceFixture] = true
+		info, err := os.Stat(task.WorkspaceFixture)
+		if err != nil {
+			t.Fatalf("task %q fixture %q does not exist: %v", task.ID, task.WorkspaceFixture, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("task %q fixture %q is not a directory", task.ID, task.WorkspaceFixture)
 		}
 	}
 }

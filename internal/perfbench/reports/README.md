@@ -8,7 +8,7 @@ model-specific, so a single snapshot here would mislead rather than inform.
 
 Run the harness over the checked-in manifest:
 
-```
+```sh
 make baseline ZERO_BENCH_MODEL=<model>              # uses ./zero
 make baseline ZERO_BENCH_MODEL=<model> ZERO_BENCH_BINARY=/path/to/zero
 ```
@@ -36,5 +36,6 @@ expectation. `.gitkeep` keeps the directory present between runs.
 
 - Each task is a fresh `zero exec` process, so iterations are **cold-start**
   samples. A warm path (reusing an in-process agent) is future work.
-- Mutating tasks (edit/fix/refactor) modify their fixture in place; repeatable
-  runs reset the fixtures from a clean checkout first.
+- Mutating tasks (edit/fix/refactor) run against a per-invocation **copy** of
+  their fixture, so the checked-in fixtures stay clean and one task's edits
+  can't bleed into the next iteration.

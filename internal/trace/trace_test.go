@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,47 @@ func TestFinishSnapshotIsCopy(t *testing.T) {
 	tr.Counters[0].Value = 999
 	if got := r.Finish().Counter(CounterToolCalls); got != 5 {
 		t.Fatalf("Finish snapshot must be a copy; mutating it changed recorder state to %d", got)
+	}
+}
+
+func TestFinishFreezesState(t *testing.T) {
+	// Once Finish returns a snapshot, the recorder is frozen: later stamps must
+	// not mutate its state, so a second Finish yields the same trace.
+	r := NewRecorder("s", "r", "")
+	r.Start()
+	r.Counter(CounterToolCalls, 2)
+	r.RecordSpan(SpanGeneration, 5*time.Millisecond)
+	r.StampFirstToken()
+	first := r.Finish()
+
+	// Post-finish stamps of every kind must be dropped.
+	r.Counter(CounterToolCalls, 100)
+	r.RecordSpan(SpanGeneration, 100*time.Millisecond)
+	r.StampFirstToken()
+	r.StampFirstVisibleEvent()
+	r.StampFirstUsefulAction()
+	s := r.Span(SpanToolExecution)
+	time.Sleep(time.Millisecond)
+	s.End()
+
+	second := r.Finish()
+	if got := second.Counter(CounterToolCalls); got != 2 {
+		t.Fatalf("post-finish Counter leaked into snapshot: got %d, want 2", got)
+	}
+	if got := second.Span(SpanGeneration); got != 5*time.Millisecond {
+		t.Fatalf("post-finish RecordSpan leaked into snapshot: got %v, want 5ms", got)
+	}
+	if got := second.Span(SpanToolExecution); got != 0 {
+		t.Fatalf("post-finish Span leaked into snapshot: got %v, want 0", got)
+	}
+	if second.FirstTokenAt != first.FirstTokenAt {
+		t.Fatalf("post-finish StampFirstToken moved timestamp")
+	}
+	if !second.FirstVisibleEventAt.IsZero() {
+		t.Fatalf("post-finish StampFirstVisibleEvent leaked into snapshot")
+	}
+	if !second.FirstUsefulActionAt.IsZero() {
+		t.Fatalf("post-finish StampFirstUsefulAction leaked into snapshot")
 	}
 }
 
@@ -200,6 +242,21 @@ func TestWriteTextIsReadable(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteTextPropagatesWriteError(t *testing.T) {
+	r := NewRecorder("s", "r", "")
+	r.Start()
+	r.RecordSpan(SpanGeneration, 42*time.Millisecond)
+	r.Counter(CounterToolCalls, 7)
+	tr := r.Finish()
+	if err := WriteText(errWriter{}, tr); err == nil {
+		t.Fatal("WriteText to a failing sink returned nil; want the write error")
+	}
+}
+
+type errWriter struct{}
+
+func (errWriter) Write(p []byte) (int, error) { return 0, errors.New("write failed") }
 
 func TestAttributionRatio(t *testing.T) {
 	r := NewRecorder("s", "r", "")

@@ -419,9 +419,6 @@ func (state *compactionState) maybeCompact(
 		PreserveLast: state.preserveLast,
 		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
 	})
-	if r := trace.FromContext(ctx); r != nil && err == nil {
-		r.Counter(trace.CounterCompactionCount, 1)
-	}
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
 		// later turn) can try again; we never drop messages on failure here.
@@ -433,6 +430,12 @@ func (state *compactionState) maybeCompact(
 		// summarize). Leave the history untouched and don't churn next turn.
 		state.lowWaterMark = size
 		return messages
+	}
+	// Only count a compaction when it actually shrank the history, so the
+	// compaction counter reflects real context reductions rather than paid
+	// no-ops that left the token budget untouched.
+	if r := trace.FromContext(ctx); r != nil {
+		r.Counter(trace.CounterCompactionCount, 1)
 	}
 	state.lowWaterMark = newSize
 	return compacted
@@ -466,9 +469,6 @@ func (state *compactionState) recover(
 		PreserveLast: state.preserveLast,
 		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
 	})
-	if r := trace.FromContext(ctx); r != nil && compactErr == nil {
-		r.Counter(trace.CounterCompactionCount, 1)
-	}
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent
 		// so the loop gives up rather than retrying a failing summarizer forever.
@@ -486,7 +486,11 @@ func (state *compactionState) recover(
 	// one-shot budget now so a provider that keeps returning context-limit errors
 	// after a successful compaction can't loop forever. Store the low-water mark in
 	// the SAME combined (messages + tool-defs) domain maybeCompact uses, so the
-	// proactive shrink-guard compares like with like.
+	// proactive shrink-guard compares like with like. Count it now that the shrink
+	// is confirmed, so the counter mirrors maybeCompact's real-reduction policy.
+	if r := trace.FromContext(ctx); r != nil {
+		r.Counter(trace.CounterCompactionCount, 1)
+	}
 	state.reactiveAttempted = true
 	state.lowWaterMark = state.calibratedTokens(estimateTokens(result) + estimateToolDefTokens(tools))
 	return result, true, nil

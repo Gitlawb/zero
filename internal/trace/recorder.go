@@ -96,6 +96,9 @@ func (r *Recorder) Counter(name string, n int64) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
 	r.addCounterLocked(name, n)
 }
 
@@ -107,7 +110,7 @@ func (r *Recorder) StampFirstToken() {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.firstTokenStamped {
+	if r.finished || r.firstTokenStamped {
 		return
 	}
 	r.firstTokenStamped = true
@@ -122,7 +125,7 @@ func (r *Recorder) StampFirstVisibleEvent() {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.firstVisibleStamped {
+	if r.finished || r.firstVisibleStamped {
 		return
 	}
 	r.firstVisibleStamped = true
@@ -137,7 +140,7 @@ func (r *Recorder) StampFirstUsefulAction() {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.firstActionStamped {
+	if r.finished || r.firstActionStamped {
 		return
 	}
 	r.firstActionStamped = true
@@ -167,6 +170,9 @@ func (r *Recorder) Finish() *TurnTrace {
 func (r *Recorder) addSpan(name string, d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
 	for i := range r.tr.Spans {
 		if r.tr.Spans[i].Name == name {
 			r.tr.Spans[i].Duration += d

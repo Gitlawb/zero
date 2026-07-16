@@ -429,6 +429,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	notify.MaybeAddWebhookSink(notifier, os.Getenv, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "[notify] "+format+"\n", args...)
 	})
+	// Spec-draft runs synthesize a prompt offline and never drive a model turn, so
+	// there is no per-turn trace to emit. Reject --trace / ZERO_TRACE up front with
+	// a clear error rather than silently accepting and writing nothing.
+	if options.useSpec && resolveTracePath(options) != "" {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, "--trace / ZERO_TRACE are not supported for spec-draft runs")
+	}
 	if options.useSpec {
 		return runExecSpecDraft(execSpecDraftRun{
 			options:            options,
@@ -483,15 +489,18 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	// Per-turn tracing is opt-in (--trace <path> or ZERO_TRACE=<path>). The
 	// recorder is stamped throughout agent.Run and the providerio seam; the run
-	// itself is byte-identical to an untraced run. We finish + emit on every exit
-	// path via the defer below. "-" writes NDJSON to stderr; otherwise the path
-	// is created/truncated. A failure to emit is logged to stderr, never fatal.
+	// itself is byte-identical to an untraced run. We finish the recorder at the
+	// agent.Run boundary (below) so the snapshot captures exactly one turn, then
+	// serialize the snapshot on every exit path via the defer. "-" writes NDJSON
+	// to stderr; otherwise the path is created/truncated. A failure to emit is
+	// logged to stderr, never fatal.
 	tracePath := resolveTracePath(options)
 	var traceRecorder *trace.Recorder
+	var traceSnapshot *trace.TurnTrace
 	if tracePath != "" {
 		traceRecorder = trace.NewRecorder(preparedSession.Session.SessionID, runID, "")
 		defer func() {
-			if err := emitTrace(traceRecorder, tracePath, stderr); err != nil {
+			if err := writeTraceSnapshot(traceSnapshot, tracePath, stderr); err != nil {
 				fmt.Fprintf(stderr, "[zero] failed to write trace: %s\n", err)
 			}
 		}()
@@ -648,6 +657,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	})
+	// Finish the trace now that the turn is done, so the snapshot captures exactly
+	// agent.Run's work and nothing the post-run cleanup stamps. The deferred
+	// writer serializes the snapshot on every exit path.
+	if traceRecorder != nil {
+		traceSnapshot = traceRecorder.Finish()
+	}
 	notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {
 		return exitCrash
@@ -1274,22 +1289,22 @@ func resolveTracePath(options execOptions) string {
 	return ""
 }
 
-// emitTrace finishes the recorder and writes the NDJSON trace to dest ("-" =>
-// stderr, otherwise a file path created/truncated). A nil recorder is a no-op
-// (tracing off). The trace is best-effort: a write error is returned to the
-// caller, which logs it but never fails the run.
-func emitTrace(recorder *trace.Recorder, dest string, stderr io.Writer) error {
-	if recorder == nil || dest == "" {
+// writeTraceSnapshot writes an already-finished trace snapshot to dest ("-" =>
+// stderr, otherwise a file path created/truncated). A nil snapshot is a no-op
+// (tracing off, or the run exited before agent.Run produced a turn). The trace
+// is best-effort: a write error is returned to the caller, which logs it but
+// never fails the run.
+func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer) error {
+	if snapshot == nil || dest == "" {
 		return nil
 	}
-	finished := recorder.Finish()
 	if strings.TrimSpace(dest) == "-" {
-		return trace.WriteNDJSON(stderr, finished)
+		return trace.WriteNDJSON(stderr, snapshot)
 	}
 	file, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	return trace.WriteNDJSON(file, finished)
+	return trace.WriteNDJSON(file, snapshot)
 }

@@ -286,6 +286,9 @@ type Options struct {
 	// retries, tokens) into it. nil DISABLES tracing entirely — every stamp is
 	// nil-safe and the loop is byte-identical to an untraced run. The caller
 	// owns the recorder: Run stamps into it but does not Finish or emit it.
+	// A fresh Recorder is required per Run — reusing one across runs merges
+	// their spans, counters, and first-event timestamps, and Finish freezes a
+	// recorder so no further stamps take.
 	Trace *trace.Recorder
 	// SelfCorrect, when set, runs a post-edit verify-and-correct cycle after a
 	// mutating tool call: it verifies the changed files (LSP diagnostics + project

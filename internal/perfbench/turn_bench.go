@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,12 @@ type TurnTaskOutcome struct {
 	VerifyErr string
 	WallMs    float64
 	Trace     *trace.TurnTrace
-	Err       error
+	// TraceIssue, when non-empty, explains why the per-turn trace could not be
+	// parsed (file missing or malformed). The run still has a pass/fail verdict,
+	// but an incomplete measurement is surfaced as a result warning so it can't
+	// masquerade as a clean attribution sample.
+	TraceIssue string
+	Err        error
 }
 
 // TurnBenchConfig configures a turn-benchmark run.
@@ -166,14 +172,24 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 			class = "default"
 		}
 		classTasks[class]++
-		passedForTask := false
+		// A task counts as passed only when every iteration passed. The per-process
+		// runner is cold-start, so a flaky pass on one iteration and a fail on
+		// another is a real regression signal, not noise to average away.
+		passedForTask := true
 		for iter := 0; iter < iterations; iter++ {
 			outcome := cfg.Runner(ctx, task, rc)
+			if outcome.TraceIssue != "" {
+				result.Warnings = append(result.Warnings, Warning{
+					Metric:  "trace",
+					Message: fmt.Sprintf("task %s: %s", task.ID, outcome.TraceIssue),
+				})
+			}
 			if outcome.Err != nil {
+				passedForTask = false
 				continue
 			}
-			if outcome.Passed {
-				passedForTask = true
+			if !outcome.Passed {
+				passedForTask = false
 			}
 			wall := outcome.WallMs
 			if wall <= 0 && outcome.Trace != nil {
@@ -334,6 +350,19 @@ func WriteTurnBenchJSON(w io.Writer, result TurnBenchResult) error {
 // VerificationCommand when present), exactly like NewExecRunner.
 func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+		// Isolate the workspace: copy the fixture into a fresh temp dir so a
+		// mutating task (edit/fix/refactor) can't dirty the shared, checked-in
+		// fixture or bleed into a later iteration of the same task. When no
+		// fixture is configured the agent runs in the caller's cwd as before.
+		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" {
+			copyDir, cerr := copyFixture(fixture)
+			if cerr != nil {
+				return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
+			}
+			defer os.RemoveAll(copyDir)
+			task.WorkspaceFixture = copyDir
+		}
+
 		traceFile, err := os.CreateTemp("", "zero-turn-trace-*.ndjson")
 		if err != nil {
 			return TurnTaskOutcome{Err: fmt.Errorf("create trace file: %w", err)}
@@ -369,15 +398,26 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 			return outcome
 		}
 
-		// Parse the captured trace (best-effort: a missing/empty file is not fatal —
-		// the run still produced a pass/fail; the trace is the attribution layer).
-		if f, ferr := os.Open(tracePath); ferr == nil {
-			if tr, perr := trace.ReadNDJSON(f); perr == nil {
+		// Parse the captured trace. The trace is the attribution layer, so a
+		// missing/malformed file is not fatal — but it IS surfaced as a warning
+		// (via outcome.TraceIssue) so an incomplete measurement can't look valid.
+		if f, ferr := os.Open(tracePath); ferr != nil {
+			outcome.TraceIssue = fmt.Sprintf("trace open failed: %v", ferr)
+		} else {
+			tr, perr := trace.ReadNDJSON(f)
+			_ = f.Close()
+			if perr != nil {
+				outcome.TraceIssue = fmt.Sprintf("trace parse failed: %v", perr)
+			} else {
 				outcome.Trace = tr
 			}
-			_ = f.Close()
 		}
 
+		// A nonzero agent exit already decided failure; don't run verification or
+		// mark the task passed.
+		if outcome.VerifyErr != "" {
+			return outcome
+		}
 		if len(task.VerificationCommand) > 0 {
 			if vOutcome := runVerification(ctx, task); !vOutcome.Passed {
 				outcome.VerifyErr = strings.TrimSpace(vOutcome.Detail)
@@ -387,6 +427,47 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		outcome.Passed = true
 		return outcome
 	}
+}
+
+// copyFixture copies the fixture directory at src into a fresh temp dir and
+// returns the copy's path. Used to give each benchmark invocation an isolated
+// workspace so mutating tasks (edit/fix/refactor) can't dirty the checked-in
+// fixture or a later iteration.
+func copyFixture(src string) (string, error) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("fixture %q is not a directory", src)
+	}
+	dst, err := os.MkdirTemp("", "zero-turn-fixture-*")
+	if err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+	if err != nil {
+		os.RemoveAll(dst)
+		return "", err
+	}
+	return dst, nil
 }
 
 func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArgs []string) []string {
