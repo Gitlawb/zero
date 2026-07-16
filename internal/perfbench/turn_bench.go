@@ -207,11 +207,13 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 					// concurrent/nested spans do not double-count: provider_connect
 					// inside generation and permission_wait inside tool_execution
 					// each contribute their own exclusive time, not their parent's.
-					d := span.Exclusive
-					if d <= 0 {
-						d = span.Duration
-					}
-					ms := float64(d.Microseconds()) / 1000
+					// A span whose exclusive is legitimately zero (a parent fully
+					// covered by its children) contributes zero on purpose — do
+					// NOT fall back to Duration, which would re-introduce the
+					// double-count. ReadNDJSON preserves a written exclusive_ms:0
+					// as 0 and only falls back to Duration when the key is absent,
+					// so span.Exclusive is always populated here.
+					ms := float64(span.Exclusive.Microseconds()) / 1000
 					perSpanSamples[span.Name] = append(perSpanSamples[span.Name], ms)
 					if classSpanTotals[class] == nil {
 						classSpanTotals[class] = map[string]float64{}

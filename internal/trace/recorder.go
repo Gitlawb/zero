@@ -242,12 +242,25 @@ func deriveNesting(spans []Span) {
 				continue
 			}
 			// b contains a when a starts at/after b and ends at/before b.
-			if !a.Start.Before(b.Start) && !a.End.After(b.End) {
-				bd := b.End.Sub(b.Start)
-				if bestIdx == -1 || bd < bestDur {
-					bestIdx = j
-					bestDur = bd
-				}
+			contained := !a.Start.Before(b.Start) && !a.End.After(b.End)
+			if !contained {
+				continue
+			}
+			// Strict containment makes b an unambiguous parent of a. When the
+			// two intervals are identical (contained but not strictly — equality
+			// satisfies the check symmetrically), they would otherwise pick
+			// each other as parent and form a 2-cycle that drops both from
+			// top-level. Break that tie deterministically: only the
+			// lower-indexed span may parent a co-extensive higher-indexed one,
+			// so one stays top-level and the other nests under it.
+			strict := a.Start.After(b.Start) || a.End.Before(b.End)
+			if !strict && j >= i {
+				continue
+			}
+			bd := b.End.Sub(b.Start)
+			if bestIdx == -1 || bd < bestDur {
+				bestIdx = j
+				bestDur = bd
 			}
 		}
 		parent[i] = bestIdx

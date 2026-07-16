@@ -14,12 +14,17 @@ import (
 // captured trace file into structured per-span stats.
 //
 // It fails loudly on a corrupt file rather than silently returning an empty
-// trace: a non-empty input must contain a "type":"trace" header line, and a
-// non-empty input that yields no spans and no counters is treated as corrupt.
-// Individual span/counter lines with bad JSON are skipped only when a valid
-// "trace" header has already been seen — a truncated middle of a real trace
-// should not fatal a run, but a file with no header at all is never parsed as
-// a valid empty trace.
+// trace. Empty or blank-only input is an error (an empty trace file means
+// emission never happened — e.g. the agent crashed before writing the header
+// or --trace was not honored — and must not masquerade as a valid zero-
+// attribution sample). A non-empty input must contain a "type":"trace" header
+// line; span/counter lines before it are an error; and a header that yields no
+// spans and no counters is treated as corrupt. Individual span/counter lines
+// with bad JSON are skipped only when a valid "trace" header has already been
+// seen — a truncated middle of a real trace should not fatal a run.
+//
+// Numbers are decoded with UseNumber so counter values round-trip as exact
+// int64s rather than going through float64 (which loses precision above 2^53).
 func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 	if r == nil {
 		return nil, nil
@@ -36,7 +41,9 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 		}
 		sawInput = true
 		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&obj); err != nil {
 			// A non-JSON line before any header means the file is not a trace.
 			if !sawTraceHeader {
 				return nil, errors.New("parse trace: not a valid NDJSON trace (no type:trace header)")
@@ -69,8 +76,15 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 			if s.End.IsZero() && !s.Start.IsZero() {
 				s.End = s.Start.Add(s.Duration)
 			}
-			s.Exclusive = parseDurationMs(obj["exclusive_ms"])
-			if s.Exclusive <= 0 {
+			// Preserve exclusive time exactly as written. A legitimately-zero
+			// exclusive (a parent whose children cover its whole interval) is
+			// emitted as exclusive_ms: 0 and MUST round-trip as 0 — falling back
+			// to Duration here would re-introduce the double-counting the
+			// exclusive-time model exists to prevent. Only fall back to Duration
+			// when the key is genuinely absent (an older/duration-only emitter).
+			if ev, ok := obj["exclusive_ms"]; ok {
+				s.Exclusive = parseDurationMs(ev)
+			} else {
 				s.Exclusive = s.Duration
 			}
 			if v, ok := obj["parent"].(string); ok {
@@ -94,10 +108,16 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if sawInput && !sawTraceHeader {
+	if !sawInput {
+		// Empty or blank-only input: emission never produced a trace line, so
+		// this is not a valid trace. Surface it so the harness records a
+		// TraceIssue rather than treating a crashed run as clean zero-attribution.
+		return nil, errors.New("parse trace: empty input (no trace emitted)")
+	}
+	if !sawTraceHeader {
 		return nil, errors.New("parse trace: non-empty input had no type:trace header")
 	}
-	if sawTraceHeader && len(t.Spans) == 0 && len(t.Counters) == 0 {
+	if len(t.Spans) == 0 && len(t.Counters) == 0 {
 		return nil, errors.New("parse trace: header present but no spans or counters recovered (corrupt or truncated)")
 	}
 	return t, nil
@@ -120,12 +140,37 @@ func parseDurationMs(v any) time.Duration {
 	return time.Duration(f * float64(time.Millisecond))
 }
 
+// parseInt64 parses a counter value. json.Number (from UseNumber) is parsed
+// directly to int64 so large counters round-trip without float64 precision
+// loss; other numeric kinds fall back to a float conversion.
 func parseInt64(v any) int64 {
-	return int64(toFloat64(v))
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+		if f, err := n.Float64(); err == nil {
+			return int64(f)
+		}
+		return 0
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	default:
+		return int64(toFloat64(v))
+	}
 }
 
 func toFloat64(v any) float64 {
 	switch n := v.(type) {
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return f
+		}
+		return 0
 	case float64:
 		return n
 	case int64:

@@ -417,3 +417,126 @@ func TestReadNDJSONRejectsHeaderOnly(t *testing.T) {
 		t.Fatal("expected error for a trace header with no spans or counters")
 	}
 }
+
+func TestReadNDJSONRejectsEmpty(t *testing.T) {
+	// Empty or blank-only input means emission never produced a trace line
+	// (e.g. the agent crashed before writing the header, or --trace was not
+	// honored). That must surface as an error so the harness records a
+	// TraceIssue rather than treating a crashed run as clean zero-attribution.
+	if _, err := ReadNDJSON(strings.NewReader("")); err == nil {
+		t.Fatal("expected error for empty input")
+	}
+	if _, err := ReadNDJSON(strings.NewReader("\n  \n\n")); err == nil {
+		t.Fatal("expected error for blank-only input")
+	}
+}
+
+func TestExclusiveZeroRoundTrips(t *testing.T) {
+	// A parent whose children exactly tile its interval has exclusive time 0.
+	// That 0 must survive a write-then-read round-trip — overwriting it with the
+	// inclusive Duration on re-parse re-introduces the double-counting the
+	// exclusive-time model exists to prevent.
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	spans := []Span{
+		{Name: SpanGeneration, Start: base, End: base.Add(100 * time.Millisecond), Duration: 100 * time.Millisecond},
+		{Name: SpanProviderConnect, Start: base, End: base.Add(60 * time.Millisecond), Duration: 60 * time.Millisecond},
+		{Name: SpanToolExecution, Start: base.Add(60 * time.Millisecond), End: base.Add(100 * time.Millisecond), Duration: 40 * time.Millisecond},
+	}
+	deriveNesting(spans)
+	if spans[0].Exclusive != 0 {
+		t.Fatalf("setup invariant: generation exclusive = %v, want 0 (children tile it)", spans[0].Exclusive)
+	}
+	original := &TurnTrace{
+		SessionID:   "s",
+		RunID:       "r",
+		StartedAt:   base,
+		CompletedAt: base.Add(100 * time.Millisecond),
+		Spans:       spans,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteNDJSON(&buf, original); err != nil {
+		t.Fatalf("WriteNDJSON: %v", err)
+	}
+	parsed, err := ReadNDJSON(&buf)
+	if err != nil {
+		t.Fatalf("ReadNDJSON: %v", err)
+	}
+	var parsedGenExclusive time.Duration
+	for _, s := range parsed.Spans {
+		if s.Name == SpanGeneration {
+			parsedGenExclusive = s.Exclusive
+		}
+	}
+	if parsedGenExclusive != 0 {
+		t.Fatalf("generation exclusive after round-trip = %v, want 0 (a written exclusive_ms:0 must be preserved, not overwritten with Duration)", parsedGenExclusive)
+	}
+	// The harness ranks by exclusive; the sum of exclusive across the run must
+	// equal the wall (children carry the time, the parent contributes 0), with
+	// no double-count.
+	var exclusiveSum time.Duration
+	for _, s := range parsed.Spans {
+		exclusiveSum += s.Exclusive
+	}
+	if exclusiveSum != original.WallDuration() {
+		t.Fatalf("exclusive sum = %v, want wall %v (double-count or gap on re-parse)", exclusiveSum, original.WallDuration())
+	}
+}
+
+func TestIdenticalIntervalsNoCycle(t *testing.T) {
+	// Two spans stamped at the exact same [start, end] would, under a symmetric
+	// containment check, pick each other as parent and form a 2-cycle, dropping
+	// both from top-level and zeroing AttributedDuration. The tie-break must
+	// keep one top-level so AttributedDuration stays correct (no cycle, no
+	// double-count).
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	spans := []Span{
+		{Name: SpanGeneration, Start: base, End: base.Add(100 * time.Millisecond), Duration: 100 * time.Millisecond},
+		{Name: SpanProviderConnect, Start: base, End: base.Add(100 * time.Millisecond), Duration: 100 * time.Millisecond},
+	}
+	deriveNesting(spans)
+
+	var topLevel int
+	var parents []string
+	for _, s := range spans {
+		if s.Parent == "" {
+			topLevel++
+		} else {
+			parents = append(parents, s.Name+"->"+s.Parent)
+		}
+	}
+	if topLevel == 0 {
+		t.Fatalf("identical intervals formed a parent cycle; no top-level spans (parents=%v)", parents)
+	}
+	if topLevel != 1 {
+		t.Fatalf("expected exactly one top-level span for co-extensive pair, got %d (parents=%v)", topLevel, parents)
+	}
+	// AttributedDuration is the single top-level span's duration — not 0 (cycle)
+	// and not 2x (siblings double-count).
+	tr := &TurnTrace{StartedAt: base, CompletedAt: base.Add(100 * time.Millisecond), Spans: spans}
+	if got := tr.AttributedDuration(); got != 100*time.Millisecond {
+		t.Fatalf("AttributedDuration = %v, want 100ms (one top-level span, no cycle)", got)
+	}
+}
+
+func TestCounterPrecisionRoundTrip(t *testing.T) {
+	// Counter values decode through json.Number so an int64 above 2^53
+	// round-trips exactly instead of losing precision via float64.
+	r := NewRecorder("s", "r", "")
+	r.Start()
+	const big = int64(1<<53 + 1) // 9007199254740993 — not representable exactly as float64
+	r.Counter(CounterInputTokens, big)
+	tr := r.Finish()
+
+	var buf bytes.Buffer
+	if err := WriteNDJSON(&buf, tr); err != nil {
+		t.Fatalf("WriteNDJSON: %v", err)
+	}
+	parsed, err := ReadNDJSON(&buf)
+	if err != nil {
+		t.Fatalf("ReadNDJSON: %v", err)
+	}
+	if got := parsed.Counter(CounterInputTokens); got != big {
+		t.Fatalf("counter round-trip = %d, want %d (float64 precision loss)", got, big)
+	}
+}
