@@ -185,7 +185,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	result = Result{Messages: copyMessages(messages)}
 	dispatchSessionStart(ctx, options)
 	defer func() {
-		dispatchSessionEnd(ctx, options, result, err)
+		// Use a context detached from ctx's cancellation: on Esc/Ctrl+C the run
+		// context is already canceled by the time this defer runs, and a canceled
+		// parent would make Hooks.Dispatch's context.WithTimeout derive an
+		// already-expired context, so the sessionEnd hook would never actually run.
+		dispatchSessionEnd(context.WithoutCancel(ctx), options, result, err)
 	}()
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
