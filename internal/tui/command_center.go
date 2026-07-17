@@ -214,6 +214,12 @@ func (m model) setDoctorStatusRow(text string) model {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		if m.transcript[i].id == doctorStatusRowID {
 			m.transcript[i] = row
+			// Settled alt-screen rows are cached across frames; force a rebuild
+			// so an in-place update (e.g. the spinner tick) is reflected
+			// immediately instead of serving the stale cached snapshot.
+			if i < m.flushed {
+				m.altScreenSettledWidth = 0
+			}
 			return m
 		}
 	}

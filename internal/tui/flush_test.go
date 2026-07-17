@@ -73,6 +73,34 @@ func TestAltScreenSettledCacheRebuildsAfterRowToggle(t *testing.T) {
 	}
 }
 
+func TestAltScreenSettledCacheRebuildsAfterDoctorStatusUpdate(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m = m.setDoctorStatusRow("frame 0")
+	m, _ = m.settleTranscript()
+	if m.altScreenSettledWidth == 0 {
+		t.Fatal("precondition: settled cache should be populated")
+	}
+
+	// An in-place update to an already-settled doctor row (e.g. a spinner tick)
+	// must invalidate the settled cache, just like toggleTranscriptRow does for
+	// expand/collapse, otherwise the alt-screen view keeps serving the stale
+	// snapshot forever.
+	m = m.setDoctorStatusRow("frame 1")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("expected in-place doctor status update to invalidate the settled cache")
+	}
+	m, _ = m.settleTranscript()
+	view := viewString(m.View())
+	if !strings.Contains(view, "frame 1") {
+		t.Fatalf("expected updated doctor status text in view, got %q", view)
+	}
+	if strings.Contains(view, "frame 0") {
+		t.Fatalf("stale doctor status text must not remain in view, got %q", view)
+	}
+}
+
 func TestRunningToolCallBlocksFrontierUntilResult(t *testing.T) {
 	m := sizedTestModel(80)
 	m.pending = true
