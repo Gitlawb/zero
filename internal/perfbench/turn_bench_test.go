@@ -450,9 +450,13 @@ func TestCopyFixtureIsolatesSourceFromMutation(t *testing.T) {
 	// The copy must be a grandchild of the system temp root (parent is a direct
 	// child of Temp, copyDir is a direct child of parent). Go ignores go.mod in
 	// direct children of Temp (a hijack guard), so this nesting is what lets the
-	// compiler-backed oracles actually run in the copy.
-	if filepath.Dir(parent) != os.TempDir() {
-		t.Fatalf("parent %q is not a direct child of temp root %q", parent, os.TempDir())
+	// compiler-backed oracles actually run in the copy. Compare via filepath.Clean
+	// because os.TempDir() may carry a trailing slash (macOS $TMPDIR ends in
+	// "/T/") while filepath.Dir strips it; the raw != would false-fail on macOS
+	// even though the parent is genuinely a direct child.
+	tempRoot := filepath.Clean(os.TempDir())
+	if filepath.Dir(parent) != tempRoot {
+		t.Fatalf("parent %q is not a direct child of temp root %q", parent, tempRoot)
 	}
 	if filepath.Dir(copyDir) != parent {
 		t.Fatalf("copyDir %q is not nested under parent %q", copyDir, parent)
