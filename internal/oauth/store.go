@@ -508,6 +508,14 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	if !ok {
 		return b.readLegacy()
 	}
+	// The legacy combined entry is consulted lazily (below) only when an indexed
+	// key's own entry is missing. write() publishes the index before the per-key
+	// entries and deletes the legacy blob only after every entry is written, so a
+	// crash partway through the initial legacy->indexed migration can leave a
+	// pre-existing credential readable solely in the still-present legacy blob.
+	// In steady state (all entries present) the legacy blob is never read.
+	var legacyTokens map[string]Token
+	legacyLoaded := false
 	tokens := make(map[string]Token, len(keys))
 	for _, key := range keys {
 		enc, ok, err := b.kr.Get(b.service, key)
@@ -515,9 +523,18 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			return nil, false, err
 		}
 		if !ok {
-			// Index and entries fell out of sync (e.g. a killed process between
-			// writing an entry and updating the index); skip rather than fail the
-			// whole read, since the next Save/Delete will reconcile the index.
+			// The index lists this key but its own entry is missing. Recover it
+			// from the legacy blob when a migration is still in flight; otherwise
+			// (a steady-state index/entry desync whose legacy blob is already
+			// gone) skip rather than fail the whole read, since the next
+			// Save/Delete will reconcile the index.
+			if !legacyLoaded {
+				legacyTokens = b.readLegacyTokens()
+				legacyLoaded = true
+			}
+			if token, has := legacyTokens[key]; has {
+				tokens[key] = token
+			}
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
@@ -552,6 +569,32 @@ func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 	return data, true, nil
 }
 
+// readLegacyTokens returns the tokens held in the legacy combined entry, or an
+// empty map when there is no readable legacy blob. It is a best-effort recovery
+// source (read() falls back to it, write() reconciles against it), so a missing
+// or malformed legacy entry is reported as "no tokens" rather than a hard error.
+func (b keyringBlob) readLegacyTokens() map[string]Token {
+	data, ok, err := b.readLegacy()
+	if err != nil || !ok {
+		return nil
+	}
+	var legacyState storeFile
+	if json.Unmarshal(data, &legacyState) != nil {
+		return nil
+	}
+	return legacyState.Tokens
+}
+
+// legacyIsFresher reports whether the legacy copy of an already-indexed key
+// should win over the indexed copy. An old binary running alongside the new one
+// refreshes tokens only in the legacy combined entry, and a refresh pushes the
+// expiry later, so a strictly later, non-zero expiry on the legacy side is the
+// signal that it holds a newer credential. A zero (unknown) expiry on either
+// side is not evidence of freshness, so the indexed value is kept.
+func legacyIsFresher(legacy, current Token) bool {
+	return !legacy.ExpiresAt.IsZero() && !current.ExpiresAt.IsZero() && legacy.ExpiresAt.After(current.ExpiresAt)
+}
+
 // write replaces the keyring's token entries with state, ordered so that
 // every interruption boundary leaves a recoverable store. The invariant is
 // that any token entry existing in the keyring at any instant is listed in
@@ -559,9 +602,11 @@ func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 // written, entries are deleted before the index shrinks, and the index
 // header is only updated after the chunks it references exist. A crash at
 // any step therefore leaves either an index over-listing keys whose entries
-// are missing (read() already skips those) or entries that a later
-// read/write can still see and reconcile, never an invisible credential
-// stranded in the OS keychain.
+// are missing (read() recovers those from the legacy blob during a migration,
+// or skips them once it is gone) or entries that a later read/write can still
+// see and reconcile, never an invisible credential stranded in the OS keychain.
+// The legacy combined entry is the durable fallback for the initial migration
+// and is deleted only as the final step, after every per-key entry is written.
 func (b keyringBlob) write(data []byte) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -576,24 +621,33 @@ func (b keyringBlob) write(data []byte) error {
 		prior[key] = true
 	}
 
-	// An older binary running alongside this one still reads and writes only
-	// the legacy combined entry. If that entry exists even though the index
-	// has already been published, it was recreated by such a binary after
-	// migration: merge any key the indexed schema has never seen before the
-	// legacy entry is deleted below, or that binary's freshly saved token
-	// would be silently lost. Keys already in the prior index are not merged;
-	// their absence from state means this write deliberately removed them.
+	// An older binary running alongside this one still reads and writes only the
+	// legacy combined entry. If that entry exists even though the index has
+	// already been published, an old binary wrote it after migration, so
+	// reconcile it into state before it is deleted below rather than blindly
+	// overwriting it:
+	//   - a key the indexed schema has never seen is a fresh old-binary login;
+	//     merge it so it is not lost;
+	//   - a key already present in state that the legacy blob refreshed (a
+	//     strictly later expiry) takes the legacy value, so a concurrent
+	//     old-binary refresh is not discarded in favor of the stale indexed one;
+	//   - a key that was in the prior index but is absent from this write was
+	//     deliberately removed (a logout); it is left removed, not resurrected.
 	if indexExisted {
-		if legacyData, ok, legacyErr := b.readLegacy(); legacyErr == nil && ok {
-			var legacyState storeFile
-			if json.Unmarshal(legacyData, &legacyState) == nil {
-				for key, token := range legacyState.Tokens {
-					if _, exists := state.Tokens[key]; exists || prior[key] || ValidateKey(key) != nil {
-						continue
-					}
-					state.Tokens[key] = token
-				}
+		for key, legacyToken := range b.readLegacyTokens() {
+			if ValidateKey(key) != nil {
+				continue
 			}
+			if current, exists := state.Tokens[key]; exists {
+				if legacyIsFresher(legacyToken, current) {
+					state.Tokens[key] = legacyToken
+				}
+				continue
+			}
+			if prior[key] {
+				continue
+			}
+			state.Tokens[key] = legacyToken
 		}
 	}
 

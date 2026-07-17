@@ -595,3 +595,110 @@ func TestStoreKeyringStatus(t *testing.T) {
 		t.Fatalf("status = %#v", statuses)
 	}
 }
+
+// TestStoreKeyringMigrationInterruptionsPreserveLegacyTokens drives the initial
+// legacy->indexed migration through an injected failure at every mutating
+// operation and checks that no pre-existing legacy credential is ever lost.
+// write() publishes the index before the per-key entries, so a crash after the
+// index appears but before an entry is written must still leave that token
+// readable in the not-yet-deleted legacy blob; read() recovers it, and a
+// following unimpeded save completes the migration.
+func TestStoreKeyringMigrationInterruptionsPreserveLegacyTokens(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	seeded := map[string]Token{
+		ProviderKey("demo"):  {AccessToken: "demo-a", RefreshToken: "demo-r"},
+		ProviderKey("other"): {AccessToken: "other-a"},
+	}
+	for failAt := 1; ; failAt++ {
+		kr := &failingKR{fakeKR: newFakeKR()}
+		// A legacy-only install: one combined entry, no index yet.
+		legacyData, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: seeded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyData)
+
+		s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr.ops = 0
+		kr.failAt = failAt
+		_ = s.Save(ProviderKey("new"), Token{AccessToken: "new-c"})
+		opsUsed := kr.ops
+		kr.failAt = 0
+
+		// Regardless of where the migration was interrupted, a subsequent
+		// unimpeded save must complete it with every token intact.
+		if err := s.Save(ProviderKey("new"), Token{AccessToken: "new-c"}); err != nil {
+			t.Fatalf("failAt=%d: reconciling Save: %v", failAt, err)
+		}
+		for key, want := range seeded {
+			got, ok, err := s.Load(key)
+			if err != nil || !ok {
+				t.Fatalf("failAt=%d: Load(%s) after migration: ok=%v err=%v (legacy token lost)", failAt, key, ok, err)
+			}
+			if got.AccessToken != want.AccessToken {
+				t.Fatalf("failAt=%d: Load(%s) = %q, want %q", failAt, key, got.AccessToken, want.AccessToken)
+			}
+		}
+		if got, ok, err := s.Load(ProviderKey("new")); err != nil || !ok || got.AccessToken != "new-c" {
+			t.Fatalf("failAt=%d: Load(new): ok=%v err=%v token=%#v", failAt, ok, err, got)
+		}
+		// The completed migration drops the legacy entry.
+		if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+			t.Fatalf("failAt=%d: legacy entry not removed after migration completed", failAt)
+		}
+		if opsUsed < failAt {
+			break
+		}
+	}
+}
+
+// TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey covers the mixed-version
+// window for a key that already exists in the index: an old binary refreshes
+// provider:alpha in the legacy combined entry (a strictly later expiry). The
+// next new-binary save must keep that fresher refresh instead of overwriting it
+// with the stale indexed value and then deleting the legacy entry.
+func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(1 * time.Hour)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a-old", RefreshToken: "r-old", ExpiresAt: stale}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An old binary refreshes alpha through the legacy combined entry, pushing
+	// the expiry later than the indexed copy.
+	fresh := stale.Add(1 * time.Hour)
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "a-new", RefreshToken: "r-new", ExpiresAt: fresh},
+	}}
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyData)
+
+	// A new-binary save of an unrelated key must reconcile alpha, not clobber it.
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok {
+		t.Fatalf("Load(alpha): ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != "a-new" || got.RefreshToken != "r-new" {
+		t.Fatalf("Load(alpha) = %#v, want the refreshed legacy value (fresh refresh discarded)", got)
+	}
+	if _, ok, _ := s.Load(ProviderKey("beta")); !ok {
+		t.Fatal("Load(beta): not stored")
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy entry should be removed once its refresh is merged")
+	}
+}
