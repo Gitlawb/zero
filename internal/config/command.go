@@ -69,12 +69,16 @@ func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, 
 
 	select {
 	case err := <-done:
-		if errors.Is(err, exec.ErrWaitDelay) {
-			// The process exited but a background descendant kept the
-			// inherited stdout/stderr pipes open past WaitDelay. Treat this
-			// like a timeout so the tree is actually terminated instead of
-			// leaking that descendant.
+		if err != nil {
+			// The shell exited (whether via ErrWaitDelay because a
+			// background descendant kept the inherited stdout/stderr pipes
+			// open, or via a nonzero exit status) but a leftover descendant
+			// may still be running. Terminate is a no-op against an
+			// already-dead tree, so always call it rather than gating on
+			// the specific error to avoid leaking that descendant.
 			proc.Terminate()
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
 			return stdout.Bytes(), stderr.Bytes(), errProviderCommandTimeout
 		}
 		return stdout.Bytes(), stderr.Bytes(), err

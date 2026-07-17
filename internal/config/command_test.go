@@ -118,6 +118,36 @@ func TestLoadProviderCommandTerminatesBackgroundChild(t *testing.T) {
 	assertProcessTerminated(t, pidFile)
 }
 
+// TestLoadProviderCommandTerminatesBackgroundChildOnFailure covers the same
+// leaked-descendant scenario as TestLoadProviderCommandTerminatesBackgroundChild,
+// but with a shell that exits nonzero. Go's exec.Cmd.Wait only returns
+// exec.ErrWaitDelay when the command itself exited successfully; a nonzero
+// exit yields the bare *ExitError instead, so the leftover child must still
+// be terminated on that path.
+func TestLoadProviderCommandTerminatesBackgroundChildOnFailure(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bg-fail.pid")
+	command := writeCommand(t, commandScript{
+		Stderr:                 "boom",
+		ExitCode:               7,
+		BackgroundSleepSeconds: 10,
+		BackgroundPidFile:      pidFile,
+	})
+
+	start := time.Now()
+	_, err := LoadProviderCommand(command)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("LoadProviderCommand() error = nil, want failure from nonzero exit")
+	}
+	if !strings.Contains(err.Error(), "exit status") {
+		t.Fatalf("error = %q, want exit status failure", err.Error())
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("returned after %s, want well under the 5s provider-command timeout since WaitDelay (1s) should trigger termination", elapsed)
+	}
+	assertProcessTerminated(t, pidFile)
+}
+
 func assertProcessTerminated(t *testing.T, pidFile string) {
 	t.Helper()
 

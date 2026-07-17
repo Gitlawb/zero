@@ -84,13 +84,22 @@ func resumeMainThread(pid int) {
 
 func (p *commandProcess) Terminate() {
 	if p.job != 0 {
+		// A job handle means the process tree was contained from launch, so
+		// TerminateJobObject alone kills every member atomically. Don't also
+		// fall through to the taskkill/PID path below: by the time
+		// Terminate runs on the ErrWaitDelay path, cmd.Wait has already
+		// reaped the root process, so its PID may have been reused by an
+		// unrelated process, and forcing /T /PID against a reused PID would
+		// kill the wrong tree.
 		_ = windows.TerminateJobObject(p.job, 1)
+		return
 	}
 	if p.cmd.Process == nil {
 		return
 	}
-	// Fallback for descendants spawned before the job assignment or when
-	// job creation failed.
+	// Fallback for the rare case where job creation or assignment failed:
+	// there's no containment, so the PID is the best signal available even
+	// though it carries the same reuse risk noted above.
 	taskkill := taskkillPath()
 	_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
 	_ = p.cmd.Process.Kill()
