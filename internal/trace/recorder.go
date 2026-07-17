@@ -188,6 +188,21 @@ func (r *Recorder) EmitPrefixHash(p PrefixHash) {
 	r.tr.PrefixHashes = append(r.tr.PrefixHashes, p)
 }
 
+// EmitOutputBudget records one content-free output budgeting decision. Calls
+// are retained in transcript emission order, including when the underlying
+// tools executed concurrently.
+func (r *Recorder) EmitOutputBudget(event OutputBudgetEvent) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
+	r.tr.OutputBudgets = append(r.tr.OutputBudgets, event)
+}
+
 // Finish stamps CompletedAt, derives each span's parent (by interval
 // containment) and exclusive time, and returns a snapshot of the trace. Calling
 // Finish more than once returns the same snapshot.
@@ -207,6 +222,7 @@ func (r *Recorder) Finish() *TurnTrace {
 	snap.Spans = append([]Span(nil), r.tr.Spans...)
 	snap.Counters = append([]Counter(nil), r.tr.Counters...)
 	snap.PrefixHashes = append([]PrefixHash(nil), r.tr.PrefixHashes...)
+	snap.OutputBudgets = append([]OutputBudgetEvent(nil), r.tr.OutputBudgets...)
 	return &snap
 }
 

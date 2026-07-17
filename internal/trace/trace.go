@@ -79,20 +79,36 @@ type Counter struct {
 	Value int64  `json:"value"`
 }
 
+// OutputBudgetEvent is compact, content-free metadata for one tool result's
+// output budgeting decision. It deliberately carries no output text, paths, or
+// arguments so tracing cannot become a secret-bearing side channel.
+type OutputBudgetEvent struct {
+	Tool                    string `json:"tool"`
+	Category                string `json:"category"`
+	OriginalBytes           int    `json:"original_bytes"`
+	RetainedBytes           int    `json:"retained_bytes"`
+	EstimatedOriginalTokens int    `json:"estimated_original_tokens"`
+	EstimatedRetainedTokens int    `json:"estimated_retained_tokens"`
+	Truncated               bool   `json:"truncated"`
+	Reason                  string `json:"reason,omitempty"`
+	SpillCreated            bool   `json:"spill_created"`
+}
+
 // TurnTrace is the finished record for one agent.Run. It is the value
 // emitters serialize; it is not mutated after Finish returns a snapshot.
 type TurnTrace struct {
-	SessionID           string       `json:"session_id"`
-	RunID               string       `json:"run_id"`
-	Profile             string       `json:"profile,omitempty"`
-	StartedAt           time.Time    `json:"started_at"`
-	FirstVisibleEventAt time.Time    `json:"first_visible_event_at,omitempty"`
-	FirstUsefulActionAt time.Time    `json:"first_useful_action_at,omitempty"`
-	FirstTokenAt        time.Time    `json:"first_token_at,omitempty"`
-	CompletedAt         time.Time    `json:"completed_at"`
-	Spans               []Span       `json:"spans"`
-	Counters            []Counter    `json:"counters"`
-	PrefixHashes        []PrefixHash `json:"prefix_hashes,omitempty"`
+	SessionID           string              `json:"session_id"`
+	RunID               string              `json:"run_id"`
+	Profile             string              `json:"profile,omitempty"`
+	StartedAt           time.Time           `json:"started_at"`
+	FirstVisibleEventAt time.Time           `json:"first_visible_event_at,omitempty"`
+	FirstUsefulActionAt time.Time           `json:"first_useful_action_at,omitempty"`
+	FirstTokenAt        time.Time           `json:"first_token_at,omitempty"`
+	CompletedAt         time.Time           `json:"completed_at"`
+	Spans               []Span              `json:"spans"`
+	Counters            []Counter           `json:"counters"`
+	PrefixHashes        []PrefixHash        `json:"prefix_hashes,omitempty"`
+	OutputBudgets       []OutputBudgetEvent `json:"output_budgets,omitempty"`
 }
 
 // PrefixHash is one fingerprint of the prompt prefix emitted by an agent run.
