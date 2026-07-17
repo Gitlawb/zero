@@ -174,8 +174,7 @@ func credentialDenyReadPaths(policy Policy) []string {
 		return nil
 	}
 	// Failed home/config lookups only drop their derived candidates; explicit
-	// credential-file overrides are still submitted as candidates (and, like
-	// every candidate, filtered by on-disk existence below).
+	// credential-file overrides are still submitted as candidates regardless.
 	home, _ := os.UserHomeDir()
 	configDir, _ := zeroUserConfigDir()
 	return credentialDenyReadPathsIn(credentialPathOptions{

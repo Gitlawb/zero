@@ -497,7 +497,10 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows credential deny-read is tracked separately")
 	}
-	configHome := t.TempDir()
+	// Resolve the temp base up front so macOS /var -> /private/var does not
+	// diverge between the pre-mkdir Clean fallback and the post-mkdir
+	// EvalSymlinks success path inside normalizeProfilePath.
+	configHome := resolvedTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	zeroDir := filepath.Join(configHome, "zero")
 
@@ -524,7 +527,11 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 
 	// Re-derive after the files exist: the same directory rule covers both
 	// the known store filename and the never-itemized migrated backup.
+	// Recompute want once the directory exists so EvalSymlinks can resolve
+	// the full path (macOS would otherwise compare a pre-mkdir Clean path
+	// against a post-mkdir /private/var form).
 	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	want = normalizeProfilePaths([]string{zeroDir})[0]
 	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
 		t.Fatalf("DenyRead = %#v, want Zero config directory %q", profile.FileSystem.DenyRead, want)
 	}
