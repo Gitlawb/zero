@@ -10,7 +10,19 @@ import (
 
 func TestDeepgramStreamTranscribeErrorRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
-		// close immediately with an error that simulates connection issue with API key
+		// Drain the client's audio frames, then wait for CloseStream so the
+		// client has flushed its writes before we reject the connection. Closing
+		// immediately (before CloseStream) risks the client failing on a write
+		// error and never observing this API-key-bearing close reason.
+		for {
+			typ, data, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			if typ == websocket.MessageText && strings.Contains(string(data), "CloseStream") {
+				break
+			}
+		}
 		c.Close(websocket.StatusPolicyViolation, "invalid key sk-test-key")
 	})
 
