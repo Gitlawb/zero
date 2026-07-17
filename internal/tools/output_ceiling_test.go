@@ -55,10 +55,10 @@ func TestOutputCeilingCapsUnbudgetedTool(t *testing.T) {
 	if result.Meta["raw_bytes"] != strconv.Itoa(len(big)) {
 		t.Fatalf("raw_bytes = %s, want %d", result.Meta["raw_bytes"], len(big))
 	}
-	if !strings.Contains(result.Output, "full output saved to ") {
+	if !strings.Contains(result.Output, "full output received by budgeting layer saved to ") {
 		t.Fatalf("ceiling truncation must include a spill hint: %q", result.Output[:200])
 	}
-	start := strings.Index(result.Output, "full output saved to ") + len("full output saved to ")
+	start := strings.Index(result.Output, "full output received by budgeting layer saved to ") + len("full output received by budgeting layer saved to ")
 	end := strings.Index(result.Output[start:], " (grep")
 	content, err := os.ReadFile(result.Output[start : start+end])
 	if err != nil {

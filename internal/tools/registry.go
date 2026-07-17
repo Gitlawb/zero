@@ -127,14 +127,17 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	// ceiling runs after the scrub so the transcript and the spill file agree on
 	// what was hidden.
 	ceilingExempt := false
+	var tool Tool
+	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
 		if !ceilingExempt {
+			result = applyRegistryOutputBudget(tool, name, args, result)
 			result = enforceOutputCeiling(name, result)
 		}
 	}()
 
-	tool, ok := registry.Get(name)
+	tool, ok = registry.Get(name)
 	if !ok {
 		return errorResult(`Error: Unknown tool "` + name + `".`)
 	}
