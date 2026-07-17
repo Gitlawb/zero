@@ -1984,6 +1984,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-stamps the in-progress last entry so the line that's still
 		// being filled stays visibly fresh.
 		m.recordStreamingDelta(msg.delta)
+		var cmds []tea.Cmd
+		// The streaming caret (appendStreamingCursor) is appended to whatever
+		// visual line is currently last. Some terminal/renderer combinations
+		// (observed over multipass + Windows Terminal) fail to clear the
+		// caret's old cell when a newline moves it to a new line, leaving
+		// ghost carets behind. A newline is exactly the moment that risk
+		// exists, so force one full-screen redraw right then rather than
+		// leaving it to the incremental diff.
+		if strings.Contains(msg.delta, "\n") {
+			cmds = append(cmds, tea.ClearScreen)
+		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
 		// case schedules the next one). Schedule the FIRST tick only on
 		// the inactive→active transition; subsequent deltas just refresh
@@ -1995,10 +2006,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			startTick := !m.fadeActive
 			m.fadeActive = true
 			if startTick {
-				return m, streamingFadeTick()
+				cmds = append(cmds, streamingFadeTick())
 			}
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
