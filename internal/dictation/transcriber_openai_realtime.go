@@ -75,7 +75,7 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		},
 	}
 	if err := writeJSON(ctx, conn, sessionUpdate); err != nil {
-		return "", fmt.Errorf("configuring OpenAI Realtime session: %w", err)
+		return "", fmt.Errorf("configuring OpenAI Realtime session: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 
 	writeErrCh := make(chan error, 1)
@@ -156,6 +156,8 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case werr := <-writeErrCh:
 			if werr == nil {
 				committed = true
+			} else {
+				return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(werr.Error(), o.cfg.APIKey))
 			}
 		default:
 		}
