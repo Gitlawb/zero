@@ -377,6 +377,13 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 ```
 
+The installed binary lands in `$GOPATH/bin` (default `~/go/bin`), which must be on
+your `PATH` to run `govulncheck` directly. If it isn't, add it:
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
 ### Cross-Compile Examples
 
 ```bash
