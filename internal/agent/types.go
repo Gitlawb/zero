@@ -61,10 +61,13 @@ const (
 )
 
 type ToolResult struct {
-	ToolCallID   string
-	Name         string
-	Status       tools.Status
-	Output       string
+	ToolCallID string
+	Name       string
+	Status     tools.Status
+	Output     string
+	// Truncated reports that the tool's model-visible output omitted content.
+	// The full result may be recoverable through Meta["spill_path"].
+	Truncated    bool
 	Meta         map[string]string
 	Redacted     bool
 	ChangedFiles []string

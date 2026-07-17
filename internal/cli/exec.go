@@ -636,6 +636,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			if len(result.Meta) > 0 {
 				payload["meta"] = result.Meta
 			}
+			if result.Truncated {
+				payload["truncated"] = true
+			}
 			if result.Redacted {
 				payload["redacted"] = true
 			}
