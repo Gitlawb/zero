@@ -119,10 +119,13 @@ func ProjectKeybindingsPath(workspaceRoot string) string {
 }
 
 // EnsureKeybindingsFile writes seed JSON if path is missing. Never overwrites.
+// Creation uses O_CREATE|O_EXCL so concurrent processes racing to seed the same
+// path cannot replace a file another process (or the user) already wrote.
 func EnsureKeybindingsFile(path string, seed KeybindingsFile) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("empty keybindings path")
 	}
+	// Fast path: already present.
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
@@ -134,7 +137,7 @@ func EnsureKeybindingsFile(path string, seed KeybindingsFile) error {
 	if strings.TrimSpace(seed.LeaderKey) == "" {
 		seed.LeaderKey = DefaultLeaderKey
 	}
-	return writeKeybindingsFile(path, seed)
+	return createKeybindingsFileIfAbsent(path, seed)
 }
 
 // EnsureKeybindingsBesideConfig seeds keybindings.json next to configPath when absent.
@@ -207,13 +210,8 @@ func cloneKeybindingsFile(in KeybindingsFile) KeybindingsFile {
 	return out
 }
 
-func writeKeybindingsFile(path string, file KeybindingsFile) error {
-	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create keybindings directory %s: %w", dir, err)
-		}
-	}
+// encodeKeybindingsJSON returns indented JSON bytes for file (with defaults filled).
+func encodeKeybindingsJSON(file KeybindingsFile) ([]byte, error) {
 	out := file
 	if strings.TrimSpace(out.LeaderKey) == "" {
 		out.LeaderKey = DefaultLeaderKey
@@ -235,9 +233,60 @@ func writeKeybindingsFile(path string, file KeybindingsFile) error {
 
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode keybindings JSON: %w", err)
+		return nil, fmt.Errorf("encode keybindings JSON: %w", err)
 	}
-	data = append(data, '\n')
+	return append(data, '\n'), nil
+}
+
+// createKeybindingsFileIfAbsent writes seed only when path does not exist.
+// Uses O_CREATE|O_EXCL so a concurrent creator that lost the race treats the
+// existing file as success and does not overwrite it (unlike rename).
+func createKeybindingsFileIfAbsent(path string, file KeybindingsFile) error {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create keybindings directory %s: %w", dir, err)
+		}
+	}
+	data, err := encodeKeybindingsJSON(file)
+	if err != nil {
+		return err
+	}
+	// Exclusive create: fails with ErrExist if another process won the race or
+	// the user already has a file. Never truncate/replace an existing path.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return fmt.Errorf("create keybindings %s: %w", path, err)
+	}
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		_ = os.Remove(path) // leave no partial seed behind
+		return fmt.Errorf("write keybindings %s: %w", path, writeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("write keybindings %s: %w", path, closeErr)
+	}
+	return nil
+}
+
+// writeKeybindingsFile overwrites path (tests / explicit rewrites only).
+// Prefer createKeybindingsFileIfAbsent for user-facing seed paths.
+func writeKeybindingsFile(path string, file KeybindingsFile) error {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create keybindings directory %s: %w", dir, err)
+		}
+	}
+	data, err := encodeKeybindingsJSON(file)
+	if err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".zero-keybindings-*.tmp")
 	if err != nil {
 		return fmt.Errorf("write keybindings %s: %w", path, err)

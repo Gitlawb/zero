@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -159,5 +160,72 @@ func TestKeybindingsJSONRoundTrip(t *testing.T) {
 	}
 	if decoded.LeaderKey != seed.LeaderKey || decoded.Leader["/model"] != "m" {
 		t.Fatalf("round-trip mismatch: %#v", decoded)
+	}
+}
+
+// Concurrent Ensure on a missing path must leave exactly one valid file and
+// never report an error when another process wins the create race.
+func TestEnsureKeybindingsFileConcurrentCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keybindings.json")
+	seed := DefaultKeybindingsFile([]string{"/model", "/help", "/theme"})
+
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- EnsureKeybindingsFile(path, seed)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Ensure: %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded KeybindingsFile
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("concurrent create left invalid JSON: %v\n%s", err, raw)
+	}
+	if decoded.LeaderKey != DefaultLeaderKey || decoded.Leader["/model"] != "m" {
+		t.Fatalf("unexpected seed after concurrent create: %#v", decoded)
+	}
+
+	// User edits must survive concurrent re-ensure (O_EXCL no-op, not rename).
+	custom := []byte(`{"leaderKey":"alt+x","leader":{"/model":"z"}}` + "\n")
+	if err := os.WriteFile(path, custom, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errs2 := make(chan error, n)
+	var wg2 sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			// Different seed would overwrite under a racy rename; must not here.
+			errs2 <- EnsureKeybindingsFile(path, DefaultKeybindingsFile([]string{"/model"}))
+		}()
+	}
+	wg2.Wait()
+	close(errs2)
+	for err := range errs2 {
+		if err != nil {
+			t.Fatalf("concurrent Ensure on existing: %v", err)
+		}
+	}
+	raw2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw2) != string(custom) {
+		t.Fatalf("concurrent Ensure overwrote user file:\n got %s\nwant %s", raw2, custom)
 	}
 }
