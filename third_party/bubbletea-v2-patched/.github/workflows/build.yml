@@ -1,0 +1,20 @@
+name: build
+on: [push, pull_request]
+
+jobs:
+  build:
+    uses: charmbracelet/meta/.github/workflows/build.yml@main
+
+  build-go-mod:
+    uses: charmbracelet/meta/.github/workflows/build.yml@main
+    with:
+      go-version: ""
+      go-version-file: ./go.mod
+
+  build-examples:
+    if: github.actor != 'dependabot[bot]'
+    uses: charmbracelet/meta/.github/workflows/build.yml@main
+    with:
+      go-version: ""
+      go-version-file: ./examples/go.mod
+      working-directory: ./examples

@@ -36,3 +36,10 @@ require (
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 )
+
+// Vendored fork of bubbletea/v2 with hard scroll optimization disabled
+// unconditionally (see third_party/bubbletea-v2-patched/cursed_renderer.go):
+// it corrupts rendering when zero's output is displayed by Windows Terminal
+// over a remote shell (e.g. running inside a multipass VM), a case the
+// upstream GOOS=="windows" check doesn't catch.
+replace charm.land/bubbletea/v2 => ./third_party/bubbletea-v2-patched
