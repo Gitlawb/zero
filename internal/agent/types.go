@@ -315,8 +315,11 @@ type Options struct {
 	// continuation cue ("…Let me check the config:"). The loop then nudges the
 	// model to continue instead, bounded by maxContinueNudges (and still by
 	// MaxTurns and the run deadline); if the model keeps stalling, the run
-	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. Default
-	// false leaves the loop byte-identical, so the interactive TUI is unaffected.
+	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. When the
+	// run's profile also enables SelfCorrect, an otherwise-complete turn gets one
+	// task-grounded semantic check before success; profiles without SelfCorrect
+	// add no model call. Default false leaves the loop byte-identical, so the
+	// interactive TUI is unaffected.
 	RequireCompletionSignal bool
 
 	runPermissions *permissionRunState
