@@ -628,7 +628,7 @@ func assertVerifyFailed(t *testing.T, label string, outcome TurnTaskOutcome) {
 
 // --- Gating tests: the oracle FAILS the wrong thing (no-op / wrong answer) ---
 
-// TestStampedOracleRejectsNoOpRefactor is the core #701 fix: refactor used to
+// TestStampedOracleRejectsNoOpRefactor is the core #712 fix: refactor used to
 // live in the build tier where a no-op `go build ./...` passed. Now a no-op
 // agent (the stub emits a clean run_end but touches nothing) leaves the fixture
 // with no formatGreeting helper, so the stamped `var _ = formatGreeting` fails
@@ -926,10 +926,11 @@ printf '%s\n' '{"type":"run_end","exitCode":0}'
 	assertVerifyFailed(t, "nav-04 substring count", outcome)
 }
 
-// TestNav04CountOracleAcceptsExactCount proves the anchored count oracle passes
-// when "count: 1" stands on its own line. The fixture's main_test.go defines
-// exactly one Test* function (TestGreet), so the ground truth is 1, not 0 — a
-// guesser that always emits "count: 0" fails (see RejectsZeroGuess).
+// TestNav04CountOracleAcceptsExactCount proves the nav-04 oracle passes for a
+// real answer: the count is anchored on its own line AND the answer names the
+// one Test* function (TestGreet, from main_test.go). The fixture's ground truth
+// is exactly one test function, so count: 1 is right, and naming TestGreet is
+// the inspection-proof that the agent actually read main_test.go.
 func TestNav04CountOracleAcceptsExactCount(t *testing.T) {
 	task := loadBaselineTask(t, "nav-04")
 	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"There is one test function: TestGreet in main_test.go.\ncount: 1"}'
@@ -939,15 +940,14 @@ printf '%s\n' '{"type":"run_end","exitCode":0}'
 		t.Fatalf("correct nav-04 answer should pass, got harness error: %v", outcome.Err)
 	}
 	if !outcome.Passed {
-		t.Fatalf("nav-04 oracle must pass when the answer states count: 1 on its own line: %+v", outcome)
+		t.Fatalf("nav-04 oracle must pass when the answer names TestGreet and states count: 1 on its own line: %+v", outcome)
 	}
 }
 
-// TestNav04CountOracleRejectsZeroGuess is the gameability gate: an agent that
-// never opens the workspace and always emits "count: 0" used to pass nav-04
+// TestNav04CountOracleRejectsZeroGuess is the count=0 gameability gate: an agent
+// that never opens the workspace and always emits "count: 0" used to pass nav-04
 // when the ground truth was 0. The fixture now has one real Test* function, so
-// the ground truth is 1 and a clean "count: 0" fails — proving the count=0
-// rubber-stamp is closed.
+// the ground truth is 1 and a clean "count: 0" fails.
 func TestNav04CountOracleRejectsZeroGuess(t *testing.T) {
 	task := loadBaselineTask(t, "nav-04")
 	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"count: 0"}'
@@ -956,9 +956,23 @@ printf '%s\n' '{"type":"run_end","exitCode":0}'
 	assertVerifyFailed(t, "nav-04 zero-guess", outcome)
 }
 
-// TestNav05CountOracleAcceptsExactCount proves nav-05's anchored count oracle
-// passes for the real ground truth: the fixture has exactly one TODO (in
-// main.go), so "count: 1" on its own line passes.
+// TestNav04CountOracleRejectsBlindCountOne is the count=1 gameability gate: once
+// the ground truth became 1, an agent that never opens the workspace and always
+// emits "count: 1" would pass a count-only oracle. nav-04's oracle also requires
+// the answer to name the test function (TestGreet), so a bare "count: 1" with no
+// named fact fails — proving the blind-count-one surface is closed.
+func TestNav04CountOracleRejectsBlindCountOne(t *testing.T) {
+	task := loadBaselineTask(t, "nav-04")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"count: 1"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-04 blind-count-one", outcome)
+}
+
+// TestNav05CountOracleAcceptsExactCount proves nav-05's oracle passes for a real
+// answer: the count is anchored on its own line AND the answer names the file
+// holding the one TODO (main.go). Naming main.go is the inspection-proof that the
+// agent actually located the TODO rather than guessing the count.
 func TestNav05CountOracleAcceptsExactCount(t *testing.T) {
 	task := loadBaselineTask(t, "nav-05")
 	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"One TODO in main.go.\ncount: 1"}'
@@ -968,11 +982,11 @@ printf '%s\n' '{"type":"run_end","exitCode":0}'
 		t.Fatalf("correct nav-05 answer should pass, got harness error: %v", outcome.Err)
 	}
 	if !outcome.Passed {
-		t.Fatalf("nav-05 oracle must pass when the answer states count: 1: %+v", outcome)
+		t.Fatalf("nav-05 oracle must pass when the answer names main.go and states count: 1: %+v", outcome)
 	}
 }
 
-// TestNav05CountOracleRejectsZeroGuess is nav-05's gameability gate: the
+// TestNav05CountOracleRejectsZeroGuess is nav-05's count=0 gameability gate: the
 // fixture now has one real TODO, so a clean "count: 0" (the always-guess-zero
 // answer) fails.
 func TestNav05CountOracleRejectsZeroGuess(t *testing.T) {
@@ -981,6 +995,33 @@ func TestNav05CountOracleRejectsZeroGuess(t *testing.T) {
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-05 zero-guess", outcome)
+}
+
+// TestNav05CountOracleRejectsBlindCountOne is nav-05's count=1 gameability gate:
+// once the ground truth became 1, an agent that never opens the workspace and
+// always emits "count: 1" would pass a count-only oracle. nav-05's oracle also
+// requires the answer to name the file (main.go), so a bare "count: 1" with no
+// named file fails — proving the blind-count-one surface is closed.
+func TestNav05CountOracleRejectsBlindCountOne(t *testing.T) {
+	task := loadBaselineTask(t, "nav-05")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"count: 1"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-05 blind-count-one", outcome)
+}
+
+// TestNav05CountOracleRejectsSubstring proves the line anchor still bites even
+// when the named fact is present: "the count: 1 is the number of TODOs in
+// main.go" names main.go and contains "count: 1" (the right value), but the
+// count does not stand on its own line, so `^count:[[:space:]]*1$` does not
+// match and the oracle fails. A pre-anchor oracle (`count:\s*1`) would have
+// rubber-stamped this. Mirrors TestNav04CountOracleRejectsSubstring.
+func TestNav05CountOracleRejectsSubstring(t *testing.T) {
+	task := loadBaselineTask(t, "nav-05")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"the count: 1 is the number of TODOs in main.go"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-05 substring count", outcome)
 }
 
 // TestNav08CountOracleAcceptsStdlibAnswer proves nav-08's oracle passes when the

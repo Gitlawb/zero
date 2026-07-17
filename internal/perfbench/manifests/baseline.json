@@ -44,24 +44,24 @@
       "id": "nav-04",
       "name": "count tests",
       "class": "nav",
-      "prompt": "Count the test functions (functions whose names start with Test) in this repository and report the number. State the count as 'count: N' on its own line. Do not modify anything.",
+      "prompt": "Count the test functions (functions whose names start with Test) in this repository. Name each one you find and report the number. State the count as 'count: N' on its own line. Do not modify anything.",
       "workspaceFixture": "../testdata/nav",
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
+        "grep -iq 'TestGreet' .zero-answer.txt && grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
       ]
     },
     {
       "id": "nav-05",
       "name": "locate a string",
       "class": "nav",
-      "prompt": "Find every occurrence of the string 'TODO' in the repository and report the files. State the count as 'count: N' on its own line. Do not modify anything.",
+      "prompt": "Find every occurrence of the string 'TODO' in the repository and report the file(s) they appear in. State the count as 'count: N' on its own line. Do not modify anything.",
       "workspaceFixture": "../testdata/nav",
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
+        "grep -iq 'main.go' .zero-answer.txt && grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
       ]
     },
     {

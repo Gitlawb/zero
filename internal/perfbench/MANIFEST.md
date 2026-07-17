@@ -40,7 +40,7 @@ manifest's `buildOnlyClasses` list:
   the only pass rate that can move with model quality: `tasksVerified` /
   `tasksPassed` / `correctnessPassRate`.
 - **Build-only** (0 tasks) — the tier is empty. refactor used to live here with
-  a non-positive `go build ./...` (a no-op refactor passed); PR #701 gave it a
+  a non-positive `go build ./...` (a no-op refactor passed); PR #712 gave it a
   structural oracle, graduating it to correctness. `buildOnlyClasses` is `[]`.
   `buildCheckedTasks` / `buildPassedTasks` / `buildPassRate` are reported as 0
   and never in `correctnessPassRate`.
@@ -75,7 +75,7 @@ structural (`var _ = Config{}.Label` for edit-03, `var _ = formatGreeting` for
 refactor-01) and behavioral `Test…` functions where the assertion is a value
 (edit-04 `Version != "1.1.0"`, edit-10 `greet("x") != "hello, world"`, edit-09
 `load("nonexistent")` wrapping). Tasks whose oracle is a plain grep/build with
-no stamped test (edit-02, refactor-02, refactor-05) carry no `oracleTest`.
+no stamped test (edit-02, refactor-02) carry no `oracleTest`.
 
 ## Known limitations
 
@@ -88,28 +88,43 @@ honest where they apply:
   answer is free-form prose and a contains-check would rubber-stamp. They stay
   in `latencyOnlyTasks` and never enter a pass rate.
 - **nav count tasks (nav-01, nav-04, nav-05, nav-08) require a structured,
-  line-anchored `count: N` token with the fixture's exact expected count, and
-  the ground truth is non-zero wherever it can be inspected offline so a
-  guess-zero answer can't rubber-stamp.** Their prompts ask the agent to state
-  the count as `count: N` on its own line, and the oracle greps for an anchored
-  `^count: N$` with the exact expected N — 5 files for nav-01 (README.md,
-  config.json, go.mod, main.go, main_test.go), 1 test function for nav-04
-  (`TestGreet` in `main_test.go`), 1 TODO for nav-05 (in `main.go`), and 0
-  third-party imports for nav-08. A substring like "the count: 1" or a wrong
-  count like "count: 3" fails the anchor. nav-04 and nav-05 were given a real
-  `TestGreet` and a real `TODO` precisely so an agent that never opens the
-  workspace and always emits "count: 0" fails (the count=0 gameability that
-  three zero-ground-truth tasks would otherwise share). nav-08 stays at 0 — a
-  real third-party import would need a network fetch and break the offline
-  suite — so its oracle additionally requires the answer to name both `fmt`
-  (from `main.go`) and `testing` (from `main_test.go`), the stdlib imports the
-  agent must have enumerated across every file to conclude 0 third-party. The
-  `testing` requirement is the tighter half: `fmt` alone is the most common Go
-  stdlib import and could be named blind, but `testing` only appears in the test
-  file, so naming it proves the agent read more than `main.go`. This trades a little
-  output freedom for determinism (a loose prose-contains on "0" would match
-  almost any answer, and an unanchored `count: 0` would match inside a longer
-  line).
+  line-anchored `count: N` token with the fixture's exact expected count AND a
+  workspace-derived fact that proves the agent actually inspected the fixture —
+  not the count alone.** Their prompts ask the agent to state the count as
+  `count: N` on its own line and to name the thing(s) counted, and the oracle
+  greps for an anchored `^count: N$` with the exact expected N plus a named fact:
+  nav-01 requires `count: 5` and names `main.go`, `config.json`, and `README.md`
+  (the three the oracle anchors on — a correct answer lists all five files, but
+  the verification contract only requires those three be named); nav-04 names
+  the one test function (`TestGreet` from `main_test.go`); nav-05 names the file
+  holding the one TODO (`main.go`); nav-08 names both stdlib imports (`fmt` from
+  `main.go`, `testing` from `main_test.go`). A substring like "the count: 1" or a
+  wrong count like "count: 3" fails the anchor; a bare "count: 1" with no named
+  fact fails the inspection check. Non-zero ground truth alone was not enough —
+  it closes the always-guess-zero game but opens an always-guess-one game (an
+  agent that never opens the workspace and emits "count: 1" would pass a
+  count-only oracle). The named-fact requirement closes that surface: a blind
+  count is no longer sufficient, the agent must commit to a fact only readable
+  from the fixture. nav-04 and nav-05 were given a real `TestGreet` and a real
+  TODO so the named fact exists to require; nav-08 stays at count 0 (a real
+  third-party import would need a network fetch and break the offline suite), so
+  its named fact is the stdlib imports the agent must enumerate across every file
+  to conclude 0 third-party. The named facts are not all equally tight. nav-04's
+  `TestGreet` is a specific, non-generic identifier a blind agent cannot produce
+  without reading `main.go` to learn a greet function exists, so it fully closes
+  the blind-count-one surface. nav-05's `main.go` is the conventional Go
+  entrypoint and thus the most guessable filename, so it *reduces* rather than
+  fully closes that surface — a blind "count: 1, in main.go" can still pass.
+  Accepted for a Phase 0 baseline: the blind floor on nav-05 is below 100% (a
+  bare "count: 1" fails), so a model still moves the pass rate by actually
+  inspecting; strengthening it further (e.g. requiring the TODO's surrounding
+  symbol) would trade output freedom for determinism and risks false-failing a
+  terse-but-correct answer. nav-08's `testing` half is the tighter of its two:
+  `fmt` alone is the most common Go stdlib import and could be named blind, but
+  `testing` only appears in the test file, so naming it proves the agent read more
+  than `main.go`. This trades a little output freedom for determinism (a loose
+  prose-contains on "0"/"1" would match almost any answer, and an unanchored
+  `count: N` would match inside a longer line).
 - **nav-03 / nav-06 / nav-07 are lenient contains-oracles on real facts.** A
   wrong-but-plausible answer that happens to mention the real symbols (e.g.
   "Config" and "MaxRetries" for nav-06) could in principle pass. Accepted for a
