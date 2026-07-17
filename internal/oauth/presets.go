@@ -99,6 +99,21 @@ var builtinOAuthPresets = map[string]providerPreset{
 		Scopes:                []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
 		Flow:                  FlowLoopback,
 	},
+	// Kimi Code uses Moonshot's public OAuth client identity (the one the
+	// open-source `kimi-code` CLI ships). The flow is device-code only (RFC 8628)
+	// against auth.kimi.com — there is no loopback/authorize path — and the
+	// resulting access token is accepted directly as a bearer on the managed
+	// coding endpoint https://api.kimi.com/coding/v1 (an OpenAI-compatible
+	// endpoint). No ID-token claim extraction is needed; the bearer is the whole
+	// credential. Endpoints and client_id are lifted verbatim from the public
+	// kimi-code source (packages/oauth/src/constants.ts, oauth.ts).
+	"kimi": {
+		ClientID:                    "17e5f671-d194-4dfb-9706-5516cb48c098",
+		DeviceAuthorizationEndpoint: "https://auth.kimi.com/api/oauth/device_authorization",
+		TokenEndpoint:               "https://auth.kimi.com/api/oauth/token",
+		Scopes:                      []string{"openid", "profile", "email", "offline_access"},
+		Flow:                        FlowDevice,
+	},
 }
 
 // lookupOAuthPreset returns the baked-in preset for a provider name (if any).

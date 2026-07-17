@@ -19,6 +19,7 @@ var expectedCatalogIDs = []string{
 	"openrouter",
 	"huggingface",
 	"chatgpt",
+	"kimi",
 	"groq",
 	"deepseek",
 	"together",
@@ -346,7 +347,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "kimi", "groq", "deepseek", "together", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
@@ -405,7 +406,7 @@ func TestReturnedDescriptorsAreCopies(t *testing.T) {
 
 func TestOAuthProviderClassification(t *testing.T) {
 	oauthIDs := descriptorIDs(OAuthProviders())
-	if want := []string{"openrouter", "huggingface", "chatgpt", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
+	if want := []string{"openrouter", "huggingface", "chatgpt", "kimi", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {
@@ -413,6 +414,9 @@ func TestOAuthProviderClassification(t *testing.T) {
 	}
 	if d, _ := Get("xai"); !d.OAuthDeviceFlow {
 		t.Fatal("xai should advertise device-code flow")
+	}
+	if d, _ := Get("kimi"); !d.OAuthDeviceFlow {
+		t.Fatal("kimi should advertise device-code flow")
 	}
 	if d, _ := Get("huggingface"); !d.OAuthDeviceFlow {
 		t.Fatal("huggingface should advertise device-code flow")
