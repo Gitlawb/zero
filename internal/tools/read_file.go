@@ -124,10 +124,16 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 		header = fmt.Sprintf("File: %s (lines %d-%d of %d)", relativePath, startLine, lastLine, total)
 	}
 
-	// The shared registry boundary applies the file policy after redaction. Build
-	// the requested range here without a second byte-prefix truncation so that
-	// policy can retain both its beginning and end.
-	budgetedOutput := newOutputBudgetBuilder(maxBytes, "use start_line/end_line or max_lines to continue with a smaller range")
+	// The shared registry boundary applies the file policy after redaction. Its
+	// input still needs a bounded capture: retain the requested range's head and
+	// tail instead of materializing an arbitrarily large file in memory. Direct
+	// Tool.Run calls preserve the legacy prefix-only byte budget.
+	var budgetedOutput *outputBudgetBuilder
+	if maxBytes > 0 {
+		budgetedOutput = newOutputBudgetBuilder(maxBytes, "use start_line/end_line or max_lines to continue with a smaller range")
+	} else {
+		budgetedOutput = newHeadTailOutputBudgetBuilder(readOutputBudgetBytes, "use start_line/end_line or max_lines to continue with a smaller range")
+	}
 	budgetedOutput.WriteString(header)
 	budgetedOutput.WriteString("\n\n")
 	if err := appendReadFileRange(budgetedOutput, absolutePath, startLine, selectedLines, width); err != nil {
@@ -142,7 +148,7 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 
 	budgeted := budgetedOutput.Result()
 	meta := map[string]string{}
-	if maxBytes > 0 {
+	if maxBytes > 0 || budgeted.Truncated {
 		for key, value := range outputBudgetMeta(budgeted) {
 			meta[key] = value
 		}

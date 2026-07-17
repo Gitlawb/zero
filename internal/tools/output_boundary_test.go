@@ -163,6 +163,9 @@ func TestRegistryLargeSingleLineFileRetainsHeadAndTail(t *testing.T) {
 	if len(result.Output) > readOutputBudgetBytes || !utf8.ValidString(result.Output) {
 		t.Fatalf("single-line file output is not safely bounded: bytes=%d valid=%t", len(result.Output), utf8.ValidString(result.Output))
 	}
+	if rawBytes, err := strconv.Atoi(result.Meta["raw_bytes"]); err != nil || rawBytes <= len(result.Output) {
+		t.Fatalf("single-line file capture was not bounded head/tail output: raw=%q emitted=%d", result.Meta["raw_bytes"], len(result.Output))
+	}
 	for _, want := range []string{"File: large.min.js", "HEAD_SINGLE_LINE_MARK", "TAIL_SINGLE_LINE_MARK"} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("single-line file output missing %q", want)
@@ -235,13 +238,72 @@ func TestShellOutputCategoryClassification(t *testing.T) {
 	}
 }
 
-func TestSelfBudgetedToolDeclaresSemanticCategoryWithoutRebudgeting(t *testing.T) {
+func TestSelfManagedOutputBudgetUsesSemanticTestPolicy(t *testing.T) {
+	setTestTempDir(t)
+	input := "stdout:\n" + strings.Repeat("PASS progress\n", 8_000) +
+		"--- FAIL: TestImportant (0.01s)\nthing_test.go:42: expected 7, got 9\nFAIL\nexit_code: 1"
+	tests := []struct {
+		name string
+		tool Tool
+		args map[string]any
+	}{
+		{name: "bash", tool: NewBashTool(t.TempDir()), args: map[string]any{"command": "go test ./..."}},
+		{name: "exec", tool: NewExecCommandTool(t.TempDir(), newExecSessionManager()), args: map[string]any{"cmd": "go test ./...", "max_output_tokens": 16_000}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := applySelfManagedOutputBudget(test.tool, test.tool.Name(), test.args, Result{Status: StatusError, Output: input, Meta: map[string]string{}})
+			if !got.Truncated || got.Meta[outputBudgetCategoryMeta] != string(outputCategoryTest) {
+				t.Fatalf("semantic budget was not applied: %#v", got)
+			}
+			for _, want := range []string{"TestImportant", "expected 7", "FAIL", "exit_code: 1"} {
+				if !strings.Contains(got.Output, want) {
+					t.Fatalf("semantic test output missing %q:\n%s", want, got.Output)
+				}
+			}
+		})
+	}
+}
+
+type semanticBashFakeTool struct{ ceilingFakeTool }
+
+func (semanticBashFakeTool) managesOutputBudget() {}
+
+func (semanticBashFakeTool) outputCategory(args map[string]any) outputCategory {
+	command, _ := args["command"].(string)
+	return shellOutputCategory(command)
+}
+
+func TestRegistryAppliesSemanticBudgetToSelfManagedShellOutput(t *testing.T) {
+	setTestTempDir(t)
+	input := "startup\n" + strings.Repeat("PASS progress\n", 8_000) +
+		"--- FAIL: TestRegistryImportant (0.01s)\nexpected 7, got 9\nFAIL\nexit_code: 1"
 	registry := NewRegistry()
-	registry.Register(NewBashTool(t.TempDir()))
-	tool, _ := registry.Get("bash")
-	result := Result{Status: StatusOK, Output: "already bounded", Meta: map[string]string{}}
-	got := annotateSelfBudgetedOutput(tool, "bash", map[string]any{"command": "go test ./..."}, result)
-	if got.Output != result.Output || got.Meta[outputBudgetCategoryMeta] != string(outputCategoryTest) {
-		t.Fatalf("self-budgeted category annotation changed output or lost category: %#v", got)
+	registry.Register(semanticBashFakeTool{newCeilingFakeTool("bash", input)})
+	result := registry.Run(context.Background(), "bash", map[string]any{"command": "go test ./..."})
+	if !result.Truncated || result.Meta[outputBudgetReasonMeta] != "semantic_test_budget" {
+		t.Fatalf("registry did not apply semantic test budget: %#v", result.Meta)
+	}
+	for _, want := range []string{"TestRegistryImportant", "expected 7", "FAIL", "exit_code: 1"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("registry semantic test output missing %q:\n%s", want, result.Output)
+		}
+	}
+}
+
+func TestRegistryAppliesSemanticBudgetToSelfManagedProcessOutput(t *testing.T) {
+	setTestTempDir(t)
+	input := "starting build\n" + strings.Repeat("progress\n", 8_000) +
+		"WARNING: cache is cold\nERROR: compilation failed\nexit_code: 1"
+	registry := NewRegistry()
+	registry.Register(semanticBashFakeTool{newCeilingFakeTool("bash", input)})
+	result := registry.Run(context.Background(), "bash", map[string]any{"command": "make build"})
+	if !result.Truncated || result.Meta[outputBudgetReasonMeta] != "semantic_process_budget" {
+		t.Fatalf("registry did not apply semantic process budget: %#v", result.Meta)
+	}
+	for _, want := range []string{"starting build", "WARNING", "ERROR", "exit_code: 1"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("registry semantic process output missing %q:\n%s", want, result.Output)
+		}
 	}
 }

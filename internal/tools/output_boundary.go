@@ -34,6 +34,50 @@ func applyRegistryOutputBudget(tool Tool, toolName string, args map[string]any, 
 	return result
 }
 
+// applySelfManagedOutputBudget applies semantic retention to tools that retain
+// output with their own capture-aware limits. Their explicit budgets remain
+// authoritative, rather than being replaced by the registry default ceiling.
+func applySelfManagedOutputBudget(tool Tool, toolName string, args map[string]any, result Result) Result {
+	budget := selfManagedOutputBudget(toolName, args)
+	if budget.maxEstimatedTokens <= 0 && budget.hardMaxBytes <= 0 {
+		return annotateSelfBudgetedOutput(tool, toolName, args, result)
+	}
+
+	category := resolveOutputCategory(tool, toolName, args)
+	budgeted := budgetSemanticOutput(result.Output, category, budget)
+	if result.Truncated && !budgeted.truncated {
+		budgeted.truncated = true
+		budgeted.reason = result.Meta["truncation_reason"]
+		if budgeted.reason == "" {
+			budgeted.reason = "upstream_tool_budget"
+		}
+	}
+	if budgeted.truncated {
+		budgeted = attachExistingSpill(toolName, result.Output, budget, budgeted)
+	}
+	result.Output = budgeted.text
+	result.Truncated = result.Truncated || budgeted.truncated
+	result.Meta = addOutputBudgetMetadata(result.Meta, budgeted)
+	return result
+}
+
+func selfManagedOutputBudget(toolName string, args map[string]any) outputBudget {
+	switch toolName {
+	case "bash":
+		// bash previously exposed at most 32 KiB from each stream. Keep that
+		// combined 64 KiB ceiling while selecting its contents semantically.
+		return outputBudget{maxEstimatedTokens: (bashOutputBudgetBytes * 2) / 4, hardMaxBytes: bashOutputBudgetBytes * 2}
+	case ExecCommandToolName:
+		maxOutputTokens := defaultMaxOutputTokens
+		if parsed, err := intArg(args, "max_output_tokens", defaultMaxOutputTokens, 1, maxExecOutputTokenRequest); err == nil {
+			maxOutputTokens = parsed
+		}
+		return outputBudget{maxEstimatedTokens: maxOutputTokens, hardMaxBytes: maxOutputTokens * 4}
+	default:
+		return outputBudget{}
+	}
+}
+
 // RebudgetAfterHook reapplies the registry's redaction and output limits after
 // an afterTool hook appends model-visible feedback to a completed result. The
 // initial registry pass has already run; this second pass is limited to the
@@ -150,6 +194,11 @@ func attachExistingSpill(toolName, output string, budget outputBudget, current b
 	base.text = text
 	base.retainedBytes = len(text)
 	base.estimatedRetainedTokens = estimateOutputTokens(text)
+	base.truncated = true
+	if base.reason == "" {
+		base.reason = current.reason
+	}
+	base.category = current.category
 	base.spillPath = path
 	return base
 }

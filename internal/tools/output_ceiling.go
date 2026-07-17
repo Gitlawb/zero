@@ -25,16 +25,17 @@ const defaultOutputCeilingTokens = 16_000
 // disables the ceiling entirely; unset or unparsable keeps the default.
 const outputCeilingEnv = "ZERO_TOOL_OUTPUT_CEILING_TOKENS"
 
-// selfBudgeting marks a tool that enforces its own deliberate output budget —
-// possibly model-raisable (exec_command) — which the registry ceiling must not
-// second-guess. The method is unexported on purpose: only tools in this
-// package can opt out, so an MCP-served tool can never exempt itself.
+// selfBudgeting marks a tool with a deliberate capture-aware output budget —
+// possibly model-raisable (exec_command). The registry applies semantic
+// retention within that explicit budget rather than replacing it with the
+// default ceiling. The method is unexported so an MCP-served tool cannot opt
+// into this path.
 type selfBudgeting interface{ managesOutputBudget() }
 
-// The exemption list, kept in one place. Shell/process tools retain their
-// established capture-aware budgets: bash (per-stream budget + spill) and
-// exec_command (model-raisable budget + spill). File/search tools now use the
-// shared post-redaction semantic boundary.
+// The list is kept in one place. Shell/process tools retain their established
+// capture-aware budgets: bash (per-stream bounded capture) and exec_command
+// (model-raisable bounded session output). File/search tools use the standard
+// shared post-redaction boundary.
 func (bashTool) managesOutputBudget()        {}
 func (execCommandTool) managesOutputBudget() {}
 

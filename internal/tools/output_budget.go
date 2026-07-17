@@ -218,6 +218,7 @@ func estimatedTokensFromBytes(bytes int) int {
 
 type outputBudgetBuilder struct {
 	builder  strings.Builder
+	capture  *boundedBuffer
 	rawBytes int
 	maxBytes int
 	hint     string
@@ -227,8 +228,24 @@ func newOutputBudgetBuilder(maxBytes int, hint string) *outputBudgetBuilder {
 	return &outputBudgetBuilder{maxBytes: maxBytes, hint: hint}
 }
 
+// newHeadTailOutputBudgetBuilder bounds capture while retaining both ends of
+// an input for a later semantic policy. It is used for registry-driven file
+// reads; direct Tool.Run calls keep the legacy prefix-only builder above.
+func newHeadTailOutputBudgetBuilder(maxBytes int, hint string) *outputBudgetBuilder {
+	headBytes := maxBytes / 2
+	return &outputBudgetBuilder{
+		capture:  newBoundedBuffer(headBytes, maxBytes-headBytes),
+		maxBytes: maxBytes,
+		hint:     hint,
+	}
+}
+
 func (builder *outputBudgetBuilder) WriteString(value string) {
 	builder.rawBytes += len(value)
+	if builder.capture != nil {
+		_, _ = builder.capture.Write([]byte(value))
+		return
+	}
 	if builder.maxBytes <= 0 {
 		builder.builder.WriteString(value)
 		return
@@ -262,6 +279,9 @@ func applyLegacyByteBudgetToResult(result Result, maxBytes int, hint string) Res
 
 func (builder *outputBudgetBuilder) Result() outputBudgetResult {
 	output := builder.builder.String()
+	if builder.capture != nil {
+		output = builder.capture.retained()
+	}
 	result := outputBudgetResult{
 		Output:       output,
 		RawBytes:     builder.rawBytes,
@@ -276,7 +296,12 @@ func (builder *outputBudgetBuilder) Result() outputBudgetResult {
 	if budget < 0 {
 		budget = 0
 	}
-	result.Output = utf8Prefix(output, budget) + marker
+	if builder.capture != nil {
+		headBytes := budget / 2
+		result.Output = utf8Prefix(output, headBytes) + marker + utf8Suffix(output, budget-headBytes)
+	} else {
+		result.Output = utf8Prefix(output, budget) + marker
+	}
 	result.Truncated = true
 	result.EmittedBytes = len(result.Output)
 	return result
