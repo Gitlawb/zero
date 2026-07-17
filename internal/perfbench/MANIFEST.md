@@ -87,11 +87,14 @@ honest where they apply:
   large generated file", or "report the first line of each of six files" — the
   answer is free-form prose and a contains-check would rubber-stamp. They stay
   in `latencyOnlyTasks` and never enter a pass rate.
-- **nav count tasks (nav-04, nav-05, nav-08) require a structured `count: N`
-  token.** Their prompts ask the agent to state the count as `count: N` on its
-  own line, and the oracle greps for `count: 0`. This trades a little output
-  freedom for determinism (a loose prose-contains on "0" would match almost any
-  answer).
+- **nav count tasks (nav-01, nav-04, nav-05, nav-08) require a structured,
+  line-anchored `count: N` token with the fixture's exact expected count.** Their
+  prompts ask the agent to state the count as `count: N` on its own line, and the
+  oracle greps for an anchored `^count: N$` (with the exact expected N — 4 files
+  for nav-01, 0 for nav-04/05/08), so a substring like "the count: 0" or a wrong
+  count like "count: 3" fails. This trades a little output freedom for
+  determinism (a loose prose-contains on "0" would match almost any answer, and
+  an unanchored `count: 0` would match inside a longer line).
 - **nav-03 / nav-06 / nav-07 are lenient contains-oracles on real facts.** A
   wrong-but-plausible answer that happens to mention the real symbols (e.g.
   "Config" and "MaxRetries" for nav-06) could in principle pass. Accepted for a
@@ -114,7 +117,10 @@ iteration or a later task.
 
 Each mutating fixture (and nav) carries a `go.mod` (`module <pkg>; go 1.22`) so
 `go test ./...` / `go build ./...` oracles work in the copy: `copyFixture`
-places the copy under `os.TempDir()/zero-turn-bench/` — one level below the
-system temp root — because Go ignores `go.mod` in direct children of the system
-temp dir (a hijack guard), which would otherwise make every compiler-backed
-oracle fail with "cannot find main module".
+creates a unique, 0700 parent under the system temp root
+(`os.MkdirTemp(os.TempDir(), "zero-turn-bench-*")`) and nests the copy beneath
+it, so the copy is a *grandchild* of the temp root. Go ignores `go.mod` in
+direct children of the system temp dir (a hijack guard), so the copy must sit
+one level below that root or every compiler-backed oracle would fail with
+"cannot find main module". The unique parent also avoids a predictable
+shared directory and is removed wholesale on cleanup.

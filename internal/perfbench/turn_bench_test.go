@@ -436,16 +436,26 @@ func TestCopyFixtureIsolatesSourceFromMutation(t *testing.T) {
 		t.Fatalf("read source main.go: %v", err)
 	}
 
-	copyDir, err := copyFixture(src)
+	copyDir, parent, err := copyFixture(src)
 	if err != nil {
 		t.Fatalf("copyFixture: %v", err)
 	}
-	defer os.RemoveAll(copyDir)
+	defer os.RemoveAll(parent) // cleans copyDir too, since copyDir lives under parent
 
 	// The copy must be a real copy, not a symlink/alias of the source, and
 	// mutating it must not touch the source.
 	if copyDir == src {
 		t.Fatalf("copyFixture returned the source dir, not a copy: %s", copyDir)
+	}
+	// The copy must be a grandchild of the system temp root (parent is a direct
+	// child of Temp, copyDir is a direct child of parent). Go ignores go.mod in
+	// direct children of Temp (a hijack guard), so this nesting is what lets the
+	// compiler-backed oracles actually run in the copy.
+	if filepath.Dir(parent) != os.TempDir() {
+		t.Fatalf("parent %q is not a direct child of temp root %q", parent, os.TempDir())
+	}
+	if filepath.Dir(copyDir) != parent {
+		t.Fatalf("copyDir %q is not nested under parent %q", copyDir, parent)
 	}
 	if err := os.WriteFile(filepath.Join(copyDir, "main.go"), []byte("package main\n\n// mutated\nfunc main() {}\n"), 0o644); err != nil {
 		t.Fatalf("mutate copy: %v", err)
@@ -591,6 +601,27 @@ func runTurnStub(t *testing.T, task BenchTask, stubBody string) TurnTaskOutcome 
 	return NewTurnExecRunner(stub)(context.Background(), task, RunContext{Model: "fake-model"})
 }
 
+// assertVerifyFailed asserts an outcome failed specifically because the oracle
+// rejected the work — Passed is false, there is no harness error (Err nil), and
+// VerifyErr carries the surfaced failure detail. This is stronger than merely
+// checking Passed=false: it distinguishes a genuine oracle rejection from a
+// harness error (Err set) or a silent non-pass (Passed=false with no VerifyErr,
+// which would mean the failure never went through verification at all). The
+// gating stubs all emit a clean run_end (exitCode 0), so a non-empty VerifyErr
+// here can only come from the verification command failing.
+func assertVerifyFailed(t *testing.T, label string, outcome TurnTaskOutcome) {
+	t.Helper()
+	if outcome.Err != nil {
+		t.Fatalf("%s: want a verify fail, got harness error: %v", label, outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("%s: want verify fail, got Passed=true", label)
+	}
+	if strings.TrimSpace(outcome.VerifyErr) == "" {
+		t.Fatalf("%s: want verify fail, but VerifyErr is empty (failure did not come from verification): %+v", label, outcome)
+	}
+}
+
 // --- Gating tests: the oracle FAILS the wrong thing (no-op / wrong answer) ---
 
 // TestStampedOracleRejectsNoOpRefactor is the core #701 fix: refactor used to
@@ -602,12 +633,7 @@ func TestStampedOracleRejectsNoOpRefactor(t *testing.T) {
 	task := loadBaselineTask(t, "refactor-01")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
 `)
-	if outcome.Err != nil {
-		t.Fatalf("no-op refactor is a verify fail, not a harness error: %v", outcome.Err)
-	}
-	if outcome.Passed {
-		t.Fatal("no-op refactor must fail the stamped oracle (formatGreeting undefined), got Passed=true")
-	}
+	assertVerifyFailed(t, "no-op refactor", outcome)
 }
 
 // TestStampedOracleRejectsMissingField proves edit-03's oracle is structural: a
@@ -617,12 +643,7 @@ func TestStampedOracleRejectsMissingField(t *testing.T) {
 	task := loadBaselineTask(t, "edit-03")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
 `)
-	if outcome.Err != nil {
-		t.Fatalf("missing-field is a verify fail, not a harness error: %v", outcome.Err)
-	}
-	if outcome.Passed {
-		t.Fatal("no-op edit-03 (no Label field) must fail the stamped oracle, got Passed=true")
-	}
+	assertVerifyFailed(t, "missing-field edit-03", outcome)
 }
 
 // TestNavAnswerOracleRejectsWrongAnswer proves the nav oracle greps the CAPTURED
@@ -634,12 +655,7 @@ func TestNavAnswerOracleRejectsWrongAnswer(t *testing.T) {
 	outcome := runTurnStub(t, task, `echo '{"type":"final","text":"the keys are foo and bar"}'
 echo '{"type":"run_end","exitCode":0}'
 `)
-	if outcome.Err != nil {
-		t.Fatalf("wrong nav answer is a verify fail, not a harness error: %v", outcome.Err)
-	}
-	if outcome.Passed {
-		t.Fatal("nav-09 oracle must reject an answer missing port/name/retries, got Passed=true")
-	}
+	assertVerifyFailed(t, "wrong nav-09 answer", outcome)
 }
 
 // TestNavNoFinalTextFails proves a run that produced no answer fails nav: with
@@ -648,12 +664,7 @@ func TestNavNoFinalTextFails(t *testing.T) {
 	task := loadBaselineTask(t, "nav-09")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
 `)
-	if outcome.Err != nil {
-		t.Fatalf("missing final is a verify fail, not a harness error: %v", outcome.Err)
-	}
-	if outcome.Passed {
-		t.Fatal("nav oracle with no captured answer must fail, got Passed=true")
-	}
+	assertVerifyFailed(t, "nav-09 no final", outcome)
 }
 
 // TestEdit05RejectsRewordedDebugPrint proves edit-05's oracle catches a reword,
@@ -666,12 +677,7 @@ func TestEdit05RejectsRewordedDebugPrint(t *testing.T) {
 	outcome := runTurnStub(t, task, `sed 's/debug: starting/starting up/' main.go > .zero-tmp && mv .zero-tmp main.go
 echo '{"type":"run_end","exitCode":0}'
 `)
-	if outcome.Err != nil {
-		t.Fatalf("reworded debug print is a verify fail, not a harness error: %v", outcome.Err)
-	}
-	if outcome.Passed {
-		t.Fatal("edit-05 oracle must reject a reworded (not removed) debug print, got Passed=true")
-	}
+	assertVerifyFailed(t, "reworded edit-05 debug print", outcome)
 }
 
 // TestEdit01IgnoresDocComment proves edit-01's scoped negative grep does NOT
@@ -748,5 +754,105 @@ echo '{"type":"run_end","exitCode":0}'
 	}
 	if !outcome.Passed {
 		t.Fatalf("nav-09 oracle must pass when the answer names port/name/retries: %+v", outcome)
+	}
+}
+
+// TestStampOracleRejectsFixturelessOracleTask covers the fail-closed path in
+// stampOracleAndAnswer: a task that carries an oracle (a stamped OracleTest or a
+// verification command) but has no workspace fixture has nowhere safe to stamp,
+// so it must error rather than let runVerification run in the caller's cwd with
+// the oracle never compiled (or the answer never captured). A fixtureless task
+// with no oracle and no verification (a pure latency-only run in the caller's
+// cwd) is left alone. This is a direct unit test (no stub), so it runs on all
+// platforms.
+func TestStampOracleRejectsFixturelessOracleTask(t *testing.T) {
+	// OracleTest set, no verificationCommand: isolates the `OracleTest != ""`
+	// reject branch so a regression that only checked VerificationCommand would
+	// fail here (the both-set case below would still pass it).
+	withOracleTest := BenchTask{
+		ID:         "t",
+		OracleTest: "package x\n\nvar _ = Missing\n",
+	}
+	if err := stampOracleAndAnswer(withOracleTest, nil); err == nil {
+		t.Fatal("fixtureless task with an OracleTest must be rejected, got nil error")
+	}
+	// verificationCommand set, no OracleTest: isolates the other reject branch.
+	withVerify := BenchTask{
+		ID:                  "t",
+		VerificationCommand: []string{"bash", "-c", "grep x .zero-answer.txt"},
+	}
+	if err := stampOracleAndAnswer(withVerify, nil); err == nil {
+		t.Fatal("fixtureless task with a verificationCommand must be rejected, got nil error")
+	}
+	// Both set: the `||` rejects, and this guards against a regression that
+	// inverted the logic to `&&`.
+	withBoth := BenchTask{
+		ID:                  "t",
+		OracleTest:          "package x\n\nvar _ = Missing\n",
+		VerificationCommand: []string{"go", "test", "./..."},
+	}
+	if err := stampOracleAndAnswer(withBoth, nil); err == nil {
+		t.Fatal("fixtureless task with both an OracleTest and a verificationCommand must be rejected, got nil error")
+	}
+	latencyOnly := BenchTask{ID: "t"}
+	if err := stampOracleAndAnswer(latencyOnly, nil); err != nil {
+		t.Fatalf("fixtureless latency-only task must not be rejected, got: %v", err)
+	}
+}
+
+// --- Count-oracle tests: anchored `^count: N$` with the exact expected count ---
+
+// TestNav01CountOracleAcceptsExactCount proves nav-01's anchored count oracle
+// passes when the answer names the files AND states the exact count (4) on its
+// own line. printf emits the JSON with a literal \n escape so the captured
+// answer has "count: 4" on its own line.
+func TestNav01CountOracleAcceptsExactCount(t *testing.T) {
+	task := loadBaselineTask(t, "nav-01")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md\ncount: 4"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct nav-01 answer should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("nav-01 oracle must pass when the answer names the files and states count: 4: %+v", outcome)
+	}
+}
+
+// TestNav01CountOracleRejectsWrongCount proves the anchored count oracle rejects
+// a wrong count: the file names are all present, but "count: 3" does not match
+// `^count: 4$`, so the task fails at verification.
+func TestNav01CountOracleRejectsWrongCount(t *testing.T) {
+	task := loadBaselineTask(t, "nav-01")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md\ncount: 3"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-01 wrong count", outcome)
+}
+
+// TestNav04CountOracleRejectsSubstring proves the line anchor rejects a
+// substring: "the count: 0 is the number" contains "count: 0" but the line does
+// not start with "count:", so `^count:[[:space:]]*0$` does not match. A
+// pre-anchor oracle (`count:\s*0`) would have rubber-stamped this.
+func TestNav04CountOracleRejectsSubstring(t *testing.T) {
+	task := loadBaselineTask(t, "nav-04")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"the count: 0 is the number of test functions"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-04 substring count", outcome)
+}
+
+// TestNav04CountOracleAcceptsExactCount proves the anchored count oracle passes
+// when "count: 0" stands on its own line.
+func TestNav04CountOracleAcceptsExactCount(t *testing.T) {
+	task := loadBaselineTask(t, "nav-04")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"There are no test functions.\ncount: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct nav-04 answer should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("nav-04 oracle must pass when the answer states count: 0 on its own line: %+v", outcome)
 	}
 }

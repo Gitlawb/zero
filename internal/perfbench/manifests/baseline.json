@@ -8,12 +8,12 @@
       "id": "nav-01",
       "name": "list repo files",
       "class": "nav",
-      "prompt": "List the files in this repository and report their count. Do not modify anything.",
+      "prompt": "List the files in this repository and report their count. State the count as 'count: N' on its own line. Do not modify anything.",
       "workspaceFixture": "../testdata/nav",
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iq 'main.go' .zero-answer.txt && grep -iq 'config.json' .zero-answer.txt && grep -iq 'readme' .zero-answer.txt"
+        "grep -iq 'main.go' .zero-answer.txt && grep -iq 'config.json' .zero-answer.txt && grep -iq 'readme' .zero-answer.txt && grep -iqE '^count:[[:space:]]*4$' .zero-answer.txt"
       ]
     },
     {
@@ -49,7 +49,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE 'count:\\s*0' .zero-answer.txt"
+        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
       ]
     },
     {
@@ -61,7 +61,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE 'count:\\s*0' .zero-answer.txt"
+        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
       ]
     },
     {
@@ -97,7 +97,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE 'count:\\s*0' .zero-answer.txt"
+        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
       ]
     },
     {

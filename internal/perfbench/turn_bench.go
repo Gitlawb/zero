@@ -522,11 +522,13 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		// fixture or bleed into a later iteration of the same task. When no
 		// fixture is configured the agent runs in the caller's cwd as before.
 		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" {
-			copyDir, cerr := copyFixture(fixture)
+			copyDir, parent, cerr := copyFixture(fixture)
 			if cerr != nil {
 				return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
 			}
-			defer os.RemoveAll(copyDir)
+			// Clean the whole unique parent (which owns copyDir) so the
+			// per-invocation scratch dir never leaks.
+			defer os.RemoveAll(parent)
 			task.WorkspaceFixture = copyDir
 		}
 
@@ -618,33 +620,41 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 }
 
 // copyFixture copies the fixture directory at src into a fresh temp dir and
-// returns the copy's path. Used to give each benchmark invocation an isolated
-// workspace so mutating tasks (edit/fix/refactor) can't dirty the checked-in
-// fixture or a later iteration.
+// returns the copy's path (dst) plus the unique parent dir that owns it (parent,
+// which the caller must RemoveAll to clean up dst and its sibling scratch space
+// together). Used to give each benchmark invocation an isolated workspace so
+// mutating tasks (edit/fix/refactor) can't dirty the checked-in fixture or a
+// later iteration.
 //
-// The copy is placed one level BELOW the system temp root (under a fixed
-// "zero-turn-bench" parent), not directly in it. Go ignores go.mod files in
-// direct children of the system temp dir (a hijack guard), which would make the
-// fixture's go.mod — and thus every `go test ./...`/`go build ./...` oracle —
-// fail with "cannot find main module". Nesting one level deeper makes Go
+// The copy is placed two levels BELOW the system temp root: a unique 0700
+// parent (created fresh per invocation via os.MkdirTemp, so concurrent runs and
+// different users can't share or traverse a predictable scratch dir) and the
+// fixture copy beneath it. Go ignores go.mod files in DIRECT children of the
+// system temp dir (a hijack guard), which would make the fixture's go.mod —
+// and thus every `go test ./...`/`go build ./...` oracle — fail with "cannot
+// find main module". Keeping the copy a grandchild of the temp root makes Go
 // respect the copied go.mod so the compiler-backed oracles actually run.
-func copyFixture(src string) (string, error) {
+func copyFixture(src string) (dst, parent string, err error) {
 	info, err := os.Stat(src)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("fixture %q is not a directory", src)
+		return "", "", fmt.Errorf("fixture %q is not a directory", src)
 	}
-	parent := filepath.Join(os.TempDir(), "zero-turn-bench")
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return "", err
-	}
-	dst, err := os.MkdirTemp(parent, "zero-turn-fixture-*")
+	// Unique, 0700-per-invocation parent directly under the temp root. The
+	// fixture copy is created BENEATH it, so the copy is a grandchild of the
+	// temp root and its go.mod is respected (see the doc comment above).
+	parent, err = os.MkdirTemp(os.TempDir(), "zero-turn-bench-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, werr error) error {
+	dst, err = os.MkdirTemp(parent, "zero-turn-fixture-*")
+	if err != nil {
+		os.RemoveAll(parent)
+		return "", "", err
+	}
+	werr := filepath.WalkDir(src, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
@@ -662,11 +672,11 @@ func copyFixture(src string) (string, error) {
 		}
 		return os.WriteFile(target, data, 0o644)
 	})
-	if err != nil {
-		os.RemoveAll(dst)
-		return "", err
+	if werr != nil {
+		os.RemoveAll(parent) // removes dst too
+		return "", "", werr
 	}
-	return dst, nil
+	return dst, parent, nil
 }
 
 // stampOracleAndAnswer writes the compiler-backed oracle test (when configured)
@@ -677,9 +687,20 @@ func copyFixture(src string) (string, error) {
 // always written (empty when no final event was captured) so a nav answer-oracle
 // fails cleanly on a run that produced no answer rather than reading a stale or
 // absent file.
+//
+// A task that needs an oracle — a stamped oracle_test.go OR a verification
+// command that reads .zero-answer.txt — but has no workspace fixture is
+// rejected: there is nowhere safe to stamp, so runVerification would otherwise
+// run in the caller's cwd with the oracle never compiled (or the answer never
+// captured), which can read as a false pass. A fixtureless task with no oracle
+// and no verification (a pure latency-only run in the caller's cwd) is left
+// alone.
 func stampOracleAndAnswer(task BenchTask, outBuf []byte) error {
 	dir := strings.TrimSpace(task.WorkspaceFixture)
 	if dir == "" {
+		if task.OracleTest != "" || len(task.VerificationCommand) > 0 {
+			return fmt.Errorf("stamp oracle: task %q has an oracle or verification but no workspace fixture to stamp into", task.ID)
+		}
 		return nil
 	}
 	if ot := task.OracleTest; ot != "" {
