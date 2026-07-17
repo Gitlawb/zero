@@ -91,7 +91,7 @@ func TestCtrlPNMovesPermissionOptions(t *testing.T) {
 	}
 }
 
-func TestCtrlPTogglesPlanWhenNoModal(t *testing.T) {
+func TestCtrlYTogglesPlanWhenNoModal(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
 	m.plan = planPanelState{
 		steps: []planStep{{content: "step one", status: "pending"}},
@@ -100,10 +100,10 @@ func TestCtrlPTogglesPlanWhenNoModal(t *testing.T) {
 		t.Fatal("setup: plan should be non-empty")
 	}
 	initial := m.plan.expanded
-	updated, _ := m.Update(testKeyCtrl('p'))
+	updated, _ := m.Update(testKeyCtrl('y'))
 	next := updated.(model)
 	if next.plan.expanded == initial {
-		t.Fatal("Ctrl+P with no modal should toggle plan.expanded")
+		t.Fatal("Ctrl+Y with no modal should toggle plan.expanded")
 	}
 }
 
@@ -133,23 +133,25 @@ func TestCtrlPDoesNotTogglePlanInPicker(t *testing.T) {
 	}
 }
 
-func TestCtrlNNoOpWithoutModal(t *testing.T) {
-	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
-	m.plan = planPanelState{
-		steps:    []planStep{{content: "step one", status: "pending"}},
-		expanded: false,
-	}
-	before := m.plan.expanded
-	updated, _ := m.Update(testKeyCtrl('n'))
-	next := updated.(model)
-	if next.picker != nil || next.suggestionsActive() {
-		t.Fatal("Ctrl+N idle must not open a modal")
-	}
-	if next.plan.expanded != before {
-		t.Fatal("Ctrl+N idle must not toggle the plan panel")
-	}
-	if next.composerValue() != "" {
-		t.Fatalf("Ctrl+N idle must not type into composer, got %q", next.composerValue())
+func TestCtrlPNNoOpWithoutModal(t *testing.T) {
+	for _, key := range []rune{'n', 'p'} {
+		m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+		m.plan = planPanelState{
+			steps:    []planStep{{content: "step one", status: "pending"}},
+			expanded: false,
+		}
+		before := m.plan.expanded
+		updated, _ := m.Update(testKeyCtrl(key))
+		next := updated.(model)
+		if next.picker != nil || next.suggestionsActive() {
+			t.Fatalf("Ctrl+%c idle must not open a modal", key-'a'+'A')
+		}
+		if next.plan.expanded != before {
+			t.Fatalf("Ctrl+%c idle must not toggle the plan panel", key-'a'+'A')
+		}
+		if next.composerValue() != "" {
+			t.Fatalf("Ctrl+%c idle must not type into composer, got %q", key-'a'+'A', next.composerValue())
+		}
 	}
 }
 

@@ -192,10 +192,41 @@ Useful controls:
 | `Enter` | send the prompt |
 | `/` | open slash-command suggestions |
 | `Ctrl+X` then letter | common slash commands (e.g. `m` → `/model`; `Ctrl+X` `?` for full list) |
-| `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work) |
+| `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work; not remappable) |
+| `Esc` / `Ctrl+G` | dismiss a popup / cancel (Ctrl+G is emacs abort; not remappable) |
 | `Shift+Tab` | cycle permission mode |
+| `Ctrl+Y` | expand / collapse the plan panel |
 | `Ctrl+B` | show/hide the sidebar |
 | `Ctrl+C` | cancel or exit |
+
+#### Leader keybinds (`keybindings.json`)
+
+The leader prefix and slash-command chords live in `keybindings.json`, created
+automatically next to `config.json` when missing:
+
+| Layer | Path |
+|---|---|
+| User | `~/.config/zero/keybindings.json` |
+| Project | `<workspace>/.zero/keybindings.json` |
+
+Schema (slash → letter, or `""` to leave unassigned / unbind):
+
+```json
+{
+  "leaderKey": "ctrl+x",
+  "leader": {
+    "/model": "m",
+    "/provider": "p",
+    "/theme": "",
+    "/clear": ""
+  }
+}
+```
+
+- Seeded with **every** builtin slash command; defaults match the table above.
+- Project overlays user; omitted keys keep the previous layer.
+- `leaderKey` must include a modifier (`ctrl` / `alt` / `cmd`).
+- Global toggles (`togglePlan`, `toggleSidebar`, …) stay under `config.json` → `keybindings`.
 
 Common slash commands:
 

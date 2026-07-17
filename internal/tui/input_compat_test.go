@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"testing"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -81,5 +82,17 @@ func renderContent(rendered any) string {
 		return v.Content
 	default:
 		return fmt.Sprint(v)
+	}
+}
+
+func TestKeyEscMatchesEscAndCtrlG(t *testing.T) {
+	if !keyEsc(testKey(tea.KeyEsc)) {
+		t.Fatal("keyEsc must match Esc")
+	}
+	if !keyEsc(testKeyCtrl('g')) {
+		t.Fatal("keyEsc must match Ctrl+G")
+	}
+	if keyEsc(testKeyCtrl('c')) {
+		t.Fatal("keyEsc must not match Ctrl+C")
 	}
 }

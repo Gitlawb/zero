@@ -426,6 +426,16 @@ func listCommandNames() []string {
 	return names
 }
 
+// PrimarySlashNames returns every primary builtin slash (no aliases). Used to
+// seed keybindings.json with the full command inventory.
+func PrimarySlashNames() []string {
+	names := make([]string, 0, len(commandDefinitions))
+	for _, command := range commandDefinitions {
+		names = append(names, command.name)
+	}
+	return names
+}
+
 func formatCommandHelpLines() []string {
 	return formatGroupedCommandHelpLines()
 }

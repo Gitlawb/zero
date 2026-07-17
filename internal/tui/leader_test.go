@@ -278,8 +278,9 @@ func TestLeaderHelpOverlayClosesOnEsc(t *testing.T) {
 }
 
 func TestLeaderHelpBindingsCoverEveryMapEntry(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
 	listed := map[string]bool{}
-	for _, b := range leaderHelpBindings() {
+	for _, b := range leaderHelpBindings(m.leaderKeyLabel(), m.leaderCommands) {
 		// "Ctrl+X m" → last field is the letter (skip the "?" meta row for map check).
 		parts := strings.Fields(b.keys)
 		if len(parts) != 2 || parts[0] != "Ctrl+X" {
@@ -294,13 +295,13 @@ func TestLeaderHelpBindingsCoverEveryMapEntry(t *testing.T) {
 			t.Fatalf("unexpected key label %q", b.keys)
 		}
 		listed[string(runes[0])] = true
-		if _, ok := leaderCommandByKey[runes[0]]; !ok {
-			t.Fatalf("help lists %q but leaderCommandByKey has no entry", b.keys)
+		if _, ok := m.leaderCommands[runes[0]]; !ok {
+			t.Fatalf("help lists %q but leaderCommands has no entry", b.keys)
 		}
 	}
-	for key := range leaderCommandByKey {
+	for key := range m.leaderCommands {
 		if !listed[string(key)] {
-			t.Fatalf("leaderCommandByKey has %q but help table omits it", string(key))
+			t.Fatalf("leaderCommands has %q but help table omits it", string(key))
 		}
 	}
 }

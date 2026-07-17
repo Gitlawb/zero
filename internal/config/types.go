@@ -142,7 +142,8 @@ type KeyBindingsConfig struct {
 	ToggleMouse KeyBindingDef `json:"toggleMouse,omitempty"`
 	// CycleReasoning cycles through reasoning effort levels (default: ctrl+t).
 	CycleReasoning KeyBindingDef `json:"cycleReasoning,omitempty"`
-	// TogglePlan toggles the plan panel expansion (default: ctrl+p).
+	// TogglePlan toggles the plan panel expansion (default: ctrl+y).
+	// Ctrl+P/N are reserved for modal nav; Ctrl+G is reserved as Esc.
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`

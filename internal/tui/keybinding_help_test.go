@@ -41,6 +41,7 @@ func TestHelpOverlayClosesOnQuestionMarkAndEsc(t *testing.T) {
 	}{
 		{"question-mark", testKeyText("?")},
 		{"esc", testKey(tea.KeyEsc)},
+		{"ctrl+g", testKeyCtrl('g')},
 		{"q", testKeyText("q")},
 		{"enter", testKey(tea.KeyEnter)},
 	} {
@@ -77,7 +78,7 @@ func TestHelpOverlayViewRendersGroupsAndKeys(t *testing.T) {
 	for _, want := range []string{
 		"Keyboard Shortcuts",
 		"Ctrl+T", "cycle reasoning effort",
-		"Shift+Tab", "Ctrl+P", "Ctrl+O",
+		"Shift+Tab", "Ctrl+Y", "Ctrl+O",
 		"drill into its sub-session",
 		"Ctrl+X then letter", "/model",
 		keybindingHelpFooter,
@@ -227,7 +228,7 @@ func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
 	m.keyBindings.toggleMouse = parseBinding("ctrl+m")
 	// Avoid Ctrl+N: idle Ctrl+N is reserved as an emacs menu no-op and never
 	// reaches configurable global bindings.
-	m.keyBindings.toggleSidebar = parseBinding("ctrl+y")
+	m.keyBindings.toggleSidebar = parseBinding("ctrl+l")
 	if !m.sidebarToggleAllowed() {
 		t.Fatal("sidebar toggle should be allowed")
 	}
@@ -248,10 +249,10 @@ func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
 	}
 
 	initialSidebar := next.sidebarHidden
-	updated, _ = next.Update(testKeyCtrl('y'))
+	updated, _ = next.Update(testKeyCtrl('l'))
 	next = updated.(model)
 	if next.sidebarHidden == initialSidebar {
-		t.Fatal("remapped Ctrl+Y toggleSidebar binding should still fire with a non-empty composer")
+		t.Fatal("remapped Ctrl+L toggleSidebar binding should still fire with a non-empty composer")
 	}
 	if next.composerValue() != "hello" {
 		t.Fatalf("remapped toggleSidebar binding should not fall through to composer input, got %q", next.composerValue())

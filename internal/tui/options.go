@@ -79,6 +79,10 @@ type Options struct {
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
 
+	// KeybindingsFile is the resolved keybindings.json (leader prefix + slash
+	// chords). Zero value uses built-in Ctrl+X + default letter map.
+	KeybindingsFile config.KeybindingsFile
+
 	// STT configures speech-to-text dictation (§ docs/dictation.md).
 	STT config.STTConfig
 	// BuildDictationTranscriber constructs the transcriber for the current STT

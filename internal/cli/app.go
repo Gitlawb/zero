@@ -786,6 +786,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if userConfigPath != "" {
 		sttDownloadRoot = filepath.Join(filepath.Dir(userConfigPath), "stt")
 	}
+	// Leader keybindings.json: register slash catalog for auto-seed, ensure files
+	// exist next to config when missing, then resolve defaults ← user ← project.
+	config.SetKeybindingsPrimarySlashes(tui.PrimarySlashNames())
+	keybindingsFile := loadResolvedKeybindings(userConfigPath, projectConfigPath, workspaceRoot)
 	// Build the hooks dispatcher out of the AgentOptions literal so its trust skip
 	// report can be combined with the plugin activation's, and emit at most one
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
@@ -864,6 +868,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PermissionMode:            permissionMode,
 		Notify:                    resolved.Notify,
 		KeyBindings:               resolved.KeyBindings,
+		KeybindingsFile:           keybindingsFile,
 		STT:                       resolved.STT,
 		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
 		ShutdownDictationServer:   sttServerManager.Shutdown,
@@ -880,6 +885,37 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			},
 		},
 	})
+}
+
+// loadResolvedKeybindings ensures keybindings.json next to user/project config
+// when missing, loads both layers, and merges onto code defaults.
+func loadResolvedKeybindings(userConfigPath, projectConfigPath, workspaceRoot string) config.KeybindingsFile {
+	defaults := config.DefaultKeybindingsFile(tui.PrimarySlashNames())
+	if userConfigPath != "" {
+		_ = config.EnsureKeybindingsBesideConfig(userConfigPath)
+	}
+	projectKB := ""
+	if projectConfigPath != "" {
+		projectKB = config.KeybindingsPathBeside(projectConfigPath)
+		_ = config.EnsureKeybindingsBesideConfig(projectConfigPath)
+	} else if workspaceRoot != "" {
+		// Project config may not exist yet; still ensure under .zero if that dir
+		// already has a config, otherwise only seed user path above.
+		candidate := filepath.Join(workspaceRoot, ".zero", "config.json")
+		if _, err := os.Stat(candidate); err == nil {
+			_ = config.EnsureKeybindingsBesideConfig(candidate)
+			projectKB = config.KeybindingsPathBeside(candidate)
+		}
+	}
+	userFile, err := config.LoadKeybindingsFile(config.KeybindingsPathBeside(userConfigPath))
+	if err != nil {
+		userFile = config.KeybindingsFile{}
+	}
+	projectFile, err := config.LoadKeybindingsFile(projectKB)
+	if err != nil {
+		projectFile = config.KeybindingsFile{}
+	}
+	return config.ResolveKeybindings(defaults, userFile, projectFile)
 }
 
 func tuiSandboxSetupCommand(backend sandbox.Backend, deps appDeps) func(context.Context) tui.SandboxSetupCommandResult {

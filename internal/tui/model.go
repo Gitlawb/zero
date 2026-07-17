@@ -152,12 +152,16 @@ type model struct {
 	transcript         []transcriptRow
 	transcriptDetailed bool
 	helpOverlay        bool // the `?` keyboard-shortcut overlay is open
-	// leaderHelpOverlay is the Ctrl+X ? modal listing every leader slash chord.
+	// leaderHelpOverlay is the leader+? modal listing every leader slash chord.
 	leaderHelpOverlay bool
-	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
-	// resolves the chord (see leader.go). leaderSeq invalidates a stale tick.
-	leaderPending         bool
-	leaderSeq             int
+	// leaderPending is true after the leader key until a second key, Esc, or
+	// timeout resolves the chord (see leader.go). leaderSeq invalidates a stale tick.
+	leaderPending bool
+	leaderSeq     int
+	// leaderKey / leaderCommands are the resolved leader prefix and letter→slash
+	// map from keybindings.json (defaults: Ctrl+X + built-in chords).
+	leaderKey             parsedBinding
+	leaderCommands        map[rune]string
 	transcriptBodyHeights *transcriptBodyHeightCache
 	input                 textinput.Model
 	composer              composerState
@@ -772,6 +776,12 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+	leaderFile := options.KeybindingsFile
+	if leaderFile.Leader == nil && strings.TrimSpace(leaderFile.LeaderKey) == "" {
+		// No file loaded: use code defaults (tests / callers that omit Options).
+		leaderFile = config.DefaultKeybindingsFile(PrimarySlashNames())
+	}
+	resolvedLeader := resolveLeaderConfig(leaderFile, resolvedKeyBindings)
 
 	m := model{
 		ctx:                         ctx,
@@ -814,6 +824,8 @@ func newModel(ctx context.Context, options Options) model {
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
 		keyBindings:                 resolvedKeyBindings,
+		leaderKey:                   resolvedLeader.key,
+		leaderCommands:              resolvedLeader.commands,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		userAgent:                   options.UserAgent,
@@ -854,6 +866,9 @@ func newModel(ctx context.Context, options Options) model {
 	m.refreshMCPViewState()
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
+	}
+	for _, notice := range resolvedLeader.notices {
+		m = m.appendSystemNotice(notice)
 	}
 	return m
 }
@@ -1227,6 +1242,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		// Ctrl+G is a reserved Escape synonym (emacs abort). Normalize early so
+		// every Esc path (setup, leader, pickers, cancel confirm, …) accepts it.
+		if keyCtrl(msg, 'g') {
+			msg = tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc})
+		}
 		// Paste-detection timing trackers. MUST run before any early return
 		// so burst counting stays accurate regardless of which branch fires.
 		now := m.now()
@@ -1292,13 +1312,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Leader owns every keystroke until resolved; never type into the composer.
 			return m.handleLeaderKey(msg)
 		}
-		if keyCtrl(msg, 'x') && m.canArmLeader() {
+		if m.matchesLeaderKey(msg) && m.canArmLeader() {
 			return m.armLeader()
 		}
-		// Emacs Ctrl+P / Ctrl+N move selection in open menus. Runs before the
-		// switch so menus win over global Ctrl+P (plan toggle). Idle Ctrl+P
-		// falls through to that binding; idle Ctrl+N is a reserved no-op so it
-		// never reaches remapped configurable bindings (e.g. toggleSidebar).
+		// Emacs Ctrl+P / Ctrl+N move selection in open menus. Both chords are
+		// reserved for list navigation and are never assignable as shortcuts.
+		// Idle (no modal): reserved no-op so they never reach remapped bindings.
 		if !m.transcriptDetailed && (keyCtrl(msg, 'p') || keyCtrl(msg, 'n')) {
 			delta := 1
 			if keyCtrl(msg, 'p') {
@@ -1307,9 +1326,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next, cmd, ok := m.moveModalSelection(delta); ok {
 				return next, cmd
 			}
-			if keyCtrl(msg, 'n') {
-				return m, nil
-			}
+			return m, nil
 		}
 		switch {
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
@@ -1571,9 +1588,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
-		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
-			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
-			// Modal selection is handled before this switch so menus win over toggle.
+		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'y') }):
+			// Ctrl+Y toggles the plan panel expansion (collapse/expand step list).
+			// Ctrl+P/N are reserved for modal nav; Ctrl+G is reserved as Esc.
 			if m.noBlockingModal() && !m.plan.isEmpty() {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
@@ -2784,7 +2801,8 @@ func (m model) composerIdleHint() string {
 	// Leader-pending is always shown (even mid-type) so the user knows the next
 	// key is a chord, not composer input.
 	if m.leaderPending {
-		return zeroTheme.faint.Render("Ctrl+X — await shortcut (m model · p provider · ? list · Esc cancel)")
+		label := m.leaderKeyLabel()
+		return zeroTheme.faint.Render(fmt.Sprintf("%s — await shortcut (m model · p provider · ? list · Esc cancel)", label))
 	}
 	// Managed (alt-screen) mode only: inline mode prints to native scrollback where
 	// this footer row isn't a stable surface. Hidden while typing, during a run, in
@@ -2804,9 +2822,9 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar", sidebarKey)
+		hint = fmt.Sprintf("? shortcuts · %s cmds · %s sidebar", m.leaderKeyLabel(), sidebarKey)
 	default:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		hint = fmt.Sprintf("? shortcuts · %s cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", m.leaderKeyLabel(), sidebarKey, detailKey, mouseKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }

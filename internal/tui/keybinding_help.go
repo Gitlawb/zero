@@ -1,5 +1,5 @@
 // keybinding_help.go renders the `?` keyboard-shortcut overlay. Zero has a
-// rich set of chord bindings (Ctrl+T effort, Ctrl+P plan, drill-in subchat,
+// rich set of chord bindings (Ctrl+T effort, Ctrl+Y plan, drill-in subchat,
 // Shift+Tab permission mode, …) that are otherwise invisible — only learnable
 // by reading the source. A single-key `?` overlay (opened on an empty composer)
 // lists them grouped, so the keymap is discoverable the way the reference TUIs
@@ -37,10 +37,10 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			bindings: []keybinding{
 				{"Enter", "send the message"},
 				{"Shift+Enter / Alt+Enter", "insert a newline (multi-line compose)"},
-				{"Esc (\u00d72)", "cancel the run / dismiss a popup / clear the input"},
+				{"Esc / Ctrl+G (\u00d72)", "cancel the run / dismiss a popup / clear the input"},
 				{"Ctrl+C", "cancel the run, then quit"},
-				{"Ctrl+X then letter", "common slash commands (m=/model, p=/provider, r=/resume, \u2026)"},
-				{"Ctrl+X ?", "list every Ctrl+X slash shortcut"},
+				{m.leaderKeyLabel() + " then letter", "common slash commands (m=/model, p=/provider, r=/resume, \u2026)"},
+				{m.leaderKeyLabel() + " ?", "list every " + m.leaderKeyLabel() + " slash shortcut"},
 				{"?", "show this help (on an empty input)"},
 			},
 		},
@@ -49,7 +49,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			bindings: []keybinding{
 				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
 				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
-				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel (when no menu is open)"},
+				{labelOr(m.keyBindings.togglePlan, "Ctrl+Y"), "expand / collapse the plan panel (when no menu is open)"},
 			},
 		},
 		{

@@ -339,6 +339,7 @@ var reservedBindings = []struct {
 }{
 	{parseBinding("ctrl+c"), "cancel / exit"},
 	{parseBinding("esc"), "cancel / close"},
+	{parseBinding("ctrl+g"), "escape / cancel (emacs abort)"},
 	{parseBinding("enter"), "submit"},
 	{parseBinding("shift+tab"), "cycle permission mode"},
 	{parseBinding("tab"), "navigation / completion"},
@@ -347,6 +348,8 @@ var reservedBindings = []struct {
 	{parseBinding("down"), "history/navigation"},
 	{parseBinding("pgup"), "transcript scroll"},
 	{parseBinding("pgdown"), "transcript scroll"},
+	{parseBinding("ctrl+p"), "previous item in menus"},
+	{parseBinding("ctrl+n"), "next item in menus"},
 	{parseBinding("ctrl+f"), "favorite model (in the /model picker)"},
 	{parseBinding("?"), "help overlay"},
 }
@@ -366,7 +369,7 @@ func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
 		{"toggleDetailed", &b.toggleDetailed, parseBinding("ctrl+o")},
 		{"toggleMouse", &b.toggleMouse, parseBinding("ctrl+e")},
 		{"cycleReasoning", &b.cycleReasoning, parseBinding("ctrl+t")},
-		{"togglePlan", &b.togglePlan, parseBinding("ctrl+p")},
+		{"togglePlan", &b.togglePlan, parseBinding("ctrl+y")},
 		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
 	}
 
