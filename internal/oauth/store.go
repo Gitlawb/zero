@@ -900,7 +900,12 @@ func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 			case <-stop:
 				return
 			case <-ticker.C:
-				at := now()
+				// Lease with wall-clock time, never the injectable now: acquireFileLock
+				// judges staleness with real time.Since(mtime), so a fixed or stale
+				// StoreOptions.Now would stamp the live lock with an old mtime that
+				// another process would immediately reclaim, reviving the token-loss
+				// race this lease prevents.
+				at := time.Now()
 				_ = os.Chtimes(b.lockPath, at, at)
 			}
 		}

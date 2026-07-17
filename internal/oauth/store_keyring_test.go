@@ -702,3 +702,37 @@ func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
 		t.Fatal("legacy entry should be removed once its refresh is merged")
 	}
 }
+
+// TestStoreKeyringLeaseUsesWallClockNotStoreClock guards the lock lease against
+// a fixed or stale StoreOptions.Now. acquireFileLock judges staleness with real
+// time.Since(mtime), so the lease must stamp the live lock with wall-clock time;
+// leasing with an old injectable clock would let a peer immediately reclaim the
+// held lock and re-enter the keyring read-modify-write concurrently.
+func TestStoreKeyringLeaseUsesWallClockNotStoreClock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "oauth-keyring.lockfile")
+	blob := keyringBlob{kr: newFakeKR(), service: "zero-test", indexAccount: "idx", lockPath: lockPath}
+
+	previous := fileLockRefreshInterval
+	fileLockRefreshInterval = 20 * time.Millisecond
+	defer func() { fileLockRefreshInterval = previous }()
+
+	// A deliberately stale, fixed clock: if the lease used it, the lock mtime
+	// would land decades in the past and look stale immediately.
+	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	var mtime time.Time
+	err := blob.withLock(func() time.Time { return fixed }, func() error {
+		time.Sleep(150 * time.Millisecond)
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil {
+			return statErr
+		}
+		mtime = info.ModTime()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withLock: %v", err)
+	}
+	if time.Since(mtime) > fileLockStaleAfter {
+		t.Fatalf("lease stamped the lock with the store clock (%v); a peer would reclaim the live lock", mtime)
+	}
+}
