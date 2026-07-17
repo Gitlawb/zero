@@ -28,6 +28,20 @@ type WindowsACLEntry struct {
 	// why that is unsafe on broad system roots.
 	NoInherit   bool `json:"noInherit,omitempty"`
 	Materialize bool `json:"materialize,omitempty"`
+	// ScanDescendants marks a shared-root DenyWrite entry whose EXISTING
+	// writable descendants must ALSO be denied, one direct (non-inheriting)
+	// deny per writable descendant, at apply time. A non-inherited deny on the
+	// root object alone does not cover a pre-existing child that independently
+	// grants Users/Authenticated Users write, because a Windows access check
+	// for that child never consults a non-inherited ACE on its parent. This is
+	// deliberately NOT serialized (json:"-"): the concrete descendant set is
+	// live-filesystem state that differs between the setup process and a later
+	// command run, so folding it into the hashed plan would make
+	// ValidateWindowsSandboxSetupMarker non-deterministic. The flag itself is
+	// derived deterministically from the same inputs on both sides, and the
+	// descendant enumeration/denies happen as an apply-time side effect in
+	// applyWindowsACLPlan (windows-only), never in the cross-platform plan hash.
+	ScanDescendants bool `json:"-"`
 }
 
 type WindowsACLPlan struct {
@@ -152,6 +166,16 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 				Path:       denyPath,
 				Capability: denySID,
 				NoInherit:  true,
+				// A non-inherited deny on this root object blocks new writes
+				// directly under it, but NOT writes to a pre-existing child
+				// that independently grants Users/Authenticated Users write
+				// (the access check for that child never evaluates a
+				// non-inherited parent ACE). applyWindowsACLPlan therefore
+				// enumerates this root's existing writable descendants and
+				// applies a direct, non-inheriting deny to each, a bounded,
+				// targeted scan that never rewrites the ACL of any descendant
+				// that is not itself already writable by those broad groups.
+				ScanDescendants: true,
 			})
 		}
 	}

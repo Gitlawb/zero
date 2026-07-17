@@ -189,6 +189,55 @@ func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
 	assertWindowsACLEntryInheritance(t, plan, WindowsACLDenyWrite, publicDir, caps.ReadOnly, false, true)
 }
 
+// TestBuildWindowsACLPlanMarksSharedDenyPathsForDescendantScan pins that the
+// four shared-root DenyWrite entries (and ONLY those) request the apply-time
+// existing-writable-descendant scan. That scan is the enforcement that keeps a
+// pre-existing writable child of one of those roots (which a non-inherited deny
+// on the root object alone does not cover) from becoming a write-jail escape
+// once the fully restricted DenyRead token is broadened with the Users and
+// Authenticated Users SIDs.
+func TestBuildWindowsACLPlanMarksSharedDenyPathsForDescendantScan(t *testing.T) {
+	home := t.TempDir()
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{`C:\workspace`},
+		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+				DenyRead:   []string{`C:\workspace\secret-read`},
+				DenyWrite:  []string{`C:\workspace\secret-write`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	systemDrive, systemRoot, programData, publicDir := windowsSharedDenyPathsForTest(t)
+	sharedKeys := map[string]bool{}
+	for _, path := range []string{systemDrive + `\`, programData, systemRoot + `\Temp`, publicDir} {
+		sharedKeys[windowsCapabilityPathKey(path)] = true
+	}
+	for _, path := range []string{systemDrive + `\`, programData, systemRoot + `\Temp`, publicDir} {
+		found := false
+		for _, entry := range plan.Entries {
+			if entry.Action == WindowsACLDenyWrite && windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(path) && entry.ScanDescendants {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("shared deny path %q is not marked ScanDescendants; existing writable descendants would stay unenforced", path)
+		}
+	}
+	for _, entry := range plan.Entries {
+		if entry.ScanDescendants && !sharedKeys[windowsCapabilityPathKey(entry.Path)] {
+			t.Fatalf("non-shared entry %#v requests descendant scan; only the four shared roots should", entry)
+		}
+	}
+}
+
 func TestBuildWindowsACLPlanRejectsUnrestrictedProfiles(t *testing.T) {
 	_, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
 		SandboxHome: t.TempDir(),

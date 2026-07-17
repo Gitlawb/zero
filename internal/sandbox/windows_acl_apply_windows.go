@@ -28,6 +28,7 @@ type windowsACLSnapshot struct {
 
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 	groups := groupWindowsACLPlanByPath(plan)
+	writeRoots := windowsPlanAllowWriteRoots(plan)
 	snapshots := make([]windowsACLSnapshot, 0, len(groups))
 	for _, group := range groups {
 		snapshot, applied, err := applyWindowsACLPathGroup(group)
@@ -41,10 +42,52 @@ func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 		if applied {
 			snapshots = append(snapshots, snapshot)
 		}
+		// A shared-root deny only protects the root object itself; its existing
+		// writable descendants each need their own direct deny (see
+		// windows_acl_descendants_windows.go). Only scan once the root deny
+		// actually applied (applied == true means the root exists).
+		if denySID, ok := windowsGroupScanDescendantsSID(group); ok && applied {
+			descendantSnapshots, err := applyWindowsSharedDescendantDenies(group.Path, denySID, writeRoots)
+			snapshots = append(snapshots, descendantSnapshots...)
+			if err != nil {
+				rollbackErr := rollbackWindowsACLSnapshots(snapshots)
+				if rollbackErr != nil {
+					return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+				}
+				return nil, err
+			}
+		}
 	}
 	return func() error {
 		return rollbackWindowsACLSnapshots(snapshots)
 	}, nil
+}
+
+// windowsPlanAllowWriteRoots collects the plan's allow-write root paths so the
+// descendant scan can exclude a configured write root (and anything under it):
+// a write root that happens to live under one of the shared roots must never be
+// jailed by a compensating deny.
+func windowsPlanAllowWriteRoots(plan WindowsACLPlan) []string {
+	var roots []string
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLAllowWrite {
+			if path := strings.TrimSpace(entry.Path); path != "" {
+				roots = append(roots, path)
+			}
+		}
+	}
+	return roots
+}
+
+// windowsGroupScanDescendantsSID returns the deny SID of a group's shared-root
+// DenyWrite entry when that entry requests descendant scanning.
+func windowsGroupScanDescendantsSID(group windowsACLPathGroup) (string, bool) {
+	for _, entry := range group.Entries {
+		if entry.Action == WindowsACLDenyWrite && entry.ScanDescendants && strings.TrimSpace(entry.Capability) != "" {
+			return entry.Capability, true
+		}
+	}
+	return "", false
 }
 
 func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
