@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode"
 
@@ -77,6 +78,51 @@ func (m model) matchesLeaderKey(msg tea.KeyMsg) bool {
 		return m.leaderKey.Matcher()(msg)
 	}
 	return keyCtrl(msg, 'x')
+}
+
+// leaderPendingHint is the faint status line while a leader chord is armed.
+// Examples come from the resolved leaderCommands map so remaps/unbindings show
+// correctly; ? list and Esc cancel stay fixed.
+func (m model) leaderPendingHint() string {
+	label := m.leaderKeyLabel()
+	examples := leaderPendingExamples(m.leaderCommands, 2)
+	if len(examples) == 0 {
+		return fmt.Sprintf("%s — await shortcut (? list · Esc cancel)", label)
+	}
+	return fmt.Sprintf("%s — await shortcut (%s · ? list · Esc cancel)", label, strings.Join(examples, " · "))
+}
+
+// leaderPendingExamples returns up to n "letter name" snippets from commands,
+// sorted the same way as the leader help table (stable, lowercase-first).
+func leaderPendingExamples(commands map[rune]string, n int) []string {
+	if n <= 0 || len(commands) == 0 {
+		return nil
+	}
+	letters := make([]rune, 0, len(commands))
+	for r := range commands {
+		letters = append(letters, r)
+	}
+	sort.Slice(letters, func(i, j int) bool {
+		a, b := letters[i], letters[j]
+		al, bl := unicode.ToLower(a), unicode.ToLower(b)
+		if al != bl {
+			return al < bl
+		}
+		return a < b
+	})
+	if len(letters) > n {
+		letters = letters[:n]
+	}
+	out := make([]string, 0, len(letters))
+	for _, r := range letters {
+		slash := commands[r]
+		name := strings.TrimPrefix(slash, "/")
+		if name == "" {
+			name = slash
+		}
+		out = append(out, fmt.Sprintf("%c %s", r, name))
+	}
+	return out
 }
 
 // leaderHelpBindings builds the display-ordered table of every assigned leader

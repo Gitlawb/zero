@@ -2801,8 +2801,7 @@ func (m model) composerIdleHint() string {
 	// Leader-pending is always shown (even mid-type) so the user knows the next
 	// key is a chord, not composer input.
 	if m.leaderPending {
-		label := m.leaderKeyLabel()
-		return zeroTheme.faint.Render(fmt.Sprintf("%s — await shortcut (m model · p provider · ? list · Esc cancel)", label))
+		return zeroTheme.faint.Render(m.leaderPendingHint())
 	}
 	// Managed (alt-screen) mode only: inline mode prints to native scrollback where
 	// this footer row isn't a stable surface. Hidden while typing, during a run, in

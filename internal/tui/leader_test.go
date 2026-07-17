@@ -337,3 +337,33 @@ func TestLeaderSecondKeyFromTextCapital(t *testing.T) {
 		t.Fatalf("leaderSecondKey(m) = %q,%v, want m,true", key, ok)
 	}
 }
+
+func TestLeaderPendingHintUsesResolvedCommands(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	// Defaults include /clear on c and /context on C — first two in sort order
+	// are lowercase letters before related uppercase; c clear then C context, etc.
+	// Prefer an explicit map for a stable assertion.
+	m.leaderCommands = map[rune]string{
+		't': "/theme",
+		'n': "/new",
+	}
+	hint := m.leaderPendingHint()
+	if !strings.Contains(hint, "n new") || !strings.Contains(hint, "t theme") {
+		t.Fatalf("hint should list remapped commands, got %q", hint)
+	}
+	if !strings.Contains(hint, "? list") || !strings.Contains(hint, "Esc cancel") {
+		t.Fatalf("hint must keep list/cancel guidance, got %q", hint)
+	}
+	if strings.Contains(hint, "m model") || strings.Contains(hint, "p provider") {
+		t.Fatalf("hint must not hardcode default examples when remapped, got %q", hint)
+	}
+
+	m.leaderCommands = nil
+	hint = m.leaderPendingHint()
+	if !strings.Contains(hint, "? list") || !strings.Contains(hint, "Esc cancel") {
+		t.Fatalf("empty map should still show list/cancel, got %q", hint)
+	}
+	if strings.Contains(hint, " · m ") || strings.Contains(hint, "model") {
+		t.Fatalf("empty map should not invent examples, got %q", hint)
+	}
+}
