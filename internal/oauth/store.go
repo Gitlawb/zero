@@ -712,6 +712,14 @@ func (b keyringBlob) write(data []byte) error {
 // roughly 22 maximum-length keys even when every token was tiny.
 const maxKeyringIndexChunkBytes = 2700
 
+// maxKeyringIndexChunks caps how many chunk entries a stored index header may
+// claim before readKeyIndex issues one OS-keyring lookup per chunk. Each chunk
+// holds up to maxKeyringIndexChunkBytes of keys (dozens to ~150 keys), so this
+// bound admits far more logins than any real install while refusing to fan a
+// corrupt header (e.g. {"v":1,"chunks":1000000000}) out into a billion blocking
+// lookups that would wedge every OAuth operation under the store lock.
+const maxKeyringIndexChunks = 128
+
 // keyIndexHeader is chunk 0 of the key index. Chunks 1..Chunks-1 live under
 // "<indexAccount>-<n>" as plain JSON string arrays. The pre-chunking format
 // (a bare JSON array at indexAccount) is still read transparently.
@@ -753,6 +761,16 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 	if err := json.Unmarshal(raw, &header); err != nil {
 		return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
 	}
+	// Reject an unsupported or corrupt header before looping: an out-of-range
+	// Chunks would otherwise drive up to that many blocking keyring lookups
+	// (each up to the 10s command timeout) while the store lock is held, wedging
+	// every Load/Status/Save/Delete instead of failing promptly.
+	if header.Version != 1 {
+		return nil, false, 0, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
+	}
+	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
+		return nil, false, 0, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+	}
 	keys := header.Keys
 	for i := 1; i < header.Chunks; i++ {
 		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
@@ -772,11 +790,7 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		}
 		keys = append(keys, more...)
 	}
-	chunks := header.Chunks
-	if chunks < 1 {
-		chunks = 1
-	}
-	return keys, true, chunks, nil
+	return keys, true, header.Chunks, nil
 }
 
 // writeKeyIndex persists keys as a chunked index and reports how many chunk

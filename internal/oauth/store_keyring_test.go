@@ -736,3 +736,46 @@ func TestStoreKeyringLeaseUsesWallClockNotStoreClock(t *testing.T) {
 		t.Fatalf("lease stamped the lock with the store clock (%v); a peer would reclaim the live lock", mtime)
 	}
 }
+
+// countingKR counts Get calls so a test can prove a corrupt index is rejected
+// before it fans out into a keyring lookup per advertised chunk.
+type countingKR struct {
+	*fakeKR
+	gets int
+}
+
+func (c *countingKR) Get(service, account string) (string, bool, error) {
+	c.gets++
+	return c.fakeKR.Get(service, account)
+}
+
+// TestStoreKeyringReadIndexRejectsCorruptHeader is the regression test for an
+// index header whose advertised chunk count is unbounded: readKeyIndex must
+// reject an out-of-range or unsupported header up front rather than issue up to
+// that many blocking keyring lookups while holding the store lock.
+func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
+	ckr := &countingKR{fakeKR: newFakeKR()}
+	blob := keyringBlob{kr: ckr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+
+	oversized, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1_000_000_000, Keys: []string{ProviderKey("demo")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(oversized)
+	ckr.gets = 0
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected an oversized chunk count to be rejected")
+	}
+	if ckr.gets != 1 {
+		t.Fatalf("readKeyIndex issued %d keyring gets on a corrupt header; it must reject before fanning out over chunks", ckr.gets)
+	}
+
+	unsupported, err := json.Marshal(keyIndexHeader{Version: 2, Chunks: 1, Keys: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(unsupported)
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected an unsupported index version to be rejected")
+	}
+}
