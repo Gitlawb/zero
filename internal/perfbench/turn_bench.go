@@ -27,7 +27,20 @@ import (
 // buildPassedTasks/buildPassRate cover the non-positive build-check classes
 // (refactor); latencyOnlyTasks covers the no-oracle classes (nav/longproc/
 // longctx/parallel). tasksAttempted is still every task run.
-const TurnSchemaVersion = 2
+//
+// v3 (PR #701) strengthens the oracles so the tiers are honest: edit/refactor
+// now carry a stamped oracle_test.go compiled by `go test ./...` (the Go
+// compiler is the structural verifier — a no-op refactor or a missing field
+// fails to compile), and nav carries an answer-oracle grepping the agent's
+// captured final answer. refactor graduates from build to correctness (its
+// oracle is now positive), nav graduates from latency-only to correctness, and
+// the build tier is empty (nothing is only-build-checked anymore). The result
+// SHAPE is unchanged — only class-list membership shifts — but
+// correctnessPassRate now means something strictly stronger, so the bump
+// prevents a v2→v2 cross-version comparison from misreading the jump as a model
+// improvement. New counts: correctness 34 (edit 10 + fix 8 + nav 10 + refactor
+// 6), build 0, latency 14 (longproc 4 + longctx 4 + parallel 6).
+const TurnSchemaVersion = 3
 
 // TurnRunner runs one benchmark task and reports its outcome plus the captured
 // per-turn trace. A non-nil Err means the run failed to execute (process crash);
@@ -577,6 +590,17 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		if outcome.VerifyErr != "" {
 			return outcome
 		}
+		// Stamp the compiler-backed oracle and capture the agent's final answer
+		// BEFORE running the verification command. Both write into the fixture
+		// copy (task.WorkspaceFixture, set to copyDir above) so runVerification —
+		// which uses that same dir as cmd.Dir — sees them. Stamping happens only
+		// after the agent run so the oracle test can't interfere with the agent's
+		// own go build/test during the task (e.g. refactor-03's package-zeroapp
+		// test would break a pre-rename build) and can't be pre-seen or tampered
+		// with.
+		if err := stampOracleAndAnswer(task, outBuf.Bytes()); err != nil {
+			return TurnTaskOutcome{WallMs: wallMs, Err: fmt.Errorf("stamp oracle: %w", err)}
+		}
 		if len(task.VerificationCommand) > 0 {
 			if vOutcome := runVerification(ctx, task); !vOutcome.Passed {
 				outcome.VerifyErr = strings.TrimSpace(vOutcome.Detail)
@@ -584,7 +608,7 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 			}
 			// A positive oracle (grep/test/build) passed: this is the only path
 			// that sets Passed. A task with no verificationCommand is latency-only
-			// (read-only nav/longproc/longctx/parallel): its exit 0 proves the turn
+			// (read-only longproc/longctx/parallel): its exit 0 proves the turn
 			// ran, not that the answer was right, so it never reports Passed and the
 			// harness counts it in latencyOnlyTasks rather than any pass rate.
 			outcome.Passed = true
@@ -597,6 +621,13 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 // returns the copy's path. Used to give each benchmark invocation an isolated
 // workspace so mutating tasks (edit/fix/refactor) can't dirty the checked-in
 // fixture or a later iteration.
+//
+// The copy is placed one level BELOW the system temp root (under a fixed
+// "zero-turn-bench" parent), not directly in it. Go ignores go.mod files in
+// direct children of the system temp dir (a hijack guard), which would make the
+// fixture's go.mod — and thus every `go test ./...`/`go build ./...` oracle —
+// fail with "cannot find main module". Nesting one level deeper makes Go
+// respect the copied go.mod so the compiler-backed oracles actually run.
 func copyFixture(src string) (string, error) {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -605,7 +636,11 @@ func copyFixture(src string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("fixture %q is not a directory", src)
 	}
-	dst, err := os.MkdirTemp("", "zero-turn-fixture-*")
+	parent := filepath.Join(os.TempDir(), "zero-turn-bench")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	dst, err := os.MkdirTemp(parent, "zero-turn-fixture-*")
 	if err != nil {
 		return "", err
 	}
@@ -632,6 +667,31 @@ func copyFixture(src string) (string, error) {
 		return "", err
 	}
 	return dst, nil
+}
+
+// stampOracleAndAnswer writes the compiler-backed oracle test (when configured)
+// and the agent's captured final answer into the fixture copy, so the
+// verification command can compile the oracle and grep the answer. Both files
+// land in task.WorkspaceFixture, which the runner has already set to the
+// fixture copy and which runVerification uses as cmd.Dir. The answer file is
+// always written (empty when no final event was captured) so a nav answer-oracle
+// fails cleanly on a run that produced no answer rather than reading a stale or
+// absent file.
+func stampOracleAndAnswer(task BenchTask, outBuf []byte) error {
+	dir := strings.TrimSpace(task.WorkspaceFixture)
+	if dir == "" {
+		return nil
+	}
+	if ot := task.OracleTest; ot != "" {
+		if err := os.WriteFile(filepath.Join(dir, "oracle_test.go"), []byte(ot), 0o644); err != nil {
+			return fmt.Errorf("write oracle_test.go: %w", err)
+		}
+	}
+	answer := streamJSONFinalText(outBuf)
+	if err := os.WriteFile(filepath.Join(dir, ".zero-answer.txt"), []byte(answer), 0o644); err != nil {
+		return fmt.Errorf("write .zero-answer.txt: %w", err)
+	}
+	return nil
 }
 
 func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArgs []string) []string {

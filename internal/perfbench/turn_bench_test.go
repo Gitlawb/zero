@@ -51,21 +51,26 @@ func cannedTrace(genMs, toolMs int, tokens int64) *trace.TurnTrace {
 }
 
 func TestRunTurnBenchAggregation(t *testing.T) {
+	// v3 tier model: nav and refactor both carry a verificationCommand and are
+	// NOT in buildOnlyClasses, so they count as correctness; longproc has no
+	// oracle and is latency-only. The build tier is empty (buildOnlyClasses is
+	// nil), matching the v3 baseline manifest where refactor graduated from
+	// build to correctness.
 	set := TaskSet{
 		ID: "fake-suite",
 		Tasks: []BenchTask{
-			{ID: "t1", Class: "nav", Prompt: "p1"},                                             // latency-only
-			{ID: "t2", Class: "nav", Prompt: "p2"},                                             // latency-only
-			{ID: "t3", Class: "edit", Prompt: "p3", VerificationCommand: []string{"true"}},     // correctness
-			{ID: "t4", Class: "refactor", Prompt: "p4", VerificationCommand: []string{"true"}}, // build-only
+			{ID: "t1", Class: "nav", Prompt: "p1", VerificationCommand: []string{"true"}},      // correctness
+			{ID: "t2", Class: "edit", Prompt: "p2", VerificationCommand: []string{"true"}},     // correctness
+			{ID: "t3", Class: "refactor", Prompt: "p3", VerificationCommand: []string{"true"}}, // correctness
+			{ID: "t4", Class: "longproc", Prompt: "p4"},                                        // latency-only
 		},
-		BuildOnlyClasses: []string{"refactor"},
+		BuildOnlyClasses: nil,
 	}
 	canned := map[string]*trace.TurnTrace{
 		"t1": cannedTrace(100, 10, 1000),
-		"t2": cannedTrace(300, 10, 1000),
-		"t3": cannedTrace(200, 50, 2000),
-		"t4": cannedTrace(150, 20, 1500),
+		"t2": cannedTrace(200, 50, 2000),
+		"t3": cannedTrace(150, 20, 1500),
+		"t4": cannedTrace(300, 10, 1000),
 	}
 	cfg := TurnBenchConfig{
 		Model:      "fake-model",
@@ -77,33 +82,36 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurnBench: %v", err)
 	}
-	// 4 tasks attempted; the tier split is 2 latency-only, 1 correctness, 1 build.
+	// 4 tasks attempted; the v3 tier split is 3 correctness (nav, edit, refactor),
+	// 1 latency-only (longproc), and 0 build (the build tier is empty).
 	if result.TasksAttempted != 4 {
 		t.Fatalf("attempted=%d, want 4", result.TasksAttempted)
 	}
-	if result.TasksVerified != 1 || result.TasksPassed != 1 {
-		t.Fatalf("correctness verified=%d passed=%d, want 1/1", result.TasksVerified, result.TasksPassed)
+	if result.TasksVerified != 3 || result.TasksPassed != 3 {
+		t.Fatalf("correctness verified=%d passed=%d, want 3/3", result.TasksVerified, result.TasksPassed)
 	}
-	if result.LatencyOnlyTasks != 2 {
-		t.Fatalf("latencyOnly=%d, want 2", result.LatencyOnlyTasks)
+	if result.LatencyOnlyTasks != 1 {
+		t.Fatalf("latencyOnly=%d, want 1", result.LatencyOnlyTasks)
 	}
-	if result.BuildCheckedTasks != 1 || result.BuildPassedTasks != 1 {
-		t.Fatalf("build checked=%d passed=%d, want 1/1", result.BuildCheckedTasks, result.BuildPassedTasks)
+	if result.BuildCheckedTasks != 0 || result.BuildPassedTasks != 0 {
+		t.Fatalf("build checked=%d passed=%d, want 0/0 (empty build tier)", result.BuildCheckedTasks, result.BuildPassedTasks)
 	}
 	if result.CorrectnessPassRate != 1.0 {
 		t.Fatalf("correctnessPassRate=%v, want 1.0", result.CorrectnessPassRate)
 	}
-	if result.BuildPassRate != 1.0 {
-		t.Fatalf("buildPassRate=%v, want 1.0", result.BuildPassRate)
+	// passRate returns 0 for a 0/0 denominator, so an empty build tier reports 0
+	// (not NaN) and cannot be misread as a perfect build score.
+	if result.BuildPassRate != 0 {
+		t.Fatalf("buildPassRate=%v, want 0 (empty build tier is 0/0 -> 0)", result.BuildPassRate)
 	}
-	if len(result.CorrectnessClasses) != 1 || result.CorrectnessClasses[0] != "edit" {
-		t.Fatalf("correctnessClasses=%v, want [edit]", result.CorrectnessClasses)
+	if len(result.CorrectnessClasses) != 3 || result.CorrectnessClasses[0] != "edit" || result.CorrectnessClasses[1] != "nav" || result.CorrectnessClasses[2] != "refactor" {
+		t.Fatalf("correctnessClasses=%v, want [edit nav refactor]", result.CorrectnessClasses)
 	}
-	if len(result.BuildOnlyClasses) != 1 || result.BuildOnlyClasses[0] != "refactor" {
-		t.Fatalf("buildOnlyClasses=%v, want [refactor]", result.BuildOnlyClasses)
+	if len(result.BuildOnlyClasses) != 0 {
+		t.Fatalf("buildOnlyClasses=%v, want empty (v3: build tier empty)", result.BuildOnlyClasses)
 	}
-	if len(result.LatencyOnlyClasses) != 1 || result.LatencyOnlyClasses[0] != "nav" {
-		t.Fatalf("latencyOnlyClasses=%v, want [nav]", result.LatencyOnlyClasses)
+	if len(result.LatencyOnlyClasses) != 1 || result.LatencyOnlyClasses[0] != "longproc" {
+		t.Fatalf("latencyOnlyClasses=%v, want [longproc]", result.LatencyOnlyClasses)
 	}
 	if result.SchemaVersion != TurnSchemaVersion {
 		t.Fatalf("schemaVersion = %d, want %d", result.SchemaVersion, TurnSchemaVersion)
@@ -112,8 +120,8 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		t.Fatalf("date = %q", result.Date)
 	}
 
-	// Per-span: generation appears in all four (100+300+200+150=750ms), tool in
-	// all four (10+10+50+20=90ms). Count must equal the number of tasks * iterations.
+	// Per-span: generation appears in all four (100+200+150+300=750ms), tool in
+	// all four (10+50+20+10=90ms). Count must equal the number of tasks * iterations.
 	gen := result.PerSpan[trace.SpanGeneration]
 	if gen.Count != 4 {
 		t.Fatalf("generation count = %d, want 4", gen.Count)
@@ -135,7 +143,7 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		t.Fatalf("top latency not ranked by share: %+v", result.TopLatency)
 	}
 
-	// Totals: 4 model requests, 4 tool calls, input tokens 1000+1000+2000+1500=5500.
+	// Totals: 4 model requests, 4 tool calls, input tokens 1000+2000+1500+1000=5500.
 	if result.Totals.ModelRequests != 4 {
 		t.Fatalf("modelRequests = %d, want 4", result.Totals.ModelRequests)
 	}
@@ -149,10 +157,10 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		t.Fatalf("outputTokens = %d, want 2750", result.Totals.OutputTokens)
 	}
 
-	// Per-class tier roll-up: nav is latency-only (0 verified, 2 latency-only),
-	// edit is correctness (1/1 verified passed), refactor is build (1/1 passed).
+	// Per-class tier roll-up: nav/edit/refactor are correctness (1/1 verified
+	// passed, 0 latency-only); longproc is latency-only (0 verified, 1 latency).
 	nav := result.PerClass["nav"]
-	if nav.Tasks != 2 || nav.Verified != 0 || nav.Passed != 0 || nav.LatencyOnly != 2 {
+	if nav.Tasks != 1 || nav.Verified != 1 || nav.Passed != 1 || nav.LatencyOnly != 0 {
 		t.Fatalf("nav class = %+v", nav)
 	}
 	edit := result.PerClass["edit"]
@@ -162,6 +170,10 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	refactor := result.PerClass["refactor"]
 	if refactor.Tasks != 1 || refactor.Verified != 1 || refactor.Passed != 1 || refactor.LatencyOnly != 0 {
 		t.Fatalf("refactor class = %+v", refactor)
+	}
+	longproc := result.PerClass["longproc"]
+	if longproc.Tasks != 1 || longproc.Verified != 0 || longproc.Passed != 0 || longproc.LatencyOnly != 1 {
+		t.Fatalf("longproc class = %+v", longproc)
 	}
 }
 
@@ -451,5 +463,290 @@ func TestCopyFixtureIsolatesSourceFromMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(src, "new.go")); !os.IsNotExist(err) {
 		t.Fatalf("file added to copy appeared in source: %v", err)
+	}
+}
+
+// TestRunTurnBenchBuildOnlyMechanism exercises the build-only tier code path in
+// isolation. The v3 baseline manifest leaves this tier empty (refactor graduated
+// to correctness), but the mechanism is still supported for future use, so a
+// focused test keeps it covered: a class listed in buildOnlyClasses with a
+// verificationCommand counts in buildCheckedTasks/buildPassedTasks — never in
+// tasksVerified/correctnessPassRate — and a build-pass cannot leak into the
+// correctness number.
+func TestRunTurnBenchBuildOnlyMechanism(t *testing.T) {
+	set := TaskSet{
+		ID: "build-suite",
+		Tasks: []BenchTask{
+			{ID: "b1", Class: "buildcheck", Prompt: "p", VerificationCommand: []string{"true"}},
+		},
+		BuildOnlyClasses: []string{"buildcheck"},
+	}
+	canned := map[string]*trace.TurnTrace{"b1": cannedTrace(120, 30, 900)}
+	result, err := RunTurnBench(context.Background(), set, TurnBenchConfig{
+		Model:  "fake-model",
+		Runner: fakeTurnRunner(canned),
+		Now:    func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.BuildCheckedTasks != 1 || result.BuildPassedTasks != 1 {
+		t.Fatalf("build checked=%d passed=%d, want 1/1", result.BuildCheckedTasks, result.BuildPassedTasks)
+	}
+	if result.BuildPassRate != 1.0 {
+		t.Fatalf("buildPassRate=%v, want 1.0", result.BuildPassRate)
+	}
+	// A build-only task must NOT count toward correctness.
+	if result.TasksVerified != 0 || result.TasksPassed != 0 {
+		t.Fatalf("build-only leaked into correctness: verified=%d passed=%d, want 0/0",
+			result.TasksVerified, result.TasksPassed)
+	}
+	if result.CorrectnessPassRate != 0 {
+		t.Fatalf("correctnessPassRate=%v, want 0 with only build-only tasks", result.CorrectnessPassRate)
+	}
+	if len(result.BuildOnlyClasses) != 1 || result.BuildOnlyClasses[0] != "buildcheck" {
+		t.Fatalf("buildOnlyClasses=%v, want [buildcheck]", result.BuildOnlyClasses)
+	}
+	if len(result.CorrectnessClasses) != 0 {
+		t.Fatalf("correctnessClasses=%v, want empty", result.CorrectnessClasses)
+	}
+	bc := result.PerClass["buildcheck"]
+	if bc.Tasks != 1 || bc.Verified != 1 || bc.Passed != 1 || bc.LatencyOnly != 0 {
+		t.Fatalf("buildcheck class = %+v, want 1/1 verified passed", bc)
+	}
+}
+
+// TestTurnSchemaVersion3 pins the schema bump. v3 records the tier
+// reclassification (refactor structural-positive and nav answer-oracles moved
+// into correctnessPassRate), so a v2->v3 cross-version comparison cannot
+// silently misread the jump as a model improvement — exactly the misread the
+// tier system exists to prevent.
+func TestTurnSchemaVersion3(t *testing.T) {
+	if TurnSchemaVersion != 3 {
+		t.Fatalf("TurnSchemaVersion = %d, want 3", TurnSchemaVersion)
+	}
+}
+
+// TestStreamJSONFinalTextExtractsAnswer, TestStreamJSONFinalTextEmptyWhenNoFinal,
+// and TestStreamJSONFinalTextLastWins cover the pure capture helper that the
+// nav answer-oracle depends on: it scans stream-json for the terminal "final"
+// event and returns its text, "" when none was emitted, and the last when
+// multiple appear (the success path emits exactly one, but the incomplete path
+// can also emit one, so last-wins matches streamJSONExitCode's tie-break).
+func TestStreamJSONFinalTextExtractsAnswer(t *testing.T) {
+	out := []byte(`{"type":"text","text":"thinking..."}
+{"type":"final","text":"the keys are port, name, and retries"}
+{"type":"run_end","exitCode":0}
+`)
+	if got := streamJSONFinalText(out); got != "the keys are port, name, and retries" {
+		t.Fatalf("streamJSONFinalText = %q, want the final text", got)
+	}
+}
+
+func TestStreamJSONFinalTextEmptyWhenNoFinal(t *testing.T) {
+	out := []byte(`{"type":"text","text":"hi"}
+{"type":"run_end","exitCode":0}
+`)
+	if got := streamJSONFinalText(out); got != "" {
+		t.Fatalf("streamJSONFinalText = %q, want empty when no final event", got)
+	}
+}
+
+func TestStreamJSONFinalTextLastWins(t *testing.T) {
+	out := []byte(`{"type":"final","text":"first"}
+{"type":"final","text":"second"}
+`)
+	if got := streamJSONFinalText(out); got != "second" {
+		t.Fatalf("streamJSONFinalText = %q, want second (last final wins)", got)
+	}
+}
+
+// loadBaselineTask returns the named task from the checked-in baseline manifest.
+// The stub-binary oracle tests below run the REAL manifest oracles against the
+// REAL fixtures through the REAL NewTurnExecRunner, so a manifest edit that
+// breaks an oracle is caught here rather than only in production.
+func loadBaselineTask(t *testing.T, id string) BenchTask {
+	t.Helper()
+	set, err := LoadTaskSet(filepath.Join("manifests", "baseline.json"))
+	if err != nil {
+		t.Fatalf("LoadTaskSet: %v", err)
+	}
+	for _, task := range set.Tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	t.Fatalf("manifest has no task %q", id)
+	return BenchTask{}
+}
+
+// runTurnStub runs one manifest task through the production NewTurnExecRunner
+// with a stub "zero" binary whose body is a POSIX sh script (writeExecStub
+// skips on Windows). The stub is invoked with cmd.Dir set to the fixture copy,
+// so it can both emit canned stream-json AND mutate the copy (apply or omit the
+// fix) before the runner stamps the oracle and runs the verification command.
+func runTurnStub(t *testing.T, task BenchTask, stubBody string) TurnTaskOutcome {
+	t.Helper()
+	stub := writeExecStub(t, stubBody)
+	return NewTurnExecRunner(stub)(context.Background(), task, RunContext{Model: "fake-model"})
+}
+
+// --- Gating tests: the oracle FAILS the wrong thing (no-op / wrong answer) ---
+
+// TestStampedOracleRejectsNoOpRefactor is the core #701 fix: refactor used to
+// live in the build tier where a no-op `go build ./...` passed. Now a no-op
+// agent (the stub emits a clean run_end but touches nothing) leaves the fixture
+// with no formatGreeting helper, so the stamped `var _ = formatGreeting` fails
+// to compile and `go test ./...` fails — the task is failed, not passed.
+func TestStampedOracleRejectsNoOpRefactor(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-01")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("no-op refactor is a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatal("no-op refactor must fail the stamped oracle (formatGreeting undefined), got Passed=true")
+	}
+}
+
+// TestStampedOracleRejectsMissingField proves edit-03's oracle is structural: a
+// no-op leaves Config with no Label field, so `var _ string = Config{}.Label`
+// fails to compile and the task fails.
+func TestStampedOracleRejectsMissingField(t *testing.T) {
+	task := loadBaselineTask(t, "edit-03")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("missing-field is a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatal("no-op edit-03 (no Label field) must fail the stamped oracle, got Passed=true")
+	}
+}
+
+// TestNavAnswerOracleRejectsWrongAnswer proves the nav oracle greps the CAPTURED
+// answer, not the raw stream: the stub emits a final answer missing the
+// required keys, the harness writes it to .zero-answer.txt, and the compound
+// grep fails — so a plausible-but-wrong answer cannot pass nav-09.
+func TestNavAnswerOracleRejectsWrongAnswer(t *testing.T) {
+	task := loadBaselineTask(t, "nav-09")
+	outcome := runTurnStub(t, task, `echo '{"type":"final","text":"the keys are foo and bar"}'
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("wrong nav answer is a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatal("nav-09 oracle must reject an answer missing port/name/retries, got Passed=true")
+	}
+}
+
+// TestNavNoFinalTextFails proves a run that produced no answer fails nav: with
+// no "final" event, .zero-answer.txt is empty and the grep finds nothing.
+func TestNavNoFinalTextFails(t *testing.T) {
+	task := loadBaselineTask(t, "nav-09")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("missing final is a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatal("nav oracle with no captured answer must fail, got Passed=true")
+	}
+}
+
+// TestEdit05RejectsRewordedDebugPrint proves edit-05's oracle catches a reword,
+// not just a deletion: changing `fmt.Println("debug: starting")` to
+// `fmt.Println("starting up")` leaves a fmt.Println string-literal call, so the
+// stamped oracle's `strings.Contains(main.go, fmt.Println(")` check fails. A
+// plain `! grep 'debug: starting'` would have rubber-stamped this reword.
+func TestEdit05RejectsRewordedDebugPrint(t *testing.T) {
+	task := loadBaselineTask(t, "edit-05")
+	outcome := runTurnStub(t, task, `sed 's/debug: starting/starting up/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("reworded debug print is a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatal("edit-05 oracle must reject a reworded (not removed) debug print, got Passed=true")
+	}
+}
+
+// TestEdit01IgnoresDocComment proves edit-01's scoped negative grep does NOT
+// false-fail a correct rename that leaves the doc comment mentioning the old
+// name. The stub renames the declaration (`MaxRetries =` -> `RetryLimit =`) but
+// leaves `// MaxRetries is the maximum...`; the scoped `! grep -RIn 'MaxRetries ='`
+// matches declaration sites only, so the comment is ignored, `var _ = RetryLimit`
+// compiles, and the task passes.
+func TestEdit01IgnoresDocComment(t *testing.T) {
+	task := loadBaselineTask(t, "edit-01")
+	outcome := runTurnStub(t, task, `sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct rename with kept doc comment should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("edit-01 oracle must not false-fail a correct rename that leaves the doc comment: %+v", outcome)
+	}
+}
+
+// --- Satisfiable tests: the oracle PASSES the right thing (real fix applied) ---
+
+// TestStampedOraclePassesWhenRefactorHappened proves the refactor-01 oracle is
+// not an always-fail gate: when the stub applies the real refactor (extract
+// formatGreeting, call it from both callers), `var _ = formatGreeting` compiles
+// and the `hello, %s` grep-count is 1 (only the helper holds the literal), so
+// the task passes.
+func TestStampedOraclePassesWhenRefactorHappened(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-01")
+	outcome := runTurnStub(t, task, `sed -e 's/return fmt.Sprintf("hello, %s", c.Name)/return formatGreeting(c.Name)/' -e 's/return fmt.Sprintf("hello, %s", name)/return formatGreeting(name)/' main.go > .zero-tmp
+cat >> .zero-tmp <<'EOF'
+
+func formatGreeting(name string) string {
+return fmt.Sprintf("hello, %s", name)
+}
+EOF
+mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("real refactor should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("refactor-01 oracle must pass when formatGreeting is extracted: %+v", outcome)
+	}
+}
+
+// TestEdit03PassesWhenFieldAdded proves edit-03's oracle passes when the field
+// is actually added: Config gets a Label string field, so `var _ string =
+// Config{}.Label` compiles and the task passes.
+func TestEdit03PassesWhenFieldAdded(t *testing.T) {
+	task := loadBaselineTask(t, "edit-03")
+	outcome := runTurnStub(t, task, `awk '/Name string/ && !d {print; print "Label string"; d=1; next} {print}' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("real field-add should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("edit-03 oracle must pass when Label is added: %+v", outcome)
+	}
+}
+
+// TestNav09PassesWithCorrectAnswer proves the nav-09 oracle passes when the
+// captured answer names all three config keys.
+func TestNav09PassesWithCorrectAnswer(t *testing.T) {
+	task := loadBaselineTask(t, "nav-09")
+	outcome := runTurnStub(t, task, `echo '{"type":"final","text":"config.json has three keys: port, name, and retries."}'
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct nav answer should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("nav-09 oracle must pass when the answer names port/name/retries: %+v", outcome)
 	}
 }

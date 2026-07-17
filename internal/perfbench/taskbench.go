@@ -51,6 +51,14 @@ type BenchTask struct {
 	Prompt              string   `json:"prompt"`
 	WorkspaceFixture    string   `json:"workspaceFixture,omitempty"`
 	VerificationCommand []string `json:"verificationCommand,omitempty"`
+	// OracleTest is Go source stamped into <fixtureCopy>/oracle_test.go AFTER
+	// the agent run (so it can't interfere with the agent's own go build/test
+	// during the task and can't be pre-seen). The verificationCommand then runs
+	// `go test ./...`, making the Go compiler the structural verifier: a
+	// compile-time reference (e.g. `var _ = Config{}.Label`) or a behavioral call
+	// fails to compile/run when the task wasn't actually done. Empty for tasks
+	// whose verificationCommand is a plain grep/build with no stamped test.
+	OracleTest string `json:"oracleTest,omitempty"`
 }
 
 // TaskConfig is the recorded configuration of a benchmark run. The honest
@@ -415,6 +423,37 @@ func streamJSONExitCode(output []byte) (int, bool) {
 		}
 	}
 	return exitCode, found
+}
+
+// streamJSONFinalText scans stream-json output for the terminal "final" event
+// and returns its text (the agent's final answer). ZERO emits one final event
+// per run on both the success and incomplete paths (exec.go writer.final), so
+// the last one wins. The turn benchmark writes this to .zero-answer.txt in the
+// fixture copy so nav answer-oracles can grep the captured answer rather than
+// the raw stream. Returns "" when no final event was emitted (e.g. a provider
+// error path) — the caller writes an empty file and a nav grep then fails,
+// which is the correct outcome for a run that produced no answer.
+func streamJSONFinalText(output []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	text := ""
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var event struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(line, &event); err != nil {
+			continue
+		}
+		if event.Type == "final" {
+			text = event.Text
+		}
+	}
+	return text
 }
 
 func firstLine(text string) string {
