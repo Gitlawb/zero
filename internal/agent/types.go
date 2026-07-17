@@ -283,6 +283,13 @@ type Options struct {
 	// request), so every existing caller is unaffected. A returned error is
 	// non-fatal: the run continues on the current model.
 	ModelSwitcher func(ctx context.Context, modelID string) (Provider, error)
+	// TurnSessionProvider, when set, supplies the turn session the run streams
+	// through — the seam an optimized provider session (connection reuse,
+	// prewarm, native compaction) plugs into without touching the loop. nil
+	// keeps the default: the loop wraps the passed provider in a no-op session
+	// whose Stream IS provider.StreamCompletion, so behavior is byte-identical
+	// and every existing caller is unaffected.
+	TurnSessionProvider zeroruntime.TurnSessionProvider
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,
