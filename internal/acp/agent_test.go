@@ -137,6 +137,12 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if newRes.Modes == nil || newRes.Modes.CurrentModeID != string(agent.PermissionModeAuto) {
 		t.Fatalf("expected auto mode, got %+v", newRes.Modes)
 	}
+	if len(newRes.ConfigOptions) != 2 || newRes.ConfigOptions[0].ID != configIDModel || newRes.ConfigOptions[0].CurrentValue != "fake-model" {
+		t.Fatalf("model config option = %+v, want fake-model fallback", newRes.ConfigOptions)
+	}
+	if newRes.ConfigOptions[1].ID != configIDMode || newRes.ConfigOptions[1].CurrentValue != string(agent.PermissionModeAuto) {
+		t.Fatalf("mode config option = %+v", newRes.ConfigOptions[1])
+	}
 
 	// session/prompt
 	var promptRes PromptResult
@@ -153,6 +159,91 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	// The streamed agent_message_chunk(s) should carry the assistant text.
 	if got := drainText(t, h.updates); !strings.Contains(got, "Hello from ZERO") {
 		t.Fatalf("streamed text = %q, want it to contain the assistant message", got)
+	}
+}
+
+func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, o config.Overrides) (config.ResolvedConfig, error) {
+		model := "gpt-5.5"
+		if o.Provider.Model != "" {
+			model = o.Provider.Model
+		}
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "ChatGPT", CatalogID: "chatgpt", Model: model,
+		}}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	option := created.ConfigOptions[0]
+	if option.CurrentValue != "gpt-5.5" || len(option.Options) < 2 {
+		t.Fatalf("new model option = %+v", option)
+	}
+	for _, choice := range option.Options {
+		if choice.Name != choice.Value {
+			t.Fatalf("model choice name = %q, want model id %q", choice.Name, choice.Value)
+		}
+	}
+	var selected SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: created.SessionID, ConfigID: configIDModel, Value: "gpt-5.4-mini",
+	}, &selected); err != nil {
+		t.Fatalf("set_config_option: %v", err)
+	}
+	if got := selected.ConfigOptions[0].CurrentValue; got != "gpt-5.4-mini" {
+		t.Fatalf("selected model = %q", got)
+	}
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: created.SessionID, ConfigID: configIDModel, Value: "not-advertised",
+	}, &SetSessionConfigOptionResult{}); err == nil {
+		t.Fatal("unknown standard model selection was accepted")
+	}
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	if len(loaded.ConfigOptions) != 2 || loaded.ConfigOptions[0].CurrentValue != "gpt-5.4-mini" {
+		t.Fatalf("load model option = %+v", loaded.ConfigOptions)
+	}
+	if loaded.ConfigOptions[1].CurrentValue != string(agent.PermissionModeAuto) {
+		t.Fatalf("load mode option = %+v", loaded.ConfigOptions[1])
+	}
+}
+
+func TestACPConfigOptionWireSchema(t *testing.T) {
+	b, err := json.Marshal(SessionConfigOption{
+		ID: "model", Name: "Model", Description: "desc", Category: "model",
+		Type: configOptionTypeSelect, CurrentValue: "m1",
+		Options: []SessionConfigOptionValue{{Value: "m1", Name: "m1", Description: "choice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"type", "category", "currentValue", "options"} {
+		if _, ok := wire[key]; !ok {
+			t.Errorf("wire field %q absent: %s", key, b)
+		}
+	}
+	if _, ok := wire["value"]; ok {
+		t.Errorf("obsolete option value field present: %s", b)
+	}
+	if _, ok := wire["values"]; ok {
+		t.Errorf("obsolete values field present: %s", b)
+	}
+	choice := wire["options"].([]any)[0].(map[string]any)
+	if choice["value"] != "m1" {
+		t.Errorf("options[].value = %#v", choice["value"])
 	}
 }
 
@@ -180,6 +271,15 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	// auto/ask are accepted.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAsk)}, &SetSessionModeResult{}); err != nil {
 		t.Fatalf("set_mode ask: %v", err)
+	}
+	var configured SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: newRes.SessionID, ConfigID: configIDMode, Value: string(agent.PermissionModeAuto),
+	}, &configured); err != nil {
+		t.Fatalf("set_config_option mode: %v", err)
+	}
+	if got := configured.ConfigOptions[1].CurrentValue; got != string(agent.PermissionModeAuto) {
+		t.Fatalf("configured mode = %q", got)
 	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {

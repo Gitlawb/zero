@@ -360,3 +360,14 @@ func codexAccountForKey(key string) string {
 	}
 	return strings.TrimSpace(token.Account)
 }
+
+// CodexAccountResolverForLogin returns the same per-request account resolver
+// used by the runtime provider. Auxiliary Codex requests use this rather than
+// independently selecting or parsing an OAuth login, which could mismatch the
+// bearer selected by oauthLoginForProfile.
+func CodexAccountResolverForLogin(key string) openai.CodexAccountResolver {
+	return func(context.Context) (string, bool, error) {
+		account := codexAccountForKey(key)
+		return account, account != "", nil
+	}
+}

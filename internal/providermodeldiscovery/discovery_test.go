@@ -52,6 +52,63 @@ func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestDiscoverChatGPTModelsUsesOAuthAndCodexHeaders(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Path; got != "/backend-api/codex/models" {
+			t.Errorf("path = %q, want Codex models endpoint", got)
+		}
+		wantToken := "Bearer old-token"
+		wantAccount := "old-account"
+		if requests == 2 {
+			wantToken = "Bearer refreshed-token"
+			wantAccount = "refreshed-account"
+		}
+		if got := r.Header.Get("Authorization"); got != wantToken {
+			t.Errorf("request %d Authorization = %q, want %q", requests, got, wantToken)
+		}
+		if got := r.Header.Get("chatgpt-account-id"); got != wantAccount {
+			t.Errorf("request %d chatgpt-account-id = %q, want %q", requests, got, wantAccount)
+		}
+		if got := r.Header.Get("originator"); got != "codex_cli_rs" {
+			t.Errorf("originator = %q", got)
+		}
+		if requests == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.4"}]}`))
+	}))
+	defer server.Close()
+
+	models, err := Discover(context.Background(), config.ProviderProfile{
+		CatalogID:    "chatgpt",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/backend-api/codex",
+	}, Options{
+		HTTPClient: server.Client(),
+		OAuthResolver: func(_ context.Context, force bool) (string, string, bool, error) {
+			if force {
+				return "Authorization", "Bearer refreshed-token", true, nil
+			}
+			return "Authorization", "Bearer old-token", true, nil
+		},
+		CodexAccountResolver: func(context.Context) (string, bool, error) {
+			if requests == 0 {
+				return "old-account", true, nil
+			}
+			return "refreshed-account", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if requests != 2 || len(models) != 1 || models[0].ID != "gpt-5.4" {
+		t.Fatalf("requests = %d, models = %#v", requests, models)
+	}
+}
+
 func TestDiscoverAIMLAPIModelsSendsAuthAndCustomHeadersWithoutAttribution(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for header, want := range map[string]string{
