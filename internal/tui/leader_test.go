@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 func TestLeaderArmsOnCtrlX(t *testing.T) {
@@ -20,6 +22,44 @@ func TestLeaderArmsOnCtrlX(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("arming leader should schedule a timeout tick")
+	}
+}
+
+func TestLeaderArmsOnCtrlXControlByte(t *testing.T) {
+	// Some terminals emit Ctrl+X as C0 byte 0x18 without ModCtrl.
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	msg := tea.KeyPressMsg(tea.Key{Code: 0x18}) // Ctrl+X control byte
+	updated, _ := m.Update(msg)
+	next := updated.(model)
+	if !next.leaderPending {
+		t.Fatal("Ctrl+X control-byte form should arm leader-pending")
+	}
+}
+
+func TestCustomLeaderMatchesControlByte(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4o",
+		KeybindingsFile: config.KeybindingsFile{
+			LeaderKey: "ctrl+k",
+			Leader:    config.DefaultLeaderAssignments(),
+		},
+	})
+	// Matcher path (Code+ModCtrl).
+	if !m.matchesLeaderKey(testKeyCtrl('k')) {
+		t.Fatal("custom ctrl+k should match ModCtrl form")
+	}
+	// Control-byte path: Ctrl+K = 0x0B.
+	if !m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x0B})) {
+		t.Fatal("custom ctrl+k should match control-byte form")
+	}
+	// Unrelated control byte must not match.
+	if m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x18})) {
+		t.Fatal("ctrl+k leader must not match Ctrl+X control byte")
+	}
+	// Alt leaders must not use control-byte matching.
+	m.leaderKey = parseBinding("alt+x")
+	if m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x18})) {
+		t.Fatal("alt+x must not match Ctrl+X control byte")
 	}
 }
 

@@ -73,11 +73,42 @@ func (m model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // matchesLeaderKey reports whether msg is the resolved leader prefix.
+// Ctrl-letter leaders also match the C0 control-byte form some terminals emit
+// without ModCtrl (e.g. Ctrl+X as Code 0x18), matching the built-in keyCtrl
+// fallback path for default bindings.
 func (m model) matchesLeaderKey(msg tea.KeyMsg) bool {
-	if !m.leaderKey.isZero() {
-		return m.leaderKey.Matcher()(msg)
+	if m.leaderKey.isZero() {
+		return ctrlLetterMatches(msg, 'x')
 	}
-	return keyCtrl(msg, 'x')
+	if m.leaderKey.Matcher()(msg) {
+		return true
+	}
+	// Custom ctrl+letter only (no alt/shift/cmd): accept control-byte form.
+	if m.leaderKey.ctrl && !m.leaderKey.alt && !m.leaderKey.shift && !m.leaderKey.cmd &&
+		m.leaderKey.code >= 'a' && m.leaderKey.code <= 'z' {
+		return ctrlLetterByte(msg, m.leaderKey.code)
+	}
+	return false
+}
+
+// ctrlLetterMatches is true for Ctrl+letter via ModCtrl or raw C0 control byte.
+func ctrlLetterMatches(msg tea.KeyMsg, letter rune) bool {
+	if letter < 'a' || letter > 'z' {
+		return false
+	}
+	if keyCtrl(msg, letter) {
+		return true
+	}
+	return ctrlLetterByte(msg, letter)
+}
+
+// ctrlLetterByte reports the terminal control-byte encoding of Ctrl+letter
+// (Ctrl+A = 0x01 … Ctrl+Z = 0x1A) with no modifier flags set.
+func ctrlLetterByte(msg tea.KeyMsg, letter rune) bool {
+	if letter < 'a' || letter > 'z' {
+		return false
+	}
+	return keyCode(msg) == (letter-'a'+1) && msg.Key().Mod == 0
 }
 
 // leaderPendingHint is the faint status line while a leader chord is armed.
