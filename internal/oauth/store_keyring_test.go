@@ -3,6 +3,7 @@ package oauth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -777,5 +778,29 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(unsupported)
 	if _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an unsupported index version to be rejected")
+	}
+}
+
+// TestKeyringFallbackLockPathIsPerUser covers the fallback taken when no config
+// location resolves. It must not be the single shared temp path that any account
+// on a multi-user host could pre-create or hold, and the last-resort temp name
+// must be scoped by uid so different users never collide on one lock file.
+func TestKeyringFallbackLockPathIsPerUser(t *testing.T) {
+	got := keyringFallbackLockPath()
+	if got == filepath.Join(os.TempDir(), "zero-oauth-keyring.lockfile") {
+		t.Fatalf("fallback lock path is the shared temp path %q; a co-tenant could grief it", got)
+	}
+	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
+		if want := filepath.Join(cache, "zero", "oauth-keyring.lockfile"); got != want {
+			t.Fatalf("fallback = %q, want per-user cache path %q", got, want)
+		}
+	}
+	name := keyringTempLockName()
+	if uid := os.Getuid(); uid >= 0 {
+		if !strings.Contains(name, fmt.Sprintf("%d", uid)) {
+			t.Fatalf("temp lock name %q is not scoped by uid %d", name, uid)
+		}
+	} else if name == "" {
+		t.Fatal("temp lock name is empty")
 	}
 }

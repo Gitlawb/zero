@@ -213,9 +213,9 @@ func NewStore(options StoreOptions) (*Store, error) {
 		// file beside where the file backend would live. Cross-process exclusion
 		// must not silently disappear when no config location resolves (withLock
 		// would be a no-op and a concurrent save could delete another process's
-		// newly written entry), so fall back to the OS temp directory, which
-		// always exists, rather than to in-process serialization only.
-		lockPath := filepath.Join(os.TempDir(), "zero-oauth-keyring.lockfile")
+		// newly written entry), so fall back to a per-user location that always
+		// exists, rather than to in-process serialization only.
+		lockPath := keyringFallbackLockPath()
 		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
 			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 		}
@@ -242,6 +242,30 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 		}
 	}
 	return filepath.Clean(filePath), nil
+}
+
+// keyringFallbackLockPath returns a per-user location for the keyring lock when
+// no config location resolves. A single shared ${TMPDIR}/zero-oauth-keyring.lockfile
+// let any other account on a multi-user host pre-create or keep refreshing the
+// victim's lock and time out their Load/Status/Save/Delete, even though each user
+// has a separate OS keychain. Prefer the per-user OS cache directory (created
+// 0700 by acquireFileLock); only if that cannot be resolved fall back to a temp
+// file scoped by uid so two different users never collide on one path.
+func keyringFallbackLockPath() string {
+	if dir, err := os.UserCacheDir(); err == nil && strings.TrimSpace(dir) != "" {
+		return filepath.Join(dir, "zero", "oauth-keyring.lockfile")
+	}
+	return filepath.Join(os.TempDir(), keyringTempLockName())
+}
+
+// keyringTempLockName names the last-resort temp lock file, scoping it by uid so
+// concurrently running different users do not share one path. os.Getuid returns
+// -1 where uids do not apply (Windows), where os.TempDir is already per-user.
+func keyringTempLockName() string {
+	if uid := os.Getuid(); uid >= 0 {
+		return fmt.Sprintf("zero-oauth-keyring-%d.lockfile", uid)
+	}
+	return "zero-oauth-keyring.lockfile"
 }
 
 // FilePath returns the resolved token store location (a path for the file
