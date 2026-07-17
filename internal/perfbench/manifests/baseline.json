@@ -1,7 +1,7 @@
 {
   "id": "zero-baseline-turn",
   "name": "Zero per-turn baseline (Phase 0)",
-  "description": "Latency-first baseline: measures where a turn spends wall time, with pass/fail reported per oracle tier so it cannot be misread as a blanket correctness verdict. Correctness classes (edit, fix, nav, refactor) carry a positive oracle: edit/refactor stamp an oracle_test.go compiled by `go test ./...` (the Go compiler is the structural verifier — a no-op refactor or a missing field fails to compile), fix runs a scoped `go test -run`, and nav greps the agent's captured final answer (.zero-answer.txt) for determinable facts. tasksVerified/tasksPassed/correctnessPassRate cover exactly these. Latency-only classes (longproc, longctx, parallel) carry no verification oracle — a zero-exit only proves the turn ran, so they count as latency-only and never in any pass rate. The build tier is empty: refactor graduated to correctness once its oracle became structural-positive. See MANIFEST.md for the per-task oracle specs and known limitations.",
+  "description": "Latency-first baseline: measures where a turn spends wall time, with pass/fail reported per oracle tier so it cannot be misread as a blanket correctness verdict. Correctness classes (edit, fix, nav, refactor) carry a positive oracle: edit/refactor stamp an oracle_test.go compiled by `go test ./...` (the Go compiler is the structural verifier \u2014 a no-op refactor or a missing field fails to compile), fix runs a scoped `go test -run`, and nav greps the agent's captured final answer (.zero-answer.txt) for determinable facts. tasksVerified/tasksPassed/correctnessPassRate cover exactly these. Latency-only classes (longproc, longctx, parallel) carry no verification oracle \u2014 a zero-exit only proves the turn ran, so they count as latency-only and never in any pass rate. The build tier is empty: refactor graduated to correctness once its oracle became structural-positive. See MANIFEST.md for the per-task oracle specs and known limitations.",
   "buildOnlyClasses": [],
   "tasks": [
     {
@@ -13,7 +13,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iq 'main.go' .zero-answer.txt && grep -iq 'config.json' .zero-answer.txt && grep -iq 'readme' .zero-answer.txt && grep -iqE '^count:[[:space:]]*4$' .zero-answer.txt"
+        "grep -iq 'main.go' .zero-answer.txt && grep -iq 'config.json' .zero-answer.txt && grep -iq 'readme' .zero-answer.txt && grep -iqE '^count:[[:space:]]*5$' .zero-answer.txt"
       ]
     },
     {
@@ -49,7 +49,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
+        "grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
       ]
     },
     {
@@ -61,7 +61,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
+        "grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
       ]
     },
     {
@@ -92,12 +92,12 @@
       "id": "nav-08",
       "name": "find imports",
       "class": "nav",
-      "prompt": "List every third-party import used by this repository. State the number of third-party (non-stdlib) imports as 'count: N' on its own line. Do not modify anything.",
+      "prompt": "List every import used by this repository and classify each as standard library or third-party. State the number of third-party (non-stdlib) imports as 'count: N' on its own line. Do not modify anything.",
       "workspaceFixture": "../testdata/nav",
       "verificationCommand": [
         "bash",
         "-c",
-        "grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
+        "grep -iq 'fmt' .zero-answer.txt && grep -iq 'testing' .zero-answer.txt && grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
       ]
     },
     {
@@ -186,7 +186,7 @@
         "test",
         "./..."
       ],
-      "oracleTest": "package edit\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestNoDebugPrintln(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\t// The greet print is fmt.Println(greet(...)) with no string literal, so a\n\t// remaining fmt.Println(\"...\") call means the debug line was not removed\n\t// (or was only reworded, not deleted).\n\tif strings.Contains(string(b), `fmt.Println(\"`) {\n\t\tt.Fatal(\"main.go still has a fmt.Println string-literal call; the debug line was not removed\")\n\t}\n}\n"
+      "oracleTest": "package edit\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestNoDebugPrintln(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\t// The greet print is fmt.Println(greet(...)) with no string literal, so a\n\t// remaining fmt.Println(\"...\") call means the debug line was not removed\n\t// (or was only reworded, not deleted).\n\tif strings.Contains(string(b), `fmt.Println(\"`) {\n\t\tt.Fatal(\"main.go still has a fmt.Println string-literal call; the debug line was not removed\")\n\t}\n\t// The task is to remove the line that prints \"debug: starting\", so the\n\t// message text itself must be gone -- this catches a reword onto a different\n\t// call form (fmt.Printf, backticks, log.Println, println) that the\n\t// string-literal check above would miss.\n\tif strings.Contains(string(b), \"debug: starting\") {\n\t\tt.Fatal(\"main.go still prints 'debug: starting'; the line was not removed (only reworded or respelled)\")\n\t}\n}\n"
     },
     {
       "id": "edit-06",
@@ -411,11 +411,11 @@
       "prompt": "Introduce a named type `type Stats map[string]int` for the bare map used by stats, and update its users (Record, Lookup).",
       "workspaceFixture": "../testdata/refactor",
       "verificationCommand": [
-        "bash",
-        "-c",
-        "go test ./... && ! grep -q 'var stats = map\\[string\\]int' main.go"
+        "go",
+        "test",
+        "./..."
       ],
-      "oracleTest": "package refactor\n\nvar _ Stats\n"
+      "oracleTest": "package refactor\n\nimport (\n\t\"os\"\n\t\"regexp\"\n\t\"strings\"\n\t\"testing\"\n)\n\n// TestStatsNamedType proves the bare map was replaced by the named Stats type:\n// the old `var stats = map[string]int` (or `stats := map[string]int{}`) form is\n// gone -- matched with a spacing-tolerant regex so a `var stats=map[string]int`\n// or `stats :=` variant can't dodge it -- and the Stats type is actually\n// referenced in main.go, so a no-op that only adds an unused `type Stats` while\n// keeping the bare map fails. `go test ./...` compiling the fixture proves the\n// type declaration is valid.\nfunc TestStatsNamedType(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tsrc := string(b)\n\tif regexp.MustCompile(`var\\s+stats\\s*=\\s*map\\[string\\]int`).MatchString(src) ||\n\t\tregexp.MustCompile(`stats\\s*:=\\s*map\\[string\\]int`).MatchString(src) {\n\t\tt.Fatal(\"main.go still declares stats as a bare map[string]int; the named Stats type was not adopted\")\n\t}\n\tif !strings.Contains(src, \"Stats\") {\n\t\tt.Fatal(\"main.go does not reference the Stats type; refactor-04 was a no-op\")\n\t}\n}\n"
     },
     {
       "id": "refactor-05",
@@ -427,7 +427,8 @@
         "bash",
         "-c",
         "go test ./... && ! grep -R 'func Wrapper' ."
-      ]
+      ],
+      "oracleTest": "package refactor\n\nimport \"testing\"\n\n// TestGreetWrapped proves greetWrapped still exists and behaves as the inlined\n// Wrapper did: deleting both Wrapper and greetWrapped (or stubbing greetWrapped\n// to return \"\") fails to compile or run, so the oracle can't be passed by\n// removing the target along with its caller. Paired with the ! grep 'func\n// Wrapper' verificationCommand that proves Wrapper itself is gone.\nfunc TestGreetWrapped(t *testing.T) {\n\tif got := greetWrapped(\"x\"); got != \"hello, x\" {\n\t\tt.Fatalf(\"greetWrapped(x) = %q, want %q\", got, \"hello, x\")\n\t}\n}\n"
     },
     {
       "id": "refactor-06",

@@ -88,13 +88,28 @@ honest where they apply:
   answer is free-form prose and a contains-check would rubber-stamp. They stay
   in `latencyOnlyTasks` and never enter a pass rate.
 - **nav count tasks (nav-01, nav-04, nav-05, nav-08) require a structured,
-  line-anchored `count: N` token with the fixture's exact expected count.** Their
-  prompts ask the agent to state the count as `count: N` on its own line, and the
-  oracle greps for an anchored `^count: N$` (with the exact expected N — 4 files
-  for nav-01, 0 for nav-04/05/08), so a substring like "the count: 0" or a wrong
-  count like "count: 3" fails. This trades a little output freedom for
-  determinism (a loose prose-contains on "0" would match almost any answer, and
-  an unanchored `count: 0` would match inside a longer line).
+  line-anchored `count: N` token with the fixture's exact expected count, and
+  the ground truth is non-zero wherever it can be inspected offline so a
+  guess-zero answer can't rubber-stamp.** Their prompts ask the agent to state
+  the count as `count: N` on its own line, and the oracle greps for an anchored
+  `^count: N$` with the exact expected N — 5 files for nav-01 (README.md,
+  config.json, go.mod, main.go, main_test.go), 1 test function for nav-04
+  (`TestGreet` in `main_test.go`), 1 TODO for nav-05 (in `main.go`), and 0
+  third-party imports for nav-08. A substring like "the count: 1" or a wrong
+  count like "count: 3" fails the anchor. nav-04 and nav-05 were given a real
+  `TestGreet` and a real `TODO` precisely so an agent that never opens the
+  workspace and always emits "count: 0" fails (the count=0 gameability that
+  three zero-ground-truth tasks would otherwise share). nav-08 stays at 0 — a
+  real third-party import would need a network fetch and break the offline
+  suite — so its oracle additionally requires the answer to name both `fmt`
+  (from `main.go`) and `testing` (from `main_test.go`), the stdlib imports the
+  agent must have enumerated across every file to conclude 0 third-party. The
+  `testing` requirement is the tighter half: `fmt` alone is the most common Go
+  stdlib import and could be named blind, but `testing` only appears in the test
+  file, so naming it proves the agent read more than `main.go`. This trades a little
+  output freedom for determinism (a loose prose-contains on "0" would match
+  almost any answer, and an unanchored `count: 0` would match inside a longer
+  line).
 - **nav-03 / nav-06 / nav-07 are lenient contains-oracles on real facts.** A
   wrong-but-plausible answer that happens to mention the real symbols (e.g.
   "Config" and "MaxRetries" for nav-06) could in principle pass. Accepted for a

@@ -28,7 +28,7 @@ import (
 // (refactor); latencyOnlyTasks covers the no-oracle classes (nav/longproc/
 // longctx/parallel). tasksAttempted is still every task run.
 //
-// v3 (PR #701) strengthens the oracles so the tiers are honest: edit/refactor
+// v3 (Phase 0 oracle hardening) strengthens the oracles so the tiers are honest: edit/refactor
 // now carry a stamped oracle_test.go compiled by `go test ./...` (the Go
 // compiler is the structural verifier — a no-op refactor or a missing field
 // fails to compile), and nav carries an answer-oracle grepping the agent's
@@ -102,10 +102,11 @@ type LatencySource struct {
 // ClassSummary is the per-class (task group) roll-up.
 //
 // Passed is the count that passed THIS class's oracle: a correctness pass for
-// edit/fix, a build pass for refactor, and always 0 for the no-oracle classes
-// (nav/longproc/longctx/parallel). Verified is how many tasks in the class
-// carry an oracle (correctness or build); LatencyOnly is how many carry none.
-// A latency-only class therefore reports Passed=0, Verified=0, LatencyOnly=Tasks.
+// the positive-oracle classes (edit/fix/nav/refactor), and always 0 for the
+// no-oracle classes (longproc/longctx/parallel) — the build tier is empty in v3
+// (refactor graduated to correctness). Verified is how many tasks in the class
+// carry an oracle; LatencyOnly is how many carry none. A latency-only class
+// therefore reports Passed=0, Verified=0, LatencyOnly=Tasks.
 type ClassSummary struct {
 	Tasks       int                `json:"tasks"`
 	Verified    int                `json:"verified"`
@@ -120,13 +121,14 @@ type ClassSummary struct {
 // Pass/fail is split into three oracle tiers so it cannot be misread as a
 // blanket correctness verdict:
 //   - Correctness (tasksVerified / tasksPassed / correctnessPassRate): tasks
-//     with a positive oracle (edit/fix). This is the only pass rate that can
-//     move with model quality.
-//   - Build-only (buildCheckedTasks / buildPassedTasks / buildPassRate): tasks
-//     whose oracle is a non-positive build check (refactor `go build`). A pass
-//     means it compiles, not that the refactor is correct.
-//   - Latency-only (latencyOnlyTasks): tasks with no oracle (nav/longproc/
-//     longctx/parallel). They ran for latency and span attribution only and are
+//     with a positive oracle (edit/fix/nav/refactor). This is the only pass
+//     rate that can move with model quality.
+//   - Build-only (buildCheckedTasks / buildPassedTasks / buildPassRate): the
+//     non-positive build-check tier. Empty in v3 — refactor graduated to
+//     correctness (its stamped oracle is positive) — so buildCheckedTasks is
+//     always 0 and buildPassRate is 0. The fields remain for schema stability.
+//   - Latency-only (latencyOnlyTasks): tasks with no oracle (longproc/longctx/
+//     parallel). They ran for latency and span attribution only and are
 //     excluded from every pass rate.
 //
 // tasksAttempted is still the total number of tasks run across all three tiers.
@@ -445,8 +447,9 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 		"model: " + displayOrUnknown(result.Model),
 		// The headline separates the three oracle tiers so an exit-0 read-only
 		// task can never inflate a "pass rate" that reads as correctness:
-		// correctness (positive oracle, edit/fix), build (non-positive `go build`,
-		// refactor), and latency-only (no oracle, nav/longproc/longctx/parallel).
+		// correctness (positive oracle: edit/fix/nav/refactor), build (empty in
+		// v3 — refactor graduated to correctness), and latency-only (no oracle:
+		// longproc/longctx/parallel).
 		fmt.Sprintf("tasks: %d total | correctness %d/%d (%.0f%%) | build %d/%d (%.0f%%) | latency-only %d | %d iter",
 			result.TasksAttempted,
 			result.TasksPassed, result.TasksVerified, result.CorrectnessPassRate*100,
@@ -601,7 +604,12 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		// test would break a pre-rename build) and can't be pre-seen or tampered
 		// with.
 		if err := stampOracleAndAnswer(task, outBuf.Bytes()); err != nil {
-			return TurnTaskOutcome{WallMs: wallMs, Err: fmt.Errorf("stamp oracle: %w", err)}
+			// Preserve the already-parsed trace, trace issue, and wall time: a
+			// stamp failure is a harness error, but the run still produced a
+			// trace worth attributing, so mutate the existing outcome rather than
+			// returning a fresh one that drops Trace/TraceIssue.
+			outcome.Err = fmt.Errorf("stamp oracle: %w", err)
+			return outcome
 		}
 		if len(task.VerificationCommand) > 0 {
 			if vOutcome := runVerification(ctx, task); !vOutcome.Passed {

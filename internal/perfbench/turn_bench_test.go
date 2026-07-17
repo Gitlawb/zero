@@ -680,6 +680,49 @@ echo '{"type":"run_end","exitCode":0}'
 	assertVerifyFailed(t, "reworded edit-05 debug print", outcome)
 }
 
+// TestEdit05RejectsRespelledDebugPrint proves the second edit-05 check (the
+// message text "debug: starting" must be absent) catches a respell onto a
+// different call form that the fmt.Println(" string-literal check misses: the
+// agent rewrites the line to fmt.Printf("debug: starting\n"), which still prints
+// the message but is no longer a fmt.Println string-literal. The
+// strings.Contains("debug: starting") assertion fails the task.
+func TestEdit05RejectsRespelledDebugPrint(t *testing.T) {
+	task := loadBaselineTask(t, "edit-05")
+	outcome := runTurnStub(t, task, `sed 's/fmt.Println("debug: starting")/fmt.Printf("debug: starting\\n")/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "respelled edit-05 debug print", outcome)
+}
+
+// TestRefactor05RejectsStubbedCaller proves refactor-05's behavioral oracle
+// catches a wrong edit the negative grep alone would pass: the agent deletes
+// Wrapper (so ! grep 'func Wrapper' succeeds) but stubs greetWrapped to return
+// "" instead of inlining. The stamped TestGreetWrapped runs greetWrapped("x"),
+// gets "" not "hello, x", and fails — so deleting the target along with its
+// caller (or stubbing the caller) can no longer pass the oracle.
+func TestRefactor05RejectsStubbedCaller(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-05")
+	outcome := runTurnStub(t, task, `sed -e 's/return Wrapper(name)/return ""/' -e '/^func Wrapper(name string) string {/,/^}/d' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "stubbed refactor-05 caller", outcome)
+}
+
+// TestRefactor04RejectsBareMapKept proves refactor-04's file-reading oracle
+// catches a no-op that the old exact-text shell grep would miss: the agent adds
+// an unused `type Stats map[string]int` (so the compile-time `var _ Stats`
+// passes) but keeps the bare `var stats = map[string]int{}` under the original
+// spacing. The spacing-tolerant regex in TestStatsNamedType still matches the
+// bare-map declaration, so the task fails — Record/Lookup never moved onto the
+// named type.
+func TestRefactor04RejectsBareMapKept(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-04")
+	outcome := runTurnStub(t, task, `sed 's/type Config struct {/type Stats map[string]int\n\ntype Config struct {/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "refactor-04 bare-map kept", outcome)
+}
+
 // TestEdit01IgnoresDocComment proves edit-01's scoped negative grep does NOT
 // false-fail a correct rename that leaves the doc comment mentioning the old
 // name. The stub renames the declaration (`MaxRetries =` -> `RetryLimit =`) but
@@ -757,6 +800,41 @@ echo '{"type":"run_end","exitCode":0}'
 	}
 }
 
+// TestRefactor05PassesWhenInlined proves refactor-05's oracle is not an
+// always-fail gate: when the stub applies the real inline (greetWrapped calls
+// GreetByName directly, Wrapper removed), TestGreetWrapped gets "hello, x" and
+// the ! grep 'func Wrapper' check passes, so the task passes.
+func TestRefactor05PassesWhenInlined(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-05")
+	outcome := runTurnStub(t, task, `sed -e 's/return Wrapper(name)/return GreetByName(name)/' -e '/^func Wrapper(name string) string {/,/^}/d' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("real inline should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("refactor-05 oracle must pass when Wrapper is inlined into greetWrapped: %+v", outcome)
+	}
+}
+
+// TestRefactor04PassesWhenTyped proves refactor-04's oracle passes when the
+// bare map is actually replaced by the named type: the stub introduces
+// `type Stats map[string]int` and retypes the var to `var stats = Stats{}`,
+// so the bare-map regex no longer matches, Stats is referenced, `var _ Stats`
+// compiles, and go test passes.
+func TestRefactor04PassesWhenTyped(t *testing.T) {
+	task := loadBaselineTask(t, "refactor-04")
+	outcome := runTurnStub(t, task, `sed -e 's/type Config struct {/type Stats map[string]int\n\ntype Config struct {/' -e 's/var stats = map\[string\]int{}/var stats = Stats{}/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("real typed refactor should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("refactor-04 oracle must pass when stats is typed as Stats: %+v", outcome)
+	}
+}
+
 // TestStampOracleRejectsFixturelessOracleTask covers the fail-closed path in
 // stampOracleAndAnswer: a task that carries an oracle (a stamped OracleTest or a
 // verification command) but has no workspace fixture has nowhere safe to stamp,
@@ -803,56 +881,144 @@ func TestStampOracleRejectsFixturelessOracleTask(t *testing.T) {
 // --- Count-oracle tests: anchored `^count: N$` with the exact expected count ---
 
 // TestNav01CountOracleAcceptsExactCount proves nav-01's anchored count oracle
-// passes when the answer names the files AND states the exact count (4) on its
-// own line. printf emits the JSON with a literal \n escape so the captured
-// answer has "count: 4" on its own line.
+// passes when the answer names the files AND states the exact count (5 — the
+// fixture has README.md, config.json, go.mod, main.go, main_test.go) on its own
+// line. printf emits the JSON with a literal \n escape so the captured answer
+// has "count: 5" on its own line.
 func TestNav01CountOracleAcceptsExactCount(t *testing.T) {
 	task := loadBaselineTask(t, "nav-01")
-	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md\ncount: 4"}'
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md, main_test.go\ncount: 5"}'
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	if outcome.Err != nil {
 		t.Fatalf("correct nav-01 answer should pass, got harness error: %v", outcome.Err)
 	}
 	if !outcome.Passed {
-		t.Fatalf("nav-01 oracle must pass when the answer names the files and states count: 4: %+v", outcome)
+		t.Fatalf("nav-01 oracle must pass when the answer names the files and states count: 5: %+v", outcome)
 	}
 }
 
 // TestNav01CountOracleRejectsWrongCount proves the anchored count oracle rejects
 // a wrong count: the file names are all present, but "count: 3" does not match
-// `^count: 4$`, so the task fails at verification.
+// `^count: 5$`, so the task fails at verification.
 func TestNav01CountOracleRejectsWrongCount(t *testing.T) {
 	task := loadBaselineTask(t, "nav-01")
-	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md\ncount: 3"}'
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"main.go, config.json, go.mod, README.md, main_test.go\ncount: 3"}'
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-01 wrong count", outcome)
 }
 
 // TestNav04CountOracleRejectsSubstring proves the line anchor rejects a
-// substring: "the count: 0 is the number" contains "count: 0" but the line does
-// not start with "count:", so `^count:[[:space:]]*0$` does not match. A
-// pre-anchor oracle (`count:\s*0`) would have rubber-stamped this.
+// substring: "the count: 1 is the number" contains "count: 1" (the right
+// value) but the line does not start with "count:", so `^count:[[:space:]]*1$`
+// does not match. A pre-anchor oracle (`count:\s*1`) would have rubber-stamped
+// this.
 func TestNav04CountOracleRejectsSubstring(t *testing.T) {
 	task := loadBaselineTask(t, "nav-04")
-	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"the count: 0 is the number of test functions"}'
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"the count: 1 is the number of test functions"}'
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-04 substring count", outcome)
 }
 
 // TestNav04CountOracleAcceptsExactCount proves the anchored count oracle passes
-// when "count: 0" stands on its own line.
+// when "count: 1" stands on its own line. The fixture's main_test.go defines
+// exactly one Test* function (TestGreet), so the ground truth is 1, not 0 — a
+// guesser that always emits "count: 0" fails (see RejectsZeroGuess).
 func TestNav04CountOracleAcceptsExactCount(t *testing.T) {
 	task := loadBaselineTask(t, "nav-04")
-	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"There are no test functions.\ncount: 0"}'
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"There is one test function: TestGreet in main_test.go.\ncount: 1"}'
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	if outcome.Err != nil {
 		t.Fatalf("correct nav-04 answer should pass, got harness error: %v", outcome.Err)
 	}
 	if !outcome.Passed {
-		t.Fatalf("nav-04 oracle must pass when the answer states count: 0 on its own line: %+v", outcome)
+		t.Fatalf("nav-04 oracle must pass when the answer states count: 1 on its own line: %+v", outcome)
 	}
+}
+
+// TestNav04CountOracleRejectsZeroGuess is the gameability gate: an agent that
+// never opens the workspace and always emits "count: 0" used to pass nav-04
+// when the ground truth was 0. The fixture now has one real Test* function, so
+// the ground truth is 1 and a clean "count: 0" fails — proving the count=0
+// rubber-stamp is closed.
+func TestNav04CountOracleRejectsZeroGuess(t *testing.T) {
+	task := loadBaselineTask(t, "nav-04")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"count: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-04 zero-guess", outcome)
+}
+
+// TestNav05CountOracleAcceptsExactCount proves nav-05's anchored count oracle
+// passes for the real ground truth: the fixture has exactly one TODO (in
+// main.go), so "count: 1" on its own line passes.
+func TestNav05CountOracleAcceptsExactCount(t *testing.T) {
+	task := loadBaselineTask(t, "nav-05")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"One TODO in main.go.\ncount: 1"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct nav-05 answer should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("nav-05 oracle must pass when the answer states count: 1: %+v", outcome)
+	}
+}
+
+// TestNav05CountOracleRejectsZeroGuess is nav-05's gameability gate: the
+// fixture now has one real TODO, so a clean "count: 0" (the always-guess-zero
+// answer) fails.
+func TestNav05CountOracleRejectsZeroGuess(t *testing.T) {
+	task := loadBaselineTask(t, "nav-05")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"count: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-05 zero-guess", outcome)
+}
+
+// TestNav08CountOracleAcceptsStdlibAnswer proves nav-08's oracle passes when the
+// agent enumerated the imports across BOTH .go files and named the stdlib ones
+// (fmt from main.go, testing from main_test.go): the answer states the only
+// imports are stdlib so there are 0 third-party, with "count: 0" on its own
+// line. The fmt+testing requirement is the inspection-proof — it forces the
+// agent to have read all the files rather than blindly emitting "count: 0".
+func TestNav08CountOracleAcceptsStdlibAnswer(t *testing.T) {
+	task := loadBaselineTask(t, "nav-08")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"The only imports are fmt (main.go) and testing (main_test.go), both standard library, so there are no third-party imports.\ncount: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("correct nav-08 answer should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("nav-08 oracle must pass when the answer names fmt+testing and states count: 0: %+v", outcome)
+	}
+}
+
+// TestNav08CountOracleRejectsAnswerWithoutFmt proves the inspection-proof bites:
+// an answer that states the right count (0) but never names the stdlib imports it
+// examined ("No third-party imports. count: 0") fails, so an agent that didn't
+// actually look at the imports can't pass by guessing the count alone.
+func TestNav08CountOracleRejectsAnswerWithoutFmt(t *testing.T) {
+	task := loadBaselineTask(t, "nav-08")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"No third-party imports.\ncount: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-08 no-fmt", outcome)
+}
+
+// TestNav08CountOracleRejectsFmtOnlyNoTesting proves the tighter inspection-proof:
+// an answer that names fmt (from main.go) but misses testing (from main_test.go)
+// fails, so an agent that only read main.go — or a guesser that names the one
+// most-common stdlib import blind — can't pass. The agent must enumerate every
+// file's imports, which is what the prompt asks for.
+func TestNav08CountOracleRejectsFmtOnlyNoTesting(t *testing.T) {
+	task := loadBaselineTask(t, "nav-08")
+	outcome := runTurnStub(t, task, `printf '%s\n' '{"type":"final","text":"The only import is fmt, which is standard library. count: 0"}'
+printf '%s\n' '{"type":"run_end","exitCode":0}'
+`)
+	assertVerifyFailed(t, "nav-08 fmt-only-no-testing", outcome)
 }
