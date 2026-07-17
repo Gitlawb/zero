@@ -431,39 +431,6 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	return cfg, nil
 }
 
-// SetProviderDescription sets a provider's description VERBATIM — including to
-// empty. The generic UpsertProvider merge treats empty fields as "leave
-// unchanged", so clearing a description needs this dedicated setter.
-func SetProviderDescription(path string, name string, description string) (FileConfig, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return FileConfig{}, fmt.Errorf("config path is required")
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return FileConfig{}, fmt.Errorf("provider name is required")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-	cfg := FileConfig{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), name) {
-			cfg.Providers[index].Description = strings.TrimSpace(description)
-			if err := writeConfigFile(path, cfg); err != nil {
-				return FileConfig{}, err
-			}
-			return cfg, nil
-		}
-	}
-	return FileConfig{}, fmt.Errorf("provider %q not found", name)
-}
-
 // migrateStoredProviderKey moves a credential-store entry to a new provider
 // name: write-new-then-delete-old, so an interruption can leave a duplicate but
 // never a missing key. A missing source entry is a no-op (the marker may be

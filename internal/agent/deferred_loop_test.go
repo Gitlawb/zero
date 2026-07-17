@@ -150,7 +150,7 @@ func assertNoDeferredDiscoveryMessage(t *testing.T, request zeroruntime.Completi
 func TestPartitionToolsInactiveIsByteIdenticalAndDropsToolSearch(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(fakeDeferredTool{name: "mcp__srv__a", desc: "tool a"})
 	registry.Register(fakeToolSearchTool{})
 
@@ -305,8 +305,8 @@ func TestPartitionToolsActiveExcludesDisabledDeferredFromDiscoveryAndExposed(t *
 func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root)) // non-deferred builtin
-	registry.Register(fakeToolSearchTool{})        // non-deferred, must stay exposed
+	registry.Register(tools.NewScopedReadFileTool(root, nil)) // non-deferred builtin
+	registry.Register(fakeToolSearchTool{})                   // non-deferred, must stay exposed
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
 

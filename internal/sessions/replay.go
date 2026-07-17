@@ -244,10 +244,6 @@ func RehydrateEvents(events []Event) ([]Event, error) {
 	return cloneEvents(events), nil
 }
 
-func ReplayEvents(events []Event) ([]Event, error) {
-	return RehydrateEvents(events)
-}
-
 func decodeCompactionPayload(event Event) (CompactionPayload, error) {
 	var payload CompactionPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {

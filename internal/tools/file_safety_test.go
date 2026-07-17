@@ -14,7 +14,7 @@ import (
 func safetyRegistry(t *testing.T, dir string) *Registry {
 	t.Helper()
 	registry := NewRegistry()
-	for _, tool := range []Tool{NewReadFileTool(dir), NewEditFileTool(dir), NewWriteFileTool(dir)} {
+	for _, tool := range []Tool{NewScopedReadFileTool(dir, nil), NewScopedEditFileTool(dir, nil), NewScopedWriteFileTool(dir, nil)} {
 		registry.Register(tool)
 	}
 	return registry

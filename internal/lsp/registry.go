@@ -1,7 +1,6 @@
 package lsp
 
 import (
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -174,16 +173,6 @@ func ServerFor(path string) ([]string, bool) {
 func LanguageID(path string) (string, bool) {
 	id, ok := languageIDs[extKey(path)]
 	return id, ok
-}
-
-// Available reports whether a configured server for the path exists on PATH.
-func Available(path string) bool {
-	cmd, ok := ServerFor(path)
-	if !ok {
-		return false
-	}
-	_, err := exec.LookPath(cmd[0])
-	return err == nil
 }
 
 func extKey(path string) string {

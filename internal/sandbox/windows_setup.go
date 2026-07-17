@@ -45,17 +45,6 @@ type WindowsSandboxSetupMarker struct {
 	NetworkFilters   int    `json:"networkFilters"`
 }
 
-// WindowsSandboxSetupPathForRunner derives the setup helper's path from a
-// standalone command-runner path (the sibling .exe in the release layout).
-// Retained for that layout; self-dispatch callers use
-// ResolveWindowsSandboxSetupHelper instead.
-func WindowsSandboxSetupPathForRunner(runnerPath string) string {
-	if strings.TrimSpace(runnerPath) == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(runnerPath), WindowsSandboxSetupName)
-}
-
 func WindowsSandboxSetupMarkerPath(sandboxHome string) string {
 	return filepath.Join(sandboxHome, "windows-setup.json")
 }

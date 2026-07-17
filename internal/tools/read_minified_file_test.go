@@ -14,7 +14,7 @@ func TestReadMinifiedFileStripsCommentsAndLineNumbers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res := NewReadMinifiedFileTool(dir).Run(context.Background(), map[string]any{"path": "f.go"})
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{"path": "f.go"})
 	if res.Status != StatusOK {
 		t.Fatalf("status %v: %s", res.Status, res.Output)
 	}
@@ -39,7 +39,7 @@ func TestReadMinifiedFileStripsCommentsAndLineNumbers(t *testing.T) {
 
 func TestReadMinifiedFileRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
-	res := NewReadMinifiedFileTool(dir).Run(context.Background(), map[string]any{"path": "../escape.go"})
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{"path": "../escape.go"})
 	if res.Status == StatusOK {
 		t.Fatalf("expected traversal rejection, got OK:\n%s", res.Output)
 	}
@@ -51,7 +51,7 @@ func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := NewReadMinifiedFileTool(dir).Run(context.Background(), map[string]any{"path": "large.txt"})
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{"path": "large.txt"})
 	if res.Status != StatusOK || !res.Truncated {
 		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", res.Status, res.Truncated)
 	}

@@ -1074,15 +1074,6 @@ func joinsPreviousMarkdownWord(text string) bool {
 	return text != "" && strings.Trim(text, ".,!?;:%)]}") == ""
 }
 
-func renderMarkdownInline(text string) string {
-	segments := parseMarkdownInline(text)
-	var builder strings.Builder
-	for _, segment := range segments {
-		builder.WriteString(renderMarkdownInlineSegment(segment))
-	}
-	return builder.String()
-}
-
 func renderMarkdownInlineSegment(segment markdownInlineSegment) string {
 	if segment.text == "" {
 		return ""

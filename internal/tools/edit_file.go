@@ -14,10 +14,6 @@ type editFileTool struct {
 	scope         PathScope
 }
 
-func NewEditFileTool(workspaceRoot string) Tool {
-	return NewScopedEditFileTool(workspaceRoot, nil)
-}
-
 func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 	return editFileTool{
 		baseTool: baseTool{

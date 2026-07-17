@@ -274,20 +274,6 @@ func (m model) removeLastAttachment() (model, bool) {
 	return m, false
 }
 
-// renderImageChips builds a compact "[Image #1] [Image #2]" row for the pending
-// image attachments, or "" when there are none, so the long file name never
-// clutters the input. Kept plain so the renderer can wrap/style it consistently.
-func renderImageChips(labels []string) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	chips := make([]string, 0, len(labels))
-	for i := range labels {
-		chips = append(chips, fmt.Sprintf("[Image #%d]", i+1))
-	}
-	return strings.Join(chips, " ")
-}
-
 // renderAttachmentChips builds the pending-attachment row from both staged images
 // and staged documents, e.g. "[Image #1] [Image #2] [Doc #1]". Returns "" when
 // nothing is staged. Numbered (not named) so a long screenshot path never shows

@@ -188,7 +188,7 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 		},
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	m := newModel(context.Background(), Options{
 		Cwd:          root,
 		ProviderName: "openai",
@@ -251,7 +251,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		},
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessages := []tea.Msg{}
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newModel(context.Background(), Options{
@@ -366,7 +366,7 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 		textScript("write allowed"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 
@@ -414,7 +414,7 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 		textScript("second write"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, grantStore, runtimeMessageCh)
 
@@ -852,7 +852,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 		textScript("never reached"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")
@@ -929,7 +929,7 @@ func TestCtrlCCancelsAndFlushesCheckpointSessionEvents(t *testing.T) {
 		textScript("never reached"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")

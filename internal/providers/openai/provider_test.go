@@ -945,9 +945,9 @@ func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
 		t.Fatalf("done FinishReason = %q, want %q", doneReason, zeroruntime.FinishReasonLength)
 	}
 
-	// And it round-trips through the runtime collector as Truncated.
+	// And it round-trips through the runtime collector's FinishReason.
 	collected := zeroruntime.CollectStream(context.Background(), replay(events))
-	if !collected.Truncated() || collected.FinishReason != zeroruntime.FinishReasonLength {
+	if collected.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("collected = %+v, want truncated length", collected)
 	}
 }

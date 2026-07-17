@@ -305,3 +305,4 @@ func OptionalEventKeys() []string {
 		"task_state",
 	}
 }
+

@@ -92,13 +92,6 @@ func AgentsDir(env map[string]string) string {
 	return dir
 }
 
-// DiscoveryRoots returns ordered skill roots for runtime discovery: primary
-// DefaultDir, optional AgentsDir when present, then pluginRoots. Empty strings
-// are omitted. Earlier entries win on name clashes.
-func DiscoveryRoots(env map[string]string, pluginRoots []string) []string {
-	return collectRoots(DefaultDir(env), AgentsDir(env), pluginRoots)
-}
-
 // collectRoots assembles ordered non-empty skill roots. primary is typically
 // DefaultDir (or an injected test dir); agents is typically AgentsDir's result.
 func collectRoots(primary string, agents string, pluginRoots []string) []string {
@@ -220,14 +213,6 @@ func ListFromRoots(dirs []string) ([]Skill, []DuplicateName, error) {
 	return listed, dups, nil
 }
 
-// Duplicates returns the duplicate-name collisions Load resolved by the
-// first-directory-wins rule, so a caller can warn the user that a shadowed skill
-// was dropped. A missing directory yields no duplicates and no error.
-func Duplicates(dir string) ([]DuplicateName, error) {
-	_, dups, err := load(dir)
-	return dups, err
-}
-
 // confineSkillPath resolves manifestPath through symlinks and returns the real
 // path only if it stays within rootReal (the already-symlink-resolved skills
 // root). This stops a symlinked SKILL.md — or a symlinked skill directory — from
@@ -341,36 +326,6 @@ func load(dir string) ([]Skill, []DuplicateName, error) {
 		return skills[left].Name < skills[right].Name
 	})
 	return skills, duplicates, nil
-}
-
-// List loads the skills directory and returns each skill without its (possibly
-// large) Content body — handy for `zero skills` listings.
-func List(dir string) ([]Skill, error) {
-	loaded, err := Load(dir)
-	if err != nil {
-		return nil, err
-	}
-	listed := make([]Skill, 0, len(loaded))
-	for _, skill := range loaded {
-		skill.Content = ""
-		listed = append(listed, skill)
-	}
-	return listed, nil
-}
-
-// Get loads the named skill from dir, returning false if it is not found.
-func Get(dir string, name string) (Skill, bool) {
-	loaded, err := Load(dir)
-	if err != nil {
-		return Skill{}, false
-	}
-	target := strings.TrimSpace(name)
-	for _, skill := range loaded {
-		if skill.Name == target {
-			return skill, true
-		}
-	}
-	return Skill{}, false
 }
 
 // parseSkill splits optional `---`-delimited frontmatter from the markdown body.

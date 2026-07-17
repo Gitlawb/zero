@@ -352,7 +352,7 @@ func TestClearCommandResetsTranscript(t *testing.T) {
 
 func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{Registry: registry})
 	m.input.SetValue("/tools")
 
@@ -463,7 +463,7 @@ func TestPlanCommandHandlesMissingPlanTool(t *testing.T) {
 
 func TestContextCommandShowsSessionState(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{
 		Cwd:            `D:\codings\Opensource\Zero`,
 		ProviderName:   "openai",

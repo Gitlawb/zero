@@ -90,9 +90,6 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	return a
 }
 
-// Serve runs the connection read loop until the stream closes or ctx is done.
-func (a *Agent) Serve(ctx context.Context) error { return a.conn.Serve(ctx) }
-
 // ---- initialize ----
 
 func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any, error) {

@@ -248,22 +248,6 @@ func (store *Store) readBlob(sessionID, hash string) ([]byte, error) {
 	return content, nil
 }
 
-// pruneOrphanBlobs removes blobs not referenced by any checkpoint event (e.g. after
-// a rewind discards later checkpoints). Best-effort; returns count removed. It
-// acquires the session lock so it cannot delete a blob that a concurrent
-// CaptureToolCheckpoint has just written but not yet referenced by its event.
-func (store *Store) pruneOrphanBlobs(sessionID string) (int, error) {
-	if !ValidSessionID(sessionID) {
-		return 0, fmt.Errorf("invalid zero session id %q", sessionID)
-	}
-	unlock, err := store.lockSession(sessionID)
-	if err != nil {
-		return 0, err
-	}
-	defer unlock()
-	return store.pruneOrphanBlobsLocked(sessionID)
-}
-
 // pruneOrphanBlobsLocked is the body of pruneOrphanBlobs WITHOUT acquiring the
 // session lock. The caller MUST already hold store.lockSession(sessionID).
 // Holding the lock around referencedBlobs + ReadDir + Remove is what closes the

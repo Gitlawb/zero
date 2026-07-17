@@ -197,14 +197,6 @@ func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return modelsDevCached
 }
 
-// resetModelsDevCacheForTest clears the process-level cache memoization and
-// disables the overlay.
-func resetModelsDevCacheForTest() {
-	modelsDevOnce = sync.Once{}
-	modelsDevCached = nil
-	modelsDevEnabled.Store(false)
-}
-
 // RefreshModelsDevCache fetches models.dev/api.json into the on-disk cache
 // when the cache is missing or older than modelsDevRefreshAfter. It is safe to
 // call fire-and-forget from startup (use a goroutine); it never affects the

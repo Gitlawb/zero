@@ -863,9 +863,6 @@ func TestRunReportsTruncationFinishReason(t *testing.T) {
 	if result.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("FinishReason = %q, want %q", result.FinishReason, zeroruntime.FinishReasonLength)
 	}
-	if !result.Truncated() {
-		t.Fatal("Truncated() = false, want true for a length-capped response")
-	}
 	if result.TruncationNotice() == "" {
 		t.Fatal("TruncationNotice() empty for a truncated response")
 	}
@@ -883,7 +880,7 @@ func TestRunNormalCompletionIsNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Truncated() || result.TruncationNotice() != "" {
+	if result.TruncationNotice() != "" {
 		t.Fatalf("normal completion reported as truncated: reason=%q", result.FinishReason)
 	}
 }
@@ -960,7 +957,7 @@ func TestRunEmitsUsageEvents(t *testing.T) {
 func TestRunAdvertisesRuntimeToolDefinitions(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventText, Content: "done"},
@@ -1167,9 +1164,9 @@ func TestRunRequestsPermissionBeforeWebSearchExecution(t *testing.T) {
 func TestRunFiltersAdvertisedTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
-	registry.Register(tools.NewGrepTool(root))
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+	registry.Register(tools.NewScopedGrepTool(root, nil))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventText, Content: "done"},
@@ -1197,7 +1194,7 @@ func TestRunFiltersAdvertisedTools(t *testing.T) {
 func TestRunRejectsFilteredToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1234,7 +1231,7 @@ func TestRunRejectsFilteredToolCalls(t *testing.T) {
 func TestRunRejectsToolCallsOutsideEnabledList(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1272,7 +1269,7 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\n")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1356,7 +1353,7 @@ func TestRunPreservesRequestPrefixAcrossTurns(t *testing.T) {
 func TestRunSanitizesMalformedToolCallArgumentsBeforeRetry(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1424,7 +1421,7 @@ func TestRunRecoversFirstObjectFromConcatenatedToolArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -1471,8 +1468,8 @@ func TestRunDefersSelfCorrectFeedbackUntilAfterToolBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -1547,7 +1544,7 @@ func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
 	// after a later call in the same turn supersedes it.
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -1604,7 +1601,7 @@ func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
 func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write denied")
 	var permissionEvents []PermissionEvent
 
@@ -1647,7 +1644,7 @@ func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var requests []PermissionRequest
 	var permissionEvents []PermissionEvent
@@ -1703,7 +1700,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -1752,7 +1749,7 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write denied")
 	var requests []PermissionRequest
 	var permissionEvents []PermissionEvent
@@ -1800,7 +1797,7 @@ func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write should not continue")
 	var permissionEvents []PermissionEvent
 
@@ -1896,7 +1893,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
 	policy := sandbox.DefaultPolicy()
@@ -1968,7 +1965,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2049,7 +2046,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2251,7 +2248,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	policy := sandbox.DefaultPolicy()
 	policy.Network = sandbox.NetworkAllow
 
@@ -2358,7 +2355,7 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 		t.Fatalf("seed command prefix: %v", err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2419,7 +2416,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		}
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2486,7 +2483,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2529,7 +2526,7 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2598,7 +2595,7 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	// prior code denied it because persistPermissionGrant errors when Sandbox==nil.
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
 
@@ -2662,7 +2659,7 @@ func TestRunCancellationPreservesContextCanceledIdentity(t *testing.T) {
 func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -2714,7 +2711,7 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("write done")
 	var permissionEvents []PermissionEvent
 
@@ -2893,7 +2890,7 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWritePathThenAnswer(outside, "sandbox handled")
 	var permissionEvents []PermissionEvent
 
@@ -2942,7 +2939,7 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
 			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
@@ -2972,7 +2969,7 @@ func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -3231,7 +3228,7 @@ func TestBuildSystemPromptAllowsSpecModeOverride(t *testing.T) {
 func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 	specmode.RegisterDraftTools(registry, root, nil)
@@ -3268,7 +3265,7 @@ func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 func TestSpecDraftDeniesHiddenToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("done")
 
 	result, err := Run(context.Background(), "draft", provider, Options{
@@ -3301,7 +3298,7 @@ func TestSpecDraftDeniesHiddenToolCalls(t *testing.T) {
 func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -3442,7 +3439,7 @@ func TestRunSurfacesDroppedToolCallAlongsideValidCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{

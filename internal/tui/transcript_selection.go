@@ -130,15 +130,6 @@ type transcriptBodyLayout struct {
 	spans      []transcriptBodyItemSpan
 }
 
-func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
-	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay, false))
-}
-
-func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
-	layout := m.transcriptBodyLayout(width, emptyOverlay)
-	return layout.String(), layout.selectable
-}
-
 func (l transcriptBodyLayout) String() string {
 	return strings.Join(l.lines, "\n")
 }
@@ -149,12 +140,6 @@ func (l transcriptBodyLayout) totalLines() int {
 		return last.startY + last.height
 	}
 	return len(l.lines)
-}
-
-func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []string {
-	start := clampInt(window.start, 0, len(l.lines))
-	end := clampInt(window.end, start, len(l.lines))
-	return append([]string(nil), l.lines[start:end]...)
 }
 
 // padTranscriptBodyLines left-indents transcript body rows when a non-zero
@@ -793,10 +778,6 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	return rendered, selectable
 }
 
-func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
-}
-
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
 	rendered := renderFn(row, width, rc)
 	if rendered == "" {
@@ -953,13 +934,6 @@ func (m model) renderSelectableSpecialistRowFn(rowIndex int, row transcriptRow, 
 		selectable[i] = sl
 	}
 	return rendered, selectable
-}
-
-// renderSelectableSpecialistRow renders a specialist card and marks every line
-// as a clickable specialistCard selectable line carrying the childSessionID.
-// A left-click or Enter on any card line drills into that specialist's subchat.
-func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -1330,21 +1304,6 @@ func (m model) stopEdgeScroll() model {
 	m.edgeScrollDelta = 0
 	m.edgeScrollSeq++
 	return m
-}
-
-func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
-}
-
-func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
-func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForBody(body, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
 }
 
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {

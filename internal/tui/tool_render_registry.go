@@ -164,10 +164,6 @@ func (registry *toolBodyRegistry) rendererFor(name string) toolBodyRenderer {
 	return unknownToolBodyRenderer{}
 }
 
-func toolBodyRendererFor(name string) toolBodyRenderer {
-	return defaultToolBodyRegistry.rendererFor(name)
-}
-
 func normalizeToolCardDetail(detail string) string {
 	detail = strings.TrimRight(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
 	// Terminal tab stops are unknowable from here and break the width math

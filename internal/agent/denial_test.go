@@ -11,7 +11,7 @@ import (
 func TestExecuteToolCallCategorizesFilteredDenial(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	result, _ := executeToolCall(context.Background(), registry, ToolCall{ID: "c1", Name: "read_file", Arguments: `{"path":"x"}`}, PermissionModeAuto, Options{
 		DisabledTools: []string{"read_file"},

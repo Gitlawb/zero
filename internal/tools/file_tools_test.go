@@ -15,7 +15,7 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "notes.txt",
 		"start_line": 2,
 		"max_lines":  2,
@@ -42,7 +42,7 @@ func TestReadFileToolMarksTruncation(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "a\nb\nc\nd\ne")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":      "notes.txt",
 		"max_lines": 2,
 	})
@@ -61,7 +61,7 @@ func TestReadFileToolAppliesByteBudget(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "large.txt"), strings.Repeat("0123456789abcdef\n", 9000))
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "large.txt",
 	})
 
@@ -89,7 +89,7 @@ func TestReadFileToolTracksWholeFileHashWhenReadingSmallRange(t *testing.T) {
 	writeTestFile(t, path, content)
 
 	tracker := NewFileTracker()
-	tool := NewReadFileTool(root).(optionsAwareTool)
+	tool := NewScopedReadFileTool(root, nil).(optionsAwareTool)
 	result := tool.RunWithOptions(context.Background(), map[string]any{
 		"path":       "large.txt",
 		"start_line": 1000,
@@ -120,7 +120,7 @@ func TestReadFileToolRejectsOutsideWorkspace(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "secret.txt")
 	writeTestFile(t, outside, "secret")
 
-	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": outside,
 	})
 
@@ -138,7 +138,7 @@ func TestListDirectoryToolListsRecursivelyAndIgnoresJunk(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "node_modules", "leftpad", "index.js"), "module.exports = 1")
 	writeTestFile(t, filepath.Join(root, "README.md"), "# Zero")
 
-	result := NewListDirectoryTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedListDirectoryTool(root, nil).Run(context.Background(), map[string]any{
 		"path":      ".",
 		"recursive": true,
 		"max_depth": 2,
@@ -164,7 +164,7 @@ func TestGlobToolFindsMatchesWithLimit(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "nested", "b.go"), "package nested")
 	writeTestFile(t, filepath.Join(root, "nested", "c.txt"), "text")
 
-	result := NewGlobTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "**/*.go",
 		"limit":   1,
 	})
@@ -190,7 +190,7 @@ func TestGlobToolCanIncludeDirectoryMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := NewGlobTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":      "src",
 		"include_dirs": true,
 	})
@@ -208,7 +208,7 @@ func TestGrepToolSearchesContent(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "cmd", "main.go"), "package main\nfunc main() {}\n")
 	writeTestFile(t, filepath.Join(root, "README.md"), "main docs\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "func main",
 		"path":       ".",
 		"glob":       "**/*.go",
@@ -230,7 +230,7 @@ func TestGrepToolMakesHeadLimitTruncationVisible(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle 1\nneedle 2\nneedle 3\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "needle",
 		"path":       ".",
 		"head_limit": 2,
@@ -260,7 +260,7 @@ func TestGrepToolStopsAfterHeadLimitInContentMode(t *testing.T) {
 	}
 	writeTestFile(t, filepath.Join(root, "notes.txt"), builder.String())
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":    "needle",
 		"path":       ".",
 		"head_limit": 3,
@@ -320,7 +320,7 @@ func TestGrepGlobMatchesRelativeToSearchDir(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "subdir", "a.go"), "package sub\nfunc target() {}\n")
 
-	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "func target",
 		"path":    "subdir",
 		"glob":    "*.go",
@@ -339,7 +339,7 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "a.txt"), "needle\nneedle\n")
 	writeTestFile(t, filepath.Join(root, "b.txt"), "needle\n")
 
-	files := NewGrepTool(root).Run(context.Background(), map[string]any{
+	files := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -350,7 +350,7 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 		t.Fatalf("expected both files, got %q", files.Output)
 	}
 
-	count := NewGrepTool(root).Run(context.Background(), map[string]any{
+	count := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "count",
 	})
@@ -366,7 +366,7 @@ func TestGrepCountModeCountsMultipleHitsPerLine(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle needle\nneedle\n")
 
-	count := NewGrepTool(root).Run(context.Background(), map[string]any{
+	count := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "count",
 	})
@@ -393,7 +393,7 @@ func TestGrepDoesNotFollowSymlinkOutsideWorkspace(t *testing.T) {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "content",
 	})
@@ -421,7 +421,7 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 
-	res := NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(linkRoot, nil).Run(context.Background(), map[string]any{
 		"pattern":     "func main",
 		"output_mode": "content",
 	})
@@ -436,7 +436,7 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 	}
 
 	// files_with_matches mode must likewise be clean-relative.
-	res = NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+	res = NewScopedGrepTool(linkRoot, nil).Run(context.Background(), map[string]any{
 		"pattern":     "func main",
 		"output_mode": "files_with_matches",
 	})
@@ -618,7 +618,7 @@ func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
 	if err := os.Symlink(filepath.Join(workspace, "subdir"), link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(workspace, nil).Run(context.Background(), map[string]any{
 		"path":    filepath.Join(link, "x.txt"),
 		"content": "nope",
 	})
@@ -667,7 +667,7 @@ func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
 func TestUnscopedToolsStillRejectOutsideWrites(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "escape.txt")
-	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(workspace, nil).Run(context.Background(), map[string]any{
 		"path":    outside,
 		"content": "nope",
 	})
@@ -705,7 +705,7 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 	mustWrite("vendor/pkg/lib.go", "needle here")
 	mustWrite(".worktrees/branch/main.go", "needle here")
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -779,7 +779,7 @@ func TestGrepSkipsBinaryLikeFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "image.png"), "needle hidden")
 	writeTestFile(t, filepath.Join(root, "archive.zip"), "needle hidden")
 
-	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "files_with_matches",
 	})
@@ -793,7 +793,7 @@ func TestGrepSkipsBinaryLikeFiles(t *testing.T) {
 		t.Fatalf("expected only keep.txt, got:\n%s", res.Output)
 	}
 
-	direct := NewGrepTool(root).Run(context.Background(), map[string]any{
+	direct := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "needle",
 		"path":    "image.png",
 	})
@@ -813,7 +813,7 @@ func TestGlobSkipsWorkspaceExcludedDirectoriesAndBinaryFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, ".worktrees", "branch", "main.go"), "package main")
 	writeTestFile(t, filepath.Join(root, "image.png"), "binary")
 
-	res := NewGlobTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{
 		"pattern": "**/*",
 		"limit":   20,
 	})

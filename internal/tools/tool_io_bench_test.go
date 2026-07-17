@@ -16,7 +16,7 @@ func BenchmarkReadFileLargeRangeSmall(b *testing.B) {
 		return fmt.Sprintf("line-%06d abcdefghijklmnopqrstuvwxyz 0123456789\n", i)
 	})
 
-	tool := NewReadFileTool(root)
+	tool := NewScopedReadFileTool(root, nil)
 	args := map[string]any{
 		"path":       "large.txt",
 		"start_line": lines / 2,
@@ -44,7 +44,7 @@ func BenchmarkGrepLargeTreeHeadLimit(b *testing.B) {
 		})
 	}
 
-	tool := NewGrepTool(root)
+	tool := NewScopedGrepTool(root, nil)
 	args := map[string]any{
 		"pattern":    "needle",
 		"path":       ".",

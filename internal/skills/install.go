@@ -232,23 +232,6 @@ func Remove(dir string, name string) error {
 	return nil
 }
 
-// Info returns the named skill plus its recorded source and hash, or ok=false if
-// it is not discoverable in dir.
-func Info(dir string, name string) (SkillInfo, bool) {
-	skill, ok := Get(dir, name)
-	if !ok {
-		return SkillInfo{}, false
-	}
-	info := SkillInfo{Skill: skill}
-	if lock, err := ReadLock(dir); err == nil {
-		if entry, found := lock[skill.Name]; found {
-			info.Source = entry.Source
-			info.Hash = entry.Hash
-		}
-	}
-	return info, true
-}
-
 // InfoFromRoots resolves the named skill across discovery roots (earlier roots
 // win). Lock source/hash are attached only when the winning skill lives under
 // primaryDir and that dir's lockfile has an entry — agents-only skills return

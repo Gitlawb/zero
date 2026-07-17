@@ -434,32 +434,6 @@ func resolveCommand(name string) (commandDefinition, bool) {
 	return commandDefinition{}, false
 }
 
-func listCommandNames() []string {
-	names := make([]string, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		names = append(names, command.name)
-		names = append(names, command.aliases...)
-	}
-	return names
-}
-
-func formatCommandHelpLines() []string {
-	return formatGroupedCommandHelpLines()
-}
-
-func formatGroupedCommandHelpLines() []string {
-	lines := make([]string, 0, len(commandDefinitions)+len(commandGroupOrder()))
-	for _, group := range commandGroupOrder() {
-		groupLines := commandHelpLinesForGroup(group)
-		if len(groupLines) == 0 {
-			continue
-		}
-		lines = append(lines, string(group)+":")
-		lines = append(lines, groupLines...)
-	}
-	return lines
-}
-
 func formatGroupedCommandHelp() string {
 	lines := []string{"Commands", "status: info"}
 	for _, group := range commandGroupOrder() {

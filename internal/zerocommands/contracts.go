@@ -134,14 +134,6 @@ func UsageError(message string) CommandError {
 	return CommandError{Kind: ErrorKindUsage, Message: strings.TrimSpace(message)}
 }
 
-func RuntimeError(message string) CommandError {
-	return CommandError{Kind: ErrorKindRuntime, Message: strings.TrimSpace(message)}
-}
-
-func ProviderError(message string) CommandError {
-	return CommandError{Kind: ErrorKindProvider, Message: strings.TrimSpace(message), Recoverable: true}
-}
-
 func ConfigSnapshotFromResolved(resolved config.ResolvedConfig) ConfigSnapshot {
 	snapshot := ConfigSnapshot{
 		Runtime:        RuntimeGo,

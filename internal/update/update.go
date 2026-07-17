@@ -86,29 +86,6 @@ func Endpoint(repository string) string {
 	return fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repository)
 }
 
-// ResolveEndpoint resolves a URL or owner/repo slug into a release API endpoint.
-func ResolveEndpoint(endpointOrRepository string, repository string) (string, error) {
-	return resolveEndpoint(endpointOrRepository, repository)
-}
-
-// NormalizeVersionTag returns a comparable x.y.z version from a release tag.
-func NormalizeVersionTag(version string) (string, error) {
-	return normalizeVersionTag(version)
-}
-
-// CompareSemver compares two semver-ish release tags.
-func CompareSemver(left string, right string) (int, error) {
-	leftParts, err := parseSemver(left)
-	if err != nil {
-		return 0, err
-	}
-	rightParts, err := parseSemver(right)
-	if err != nil {
-		return 0, err
-	}
-	return compareSemverParts(leftParts, rightParts), nil
-}
-
 // ResolveTarget maps a release target name like windows-x64 to Go build
 // coordinates and release asset naming fields.
 func ResolveTarget(target string) (Target, error) {
@@ -400,14 +377,6 @@ func normalizeVersionTag(version string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%d.%d.%d", major, minor, patch), nil
-}
-
-func parseSemver(version string) (semverParts, error) {
-	normalized, err := NormalizeVersionTag(version)
-	if err != nil {
-		return semverParts{}, err
-	}
-	return parseSemverNormalized(normalized)
 }
 
 func parseSemverNormalized(version string) (semverParts, error) {

@@ -16,7 +16,7 @@ func TestBuildCountsProjectGuidelinesAndFreeBudget(t *testing.T) {
 	writeTestFile(t, root, "AGENTS.md", strings.Repeat("project rules\n", 200))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 
@@ -80,7 +80,7 @@ func TestBuildHasStableJSONContractAndCategoryMath(t *testing.T) {
 	writeTestFile(t, root, "ZERO.md", strings.Repeat("zero rules\n", 16))
 
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 

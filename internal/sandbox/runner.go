@@ -143,28 +143,6 @@ func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Re
 	}, nil
 }
 
-// writeRoots returns the full ordered write-root list for command plans:
-// the workspace root plus any granted extra roots. The single-root fallback
-// only applies to engines built without a workspace root (NewEngine always
-// builds a scope otherwise); it is kept as defense in depth.
-func (engine *Engine) writeRoots(workspaceRoot string) []string {
-	var roots []string
-	if engine.scope != nil {
-		roots = engine.scope.Roots()
-	} else {
-		roots = []string{workspaceRoot}
-	}
-	// Reflect the policy's AllowWrite roots in the OS backend write binds so a
-	// sandboxed shell command may write where the policy grants writes. DenyWrite
-	// is enforced at the policy gate, and on sandbox-exec additionally as an
-	// explicit deny rule (see sandboxExecProfile).
-	policy := engine.effectivePolicy(engine.policy)
-	if extra := resolveWriteRootPaths(policy.AllowWrite); len(extra) > 0 {
-		roots = dedupeStrings(append(roots, extra...))
-	}
-	return roots
-}
-
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if engine == nil {
 		return directCommandPlan(spec, Backend{Name: BackendUnavailable, Message: "sandbox disabled"}, Policy{}, ""), nil
@@ -453,32 +431,6 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	return plan
 }
 
-func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
-	fs := FileSystemPolicy{
-		Kind:                 FileSystemUnrestricted,
-		ReadRoots:            []string{string(filepath.Separator)},
-		IncludePlatformRoots: true,
-		AllowTemp:            true,
-	}
-	if policy.EnforceWorkspace {
-		fs.Kind = FileSystemRestricted
-		fs.WriteRoots = make([]WritableRoot, 0, len(writeRoots))
-		for _, root := range writeRoots {
-			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
-		}
-	}
-	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
-	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
-	return PermissionProfile{
-		FileSystem: fs,
-		Network:    NetworkPolicy{Mode: policy.Network},
-	}
-}
-
-func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend, workspaceRoot)
-}
-
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
 	return sandboxEnvironmentForCommandWithSensitiveEnv(specEnv, policy, backend, workspaceRoot, nil)
 }
@@ -662,10 +614,6 @@ func sandboxMachLookupRule() string {
 		filters = append(filters, `(global-name "`+sandboxProfileString(service)+`")`)
 	}
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
-}
-
-func sandboxExecProfile(writeRoots []string, policy Policy, denialTag string) string {
-	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, denialTag)
 }
 
 func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, denialTag string) string {

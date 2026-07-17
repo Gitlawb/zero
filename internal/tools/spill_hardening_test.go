@@ -84,7 +84,7 @@ func TestReadFileCanReadSpillFile(t *testing.T) {
 		t.Fatal("spill must succeed")
 	}
 	workspace := t.TempDir()
-	result := NewReadFileTool(workspace).Run(context.Background(), map[string]any{"path": spillPath})
+	result := NewScopedReadFileTool(workspace, nil).Run(context.Background(), map[string]any{"path": spillPath})
 	if result.Status != StatusOK || !strings.Contains(result.Output, "line two") {
 		t.Fatalf("read_file must be able to follow the truncation notice: %s %q", result.Status, result.Output)
 	}

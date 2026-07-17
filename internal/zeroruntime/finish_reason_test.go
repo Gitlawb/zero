@@ -17,9 +17,6 @@ func TestCollectStreamRecordsFinishReason(t *testing.T) {
 	if got.FinishReason != FinishReasonLength {
 		t.Fatalf("FinishReason = %q, want %q", got.FinishReason, FinishReasonLength)
 	}
-	if !got.Truncated() {
-		t.Fatal("Truncated() = false, want true for a length-capped response")
-	}
 }
 
 // A finish reason may also arrive on an earlier event (e.g. a usage event) and
@@ -33,8 +30,5 @@ func TestCollectStreamFinishReasonEmptyOnNormalCompletion(t *testing.T) {
 	got := CollectStream(context.Background(), events)
 	if got.FinishReason != "" {
 		t.Fatalf("FinishReason = %q, want empty for a normal completion", got.FinishReason)
-	}
-	if got.Truncated() {
-		t.Fatal("Truncated() = true, want false for a normal completion")
 	}
 }
