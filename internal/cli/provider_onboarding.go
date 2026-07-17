@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,14 +56,30 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
+		if strings.Contains(err.Error(), "provider ") && strings.Contains(err.Error(), " not found") {
+			err = fmt.Errorf("%w; only providers saved in user config are selectable (use zero providers setup or zero providers add first)", err)
+		}
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	effectiveProvider := strings.TrimSpace(os.Getenv(config.ActiveProviderEnv))
+	overridden := effectiveProvider != "" && effectiveProvider != cfg.ActiveProvider
 
 	if options.json {
-		if err := writePrettyJSON(stdout, map[string]any{
+		payload := map[string]any{
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
-		}); err != nil {
+		}
+		if overridden {
+			payload["effectiveProvider"] = effectiveProvider
+			payload["overriddenBy"] = config.ActiveProviderEnv
+		}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if overridden {
+		if _, err := fmt.Fprintf(stdout, "Saved active provider: %s\nEffective provider: %s\n%s overrides the saved selection.\nnext: %s\n", cfg.ActiveProvider, effectiveProvider, config.ActiveProviderEnv, providerCheckCommand(effectiveProvider, false)); err != nil {
 			return exitCrash
 		}
 		return exitSuccess

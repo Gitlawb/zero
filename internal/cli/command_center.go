@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +26,12 @@ type configSummary = zerocommands.ConfigSnapshot
 type providerSummary = zerocommands.ProviderSnapshot
 type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
+
+type providerCLISummary struct {
+	providerSummary
+	Selectable bool   `json:"selectable"`
+	Source     string `json:"source"`
+}
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseCommandCenterArgs(args, false, false)
@@ -125,15 +133,28 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitCode
 	}
 	summary := summarizeConfig(resolved)
-	providers := summary.Providers
+	userProviderNames, err := loadUserProviderNames(deps)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	providers := make([]providerCLISummary, 0, len(summary.Providers))
+	for _, provider := range summary.Providers {
+		_, selectable := userProviderNames[strings.ToLower(strings.TrimSpace(provider.Name))]
+		source := "runtime"
+		if selectable {
+			source = "user-config"
+		}
+		providers = append(providers, providerCLISummary{providerSummary: provider, Selectable: selectable, Source: source})
+	}
 	if command == "current" {
-		providers = []providerSummary{}
-		for _, provider := range summary.Providers {
+		current := []providerCLISummary{}
+		for _, provider := range providers {
 			if provider.Active {
-				providers = append(providers, provider)
+				current = append(current, provider)
 				break
 			}
 		}
+		providers = current
 	}
 	if options.json {
 		if command == "current" {
@@ -151,10 +172,33 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatProviderSummaries(command, providers)); err != nil {
+	if _, err := fmt.Fprintln(stdout, formatProviderCLISummaries(command, providers)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func loadUserProviderNames(deps appDeps) (map[string]struct{}, error) {
+	names := map[string]struct{}{}
+	path, err := deps.userConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return names, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for _, provider := range cfg.Providers {
+		names[strings.ToLower(strings.TrimSpace(provider.Name))] = struct{}{}
+	}
+	return names, nil
 }
 
 func runModels(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -326,6 +370,14 @@ func formatConfigSummary(summary configSummary) string {
 }
 
 func formatProviderSummaries(command string, providers []providerSummary) string {
+	cliProviders := make([]providerCLISummary, 0, len(providers))
+	for _, provider := range providers {
+		cliProviders = append(cliProviders, providerCLISummary{providerSummary: provider, Selectable: true, Source: "user-config"})
+	}
+	return formatProviderCLISummaries(command, cliProviders)
+}
+
+func formatProviderCLISummaries(command string, providers []providerCLISummary) string {
 	title := "Providers"
 	if command == "current" {
 		title = "Provider"
@@ -343,24 +395,32 @@ func formatProviderSummaries(command string, providers []providerSummary) string
 				"model: "+displayCLIValue(provider.Model, "none"),
 				"api model: "+displayCLIValue(provider.APIModel, "unknown"),
 				"base url: "+displayCLIValue(provider.BaseURL, "default"),
-				"api key: "+providerCredentialState(provider),
+				"api key: "+providerCredentialState(provider.providerSummary),
+				fmt.Sprintf("selectable: %t (source: %s)", provider.Selectable, provider.Source),
 			)
 			if provider.Message != "" {
 				lines = append(lines, "status: "+provider.Status+" - "+provider.Message)
 			}
 			continue
 		}
-		lines = append(lines, "  "+formatProviderLine(provider))
+		lines = append(lines, "  "+formatProviderCLILine(provider))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatProviderLine(provider providerSummary) string {
+	return formatProviderCLILine(providerCLISummary{providerSummary: provider, Selectable: true, Source: "user-config"})
+}
+
+func formatProviderCLILine(provider providerCLISummary) string {
 	marker := " "
 	if provider.Active {
 		marker = "*"
 	}
-	line := fmt.Sprintf("%s %s [%s] model=%s apiModel=%s api key: %s", marker, displayCLIValue(provider.Name, "none"), displayCLIValue(provider.ProviderKind, "unknown"), displayCLIValue(provider.Model, "none"), displayCLIValue(provider.APIModel, "unknown"), providerCredentialState(provider))
+	line := fmt.Sprintf("%s %s [%s] model=%s apiModel=%s api key: %s", marker, displayCLIValue(provider.Name, "none"), displayCLIValue(provider.ProviderKind, "unknown"), displayCLIValue(provider.Model, "none"), displayCLIValue(provider.APIModel, "unknown"), providerCredentialState(provider.providerSummary))
+	if !provider.Selectable {
+		line += " (runtime-only; not selectable/saved)"
+	}
 	if provider.Message != "" {
 		line += " (" + provider.Status + ": " + provider.Message + ")"
 	}
