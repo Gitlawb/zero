@@ -135,6 +135,19 @@ var descriptors = []Descriptor{
 		d.RequiresAuth = true
 		return oauthProvider(d, false, false)
 	}(),
+	// Kimi Code (managed OAuth) — the bearer from a Kimi Code device-code OAuth
+	// login routes to the managed coding endpoint at https://api.kimi.com/coding/v1
+	// (NOT api.moonshot.ai/v1, which is the API-key path for the `moonshot`
+	// catalog entry). Kimi only supports the RFC 8628 device-code flow against
+	// auth.kimi.com; the access token is accepted directly as a bearer on the
+	// managed endpoint, so no client spoofing is involved. The baked-in preset
+	// ships the public Kimi Code client_id and endpoints (off by default, like the
+	// other presets); env overrides via ZERO_OAUTH_KIMI_* win.
+	func() Descriptor {
+		d := openAICompat("kimi", "Kimi Code", "https://api.kimi.com/coding/v1", "kimi-k2.7-code-highspeed", nil)
+		d.RequiresAuth = true
+		return oauthProvider(d, false, true)
+	}(),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),

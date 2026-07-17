@@ -179,6 +179,35 @@ func TestResolveConfigHuggingFaceWithEnvClientID(t *testing.T) {
 	}
 }
 
+// Kimi Code ships a baked-in client_id (the public kimi-code CLI identity) AND a
+// device-code endpoint, so the preset resolves without env. The flow is device
+// only (RFC 8628): no loopback/authorize endpoint, no issuer discovery.
+func TestResolveConfigKimiPreset(t *testing.T) {
+	r := NewRegistry()
+	cfg, flow, err := r.ResolveConfig("kimi", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
+	if err != nil {
+		t.Fatalf("ResolveConfig(kimi): %v", err)
+	}
+	if cfg.ClientID != "17e5f671-d194-4dfb-9706-5516cb48c098" {
+		t.Fatalf("client_id = %q", cfg.ClientID)
+	}
+	if cfg.DeviceAuthorizationEndpoint != "https://auth.kimi.com/api/oauth/device_authorization" {
+		t.Fatalf("device endpoint = %q", cfg.DeviceAuthorizationEndpoint)
+	}
+	if cfg.TokenEndpoint != "https://auth.kimi.com/api/oauth/token" {
+		t.Fatalf("token = %q", cfg.TokenEndpoint)
+	}
+	if cfg.AuthorizationEndpoint != "" {
+		t.Fatalf("authorize endpoint = %q, want empty (Kimi has no loopback flow)", cfg.AuthorizationEndpoint)
+	}
+	if flow != FlowDevice {
+		t.Fatalf("flow = %q, want device (RFC 8628 only)", flow)
+	}
+	if len(cfg.Scopes) == 0 {
+		t.Fatal("preset scopes should be populated")
+	}
+}
+
 // ChatGPT (Codex) ships a baked-in client_id (the public Codex CLI identity),
 // so the preset resolves without env. The flow is loopback because the Codex
 // backend requires a browser; there is no device-code path.
