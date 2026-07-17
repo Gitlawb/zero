@@ -347,20 +347,38 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		wizard.manageStatus = "No user config path — cannot delete."
 		return m, nil
 	}
-	cfg, err := config.RemoveProvider(m.userConfigPath, name)
-	if err != nil {
-		wizard.manageStatus = "Delete failed: " + err.Error()
-		return m, nil
+
+	var notes []string
+	var activeAfter string
+	if config.ProviderPersisted(m.userConfigPath, name) {
+		cfg, err := config.RemoveProvider(m.userConfigPath, name)
+		if err != nil {
+			wizard.manageStatus = "Delete failed: " + err.Error()
+			return m, nil
+		}
+		activeAfter = cfg.ActiveProvider
+		notes = []string{"Deleted " + name + "."}
+	} else {
+		// Env-derived providers (e.g. from an ambient OPENAI_API_KEY) are
+		// synthesized in-memory by Resolve on every launch and never gain a
+		// config.json row, so there's nothing on disk to remove —
+		// RemoveProvider would only ever fail with a confusing "not found"
+		// even though the provider is genuinely visible/usable this session.
+		// Drop it from the session's list instead and say why it can return.
+		notes = []string{
+			"Removed " + name + " from this session.",
+			"It wasn't saved in config.json (likely set via an environment variable) — unset it to stop Zero from detecting it automatically.",
+		}
 	}
+
 	// Surgical removal — see saveManagerEdit for why the raw cfg.Providers list
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	notes := []string{"Deleted " + name + "."}
 	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(name)) {
 		notes = append(notes, "This session keeps running on it until you switch.")
-	} else if active := strings.TrimSpace(cfg.ActiveProvider); active != "" && !strings.EqualFold(active, name) {
-		notes = append(notes, "Active provider: "+active+".")
+	} else if activeAfter != "" && !strings.EqualFold(activeAfter, name) {
+		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
 	cleanup := providerManagerCleanupCmd(m.userConfigPath, row.profile)
 
