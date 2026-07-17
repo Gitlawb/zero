@@ -131,3 +131,64 @@ func TestNewTurnSessionProviderProjectsRegistryCapabilities(t *testing.T) {
 		t.Fatal("NativeCompaction = true, want false for the default adapter")
 	}
 }
+
+// TestNewTurnSessionProviderUsesEffectiveReasoningEfforts asserts the
+// projection reads efforts through Registry.ReasoningEfforts, so a catalog
+// entry that enumerates no efforts of its own still reports the name-inferred
+// effective tiers the /effort picker and run-time resolver advertise.
+func TestNewTurnSessionProviderUsesEffectiveReasoningEfforts(t *testing.T) {
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
+		// A gpt-5-family id with NO ReasoningEfforts listed: the effective
+		// efforts come from name inference, differing from the raw entry.
+		ID:          "gpt-5-pr7-probe",
+		DisplayName: "PR7 Effective Efforts Probe",
+		APIModel:    "gpt-5-pr7-probe-api",
+		Provider:    modelregistry.ProviderOpenAI,
+		ContextLimits: modelregistry.ContextLimits{
+			ContextWindow:   400_000,
+			MaxOutputTokens: 128_000,
+		},
+		Capabilities: modelregistry.ModelCapabilities{
+			modelregistry.ModelCapabilityChat,
+			modelregistry.ModelCapabilityReasoning,
+		},
+		Cost: modelregistry.ModelCost{
+			Currency:           "USD",
+			Unit:               "per_1m_tokens",
+			InputPerMillion:    1,
+			OutputPerMillion:   2,
+			Source:             "https://provider.example/pricing (test fixture)",
+			SourceLastVerified: "2026-07-18",
+		},
+		Status:  modelregistry.ModelStatusActive,
+		Aliases: []string{"pr7-effective-efforts"},
+	}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	tsp, err := NewTurnSessionProvider(config.ProviderProfile{
+		Name:         "pr7-effective",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      "https://provider.example/v1",
+		APIKey:       "sk-turn-session-test",
+		Model:        "gpt-5-pr7-probe",
+	}, Options{
+		UserAgent:     "zero-turn-session-test",
+		ModelRegistry: &registry,
+	})
+	if err != nil {
+		t.Fatalf("NewTurnSessionProvider: %v", err)
+	}
+
+	got := tsp.Capabilities().ReasoningEfforts
+	want := []string{"minimal", "low", "medium", "high"}
+	if len(got) != len(want) {
+		t.Fatalf("ReasoningEfforts = %v, want %v (name-inferred fallback)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ReasoningEfforts[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}

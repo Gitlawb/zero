@@ -148,7 +148,11 @@ func resolveCapabilities(profile config.ProviderProfile, options Options) (zeror
 		caps.SupportsVision = entry.Supports(modelregistry.ModelCapabilityVision)
 		caps.SupportsReasoning = entry.Supports(modelregistry.ModelCapabilityReasoning)
 		caps.SupportsPromptCache = entry.Supports(modelregistry.ModelCapabilityPromptCache)
-		for _, effort := range entry.ReasoningEfforts {
+		// Read efforts through Registry.ReasoningEfforts (not the raw entry) so
+		// the projection matches what the /effort picker and the run-time
+		// resolver advertise — including the name-based fallback for catalog
+		// entries that enumerate no efforts of their own.
+		for _, effort := range registry.ReasoningEfforts(entry.ID) {
 			caps.ReasoningEfforts = append(caps.ReasoningEfforts, string(effort))
 		}
 	}
