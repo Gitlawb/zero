@@ -42,6 +42,22 @@ func TestSearchOutputPolicyPreservesMultiFileCoverage(t *testing.T) {
 	}
 }
 
+func TestSearchOutputPolicyPreservesWindowsPathCoverage(t *testing.T) {
+	var lines []string
+	for _, file := range []string{"a.go", "b.go", "c.go", "d.go"} {
+		for line := 1; line <= 30; line++ {
+			lines = append(lines, fmt.Sprintf(`C:\workspace\%s:%d: match value %d`, file, line, line))
+		}
+	}
+	lines = append(lines, "120 matches found")
+	got := budgetSemanticOutput(strings.Join(lines, "\n"), outputCategorySearch, semanticTestBudget())
+	for _, want := range []string{`C:\workspace\a.go:`, `C:\workspace\b.go:`, `C:\workspace\c.go:`, `C:\workspace\d.go:`, "120 matches"} {
+		if !strings.Contains(got.text, want) {
+			t.Fatalf("search policy missing %q:\n%s", want, got.text)
+		}
+	}
+}
+
 func TestProcessOutputPolicyCollapsesRepetitiveLogsAndKeepsDiagnostics(t *testing.T) {
 	input := "starting server\n" + strings.Repeat("polling...\n", 300) + "WARNING: queue slow\nERROR: request failed\nshutdown complete"
 	got := budgetSemanticOutput(input, outputCategoryProcess, semanticTestBudget())

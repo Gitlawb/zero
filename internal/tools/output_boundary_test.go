@@ -146,6 +146,51 @@ func TestRegistryLargeFileUsesSemanticFilePolicy(t *testing.T) {
 	}
 }
 
+func TestRegistryLargeSingleLineFileRetainsHeadAndTail(t *testing.T) {
+	setTestTempDir(t)
+	root := t.TempDir()
+	content := "HEAD_SINGLE_LINE_MARK" + strings.Repeat("x", readOutputBudgetBytes*2) + "TAIL_SINGLE_LINE_MARK"
+	if err := os.WriteFile(filepath.Join(root, "large.min.js"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewRegistry()
+	registry.Register(NewReadFileTool(root))
+	result := registry.Run(context.Background(), "read_file", map[string]any{"path": "large.min.js"})
+	if !result.Truncated || result.Meta[outputBudgetCategoryMeta] != string(outputCategoryFile) {
+		t.Fatalf("single-line file was not semantically budgeted: truncated=%t meta=%#v", result.Truncated, result.Meta)
+	}
+	if len(result.Output) > readOutputBudgetBytes || !utf8.ValidString(result.Output) {
+		t.Fatalf("single-line file output is not safely bounded: bytes=%d valid=%t", len(result.Output), utf8.ValidString(result.Output))
+	}
+	for _, want := range []string{"File: large.min.js", "HEAD_SINGLE_LINE_MARK", "TAIL_SINGLE_LINE_MARK"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("single-line file output missing %q", want)
+		}
+	}
+}
+
+func TestRegistryMinifiedFileUpdatesEmittedBytesAfterBudgeting(t *testing.T) {
+	setTestTempDir(t)
+	root := t.TempDir()
+	content := "HEAD_MINIFIED_MARK" + strings.Repeat("x", readOutputBudgetBytes*2) + "TAIL_MINIFIED_MARK"
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewRegistry()
+	registry.Register(NewReadMinifiedFileTool(root))
+	result := registry.Run(context.Background(), "read_minified_file", map[string]any{"path": "large.txt"})
+	if !result.Truncated || result.Meta["emitted_bytes"] != strconv.Itoa(len(result.Output)) {
+		t.Fatalf("minified metadata does not describe final output: truncated=%t emitted=%q bytes=%d", result.Truncated, result.Meta["emitted_bytes"], len(result.Output))
+	}
+	for _, want := range []string{"HEAD_MINIFIED_MARK", "TAIL_MINIFIED_MARK"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("minified single-line file output missing %q", want)
+		}
+	}
+}
+
 func TestRegistryGrepUsesSemanticMultiFileCoverage(t *testing.T) {
 	setTestTempDir(t)
 	root := t.TempDir()

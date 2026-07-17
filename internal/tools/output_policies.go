@@ -83,7 +83,18 @@ func budgetFileLines(output string, budget outputBudget) string {
 			priorities = append(priorities, right)
 		}
 	}
-	return retainPrioritizedLines(lines, priorities, budget)
+	units := lineDiffUnits(lines)
+	selected := selectPrioritizedUnits(units, priorities, budget)
+	for index := range selected {
+		// Index zero is the file/range header. If no non-blank requested
+		// content line fits as a complete line, let the common caller fall
+		// back to its UTF-8-safe head/tail policy rather than returning only
+		// a header and omission marker for a minified single-line file.
+		if index > 0 && strings.TrimSpace(lines[index]) != "" {
+			return renderSelectedUnits(units, selected)
+		}
+	}
+	return ""
 }
 
 func budgetSearchLines(output string, budget outputBudget) string {
@@ -232,14 +243,22 @@ func splitDiffUnits(output string) []diffUnit {
 }
 
 func retainPrioritizedLines(lines []string, priorities []int, budget outputBudget) string {
+	return retainPrioritizedUnits(lineDiffUnits(lines), priorities, budget)
+}
+
+func lineDiffUnits(lines []string) []diffUnit {
 	units := make([]diffUnit, 0, len(lines))
 	for index, line := range lines {
 		units = append(units, diffUnit{order: index, text: line})
 	}
-	return retainPrioritizedUnits(units, priorities, budget)
+	return units
 }
 
 func retainPrioritizedUnits(units []diffUnit, priorities []int, budget outputBudget) string {
+	return renderSelectedUnits(units, selectPrioritizedUnits(units, priorities, budget))
+}
+
+func selectPrioritizedUnits(units []diffUnit, priorities []int, budget outputBudget) map[int]bool {
 	selected := map[int]bool{}
 	indexes := make([]int, 0, len(priorities))
 	cost := retainedUnitCost{}
@@ -275,7 +294,7 @@ func retainPrioritizedUnits(units []diffUnit, priorities []int, budget outputBud
 		indexes[position] = index
 		cost = candidate
 	}
-	return renderSelectedUnits(units, selected)
+	return selected
 }
 
 // retainedUnitCost tracks the exact rendered size of selected units without
@@ -379,14 +398,23 @@ func collapseConsecutiveDuplicateLines(lines []string) []string {
 }
 
 func searchResultFile(line string) string {
-	parts := strings.SplitN(line, ":", 3)
-	if len(parts) < 3 {
-		return ""
+	// Search output is path:line: text. Locate the numeric line field from
+	// the right so a Windows drive prefix (C:) remains part of the path.
+	for end := len(line); end > 0; {
+		lineEnd := strings.LastIndex(line[:end], ":")
+		if lineEnd < 0 {
+			return ""
+		}
+		lineStart := strings.LastIndex(line[:lineEnd], ":")
+		if lineStart < 0 {
+			return ""
+		}
+		if _, err := strconv.Atoi(line[lineStart+1 : lineEnd]); err == nil {
+			return strings.TrimSpace(line[:lineStart])
+		}
+		end = lineStart
 	}
-	if _, err := strconv.Atoi(parts[1]); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(parts[0])
+	return ""
 }
 
 func isTestFailureLine(line string) bool {

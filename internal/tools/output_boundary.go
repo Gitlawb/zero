@@ -172,9 +172,10 @@ func addOutputBudgetMetadata(meta map[string]string, output budgetedOutput) map[
 		if _, exists := meta["raw_bytes"]; !exists {
 			meta["raw_bytes"] = strconv.Itoa(output.originalBytes)
 		}
-		if _, exists := meta["emitted_bytes"]; !exists {
-			meta["emitted_bytes"] = strconv.Itoa(output.retainedBytes)
-		}
+		// This is the final, model-visible output after semantic budgeting. A
+		// tool may have reported its pre-budget emitted size, but retaining that
+		// value here would make the established field disagree with Output.
+		meta["emitted_bytes"] = strconv.Itoa(output.retainedBytes)
 		if _, exists := meta["estimated_tokens"]; !exists {
 			meta["estimated_tokens"] = strconv.Itoa(output.estimatedRetainedTokens)
 		}
