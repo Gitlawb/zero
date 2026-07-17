@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
@@ -60,7 +61,7 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 		HTTPHeader: http.Header{"Authorization": {"Token " + d.cfg.APIKey}},
 	})
 	if err != nil {
-		return "", fmt.Errorf("connecting to Deepgram: %w", err)
+		return "", fmt.Errorf("connecting to Deepgram: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 	}
 	defer conn.CloseNow()
 
@@ -100,7 +101,7 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("Deepgram stream error: %w", err) //nolint:staticcheck // Preserve established user-facing error text.
+			return compose(), fmt.Errorf("Deepgram stream error: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {
 			continue

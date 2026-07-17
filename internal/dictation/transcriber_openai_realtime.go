@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
@@ -59,7 +60,7 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("connecting to OpenAI Realtime: %w", err)
+		return "", fmt.Errorf("connecting to OpenAI Realtime: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 	defer conn.CloseNow()
 
@@ -113,7 +114,7 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("OpenAI Realtime stream error: %w", err)
+			return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {
 			continue
@@ -147,7 +148,7 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case realtimeCommitted:
 			committed = true
 		case realtimeError:
-			return compose(), fmt.Errorf("OpenAI Realtime error: %s", evt.text)
+			return compose(), fmt.Errorf("OpenAI Realtime error: %s", providerio.Redact(evt.text, o.cfg.APIKey))
 		}
 		// The writer signals commit completion out of band; observe it so a
 		// stop with no further audio still flips `committed`.
