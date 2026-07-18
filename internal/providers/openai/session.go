@@ -147,19 +147,21 @@ func (s *turnSession) computeFingerprint(request zeroruntime.CompletionRequest) 
 }
 
 // canonicalToolsDigest renders the tool set order-insensitively: name-sorted,
-// each tool as name + newline + its JSON-marshaled parameters (encoding/json
-// sorts map keys, so the render is stable). A schema that fails to marshal is
-// recorded under a stable sentinel — this digest feeds telemetry counters, so
-// cruder handling of that pathological case is acceptable.
+// each tool as name + description + its JSON-marshaled parameters
+// (encoding/json sorts map keys, so the render is stable). Descriptions are
+// model-visible request bytes, so a description-only change counts as prefix
+// drift. A schema that fails to marshal is recorded under a stable sentinel —
+// this digest feeds telemetry counters, so cruder handling of that
+// pathological case is acceptable.
 func canonicalToolsDigest(tools []zeroruntime.ToolDefinition) string {
 	rendered := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		schema, err := json.Marshal(tool.Parameters)
 		if err != nil {
-			rendered = append(rendered, tool.Name+"\n__non_json:"+tool.Name)
+			rendered = append(rendered, tool.Name+"\n"+tool.Description+"\n__non_json:"+tool.Name)
 			continue
 		}
-		rendered = append(rendered, tool.Name+"\n"+string(schema))
+		rendered = append(rendered, tool.Name+"\n"+tool.Description+"\n"+string(schema))
 	}
 	sort.Strings(rendered)
 	sum := sha256.Sum256([]byte(strings.Join(rendered, "\x00")))

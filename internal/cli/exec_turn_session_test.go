@@ -70,8 +70,10 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 		t.Fatalf("server saw %d chat-completions POSTs, want >= 1", got)
 	}
 	// The prewarm probe is asynchronous; it fires well before the model turn
-	// finishes, but poll briefly rather than assuming scheduling order.
-	deadline := time.Now().Add(2 * time.Second)
+	// finishes, but poll rather than assuming scheduling order. The deadline
+	// exceeds the production prewarmTimeout (3s) so a slow probe cannot flake
+	// this assertion.
+	deadline := time.Now().Add(5 * time.Second)
 	for heads.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

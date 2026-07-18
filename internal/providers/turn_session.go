@@ -47,7 +47,10 @@ func OptimizedTurnSessions(profile config.ProviderProfile, provider zeroruntime.
 	}
 	caps, err := resolveCapabilities(profile, options)
 	if err != nil {
-		caps = zeroruntime.ProviderCapabilities{}
+		// resolveProfile above already succeeded, so this is effectively
+		// unreachable — but never ship an optimized session with unknown
+		// capabilities; the default path is the safe answer.
+		return nil, false
 	}
 	return openai.NewTurnSessionProvider(concrete, caps), true
 }

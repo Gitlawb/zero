@@ -209,6 +209,21 @@ func TestTurnSessionFingerprintDriftOnToolsAndEffort(t *testing.T) {
 	}
 }
 
+func TestTurnSessionFingerprintDriftOnToolDescription(t *testing.T) {
+	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
+	session := openOptimizedSession(t, provider)
+
+	base := session.computeFingerprint(zeroruntime.CompletionRequest{
+		Tools: []zeroruntime.ToolDefinition{{Name: "read_file", Description: "Reads a file.", Parameters: map[string]any{"type": "object"}}},
+	})
+	changedDescription := session.computeFingerprint(zeroruntime.CompletionRequest{
+		Tools: []zeroruntime.ToolDefinition{{Name: "read_file", Description: "Reads a file, now with ranges.", Parameters: map[string]any{"type": "object"}}},
+	})
+	if base == changedDescription {
+		t.Fatal("fingerprint did not drift on a description-only tool change — descriptions are model-visible request bytes")
+	}
+}
+
 func TestTurnSessionFingerprintOrderInsensitiveTools(t *testing.T) {
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
