@@ -376,7 +376,7 @@ func providerWizardMethodOptions() []providerWizardMethodOption {
 		options = append(options, providerWizardMethodOption{
 			oauth:    true,
 			label:    "Sign in with OAuth",
-			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI, Kimi, ChatGPT, Hugging Face).",
+			subtitle: "No API key to copy — one-click browser login (OpenRouter, xAI, ChatGPT, Hugging Face) or device code (Kimi Code).",
 		})
 	}
 	options = append(options, providerWizardMethodOption{
@@ -868,10 +868,16 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	// On the OAuth provider list, "d" forces device-code login for a device-capable
-	// provider (xAI) — useful on a desktop when the browser flow won't work.
+	// provider (xAI) — useful on a desktop when the browser flow won't work. A
+	// device-ONLY provider (Kimi Code has no loopback/authorize endpoint at
+	// all) has no browser flow to fall back to, so a plain Enter must also go
+	// straight to device login: the generic Enter/advanceProviderWizard path
+	// further below assumes a loopback flow exists and would otherwise hang or
+	// error against an endpoint that genuinely does not exist.
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode &&
-		(keyText(msg) == "d" || keyText(msg) == "D") &&
-		m.providerWizard.currentProvider().OAuthDeviceFlow {
+		m.providerWizard.currentProvider().OAuthDeviceFlow &&
+		(keyText(msg) == "d" || keyText(msg) == "D" ||
+			(keyIs(msg, tea.KeyEnter) && m.providerWizard.currentProvider().OAuthDeviceOnly)) {
 		return m.startProviderDeviceLogin()
 	}
 	if m.providerWizard.step == providerWizardStepProvider {
@@ -1463,6 +1469,9 @@ func (wizard *providerWizardState) footerText() string {
 	case providerWizardStepMethod:
 		return "↑/↓ move   Enter/→ continue   Esc close"
 	case providerWizardStepProvider:
+		if wizard.oauthMode && wizard.currentProvider().OAuthDeviceOnly {
+			return "↑/↓ move   Enter device code   ← back   Esc close"
+		}
 		if wizard.oauthMode && wizard.currentProvider().OAuthDeviceFlow {
 			return "↑/↓ move   Enter sign in   d device code   ← back   Esc close"
 		}
