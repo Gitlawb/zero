@@ -56,10 +56,16 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 			}, nil
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			// Pin a keep-alive transport so the probe fires on every platform:
+			// the shared default transport disables keep-alives on macOS, where
+			// the session correctly skips the prewarm.
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.DisableKeepAlives = false
 			return openai.New(openai.Options{
-				APIKey:  profile.APIKey,
-				BaseURL: profile.BaseURL,
-				Model:   profile.Model,
+				APIKey:     profile.APIKey,
+				BaseURL:    profile.BaseURL,
+				Model:      profile.Model,
+				HTTPClient: &http.Client{Transport: transport},
 			})
 		},
 	})

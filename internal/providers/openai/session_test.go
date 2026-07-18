@@ -13,6 +13,23 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+// keepAliveClient returns a client whose transport retains idle connections on
+// EVERY platform. The shared default transport disables keep-alives on macOS,
+// where the session correctly skips the probe — tests that assert the probe
+// fires must therefore pin a reusable transport to stay platform-deterministic.
+func keepAliveClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = false
+	return &http.Client{Transport: transport}
+}
+
+// newPrewarmTestProvider builds a provider whose transport always allows the
+// prewarm probe, regardless of host platform.
+func newPrewarmTestProvider(t *testing.T, handler http.HandlerFunc) *Provider {
+	t.Helper()
+	return newTestProviderWithOptions(t, Options{APIKey: "sk-test", HTTPClient: keepAliveClient()}, handler)
+}
+
 func waitPrewarmDone(t *testing.T, session *turnSession) {
 	t.Helper()
 	if session.prewarmDone == nil {
@@ -37,7 +54,7 @@ func openOptimizedSession(t *testing.T, provider *Provider) *turnSession {
 func TestTurnSessionPrewarmSendsSingleHEAD(t *testing.T) {
 	var requests atomic.Int64
 	var lastMethod atomic.Value
-	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		lastMethod.Store(r.Method)
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -72,7 +89,7 @@ func TestTurnSessionPrewarmNonFatalOnConnectError(t *testing.T) {
 	deadURL := server.URL
 	server.Close()
 
-	provider, err := New(Options{APIKey: "sk-test", BaseURL: deadURL, Model: "gpt-test"})
+	provider, err := New(Options{APIKey: "sk-test", BaseURL: deadURL, Model: "gpt-test", HTTPClient: keepAliveClient()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -84,7 +101,7 @@ func TestTurnSessionPrewarmNonFatalOnConnectError(t *testing.T) {
 }
 
 func TestTurnSessionPrewarmTraceStamps(t *testing.T) {
-	provider := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
 	recorder := trace.NewRecorder("session-test", "run-1", "test")
@@ -257,7 +274,7 @@ func TestTurnSessionFingerprintDriftOnToolReorder(t *testing.T) {
 // prewarm probe must appear ONLY under provider_prewarm — a provider_connect
 // stamp from the probe would contaminate the exact span the benchmark compares.
 func TestTurnSessionPrewarmDoesNotStampProviderConnect(t *testing.T) {
-	provider := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
 	recorder := trace.NewRecorder("session-test", "run-1", "test")
