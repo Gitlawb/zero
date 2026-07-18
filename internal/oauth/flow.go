@@ -154,7 +154,7 @@ func ExchangeCode(ctx context.Context, client *http.Client, cfg Config, code, ve
 	if secret := trimmed(cfg.ClientSecret); secret != "" {
 		form.Set("client_secret", secret)
 	}
-	return PostToken(ctx, client, cfg.TokenEndpoint, form, Token{Scopes: cfg.Scopes}, now)
+	return PostToken(ctx, client, cfg.TokenEndpoint, form, Token{Scopes: cfg.Scopes}, cfg.ExtraHeaders, now)
 }
 
 // Refresh exchanges a refresh token for a fresh access token. A response that
@@ -181,7 +181,7 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 	// and PostToken only overwrites TokenType when the response supplies one, so
 	// without seeding it here the type would be silently lost across refreshes (L15).
 	base := Token{Scopes: current.Scopes, RefreshToken: refresh, Account: current.Account, IDToken: current.IDToken, TokenType: current.TokenType}
-	return PostToken(ctx, client, cfg.TokenEndpoint, form, base, now)
+	return PostToken(ctx, client, cfg.TokenEndpoint, form, base, cfg.ExtraHeaders, now)
 }
 
 // PostToken performs a token-endpoint POST and maps the response onto a Token.
@@ -189,7 +189,7 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 // (e.g. an existing refresh token or scopes) when the response omits them.
 // Error messages carry only the server's error/error_description — never the raw
 // body — so token material in an unexpected payload is not leaked.
-func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, form url.Values, base Token, now func() time.Time) (Token, error) {
+func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, form url.Values, base Token, extraHeaders map[string]string, now func() time.Time) (Token, error) {
 	if err := validateTokenEndpoint(tokenEndpoint); err != nil {
 		return Token{}, err
 	}
@@ -205,6 +205,7 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
+	applyExtraHeaders(request, extraHeaders)
 
 	response, err := client.Do(request)
 	if err != nil {

@@ -23,6 +23,7 @@ package oauth
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -79,6 +80,14 @@ type Config struct {
 
 	// ExtraAuthParams are appended to the authorization URL (e.g. login_hint).
 	ExtraAuthParams map[string]string
+
+	// ExtraHeaders are set on every device-authorization, token-poll, code
+	// exchange, and refresh HTTP request this Config makes. Most providers
+	// need none; Kimi Code's backend rejects all of those requests with 401
+	// unless its vendor-identity X-Msh-* headers are present (see
+	// kimiExtraHeaders in presets.go), which the generic RFC 8628/OAuth2 form
+	// bodies built elsewhere in this package have no other way to carry.
+	ExtraHeaders map[string]string
 }
 
 // Errors returned by the engine. Callers can match these with errors.Is.
@@ -105,3 +114,13 @@ var (
 
 // trimmed is a tiny helper used across the package.
 func trimmed(s string) string { return strings.TrimSpace(s) }
+
+// applyExtraHeaders sets a Config's provider-specific headers (see
+// Config.ExtraHeaders) on an outgoing request, after the caller has already
+// set the standard Content-Type/Accept pair so a provider entry could
+// (in principle) override them.
+func applyExtraHeaders(request *http.Request, headers map[string]string) {
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+}

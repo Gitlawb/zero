@@ -1,8 +1,12 @@
 package oauth
 
 import (
+	"crypto/rand"
+	"fmt"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // envWithPresetsAllowed returns an env map that opts into the baked-in presets
@@ -99,15 +103,20 @@ var builtinOAuthPresets = map[string]providerPreset{
 		Scopes:                []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
 		Flow:                  FlowLoopback,
 	},
-	// Kimi Code uses Moonshot's public OAuth client identity (the one the
-	// open-source `kimi-code` CLI ships). The flow is device-code only (RFC 8628)
+	// Kimi Code uses the same public OAuth client identity the open-source
+	// kimi-cli ships (github.com/MoonshotAI/kimi-cli,
+	// src/kimi_cli/auth/oauth.py). The flow is device-code only (RFC 8628)
 	// against auth.kimi.com — there is no loopback/authorize path — and the
 	// resulting access token is accepted directly as a bearer on the managed
 	// coding endpoint https://api.kimi.com/coding/v1 (an OpenAI-compatible
-	// endpoint). No ID-token claim extraction is needed; the bearer is the whole
-	// credential. Endpoints and client_id are lifted verbatim from the public
-	// kimi-code source (packages/oauth/src/constants.ts, oauth.ts).
-	"kimi": {
+	// endpoint). No ID-token claim extraction is needed; the bearer is the
+	// whole credential. The preset (and catalog descriptor) key is
+	// "kimi-code", not "kimi": the existing `moonshot` entry already aliases
+	// "kimi" to itself (its API-key path at api.moonshot.ai), and Get()
+	// matches an exact descriptor ID before it ever reaches another
+	// descriptor's aliases, so reusing "kimi" here would silently steal that
+	// alias out from under existing moonshot profiles.
+	"kimi-code": {
 		ClientID:                    "17e5f671-d194-4dfb-9706-5516cb48c098",
 		DeviceAuthorizationEndpoint: "https://auth.kimi.com/api/oauth/device_authorization",
 		TokenEndpoint:               "https://auth.kimi.com/api/oauth/token",
@@ -142,4 +151,77 @@ func scopesOrPreset(envScopes string, preset []string) []string {
 	}
 	// Copy so a caller appending to cfg.Scopes can't mutate the shared preset slice.
 	return append([]string(nil), preset...)
+}
+
+// providerExtraHeaders returns the Config.ExtraHeaders a provider's OAuth
+// requests need beyond the generic RFC 8628/OAuth2 form bodies this package
+// builds. This is a protocol requirement of the provider's OWN backend
+// (not tied to whether its preset client_id or an operator-supplied one is in
+// use), so unlike the presets above it applies regardless of
+// ZERO_OAUTH_ALLOW_PRESETS.
+func providerExtraHeaders(name string) map[string]string {
+	if strings.ToLower(strings.TrimSpace(name)) == "kimi-code" {
+		return kimiExtraHeaders()
+	}
+	return nil
+}
+
+// kimiDeviceID is a per-process device identifier sent as X-Msh-Device-Id.
+// Kimi Code's own CLI persists this to ~/.kimi/device_id so the same value
+// follows a device across logins/refreshes; generating a fresh one per
+// process instead of persisting it is a disclosed simplification here — the
+// header just needs to be present and consistent within a single
+// login/refresh cycle, not stable across separate runs of zero.
+var kimiDeviceID = sync.OnceValue(generateKimiDeviceID)
+
+func generateKimiDeviceID() string {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "00000000-0000-0000-0000-000000000000"
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40 // version 4
+	raw[8] = (raw[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+}
+
+// kimiExtraHeaders returns the X-Msh-* vendor-identity headers Kimi Code's
+// OAuth/API backend requires on every device-authorization, poll, and refresh
+// request — reported to reject all of them with 401 otherwise. Header names
+// and general shape are reverse-engineered from the open-source kimi-cli
+// client (src/kimi_cli/auth/oauth.py, _common_headers); Kimi has no published
+// public API documentation for this, so these values are a best-effort match,
+// not a verified spec, and should be confirmed against a real login before
+// this ships.
+func kimiExtraHeaders() map[string]string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	return map[string]string{
+		"X-Msh-Platform":     "zero-cli",
+		"X-Msh-Version":      "unknown",
+		"X-Msh-Device-Name":  asciiHeaderValue(hostname),
+		"X-Msh-Device-Model": asciiHeaderValue(runtime.GOOS + " " + runtime.GOARCH),
+		"X-Msh-Os-Version":   runtime.GOOS,
+		"X-Msh-Device-Id":    kimiDeviceID(),
+	}
+}
+
+// asciiHeaderValue strips anything outside printable ASCII (0x20-0x7e). This
+// mirrors a defensive fix kimi-cli itself needed: a raw platform-version
+// string containing "#" broke an HTTP client's header validation on Linux
+// (MoonshotAI/kimi-cli#1169) because HTTP header values must not contain
+// control characters.
+func asciiHeaderValue(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x20 && r <= 0x7e {
+			b.WriteRune(r)
+		}
+	}
+	clean := strings.TrimSpace(b.String())
+	if clean == "" {
+		return "unknown"
+	}
+	return clean
 }

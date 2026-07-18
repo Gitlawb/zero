@@ -71,6 +71,7 @@ func RequestDeviceCode(ctx context.Context, client *http.Client, cfg Config, now
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
+	applyExtraHeaders(request, cfg.ExtraHeaders)
 	response, err := client.Do(request)
 	if err != nil {
 		return DeviceAuth{}, fmt.Errorf("oauth: device authorization request failed: %w", err)
@@ -173,6 +174,7 @@ func pollDeviceOnce(ctx context.Context, client *http.Client, cfg Config, device
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
+	applyExtraHeaders(request, cfg.ExtraHeaders)
 	response, err := client.Do(request)
 	if err != nil {
 		return Token{}, fmt.Errorf("oauth: device token poll failed: %w", err)
