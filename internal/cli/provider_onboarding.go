@@ -65,7 +65,7 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if !persisted {
-		if exit, handled := reportUnpersistedProviderUse(stdout, stderr, deps, options); handled {
+		if exit, handled := reportUnpersistedProviderUse(stdout, stderr, deps, options, configPath); handled {
 			return exit
 		}
 	}
@@ -511,7 +511,7 @@ func providerResolvedByName(providers []config.ProviderProfile, name string) boo
 // SetActiveProvider would only ever fail "not found" against it, so this
 // reports the situation plainly instead of that confusing error (issue
 // #707).
-func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions) (int, bool) {
+func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions, configPath string) (int, bool) {
 	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		// resolveCommandCenterConfig already wrote its own error to stderr;
@@ -528,6 +528,7 @@ func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, option
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
 			"activeProvider": resolved.ActiveProvider,
+			"configPath":     configPath,
 			"persisted":      false,
 			"message":        message,
 		}); err != nil {
@@ -591,7 +592,7 @@ func reportUnpersistedProviderRename(stdout, stderr io.Writer, deps appDeps, nam
 	)
 	if jsonOutput {
 		if err := writePrettyJSON(stdout, map[string]any{
-			"renamed":    false,
+			"renamed":    nil,
 			"configPath": configPath,
 			"persisted":  false,
 			"message":    message,

@@ -92,6 +92,29 @@ func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 	}
 }
 
+func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		ConfigPath string `json:"configPath"`
+		Persisted  bool   `json:"persisted"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.ConfigPath != configPath || payload.Persisted {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
 func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
@@ -130,6 +153,30 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "no saved profile to rename") {
 		t.Fatalf("stdout = %q, want unpersisted explanation", stdout.String())
+	}
+}
+
+func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Renamed    *struct{} `json:"renamed"`
+		ConfigPath string    `json:"configPath"`
+		Persisted  bool      `json:"persisted"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Renamed != nil || payload.ConfigPath != configPath || payload.Persisted {
+		t.Fatalf("unexpected payload: %+v", payload)
 	}
 }
 
