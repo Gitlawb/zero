@@ -15,9 +15,9 @@ import (
 // Mirror internal/cli/exec.go exit codes so wrapper doctor fallback tests assert
 // the same CLI contract as the Go doctor command.
 const (
-	wrapperExitSuccess  = 0
-	wrapperExitUsage    = 2
-	wrapperExitDoctor   = 1
+	wrapperExitSuccess = 0
+	wrapperExitUsage   = 2
+	wrapperExitDoctor  = 1
 )
 
 func runWrapperFixture(t *testing.T, wrapperPath string, args ...string) (stdout string, stderr string, exitCode int) {
