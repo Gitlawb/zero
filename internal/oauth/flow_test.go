@@ -257,7 +257,7 @@ func TestExchangeCodeErrorRedactsBody(t *testing.T) {
 }
 
 func TestPostTokenRefusesInsecureEndpoint(t *testing.T) {
-	_, err := PostToken(context.Background(), http.DefaultClient, "http://auth.example.com/token", url.Values{}, Token{}, nil)
+	_, err := PostToken(context.Background(), http.DefaultClient, "http://auth.example.com/token", url.Values{}, Token{}, nil, nil)
 	if !errors.Is(err, ErrInsecureTokenEndpoint) {
 		t.Fatalf("err = %v, want ErrInsecureTokenEndpoint", err)
 	}
