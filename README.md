@@ -8,6 +8,7 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
@@ -205,6 +206,7 @@ Common slash commands:
 | `/spec`, `/plan` | draft and review a plan before building |
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
+| `/new` | start a fresh session in place (previous session stays on disk) |
 | `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
 | `/permissions`, `/tools` | inspect available tools and policy |
@@ -300,7 +302,8 @@ zero verify           detect and run local verification checks
 zero changes          inspect and commit local git changes
 zero usage            token usage and estimated cost
 zero cron             scheduled agent jobs
-zero update           check for newer releases
+zero update --check   check for newer releases
+zero upgrade          download, verify, and install the latest release
 ```
 
 ## Extending Zero
@@ -401,6 +404,11 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 - [Benchmarks](docs/BENCHMARK.md)
 - [Performance](docs/PERFORMANCE.md)
 - [Agent evals](docs/AGENT_EVALS.md)
+
+## Community
+
+Join the [Discord server](https://discord.gg/CaQDS6wdFn) for questions,
+feedback, and discussion.
 
 ## Contributing
 

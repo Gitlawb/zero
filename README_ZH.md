@@ -8,6 +8,7 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
   <a href="README.md">English</a> | <strong>中文</strong>
 </p>
@@ -141,6 +142,7 @@ zero
 | `/spec`、`/plan` | 在构建之前起草和审查计划 |
 | `/image` | 为视觉模型附加图片 |
 | `/resume`、`/rewind` | 继续或回滚本地会话 |
+| `/new` | 原地开始一个新会话（之前的会话仍保留在磁盘上） |
 | `/compact`、`/context` | 管理上下文使用 |
 | `/permissions`、`/tools` | 检查可用工具和策略 |
 | `/add-dir` | 为此会话授予额外的写入目录 |
@@ -226,7 +228,8 @@ zero verify           检测和运行本地验证检查
 zero changes          检查和提交本地 Git 变更
 zero usage            Token 使用量和估算成本
 zero cron             定时智能体任务
-zero update           检查更新版本
+zero update --check   检查更新版本
+zero upgrade          下载、验证并安装最新版本
 ```
 
 ## 外观和无障碍
@@ -268,6 +271,10 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 - [基准测试](docs/BENCHMARK.md)
 - [性能](docs/PERFORMANCE.md)
 - [智能体评估](docs/AGENT_EVALS.md)
+
+## 社区
+
+加入 [Discord 服务器](https://discord.gg/CaQDS6wdFn) 提问、反馈和讨论。
 
 ## 贡献
 
