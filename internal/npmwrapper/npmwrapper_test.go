@@ -20,13 +20,28 @@ const (
 	wrapperExitDoctor  = 1
 )
 
+// Canonical Bun recovery copy from bin/zero.js bunRecoveryParagraph() — shared
+// by the generic missing-binary path and the doctor text fallback.
+const (
+	bunRecoveryLead        = "You installed with Bun, which does not run dependency lifecycle scripts"
+	bunPmTrustProject      = "bun pm trust @gitlawb/zero"
+	bunPmTrustGlobal       = "bun pm -g trust @gitlawb/zero"
+	bunRecoveryTrustedDeps = `"trustedDependencies": ["@gitlawb/zero"]`
+	buildFromSourceLead    = "If this platform has no prebuilt binary, build from source:"
+)
+
 func runWrapperFixture(t *testing.T, wrapperPath string, args ...string) (stdout string, stderr string, exitCode int) {
+	return runWrapperFixtureWithEnv(t, wrapperPath, nil, args...)
+}
+
+func runWrapperFixtureWithEnv(t *testing.T, wrapperPath string, extraEnv []string, args ...string) (stdout string, stderr string, exitCode int) {
 	t.Helper()
 	node := requireNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
 	command := nodeWrapperCommand(ctx, node, wrapperPath, args...)
 	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_WRAPPER_SIMULATE_BUN"), extraEnv...)
 	var stdoutBuf, stderrBuf strings.Builder
 	command.Stdout = &stdoutBuf
 	command.Stderr = &stderrBuf
@@ -465,7 +480,7 @@ func TestNodeWrapperDoctorReportsMissingNativeBinaryAsDoctorFail(t *testing.T) {
 	// Regression guard for the original blind-alley bug: the doctor path must
 	// NOT emit the generic wrapper bail (that's what sent users debugging the
 	// wrong thing).
-	if strings.Contains(stdout, "[zero] No native binary found next to the npm wrapper") {
+	if strings.Contains(stdout, "[zero] No native binary is available for this install") {
 		t.Fatalf("doctor must not emit the generic wrapper bail, got stdout=%q", stdout)
 	}
 }
@@ -560,9 +575,85 @@ func TestNodeWrapperDoctorWithFlagsStillReportsDoctorFail(t *testing.T) {
 	if !strings.Contains(stdout, "[fail] runtime.go") {
 		t.Fatalf("doctor --connectivity must still emit the failing runtime.go line, got stdout=%q", stdout)
 	}
-	if strings.Contains(stdout, "[zero] No native binary found next to the npm wrapper") {
+	if strings.Contains(stdout, "[zero] No native binary is available for this install") {
 		t.Fatalf("doctor --connectivity must not fall back to the generic bail, got stdout=%q", stdout)
 	}
+}
+
+func TestNodeWrapperGenericReportsBunRecoveryWhenInstalledByBun(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	_, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}, "--version")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("generic missing-binary exit = %d, want %d; stderr=%s", exitCode, wrapperExitDoctor, stderr)
+	}
+	assertBunRecoveryMessage(t, stderr)
+	if !strings.Contains(stderr, buildFromSourceLead) {
+		t.Fatalf("generic bun stderr should include build-from-source guidance, got %q", stderr)
+	}
+}
+
+func TestNodeWrapperDoctorReportsBunRecoveryWhenInstalledByBun(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}, "doctor")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor bun exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor bun report must go to stdout only, got stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor bun report must still fail runtime.go, got stdout=%q", stdout)
+	}
+	assertBunRecoveryMessage(t, stdout)
+	if !strings.Contains(stdout, buildFromSourceLead) {
+		t.Fatalf("doctor bun report should reuse generic build-from-source guidance, got stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "If reinstall fails") {
+		t.Fatalf("doctor bun report must not use a separate build-from-source string, got stdout=%q", stdout)
+	}
+}
+
+func TestNodeWrapperDoctorAndGenericShareBunRecoveryCopy(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	simulateBun := []string{"ZERO_WRAPPER_SIMULATE_BUN=1"}
+	_, genericStderr, _ := runWrapperFixtureWithEnv(t, wrapperPath, simulateBun, "--version")
+	doctorStdout, _, _ := runWrapperFixtureWithEnv(t, wrapperPath, simulateBun, "doctor")
+	genericBun := extractBunRecoveryBlock(genericStderr)
+	doctorBun := extractBunRecoveryBlock(doctorStdout)
+	if genericBun != doctorBun {
+		t.Fatalf("bun recovery copy drift:\ngeneric=%q\ndoctor=%q", genericBun, doctorBun)
+	}
+}
+
+func assertBunRecoveryMessage(t *testing.T, output string) {
+	t.Helper()
+	if !strings.Contains(output, bunRecoveryLead) {
+		t.Fatalf("output should include bun recovery lead, got %q", output)
+	}
+	if !strings.Contains(output, bunPmTrustProject) {
+		t.Fatalf("output should include project bun pm trust guidance, got %q", output)
+	}
+	if !strings.Contains(output, bunPmTrustGlobal) {
+		t.Fatalf("output should include global bun pm trust guidance, got %q", output)
+	}
+	if !strings.Contains(output, bunRecoveryTrustedDeps) {
+		t.Fatalf("output should include trustedDependencies fallback guidance, got %q", output)
+	}
+	if !strings.Contains(output, "to your project package.json and reinstall.") {
+		t.Fatalf("output should mention package.json reinstall fallback, got %q", output)
+	}
+}
+
+func extractBunRecoveryBlock(output string) string {
+	start := strings.Index(output, bunRecoveryLead)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(output[start:], buildFromSourceLead)
+	if end < 0 {
+		return strings.TrimSpace(output[start:])
+	}
+	return strings.TrimSpace(output[start : start+end])
 }
 
 func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {

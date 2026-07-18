@@ -70,6 +70,65 @@ Flags:
 
 const EXIT_USAGE = 2;
 
+function installedByBun() {
+  if (process.env.ZERO_WRAPPER_SIMULATE_BUN === '1') {
+    return true;
+  }
+  return process.execPath.includes('bun') || !!process.versions?.bun;
+}
+
+function bunRecoveryParagraph() {
+  return (
+    'You installed with Bun, which does not run dependency lifecycle scripts\n' +
+    'by default. Trust the package to run the blocked postinstall:\n' +
+    '  bun pm trust @gitlawb/zero       (project install)\n' +
+    '  bun pm -g trust @gitlawb/zero    (global install)\n' +
+    'On Bun versions without `bun pm trust`, add\n' +
+    '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+    'to your project package.json and reinstall.\n' +
+    '\n'
+  );
+}
+
+function buildFromSourceParagraph() {
+  return (
+    'If this platform has no prebuilt binary, build from source:\n' +
+    'https://github.com/Gitlawb/zero (go run ./cmd/zero, requires Go 1.26+).'
+  );
+}
+
+function missingBinaryContextParagraph() {
+  return (
+    'Normally npm installs it as an optional dependency of @gitlawb/zero\n' +
+    `(@gitlawb/zero-${process.platform}-${process.arch}), and the wrapper can\n` +
+    'also download it from the GitHub Release when it is missing.'
+  );
+}
+
+function missingNativeRecoveryParagraphs(postinstallScript) {
+  const ranByBun = installedByBun();
+  return (
+    missingBinaryContextParagraph() +
+    '\n' +
+    '\n' +
+    'Things to try:\n' +
+    '  - reinstall without omitting optional dependencies:\n' +
+    '      npm install -g @gitlawb/zero\n' +
+    '  - run the downloader manually (needs write access to the package dir):\n' +
+    `      node "${postinstallScript}"\n` +
+    '\n' +
+    (ranByBun ? bunRecoveryParagraph() : '') +
+    buildFromSourceParagraph()
+  );
+}
+
+function formatGenericMissingNativeBinaryMessage(postinstallScript) {
+  return (
+    '[zero] No native binary is available for this install.\n' +
+    missingNativeRecoveryParagraphs(postinstallScript)
+  );
+}
+
 function parseDoctorArgs(args) {
   let json = false;
   for (const arg of args) {
@@ -108,7 +167,7 @@ function missingNativeDoctorJSONReport(postinstallScript) {
   };
 }
 
-function missingNativeDoctorTextReport(postinstallScript, ranByBun) {
+function missingNativeDoctorTextReport(postinstallScript) {
   return (
     'Zero doctor report (' +
     new Date().toISOString() +
@@ -119,17 +178,7 @@ function missingNativeDoctorTextReport(postinstallScript, ranByBun) {
     postinstallScript +
     '"\n' +
     '\n' +
-    'The platform binary is fetched at install time by a postinstall script,\n' +
-    'which did not run (or was skipped) for this install.' +
-    (ranByBun
-      ? '\nYou installed with Bun, which does not run dependency lifecycle scripts\n' +
-        'by default. To let it run on future installs, add zero to your\n' +
-        "project's trustedDependencies:\n" +
-        '  "trustedDependencies": ["@gitlawb/zero"]\n' +
-        'then reinstall.'
-      : '') +
-    '\nIf reinstall fails, build from source: https://github.com/Gitlawb/zero\n' +
-    '(go run ./cmd/zero, requires Go 1.25+).'
+    missingNativeRecoveryParagraphs(postinstallScript)
   );
 }
 
@@ -193,7 +242,6 @@ const nativePath = resolveNativeBinary();
 
 if (!nativePath) {
   const postinstallScript = join(packageRoot, 'scripts', 'postinstall.mjs');
-  const ranByBun = process.execPath.includes('bun') || !!process.versions?.bun;
 
   // `zero doctor` is the diagnostic command: when the native binary is missing
   // it's the one invocation that must NOT bail with the generic wrapper error,
@@ -220,25 +268,11 @@ if (!nativePath) {
       process.exit(1);
     }
 
-    process.stdout.write(missingNativeDoctorTextReport(postinstallScript, ranByBun) + '\n');
+    process.stdout.write(missingNativeDoctorTextReport(postinstallScript) + '\n');
     process.exit(1);
   }
 
-  console.error(
-    '[zero] No native binary is available for this install.\n' +
-      'Normally npm installs it as an optional dependency of @gitlawb/zero\n' +
-      `(@gitlawb/zero-${process.platform}-${process.arch}), and the wrapper can\n` +
-      'also download it from the GitHub Release when it is missing.\n' +
-      '\n' +
-      'Things to try:\n' +
-      '  - reinstall without omitting optional dependencies:\n' +
-      '      npm install -g @gitlawb/zero\n' +
-      '  - run the downloader manually (needs write access to the package dir):\n' +
-      `      node "${join(packageRoot, 'scripts', 'postinstall.mjs')}"\n` +
-      '\n' +
-      'If this platform has no prebuilt binary, build from source:\n' +
-      'https://github.com/Gitlawb/zero (go run ./cmd/zero, requires Go 1.26+).',
-  );
+  console.error(formatGenericMissingNativeBinaryMessage(postinstallScript));
   process.exit(1);
 }
 
