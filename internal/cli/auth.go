@@ -596,7 +596,7 @@ Commands:
   logout <provider>                               Delete a provider's stored login
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
-   openrouter                                      Log in to OpenRouter in the browser; mints an API key
+  openrouter                                      Log in to OpenRouter in the browser; mints an API key
   chatgpt                                         Log in to ChatGPT in the browser (Codex backend, ChatGPT Plus/Pro)
   kimi                                            Log in to Kimi Code via device code (managed coding endpoint)
 
