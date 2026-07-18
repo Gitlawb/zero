@@ -2308,18 +2308,18 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 	}
 }
 
-func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
+func TestRunApprovedGitPushPromptAppliesTurnNetworkGrant(t *testing.T) {
 	root := t.TempDir()
-	command := "PATH=.:$PATH curl https://example.com"
+	command := "PATH=.:$PATH git push gitlawb://example.com/repo.git main"
 	if runtime.GOOS == "windows" {
-		command = "set PATH=.;%PATH% && curl https://example.com"
-		fakeCurl := filepath.Join(root, "curl.cmd")
-		if err := os.WriteFile(fakeCurl, []byte("@echo fake curl %*\r\n"), 0o755); err != nil {
+		command = "set PATH=.;%PATH% && git push gitlawb://example.com/repo.git main"
+		fakeGit := filepath.Join(root, "git.cmd")
+		if err := os.WriteFile(fakeGit, []byte("@echo fake git %*\r\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		fakeCurl := filepath.Join(root, "curl")
-		if err := os.WriteFile(fakeCurl, []byte("#!/bin/sh\necho fake curl \"$@\"\n"), 0o755); err != nil {
+		fakeGit := filepath.Join(root, "git")
+		if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho fake git \"$@\"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2341,7 +2341,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	}
 	var requests []PermissionRequest
 	var events []PermissionEvent
-	result, err := Run(context.Background(), "curl", provider, Options{
+	result, err := Run(context.Background(), "push changes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
 		Autonomy:       "medium",
@@ -2383,7 +2383,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	if !strings.Contains(lastMessage.Content, "fake curl https://example.com") {
+	if !strings.Contains(lastMessage.Content, "fake git push gitlawb://example.com/repo.git main") {
 		t.Fatalf("expected approved network command output after degraded execution, got %q", lastMessage.Content)
 	}
 }

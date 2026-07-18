@@ -151,7 +151,7 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return firstSubcommand(words, nil) == "get"
 	case "git":
 		switch firstSubcommand(words, nil) {
-		case "clone", "push":
+		case "clone", "fetch", "pull", "push":
 			return true
 		default:
 			return false

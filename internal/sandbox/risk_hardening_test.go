@@ -273,7 +273,9 @@ func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
 		"ftp ftp.example.com",
 		"sftp user@host",
 		"sudo telnet example.com 23",
-		"git push gitlawb main",
+		"git fetch origin",
+		"git pull origin main",
+		"git push gitlawb://example.com/repo.git main",
 	} {
 		risk := classifyCommand(command)
 		if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
@@ -292,12 +294,19 @@ func TestClassifyFlagsUnparseableCommand(t *testing.T) {
 }
 
 func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
-	risk := classifyCommand(`curl https://example.com && "unterminated`)
-	if !HasRiskCategory(risk, "unparseable_command") {
-		t.Fatalf("Classify of unparseable network command = categories %v; want unparseable_command", risk.Categories)
-	}
-	if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
-		t.Fatalf("Classify of unparseable network command = level %s, categories %v; want critical network", risk.Level, risk.Categories)
+	for _, command := range []string{
+		`curl https://example.com && "unterminated`,
+		`git fetch origin && "unterminated`,
+		`git pull origin main && "unterminated`,
+		`git push gitlawb://example.com/repo.git main && "unterminated`,
+	} {
+		risk := classifyCommand(command)
+		if !HasRiskCategory(risk, "unparseable_command") {
+			t.Fatalf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+		}
+		if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+			t.Fatalf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+		}
 	}
 }
 
