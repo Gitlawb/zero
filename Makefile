@@ -1,12 +1,8 @@
-# Zero build/test/lint targets. AGENTS.md says "Build with `make`" and "Run `make
-# lint` before opening a PR" — these targets back those instructions.
+# Zero build/test/lint targets. AGENTS.md says to build and run quality checks
+# with `make` — these targets back those instructions.
 .DEFAULT_GOAL := build
-GO_MOD_WORDS := $(file <go.mod)
-ifneq ($(word 3,$(GO_MOD_WORDS)),go)
-$(error expected go.mod to begin with module <path> followed by go <version>)
-endif
-GO_VERSION := $(word 4,$(GO_MOD_WORDS))
-GO_TOOLCHAIN := go$(GO_VERSION)
+GO_VERSION = $(word 2,$(shell git grep -h ^go[[:space:]] -- go.mod))
+GO_TOOLCHAIN = go$(GO_VERSION)
 DEADCODE_VERSION := v0.46.0
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION := v1.3.0
@@ -44,9 +40,10 @@ fmt-check:
 lint: fmt-check vet
 
 # Versioned tools select the toolchain from their own modules when invoked with
-# package@version. Parse this module's required version directly from go.mod so
-# an inherited stale GOTOOLCHAIN or a multi-module GOWORK cannot break the
-# recovery probe. The target-specific export is shell-independent.
+# package@version. Read this module's go directive directly, without invoking
+# the possibly stale Go toolchain or consulting a multi-module GOWORK. git grep
+# works with both POSIX shells and cmd.exe, including GNU Make 3.81 on macOS.
+# The target-specific export is shell-independent.
 lint-static deadcode vulncheck: export GOTOOLCHAIN = $(GO_TOOLCHAIN)
 
 lint-static:

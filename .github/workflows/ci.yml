@@ -35,6 +35,10 @@ jobs:
         shell: pwsh
         run: choco install make --no-progress -y
 
+      - name: Validate quality targets with stock macOS Make
+        if: matrix.os == 'macos-latest'
+        run: make -n vulncheck
+
       - name: Check vulnerabilities through native Windows Make
         if: matrix.os == 'windows-latest'
         shell: cmd
