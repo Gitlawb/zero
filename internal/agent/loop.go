@@ -185,6 +185,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
+	// The execution-profile posture controller. nil Options.Profile (every
+	// existing caller) makes every observe/decide call a no-op, keeping the
+	// loop byte-identical for unprofiled runs.
+	posture := newProfileController(options.Profile)
 
 	// Background post-edit diagnostics: files changed by mutating tools are
 	// checked off the tool-call critical path and any errors are appended as a
@@ -692,6 +696,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
 			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
+			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -724,7 +729,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the assistant's tool_results stay contiguous (a user message between
 		// tool_results breaks strict provider replay). nil SelfCorrect is a no-op.
 		if options.SelfCorrect != nil && len(changedFilesThisBatch) > 0 {
-			if feedback, _ := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch)); feedback != "" {
+			feedback, selfCorrectOutcome := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch))
+			posture.observeSelfCorrect(selfCorrectOutcome)
+			if feedback != "" {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
 					Content: feedback,
@@ -816,6 +823,24 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Role:    zeroruntime.MessageRoleUser,
 				Content: reminder,
 			})
+		}
+
+		// One-shot posture escalation: when an armed profile trigger fired this
+		// turn, restore the stricter knob values the profile displaced. Mutates
+		// only per-turn-read policy (the hoisted turn ceiling, reasoning effort,
+		// completion gate); never messages, model, or session. No-op forever
+		// after the first escalation and for every unprofiled run.
+		if target, fired := posture.maybeEscalate(); fired {
+			if target.MaxTurns > maxTurns {
+				maxTurns = target.MaxTurns
+			}
+			if target.ReasoningEffort != "" {
+				options.ReasoningEffort = target.ReasoningEffort
+			}
+			if target.RestoreCompletionGate {
+				options.RequireCompletionSignal = true
+			}
+			options.Trace.Counter(trace.CounterPostureEscalations, 1)
 		}
 	}
 
@@ -1338,10 +1363,23 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			result = registry.RebudgetAfterHook(call.Name, args, result)
 		}
 	}
+	// Stamp the sandbox risk classification for this EXECUTED call so run-policy
+	// observers can see the risk of an allowed mutation. Prefer the preflight
+	// decision's classification when the sandbox evaluated the call; otherwise
+	// run the same pure classifier the permission path uses. Denied/canceled
+	// results returned earlier keep the zero value.
+	executedRisk := sandbox.Risk{}
+	if preflightDecision != nil {
+		executedRisk = preflightDecision.Risk
+	} else {
+		executedRisk = sandbox.Classify(sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
+	}
+
 	// Secret scrubbing happens at the registry boundary (the single point both
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
 	return ToolResult{
+		Risk:         executedRisk,
 		ToolCallID:   call.ID,
 		Name:         call.Name,
 		Status:       result.Status,
