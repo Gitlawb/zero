@@ -8,6 +8,13 @@ stabilizes. Community participation is still welcome, especially through bug
 reports, feature requests, reproduction details, logs, and discussion on existing
 issues.
 
+Questions and setup help belong in
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions) (see
+[SUPPORT.md](SUPPORT.md)), not in the issue tracker. Feature ideas start in the
+[Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) category;
+an idea that gains traction there is also the natural path to an
+`issue-approved` issue.
+
 Please read this policy before opening a pull request. Pull requests that do not
 follow it may be closed without review.
 
