@@ -3881,3 +3881,66 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 		t.Fatal("OnUsage not forwarded when Trace is nil")
 	}
 }
+
+// TestRunSuppressesExecutableHooksInPlanMode: plan mode promises a read-only
+// turn, but hooks execute configured host commands outside the advertised-tool
+// and sandbox gates. Merely starting and finishing a plan run must therefore
+// launch no hook command at all (a marker-writing sessionStart/sessionEnd hook
+// would otherwise mutate the workspace from a "read-only" session).
+func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker-dir")
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				// A hook that mutates the filesystem when executed.
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(marker, "go.mod"), "marker"}, Enabled: true},
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "plan drafted"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+
+	if _, err := Run(context.Background(), "plan something", provider, Options{
+		SessionID:      "session-plan",
+		Cwd:            t.TempDir(),
+		ProviderName:   "test-provider",
+		Model:          "test-model",
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "hook_execution_started" {
+			t.Fatalf("hook %q executed during a plan-mode run", event.Event)
+		}
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("plan-mode run let a hook touch the filesystem: %v", statErr)
+	}
+}

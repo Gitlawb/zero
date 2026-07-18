@@ -1769,11 +1769,20 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
+// hooksSuppressed reports whether executable hooks must not run for this
+// run's permission mode. Plan and spec-draft promise a read-only turn, but
+// hooks execute configured host commands outside the advertised-tool and
+// sandbox gates — so dispatching them would let merely starting a plan
+// session or calling read_file mutate the workspace or spawn processes.
+func hooksSuppressed(options Options) bool {
+	return options.PermissionMode == PermissionModePlan || options.PermissionMode == PermissionModeSpecDraft
+}
+
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return hooks.DispatchOutcome{}, false
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1796,7 +1805,7 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 // returns any advisory output (e.g. a formatter or vet result) to surface back
 // to the model. afterTool hooks never block. A nil dispatcher is a no-op.
 func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return ""
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1820,7 +1829,7 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 // model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
 // never block the run.
 func dispatchSessionStart(ctx context.Context, options Options) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1841,7 +1850,7 @@ func dispatchSessionStart(ctx context.Context, options Options) {
 // dispatchSessionEnd runs configured sessionEnd hooks once when the agent run
 // exits, including early error returns. Lifecycle hooks are advisory.
 func dispatchSessionEnd(ctx context.Context, options Options, result Result, runErr error) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	payload := map[string]any{
