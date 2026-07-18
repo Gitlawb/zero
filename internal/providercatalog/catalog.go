@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 type Transport string
@@ -401,6 +403,17 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
+	// kimi-code's managed endpoint rejects completions that arrive without
+	// the same X-Msh-* device identity its OAuth login presented, so the
+	// descriptor carries those headers into the runtime request path via
+	// CustomHeaders. They are populated lazily here, at access time, rather
+	// than in the package-level descriptor table: the set includes a
+	// persistent device ID backed by a config-dir file, and minting/reading
+	// that file at import time would do filesystem IO in every process
+	// regardless of provider.
+	if descriptor.ID == "kimi-code" && descriptor.CustomHeaders == nil {
+		descriptor.CustomHeaders = kimiidentity.Headers()
+	}
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
 	}

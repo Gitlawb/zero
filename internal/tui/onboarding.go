@@ -784,7 +784,12 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 			if descriptor.OAuth {
 				// Headless/SSH boxes can't open a browser — use device code there
 				// by default (the user can also force it with "d" from the list).
-				if descriptor.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+				// A device-only provider (no loopback/authorization endpoint)
+				// must take this path on desktops too: the generic manager
+				// would still run the device flow, but with no UI its
+				// verification URL and user code are discarded and the
+				// "browser login" spinner just times out.
+				if descriptor.OAuthDeviceFlow && (descriptor.OAuthDeviceOnly || oauthPreferDeviceFlow()) {
 					return m.startSetupDeviceLogin(descriptor)
 				}
 				m.setup.oauthPending = true

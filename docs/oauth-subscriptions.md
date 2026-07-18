@@ -112,7 +112,8 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    This is distinct from the `moonshot` catalog entry, which is the API-key path at
    `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). To override the managed
    endpoint, set `baseURL` on the provider profile; to override the OAuth host,
-   set `ZERO_OAUTH_KIMI_ISSUER_URL`/`ZERO_OAUTH_KIMI_DEVICE_URL`/`ZERO_OAUTH_KIMI_TOKEN_URL`.
+   set `ZERO_OAUTH_KIMI_CODE_ISSUER_URL`/`ZERO_OAUTH_KIMI_CODE_DEVICE_URL`/`ZERO_OAUTH_KIMI_CODE_TOKEN_URL`
+   (the provider resolves as `kimi-code`, so the env prefix is `KIMI_CODE`).
 - **ChatGPT (Codex) — opt-in preset** — `zero auth chatgpt` opens a browser, you
   approve with your ChatGPT Plus/Pro/Business/Enterprise account, and the bearer is
   stored. The bearer routes to `https://chatgpt.com/backend-api/codex/responses`

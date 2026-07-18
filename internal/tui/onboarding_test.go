@@ -2182,3 +2182,58 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 		t.Fatalf("%s = %q after setup save, want %q (children would spawn on the stale provider)", config.ActiveProviderEnv, got, next.providerName)
 	}
 }
+
+// TestSetupEnterStartsDeviceFlowForDeviceOnlyProvider pins the first-run
+// onboarding counterpart of the /provider wizard fix: Kimi Code has no
+// loopback/authorize endpoint, so a plain desktop Enter must take the
+// device-code path (showing the verification URL and user code) instead of
+// the generic browser-login command, whose manager would run the device flow
+// with a discarded output writer and leave the spinner to time out.
+func TestSetupEnterStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	// Force a "normal desktop with a browser available" environment:
+	// oauthPreferDeviceFlow() already picks device flow on headless boxes,
+	// which would mask the bug this test exists to catch.
+	t.Setenv("ZERO_OAUTH_DEVICE", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{
+			{ID: "kimi-code", Name: "Kimi Code", RequiresAuth: true},
+			{ID: "xai", Name: "xAI", DefaultModel: "grok-4", RequiresAuth: true, EnvVar: "XAI_API_KEY"},
+		},
+	}})
+	m.width = 100
+	m.height = 30
+	m = pressSetupContinueOnce(m) // Welcome → Method
+	m.setup.selectedMethod = 0    // Sign in with OAuth
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	found := false
+	for i, p := range m.setup.providers {
+		if p.ID == "kimi-code" {
+			m.setup.selected = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("kimi-code missing from OAuth provider list: %#v", m.setup.providers)
+	}
+	if !m.setupProviderDescriptor().OAuthDeviceOnly {
+		t.Fatal("test fixture assumes kimi-code is OAuthDeviceOnly")
+	}
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.setup.oauthPending || !m.setup.oauthDevice {
+		t.Fatalf("Enter on a device-only provider should start device login (pending=%v device=%v)", m.setup.oauthPending, m.setup.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on a device-only provider should return the device-prepare command")
+	}
+}
