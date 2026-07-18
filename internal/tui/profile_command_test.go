@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -70,6 +71,74 @@ func TestProfileEffortReconciledOnModelSwitch(t *testing.T) {
 	}
 	if !m.agentOptions.Profile.Escalate.RestoreDefaultEffort {
 		t.Fatal("the profile governs the effort again, so the restore must re-arm")
+	}
+}
+
+// The direct /model path (reconcileEffortForModelSwitch, driven by the
+// target's authoritative ring) drops a KNOWN-unsupported effort — the TUI run
+// path forwards the effort unfiltered, so it must not survive. When that drop
+// voids a choice made under an active profile, the profile's effort
+// bookkeeping resets and the profile resumes governing: a later switch to a
+// supporting ring fills the profile's level again.
+func TestProfileEffortVoidedByModelSwitchDrop(t *testing.T) {
+	m := profileSwitchModel(t)
+
+	m, _ = m.handleProfileCommand("fast")
+	m, _ = m.handleEffortCommand("high")
+	if m.reasoningEffort != "high" || !m.execProfileEffortTouched {
+		t.Fatalf("setup: effort %q touched %v, want an explicit high", m.reasoningEffort, m.execProfileEffortTouched)
+	}
+
+	// Destination with no effort ring: "high" is known-unsupported, the drop
+	// fires, and the voided choice resets the profile's bookkeeping.
+	m, reset := m.reconcileEffortForModelSwitch(nil)
+	if !reset {
+		t.Fatal("a dropped preference with nothing refilled must report the reset")
+	}
+	if m.reasoningEffort != "" {
+		t.Fatalf("effort = %q, a known-unsupported level must not survive", m.reasoningEffort)
+	}
+	if m.execProfileEffortTouched || m.execProfileAppliedEffort != "" {
+		t.Fatalf("voided choice must reset the bookkeeping: touched %v applied %q", m.execProfileEffortTouched, m.execProfileAppliedEffort)
+	}
+	if m.agentOptions.Profile.Escalate.RestoreDefaultEffort {
+		t.Fatal("no profile-governed effort on this model, so the restore must be disarmed")
+	}
+	if m.execProfileName != "fast" || m.agentOptions.MaxTurns != 30 {
+		t.Fatalf("profile must stay active: name %q turns %d", m.execProfileName, m.agentOptions.MaxTurns)
+	}
+
+	// With the void cleared, a destination that supports the profile's level
+	// behaves like selecting the profile there: the fill returns.
+	ring := []modelregistry.ReasoningEffort{"low", "medium", "high"}
+	m, reset = m.reconcileEffortForModelSwitch(ring)
+	if reset {
+		t.Fatal("a refill is not a reset to auto")
+	}
+	if m.reasoningEffort != "low" || m.execProfileAppliedEffort != "low" {
+		t.Fatalf("effort = %q applied = %q, want the profile's low refilled", m.reasoningEffort, m.execProfileAppliedEffort)
+	}
+	if !m.agentOptions.Profile.Escalate.RestoreDefaultEffort {
+		t.Fatal("the profile governs the effort again, so the restore must re-arm")
+	}
+}
+
+// A touched effort the destination DOES support survives the direct /model
+// path untouched — the drop only fires for known-unsupported levels.
+func TestProfileEffortTouchedSurvivesSupportedModelSwitch(t *testing.T) {
+	m := profileSwitchModel(t)
+
+	m, _ = m.handleProfileCommand("fast")
+	m, _ = m.handleEffortCommand("high")
+	m, reset := m.reconcileEffortForModelSwitch([]modelregistry.ReasoningEffort{"low", "medium", "high"})
+	if reset {
+		t.Fatal("nothing was dropped, so no reset")
+	}
+	if m.reasoningEffort != "high" || !m.execProfileEffortTouched {
+		t.Fatalf("effort = %q touched %v, an explicit choice the destination supports must survive", m.reasoningEffort, m.execProfileEffortTouched)
+	}
+	if m.agentOptions.Profile.Escalate.RestoreDefaultEffort {
+		t.Fatal("an explicit choice keeps the restore disarmed")
 	}
 }
 

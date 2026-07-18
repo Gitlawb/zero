@@ -164,15 +164,44 @@ func (m model) setProfileEffortRestore(restore bool) model {
 	return m
 }
 
+// reconcileEffortForModelSwitch applies the effort rules for a model switch,
+// given the destination's supported ring (nil for a model with none, or one
+// the catalog does not know). First the pre-existing generic rule: a
+// KNOWN-unsupported preference is dropped — the TUI run path forwards the
+// effort to the provider unfiltered, so it must not survive the switch, for a
+// profile-touched effort exactly as for a plain one. When that drop voids a
+// choice living under an active profile (the profile's own fill or a user
+// override of it), the profile's effort bookkeeping resets so a choice that
+// no longer exists stops binding and no stale applied/restore state remains.
+// Then the profile rule: an active, untouched profile re-derives its fill for
+// the destination. The second return reports whether an unsupported
+// preference was dropped and nothing refilled (the caller's
+// "(unsupported preference reset)" display case).
+func (m model) reconcileEffortForModelSwitch(efforts []modelregistry.ReasoningEffort) (model, bool) {
+	dropped := false
+	if m.reasoningEffort != "" && !reasoningEffortAllowed(efforts, m.reasoningEffort) {
+		m.reasoningEffort = ""
+		dropped = true
+		if m.execProfileName != "" {
+			m.execProfileEffortTouched = false
+			m.execProfileAppliedEffort = ""
+			m = m.setProfileEffortRestore(false)
+		}
+	}
+	m = m.reconcileProfileAfterModelSwitch(efforts)
+	return m, dropped && m.reasoningEffort == ""
+}
+
 // reconcileProfileAfterModelSwitch re-derives an active profile's effort fill
-// for the model the session just switched to. The fill is per-model, not a
-// session preference: fast selected on a model without "low" fills nothing,
-// and switching to a model that supports it should behave exactly like
-// selecting the profile there (and the reverse switch must not keep sending a
-// level the destination does not support). An explicitly touched effort is the
-// user's choice and is never reconciled; the escalation's RestoreDefaultEffort
-// tracks whether the profile currently governs the effort.
-func (m model) reconcileProfileAfterModelSwitch() model {
+// for the model the session just switched to, whose supported ring is passed
+// in. The fill is per-model, not a session preference: fast selected on a
+// model without "low" fills nothing, and switching to a model that supports
+// it should behave exactly like selecting the profile there (and the reverse
+// switch must not keep sending a level the destination does not support). An
+// explicitly touched effort is the user's choice and is never reconciled; the
+// escalation's RestoreDefaultEffort tracks whether the profile currently
+// governs the effort.
+func (m model) reconcileProfileAfterModelSwitch(efforts []modelregistry.ReasoningEffort) model {
 	if m.execProfileName == "" || m.execProfileEffortTouched {
 		return m
 	}
@@ -181,7 +210,7 @@ func (m model) reconcileProfileAfterModelSwitch() model {
 		return m
 	}
 	want := modelregistry.ReasoningEffort(profile.ReasoningEffort)
-	supported := reasoningEffortAllowed(m.availableReasoningEfforts(), want)
+	supported := reasoningEffortAllowed(efforts, want)
 	filled := m.execProfileAppliedEffort != ""
 	switch {
 	case supported && !filled && m.reasoningEffort == "":
