@@ -1193,7 +1193,10 @@ func TestBuildTurnExecArgsIncludesExecProfile(t *testing.T) {
 }
 
 // The configured profile must reach the runner's RunContext and be stamped
-// into the result, so a profile A/B report is self-describing.
+// into the result, so a profile A/B report is self-describing. The boundary
+// canonicalizes (case/whitespace) so equivalent postures always carry the same
+// label, and rejects unknown names so a direct library caller cannot slip an
+// unvalidated profile into a report the way the CLI (parse-time check) cannot.
 func TestRunTurnBenchStampsExecProfile(t *testing.T) {
 	set := TaskSet{
 		ID:    "profile-suite",
@@ -1202,7 +1205,7 @@ func TestRunTurnBenchStampsExecProfile(t *testing.T) {
 	var gotProfile string
 	cfg := TurnBenchConfig{
 		Model:       "fake-model",
-		ExecProfile: "fast",
+		ExecProfile: " FAST ",
 		Iterations:  1,
 		Runner: func(_ context.Context, _ BenchTask, rc RunContext) TurnTaskOutcome {
 			gotProfile = rc.ExecProfile
@@ -1215,10 +1218,10 @@ func TestRunTurnBenchStampsExecProfile(t *testing.T) {
 		t.Fatalf("RunTurnBench: %v", err)
 	}
 	if gotProfile != "fast" {
-		t.Fatalf("runner RunContext.ExecProfile = %q, want fast", gotProfile)
+		t.Fatalf("runner RunContext.ExecProfile = %q, want the canonical fast", gotProfile)
 	}
 	if result.ExecProfile != "fast" {
-		t.Fatalf("result.ExecProfile = %q, want fast", result.ExecProfile)
+		t.Fatalf("result.ExecProfile = %q, want the canonical fast", result.ExecProfile)
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -1226,5 +1229,29 @@ func TestRunTurnBenchStampsExecProfile(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"execProfile":"fast"`) {
 		t.Fatal("published JSON must carry execProfile")
+	}
+}
+
+func TestRunTurnBenchRejectsUnknownExecProfile(t *testing.T) {
+	set := TaskSet{
+		ID:    "profile-suite",
+		Tasks: []BenchTask{{ID: "t1", Class: "longproc", Prompt: "p"}},
+	}
+	ran := false
+	cfg := TurnBenchConfig{
+		Model:       "fake-model",
+		ExecProfile: "blanced",
+		Iterations:  1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			ran = true
+			return TurnTaskOutcome{Passed: true, WallMs: 10, Trace: cannedTrace(10, 1, 100)}
+		},
+	}
+	_, err := RunTurnBench(context.Background(), set, cfg)
+	if err == nil || !strings.Contains(err.Error(), "unknown execution profile") {
+		t.Fatalf("err = %v, want an unknown-profile rejection", err)
+	}
+	if ran {
+		t.Fatal("nothing may run under an unknown profile")
 	}
 }

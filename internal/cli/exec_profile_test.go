@@ -55,6 +55,23 @@ func TestApplyExecProfileThoroughArmsSelfCorrect(t *testing.T) {
 	}
 }
 
+// The spec-draft path wires no self-corrector (explicit --self-correct
+// --use-spec is rejected at parse time, before profiles apply), so a profile's
+// self-correct knob is projected away under --use-spec instead of silently
+// arming a knob the draft runner ignores. The other knobs still apply.
+func TestApplyExecProfileSpecProjectsAwaySelfCorrect(t *testing.T) {
+	options := execOptions{execProfile: "thorough", useSpec: true}
+	if _, _, err := applyExecProfile(&options); err != nil {
+		t.Fatalf("applyExecProfile: %v", err)
+	}
+	if options.selfCorrect {
+		t.Fatal("thorough under --use-spec must not arm self-correct (the draft runner has none)")
+	}
+	if options.reasoningEffort != "high" {
+		t.Fatalf("reasoningEffort = %q, the profile's other knobs must still apply", options.reasoningEffort)
+	}
+}
+
 func TestApplyExecProfileUnknownIsUsageError(t *testing.T) {
 	options := execOptions{execProfile: "turbo"}
 	_, _, err := applyExecProfile(&options)

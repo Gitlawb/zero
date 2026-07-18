@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 func TestProfileCommandStatus(t *testing.T) {
@@ -161,6 +164,26 @@ func TestProfileCommandRevertLeavesCoincidingOverride(t *testing.T) {
 	}
 }
 
+// Reverting a profile whose displaced budget was zero (nothing was set before
+// it) must clear ZERO_MAX_TURNS: SetMaxTurnsEnv ignores zero, so without an
+// explicit unset, spawned sub-agents would keep the removed profile's budget.
+func TestProfileCommandRevertFromZeroClearsMaxTurnsEnv(t *testing.T) {
+	t.Setenv(config.MaxTurnsEnv, "")
+	m := model{} // MaxTurns 0: the profile displaces nothing
+
+	m, _ = m.handleProfileCommand("fast")
+	if got := os.Getenv(config.MaxTurnsEnv); got != "30" {
+		t.Fatalf("env after apply = %q, want the profile's 30", got)
+	}
+	m, _ = m.handleProfileCommand("balanced")
+	if m.agentOptions.MaxTurns != 0 {
+		t.Fatalf("MaxTurns = %d, want the displaced 0 restored", m.agentOptions.MaxTurns)
+	}
+	if got := os.Getenv(config.MaxTurnsEnv); got != "" {
+		t.Fatalf("env after revert = %q, want cleared", got)
+	}
+}
+
 // An explicit effort choice after /profile must disarm the escalation's
 // effort restore (the effort analog of the /turns pin): a mid-run escalation
 // must never clear an effort the user pinned by hand. Needs a catalog model
@@ -171,7 +194,7 @@ func TestProfileCommandExplicitEffortDisarmsRestore(t *testing.T) {
 
 	m, _ = m.handleProfileCommand("fast")
 	if m.reasoningEffort != "low" {
-		t.Skipf("model catalog does not fill low effort here (got %q); disarm path not reachable", m.reasoningEffort)
+		t.Fatalf("profile did not fill low effort for the test model: got %q", m.reasoningEffort)
 	}
 	policy := m.agentOptions.Profile
 	if policy == nil || policy.Escalate == nil || !policy.Escalate.RestoreDefaultEffort {

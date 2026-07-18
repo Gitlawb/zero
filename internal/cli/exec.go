@@ -1186,7 +1186,12 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 		options.reasoningEffort = profile.ReasoningEffort
 		effortFilled = true
 	}
-	if profile.SelfCorrect {
+	// Spec-safe projection: the spec-draft path wires no self-corrector (an
+	// explicit --self-correct --use-spec is rejected at parse time, before
+	// profiles apply), so a profile's self-correct knob is meaningless there.
+	// Project it away rather than erroring: the user asked for a thorough
+	// DRAFT, and the profile's other knobs (budget, effort) apply to it fine.
+	if profile.SelfCorrect && !options.useSpec {
 		options.selfCorrect = true
 	}
 	return profile, effortFilled, nil

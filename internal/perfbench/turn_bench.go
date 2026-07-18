@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/trace"
 )
 
@@ -213,6 +214,19 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	if cfg.Runner == nil {
 		return TurnBenchResult{}, errors.New("turn benchmark requires a runner")
 	}
+	// Canonicalize the profile once at the boundary so every consumer — the
+	// child exec args, the stamped result, the summary — carries the same
+	// catalog name regardless of the caller's casing/whitespace, and a direct
+	// library caller cannot slip an unknown name into a report the way the CLI
+	// (which validates at parse time) cannot.
+	benchProfile := strings.TrimSpace(cfg.ExecProfile)
+	if benchProfile != "" {
+		profile, ok := execprofile.Lookup(benchProfile)
+		if !ok {
+			return TurnBenchResult{}, fmt.Errorf("unknown execution profile %q (valid: %s)", cfg.ExecProfile, strings.Join(execprofile.Names(), ", "))
+		}
+		benchProfile = profile.Name
+	}
 	iterations := cfg.Iterations
 	if iterations < 1 {
 		iterations = 1
@@ -221,7 +235,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	if now == nil {
 		now = time.Now
 	}
-	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect, ExecProfile: cfg.ExecProfile}
+	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect, ExecProfile: benchProfile}
 
 	perSpanSamples := map[string][]float64{}
 	classWalls := map[string][]float64{}
@@ -251,7 +265,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 		Suite:         strings.TrimSpace(set.ID),
 		Model:         strings.TrimSpace(cfg.Model),
 		Mode:          strings.TrimSpace(cfg.Mode),
-		ExecProfile:   strings.TrimSpace(cfg.ExecProfile),
+		ExecProfile:   benchProfile,
 		SelfCorrect:   cfg.SelfCorrect,
 		Version:       strings.TrimSpace(cfg.Version),
 		Commit:        strings.TrimSpace(cfg.Commit),

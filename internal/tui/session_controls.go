@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -395,6 +396,12 @@ func (m model) revertExecProfile() model {
 		m.agentOptions.MaxTurns = m.execProfileDisplacedMaxTurns
 		if m.execProfileDisplacedMaxTurns > 0 {
 			config.SetMaxTurnsEnv(m.execProfileDisplacedMaxTurns)
+		} else {
+			// The profile's apply exported its budget to ZERO_MAX_TURNS (for
+			// sub-agents), and SetMaxTurnsEnv ignores zero — so restoring a
+			// zero displaced budget must clear the env explicitly or spawned
+			// children would keep the removed profile's budget.
+			_ = os.Unsetenv(config.MaxTurnsEnv)
 		}
 	}
 	if !m.execProfileEffortTouched && m.execProfileAppliedEffort != "" && m.reasoningEffort == m.execProfileAppliedEffort {
