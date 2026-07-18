@@ -474,7 +474,7 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 			result.LatencyOnlyTasks, result.Iterations),
 	}
 	if result.TasksErrored > 0 {
-		lines = append(lines, fmt.Sprintf("ERRORED: %d task(s) never produced an agent run (spawn/crash) — pass rates above cover only what actually ran", result.TasksErrored))
+		lines = append(lines, fmt.Sprintf("ERRORED: %d task(s) never produced an agent run (spawn/crash) — they count as FAILURES in the tier pass rates above", result.TasksErrored))
 		shown := 0
 		for _, warning := range result.Warnings {
 			if warning.Metric != "run" {
