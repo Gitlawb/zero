@@ -10,5 +10,5 @@ import (
 
 func (p *Program) checkOptimizedMovements(s *term.State) {
 	p.useHardTabs = s.Oflag&unix.TABDLY == unix.TAB0
-	p.useBackspace = s.Lflag&unix.BSDLY == unix.BS0
+	p.useBackspace = s.Oflag&unix.BSDLY == unix.BS0
 }

@@ -377,7 +377,15 @@ type model struct {
 	lastStreamActivity time.Time
 	fadeActive         bool
 	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color / reduced motion)
-	reducedMotion      bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
+	// streamClearDisabled turns off the full-redraw-on-streamed-newline
+	// workaround for terminals that render scroll regions correctly
+	// (ZERO_NO_STREAM_CLEAR=1). lastStreamClear rate-limits the redraws the
+	// workaround schedules so heavy streaming output (code, logs, diffs)
+	// coalesces to a bounded number of repaints per second instead of one
+	// per newline.
+	streamClearDisabled bool
+	lastStreamClear     time.Time
+	reducedMotion       bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
@@ -887,6 +895,12 @@ func newModel(ctx context.Context, options Options) model {
 	// Streaming text always renders statically at base ink (the disabled path in
 	// styleStreamingLine), so no accent glow and no per-line fade ticks.
 	m.fadeDisabled = true
+	// Terminals that handle scroll regions correctly can opt back into the
+	// fast incremental path; the redraw workaround (see the ClearScreen
+	// scheduling in updateModel) is otherwise on, rate-limited.
+	if v := strings.TrimSpace(os.Getenv("ZERO_NO_STREAM_CLEAR")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+		m.streamClearDisabled = true
+	}
 	// One session-long LSP manager (cheap to build — servers start lazily on the
 	// first Check), reused across prompts so gopls stays warm between turns.
 	if cwd != "" {
@@ -1991,8 +2005,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// caret's old cell when a newline moves it to a new line, leaving
 		// ghost carets behind. A newline is exactly the moment that risk
 		// exists, so force one full-screen redraw right then rather than
-		// leaving it to the incremental diff.
-		if strings.Contains(msg.delta, "\n") {
+		// leaving it to the incremental diff. Rate-limited: heavy streaming
+		// output (code, logs, diffs) would otherwise turn every coalesced
+		// newline into a full-screen repaint, a real throughput/latency cost
+		// on SSH and slow links. ~10 redraws/second is enough to keep the
+		// caret clean without dominating the write path; terminals that
+		// render scroll regions correctly can opt out entirely with
+		// ZERO_NO_STREAM_CLEAR=1.
+		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled &&
+			time.Since(m.lastStreamClear) >= 100*time.Millisecond {
+			m.lastStreamClear = time.Now()
 			cmds = append(cmds, tea.ClearScreen)
 		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg

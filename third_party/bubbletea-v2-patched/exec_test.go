@@ -50,6 +50,13 @@ type spyRenderer struct {
 	calledReset bool
 }
 
+func (s *spyRenderer) reset() {
+	s.calledReset = true
+	if s.renderer != nil {
+		s.renderer.reset()
+	}
+}
+
 func successExecCommand() *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		return exec.Command("cmd", "/c", "exit 0")
@@ -99,20 +106,25 @@ func TestTeaExec(t *testing.T) {
 				WithInput(&in),
 				WithOutput(&buf),
 			)
+			// Inject the spy BEFORE Run so it observes execution-time
+			// operations; assigning it afterwards records nothing.
+			spy := &spyRenderer{renderer: &nilRenderer{}}
+			p.renderer = spy
 			if _, err := p.Run(); err != nil {
 				t.Error(err)
 			}
-			p.renderer = &spyRenderer{renderer: p.renderer}
 
 			if m.err != nil && !test.expectErr {
 				t.Errorf("expected no error, got %v", m.err)
-
-				if !p.renderer.(*spyRenderer).calledReset {
-					t.Error("expected renderer to be reset")
-				}
 			}
 			if m.err == nil && test.expectErr {
 				t.Error("expected error, got nil")
+			}
+			// Exec hands the terminal to the child via releaseTerminal(false):
+			// the renderer must NOT be reset, or the resumed TUI would repaint
+			// from scratch instead of continuing where it left off.
+			if spy.calledReset {
+				t.Error("exec run reset the renderer; expected releaseTerminal(false) to preserve its state")
 			}
 		})
 	}

@@ -417,7 +417,7 @@ func (s *cursedRenderer) flush(closing bool) error {
 		{newColor: view.ForegroundColor, oldColor: lfg, reset: ansi.ResetForegroundColor, setter: ansi.SetForegroundColor},
 		{newColor: view.BackgroundColor, oldColor: lbg, reset: ansi.ResetBackgroundColor, setter: ansi.SetBackgroundColor},
 	} {
-		if c.newColor != c.oldColor {
+		if !colorsEqual(c.newColor, c.oldColor) {
 			if c.newColor == nil {
 				// Reset the color if it was set to nil.
 				_, _ = s.scr.WriteString(c.reset)
@@ -645,6 +645,11 @@ func (s *cursedRenderer) clearScreen() {
 	// screen redraw.
 	s.scr.MoveTo(0, 0)
 	s.scr.Erase()
+	// Invalidate the last view: without this, a render of an unchanged view
+	// short-circuits on viewEquals and the queued erase sits in the buffer
+	// until an unrelated view change (or shutdown) flushes it — exactly the
+	// reordering that leaves the ghost caret this call is meant to repair.
+	s.lastView = nil
 	s.mu.Unlock()
 }
 
@@ -736,7 +741,11 @@ func (s *cursedRenderer) insertAbove(str string) error {
 	for _, line := range lines {
 		lineWidth := ansi.StringWidth(line)
 		if w > 0 && lineWidth > w {
-			offset += (lineWidth / w)
+			// Rows beyond the first: ceil(lineWidth/w) - 1. Plain
+			// lineWidth/w over-counts an exact multiple (a 160-cell line in
+			// an 80-column terminal needs one extra row, not two), leaving
+			// blank lines in unmanaged output.
+			offset += (lineWidth - 1) / w
 		}
 	}
 
@@ -808,6 +817,19 @@ func setProgressBar(s *cursedRenderer, pb *ProgressBar) {
 	}
 }
 
+// colorsEqual compares two possibly-nil color.Color values by normalized
+// RGBA. Direct interface equality (==) panics when a caller supplies a
+// non-comparable implementation and treats equal colors held in different
+// concrete types as different.
+func colorsEqual(a, b color.Color) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ar, ag, ab, aa := a.RGBA()
+	br, bg, bb, ba := b.RGBA()
+	return ar == br && ag == bg && ab == bb && aa == ba
+}
+
 func viewEquals(a, b *View) bool {
 	if a == nil || b == nil {
 		return false
@@ -819,8 +841,8 @@ func viewEquals(a, b *View) bool {
 		a.ReportFocus != b.ReportFocus ||
 		a.MouseMode != b.MouseMode ||
 		a.WindowTitle != b.WindowTitle ||
-		a.ForegroundColor != b.ForegroundColor ||
-		a.BackgroundColor != b.BackgroundColor ||
+		!colorsEqual(a.ForegroundColor, b.ForegroundColor) ||
+		!colorsEqual(a.BackgroundColor, b.BackgroundColor) ||
 		a.KeyboardEnhancements != b.KeyboardEnhancements {
 		return false
 	}
@@ -833,7 +855,7 @@ func viewEquals(a, b *View) bool {
 			a.Cursor.Y != b.Cursor.Y ||
 			a.Cursor.Shape != b.Cursor.Shape ||
 			a.Cursor.Blink != b.Cursor.Blink ||
-			a.Cursor.Color != b.Cursor.Color {
+			!colorsEqual(a.Cursor.Color, b.Cursor.Color) {
 			return false
 		}
 	}

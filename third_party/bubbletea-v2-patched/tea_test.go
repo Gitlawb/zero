@@ -252,14 +252,25 @@ func testTeaWithFilter(t *testing.T, preventCount uint32) {
 		return msg
 	}
 
+	// The loop condition alone never turns false (shutdowns stays equal to
+	// preventCount after the final accepted Quit), so tie the goroutine to a
+	// channel closed when Run returns instead of leaking it until process
+	// exit.
+	done := make(chan struct{})
 	go func() {
 		for atomic.LoadUint32(&shutdowns) <= preventCount {
-			time.Sleep(time.Millisecond)
+			select {
+			case <-done:
+				return
+			case <-time.After(time.Millisecond):
+			}
 			p.Quit()
 		}
 	}()
 
-	if _, err := p.Run(); err != nil {
+	_, err := p.Run()
+	close(done)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if shutdowns != preventCount {
