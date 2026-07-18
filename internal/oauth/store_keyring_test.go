@@ -373,11 +373,12 @@ func TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 				t.Fatalf("failAt=%d: Load(%s) after reconcile: ok=%v err=%v", failAt, name, ok, err)
 			}
 		}
-		// saveErr itself is not asserted: most boundaries surface the injected
-		// failure, but the final legacy-entry delete is deliberately
-		// best-effort, so its failure is swallowed by design. The invariant
-		// and the reconcile above are the actual contract.
-		_ = saveErr
+		// Every mutating boundary of the write path now surfaces its failure,
+		// including the legacy-entry delete (a swallowed failure there could
+		// let a later save resurrect logged-out credentials).
+		if opsUsed >= failAt && saveErr == nil {
+			t.Fatalf("failAt=%d: injected keyring failure was swallowed", failAt)
+		}
 		if opsUsed < failAt {
 			// The write used fewer mutating ops than failAt, so the injection
 			// never fired and every boundary has been covered.
@@ -802,5 +803,85 @@ func TestKeyringFallbackLockPathIsPerUser(t *testing.T) {
 		}
 	} else if name == "" {
 		t.Fatal("temp lock name is empty")
+	}
+}
+
+// legacyDeleteFailKR fails Delete for the legacy combined entry only, to
+// exercise the boundary where a logout has already rewritten the indexed
+// state but the stale legacy blob cannot be removed.
+type legacyDeleteFailKR struct {
+	*fakeKR
+	fail bool
+}
+
+func (f *legacyDeleteFailKR) Delete(service, account string) (bool, error) {
+	if f.fail && account == keyringLegacyAccount {
+		return false, errKRInjected
+	}
+	return f.fakeKR.Delete(service, account)
+}
+
+// TestStoreKeyringLogoutSurfacesLegacyBlobDeleteFailure: when the final
+// legacy-blob delete fails during a logout, the operation must report the
+// failure (not success with the secret still resident), and after a clean
+// retry the logged-out credential must not be resurrected by a later save.
+func TestStoreKeyringLogoutSurfacesLegacyBlobDeleteFailure(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := &legacyDeleteFailKR{fakeKR: newFakeKR()}
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	// A leftover legacy blob still carries alpha (e.g. written by an old
+	// binary during the upgrade window).
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "stale-a"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	kr.fail = true
+	if _, err := s.Delete(ProviderKey("alpha")); err == nil {
+		t.Fatal("Delete reported success although the stale legacy blob could not be removed")
+	}
+
+	// A clean retry succeeds, and a later save must not classify the stale
+	// legacy alpha as a fresh old-binary login.
+	kr.fail = false
+	if _, err := s.Delete(ProviderKey("alpha")); err != nil {
+		t.Fatalf("retried Delete: %v", err)
+	}
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || ok {
+		t.Fatalf("logged-out credential resurrected: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestStoreKeyringWriteIndexRejectsOverCapChunks: writeKeyIndex must refuse
+// to publish an index header that readKeyIndex would reject, instead of
+// persisting a store no later operation can open.
+func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+	// Each key exceeds the per-chunk byte budget on its own, forcing one
+	// chunk per key.
+	long := strings.Repeat("k", maxKeyringIndexChunkBytes)
+	keys := make([]string, maxKeyringIndexChunks+1)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("%s-%d", long, i)
+	}
+	if _, err := b.writeKeyIndex(keys, 0); err == nil {
+		t.Fatal("writeKeyIndex published an index readKeyIndex would refuse")
+	}
+	if len(kr.data) != 0 {
+		t.Fatalf("over-cap index write must publish nothing, found %d entries", len(kr.data))
 	}
 }

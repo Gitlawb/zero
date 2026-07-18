@@ -668,7 +668,9 @@ func legacyIsFresher(legacy, current Token) bool {
 // or skips them once it is gone) or entries that a later read/write can still
 // see and reconcile, never an invisible credential stranded in the OS keychain.
 // The legacy combined entry is the durable fallback for the initial migration
-// and is deleted only as the final step, after every per-key entry is written.
+// and is deleted only after every per-key entry is written, while the union
+// index still lists removed keys; a failure of that delete is returned so a
+// logout is never reported successful with the stale blob still resident.
 func (b keyringBlob) write(data []byte) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -756,13 +758,19 @@ func (b keyringBlob) write(data []byte) error {
 			}
 		}
 	}
-	// 4. Shrink the index to the exact new key set.
+	// 4. Drop the legacy entry: the index now exists and is authoritative,
+	// and its fresh writes were merged above. This must happen while the
+	// union index still lists any removed keys and its failure must surface:
+	// if a stale legacy blob survived a logout whose index shrink already
+	// completed, the next save would classify its keys as fresh old-binary
+	// logins and silently resurrect the logged-out credential.
+	if _, err := b.kr.Delete(b.service, b.legacyAccount); err != nil {
+		return err
+	}
+	// 5. Shrink the index to the exact new key set.
 	if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
 		return err
 	}
-	// The index now exists and is authoritative; drop the legacy entry so a
-	// future read never falls back to it (its fresh writes were merged above).
-	_, _ = b.kr.Delete(b.service, b.legacyAccount)
 	return nil
 }
 
@@ -863,6 +871,12 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 // chunk is never read).
 func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) {
 	chunks := chunkIndexKeys(keys)
+	// Refuse to publish an index the reader would reject: readKeyIndex caps
+	// headers at maxKeyringIndexChunks, and a header beyond it would make
+	// every later Load/Status/Save/Delete fail before it could recover.
+	if len(chunks) > maxKeyringIndexChunks {
+		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunks), maxKeyringIndexChunks)
+	}
 	for i := 1; i < len(chunks); i++ {
 		chunkData, err := json.Marshal(chunks[i])
 		if err != nil {
