@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -530,14 +531,15 @@ func TestRunTurnBenchBuildOnlyMechanism(t *testing.T) {
 	}
 }
 
-// TestTurnSchemaVersion3 pins the schema bump. v3 records the tier
-// reclassification (refactor structural-positive and nav answer-oracles moved
-// into correctnessPassRate), so a v2->v3 cross-version comparison cannot
-// silently misread the jump as a model improvement — exactly the misread the
-// tier system exists to prevent.
-func TestTurnSchemaVersion3(t *testing.T) {
-	if TurnSchemaVersion != 3 {
-		t.Fatalf("TurnSchemaVersion = %d, want 3", TurnSchemaVersion)
+// TestTurnSchemaVersion pins the schema bump so a shape change is a conscious
+// decision. v3 recorded the tier reclassification (refactor structural-positive
+// and nav answer-oracles moved into correctnessPassRate). v4 adds tasksErrored:
+// tasks whose every iteration died before the agent produced a run are now
+// first-class in the report instead of visible only in warnings, so a
+// spawn-broken run cannot print a clean-looking summary or exit 0.
+func TestTurnSchemaVersion(t *testing.T) {
+	if TurnSchemaVersion != 4 {
+		t.Fatalf("TurnSchemaVersion = %d, want 4", TurnSchemaVersion)
 	}
 }
 
@@ -1066,4 +1068,96 @@ func TestNav08CountOracleRejectsFmtOnlyNoTesting(t *testing.T) {
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-08 fmt-only-no-testing", outcome)
+}
+
+func TestResolveBinaryAbsolutizesExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	name := "zero-probe.exe"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	resolved, err := ResolveBinary("./" + name)
+	if err != nil {
+		t.Fatalf("ResolveBinary: %v", err)
+	}
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("ResolveBinary returned relative path %q; the turn runner sets cmd.Dir per task, so a relative binary fails to spawn from every fixture copy", resolved)
+	}
+}
+
+func TestRunTurnBenchCountsErroredTasks(t *testing.T) {
+	set := TaskSet{
+		ID: "errored-suite",
+		Tasks: []BenchTask{
+			{ID: "t1", Class: "nav", Prompt: "p1", VerificationCommand: []string{"true"}},
+			{ID: "t2", Class: "longproc", Prompt: "p2"},
+		},
+	}
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			return TurnTaskOutcome{Err: errors.New("fork/exec ./zero: file does not exist")}
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 2 {
+		t.Fatalf("TasksErrored=%d, want 2 (every iteration of both tasks errored)", result.TasksErrored)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings=%d, want 2 run warnings", len(result.Warnings))
+	}
+	summary := FormatTurnBenchSummary(result)
+	if !strings.Contains(summary, "ERRORED: 2 task(s)") {
+		t.Fatalf("summary does not surface the errored tasks:\n%s", summary)
+	}
+	if !strings.Contains(summary, "fork/exec ./zero") {
+		t.Fatalf("summary does not echo the underlying run error:\n%s", summary)
+	}
+}
+
+func TestRunTurnBenchPartialErrorStillCounts(t *testing.T) {
+	set := TaskSet{
+		ID: "partial-suite",
+		Tasks: []BenchTask{
+			{ID: "ok", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+			{ID: "dead", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+		},
+	}
+	canned := map[string]*trace.TurnTrace{"ok": cannedTrace(100, 10, 1000)}
+	inner := fakeTurnRunner(canned)
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+			if task.ID == "dead" {
+				return TurnTaskOutcome{Err: errors.New("spawn failed")}
+			}
+			return inner(ctx, task, rc)
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 1 {
+		t.Fatalf("TasksErrored=%d, want 1", result.TasksErrored)
+	}
+	if result.TasksAttempted != 2 {
+		t.Fatalf("TasksAttempted=%d, want 2", result.TasksAttempted)
+	}
 }
