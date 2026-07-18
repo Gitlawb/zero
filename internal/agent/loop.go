@@ -1371,7 +1371,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	executedRisk := sandbox.Risk{}
 	if preflightDecision != nil {
 		executedRisk = preflightDecision.Risk
-	} else {
+	} else if toolFound {
+		// Unknown-tool results fall through here with a nil tool; they carry a
+		// denial and keep the zero risk value.
 		executedRisk = sandbox.Classify(sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
 	}
 
