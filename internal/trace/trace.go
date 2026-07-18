@@ -57,6 +57,11 @@ const (
 	CounterPrewarmAttempts   = "prewarm_attempts"
 	CounterPrefixStable      = "prefix_stable"
 	CounterPrefixDrift       = "prefix_drift"
+	// CounterPostureEscalations counts one-shot in-run posture escalations by
+	// the execution-profile controller. Deliberately distinct from
+	// model_switches: a posture escalation changes loop policy knobs, never the
+	// model or session.
+	CounterPostureEscalations = "posture_escalations"
 )
 
 // Span is one named wall interval attributed to part of a run. Each stamp is
@@ -289,6 +294,7 @@ func OptionalEventKeys() []string {
 		"counter:" + CounterPrewarmAttempts,
 		"counter:" + CounterPrefixStable,
 		"counter:" + CounterPrefixDrift,
+		"counter:" + CounterPostureEscalations,
 		"event:prefix_hash",
 	}
 }
