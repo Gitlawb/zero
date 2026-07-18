@@ -226,8 +226,10 @@ func TestExecuteToolCallClassifiesRiskWithoutSandbox(t *testing.T) {
 	}
 }
 
-// TestDeniedToolResultCarriesZeroRisk verifies denial paths keep the zero value.
-func TestDeniedToolResultCarriesZeroRisk(t *testing.T) {
+// TestUnknownToolResultCarriesZeroRisk verifies a call that never executed a
+// tool (unknown name, nil tool) keeps the zero risk value instead of panicking
+// or inventing a classification.
+func TestUnknownToolResultCarriesZeroRisk(t *testing.T) {
 	registry := tools.NewRegistry()
 	result, abortErr := executeToolCall(
 		context.Background(),
@@ -239,10 +241,10 @@ func TestDeniedToolResultCarriesZeroRisk(t *testing.T) {
 	if abortErr != nil {
 		t.Fatal(abortErr)
 	}
-	if result.DenialReason == DenialNone {
-		t.Fatal("expected a denial for an unknown tool")
+	if result.Status == tools.StatusOK {
+		t.Fatal("expected an error result for an unknown tool")
 	}
 	if result.Risk.Level != "" {
-		t.Fatalf("denied result must keep the zero risk value, got %q", result.Risk.Level)
+		t.Fatalf("not-executed result must keep the zero risk value, got %q", result.Risk.Level)
 	}
 }
