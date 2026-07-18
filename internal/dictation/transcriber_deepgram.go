@@ -3,6 +3,7 @@ package dictation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -100,6 +101,12 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 					err = werr
 				}
 			default:
+			}
+			// A user abort cancels the streaming context; the UI matches it
+			// with errors.Is(err, context.Canceled), so return the sentinel
+			// itself (it carries no key) instead of a flat redacted string.
+			if errors.Is(err, context.Canceled) {
+				return compose(), ctx.Err()
 			}
 			return compose(), fmt.Errorf("Deepgram stream error: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 		}
