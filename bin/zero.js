@@ -127,6 +127,31 @@ if (!nativePath) {
   const argv = process.argv.slice(2);
   const isDoctor = argv.length > 0 && argv[0] === 'doctor';
   if (isDoctor) {
+    if (argv.includes('--json')) {
+      process.stdout.write(
+        JSON.stringify(
+          {
+            generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+            ok: false,
+            checks: [
+              {
+                id: 'runtime.go',
+                label: 'Go runtime',
+                status: 'fail',
+                message: 'Native zero binary is missing next to the npm wrapper.',
+                details: {
+                  remedy: `node "${postinstallScript}"`,
+                },
+              },
+            ],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      process.exit(1);
+    }
+
     console.error(
       'Zero doctor report (' +
         new Date().toISOString() +

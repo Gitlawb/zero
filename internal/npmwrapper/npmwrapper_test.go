@@ -448,6 +448,67 @@ func TestNodeWrapperDoctorReportsMissingNativeBinaryAsDoctorFail(t *testing.T) {
 	}
 }
 
+func TestNodeWrapperDoctorJSONReportsMissingNativeBinaryAsJSONFail(t *testing.T) {
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor", "--json")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out: %v; stdout: %s stderr: %s", ctx.Err(), stdout.String(), stderr.String())
+	}
+	if err == nil {
+		t.Fatalf("doctor --json should not exit 0 when the native binary is missing: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("doctor --json err = %v, want exit 1; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Fatalf("doctor --json should write machine-readable output to stdout only, got stderr=%q", stderr.String())
+	}
+	var report struct {
+		GeneratedAt string `json:"generatedAt"`
+		OK          bool   `json:"ok"`
+		Checks      []struct {
+			ID      string         `json:"id"`
+			Label   string         `json:"label"`
+			Status  string         `json:"status"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &report); err != nil {
+		t.Fatalf("doctor --json stdout should be valid JSON, got %q: %v", stdout.String(), err)
+	}
+	if report.GeneratedAt == "" {
+		t.Fatalf("doctor --json report should include generatedAt: %#v", report)
+	}
+	if report.OK {
+		t.Fatalf("doctor --json ok = true, want false: %#v", report)
+	}
+	if len(report.Checks) != 1 {
+		t.Fatalf("doctor --json checks length = %d, want 1: %#v", len(report.Checks), report.Checks)
+	}
+	check := report.Checks[0]
+	if check.ID != "runtime.go" || check.Label != "Go runtime" || check.Status != "fail" {
+		t.Fatalf("doctor --json runtime check = %#v, want failing runtime.go check", check)
+	}
+	if !strings.Contains(check.Message, "Native zero binary is missing next to the npm wrapper") {
+		t.Fatalf("doctor --json must name the actual cause, got %#v", check)
+	}
+	remedy, _ := check.Details["remedy"].(string)
+	if !strings.Contains(remedy, "postinstall.mjs") {
+		t.Fatalf("doctor --json remedy should name the postinstall script, got %#v", check.Details)
+	}
+}
+
 // `doctor --connectivity` (a real doctor invocation with a trailing flag) must
 // take the same doctor-shaped path: the doctor branch matches the literal
 // subcommand and forwards the rest of argv verbatim, the way the spawn path
