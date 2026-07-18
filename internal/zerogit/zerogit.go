@@ -627,7 +627,10 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
 	defer cancel()
-	if out, err := gitOutput(lookupCtx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
+	// "--" terminates option parsing: remote comes from --remote/branch config,
+	// and a value like "--upload-pack=/bin/echo" must reach Git as a positional
+	// argument, never as an option.
+	if out, err := gitOutput(lookupCtx, runGit, dir, "ls-remote", "--symref", "--", remote, "HEAD"); err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
@@ -635,6 +638,15 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 				symref = strings.TrimSuffix(symref, "\tHEAD")
 				return branch == symref, nil
 			}
+		}
+		if strings.TrimSpace(out) == "" {
+			// The remote answered and has no refs at all: it is unborn (a
+			// freshly created empty repository). It cannot have a protected
+			// default branch yet, and `git remote set-head --auto` cannot
+			// record one, so the fail-closed error below would make the very
+			// first feature-branch push a dead end. A non-default first push
+			// is safe; main/master were already caught above.
+			return false, nil
 		}
 	}
 	// The remote lookup failed (unreachable, slow, or gave no symref): the
@@ -715,6 +727,11 @@ type BranchOptions struct {
 	Name   string // full branch name, e.g. "alice/fix-typo"
 	DryRun bool
 	RunGit Runner
+	// Remote, when non-empty, is the remote the new branch will be pushed
+	// to; its branch names are treated as taken when resolving collisions,
+	// so a remote-only stale branch (e.g. an old merged PR) is never
+	// fast-forwarded with unrelated new work.
+	Remote string
 }
 
 // BranchResult reports the branch that was (or, in dry-run, would be) created.
@@ -753,13 +770,35 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 	// commit behind on the default branch. Pick a unique suffixed name off
 	// the current HEAD instead, and fail visibly when the namespace is
 	// exhausted rather than guess.
+	//
+	// Local refs are not enough: a branch that exists only on the target
+	// remote (an old merged-PR branch, or one pruned locally) would be
+	// silently fast-forwarded by the later `push -u`, appending the new work
+	// to an unrelated remote branch. Probe the remote's heads once, bounded,
+	// and fail visibly when the remote cannot be consulted — the push that
+	// follows would need the same connectivity anyway.
+	remoteTaken := map[string]bool{}
+	if remote := strings.TrimSpace(options.Remote); remote != "" {
+		lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
+		defer cancel()
+		out, err := gitOutput(lookupCtx, runGit, root, "ls-remote", "--heads", "--", remote)
+		if err != nil {
+			return BranchResult{}, fmt.Errorf("cannot check branch names against remote %q: %w", remote, err)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if _, ref, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+				remoteTaken[strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")] = true
+			}
+		}
+	}
 	base := name
 	for suffix := 2; ; suffix++ {
-		if _, err := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name); err != nil {
+		_, localErr := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+		if localErr != nil && !remoteTaken[name] {
 			break
 		}
 		if suffix > 9 {
-			return BranchResult{}, fmt.Errorf("branch %q already exists (as do %s-2 through %s-9); delete the stale branches or create one explicitly with `git checkout -b`", base, base, base)
+			return BranchResult{}, fmt.Errorf("branch %q already exists locally or on the remote (as do %s-2 through %s-9); delete the stale branches or create one explicitly with `git checkout -b`", base, base, base)
 		}
 		name = fmt.Sprintf("%s-%d", base, suffix)
 	}

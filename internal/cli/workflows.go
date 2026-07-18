@@ -1197,7 +1197,7 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	}
 
 	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
-	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name})
+	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create branch: %w", err)
 	}

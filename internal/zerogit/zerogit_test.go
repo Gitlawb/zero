@@ -928,7 +928,7 @@ func TestIsDefaultBranch(t *testing.T) {
 		if isDefault || branch != "feat/some-feature" || remote != "upstream" {
 			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
 		}
-		if got := runner.commandLine(2); got != "git ls-remote --symref upstream HEAD" {
+		if got := runner.commandLine(2); got != "git ls-remote --symref -- upstream HEAD" {
 			t.Fatalf("expected lookup against the resolved remote, got %q", got)
 		}
 	})
@@ -1106,5 +1106,105 @@ func TestBuildBranchName(t *testing.T) {
 	}
 	if got := BuildBranchName("", ""); got != "user/changes" {
 		t.Fatalf("BuildBranchName with empty inputs = %q, want %q", got, "user/changes")
+	}
+}
+
+func TestIsDefaultBranchTerminatesOptionsBeforeRemote(t *testing.T) {
+	// A remote value that looks like a Git option (from --remote or branch
+	// config) must reach ls-remote as a positional argument after "--",
+	// never be parsed as an option such as --upload-pack.
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"},
+	}}
+
+	_, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		Cwd:    root,
+		Branch: "feature",
+		Remote: "--upload-pack=/bin/echo",
+		RunGit: runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("IsDefaultBranch returned error: %v", err)
+	}
+	if got := runner.commandLine(1); got != "git ls-remote --symref -- --upload-pack=/bin/echo HEAD" {
+		t.Fatalf("remote was not terminated with --: %q", got)
+	}
+}
+
+func TestIsDefaultBranchAllowsFirstPushToUnbornRemote(t *testing.T) {
+	// A freshly created empty remote has no refs, so ls-remote succeeds with
+	// empty output and `git remote set-head --auto` cannot record a default.
+	// The guard must not turn the very first feature-branch push into a
+	// --yes dead end; main/master stay protected by the name heuristic.
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "\n"}, // ls-remote --symref: remote answered, zero refs
+	}}
+
+	isDefault, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		Cwd:    root,
+		Branch: "alice/first-work",
+		Remote: "origin",
+		RunGit: runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("IsDefaultBranch on an unborn remote: %v", err)
+	}
+	if isDefault {
+		t.Fatal("feature branch on an unborn remote reported as default")
+	}
+}
+
+func TestCreateBranchAvoidsRemoteOnlyCollision(t *testing.T) {
+	// A branch that exists only on the target remote (an old merged-PR
+	// branch pruned locally) must count as taken: `push -u` would otherwise
+	// silently fast-forward it with unrelated new work.
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "abc123\trefs/heads/alice/fix-typo\nqrs789\trefs/heads/other\n"}, // ls-remote --heads
+		{ExitCode: 1}, // rev-parse: alice/fix-typo not local, but remote-taken
+		{ExitCode: 1}, // rev-parse: alice/fix-typo-2 free locally
+		{Stdout: "Switched to a new branch 'alice/fix-typo-2'\n"},
+	}}
+
+	result, err := CreateBranch(context.Background(), BranchOptions{
+		Cwd:    root,
+		Name:   "alice/fix-typo",
+		Remote: "origin",
+		RunGit: runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("CreateBranch returned error: %v", err)
+	}
+	if result.Branch != "alice/fix-typo-2" {
+		t.Fatalf("unexpected branch: %#v", result)
+	}
+	if got := runner.commandLine(1); got != "git ls-remote --heads -- origin" {
+		t.Fatalf("unexpected remote probe: %q", got)
+	}
+}
+
+func TestCreateBranchFailsWhenRemoteProbeFails(t *testing.T) {
+	// When the target remote cannot be consulted, fail visibly instead of
+	// risking a push onto an unseen remote-only branch; the push itself
+	// would need the same connectivity anyway.
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{ExitCode: 128, Stderr: "fatal: unable to access"}, // ls-remote --heads fails
+	}}
+
+	_, err := CreateBranch(context.Background(), BranchOptions{
+		Cwd:    root,
+		Name:   "alice/fix-typo",
+		Remote: "origin",
+		RunGit: runner.Run,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the remote probe fails")
 	}
 }
