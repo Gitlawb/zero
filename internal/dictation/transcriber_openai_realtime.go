@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -113,6 +114,12 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 					err = werr
 				}
 			default:
+			}
+			// A user abort cancels the streaming context; the UI matches it
+			// with errors.Is(err, context.Canceled), so return the sentinel
+			// itself (it carries no key) instead of a flat redacted string.
+			if errors.Is(err, context.Canceled) {
+				return compose(), ctx.Err()
 			}
 			return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 		}
