@@ -85,6 +85,10 @@ type RunContext struct {
 	Model       string
 	Mode        string
 	SelfCorrect bool
+	// ExecProfile, when non-empty, is forwarded to the agent invocation as
+	// --exec-profile (turn benchmark runner; the task benchmark leaves it
+	// empty).
+	ExecProfile string
 }
 
 // TaskRunner runs a single benchmark task and returns its outcome.

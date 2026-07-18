@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/errhint"
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -69,7 +70,14 @@ type execOptions struct {
 	// intentionally inert: nothing consumes it. Model selection is driven by
 	// --model / --mode instead. See writeExecHelp ("Accept legacy model profile
 	// selection") and TestRunExecAcceptsLegacyModelProfileFlags.
-	modelProfile          string
+	modelProfile string
+	// execProfile selects a named execution profile (balanced, fast, thorough):
+	// a loop-posture bundle (turn budget, reasoning effort, self-correction,
+	// escalation triggers) applied AFTER --mode with the same
+	// fill-only-if-unset rule, so precedence is explicit flag > mode > profile.
+	// Distinct from the mode preset also named "fast" (which picks a model) and
+	// from the legacy inert --profile above. See internal/execprofile.
+	execProfile           string
 	reasoningEffort       string
 	useSpec               bool
 	specModel             string
@@ -165,6 +173,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// notice) path as an explicit --model. Explicit flags still win: applyExecMode
 	// only fills fields the caller left unset.
 	if err := applyExecMode(&options); err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	// A profile tunes loop posture the way a mode tunes model selection, and
+	// runs after it so the mode's fills count as "set" and win. MaxTurns is
+	// deferred to config resolution below, where the displaced resolved budget
+	// is known and becomes the escalation restore target.
+	execProfile, err := applyExecProfile(&options)
+	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
@@ -272,6 +288,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	var displacedMaxTurns int
+	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -528,7 +546,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	var traceRecorder *trace.Recorder
 	var traceSnapshot *trace.TurnTrace
 	if tracePath != "" {
-		traceRecorder = trace.NewRecorder(preparedSession.Session.SessionID, runID, "")
+		traceRecorder = trace.NewRecorder(preparedSession.Session.SessionID, runID, execProfile.Name)
 		defer func() {
 			if err := writeTraceSnapshot(traceSnapshot, tracePath, stderr); err != nil {
 				fmt.Fprintf(stderr, "[zero] failed to write trace: %s\n", err)
@@ -627,6 +645,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Autonomy:             options.autonomy,
 		SelfCorrect:          selfCorrector,
 		FileDiagnostics:      fileDiagnostics,
+		Profile:              execProfile.Policy(displacedMaxTurns),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -1131,6 +1150,47 @@ func applyExecMode(options *execOptions) error {
 		options.disabledTools = append([]string{}, mode.DisabledTools...)
 	}
 	return nil
+}
+
+// applyExecProfile expands an --exec-profile selection onto the exec options.
+// Like applyExecMode it only fills fields the caller left unset, and it runs
+// AFTER the mode so a mode-filled field counts as set: precedence is explicit
+// flag > --mode > --exec-profile. Only the options-level knobs are applied here
+// (reasoning effort still flows through the model-supported gating downstream;
+// self-correct is presence-only so a profile can only turn it on). MaxTurns is
+// intentionally NOT applied here — the profile displaces the resolved budget
+// after config resolution, where the displaced value is known and becomes the
+// escalation restore target. An unknown profile is a usage error listing the
+// valid names. Not to be confused with the legacy inert --profile flag.
+func applyExecProfile(options *execOptions) (execprofile.Profile, error) {
+	name := strings.TrimSpace(options.execProfile)
+	if name == "" {
+		return execprofile.Profile{}, nil
+	}
+	profile, ok := execprofile.Lookup(name)
+	if !ok {
+		return execprofile.Profile{}, execUsageError{fmt.Sprintf("unknown execution profile %q. Valid profiles: %s.", options.execProfile, strings.Join(execprofile.Names(), ", "))}
+	}
+	if options.reasoningEffort == "" && profile.ReasoningEffort != "" {
+		options.reasoningEffort = profile.ReasoningEffort
+	}
+	if profile.SelfCorrect {
+		options.selfCorrect = true
+	}
+	return profile, nil
+}
+
+// applyProfileTurnBudget decides the run's turn budget once config is resolved.
+// The profile displaces the RESOLVED value, not the flag: an explicit
+// --max-turns (or a mode preset, which fills the same options field) always
+// wins and the profile backs off entirely, while an env/config budget is the
+// "balanced posture" a mid-run escalation can restore. displaced is 0 when
+// nothing was displaced, so an escalation leaves the ceiling untouched.
+func applyProfileTurnBudget(profile execprofile.Profile, explicitMaxTurns int, resolvedMaxTurns int) (effective int, displaced int) {
+	if profile.MaxTurns > 0 && explicitMaxTurns == 0 {
+		return profile.MaxTurns, resolvedMaxTurns
+	}
+	return resolvedMaxTurns, 0
 }
 
 // resolveSelectedModel routes a user-supplied --model value through the model

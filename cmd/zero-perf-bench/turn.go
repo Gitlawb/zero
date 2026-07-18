@@ -20,6 +20,7 @@ type turnOptions struct {
 	SuitePath   string
 	Model       string
 	Mode        string
+	ExecProfile string
 	SelfCorrect bool
 	Binary      string
 	Iterations  int
@@ -64,6 +65,7 @@ func runTurnCommand(args []string, getenv func(string) string, stdout io.Writer,
 	result, err := perfbench.RunTurnBench(context.Background(), set, perfbench.TurnBenchConfig{
 		Model:       options.Model,
 		Mode:        options.Mode,
+		ExecProfile: options.ExecProfile,
 		SelfCorrect: options.SelfCorrect,
 		Version:     options.Version,
 		Commit:      options.Commit,
@@ -136,6 +138,13 @@ func parseTurnArgs(args []string, getenv func(string) string) (turnOptions, erro
 				return options, err
 			}
 			options.Mode = value
+			index = next
+		case "--exec-profile":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, err
+			}
+			options.ExecProfile = value
 			index = next
 		case "--binary":
 			value, next, err := readOptionValue(args, inlineValue, index, flag)
@@ -239,6 +248,9 @@ func turnHelpText() string {
 		"  --suite <path>      Task set JSON file (required)",
 		"  --model <model>     Model to run (required unless --dry-run)",
 		"  --mode <name>       Exec mode preset to apply",
+		"  --exec-profile <name>",
+		"                      Execution profile for every task (fast|balanced|thorough);",
+		"                      forwarded to zero exec and stamped into the result",
 		"  --self-correct      Enable the post-edit verify-and-correct loop",
 		"  --binary <path>     Path to the `zero` binary (default: zero on PATH / repo root)",
 		"  --iterations <n>    Times to run each task (default: 1)",

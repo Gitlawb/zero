@@ -41,6 +41,7 @@ const (
 	commandAddDir
 	commandSelfCorrect
 	commandTurns
+	commandProfile
 	commandRetry
 	commandEdit
 	commandCopy
@@ -285,6 +286,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or set the per-run tool-turn budget for this session (raise it for long multi-step tasks).",
 		kind:        commandTurns,
+	},
+	{
+		name:        "/profile",
+		usage:       "/profile [status|balanced|fast|thorough]",
+		group:       commandGroupSession,
+		description: "Show or switch the execution profile for the next run (loop posture: turn budget, effort, self-correction, escalation; model selection is unchanged).",
+		kind:        commandProfile,
 	},
 	{
 		name:        "/retry",

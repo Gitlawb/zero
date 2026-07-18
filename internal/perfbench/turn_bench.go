@@ -52,7 +52,13 @@ import (
 // attempted task errored. Accounting: an errored oracle task stays in its
 // tier denominator as a failure; an errored latency-only task counts in
 // latencyOnlyTasks and, as always, in no pass rate.
-const TurnSchemaVersion = 4
+//
+// v5 is ADDITIVE ONLY: execProfile records the execution profile the run was
+// benchmarked under (omitted when none was selected), so profile A/B captures
+// are self-describing and two reports can't be compared without noticing they
+// ran different postures. No existing field changed shape or meaning; a v4
+// consumer reading a v5 report misses only the new field.
+const TurnSchemaVersion = 5
 
 // TurnRunner runs one benchmark task and reports its outcome plus the captured
 // per-turn trace. A non-nil Err means the run failed to execute (process crash);
@@ -79,6 +85,10 @@ type TurnBenchConfig struct {
 	Model       string
 	Mode        string
 	SelfCorrect bool
+	// ExecProfile, when non-empty, runs every task under the named execution
+	// profile (zero exec --exec-profile) and stamps it into the result so the
+	// report is self-describing for profile A/B comparisons.
+	ExecProfile string
 	Version     string
 	Commit      string
 	// Iterations is how many times each task is run. The per-process `zero exec`
@@ -151,6 +161,7 @@ type TurnBenchResult struct {
 	Suite               string                  `json:"suite"`
 	Model               string                  `json:"model"`
 	Mode                string                  `json:"mode,omitempty"`
+	ExecProfile         string                  `json:"execProfile,omitempty"`
 	SelfCorrect         bool                    `json:"selfCorrect"`
 	Version             string                  `json:"version,omitempty"`
 	Commit              string                  `json:"commit,omitempty"`
@@ -210,7 +221,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	if now == nil {
 		now = time.Now
 	}
-	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect}
+	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect, ExecProfile: cfg.ExecProfile}
 
 	perSpanSamples := map[string][]float64{}
 	classWalls := map[string][]float64{}
@@ -240,6 +251,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 		Suite:         strings.TrimSpace(set.ID),
 		Model:         strings.TrimSpace(cfg.Model),
 		Mode:          strings.TrimSpace(cfg.Mode),
+		ExecProfile:   strings.TrimSpace(cfg.ExecProfile),
 		SelfCorrect:   cfg.SelfCorrect,
 		Version:       strings.TrimSpace(cfg.Version),
 		Commit:        strings.TrimSpace(cfg.Commit),
@@ -770,6 +782,9 @@ func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArg
 	}
 	if rc.SelfCorrect {
 		args = append(args, "--self-correct")
+	}
+	if profile := strings.TrimSpace(rc.ExecProfile); profile != "" {
+		args = append(args, "--exec-profile", profile)
 	}
 	args = append(args, extraArgs...)
 	args = append(args, task.Prompt)

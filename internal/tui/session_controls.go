@@ -10,6 +10,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -279,6 +280,111 @@ func (m model) handleTurnsCommand(args string) (model, string) {
 	// environment) so a delegated task gets the same budget, not config.json's default.
 	config.SetMaxTurnsEnv(n)
 	return m, m.turnsText()
+}
+
+// handleProfileCommand shows or switches the session's execution profile: a
+// loop-posture bundle (turn budget, reasoning effort, self-correction,
+// escalation triggers) applied to the NEXT run, composing with the selected
+// model rather than replacing it. Switching first restores whatever the
+// previous profile displaced (profiles never stack), and balanced IS that
+// restore: the empty profile, so selecting it just clears the posture.
+func (m model) handleProfileCommand(args string) (model, string) {
+	args = strings.TrimSpace(args)
+	if args == "" || strings.EqualFold(args, "status") {
+		return m, m.profileText()
+	}
+	profile, ok := execprofile.Lookup(args)
+	if !ok {
+		return m, "Profile\nUsage: /profile [status|" + strings.Join(execprofile.Names(), "|") + "] — switch the next run's loop posture."
+	}
+	m = m.revertExecProfile()
+	if profile.Name == execprofile.Balanced.Name {
+		return m, m.profileText()
+	}
+	// Turn budget: displace the session's current budget. The displaced value
+	// becomes the escalation restore target, exactly like headless exec, and
+	// the new budget propagates to spawned sub-agents the same way /turns does.
+	displacedMaxTurns := 0
+	if profile.MaxTurns > 0 {
+		displacedMaxTurns = m.agentOptions.MaxTurns
+		m.agentOptions.MaxTurns = profile.MaxTurns
+		m.execProfileAppliedMaxTurns = profile.MaxTurns
+		m.execProfileDisplacedMaxTurns = displacedMaxTurns
+		config.SetMaxTurnsEnv(profile.MaxTurns)
+	}
+	// Reasoning effort: fill only when the session is on auto AND the active
+	// model supports the profile's level, mirroring exec's supported-effort
+	// gating. An explicit user choice always wins over the profile.
+	if want := modelregistry.ReasoningEffort(profile.ReasoningEffort); want != "" && m.reasoningEffort == "" {
+		if reasoningEffortAllowed(m.availableReasoningEfforts(), want) {
+			m.reasoningEffort = want
+			m.execProfileAppliedEffort = want
+		}
+	}
+	// Self-correction is presence-only: a profile can arm it but never disarm
+	// an explicit /selfcorrect choice.
+	if profile.SelfCorrect && !m.selfCorrectTests {
+		m.selfCorrectTests = true
+		m.execProfileArmedSelfCorrect = true
+	}
+	m.agentOptions.Profile = profile.Policy(displacedMaxTurns)
+	m.execProfileName = profile.Name
+	return m, m.profileText()
+}
+
+// revertExecProfile restores what the active profile displaced. Each knob is
+// restored only when it still holds the value the profile applied, so manual
+// overrides made after selecting the profile (/turns, Ctrl+T, /selfcorrect)
+// survive the revert.
+func (m model) revertExecProfile() model {
+	if m.execProfileName == "" {
+		return m
+	}
+	if m.execProfileAppliedMaxTurns > 0 && m.agentOptions.MaxTurns == m.execProfileAppliedMaxTurns {
+		m.agentOptions.MaxTurns = m.execProfileDisplacedMaxTurns
+		if m.execProfileDisplacedMaxTurns > 0 {
+			config.SetMaxTurnsEnv(m.execProfileDisplacedMaxTurns)
+		}
+	}
+	if m.execProfileAppliedEffort != "" && m.reasoningEffort == m.execProfileAppliedEffort {
+		m.reasoningEffort = ""
+	}
+	if m.execProfileArmedSelfCorrect && m.selfCorrectTests {
+		m.selfCorrectTests = false
+	}
+	m.agentOptions.Profile = nil
+	m.execProfileName = ""
+	m.execProfileDisplacedMaxTurns = 0
+	m.execProfileAppliedMaxTurns = 0
+	m.execProfileAppliedEffort = ""
+	m.execProfileArmedSelfCorrect = false
+	return m
+}
+
+func (m model) profileText() string {
+	name := m.execProfileName
+	if name == "" {
+		name = execprofile.Balanced.Name + " (default)"
+	}
+	lines := []string{
+		"execution profile: " + name,
+		fmt.Sprintf("max tool-turns per run: %d", m.agentOptions.MaxTurns),
+		"reasoning effort: " + m.effortDisplay(),
+	}
+	if m.agentOptions.Profile != nil && m.agentOptions.Profile.Escalate != nil {
+		lines = append(lines,
+			"escalation: armed — one-shot restore of the displaced posture on a tool-failure streak, a failing self-correct cycle, or a high-risk mutation",
+			"note: the uncertain-completion signal is headless-only (the completion gate never runs interactively), so it cannot fire in the TUI")
+	}
+	return renderCommandOutput(commandOutput{
+		Title:  "Profile",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "State",
+			Lines: lines,
+		}},
+		Hints: []string{"/profile " + strings.Join(execprofile.Names(), "|") + " switches the next run's loop posture (turn budget, effort, self-correction, escalation); pick the model separately with /model"},
+	})
 }
 
 func (m model) turnsText() string {
