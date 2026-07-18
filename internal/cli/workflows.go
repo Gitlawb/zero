@@ -177,7 +177,7 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 	if err := deps.releaseWorktree(context.Background(), releaseOptions, absPath); err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	if _, err := fmt.Fprintf(stdout, "released %s\n", path); err != nil {
+	if _, err := fmt.Fprintf(stdout, "released %s\n", redactCLIString(path)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -877,11 +877,15 @@ once you are done with it, so cleanup can reclaim it later if it goes stale.
 If the worktree directory was deleted by hand, run release with -C pointing
 at the source repository so the orphaned lock can still be cleared.
 
-Flags:
+prepare flags:
       --name <name>       Worktree name; defaults to a timestamped task name
       --dir <path>        Base directory for Zero worktrees
   -C, --cwd <path>        Source repository directory
       --json              Print JSON output
+
+release flags:
+  -C, --cwd <path>        Source repository directory (required if the
+                           worktree directory was already deleted)
   -h, --help              Show this help
 `)
 	return err

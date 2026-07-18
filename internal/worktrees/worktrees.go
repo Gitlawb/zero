@@ -218,10 +218,49 @@ func Release(ctx context.Context, options Options, path string) error {
 			dir = cwd
 		}
 	}
+	if err := verifyZeroOwnedWorktree(ctx, runGit, dir, path); err != nil {
+		return err
+	}
 	if _, err := gitOutput(ctx, runGit, dir, "worktree", "unlock", path); err != nil {
 		return fmt.Errorf("unlock git worktree: %w", err)
 	}
 	return nil
+}
+
+// verifyZeroOwnedWorktree confirms path has a zero-worktree-<repoKey> ancestor
+// directory component, so Release cannot be used to clear the lock on a
+// worktree a user (or another tool) manages by hand: the command is
+// documented as releasing a worktree `prepare` created, not an arbitrary git
+// worktree lock. This checks for the ancestor component itself rather than
+// reconstructing and comparing a full repoDir, because Release has no
+// reliable way to know which --dir a long-gone Prepare call used (the CLI
+// never threads BaseDir through to Release, and a custom --dir is not
+// recorded anywhere the lock/unlock path can read back); the repoKey
+// component is Prepare's actual ownership signature regardless of which
+// directory it was created under. gitCommonDir resolves the shared .git
+// directory whether dir is the worktree itself or the main repository, so
+// this needs no branching on which of Release's two cwd cases is in play;
+// its parent is the same repoRoot Prepare/Clean use to compute repoKey.
+func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, path string) error {
+	commonDir, err := gitCommonDir(ctx, runGit, dir)
+	if err != nil {
+		return fmt.Errorf("resolve repository for %s: %w", path, err)
+	}
+	repoRoot := filepath.Dir(commonDir)
+	want := "zero-worktree-" + repoKey(repoRoot)
+
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
+	} else if abs, err := filepath.Abs(path); err == nil {
+		target = abs
+	}
+	for _, component := range strings.Split(filepath.Clean(target), string(filepath.Separator)) {
+		if component == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing to release %s: not a zero-managed worktree (expected an ancestor directory named %q)", path, want)
 }
 
 func DefaultBaseDir(env map[string]string) (string, error) {
@@ -425,6 +464,17 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// git worktree list --porcelain reports each worktree's PHYSICAL location,
+	// resolving any symlink component (for example a --worktree-dir that is
+	// itself a symlink, or a symlinked ancestor). Comparing entry paths against
+	// a merely-absolute (but not symlink-resolved) baseDir would then reject
+	// every worktree Prepare actually created under a symlinked base, leaving
+	// them permanently unprunable. EvalSymlinks failing (most commonly because
+	// the directory does not exist yet) just means there is nothing under it
+	// to prune, so falling back to the plain absolute path is safe.
+	if resolved, err := filepath.EvalSymlinks(baseDir); err == nil {
+		baseDir = resolved
+	}
 	// Prepare only ever creates worktrees under this per-repository subtree
 	// (mirroring the repoDir it computes). Scoping pruning to baseDir itself
 	// would authorize deleting a worktree a user manages by hand in the same
@@ -472,6 +522,10 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 				// still live work waiting on a model, network, or user, so
 				// force-removing here would discard it. Skip until it either
 				// gets committed/cleaned (no longer dirty) or unlocked.
+				continue
+			}
+			if err := preserveUnreachableWorktreeHead(ctx, runGit, repoRoot, entry.path); err != nil {
+				lastErr = errors.Join(lastErr, fmt.Errorf("preserve worktree HEAD %s: %w", entry.path, err))
 				continue
 			}
 			// gitOutput (not a raw runGit call) so a nonzero exit code is
@@ -535,6 +589,46 @@ func isUnderDir(path, dir string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// preserveUnreachableWorktreeHead guards against `git worktree remove --force`
+// silently discarding a commit: Prepare creates every worktree with `worktree
+// add --detach`, so its HEAD is a plain commit, not a branch, and nothing
+// outside that worktree's own administrative files points at it. If a task
+// committed its result there and the worktree goes stale before that commit
+// is otherwise referenced (merged, pushed, cherry-picked), force-removing it
+// deletes the only ref keeping the commit reachable — it becomes immediately
+// eligible for git gc, exactly as if it had never been committed. This checks
+// whether some OTHER ref in the repository already contains worktreePath's
+// HEAD; if none does, it creates a durable ref for it in the main
+// repository's refs namespace before the caller proceeds to remove the
+// worktree, so the commit survives (visible under refs/zero/orphaned-worktree)
+// even after the worktree itself is gone.
+func preserveUnreachableWorktreeHead(ctx context.Context, runGit GitRunner, repoRoot, worktreePath string) error {
+	head, err := gitOutput(ctx, runGit, worktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		// No commit to preserve (an empty/unborn worktree, or one already
+		// gone) — nothing for this guard to do; let the caller proceed.
+		return nil
+	}
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return nil
+	}
+	contained, err := gitOutput(ctx, runGit, repoRoot, "for-each-ref", "--contains="+head, "--count=1", "--format=%(refname)")
+	if err != nil {
+		return fmt.Errorf("check ref reachability for %s: %w", head, err)
+	}
+	if strings.TrimSpace(contained) != "" {
+		// Already reachable from some branch/tag; the worktree's own HEAD is
+		// redundant and removal cannot orphan the commit.
+		return nil
+	}
+	refName := "refs/zero/orphaned-worktree/" + head
+	if _, err := gitOutput(ctx, runGit, repoRoot, "update-ref", refName, head); err != nil {
+		return fmt.Errorf("preserve unreachable commit %s: %w", head, err)
+	}
+	return nil
 }
 
 // worktreeIsStale reports whether every file under root was last modified

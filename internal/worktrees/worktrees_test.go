@@ -91,22 +91,36 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 }
 
 func TestReleaseUnlocksWorktree(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "task-a")
-	if err := os.Mkdir(path, 0o700); err != nil {
+	repoRoot := t.TempDir()
+	// gitCommonDir resolves its answer with EvalSymlinks, so the fake
+	// --git-common-dir response needs a real directory behind it.
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runner := &fakeRunner{results: []CommandResult{{}}}
+	// path must carry the zero-worktree-<repoKey> ancestor component Prepare
+	// actually creates: Release now refuses to unlock anything else.
+	path := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "task-a")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: filepath.Join(repoRoot, ".git") + "\n"},
+		{},
+	}}
 
 	if err := Release(context.Background(), Options{RunGit: runner.Run}, path); err != nil {
 		t.Fatalf("Release returned error: %v", err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("expected exactly one git call, got %#v", runner.calls)
+	if len(runner.calls) != 2 {
+		t.Fatalf("expected exactly two git calls (ownership check, then unlock), got %#v", runner.calls)
 	}
-	if runner.calls[0].dir != path {
-		t.Fatalf("git worktree unlock dir = %q, want %q", runner.calls[0].dir, path)
+	if got := runner.commandLine(0); got != "git rev-parse --git-common-dir" {
+		t.Fatalf("ownership-check command = %q", got)
 	}
-	if got := runner.commandLine(0); got != "git worktree unlock "+path {
+	if runner.calls[1].dir != path {
+		t.Fatalf("git worktree unlock dir = %q, want %q", runner.calls[1].dir, path)
+	}
+	if got := runner.commandLine(1); got != "git worktree unlock "+path {
 		t.Fatalf("git worktree unlock command = %q", got)
 	}
 }
@@ -116,21 +130,54 @@ func TestReleaseFallsBackToCwdWhenWorktreeDirMissing(t *testing.T) {
 	// releasing it first leaves path itself gone; Release must still be able
 	// to run `git worktree unlock` (from the main repo, via options.Cwd) so
 	// the orphaned lock can be cleared and the entry later pruned.
-	missingPath := filepath.Join(t.TempDir(), "already-deleted")
 	repoRoot := t.TempDir()
-	runner := &fakeRunner{results: []CommandResult{{}}}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "already-deleted")
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: filepath.Join(repoRoot, ".git") + "\n"},
+		{},
+	}}
 
 	if err := Release(context.Background(), Options{RunGit: runner.Run, Cwd: repoRoot}, missingPath); err != nil {
 		t.Fatalf("Release returned error: %v", err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("expected exactly one git call, got %#v", runner.calls)
+	if len(runner.calls) != 2 {
+		t.Fatalf("expected exactly two git calls (ownership check, then unlock), got %#v", runner.calls)
 	}
-	if runner.calls[0].dir != repoRoot {
-		t.Fatalf("git worktree unlock dir = %q, want fallback to Cwd %q", runner.calls[0].dir, repoRoot)
+	if runner.calls[0].dir != repoRoot || runner.calls[1].dir != repoRoot {
+		t.Fatalf("git calls = %#v, want both to fall back to Cwd %q", runner.calls, repoRoot)
 	}
-	if got := runner.commandLine(0); got != "git worktree unlock "+missingPath {
+	if got := runner.commandLine(1); got != "git worktree unlock "+missingPath {
 		t.Fatalf("git worktree unlock command = %q, want the original path as the unlock target", got)
+	}
+}
+
+// TestReleaseRejectsNonZeroOwnedWorktree pins the fix for Release being
+// usable to clear the lock on a worktree a user (or another tool) manages by
+// hand: the command is documented as releasing a worktree `prepare` created,
+// not an arbitrary git worktree lock, so a path with no zero-worktree-<repoKey>
+// ancestor component must be refused before any unlock is attempted.
+func TestReleaseRejectsNonZeroOwnedWorktree(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manualWorktree := filepath.Join(t.TempDir(), "my-manual-worktree")
+	if err := os.MkdirAll(manualWorktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: filepath.Join(repoRoot, ".git") + "\n"},
+	}}
+
+	err := Release(context.Background(), Options{RunGit: runner.Run}, manualWorktree)
+	if err == nil || !strings.Contains(err.Error(), "not a zero-managed worktree") {
+		t.Fatalf("Release error = %v, want a not-zero-managed rejection", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected only the ownership check, no unlock call, got %#v", runner.calls)
 	}
 }
 
@@ -246,6 +293,65 @@ func physicalTestPath(t *testing.T, path string) string {
 		t.Fatalf("resolve %s: %v", path, err)
 	}
 	return resolved
+}
+
+// TestCleanPrunesStaleWorktreeUnderSymlinkedBaseDir pins the fix for a
+// symlinked --worktree-dir: git worktree list --porcelain reports each
+// worktree's PHYSICAL location, resolving any symlink component, so Clean
+// comparing entries against a merely-absolute (not symlink-resolved) baseDir
+// would reject every worktree created under a symlinked base and never prune
+// it. Unlike the other Clean tests, base is deliberately handed to
+// Prepare/Clean via its symlinked spelling, not its physical one (which
+// physicalTestPath would normally produce), so this actually exercises the
+// mismatch.
+func TestCleanPrunesStaleWorktreeUnderSymlinkedBaseDir(t *testing.T) {
+	ctx := context.Background()
+	repo := physicalTestPath(t, t.TempDir())
+	mustGit := func(args ...string) string {
+		t.Helper()
+		out, err := gitOutput(ctx, defaultRunGit, repo, args...)
+		if err != nil {
+			t.Skipf("git unavailable or failed (%v): %v", args, err)
+		}
+		return out
+	}
+	mustGit("init")
+	mustGit("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-m", "seed")
+
+	realBase := physicalTestPath(t, t.TempDir())
+	base := filepath.Join(t.TempDir(), "base-link")
+	if err := os.Symlink(realBase, base); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if _, err := Prepare(ctx, Options{Cwd: repo, BaseDir: base, Name: "stale-task"}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	staleDir := filepath.Join(realBase, "zero-worktree-"+repoKey(repo), "stale-task")
+	if _, err := os.Stat(staleDir); err != nil {
+		t.Fatalf("expected worktree created at physical base path %s: %v", staleDir, err)
+	}
+	// Release the lock Prepare took and age every entry past the cutoff, so
+	// the worktree is both unlocked and stale.
+	if err := Release(ctx, Options{Cwd: repo}, staleDir); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := filepath.WalkDir(staleDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Clean(ctx, Options{Cwd: repo, BaseDir: base}, 24*time.Hour); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("Clean should have pruned the stale worktree under the symlinked base dir, stat err: %v", err)
+	}
 }
 
 // TestPrepareValidatesRequestBeforeCleanup pins the order of validation and
@@ -460,9 +566,11 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 		results: []CommandResult{
 			{Stdout: repoRoot}, // rev-parse --show-toplevel
 			{Stdout: "worktree " + youngPath + "\nworktree " + stalePath + "\n"}, // worktree list --porcelain
-			{ExitCode: 0}, // status --porcelain <stalePath> (clean)
-			{ExitCode: 0}, // worktree remove --force <stalePath>
-			{ExitCode: 0}, // worktree prune
+			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
+			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
+			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
+			{ExitCode: 0},               // worktree remove --force <stalePath>
+			{ExitCode: 0},               // worktree prune
 		},
 	}
 
@@ -478,8 +586,8 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 	}
 
 	// Verify the calls made by Clean
-	if len(runner.calls) != 5 {
-		t.Fatalf("expected 5 git calls, got %d", len(runner.calls))
+	if len(runner.calls) != 7 {
+		t.Fatalf("expected 7 git calls, got %d", len(runner.calls))
 	}
 	if runner.commandLine(0) != "git rev-parse --show-toplevel" {
 		t.Errorf("call 0 = %q", runner.commandLine(0))
@@ -491,12 +599,15 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 	if runner.commandLine(2) != expectedStatusCall {
 		t.Errorf("call 2 = %q, want %q", runner.commandLine(2), expectedStatusCall)
 	}
-	expectedRemoveCall := "git worktree remove --force " + filepath.Clean(stalePath)
-	if runner.commandLine(3) != expectedRemoveCall {
-		t.Errorf("call 3 = %q, want %q", runner.commandLine(3), expectedRemoveCall)
+	if runner.commandLine(3) != "git rev-parse HEAD" {
+		t.Errorf("call 3 = %q, want the pre-removal HEAD-preservation check", runner.commandLine(3))
 	}
-	if runner.commandLine(4) != "git worktree prune" {
-		t.Errorf("call 4 = %q", runner.commandLine(4))
+	expectedRemoveCall := "git worktree remove --force " + filepath.Clean(stalePath)
+	if runner.commandLine(5) != expectedRemoveCall {
+		t.Errorf("call 5 = %q, want %q", runner.commandLine(5), expectedRemoveCall)
+	}
+	if runner.commandLine(6) != "git worktree prune" {
+		t.Errorf("call 6 = %q", runner.commandLine(6))
 	}
 }
 
@@ -526,8 +637,10 @@ func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
 		results: []CommandResult{
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + stalePath + "\n"},
-			{ExitCode: 0}, // status --porcelain <stalePath> (clean)
-			{ExitCode: 1, Stderr: "fatal: unable to remove worktree: in use"},
+			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
+			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
+			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
+			{ExitCode: 1, Stderr: "fatal: unable to remove worktree: in use"}, // worktree remove --force <stalePath>
 			{ExitCode: 0},
 		},
 	}
@@ -568,9 +681,13 @@ func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
 		results: []CommandResult{
 			{Stdout: repoRoot},
 			{Stdout: "worktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
-			{ExitCode: 0}, // status --porcelain <stalePathA> (clean)
+			{ExitCode: 0},               // status --porcelain <stalePathA> (clean)
+			{Stdout: "deadbeefa"},       // rev-parse HEAD <stalePathA>
+			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeefa (already reachable)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree A"}, // remove stalePathA
-			{ExitCode: 0}, // status --porcelain <stalePathB> (clean)
+			{ExitCode: 0},               // status --porcelain <stalePathB> (clean)
+			{Stdout: "deadbeefb"},       // rev-parse HEAD <stalePathB>
+			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeefb (already reachable)
 			{ExitCode: 1, Stderr: "fatal: unable to remove worktree B"}, // remove stalePathB
 			{ExitCode: 0}, // final prune
 		},
@@ -760,6 +877,65 @@ func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
 // generated drafts, task artifacts) must still block force-removal: plain
 // `git status --porcelain` reports such a worktree as clean, but
 // worktreeIsDirty now also passes --ignored, so Clean must treat it as dirty.
+// TestCleanPreservesUnreachableCommitBeforeRemoval pins the fix for a real
+// data-loss case: Prepare creates every worktree with `worktree add --detach`,
+// so a commit made there is reachable only through that worktree's own HEAD.
+// If the worktree goes stale and clean before the commit is otherwise
+// referenced, force-removing it must not let the commit become unreachable —
+// Clean has to preserve it under a durable ref first.
+func TestCleanPreservesUnreachableCommitBeforeRemoval(t *testing.T) {
+	ctx := context.Background()
+	repo := physicalTestPath(t, t.TempDir())
+	mustGit := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := gitOutput(ctx, defaultRunGit, dir, args...)
+		if err != nil {
+			t.Skipf("git unavailable or failed (%v): %v", args, err)
+		}
+		return out
+	}
+	mustGit(repo, "init")
+	mustGit(repo, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-m", "seed")
+
+	base := physicalTestPath(t, t.TempDir())
+	if _, err := Prepare(ctx, Options{Cwd: repo, BaseDir: base, Name: "orphan-task"}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	staleDir := filepath.Join(base, "zero-worktree-"+repoKey(repo), "orphan-task")
+
+	// Commit inside the worktree: this HEAD is not on any branch, so nothing
+	// outside the worktree itself points at it yet.
+	mustGit(staleDir, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-m", "orphaned work")
+	orphanSHA := mustGit(staleDir, "rev-parse", "HEAD")
+
+	if err := Release(ctx, Options{Cwd: repo}, staleDir); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := filepath.WalkDir(staleDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Clean(ctx, Options{Cwd: repo, BaseDir: base}, 24*time.Hour); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("Clean should have pruned the stale worktree, stat err: %v", err)
+	}
+	if _, err := gitOutput(ctx, defaultRunGit, repo, "cat-file", "-e", orphanSHA); err != nil {
+		t.Fatalf("commit %s is no longer reachable after Clean: %v", orphanSHA, err)
+	}
+	preserved := mustGit(repo, "for-each-ref", "--contains="+orphanSHA, "--count=1", "--format=%(refname)")
+	if strings.TrimSpace(preserved) == "" {
+		t.Fatalf("commit %s survived only by luck (not yet GC'd); expected a durable ref to contain it", orphanSHA)
+	}
+}
+
 func TestCleanSkipsWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	baseDir := filepath.Join(tempDir, "zero-worktrees")

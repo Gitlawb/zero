@@ -217,7 +217,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		if preparedWorktree.LockAcquired {
 			defer func() {
 				if releaseErr := deps.releaseWorktree(context.Background(), worktrees.Options{Cwd: trustRoot}, preparedWorktree.Path); releaseErr != nil {
-					fmt.Fprintf(stderr, "zero: failed to release worktree lock on %s: %v\n", preparedWorktree.Path, releaseErr)
+					fmt.Fprintf(stderr, "zero: failed to release worktree lock on %s: %v\n", redactCLIString(preparedWorktree.Path), releaseErr)
 				}
 			}()
 		}
