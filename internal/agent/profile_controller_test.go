@@ -45,14 +45,24 @@ func TestProfileControllerEscalatesOnRiskyMutation(t *testing.T) {
 	if _, fired := controller.maybeEscalate(); fired {
 		t.Fatal("medium risk must not trip a high threshold")
 	}
-	// Critical risk on a DENIED result: never counts.
+	// Critical risk on a DENIED result: never counts (the mutation never ran).
 	controller.observeToolOutcome(toolFailureOutcome{}, ToolResult{Status: tools.StatusError, DenialReason: DenialSandboxBlock, Risk: sandbox.Risk{Level: sandbox.RiskCritical}})
 	if _, fired := controller.maybeEscalate(); fired {
 		t.Fatal("a denied result must not trip the risky-mutation signal")
 	}
-	controller.observeToolOutcome(toolFailureOutcome{}, ToolResult{Status: tools.StatusOK, Risk: sandbox.Risk{Level: sandbox.RiskCritical}})
+	// Critical risk on an executed PARTIAL FAILURE (error status, no denial):
+	// the mutation ran, so it counts.
+	controller.observeToolOutcome(toolFailureOutcome{}, ToolResult{Status: tools.StatusError, Risk: sandbox.Risk{Level: sandbox.RiskCritical}})
 	if _, fired := controller.maybeEscalate(); !fired {
-		t.Fatal("critical executed mutation must trip a high threshold")
+		t.Fatal("an executed partial failure at critical risk must trip a high threshold")
+	}
+}
+
+func TestProfileControllerIgnoresInvalidRiskThreshold(t *testing.T) {
+	controller := newProfileController(&ProfilePolicy{Escalate: &PostureEscalation{OnRiskyMutation: sandbox.RiskLevel("hgih")}})
+	controller.observeToolOutcome(toolFailureOutcome{}, ToolResult{Status: tools.StatusOK, Risk: sandbox.Risk{Level: sandbox.RiskCritical}})
+	if _, fired := controller.maybeEscalate(); fired {
+		t.Fatal("an unrecognized threshold must disable the signal, not match every result")
 	}
 }
 
@@ -94,13 +104,53 @@ func TestProfileControllerEscalatesAtMostOnce(t *testing.T) {
 	}
 }
 
-func TestOptionalEventKeysIncludePostureEscalations(t *testing.T) {
-	for _, key := range trace.OptionalEventKeys() {
-		if key == "counter:"+trace.CounterPostureEscalations {
-			return
-		}
+// TestPostureEscalationOnUncertainCompletion proves the uncertain-path act
+// point: the completion gate's continue branch escapes the end-of-turn tail,
+// so escalation must apply before the continue. A cue turn under the gate
+// counts as uncertain, escalates, and the very next request carries the target
+// effort.
+func TestPostureEscalationOnUncertainCompletion(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventText, Content: "Let me read the file:"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "Done. All set."},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	recorder := trace.NewRecorder("posture-session", "run-2", "fast")
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry:                tools.NewRegistry(),
+		MaxTurns:                10,
+		RequireCompletionSignal: true,
+		Trace:                   recorder,
+		Profile: &ProfilePolicy{
+			Name: "fast",
+			Escalate: &PostureEscalation{
+				ReasoningEffort:       "high",
+				OnCompletionUncertain: 1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("posture_escalations missing from OptionalEventKeys: %v", trace.OptionalEventKeys())
+	if result.FinalAnswer != "Done. All set." {
+		t.Fatalf("expected the completed answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(provider.requests))
+	}
+	if provider.requests[1].ReasoningEffort != "high" {
+		t.Fatalf("expected the post-escalation request to carry the target effort, got %q", provider.requests[1].ReasoningEffort)
+	}
+	tr := recorder.Finish()
+	if got := tr.Counter(trace.CounterPostureEscalations); got != 1 {
+		t.Fatalf("posture_escalations = %d, want 1", got)
+	}
 }
 
 // failingProfileTool always errors with the same signature so the repeated-
@@ -197,8 +247,8 @@ func TestPostureEscalationAbsentWithoutProfile(t *testing.T) {
 	if len(provider.requests) > 3 {
 		t.Fatalf("unprofiled run must not extend the ceiling, got %d requests", len(provider.requests))
 	}
-	if !strings.Contains(result.FinalAnswer, "maximum number of turns") && result.FinalAnswer == "recovered after escalation" {
-		t.Fatalf("unprofiled run unexpectedly continued: %q", result.FinalAnswer)
+	if !strings.Contains(result.FinalAnswer, "maximum number of turns") {
+		t.Fatalf("unprofiled run must end with the max-turns answer, got %q", result.FinalAnswer)
 	}
 }
 

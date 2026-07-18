@@ -2,7 +2,6 @@ package agent
 
 import (
 	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // profileController observes per-turn run signals and decides at most one
@@ -48,8 +47,12 @@ func (c *profileController) observeToolOutcome(outcome toolFailureOutcome, resul
 	if c.policy.OnToolFailureStreak > 0 && outcome.Count >= c.policy.OnToolFailureStreak {
 		c.failureTripped = true
 	}
-	if c.policy.OnRiskyMutation != "" && result.Status == tools.StatusOK &&
-		riskRank(result.Risk.Level) >= riskRank(c.policy.OnRiskyMutation) {
+	if threshold := riskRank(c.policy.OnRiskyMutation); threshold > 0 &&
+		result.DenialReason == DenialNone &&
+		riskRank(result.Risk.Level) >= threshold {
+		// The call EXECUTED (was not denied): partial failures count too, since
+		// the mutation ran. An unrecognized threshold ranks 0 and disables the
+		// signal instead of matching everything.
 		c.riskTripped = true
 	}
 }
@@ -96,8 +99,9 @@ func (c *profileController) maybeEscalate() (PostureEscalation, bool) {
 }
 
 // riskRank orders sandbox risk levels for threshold comparison. Unknown levels
-// rank lowest so a malformed threshold or classification can never trip the
-// signal spuriously.
+// rank 0: an unrecognized RESULT level can never meet a valid threshold, and an
+// unrecognized THRESHOLD is rejected before comparison (rank 0 disables the
+// signal) so a typo in a profile can never make every result match.
 func riskRank(level sandbox.RiskLevel) int {
 	switch level {
 	case sandbox.RiskLow:

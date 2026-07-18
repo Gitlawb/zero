@@ -189,6 +189,26 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// existing caller) makes every observe/decide call a no-op, keeping the
 	// loop byte-identical for unprofiled runs.
 	posture := newProfileController(options.Profile)
+	// applyPosture applies at most one posture escalation when an armed trigger
+	// has fired: raise the hoisted turn ceiling, restore effort and the
+	// completion gate, stamp the counter. Shared by the end-of-turn tail and
+	// the completion-gate uncertain path (which continues the loop before the
+	// tail runs). No-op forever after the first escalation and for unprofiled
+	// runs.
+	applyPosture := func() {
+		if target, fired := posture.maybeEscalate(); fired {
+			if target.MaxTurns > maxTurns {
+				maxTurns = target.MaxTurns
+			}
+			if target.ReasoningEffort != "" {
+				options.ReasoningEffort = target.ReasoningEffort
+			}
+			if target.RestoreCompletionGate {
+				options.RequireCompletionSignal = true
+			}
+			options.Trace.Counter(trace.CounterPostureEscalations, 1)
+		}
+	}
 
 	// Background post-edit diagnostics: files changed by mutating tools are
 	// checked off the tool-call critical path and any errors are appended as a
@@ -558,6 +578,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					result.Messages = copyMessages(messages)
 					return result, nil
 				case CompletionUncertain:
+					// Observe the uncertainty signal and apply any escalation NOW:
+					// this branch continues the turn loop before the end-of-turn
+					// act point, so deferring would skip escalation entirely.
+					posture.observeUncertain()
+					applyPosture()
 					switch evaluation.Action {
 					case completionActionContinue:
 						options.Trace.Counter(trace.CounterCompletionNudges, 1)
@@ -830,18 +855,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// only per-turn-read policy (the hoisted turn ceiling, reasoning effort,
 		// completion gate); never messages, model, or session. No-op forever
 		// after the first escalation and for every unprofiled run.
-		if target, fired := posture.maybeEscalate(); fired {
-			if target.MaxTurns > maxTurns {
-				maxTurns = target.MaxTurns
-			}
-			if target.ReasoningEffort != "" {
-				options.ReasoningEffort = target.ReasoningEffort
-			}
-			if target.RestoreCompletionGate {
-				options.RequireCompletionSignal = true
-			}
-			options.Trace.Counter(trace.CounterPostureEscalations, 1)
-		}
+		applyPosture()
 	}
 
 	if ctx.Err() != nil {
