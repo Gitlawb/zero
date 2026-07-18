@@ -3456,6 +3456,66 @@ func TestPlanModeDeniesBashToolCalls(t *testing.T) {
 	}
 }
 
+// TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt guards against
+// the read-only gate's blind spot: request_permissions is dispatched by name in
+// executeToolCall before the registry-based ToolAdvertised check runs, so a
+// plan/spec-draft registry that simply omits the tool (rather than registering
+// it as denied) must not let the call fall through to a real grant.
+func TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt(t *testing.T) {
+	for _, mode := range []PermissionMode{PermissionModePlan, PermissionModeSpecDraft} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewReadFileTool(root))
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "grant-1", ToolName: tools.RequestPermissionsToolName},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "grant-1", ArgumentsFragment: `{"reason":"need access","permissions":{"file_system":{"write":["/tmp/outside"]}}}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "grant-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+			var promptCount int
+
+			result, err := Run(context.Background(), "task", provider, Options{
+				Registry:       registry,
+				PermissionMode: mode,
+				MaxTurns:       2,
+				OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+					promptCount++
+					return PermissionDecision{Action: PermissionDecisionAllow, Reason: "ok"}, nil
+				},
+			})
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.FinalAnswer != "done" {
+				t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+			}
+			if promptCount != 0 {
+				t.Fatalf("request_permissions must be denied before reaching OnPermissionRequest, got %d prompts", promptCount)
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available in "+string(mode)+" mode") {
+				t.Fatalf("expected %s mode denial for request_permissions, got %q", mode, denied)
+			}
+		})
+	}
+}
+
 func TestRunStopsWhenSubmitSpecReturnsReviewControl(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
