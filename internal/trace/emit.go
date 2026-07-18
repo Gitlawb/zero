@@ -7,14 +7,6 @@ import (
 	"time"
 )
 
-// Sink is the abstraction a finished TurnTrace is written to. The NDJSON and
-// text sinks are implemented here; an OpenTelemetry sink is a documented
-// future addition (see opentelemetrySink below) and is intentionally not
-// pulled in as a dependency.
-type Sink interface {
-	Emit(*TurnTrace) error
-}
-
 // WriteNDJSON emits the trace as newline-delimited JSON compatible with the
 // internal/agenteval trace contract: one object per line carrying a "type"
 // and (for spans/counters) a "name" so ParseTraceEventKeys keys them.
@@ -160,23 +152,11 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 	return nil
 }
 
-// NDJSONSink adapts an io.Writer as a Sink emitting NDJSON.
-type NDJSONSink struct{ W io.Writer }
-
-// TextSink adapts an io.Writer as a Sink emitting human-readable text.
-type TextSink struct{ W io.Writer }
-
-// opentelemetrySink is a placeholder documenting the future OpenTelemetry
-// export path. It is intentionally not implemented in the baseline: doing so
-// would pull in the OTLP exporter dependency. When added, satisfy Sink by
-// translating each Span into an OTLP span and each Counter into an attribute,
-// parented under the run's trace:
-//
-//	type opentelemetrySink struct{ exp someExporter }
-//	func (s opentelemetrySink) Emit(t *TurnTrace) error { ... }
-//
-// It is left as a comment to avoid an unused-type lint while signaling the
-// intended extension seam to the next PR.
+// An OpenTelemetry export path is a documented future addition. It is
+// intentionally not implemented in the baseline: doing so would pull in the
+// OTLP exporter dependency. When added, mirror WriteNDJSON by translating
+// each Span into an OTLP span and each Counter into an attribute, parented
+// under the run's trace.
 
 func ms(d time.Duration) float64 { return round3(float64(d.Microseconds()) / 1000) }
 

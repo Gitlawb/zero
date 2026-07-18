@@ -39,7 +39,7 @@ var errNotDirectory = errors.New("not a directory")
 // NOT created — a missing directory simply yields no skills.
 //
 // DefaultDir is the primary write root for install/remove/lock. Runtime discovery
-// also considers AgentsDir and plugin skill roots via DiscoveryRoots / LoadFromRoots.
+// also considers AgentsDir and plugin skill roots via LoadFromRoots.
 func DefaultDir(env map[string]string) string {
 	if override := strings.TrimSpace(envValue(env, "ZERO_SKILLS_DIR")); override != "" {
 		return override
@@ -135,13 +135,13 @@ type DuplicateName struct {
 // directory name wins (os.ReadDir returns entries sorted by filename, so the
 // first one encountered is kept and later same-name duplicates are dropped).
 // This guarantees Load/List/Get always resolve a duplicated name to the same
-// winner regardless of sort stability. Use Duplicates to surface a warning about
-// any such collisions.
+// winner regardless of sort stability. LoadFromRoots reports the dropped
+// collisions so callers can warn about any such shadowing.
 //
-// NOTE: Load scans one root. Runtime discovery uses LoadFromRoots /
-// DiscoveryRoots (primary DefaultDir, optional ~/.agents/skills, then plugin
-// skill roots). Prefer those multi-root helpers for agent/CLI discovery; keep
-// Load for single-dir install/write call sites.
+// NOTE: Load scans one root. Runtime discovery uses LoadFromRoots (primary
+// DefaultDir, optional ~/.agents/skills, then plugin skill roots). Prefer
+// that multi-root helper for agent/CLI discovery; keep Load for single-dir
+// install/write call sites.
 func Load(dir string) ([]Skill, error) {
 	skills, _, err := load(dir)
 	return skills, err
@@ -240,7 +240,7 @@ func confineSkillPath(rootReal string, manifestPath string) (string, bool) {
 	return real, true
 }
 
-// load is the shared scanner behind Load and Duplicates: it parses every
+// load is the shared scanner behind Load and LoadFromRoots: it parses every
 // SKILL.md, deduplicates by frontmatter name (first directory wins) and reports
 // the dropped collisions.
 func load(dir string) ([]Skill, []DuplicateName, error) {
