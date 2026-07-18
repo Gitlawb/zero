@@ -55,6 +55,84 @@ function localControlHelperManifest(packageRoot) {
   return JSON.stringify({ version: 1, helpers });
 }
 
+// Mirrors internal/cli/observability.go parseDoctorArgs + writeDoctorHelp so the
+// wrapper's missing-binary doctor fallback matches the Go doctor CLI surface.
+const DOCTOR_HELP = `Usage:
+  zero doctor [flags]
+
+Runs Go backend health checks for config and provider setup.
+
+Flags:
+      --json            Print JSON report
+      --connectivity    Include provider endpoint connectivity probe when available
+  -h, --help            Show this help
+`;
+
+const EXIT_USAGE = 2;
+
+function parseDoctorArgs(args) {
+  let json = false;
+  for (const arg of args) {
+    switch (arg) {
+      case '-h':
+      case '--help':
+      case 'help':
+        return { kind: 'help' };
+      case '--json':
+        json = true;
+        break;
+      case '--connectivity':
+        break;
+      default:
+        return { kind: 'error', message: `unknown doctor flag ${JSON.stringify(arg)}` };
+    }
+  }
+  return { kind: 'run', json };
+}
+
+function missingNativeDoctorJSONReport(postinstallScript) {
+  return {
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    ok: false,
+    checks: [
+      {
+        id: 'runtime.go',
+        label: 'Go runtime',
+        status: 'fail',
+        message: 'Native zero binary is missing next to the npm wrapper.',
+        details: {
+          remedy: `node "${postinstallScript}"`,
+        },
+      },
+    ],
+  };
+}
+
+function missingNativeDoctorTextReport(postinstallScript, ranByBun) {
+  return (
+    'Zero doctor report (' +
+    new Date().toISOString() +
+    ')\n' +
+    'Overall: fail\n' +
+    '[fail] runtime.go - Native zero binary is missing next to the npm wrapper.\n' +
+    '  remedy: node "' +
+    postinstallScript +
+    '"\n' +
+    '\n' +
+    'The platform binary is fetched at install time by a postinstall script,\n' +
+    'which did not run (or was skipped) for this install.' +
+    (ranByBun
+      ? '\nYou installed with Bun, which does not run dependency lifecycle scripts\n' +
+        'by default. To let it run on future installs, add zero to your\n' +
+        "project's trustedDependencies:\n" +
+        '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+        'then reinstall.'
+      : '') +
+    '\nIf reinstall fails, build from source: https://github.com/Gitlawb/zero\n' +
+    '(go run ./cmd/zero, requires Go 1.25+).'
+  );
+}
+
 // The platform payload is a version of @gitlawb/zero itself, installed under
 // an npm: alias (see docs/NPM_PACKAGING.md). The alias name is derived from
 // process.platform/process.arch, so an unsupported platform simply fails to
@@ -127,53 +205,22 @@ if (!nativePath) {
   const argv = process.argv.slice(2);
   const isDoctor = argv.length > 0 && argv[0] === 'doctor';
   if (isDoctor) {
-    if (argv.includes('--json')) {
-      process.stdout.write(
-        JSON.stringify(
-          {
-            generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-            ok: false,
-            checks: [
-              {
-                id: 'runtime.go',
-                label: 'Go runtime',
-                status: 'fail',
-                message: 'Native zero binary is missing next to the npm wrapper.',
-                details: {
-                  remedy: `node "${postinstallScript}"`,
-                },
-              },
-            ],
-          },
-          null,
-          2,
-        ) + '\n',
-      );
+    const parsed = parseDoctorArgs(argv.slice(1));
+    if (parsed.kind === 'help') {
+      process.stdout.write(DOCTOR_HELP);
+      process.exit(0);
+    }
+    if (parsed.kind === 'error') {
+      process.stderr.write(`[zero] ${parsed.message}\n`);
+      process.exit(EXIT_USAGE);
+    }
+
+    if (parsed.json) {
+      process.stdout.write(JSON.stringify(missingNativeDoctorJSONReport(postinstallScript), null, 2) + '\n');
       process.exit(1);
     }
 
-    console.error(
-      'Zero doctor report (' +
-        new Date().toISOString() +
-        ')\n' +
-        'Overall: fail\n' +
-        '[fail] runtime.go - Native zero binary is missing next to the npm wrapper.\n' +
-        '  remedy: node "' +
-        postinstallScript +
-        '"\n' +
-        '\n' +
-        'The platform binary is fetched at install time by a postinstall script,\n' +
-        'which did not run (or was skipped) for this install.' +
-        (ranByBun
-          ? '\nYou installed with Bun, which does not run dependency lifecycle scripts\n' +
-            'by default. To let it run on future installs, add zero to your\n' +
-            "project's trustedDependencies:\n" +
-            '  "trustedDependencies": ["@gitlawb/zero"]\n' +
-            'then reinstall.'
-          : '') +
-        '\nIf reinstall fails, build from source: https://github.com/Gitlawb/zero\n' +
-        '(go run ./cmd/zero, requires Go 1.25+).',
-    );
+    process.stdout.write(missingNativeDoctorTextReport(postinstallScript, ranByBun) + '\n');
     process.exit(1);
   }
 

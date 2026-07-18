@@ -12,6 +12,39 @@ import (
 	"time"
 )
 
+// Mirror internal/cli/exec.go exit codes so wrapper doctor fallback tests assert
+// the same CLI contract as the Go doctor command.
+const (
+	wrapperExitSuccess  = 0
+	wrapperExitUsage    = 2
+	wrapperExitDoctor   = 1
+)
+
+func runWrapperFixture(t *testing.T, wrapperPath string, args ...string) (stdout string, stderr string, exitCode int) {
+	t.Helper()
+	node := requireNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, args...)
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	var stdoutBuf, stderrBuf strings.Builder
+	command.Stdout = &stdoutBuf
+	command.Stderr = &stderrBuf
+	err := command.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out: %v; stdout: %s stderr: %s", ctx.Err(), stdoutBuf.String(), stderrBuf.String())
+	}
+	exitCode = wrapperExitSuccess
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("wrapper err = %v, want *exec.ExitError; stdout=%s stderr=%s", err, stdoutBuf.String(), stderrBuf.String())
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return stdoutBuf.String(), stderrBuf.String(), exitCode
+}
+
 func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	root := repoRoot(t)
 	bytes, err := os.ReadFile(filepath.Join(root, "package.json"))
@@ -401,77 +434,50 @@ func nodeArchName() string {
 // UX matches what the Go-side doctor.Format produces) and on exit 1 (a missing
 // binary is still a hard failure, not a pass).
 func TestNodeWrapperDoctorReportsMissingNativeBinaryAsDoctorFail(t *testing.T) {
-	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
-	defer cancel()
-	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor")
-	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
-	output, err := command.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("wrapper timed out: %v; output: %s", ctx.Err(), output)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
 	}
-	if err == nil {
-		t.Fatalf("doctor should not exit 0 when the native binary is missing: %s", output)
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor text report must go to stdout only, got stderr=%q", stderr)
 	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 1 {
-		t.Fatalf("doctor err = %v, want exit 1; output: %s", err, output)
-	}
-	got := string(output)
 	// Doctor-shaped report, not the generic wrapper bail. Matches the shape the
 	// Go-side doctor.Format emits: a header, "Overall: <pass/fail>", then
 	// "[<status>] <id> - <message>" lines.
-	if !strings.Contains(got, "Zero doctor report (") {
-		t.Fatalf("doctor output should start with a doctor report header, got %q", got)
+	if !strings.Contains(stdout, "Zero doctor report (") {
+		t.Fatalf("doctor output should start with a doctor report header, got stdout=%q", stdout)
 	}
-	if !strings.Contains(got, "Overall: fail") {
-		t.Fatalf("doctor overall must be fail when the native binary is missing, got %q", got)
+	if !strings.Contains(stdout, "Overall: fail") {
+		t.Fatalf("doctor overall must be fail when the native binary is missing, got stdout=%q", stdout)
 	}
-	if !strings.Contains(got, "[fail] runtime.go") {
-		t.Fatalf("doctor must report a failing runtime.go check, got %q", got)
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor must report a failing runtime.go check, got stdout=%q", stdout)
 	}
-	if !strings.Contains(got, "Native zero binary is missing next to the npm wrapper") {
-		t.Fatalf("doctor must name the actual cause (missing native binary), got %q", got)
+	if !strings.Contains(stdout, "Native zero binary is missing next to the npm wrapper") {
+		t.Fatalf("doctor must name the actual cause (missing native binary), got stdout=%q", stdout)
 	}
 	// The actionable remedy must point at the postinstall script that would fix
 	// the install, not just "build from source".
-	if !strings.Contains(got, "postinstall.mjs") {
-		t.Fatalf("doctor remedy should name the postinstall script, got %q", got)
+	if !strings.Contains(stdout, "postinstall.mjs") {
+		t.Fatalf("doctor remedy should name the postinstall script, got stdout=%q", stdout)
 	}
 	// Regression guard for the original blind-alley bug: the doctor path must
 	// NOT emit the generic wrapper bail (that's what sent users debugging the
 	// wrong thing).
-	if strings.Contains(got, "[zero] No native binary found next to the npm wrapper") {
-		t.Fatalf("doctor must not emit the generic wrapper bail, got %q", got)
+	if strings.Contains(stdout, "[zero] No native binary found next to the npm wrapper") {
+		t.Fatalf("doctor must not emit the generic wrapper bail, got stdout=%q", stdout)
 	}
 }
 
 func TestNodeWrapperDoctorJSONReportsMissingNativeBinaryAsJSONFail(t *testing.T) {
-	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
-	defer cancel()
-	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor", "--json")
-	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
-	var stdout, stderr strings.Builder
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	err := command.Run()
-	if ctx.Err() != nil {
-		t.Fatalf("wrapper timed out: %v; stdout: %s stderr: %s", ctx.Err(), stdout.String(), stderr.String())
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--json")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor --json exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
 	}
-	if err == nil {
-		t.Fatalf("doctor --json should not exit 0 when the native binary is missing: stdout=%s stderr=%s", stdout.String(), stderr.String())
-	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 1 {
-		t.Fatalf("doctor --json err = %v, want exit 1; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
-	}
-	if strings.TrimSpace(stderr.String()) != "" {
-		t.Fatalf("doctor --json should write machine-readable output to stdout only, got stderr=%q", stderr.String())
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor --json should write machine-readable output to stdout only, got stderr=%q", stderr)
 	}
 	var report struct {
 		GeneratedAt string `json:"generatedAt"`
@@ -484,8 +490,8 @@ func TestNodeWrapperDoctorJSONReportsMissingNativeBinaryAsJSONFail(t *testing.T)
 			Details map[string]any `json:"details"`
 		} `json:"checks"`
 	}
-	if err := json.Unmarshal([]byte(stdout.String()), &report); err != nil {
-		t.Fatalf("doctor --json stdout should be valid JSON, got %q: %v", stdout.String(), err)
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("doctor --json stdout should be valid JSON, got %q: %v", stdout, err)
 	}
 	if report.GeneratedAt == "" {
 		t.Fatalf("doctor --json report should include generatedAt: %#v", report)
@@ -509,31 +515,53 @@ func TestNodeWrapperDoctorJSONReportsMissingNativeBinaryAsJSONFail(t *testing.T)
 	}
 }
 
-// `doctor --connectivity` (a real doctor invocation with a trailing flag) must
-// take the same doctor-shaped path: the doctor branch matches the literal
-// subcommand and forwards the rest of argv verbatim, the way the spawn path
-// would.
-func TestNodeWrapperDoctorWithFlagsStillReportsDoctorFail(t *testing.T) {
-	node := requireNode(t)
+func TestNodeWrapperDoctorHelpShowsUsage(t *testing.T) {
 	wrapperPath := copyWrapperFixture(t)
+	for _, args := range [][]string{{"doctor", "--help"}, {"doctor", "help"}, {"doctor", "-h"}} {
+		stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, args...)
+		if exitCode != wrapperExitSuccess {
+			t.Fatalf("%v exit = %d, want %d; stdout=%s stderr=%s", args, exitCode, wrapperExitSuccess, stdout, stderr)
+		}
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("%v help must write to stdout only, got stderr=%q", args, stderr)
+		}
+		if !strings.Contains(stdout, "Usage:") || !strings.Contains(stdout, "zero doctor [flags]") {
+			t.Fatalf("%v help output = %q, want doctor usage text", args, stdout)
+		}
+	}
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
-	defer cancel()
-	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor", "--connectivity")
-	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
-	output, err := command.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("wrapper timed out: %v; output: %s", ctx.Err(), output)
+func TestNodeWrapperDoctorRejectsUnknownFlag(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--bogus")
+	if exitCode != wrapperExitUsage {
+		t.Fatalf("doctor --bogus exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitUsage, stdout, stderr)
 	}
-	if err == nil {
-		t.Fatalf("doctor --connectivity should not exit 0 when binary missing: %s", output)
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("invalid doctor flag should not write stdout, got %q", stdout)
 	}
-	got := string(output)
-	if !strings.Contains(got, "[fail] runtime.go") {
-		t.Fatalf("doctor --connectivity must still emit the failing runtime.go line, got %q", got)
+	if stderr != "[zero] unknown doctor flag \"--bogus\"\n" {
+		t.Fatalf("invalid doctor flag stderr = %q", stderr)
 	}
-	if strings.Contains(got, "[zero] No native binary found next to the npm wrapper") {
-		t.Fatalf("doctor --connectivity must not fall back to the generic bail, got %q", got)
+}
+
+// `doctor --connectivity` (a valid doctor invocation with a trailing flag) must
+// take the same doctor-shaped path: parseDoctorArgs accepts --connectivity and
+// the missing-binary fallback still reports the runtime failure.
+func TestNodeWrapperDoctorWithFlagsStillReportsDoctorFail(t *testing.T) {
+	wrapperPath := copyWrapperFixture(t)
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "doctor", "--connectivity")
+	if exitCode != wrapperExitDoctor {
+		t.Fatalf("doctor --connectivity exit = %d, want %d; stdout=%s stderr=%s", exitCode, wrapperExitDoctor, stdout, stderr)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("doctor --connectivity must write to stdout only, got stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "[fail] runtime.go") {
+		t.Fatalf("doctor --connectivity must still emit the failing runtime.go line, got stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "[zero] No native binary found next to the npm wrapper") {
+		t.Fatalf("doctor --connectivity must not fall back to the generic bail, got stdout=%q", stdout)
 	}
 }
 
