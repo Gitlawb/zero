@@ -280,6 +280,52 @@ func TestRunModelSessionSwitcherCarriesOptimizedSession(t *testing.T) {
 	}
 }
 
+// TestRunModelSessionSwitcherOpenFailureIsNonFatal verifies the swap-time open
+// failure: the switcher returns a TurnSessionProvider whose OpenTurnSession
+// fails. The run stays non-fatal on the ORIGINAL session (closed only at
+// teardown), and the switch-failure note reaches the next request.
+func TestRunModelSessionSwitcherOpenFailureIsNonFatal(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	inner := &mockProvider{turns: escalateThenAnswerTurns("recovered after failed open")}
+	session := &fakeTurnSession{inner: inner}
+	failingOpen := &fakeTurnSessionProvider{openErr: errors.New("switched handshake refused")}
+
+	result, err := Run(context.Background(), "go", inner, Options{
+		Registry:            registry,
+		Model:               "claude-sonnet-4.5",
+		MaxTurns:            4,
+		TurnSessionProvider: &fakeTurnSessionProvider{session: session},
+		ModelSessionSwitcher: func(_ context.Context, _ string) (zeroruntime.TurnSessionProvider, error) {
+			return failingOpen, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected a failed swap open to be non-fatal, got %v", err)
+	}
+	if result.FinalAnswer != "recovered after failed open" {
+		t.Fatalf("expected the run to recover on the original session, got %q", result.FinalAnswer)
+	}
+	if failingOpen.opens != 1 {
+		t.Fatalf("expected exactly one open attempt on the switched provider, got %d", failingOpen.opens)
+	}
+	// The original session serves both turns and is closed only at teardown —
+	// never by the failed swap.
+	if session.streams != 2 || session.closes != 1 {
+		t.Fatalf("expected the original session to serve both turns and close once (streams=%d closes=%d)", session.streams, session.closes)
+	}
+	var sawNote bool
+	for _, message := range inner.requests[1].Messages {
+		if message.Role == zeroruntime.MessageRoleUser && strings.Contains(strings.ToLower(message.Content), "could not switch") {
+			sawNote = true
+		}
+	}
+	if !sawNote {
+		t.Fatalf("expected a switch-failure note on the next turn, messages: %+v", inner.requests[1].Messages)
+	}
+}
+
 // TestRunModelSessionSwitcherErrorIsNonFatal verifies a ModelSessionSwitcher
 // error keeps the run on the current session with a transcript note — the same
 // non-fatal contract as ModelSwitcher.
