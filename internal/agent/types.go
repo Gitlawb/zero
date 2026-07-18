@@ -290,6 +290,14 @@ type Options struct {
 	// whose Stream IS provider.StreamCompletion, so behavior is byte-identical
 	// and every existing caller is unaffected.
 	TurnSessionProvider zeroruntime.TurnSessionProvider
+	// ModelSessionSwitcher, when set, is the target-aware escalation hook: the
+	// loop prefers it over ModelSwitcher, and its TurnSessionProvider keeps an
+	// optimized session (and its capabilities) across a mid-run model switch.
+	// nil falls back to ModelSwitcher, whose bare Provider is wrapped in the
+	// default no-op session — today's behavior, unchanged. Same non-fatal error
+	// contract as ModelSwitcher: a returned error records a note and the run
+	// continues on the current model and session.
+	ModelSessionSwitcher func(ctx context.Context, modelID string) (zeroruntime.TurnSessionProvider, error)
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,

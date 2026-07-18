@@ -737,23 +737,35 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// of the run. At most one switch per turn (first request wins). A switcher
 		// error is NON-FATAL — record a brief note and continue on the current
 		// model. nil switcher ⇒ requests are ignored entirely (escalation off).
-		if turnRequestedModel != "" && options.ModelSwitcher != nil {
-			newProvider, switchErr := options.ModelSwitcher(ctx, turnRequestedModel)
+		if turnRequestedModel != "" && (options.ModelSessionSwitcher != nil || options.ModelSwitcher != nil) {
+			// Resolve the escalated model's session source. The target-aware
+			// ModelSessionSwitcher is preferred: its TurnSessionProvider carries an
+			// optimized session (and capabilities) across the swap. The legacy
+			// ModelSwitcher fallback returns a bare Provider, wrapped in the
+			// default no-op session — identical to pre-seam behavior.
+			var newSessions zeroruntime.TurnSessionProvider
+			var switchErr error
+			if options.ModelSessionSwitcher != nil {
+				newSessions, switchErr = options.ModelSessionSwitcher(ctx, turnRequestedModel)
+			} else {
+				var newProvider Provider
+				newProvider, switchErr = options.ModelSwitcher(ctx, turnRequestedModel)
+				if switchErr == nil && newProvider != nil {
+					newSessions = zeroruntime.NewProviderTurnSessionProvider(newProvider, zeroruntime.ProviderCapabilities{})
+				}
+			}
 			if switchErr != nil {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
 					Content: escalationFailedNoticePrefix + " (" + turnRequestedModel + "): " + switchErr.Error() + ". Continuing on " + options.Model + ".",
 				})
-			} else if newProvider != nil {
-				// Open a fresh default session over the escalated provider and close
-				// the old one, so the next turn's streams and compaction use the new
-				// model. The default open never errors and its Close is a no-op, so
-				// this stays byte-identical to the old direct reassignment; the
-				// guarded open matters once a session holds real state. Note the
-				// switcher returns a bare Provider, so an optimized session is not
-				// carried across a swap — acceptable for the same reason as the
-				// context-window limitation below (a switcher contract change).
-				newSession, openErr := zeroruntime.NewProviderTurnSessionProvider(newProvider, zeroruntime.ProviderCapabilities{}).OpenTurnSession(ctx)
+			} else if newSessions != nil {
+				// Open the new session and close the old one, so the next turn's
+				// streams and compaction use the new model. For the default adapter
+				// the open never errors and Close is a no-op, so this stays
+				// byte-identical to a direct provider reassignment; the guarded open
+				// and prewarm matter once a session holds real state.
+				newSession, openErr := newSessions.OpenTurnSession(ctx)
 				if openErr != nil {
 					messages = append(messages, zeroruntime.Message{
 						Role:    zeroruntime.MessageRoleUser,
@@ -769,8 +781,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					// KNOWN LIMITATION (deferred): the compactor's context-window budget
 					// is fixed at run start from options.ContextWindow and is NOT updated
 					// here, so a switch to a model with a different window keeps compacting
-					// against the original budget. Fixing it needs a ModelSwitcher contract
-					// change (return the new window) — out of scope for this change.
+					// against the original budget. Fixing it needs the switcher to also
+					// report the new window — out of scope for this change.
 				}
 			}
 		}

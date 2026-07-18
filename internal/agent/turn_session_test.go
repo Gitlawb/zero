@@ -214,3 +214,108 @@ func TestRunModelSwitchClosesSessionAndContinues(t *testing.T) {
 		t.Fatalf("expected the post-switch turn on the new provider, got %d requests", len(secondProvider.requests))
 	}
 }
+
+// TestRunModelSessionSwitcherCarriesOptimizedSession verifies the target-aware
+// switcher: the switched-to TurnSessionProvider's DISTINCT session receives the
+// post-switch streams, is prewarmed exactly once, and is closed exactly once at
+// teardown — and the legacy ModelSwitcher is never consulted when both are set.
+func TestRunModelSessionSwitcherCarriesOptimizedSession(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	firstInner := &mockProvider{turns: escalateThenAnswerTurns("unused")}
+	firstSession := &fakeTurnSession{inner: firstInner}
+	initial := &fakeTurnSessionProvider{session: firstSession}
+
+	switchedInner := &mockProvider{turns: singleAnswerTurns("answered on the switched session")}
+	switchedSession := &fakeTurnSession{inner: switchedInner}
+	switched := &fakeTurnSessionProvider{session: switchedSession}
+
+	var switchedTo string
+	legacyCalled := false
+	result, err := Run(context.Background(), "go", firstInner, Options{
+		Registry:            registry,
+		Model:               "claude-sonnet-4.5",
+		MaxTurns:            4,
+		TurnSessionProvider: initial,
+		ModelSessionSwitcher: func(_ context.Context, modelID string) (zeroruntime.TurnSessionProvider, error) {
+			switchedTo = modelID
+			return switched, nil
+		},
+		ModelSwitcher: func(_ context.Context, _ string) (Provider, error) {
+			legacyCalled = true
+			return nil, errors.New("legacy switcher must not be consulted")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "answered on the switched session" {
+		t.Fatalf("expected the switched session's answer, got %q", result.FinalAnswer)
+	}
+	if switchedTo != "claude-opus-4.1" {
+		t.Fatalf("expected switch to claude-opus-4.1, got %q", switchedTo)
+	}
+	if legacyCalled {
+		t.Fatal("legacy ModelSwitcher was consulted despite ModelSessionSwitcher being set")
+	}
+	if switched.opens != 1 {
+		t.Fatalf("expected exactly one open of the switched provider, got %d", switched.opens)
+	}
+	// The switched session carries the rest of the run: it streams the answer
+	// turn, is prewarmed exactly once at the swap, and is closed exactly once by
+	// the teardown defer.
+	if switchedSession.streams != 1 || len(switchedInner.requests) != 1 {
+		t.Fatalf("expected the switched session to stream the post-switch turn, streams=%d inner=%d", switchedSession.streams, len(switchedInner.requests))
+	}
+	if switchedSession.prewarms != 1 {
+		t.Fatalf("expected the switched session to be prewarmed exactly once, got %d", switchedSession.prewarms)
+	}
+	if switchedSession.closes != 1 {
+		t.Fatalf("expected the switched session to be closed exactly once at teardown, got %d", switchedSession.closes)
+	}
+	// The original session ends with the swap: one stream, one close.
+	if firstSession.streams != 1 || firstSession.closes != 1 {
+		t.Fatalf("expected the original session to end at the swap (streams=%d closes=%d)", firstSession.streams, firstSession.closes)
+	}
+}
+
+// TestRunModelSessionSwitcherErrorIsNonFatal verifies a ModelSessionSwitcher
+// error keeps the run on the current session with a transcript note — the same
+// non-fatal contract as ModelSwitcher.
+func TestRunModelSessionSwitcherErrorIsNonFatal(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	inner := &mockProvider{turns: escalateThenAnswerTurns("recovered on original session")}
+	session := &fakeTurnSession{inner: inner}
+
+	result, err := Run(context.Background(), "go", inner, Options{
+		Registry:            registry,
+		Model:               "claude-sonnet-4.5",
+		MaxTurns:            4,
+		TurnSessionProvider: &fakeTurnSessionProvider{session: session},
+		ModelSessionSwitcher: func(_ context.Context, _ string) (zeroruntime.TurnSessionProvider, error) {
+			return nil, errors.New("session build blew up")
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected session-switcher error to be non-fatal, got %v", err)
+	}
+	if result.FinalAnswer != "recovered on original session" {
+		t.Fatalf("expected the run to recover on the original session, got %q", result.FinalAnswer)
+	}
+	// Both turns stream through the original session; it closes once at teardown.
+	if session.streams != 2 || session.closes != 1 {
+		t.Fatalf("expected the original session to serve both turns and close once (streams=%d closes=%d)", session.streams, session.closes)
+	}
+	var sawNote bool
+	for _, request := range inner.requests[1].Messages {
+		if request.Role == zeroruntime.MessageRoleUser && strings.Contains(strings.ToLower(request.Content), "could not switch") {
+			sawNote = true
+		}
+	}
+	if !sawNote {
+		t.Fatalf("expected a non-fatal switch-failure note on the next turn, messages: %+v", inner.requests[1].Messages)
+	}
+}
