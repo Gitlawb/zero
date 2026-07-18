@@ -191,7 +191,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	for _, want := range []string{
 		"Paste API key",
 		"ANTHROPIC_API_KEY",
-		"Enter continue",
+		"Enter/→ continue",
 	} {
 		assertContains(t, view, want)
 	}
