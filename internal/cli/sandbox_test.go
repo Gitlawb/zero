@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -483,14 +484,16 @@ func TestTUISandboxSetupCommandGatedToWindowsNativeBackend(t *testing.T) {
 }
 
 func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
-	// Point HOME at an empty directory so the default credential-store
-	// deny-read entries (which depend on what exists in the real home, e.g.
-	// ~/.aws on the macOS CI image) cannot leak host paths into the golden
-	// comparison.
+	// Point all user-config roots at an empty directory so the platform-specific
+	// credential deny baseline can be asserted without leaking host paths into
+	// the platform-neutral golden comparison.
 	emptyHome := t.TempDir()
 	t.Setenv("HOME", emptyHome)
 	t.Setenv("USERPROFILE", emptyHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(emptyHome, ".config"))
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	store := newSandboxTestStore(t)
 	workspace := t.TempDir()
 	deps := appDeps{
@@ -518,7 +521,7 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	got := stdout.String()
 	got = replacePathToken(got, workspace, "$WORKSPACE")
 	got = replacePathToken(got, store.FilePath(), "$GRANTS")
-	gotBytes := normalizeSandboxPolicyGoldenTempRoots(t, []byte(got), workspace)
+	gotBytes := normalizeSandboxPolicyGoldenTempRoots(t, []byte(got), workspace, emptyHome)
 	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_unavailable.golden.json"))
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
@@ -528,7 +531,7 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	}
 }
 
-func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, workspace string) []byte {
+func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, workspace string, emptyHome string) []byte {
 	t.Helper()
 	scope, err := sandbox.NewScope(workspace, nil)
 	if err != nil {
@@ -549,6 +552,19 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	plan, _ := value.(map[string]any)["plan"].(map[string]any)
 	profile, _ := plan["permissionProfile"].(map[string]any)
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
+	wantDenyRead := []string(nil)
+	if runtime.GOOS != "windows" {
+		wantDenyRead = []string{
+			filepath.Join(emptyHome, ".aws"),
+			filepath.Join(emptyHome, ".config", "gcloud"),
+			filepath.Join(emptyHome, ".azure"),
+			filepath.Join(emptyHome, ".config", "zero"),
+		}
+	}
+	if gotDenyRead := jsonStringSlice(fileSystem["denyRead"]); !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
+		t.Fatalf("manager credential deny baseline = %#v, want %#v", gotDenyRead, wantDenyRead)
+	}
+	delete(fileSystem, "denyRead")
 	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)
 	fileSystem["writeRoots"] = filterJSONWriteRoots(fileSystem["writeRoots"], tempRoots)
 	normalized, err := json.MarshalIndent(value, "", "  ")
@@ -556,6 +572,22 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 		t.Fatalf("encode normalized policy JSON: %v", err)
 	}
 	return append(normalized, '\n')
+}
+
+func jsonStringSlice(value any) []string {
+	values, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			return nil
+		}
+		out = append(out, text)
+	}
+	return out
 }
 
 func filterJSONStringRoots(value any, excluded map[string]struct{}) any {
