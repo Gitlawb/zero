@@ -508,6 +508,9 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 	if result.Mode != "" {
 		lines = append(lines, "mode: "+result.Mode)
 	}
+	if result.ExecProfile != "" {
+		lines = append(lines, "exec-profile: "+result.ExecProfile)
+	}
 	if len(result.TopLatency) > 0 {
 		lines = append(lines, "top latency sources:")
 		for _, src := range result.TopLatency {

@@ -179,7 +179,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// runs after it so the mode's fills count as "set" and win. MaxTurns is
 	// deferred to config resolution below, where the displaced resolved budget
 	// is known and becomes the escalation restore target.
-	execProfile, err := applyExecProfile(&options)
+	execProfile, execProfileFilledEffort, err := applyExecProfile(&options)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -504,6 +504,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			reasoningEffort:    forwardEffort,
 			specPermissionMode: permissionMode,
 			notifier:           notifier,
+			// The profile displaced resolved.MaxTurns above, so the spec-draft
+			// run gets the same escalation safety net as the main run.
+			profilePolicy: execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		})
 	}
 
@@ -645,7 +648,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Autonomy:             options.autonomy,
 		SelfCorrect:          selfCorrector,
 		FileDiagnostics:      fileDiagnostics,
-		Profile:              execProfile.Policy(displacedMaxTurns),
+		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -1162,22 +1165,27 @@ func applyExecMode(options *execOptions) error {
 // after config resolution, where the displaced value is known and becomes the
 // escalation restore target. An unknown profile is a usage error listing the
 // valid names. Not to be confused with the legacy inert --profile flag.
-func applyExecProfile(options *execOptions) (execprofile.Profile, error) {
+// The second return reports whether the profile actually filled the reasoning
+// effort (false when the user set one explicitly), so the escalation policy
+// knows the displaced effort was the provider default and can restore it.
+func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 	name := strings.TrimSpace(options.execProfile)
 	if name == "" {
-		return execprofile.Profile{}, nil
+		return execprofile.Profile{}, false, nil
 	}
 	profile, ok := execprofile.Lookup(name)
 	if !ok {
-		return execprofile.Profile{}, execUsageError{fmt.Sprintf("unknown execution profile %q. Valid profiles: %s.", options.execProfile, strings.Join(execprofile.Names(), ", "))}
+		return execprofile.Profile{}, false, execUsageError{fmt.Sprintf("unknown execution profile %q. Valid profiles: %s.", options.execProfile, strings.Join(execprofile.Names(), ", "))}
 	}
+	effortFilled := false
 	if options.reasoningEffort == "" && profile.ReasoningEffort != "" {
 		options.reasoningEffort = profile.ReasoningEffort
+		effortFilled = true
 	}
 	if profile.SelfCorrect {
 		options.selfCorrect = true
 	}
-	return profile, nil
+	return profile, effortFilled, nil
 }
 
 // applyProfileTurnBudget decides the run's turn budget once config is resolved.

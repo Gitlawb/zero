@@ -202,6 +202,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if target.ReasoningEffort != "" {
 				options.ReasoningEffort = target.ReasoningEffort
+			} else if target.RestoreDefaultEffort {
+				options.ReasoningEffort = ""
 			}
 			if target.RestoreCompletionGate {
 				options.RequireCompletionSignal = true

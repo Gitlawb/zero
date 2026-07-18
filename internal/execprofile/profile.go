@@ -7,8 +7,10 @@
 // last with the same fill-only-if-unset rule modes use.
 //
 // The catalog is deliberately tiny and value-stable: balanced is the empty
-// profile (a balanced run is byte-identical to an unflagged run — asserted by
-// test, not claimed), fast trades turn budget and effort for latency with a
+// profile (selecting it leaves the run's options, budget, and loop behavior
+// identical to an unflagged run — asserted by test; only the opt-in trace and
+// bench artifacts record the selected profile name, by design, so captures are
+// self-describing), fast trades turn budget and effort for latency with a
 // one-shot escalation back to the displaced posture as the safety net, and
 // thorough raises the budget and arms full self-correction.
 package execprofile
@@ -64,9 +66,15 @@ var (
 	Balanced = Profile{Name: "balanced"}
 
 	// Fast starts cheap (30 turns, low effort) and arms every escalation
-	// trigger so a struggling run restores its displaced budget: two
+	// trigger so a struggling run restores its displaced posture: two
 	// same-tool retriable failures in a row, a second uncertain completion
-	// evaluation, a failing self-correction cycle, or a high-risk mutation.
+	// evaluation, a failing self-correction cycle, or a critical-risk
+	// mutation. The risk threshold is deliberately Critical, not High: the
+	// sandbox classifies EVERY shell command as at least high risk before any
+	// command analysis, so a High trigger would fire on the first `go test`
+	// of virtually any coding task and spend the one-shot on turn one.
+	// Critical marks the genuinely scary categories (destructive commands,
+	// piped installers, out-of-workspace writes, network mutations).
 	Fast = Profile{
 		Name:                          "fast",
 		MaxTurns:                      30,
@@ -74,7 +82,7 @@ var (
 		EscalateOnToolFailureStreak:   2,
 		EscalateOnCompletionUncertain: 2,
 		EscalateOnSelfCorrectFailure:  true,
-		EscalateOnRiskyMutation:       sandbox.RiskHigh,
+		EscalateOnRiskyMutation:       sandbox.RiskCritical,
 	}
 
 	// Thorough doubles the default budget, asks for high effort, and arms the
@@ -117,14 +125,16 @@ func Names() []string {
 // (what the run would have used without it) and becomes the escalation's
 // restore target; pass 0 when the profile did not displace the budget (e.g.
 // the user pinned --max-turns explicitly) so escalation leaves the ceiling
-// untouched. A displaced reasoning effort is always "" by construction —
-// profiles only fill effort when it was unset — so the escalation carries no
-// effort target (zero-valued targets are no-ops in the loop).
+// untouched. effortFilled reports whether the profile actually filled the
+// run's reasoning effort (it backs off when the user set one explicitly); the
+// displaced effort is then "" (the provider default) by construction, which
+// the escalation restores via RestoreDefaultEffort — a plain "" target would
+// mean "leave untouched".
 //
 // Profiles with no armed triggers return nil: the loop treats a nil policy as
 // "no profile" (no observation, no counters), which keeps balanced and
 // thorough runs byte-identical to the same knob values set by hand.
-func (p Profile) Policy(displacedMaxTurns int) *agent.ProfilePolicy {
+func (p Profile) Policy(displacedMaxTurns int, effortFilled bool) *agent.ProfilePolicy {
 	if p.EscalateOnToolFailureStreak == 0 && p.EscalateOnCompletionUncertain == 0 &&
 		!p.EscalateOnSelfCorrectFailure && p.EscalateOnRiskyMutation == "" {
 		return nil
@@ -133,6 +143,7 @@ func (p Profile) Policy(displacedMaxTurns int) *agent.ProfilePolicy {
 		Name: p.Name,
 		Escalate: &agent.PostureEscalation{
 			MaxTurns:              displacedMaxTurns,
+			RestoreDefaultEffort:  effortFilled,
 			OnToolFailureStreak:   p.EscalateOnToolFailureStreak,
 			OnCompletionUncertain: p.EscalateOnCompletionUncertain,
 			OnSelfCorrectFailure:  p.EscalateOnSelfCorrectFailure,

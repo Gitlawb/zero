@@ -106,6 +106,61 @@ func TestProfileCommandSwitchDoesNotStack(t *testing.T) {
 	}
 }
 
+// An explicit /turns while a profile is active is a pinned budget: it must
+// disarm the escalation's turn target (mirroring headless exec, where an
+// explicit --max-turns leaves nothing displaced) while the other triggers
+// stay armed, and it must survive a later revert.
+func TestProfileCommandTurnsPinDisarmsEscalationTarget(t *testing.T) {
+	m := model{}
+	m.agentOptions.MaxTurns = 80
+
+	m, _ = m.handleProfileCommand("fast")
+	m, _ = m.handleTurnsCommand("20")
+	if m.agentOptions.MaxTurns != 20 {
+		t.Fatalf("MaxTurns = %d, want the pinned 20", m.agentOptions.MaxTurns)
+	}
+	policy := m.agentOptions.Profile
+	if policy == nil || policy.Escalate == nil {
+		t.Fatal("the profile's other escalation triggers must stay armed")
+	}
+	if policy.Escalate.MaxTurns != 0 {
+		t.Fatalf("Escalate.MaxTurns = %d, want 0 (a pinned budget must never be raised by escalation)", policy.Escalate.MaxTurns)
+	}
+	if policy.Escalate.OnToolFailureStreak == 0 {
+		t.Fatal("disarming the turn target must not disarm the other triggers")
+	}
+	m, _ = m.handleProfileCommand("balanced")
+	if m.agentOptions.MaxTurns != 20 {
+		t.Fatalf("MaxTurns = %d, the pinned 20 must survive the revert", m.agentOptions.MaxTurns)
+	}
+}
+
+// A manual override that COINCIDES with the profile's own value must still
+// survive the revert: touched beats value equality.
+func TestProfileCommandRevertLeavesCoincidingOverride(t *testing.T) {
+	m := model{}
+	m.agentOptions.MaxTurns = 80
+
+	m, _ = m.handleProfileCommand("fast")
+	m, _ = m.handleTurnsCommand("30") // explicit, happens to equal fast's 30
+	m, _ = m.handleProfileCommand("balanced")
+	if m.agentOptions.MaxTurns != 30 {
+		t.Fatalf("MaxTurns = %d, the explicit /turns 30 must survive even though it equals fast's value", m.agentOptions.MaxTurns)
+	}
+
+	// Same for self-correct: /selfcorrect off then on under thorough is an
+	// explicit opt-in, not the profile's arming.
+	m2 := model{}
+	m2.agentOptions.MaxTurns = 80
+	m2, _ = m2.handleProfileCommand("thorough")
+	m2, _ = m2.handleSelfCorrectCommand("off")
+	m2, _ = m2.handleSelfCorrectCommand("on")
+	m2, _ = m2.handleProfileCommand("balanced")
+	if !m2.selfCorrectTests {
+		t.Fatal("an explicit /selfcorrect on must survive the revert even though thorough also armed it")
+	}
+}
+
 // A manual override made after selecting a profile survives the revert: the
 // profile only restores knobs that still hold the value it applied.
 func TestProfileCommandRevertLeavesManualOverride(t *testing.T) {

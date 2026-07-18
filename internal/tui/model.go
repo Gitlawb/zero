@@ -138,20 +138,26 @@ type model struct {
 	execProfileAppliedMaxTurns   int
 	execProfileAppliedEffort     modelregistry.ReasoningEffort
 	execProfileArmedSelfCorrect  bool
-	responseStyle                string
-	keyBindings                  keyBindings
-	themeMode                    themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                    bool      // last terminal background-detection result (auto mode)
-	userAgent                    string
-	compactRequests              int
-	compactInFlight              bool
-	compactFrame                 int
-	lastCompactResult            *CompactResult
-	lastCompactError             string
-	unpricedRequests             int
-	unpricedTokens               int
-	lastUsage                    usage.Normalized
-	lastUsageSeen                bool
+	// The touched bits record explicit user choices made while a profile is
+	// active (/turns, /effort, Ctrl+T, /selfcorrect); a touched knob is never
+	// reverted, even when its value coincides with what the profile applied.
+	execProfileTurnsTouched       bool
+	execProfileEffortTouched      bool
+	execProfileSelfCorrectTouched bool
+	responseStyle                 string
+	keyBindings                   keyBindings
+	themeMode                     themeMode // palette preference: auto (default), dark, light
+	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
+	userAgent                     string
+	compactRequests               int
+	compactInFlight               bool
+	compactFrame                  int
+	lastCompactResult             *CompactResult
+	lastCompactError              string
+	unpricedRequests              int
+	unpricedTokens                int
+	lastUsage                     usage.Normalized
+	lastUsageSeen                 bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.

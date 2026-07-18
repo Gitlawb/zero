@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/perfbench"
 )
 
@@ -217,6 +218,20 @@ func parseTurnArgs(args []string, getenv func(string) string) (turnOptions, erro
 	}
 	if strings.TrimSpace(options.Model) == "" && !options.DryRun {
 		return options, fmt.Errorf("--model is required (or pass --dry-run)")
+	}
+	// Validate the profile here, before anything spawns: an unknown name would
+	// otherwise make every child exit with a usage error in milliseconds, and
+	// those near-zero walls would be recorded as valid latency samples in an
+	// exit-0 report — exactly the misread-as-improvement trap the harness
+	// closed for spawn failures. Normalizing to the catalog name also keeps
+	// the stamped execProfile canonical (Lookup is case-insensitive), so two
+	// captures of the same posture always compare equal.
+	if raw := strings.TrimSpace(options.ExecProfile); raw != "" {
+		profile, ok := execprofile.Lookup(raw)
+		if !ok {
+			return options, fmt.Errorf("unknown execution profile %q for --exec-profile. Valid profiles: %s", raw, strings.Join(execprofile.Names(), ", "))
+		}
+		options.ExecProfile = profile.Name
 	}
 	return options, nil
 }

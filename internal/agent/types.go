@@ -126,6 +126,12 @@ type PostureEscalation struct {
 	MaxTurns int
 	// ReasoningEffort replaces the run's effort when non-empty.
 	ReasoningEffort string
+	// RestoreDefaultEffort clears the run's effort override (back to the
+	// provider/model default) when true. It exists because the displaced value
+	// of a profile-filled effort is "" — which as a ReasoningEffort target
+	// means "leave untouched" — so restoring the default needs its own signal.
+	// Ignored when ReasoningEffort is non-empty.
+	RestoreDefaultEffort bool
 	// RestoreCompletionGate re-enables RequireCompletionSignal (headless
 	// completion semantics) when true.
 	RestoreCompletionGate bool

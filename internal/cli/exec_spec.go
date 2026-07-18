@@ -46,6 +46,11 @@ type execSpecDraftRun struct {
 	reasoningEffort    string
 	specPermissionMode agent.PermissionMode
 	notifier           *notify.Notifier
+	// profilePolicy carries the selected execution profile's escalation policy
+	// (nil when none): the profile displaces resolved.MaxTurns before this
+	// path branches off, so the spec-draft run needs the same safety net as
+	// the main run.
+	profilePolicy *agent.ProfilePolicy
 }
 
 type execSpecDraftInfo struct {
@@ -119,6 +124,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		ProviderName:    run.resolved.Provider.Name,
 		Model:           run.resolved.Provider.Model,
 		ReasoningEffort: run.reasoningEffort,
+		Profile:         run.profilePolicy,
 		Cwd:             run.workspaceRoot,
 		SystemPrompt:    specmode.DraftSystemPrompt,
 		Images:          run.images,

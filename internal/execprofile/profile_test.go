@@ -21,7 +21,7 @@ func TestBalancedProfileIsEmpty(t *testing.T) {
 	if !reflect.DeepEqual(profile, Profile{}) {
 		t.Fatalf("balanced must be zero-valued apart from its name, got %+v", profile)
 	}
-	if policy := Balanced.Policy(80); policy != nil {
+	if policy := Balanced.Policy(80, false); policy != nil {
 		t.Fatalf("balanced Policy must be nil (byte-identical loop), got %+v", policy)
 	}
 }
@@ -48,7 +48,7 @@ func TestNamesAreSorted(t *testing.T) {
 // triggers, the call site supplies what was displaced, and nothing else may
 // appear in the escalation.
 func TestFastPolicyTargetsDisplacedValuesOnly(t *testing.T) {
-	policy := Fast.Policy(80)
+	policy := Fast.Policy(80, true)
 	if policy == nil {
 		t.Fatal("fast must arm an escalation policy")
 	}
@@ -63,7 +63,10 @@ func TestFastPolicyTargetsDisplacedValuesOnly(t *testing.T) {
 		t.Fatalf("Escalate.MaxTurns = %d, want the displaced 80", esc.MaxTurns)
 	}
 	if esc.ReasoningEffort != "" {
-		t.Fatalf("Escalate.ReasoningEffort = %q, want empty (displaced effort is always unset by construction)", esc.ReasoningEffort)
+		t.Fatalf("Escalate.ReasoningEffort = %q, want empty (displaced effort is the provider default by construction)", esc.ReasoningEffort)
+	}
+	if !esc.RestoreDefaultEffort {
+		t.Fatal("effort was profile-filled, so escalation must restore the provider default")
 	}
 	if esc.RestoreCompletionGate {
 		t.Fatal("fast does not touch the completion gate, so escalation must not either")
@@ -76,10 +79,23 @@ func TestFastPolicyTargetsDisplacedValuesOnly(t *testing.T) {
 	}
 }
 
+// The effort restore arms only when the profile actually filled the effort:
+// with an explicit user effort the profile backed off, so escalation must not
+// clear the user's choice.
+func TestFastPolicyExplicitEffortIsNeverRestored(t *testing.T) {
+	policy := Fast.Policy(80, false)
+	if policy == nil || policy.Escalate == nil {
+		t.Fatal("fast must still arm its triggers")
+	}
+	if policy.Escalate.RestoreDefaultEffort {
+		t.Fatal("the profile did not fill the effort, so escalation must leave it alone")
+	}
+}
+
 // A profile that did not displace the budget (explicit --max-turns pinned it)
 // must not let escalation move the ceiling at all.
 func TestFastPolicyZeroDisplacedLeavesCeilingUntouched(t *testing.T) {
-	policy := Fast.Policy(0)
+	policy := Fast.Policy(0, false)
 	if policy == nil || policy.Escalate == nil {
 		t.Fatal("fast must still arm its triggers with a zero displaced budget")
 	}
@@ -91,7 +107,7 @@ func TestFastPolicyZeroDisplacedLeavesCeilingUntouched(t *testing.T) {
 // Thorough is already the maximum posture: no triggers, so no policy — the
 // loop must stay byte-identical to the same knobs set by hand.
 func TestThoroughPolicyIsNil(t *testing.T) {
-	if policy := Thorough.Policy(80); policy != nil {
+	if policy := Thorough.Policy(80, true); policy != nil {
 		t.Fatalf("thorough Policy must be nil, got %+v", policy)
 	}
 }
@@ -103,8 +119,11 @@ func TestCatalogProvisionalValues(t *testing.T) {
 	if Fast.MaxTurns != 30 || Fast.ReasoningEffort != "low" || Fast.SelfCorrect {
 		t.Fatalf("fast knobs changed: %+v", Fast)
 	}
-	if Fast.EscalateOnRiskyMutation != sandbox.RiskHigh {
-		t.Fatalf("fast risky-mutation trigger = %q, want %q", Fast.EscalateOnRiskyMutation, sandbox.RiskHigh)
+	// Critical, not High: the sandbox classifies every shell command as at
+	// least high risk, so a High trigger would spend the one-shot escalation
+	// on the first benign `go test` of any coding task.
+	if Fast.EscalateOnRiskyMutation != sandbox.RiskCritical {
+		t.Fatalf("fast risky-mutation trigger = %q, want %q", Fast.EscalateOnRiskyMutation, sandbox.RiskCritical)
 	}
 	if Thorough.MaxTurns != 160 || Thorough.ReasoningEffort != "high" || !Thorough.SelfCorrect {
 		t.Fatalf("thorough knobs changed: %+v", Thorough)

@@ -153,6 +153,51 @@ func TestPostureEscalationOnUncertainCompletion(t *testing.T) {
 	}
 }
 
+// A profile that filled the run's effort displaced the provider default ("");
+// RestoreDefaultEffort lets escalation restore that default, which a plain ""
+// ReasoningEffort target cannot express (it means "leave untouched").
+func TestPostureEscalationRestoresDefaultEffort(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventText, Content: "Let me read the file:"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "Done. All set."},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry:                tools.NewRegistry(),
+		MaxTurns:                10,
+		ReasoningEffort:         "low",
+		RequireCompletionSignal: true,
+		Profile: &ProfilePolicy{
+			Name: "fast",
+			Escalate: &PostureEscalation{
+				RestoreDefaultEffort:  true,
+				OnCompletionUncertain: 1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "Done. All set." {
+		t.Fatalf("expected the completed answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(provider.requests))
+	}
+	if provider.requests[0].ReasoningEffort != "low" {
+		t.Fatalf("pre-escalation request effort = %q, want the profile's low", provider.requests[0].ReasoningEffort)
+	}
+	if provider.requests[1].ReasoningEffort != "" {
+		t.Fatalf("post-escalation request effort = %q, want the restored provider default (empty)", provider.requests[1].ReasoningEffort)
+	}
+}
+
 // failingProfileTool always errors with the same signature so the repeated-
 // failure guard builds a streak.
 type failingProfileTool struct{}

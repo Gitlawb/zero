@@ -11,9 +11,10 @@ import (
 )
 
 func TestApplyExecProfileFillsOnlyUnset(t *testing.T) {
-	// Unset effort: the profile fills it.
+	// Unset effort: the profile fills it and reports the fill, so the
+	// escalation policy knows the displaced effort was the provider default.
 	options := execOptions{execProfile: "fast"}
-	profile, err := applyExecProfile(&options)
+	profile, effortFilled, err := applyExecProfile(&options)
 	if err != nil {
 		t.Fatalf("applyExecProfile: %v", err)
 	}
@@ -23,20 +24,27 @@ func TestApplyExecProfileFillsOnlyUnset(t *testing.T) {
 	if options.reasoningEffort != "low" {
 		t.Fatalf("reasoningEffort = %q, want the profile's low", options.reasoningEffort)
 	}
+	if !effortFilled {
+		t.Fatal("the profile filled the effort, so effortFilled must report it")
+	}
 
 	// Set effort (explicit flag or a mode's fill): the profile backs off.
 	options = execOptions{execProfile: "fast", reasoningEffort: "high"}
-	if _, err := applyExecProfile(&options); err != nil {
+	_, effortFilled, err = applyExecProfile(&options)
+	if err != nil {
 		t.Fatalf("applyExecProfile: %v", err)
 	}
 	if options.reasoningEffort != "high" {
 		t.Fatalf("reasoningEffort = %q, an explicit value must win over the profile", options.reasoningEffort)
 	}
+	if effortFilled {
+		t.Fatal("the profile backed off, so effortFilled must be false")
+	}
 }
 
 func TestApplyExecProfileThoroughArmsSelfCorrect(t *testing.T) {
 	options := execOptions{execProfile: "thorough"}
-	if _, err := applyExecProfile(&options); err != nil {
+	if _, _, err := applyExecProfile(&options); err != nil {
 		t.Fatalf("applyExecProfile: %v", err)
 	}
 	if !options.selfCorrect {
@@ -49,7 +57,7 @@ func TestApplyExecProfileThoroughArmsSelfCorrect(t *testing.T) {
 
 func TestApplyExecProfileUnknownIsUsageError(t *testing.T) {
 	options := execOptions{execProfile: "turbo"}
-	_, err := applyExecProfile(&options)
+	_, _, err := applyExecProfile(&options)
 	if err == nil {
 		t.Fatal("expected a usage error for an unknown profile")
 	}
@@ -71,7 +79,7 @@ func TestExecProfilePrecedenceFlagOverModeOverProfile(t *testing.T) {
 	if err := applyExecMode(&options); err != nil {
 		t.Fatalf("applyExecMode: %v", err)
 	}
-	profile, err := applyExecProfile(&options)
+	profile, _, err := applyExecProfile(&options)
 	if err != nil {
 		t.Fatalf("applyExecProfile: %v", err)
 	}
@@ -109,15 +117,25 @@ func TestApplyProfileTurnBudget(t *testing.T) {
 func TestExecProfileBalancedLeavesOptionsUntouched(t *testing.T) {
 	options := execOptions{execProfile: "balanced"}
 	reference := options
-	profile, err := applyExecProfile(&options)
+	profile, _, err := applyExecProfile(&options)
 	if err != nil {
 		t.Fatalf("applyExecProfile: %v", err)
 	}
 	if !reflect.DeepEqual(options, reference) {
 		t.Fatalf("balanced changed the options: %+v vs %+v", options, reference)
 	}
-	if policy := profile.Policy(80); policy != nil {
+	if policy := profile.Policy(80, false); policy != nil {
 		t.Fatalf("balanced must produce a nil policy, got %+v", policy)
+	}
+}
+
+// --exec-profile= with an inline empty value must error like its two-token
+// form and the sibling --mode=, not silently run the default posture (the
+// classic shell hazard: an unset variable expanding into the inline form).
+func TestParseExecProfileInlineEmptyIsError(t *testing.T) {
+	_, _, err := parseExecArgs([]string{"--exec-profile=", "hello"})
+	if err == nil || !strings.Contains(err.Error(), "--exec-profile requires a value") {
+		t.Fatalf("expected a required-value error, got %v", err)
 	}
 }
 
@@ -137,6 +155,27 @@ func TestRunExecTraceRecordsSelectedProfile(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"profile":"fast"`) {
 		t.Fatalf("trace must record the selected profile, got %s", raw)
+	}
+}
+
+// The trace label deliberately records the SELECTED profile, balanced
+// included, so captures are self-describing. Run behavior stays identical
+// (balanced fills nothing and arms no policy); the label is the one intended
+// difference in the opt-in trace artifact.
+func TestRunExecTraceRecordsBalancedSelection(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "trace.ndjson")
+	exitCode, _, stderr := runExecWithEcho(t, []string{
+		"exec", "--exec-profile", "balanced", "--trace", tracePath, "hello",
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	raw, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if !strings.Contains(string(raw), `"profile":"balanced"`) {
+		t.Fatalf("trace must record the balanced selection, got %s", raw)
 	}
 }
 
