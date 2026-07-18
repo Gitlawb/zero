@@ -2149,6 +2149,20 @@ type requestPermissionsArgs struct {
 }
 
 func executeRequestPermissions(ctx context.Context, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	// request_permissions is dispatched by name above, before the registry-based
+	// ToolAdvertised gate runs, so a read-only mode's registry omitting this tool
+	// (rather than registering it as denied) must not fall through to a real
+	// grant. Deny it here unconditionally for spec-draft/plan, independent of
+	// whether the caller's registry happens to contain the tool.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + string(permissionMode) + ` mode.`,
+			DenialReason: DenialFiltered,
+		}, nil
+	}
 	parsed, err := parseRequestPermissionsArgs(args)
 	if err != nil {
 		return ToolResult{
