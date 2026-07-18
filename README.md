@@ -358,6 +358,12 @@ go run ./cmd/zero-release smoke
 go run ./cmd/zero-perf-bench
 ```
 
+Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
+session (background connection prewarm + request-prefix telemetry) for headless
+`zero exec` runs against official OpenAI profiles. Off by default; `0`/`false`
+disable. A/B-benchmark it by running the same `zero-perf-bench` suite with the
+variable unset and set.
+
 ### Code Quality and Security Checks
 
 Before committing any changes, ensure all Go code quality and security checks pass. Pinned `go run` commands matching CI constraints can be used directly without prior installation:
