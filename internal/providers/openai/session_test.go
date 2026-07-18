@@ -155,7 +155,7 @@ func TestTurnSessionStreamDelegatesToProvider(t *testing.T) {
 	}
 }
 
-func TestTurnSessionFingerprintIgnoresMessagesAndCacheKey(t *testing.T) {
+func TestTurnSessionFingerprintIgnoresMessages(t *testing.T) {
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -172,10 +172,22 @@ func TestTurnSessionFingerprintIgnoresMessagesAndCacheKey(t *testing.T) {
 			{Role: zeroruntime.MessageRoleUser, Content: "turn two"},
 		},
 		Tools:          tools,
-		PromptCacheKey: "session-b",
+		PromptCacheKey: "session-a",
 	})
 	if base != grown {
-		t.Fatal("fingerprint changed when only messages/cache key changed — prefix parameters must be the only inputs")
+		t.Fatal("fingerprint changed when only messages grew — conversation content must not be an input")
+	}
+}
+
+func TestTurnSessionFingerprintDriftOnCacheKey(t *testing.T) {
+	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
+	session := openOptimizedSession(t, provider)
+
+	tools := []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}}
+	base := session.computeFingerprint(zeroruntime.CompletionRequest{Tools: tools, PromptCacheKey: "session-a"})
+	changed := session.computeFingerprint(zeroruntime.CompletionRequest{Tools: tools, PromptCacheKey: "session-b"})
+	if base == changed {
+		t.Fatal("fingerprint did not drift on a changed prompt-cache key — it is a serialized request field")
 	}
 }
 
@@ -224,7 +236,7 @@ func TestTurnSessionFingerprintDriftOnToolDescription(t *testing.T) {
 	}
 }
 
-func TestTurnSessionFingerprintOrderInsensitiveTools(t *testing.T) {
+func TestTurnSessionFingerprintDriftOnToolReorder(t *testing.T) {
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -236,8 +248,75 @@ func TestTurnSessionFingerprintOrderInsensitiveTools(t *testing.T) {
 		{Name: "beta", Parameters: map[string]any{"type": "object"}},
 		{Name: "alpha", Parameters: map[string]any{"type": "object"}},
 	}})
-	if forward != reversed {
-		t.Fatal("tools digest must be order-insensitive")
+	if forward == reversed {
+		t.Fatal("fingerprint did not drift on a tool reorder — request serialization preserves tool order, so a reorder changes the wire bytes")
+	}
+}
+
+// TestTurnSessionPrewarmDoesNotStampProviderConnect guards the A/B metric: the
+// prewarm probe must appear ONLY under provider_prewarm — a provider_connect
+// stamp from the probe would contaminate the exact span the benchmark compares.
+func TestTurnSessionPrewarmDoesNotStampProviderConnect(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	recorder := trace.NewRecorder("session-test", "run-1", "test")
+	recorder.Start()
+	ctx := trace.WithContext(context.Background(), recorder)
+
+	session := openOptimizedSession(t, provider)
+	if err := session.Prewarm(ctx); err != nil {
+		t.Fatalf("Prewarm: %v", err)
+	}
+	waitPrewarmDone(t, session)
+
+	tr := recorder.Finish()
+	for _, span := range tr.Spans {
+		if span.Name == trace.SpanProviderConnect {
+			t.Fatalf("prewarm stamped a %s span — it must stay solely under %s", trace.SpanProviderConnect, trace.SpanProviderPrewarm)
+		}
+	}
+}
+
+// TestTurnSessionPrewarmSkippedWhenKeepAlivesDisabled verifies the probe is not
+// spent when the transport cannot retain idle connections (the macOS shared
+// transport): no request, no trace stamps, and the done channel still closes.
+func TestTurnSessionPrewarmSkippedWhenKeepAlivesDisabled(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer server.Close()
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
+	provider, err := New(Options{
+		APIKey:     "sk-test",
+		BaseURL:    server.URL,
+		Model:      "gpt-test",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	recorder := trace.NewRecorder("session-test", "run-1", "test")
+	recorder.Start()
+	ctx := trace.WithContext(context.Background(), recorder)
+
+	session := openOptimizedSession(t, provider)
+	if err := session.Prewarm(ctx); err != nil {
+		t.Fatalf("Prewarm: %v", err)
+	}
+	waitPrewarmDone(t, session)
+
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("keep-alive-disabled transport still received %d probe requests, want 0", got)
+	}
+	tr := recorder.Finish()
+	if got := tr.Counter(trace.CounterPrewarmAttempts); got != 0 {
+		t.Fatalf("prewarm_attempts = %d, want 0 for a skipped probe", got)
 	}
 }
 
