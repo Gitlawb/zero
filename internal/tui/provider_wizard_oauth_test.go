@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
@@ -103,6 +105,42 @@ func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("'d' should return the device-prepare command")
+	}
+}
+
+// TestProviderWizardEnterStartsDeviceFlowForDeviceOnlyProvider pins the fix
+// for a device-only provider (Kimi Code has no loopback/authorize endpoint at
+// all): the generic Enter path assumes a browser flow exists and would
+// otherwise hang or error, so Enter must behave exactly like the "d" shortcut
+// for a provider with OAuthDeviceOnly set.
+func TestProviderWizardEnterStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	// oauthPreferDeviceFlow() already defaults to device flow on a headless
+	// box (no DISPLAY/WAYLAND_DISPLAY, an SSH session, or ZERO_OAUTH_DEVICE
+	// set) — exactly the environment this test suite runs in — which would
+	// mask the bug this test exists to catch. Force a "normal desktop with a
+	// browser available" environment so Enter actually exercises the
+	// otherwise-loopback-preferring path.
+	t.Setenv("ZERO_OAUTH_DEVICE", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "kimi-code")
+	if !m.providerWizard.currentProvider().OAuthDeviceOnly {
+		t.Fatal("test fixture assumes kimi-code is OAuthDeviceOnly")
+	}
+
+	out, cmd := m.handleProviderWizardKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
+		t.Fatalf("Enter on a device-only provider should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on a device-only provider should return the device-prepare command")
 	}
 }
 

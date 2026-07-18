@@ -37,7 +37,7 @@ before. Tokens are stored 0600 (or the OS keyring with
 Running `/provider` opens a **"How do you want to connect?"** chooser:
 
 ```text
-❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI, Kimi, ChatGPT, Hugging Face)
+❯ Sign in with OAuth                 No API key to copy — browser login (OpenRouter, xAI, ChatGPT, Hugging Face) or device code (Kimi Code)
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
@@ -51,21 +51,23 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   Hugging Face    browser or device code
 ```
 
-- **OpenRouter / xAI / Kimi / ChatGPT / Hugging Face** are real OAuth: your browser
-   opens to approve → done (no key to paste). OpenRouter mints a key; xAI / Kimi /
+- **OpenRouter / xAI / ChatGPT / Hugging Face** are real OAuth: your browser
+   opens to approve → done (no key to paste). OpenRouter mints a key; xAI /
    ChatGPT / Hugging Face store a refreshable bearer. Hugging Face requires a
    one-time OAuth-app registration (no secret needed for "public" apps); the
-   preset pre-fills scopes, endpoints, and the OIDC issuer. The same chooser
-   appears in first-run onboarding. (xAI and Kimi use an opt-in preset — set
-   `ZERO_OAUTH_ALLOW_PRESETS=1` or your own `ZERO_OAUTH_XAI_*` / `ZERO_OAUTH_KIMI_*`;
-   see below.)
-- **Device code (headless / SSH):** for a provider that supports it (xAI, Kimi,
-   Hugging Face), press **d** on the list to get a code to enter on another
-   device instead of opening a browser. On an SSH session or headless Linux box
-   (no `DISPLAY`) device code is used automatically; set `ZERO_OAUTH_DEVICE=1`
-   to force it anywhere. The CLI equivalent is
-   `zero auth login <name> --device`. (Kimi is **device-code only** — it has no
-   loopback/browser flow, so `zero auth kimi` always uses the device path.)
+   preset pre-fills scopes, endpoints, and the OIDC issuer. Kimi Code is also
+   real OAuth but has no browser flow at all — see the device-code bullet
+   below. The same chooser appears in first-run onboarding. (xAI and Kimi Code
+   use an opt-in preset — set `ZERO_OAUTH_ALLOW_PRESETS=1` or your own
+   `ZERO_OAUTH_XAI_*` / `ZERO_OAUTH_KIMI_CODE_*`; see below.)
+- **Device code (headless / SSH):** for a provider that supports it (xAI, Kimi
+   Code, Hugging Face), press **d** on the list to get a code to enter on
+   another device instead of opening a browser. On an SSH session or headless
+   Linux box (no `DISPLAY`) device code is used automatically; set
+   `ZERO_OAUTH_DEVICE=1` to force it anywhere. The CLI equivalent is
+   `zero auth login <name> --device`. (Kimi Code is **device-code only** — it
+   has no loopback/browser flow, so `zero auth kimi` always uses the device
+   path and pressing plain Enter on it in the wizard does too.)
 - **ChatGPT / Claude are intentionally not in this list for the proxy path** —
   use the dedicated `chatgpt-proxy` / `custom-anthropic-compatible` preset
   (see §2) for subscription-via-proxy. ChatGPT *is* a first-class OAuth
@@ -90,16 +92,23 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    SuperGrok / X Premium+ subscription; the client_id is an undocumented public
    Grok-CLI client that may change without notice.
 - **Kimi Code — opt-in preset, device-code only** — `zero auth kimi` (or
-   `zero auth login kimi --device`) runs the RFC 8628 device-code flow against
-   `https://auth.kimi.com`. You approve on another device and enter the code; the
-   returned access token is stored and used **directly** as a bearer on Kimi's
-   managed coding endpoint `https://api.kimi.com/coding/v1` (an OpenAI-compatible
-   chat-completions endpoint) — no ID-token claim extraction is needed. Kimi has
-   **no browser/loopback flow**, so the device code is the only path (it is used
-   automatically, and `--device` is accepted but redundant). Like xAI, the preset
-   ships the public Kimi Code CLI client identity
-   (`17e5f671-d194-4dfb-9706-5516cb48c098`) and is opt-in via
-   `ZERO_OAUTH_ALLOW_PRESETS=1`; any field is overridable with `ZERO_OAUTH_KIMI_*`.
+   `zero auth login kimi-code --device`) runs the RFC 8628 device-code flow
+   against `https://auth.kimi.com`. You approve on another device and enter the
+   code; the returned access token is stored and used **directly** as a bearer
+   on Kimi's managed coding endpoint `https://api.kimi.com/coding/v1` (an
+   OpenAI-compatible chat-completions endpoint) — no ID-token claim extraction
+   is needed. Kimi has **no browser/loopback flow**, so the device code is the
+   only path (it is used automatically, and `--device` is accepted but
+   redundant). The catalog/provider ID is `kimi-code`, not `kimi` — the
+   `moonshot` provider already uses `kimi` as an alias for its separate,
+   API-key-based endpoint, so `zero auth kimi` is CLI sugar that forwards to
+   `kimi-code` rather than reusing that name. Like xAI, the preset ships the
+   public kimi-cli client identity (`17e5f671-d194-4dfb-9706-5516cb48c098`) and
+   is opt-in via `ZERO_OAUTH_ALLOW_PRESETS=1`; any field is overridable with
+   `ZERO_OAUTH_KIMI_CODE_*`. Kimi's backend also requires a handful of
+   vendor-identity `X-Msh-*` headers on every device-authorization/poll/refresh
+   request (reverse-engineered from kimi-cli, not from public documentation —
+   verify against a real login before relying on this).
    This is distinct from the `moonshot` catalog entry, which is the API-key path at
    `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). To override the managed
    endpoint, set `baseURL` on the provider profile; to override the OAuth host,
