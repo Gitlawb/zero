@@ -70,6 +70,12 @@ type Descriptor struct {
 	// OAuthDeviceFlow reports that RFC 8628 device-code login is supported (for
 	// headless / SSH use) in addition to the browser flow.
 	OAuthDeviceFlow bool
+	// OAuthDeviceOnly reports that device-code is the ONLY OAuth path this
+	// provider has — there is no browser/loopback authorize endpoint to fall
+	// back to (Kimi Code). Callers that default a plain Enter/click to the
+	// browser flow for OAuthDeviceFlow providers must check this first: for a
+	// device-only provider that generic path has no endpoint to hit at all.
+	OAuthDeviceOnly bool
 
 	// Recommended marks a provider surfaced at the top and badged in
 	// catalog-ordered lists and pickers. The recommended descriptors are the first
@@ -141,12 +147,27 @@ var descriptors = []Descriptor{
 	// catalog entry). Kimi only supports the RFC 8628 device-code flow against
 	// auth.kimi.com; the access token is accepted directly as a bearer on the
 	// managed endpoint, so no client spoofing is involved. The baked-in preset
-	// ships the public Kimi Code client_id and endpoints (off by default, like the
-	// other presets); env overrides via ZERO_OAUTH_KIMI_* win.
+	// ships the public Kimi Code client_id and endpoints (off by default, like
+	// the other presets); env overrides via ZERO_OAUTH_KIMI_CODE_* win.
+	//
+	// Descriptor ID is "kimi-code", not "kimi": the `moonshot` entry below
+	// already aliases "kimi" to itself, and Get() matches an exact descriptor
+	// ID before it reaches another descriptor's aliases, so reusing "kimi"
+	// here would silently steal that alias out from under any existing
+	// moonshot profile (changing its endpoint, default model, and
+	// MOONSHOT_API_KEY auth without the user asking for it).
+	//
+	// Default model is "kimi-for-coding" — the managed endpoint's standard
+	// tier, available to every Kimi Code member. "kimi-for-coding-highspeed"
+	// also exists but requires a higher subscription tier (Allegretto+); a
+	// user who has it can select it explicitly rather than have a fresh
+	// `zero auth kimi-code` default to a model their plan may not include.
 	func() Descriptor {
-		d := openAICompat("kimi", "Kimi Code", "https://api.kimi.com/coding/v1", "kimi-k2.7-code-highspeed", nil)
+		d := openAICompat("kimi-code", "Kimi Code", "https://api.kimi.com/coding/v1", "kimi-for-coding", nil)
 		d.RequiresAuth = true
-		return oauthProvider(d, false, true)
+		d = oauthProvider(d, false, true)
+		d.OAuthDeviceOnly = true
+		return d
 	}(),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
