@@ -163,6 +163,9 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	if client == nil {
 		client = http.DefaultClient
 	}
+
+	tokenClient := *client
+	tokenClient.CheckRedirect = checkTokenRedirect
 	if now == nil {
 		now = time.Now
 	}
@@ -173,7 +176,7 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
 
-	response, err := client.Do(request)
+	response, err := tokenClient.Do(request)
 	if err != nil {
 		return Token{}, fmt.Errorf("oauth: token request failed: %w", err)
 	}
@@ -220,4 +223,8 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 		token.IDToken = parsed.IDToken
 	}
 	return token, nil
+}
+
+func checkTokenRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }

@@ -188,6 +188,79 @@ func TestPostTokenRefusesInsecureEndpoint(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInsecureTokenEndpoint", err)
 	}
 }
+func TestExchangeCodeRejects307Redirect(t *testing.T) {
+	var attackerHit bool
+
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerHit = true
+		t.Errorf("redirect target received unexpected request")
+	}))
+	defer attacker.Close()
+
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	cfg := Config{
+		ClientID:      "c",
+		TokenEndpoint: redirect.URL,
+	}
+
+	_, err := ExchangeCode(
+		context.Background(),
+		redirect.Client(),
+		cfg,
+		"code",
+		"verifier",
+		"http://127.0.0.1/cb",
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("expected redirect error")
+	}
+
+	if attackerHit {
+		t.Fatal("redirect target received credential-bearing request")
+	}
+}
+
+func TestRefreshRejects308Redirect(t *testing.T) {
+	var attackerHit bool
+
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerHit = true
+		t.Errorf("redirect target received unexpected request")
+	}))
+	defer attacker.Close()
+
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL, http.StatusPermanentRedirect)
+	}))
+	defer redirect.Close()
+
+	cfg := Config{
+		ClientID:      "c",
+		TokenEndpoint: redirect.URL,
+	}
+
+	_, err := Refresh(
+		context.Background(),
+		redirect.Client(),
+		cfg,
+		Token{RefreshToken: "refresh-token"},
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("expected redirect error")
+	}
+
+	if attackerHit {
+		t.Fatal("redirect target received credential-bearing request")
+	}
+}
 
 func TestRefreshNoToken(t *testing.T) {
 	_, err := Refresh(context.Background(), http.DefaultClient, Config{TokenEndpoint: "https://a/token"}, Token{}, nil)
