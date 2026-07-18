@@ -146,7 +146,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "go test ./... && ! grep --exclude=.zero-answer.txt -R receieves . && grep -R receives ."
+        "go test ./... && ! grep --exclude=.zero-answer.txt -R receieves . && grep --exclude=.zero-answer.txt -R receives ."
       ]
     },
     {
@@ -400,7 +400,7 @@
       "verificationCommand": [
         "bash",
         "-c",
-        "go test ./... && ! grep --exclude=.zero-answer.txt -R 'package refactor' . && grep -R 'package zeroapp' ."
+        "go test ./... && ! grep --exclude=.zero-answer.txt -R 'package refactor' . && grep --exclude=.zero-answer.txt -R 'package zeroapp' ."
       ],
       "oracleTest": "package zeroapp\n\nvar _ = Config{}\n"
     },
