@@ -393,6 +393,89 @@ func nodeArchName() string {
 	}
 }
 
+// Issue #405: `zero doctor` is the diagnostic command, so when the native
+// binary is the thing that's broken it must NOT bail with the generic wrapper
+// error; that's exactly the blind alley the bug report calls out. Instead it
+// emits a doctor-shaped FAIL line for the runtime so the user's own diagnostic
+// surfaces the real cause. We assert on the doctor-report shape (so the doctor
+// UX matches what the Go-side doctor.Format produces) and on exit 1 (a missing
+// binary is still a hard failure, not a pass).
+func TestNodeWrapperDoctorReportsMissingNativeBinaryAsDoctorFail(t *testing.T) {
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out: %v; output: %s", ctx.Err(), output)
+	}
+	if err == nil {
+		t.Fatalf("doctor should not exit 0 when the native binary is missing: %s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("doctor err = %v, want exit 1; output: %s", err, output)
+	}
+	got := string(output)
+	// Doctor-shaped report, not the generic wrapper bail. Matches the shape the
+	// Go-side doctor.Format emits: a header, "Overall: <pass/fail>", then
+	// "[<status>] <id> - <message>" lines.
+	if !strings.Contains(got, "Zero doctor report (") {
+		t.Fatalf("doctor output should start with a doctor report header, got %q", got)
+	}
+	if !strings.Contains(got, "Overall: fail") {
+		t.Fatalf("doctor overall must be fail when the native binary is missing, got %q", got)
+	}
+	if !strings.Contains(got, "[fail] runtime.go") {
+		t.Fatalf("doctor must report a failing runtime.go check, got %q", got)
+	}
+	if !strings.Contains(got, "Native zero binary is missing next to the npm wrapper") {
+		t.Fatalf("doctor must name the actual cause (missing native binary), got %q", got)
+	}
+	// The actionable remedy must point at the postinstall script that would fix
+	// the install, not just "build from source".
+	if !strings.Contains(got, "postinstall.mjs") {
+		t.Fatalf("doctor remedy should name the postinstall script, got %q", got)
+	}
+	// Regression guard for the original blind-alley bug: the doctor path must
+	// NOT emit the generic wrapper bail (that's what sent users debugging the
+	// wrong thing).
+	if strings.Contains(got, "[zero] No native binary found next to the npm wrapper") {
+		t.Fatalf("doctor must not emit the generic wrapper bail, got %q", got)
+	}
+}
+
+// `doctor --connectivity` (a real doctor invocation with a trailing flag) must
+// take the same doctor-shaped path: the doctor branch matches the literal
+// subcommand and forwards the rest of argv verbatim, the way the spawn path
+// would.
+func TestNodeWrapperDoctorWithFlagsStillReportsDoctorFail(t *testing.T) {
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "doctor", "--connectivity")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out: %v; output: %s", ctx.Err(), output)
+	}
+	if err == nil {
+		t.Fatalf("doctor --connectivity should not exit 0 when binary missing: %s", output)
+	}
+	got := string(output)
+	if !strings.Contains(got, "[fail] runtime.go") {
+		t.Fatalf("doctor --connectivity must still emit the failing runtime.go line, got %q", got)
+	}
+	if strings.Contains(got, "[zero] No native binary found next to the npm wrapper") {
+		t.Fatalf("doctor --connectivity must not fall back to the generic bail, got %q", got)
+	}
+}
+
 func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock executable fixture uses a POSIX shell script")

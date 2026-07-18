@@ -114,6 +114,44 @@ function resolveNativeBinary() {
 const nativePath = resolveNativeBinary();
 
 if (!nativePath) {
+  const postinstallScript = join(packageRoot, 'scripts', 'postinstall.mjs');
+  const ranByBun = process.execPath.includes('bun') || !!process.versions?.bun;
+
+  // `zero doctor` is the diagnostic command: when the native binary is missing
+  // it's the one invocation that must NOT bail with the generic wrapper error,
+  // because that's exactly the blind alley issue #405 reports. Instead, surface
+  // a doctor-shaped FAIL line for the runtime so the user's diagnostic finds the
+  // real cause. We branch on a literal 'doctor' subcommand only (matching `zero
+  // doctor` and `zero doctor --connectivity`), preserving the existing bail for
+  // every other invocation (exec, providers list, TUI, --version, etc.).
+  const argv = process.argv.slice(2);
+  const isDoctor = argv.length > 0 && argv[0] === 'doctor';
+  if (isDoctor) {
+    console.error(
+      'Zero doctor report (' +
+        new Date().toISOString() +
+        ')\n' +
+        'Overall: fail\n' +
+        '[fail] runtime.go - Native zero binary is missing next to the npm wrapper.\n' +
+        '  remedy: node "' +
+        postinstallScript +
+        '"\n' +
+        '\n' +
+        'The platform binary is fetched at install time by a postinstall script,\n' +
+        'which did not run (or was skipped) for this install.' +
+        (ranByBun
+          ? '\nYou installed with Bun, which does not run dependency lifecycle scripts\n' +
+            'by default. To let it run on future installs, add zero to your\n' +
+            "project's trustedDependencies:\n" +
+            '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+            'then reinstall.'
+          : '') +
+        '\nIf reinstall fails, build from source: https://github.com/Gitlawb/zero\n' +
+        '(go run ./cmd/zero, requires Go 1.25+).',
+    );
+    process.exit(1);
+  }
+
   console.error(
     '[zero] No native binary is available for this install.\n' +
       'Normally npm installs it as an optional dependency of @gitlawb/zero\n' +
