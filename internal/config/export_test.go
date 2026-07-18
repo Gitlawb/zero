@@ -19,9 +19,9 @@ func ToolsOverride(deferThreshold int) ToolsConfig {
 // ValidateFile reads and parses path as a Zero FileConfig and runs the same
 // semantic provider/model rules used during resolution. It returns the parsed
 // config (zero value on parse failure) plus any structured issues. A parse
-// failure yields a single issue whose Message wraps the underlying JSON error
-// so callers can extract *json.SyntaxError / *json.UnmarshalTypeError offsets
-// via errors.As.
+// failure yields a single issue whose Message is the underlying JSON error's
+// text (already flattened via Error(), not chained — callers cannot recover
+// the original *json.SyntaxError / *json.UnmarshalTypeError via errors.As).
 func ValidateFile(path string) (FileConfig, []Issue) {
 	data, err := os.ReadFile(path)
 	if err != nil {
