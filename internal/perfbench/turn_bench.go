@@ -592,12 +592,14 @@ const execExitIncomplete = 4
 // headless `zero exec` with stream-json output AND `--trace <tmpfile>`, then
 // parses the emitted NDJSON trace into a *trace.TurnTrace. binary is the path to
 // the `zero` binary; extraArgs are appended to every invocation. Pass/fail is
-// decided by the task's oracle (OracleTest/VerificationCommand) when it has one:
-// the stamped oracle is ground truth, so an oracle-bearing task that applied the
-// right edit but exited INCOMPLETE (exit 4 — its sandboxed self-verification
-// couldn't run) still passes. Any OTHER nonzero exit (crash/usage/provider/
-// interrupt) stays authoritative and fails even an oracle-bearing task. For a
-// latency-only task (no oracle) any nonzero exit is the only signal, so it fails.
+// decided by the task's oracle when it has one. The oracle that gates the verdict
+// is the VerificationCommand (which compiles and runs the stamped OracleTest via
+// `go test`, plus any greps against the fixture); it is ground truth, so an
+// oracle-bearing task that applied the right edit but exited INCOMPLETE (exit 4,
+// its sandboxed self-verification couldn't run) still passes. Any OTHER nonzero
+// exit (crash/usage/provider/interrupt) stays authoritative and fails even an
+// oracle-bearing task. A latency-only task has no VerificationCommand, so any
+// nonzero exit is its only signal and fails it.
 func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
 		// buildTurnExecArgs grants the write + sandboxed-shell tool set to EVERY
@@ -614,17 +616,16 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		}
 		// Isolate the workspace: copy the fixture into a fresh temp dir so a
 		// mutating task (edit/fix/refactor) can't dirty the shared, checked-in
-		// fixture or bleed into a later iteration of the same task.
-		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" {
-			copyDir, parent, cerr := copyFixture(fixture)
-			if cerr != nil {
-				return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
-			}
-			// Clean the whole unique parent (which owns copyDir) so the
-			// per-invocation scratch dir never leaks.
-			defer os.RemoveAll(parent)
-			task.WorkspaceFixture = copyDir
+		// fixture or bleed into a later iteration of the same task. The guard above
+		// guarantees WorkspaceFixture is set, so this always runs.
+		copyDir, parent, cerr := copyFixture(strings.TrimSpace(task.WorkspaceFixture))
+		if cerr != nil {
+			return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
 		}
+		// Clean the whole unique parent (which owns copyDir) so the per-invocation
+		// scratch dir never leaks.
+		defer os.RemoveAll(parent)
+		task.WorkspaceFixture = copyDir
 
 		traceFile, err := os.CreateTemp("", "zero-turn-trace-*.ndjson")
 		if err != nil {
