@@ -3,6 +3,8 @@ package providerio
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -32,6 +34,98 @@ func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("transport error replayed %d times — a non-idempotent POST must not be retried, want 1", got)
+	}
+}
+
+// A PROVABLY pre-send transport failure (no request bytes left this host) is
+// safe to replay and must be retried up to maxAttempts, unlike an ambiguous
+// post-send failure. Covers the string-marker path (refused dial) and the
+// typed path (net.DNSError via errors.As).
+func TestSendWithRetryReplaysProvablyPreSendErrors(t *testing.T) {
+	shrinkBackoff(t)
+	cases := map[string]error{
+		"connection refused":    errors.New("dial tcp 127.0.0.1:1: connect: connection refused"),
+		"network unreachable":   errors.New("dial tcp: connect: network is unreachable"),
+		"tls handshake timeout": errors.New("net/http: TLS handshake timeout"),
+		"dns not found":         &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true},
+	}
+	for name, transportErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			var calls int32
+			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return nil, transportErr
+			})}
+			resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if err == nil {
+				t.Fatal("expected the transport error to surface after retries are exhausted")
+			}
+			if got := atomic.LoadInt32(&calls); got != 3 {
+				t.Fatalf("pre-send error retried to %d attempts, want 3 (maxAttempts)", got)
+			}
+		})
+	}
+}
+
+// An ambiguous transport failure that could have followed a sent request must
+// NOT be replayed: a non-idempotent completion POST could duplicate billable
+// work. This is the safety line the fix must not cross.
+func TestSendWithRetryDoesNotReplayAmbiguousTransportErrors(t *testing.T) {
+	for name, transportErr := range map[string]error{
+		"generic i/o timeout": errors.New("dial tcp 1.2.3.4:443: i/o timeout"),
+		"broken pipe":         errors.New("write tcp: broken pipe"),
+		"unexpected eof":      io.ErrUnexpectedEOF,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls int32
+			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return nil, transportErr
+			})}
+			resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if err == nil {
+				t.Fatal("expected the transport error to surface")
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Fatalf("ambiguous transport error replayed %d times, want 1 (no retry)", got)
+			}
+		})
+	}
+}
+
+func TestIsPreSendTransportError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"dns not found", &net.DNSError{Err: "no such host", Name: "x.invalid", IsNotFound: true}, true},
+		{"dns timeout", &net.DNSError{Err: "server misbehaving", Name: "x.invalid", IsTimeout: true}, true},
+		{"connection refused", errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), true},
+		{"network unreachable", errors.New("dial tcp: connect: network is unreachable"), true},
+		{"no route to host", errors.New("dial tcp: connect: no route to host"), true},
+		{"tls handshake timeout", errors.New("net/http: TLS handshake timeout"), true},
+		{"connection reset", errors.New("read tcp: connection reset by peer"), false},
+		{"broken pipe", errors.New("write tcp: broken pipe"), false},
+		{"unexpected eof", io.ErrUnexpectedEOF, false},
+		{"eof", io.EOF, false},
+		{"generic io timeout", errors.New("dial tcp: i/o timeout"), false},
+		{"context deadline", context.DeadlineExceeded, false},
+		{"exclusion wins over inclusion", errors.New("connect: connection refused, then i/o timeout"), false},
+		{"host named eof still refused", errors.New("dial tcp eof.example:443: connect: connection refused"), true},
+		{"unrelated", errors.New("some other error"), false},
+	}
+	for _, c := range cases {
+		if got := isPreSendTransportError(c.err); got != c.want {
+			t.Errorf("%s: isPreSendTransportError(%v) = %v, want %v", c.name, c.err, got, c.want)
+		}
 	}
 }
 

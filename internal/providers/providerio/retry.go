@@ -3,6 +3,9 @@ package providerio
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,13 +20,17 @@ import (
 // (previously only the OpenAI provider retried; Anthropic and Gemini surfaced the
 // first failure).
 //
-// What is retried: ONLY 429 (rate limit) and 503 (service unavailable) — the
-// statuses where the server explicitly did NOT accept the request, so replaying
-// it cannot duplicate work. Other 5xx (500/502/504) and transport/network errors
-// are NOT retried: a completion POST is non-idempotent and may have reached and
-// been processed by the server, so replaying it could duplicate
-// (billable) work. Only the INITIAL request is ever in scope; once the response
-// body starts streaming it is never re-issued.
+// What is retried: 429 (rate limit) and 503 (service unavailable) — the statuses
+// where the server explicitly did NOT accept the request — plus PROVABLY
+// pre-send transport failures (DNS resolution, a refused/unreachable dial, a TLS
+// handshake timeout) where no request bytes ever left this host. In every one of
+// those cases we KNOW the server did not receive and process the request, so a
+// replay cannot duplicate work. Other 5xx (500/502/504) and every ambiguous or
+// post-send transport error (connection reset, broken pipe, EOF, a generic i/o
+// timeout, context deadline) are NOT retried: a completion POST is
+// non-idempotent and may already have reached and been processed by the server,
+// so replaying it could duplicate (billable) work. Only the INITIAL request is
+// ever in scope; once the response body starts streaming it is never re-issued.
 
 const defaultMaxRetryAttempts = 6
 
@@ -73,13 +80,25 @@ func SendWithRetry(
 		response, err := client.Do(request)
 		connectSpan.End()
 		if err != nil {
-			// A transport failure on a POST does NOT mean the server didn't receive
-			// it — the request may have arrived and be generating a (billable,
-			// non-idempotent) completion while only the response/connection failed.
-			// Replaying it could duplicate that work, so surface the error instead
-			// of retrying. Only 429/503 responses (below), where we KNOW the request
-			// was not accepted, are safe to retry.
+			// Context cancellation always surfaces as cancellation, never a retry.
 			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// A transport failure on a POST does NOT usually mean the server didn't
+			// receive it — the request may have arrived and be generating a
+			// (billable, non-idempotent) completion while only the response or
+			// connection failed. Replaying that could duplicate work, so it is
+			// surfaced immediately. The one safe exception is a PROVABLY pre-send
+			// failure (see isPreSendTransportError): the request never left this
+			// host, so a replay cannot duplicate anything — exactly like a 429/503
+			// where we KNOW the request was not accepted.
+			if isPreSendTransportError(err) && attempt < maxAttempts {
+				if r := trace.FromContext(ctx); r != nil {
+					r.Counter(trace.CounterRetryCount, 1)
+				}
+				if Backoff(ctx, attempt, 0) {
+					continue
+				}
 				return nil, ctx.Err()
 			}
 			return nil, err
@@ -107,6 +126,52 @@ func SendWithRetry(
 		}
 		return response, nil
 	}
+}
+
+// isPreSendTransportError reports whether a transport error PROVES no request
+// bytes reached the server, so replaying the request cannot duplicate a
+// billable completion. Only narrow, unambiguous pre-connect failures qualify:
+// DNS resolution failure, a refused or unreachable dial, and a TLS handshake
+// timeout (the handshake completes before any HTTP request bytes are written).
+//
+// Ambiguous or post-send failures are deliberately excluded and checked FIRST,
+// so a message that happens to contain both an excluded and an included marker
+// is never treated as pre-send: connection reset and broken pipe can follow a
+// request that was already sent, and a bare "i/o timeout" covers read timeouts
+// after send as well as dial timeouts — none of these prove the request was not
+// received, so a non-idempotent POST must not be replayed on them.
+func isPreSendTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// DNS resolution precedes any connection, so a lookup failure — including a
+	// DNS timeout — proves nothing was sent. errors.As unwraps url.Error/OpError.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	// A connection closed mid-exchange (EOF) may well have delivered the request
+	// first, so it is post-send. Matched by identity, not substring, so a
+	// hostname containing "eof" can't be misread.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Exclusions win: never classify an ambiguous/post-send failure as pre-send.
+	if strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "i/o timeout") {
+		return false
+	}
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return true
+	case strings.Contains(msg, "network is unreachable"), strings.Contains(msg, "no route to host"):
+		return true
+	case strings.Contains(msg, "tls handshake timeout"):
+		return true
+	}
+	return false
 }
 
 // ShouldRetryStatus reports whether an HTTP status is safe to retry for a
