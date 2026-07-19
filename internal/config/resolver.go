@@ -695,6 +695,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
 	}
+	if overrides.Sandbox.Enabled != nil {
+		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled
+	}
 	if overrides.Sandbox.BlockUnixSockets {
 		cfg.Sandbox.BlockUnixSockets = true
 	}

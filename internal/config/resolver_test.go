@@ -1769,6 +1769,29 @@ func TestResolveSandboxDisableIgnoredFromProjectConfig(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxEnabledCLIOverride(t *testing.T) {
+	// A CLI/programmatic override (applied after every config source) must be able
+	// to disable the sandbox, even with no config file.
+	disabled := false
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &disabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:false must disable the sandbox, got %v", resolved.Sandbox.Enabled)
+	}
+	// An explicit true override must win over a lower-precedence global-config false.
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	enabled := true
+	resolved2, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &enabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved2.Sandbox.Enabled == nil || !*resolved2.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:true must win over config false, got %v", resolved2.Sandbox.Enabled)
+	}
+}
+
 func TestResolveNotifyValid(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"both","focusMode":"always"}}`)
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
