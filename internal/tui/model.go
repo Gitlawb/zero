@@ -510,6 +510,13 @@ type agentTextMsg struct {
 	delta string
 }
 
+// streamClearThrottle is the minimum gap between full-screen stream-clear
+// redraws. Newlines that arrive inside this window mark a deferred clear
+// (pendingStreamClear) instead of firing immediately, so heavy streaming
+// output coalesces to ~10 repaints/second while still guaranteeing a
+// eventual caret repair.
+const streamClearThrottle = 100 * time.Millisecond
+
 // streamClearFlushMsg fires once, roughly when the stream-clear throttle
 // window (see lastStreamClear) has elapsed, to flush a ClearScreen that a
 // throttled newline deferred rather than fired directly. It's a no-op if
@@ -2039,14 +2046,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// any still-pending clear at stream end, belt-and-suspenders) as
 		// well as one buried in the middle of a long, still-streaming turn.
 		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled {
-			const throttle = 100 * time.Millisecond
-			if elapsed := time.Since(m.lastStreamClear); elapsed >= throttle {
-				m.lastStreamClear = time.Now()
+			now := m.now()
+			if elapsed := now.Sub(m.lastStreamClear); elapsed >= streamClearThrottle {
+				m.lastStreamClear = now
 				m.pendingStreamClear = false
 				cmds = append(cmds, tea.ClearScreen)
 			} else if !m.pendingStreamClear {
 				m.pendingStreamClear = true
-				cmds = append(cmds, scheduleStreamClearFlush(throttle-elapsed))
+				cmds = append(cmds, scheduleStreamClearFlush(streamClearThrottle-elapsed))
 			}
 		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
@@ -2145,8 +2152,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// relied on to drive this), and independent of stream end: a turn
 		// that keeps streaming for a while after the throttled newline would
 		// otherwise leave the ghost caret up for the rest of the turn.
-		if m.pendingStreamClear && time.Since(m.lastStreamClear) >= 100*time.Millisecond {
-			m.lastStreamClear = time.Now()
+		now := m.now()
+		if m.pendingStreamClear && now.Sub(m.lastStreamClear) >= streamClearThrottle {
+			m.lastStreamClear = now
 			m.pendingStreamClear = false
 			return m, tea.ClearScreen
 		}
