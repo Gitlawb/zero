@@ -23,6 +23,12 @@ var lockSeq atomic.Uint64
 // file is older than fileLockStaleAfter (so a crashed holder cannot deadlock the
 // store). Release is ownership-aware: it removes the lock only if it still holds
 // our token, so a stale-broken holder cannot delete a newer holder's lock.
+//
+// The acquisition deadline is always measured against the real wall clock, never
+// the now parameter: now is StoreOptions.Now, which callers may legitimately fix
+// (e.g. a test or an embedded clock), and deadline := now().Add(fileLockTimeout)
+// followed by now().After(deadline) would then never become true, turning lock
+// contention into an infinite retry loop instead of a timeout error.
 func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 	if now == nil {
 		now = time.Now
@@ -31,7 +37,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		return nil, err
 	}
 	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), now().UnixNano(), lockSeq.Add(1))
-	deadline := now().Add(fileLockTimeout)
+	deadline := time.Now().Add(fileLockTimeout)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -88,7 +94,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 			// Lost the reclaim race (or it was actually fresh) — fall through to the
 			// bounded wait rather than hot-spinning on a reclaim that never wins.
 		}
-		if now().After(deadline) {
+		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("oauth: timed out acquiring token lock %s", filepath.Base(lockPath))
 		}
 		time.Sleep(10 * time.Millisecond)

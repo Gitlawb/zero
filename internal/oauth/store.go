@@ -752,6 +752,25 @@ const maxKeyringIndexChunkBytes = 2700
 // lookups that would wedge every OAuth operation under the store lock.
 const maxKeyringIndexChunks = 128
 
+// maxKeyringIndexKeys bounds how many keys readKeyIndex will ever return, across
+// the header and every chunk (and the legacy bare-array format), before read()
+// and write() fan them out into one kr.Get per key while holding the store
+// lock. maxKeyringIndexChunks only bounds the number of chunk entries fetched;
+// it does not bound how many keys a single chunk's JSON can claim, so a
+// corrupted index with an oversized keys array (or many chunks each stuffed
+// with keys) could still drive an unbounded number of blocking lookups. The
+// bound here is generous relative to what chunkIndexKeys ever legitimately
+// produces (short namespaced keys cost at least ~18 bytes each, so one
+// maxKeyringIndexChunkBytes chunk holds on the order of a hundred, times
+// maxKeyringIndexChunks) while still rejecting a damaged index promptly.
+const maxKeyringIndexKeys = maxKeyringIndexChunks * 200
+
+// errKeyringIndexTooManyKeys is returned when a decoded index (or one of its
+// chunks) claims more keys than maxKeyringIndexKeys.
+func errKeyringIndexTooManyKeys(count int) error {
+	return fmt.Errorf("oauth: keyring token index lists %d keys, over the %d-key cap", count, maxKeyringIndexKeys)
+}
+
 // keyIndexHeader is chunk 0 of the key index. Chunks 1..Chunks-1 live under
 // "<indexAccount>-<n>" as plain JSON string arrays. The pre-chunking format
 // (a bare JSON array at indexAccount) is still read transparently.
@@ -787,6 +806,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		if err := json.Unmarshal(raw, &keys); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
+		if len(keys) > maxKeyringIndexKeys {
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
+		}
 		return keys, true, 1, nil
 	}
 	var header keyIndexHeader
@@ -802,6 +824,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 	}
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
 		return nil, false, 0, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+	}
+	if len(header.Keys) > maxKeyringIndexKeys {
+		return nil, false, 0, errKeyringIndexTooManyKeys(len(header.Keys))
 	}
 	keys := header.Keys
 	for i := 1; i < header.Chunks; i++ {
@@ -819,6 +844,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		var more []string
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+		}
+		if len(keys)+len(more) > maxKeyringIndexKeys {
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys) + len(more))
 		}
 		keys = append(keys, more...)
 	}
