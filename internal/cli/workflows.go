@@ -1047,9 +1047,12 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // git-only, and sending the change diff to a configured provider on every
 // default-branch push would silently export source code nobody asked to
 // share. Without the opt-in the name comes from deterministic local
-// information only. maxDiffBytes caps the diff Inspect returns, so a user who
-// passed --diff-bytes to bound the proprietary source sent for LLM naming has
-// that cap honored here just as the commit path does.
+// information only. maxDiffBytes caps the committed-range diff Inspect
+// returns, so a user who passed --diff-bytes to bound the proprietary source
+// sent for LLM naming has that cap honored here just as the commit path does.
+// The working tree must be clean and HEAD must be ahead of the resolved remote
+// default before a branch is created; otherwise the push would either leave
+// uncommitted edits behind or publish an empty comparison.
 func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
 	if allowDefaultBranch || dryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
@@ -1063,27 +1066,34 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return currentBranch, remote, false, nil
 	}
 
+	// CreateBranch and Push publish commits only. A dirty working tree would
+	// leave uncommitted edits behind under a branch/PR that does not include
+	// them, so refuse until the tree is clean (commit or stash first).
+	workingTree, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
+	if err != nil {
+		return "", "", false, fmt.Errorf("failed to inspect working tree: %w", err)
+	}
+	if !workingTree.Clean {
+		return "", "", false, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
+	}
+
 	// Branching off the default branch only makes sense when HEAD carries a
 	// commit that is not already on the remote default branch. A clean,
 	// up-to-date default branch would otherwise publish a feature branch at the
-	// exact default tip, and a branch carrying only uncommitted edits would push
-	// the unchanged HEAD while leaving the edits local; changes pr then leaves
-	// the empty branch behind before the host rejects the empty comparison.
+	// exact default tip. If the ahead count cannot be determined (for example
+	// the remote-tracking ref was never fetched), fail rather than guess.
 	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
-	if aheadErr == nil && ahead == 0 {
+	if aheadErr != nil {
+		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, aheadErr)
+	}
+	if ahead == 0 {
 		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
 	}
 
-	// Push and CreateBranch publish commits, not the working tree, so the
-	// branch is named (and, with --auto, its diff sent to a provider) from
-	// what HEAD is actually ahead of the resolved remote branch by, using the
-	// same ref commitsAhead just checked, never from a working-tree
-	// snapshot, which can carry edits a commit-only push won't include, or
-	// sit unchanged with nothing committed at all. That also means a
-	// remote-tracking ref that can't be resolved (the same condition that
-	// left ahead above unverified) fails here instead of silently falling
-	// back to a name derived from uncommitted edits for a push that may
-	// publish nothing.
+	// Name the branch (and, with --auto, send the provider) from what HEAD is
+	// actually ahead of the resolved remote branch by, using the same ref
+	// commitsAhead just checked. A working-tree snapshot can describe edits a
+	// commit-only push will never include.
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: remote + "/" + currentBranch, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)

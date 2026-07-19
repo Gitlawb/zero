@@ -852,11 +852,10 @@ func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
 // CommitsAhead reports how many commits HEAD is ahead of the remote-tracking
 // ref <remote>/<branch>. Auto-branching runs this before creating and pushing
 // a feature branch off the default branch: a clean, up-to-date default branch
-// (or one carrying only uncommitted edits) has nothing to publish, so the
-// caller can refuse rather than push an empty comparison. It returns an error
-// when the count cannot be determined (for example the remote-tracking ref was
-// never fetched); callers treat that as "cannot tell" and proceed rather than
-// block a legitimate first push.
+// has nothing to publish, so the caller can refuse rather than push an empty
+// comparison. It returns an error when the count cannot be determined (for
+// example the remote-tracking ref was never fetched); callers treat that as a
+// hard failure rather than guessing that there is something to publish.
 func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", remote+"/"+branch+"..HEAD")
