@@ -589,10 +589,21 @@ func WriteTurnBenchJSON(w io.Writer, result TurnBenchResult) error {
 // code is the only signal, so a nonzero exit fails it.
 func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+		// buildTurnExecArgs grants the write + sandboxed-shell tool set to EVERY
+		// invocation, so a task MUST run inside an isolated fixture copy — never the
+		// caller's cwd. The grant is unconditional, so the isolation can't be
+		// optional: a fixtureless task would turn an agent with write/shell tools
+		// loose in the caller's working directory (their real repo). Enforce the
+		// invariant instead of trusting it — reject a fixtureless task up front,
+		// before anything is launched, so the grant and the guard can't drift apart.
+		// Every shipped task declares a fixture, so this only fires on a malformed or
+		// newly added task, and it fails loudly rather than silently.
+		if strings.TrimSpace(task.WorkspaceFixture) == "" {
+			return TurnTaskOutcome{Err: errors.New("benchmark task has no workspaceFixture: the run grants write/shell tools and must execute in an isolated fixture copy, not the caller's cwd")}
+		}
 		// Isolate the workspace: copy the fixture into a fresh temp dir so a
 		// mutating task (edit/fix/refactor) can't dirty the shared, checked-in
-		// fixture or bleed into a later iteration of the same task. When no
-		// fixture is configured the agent runs in the caller's cwd as before.
+		// fixture or bleed into a later iteration of the same task.
 		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" {
 			copyDir, parent, cerr := copyFixture(fixture)
 			if cerr != nil {

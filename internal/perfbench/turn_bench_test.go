@@ -1265,6 +1265,27 @@ func TestBuildTurnExecArgsGrantsWriteTools(t *testing.T) {
 	}
 }
 
+// TestTurnRunnerRejectsFixturelessTask is the other half of the write-tools
+// contract: because buildTurnExecArgs grants the write + sandboxed-shell tool
+// set to every invocation, a task with no fixture would run an agent with those
+// tools in the caller's cwd. The runner must reject such a task BEFORE launching
+// zero exec. Passing a binary path that does not exist proves the rejection is
+// pre-launch — the outcome carries the fixture error, not a spawn error — so this
+// runs on every OS (it never reaches the POSIX-only exec stub).
+func TestTurnRunnerRejectsFixturelessTask(t *testing.T) {
+	task := BenchTask{ID: "no-fixture", Prompt: "do a thing"} // no WorkspaceFixture set
+	outcome := NewTurnExecRunner(filepath.Join(t.TempDir(), "does-not-exist-zero"))(context.Background(), task, RunContext{Model: "m"})
+	if outcome.Err == nil {
+		t.Fatalf("a fixtureless task must be rejected before launch, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Err.Error(), "workspaceFixture") {
+		t.Fatalf("rejection must name the missing workspaceFixture, got: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("a rejected task must not pass, got %+v", outcome)
+	}
+}
+
 // The configured profile must reach the runner's RunContext and be stamped
 // into the result, so a profile A/B report is self-describing. The boundary
 // canonicalizes (case/whitespace) so equivalent postures always carry the same
