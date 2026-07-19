@@ -996,9 +996,13 @@ func TestUndoAliasesRewind(t *testing.T) {
 	if !ok || alias.kind != rewind.kind {
 		t.Fatalf("expected /undo to alias /rewind, got ok=%v command=%#v", ok, alias)
 	}
-	// End-to-end: a typed /undo dispatches to the rewind handler with args intact.
+	// End-to-end: a typed /undo dispatches to the rewind handler with args intact,
+	// for both the "latest" and numeric-<sequence> forms of the /rewind contract.
 	if parsed := parseCommand("/undo latest"); parsed.kind != commandRewind || parsed.text != "latest" {
 		t.Fatalf("parseCommand(%q) = %#v, want commandRewind with text=latest", "/undo latest", parsed)
+	}
+	if parsed := parseCommand("/undo 123"); parsed.kind != commandRewind || parsed.text != "123" {
+		t.Fatalf("parseCommand(%q) = %#v, want commandRewind with text=123", "/undo 123", parsed)
 	}
 	// Guard: without the alias it would be commandUnknown.
 	if parsed := parseCommand("/undo"); parsed.kind == commandUnknown {
