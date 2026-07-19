@@ -225,6 +225,7 @@ func TestBTWExitBlockedWhileParentRunActive(t *testing.T) {
 
 func TestBTWReturnRestartsParentSpinner(t *testing.T) {
 	m := newBTWTestModel(t)
+	m.reducedMotion = false
 	m.pending = true
 	m.spinnerTicking = true
 	side, _ := m.handleBTWCommand("")

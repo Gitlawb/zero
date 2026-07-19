@@ -576,6 +576,9 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	if got := FormatExecPrompt("continue", prepared); got == "continue" || !strings.Contains(got, "previous answer") {
 		t.Fatalf("expected session context in prompt, got %q", got)
 	}
+	if _, err := PrepareExec(PrepareExecOptions{Store: store, Resume: "newer-side"}); err == nil || !strings.Contains(err.Error(), "Zero session is not resumable: newer-side") {
+		t.Fatalf("explicit side-session resume error = %v, want non-resumable rejection", err)
+	}
 
 	forked, err := PrepareExec(PrepareExecOptions{Store: store, Fork: "latest", SessionID: "forked"})
 	if err != nil {
