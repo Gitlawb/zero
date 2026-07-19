@@ -364,6 +364,15 @@ func TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 			}
 		}
 
+		// The tokens this write didn't touch must stay readable at the
+		// interruption boundary itself, not just after a later reconciling
+		// write papers over an incorrect intermediate state.
+		for _, name := range []string{"alpha", "beta"} {
+			if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
+				t.Fatalf("failAt=%d: Load(%s) before reconcile: ok=%v err=%v", failAt, name, ok, err)
+			}
+		}
+
 		// A later unimpeded write must reconcile completely.
 		if err := s.Save(ProviderKey("gamma"), Token{AccessToken: "c"}); err != nil {
 			t.Fatalf("failAt=%d: reconciling Save: %v", failAt, err)
@@ -407,7 +416,7 @@ func TestStoreKeyringDeleteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 		}
 		kr.ops = 0
 		kr.failAt = failAt
-		_, _ = s.Delete(ProviderKey("beta"))
+		_, deleteErr := s.Delete(ProviderKey("beta"))
 		opsUsed := kr.ops
 		kr.failAt = 0
 
@@ -432,6 +441,12 @@ func TestStoreKeyringDeleteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 		}
 		if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok {
 			t.Fatalf("failAt=%d: Load(alpha): ok=%v err=%v", failAt, ok, err)
+		}
+		// Every mutating boundary of the delete path must surface its failure,
+		// mirroring the Save-interruption assertion: a swallowed error here
+		// would let a caller believe a logout succeeded when it didn't.
+		if opsUsed >= failAt && deleteErr == nil {
+			t.Fatalf("failAt=%d: injected keyring failure was swallowed", failAt)
 		}
 		if opsUsed < failAt {
 			break
@@ -472,6 +487,11 @@ func TestStoreKeyringMergesFreshLegacyWriteFromOldBinary(t *testing.T) {
 		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
 			t.Fatalf("Load(%s): ok=%v err=%v (fresh legacy write lost)", name, ok, err)
 		}
+	}
+	// Presence alone doesn't rule out the merge corrupting carol's credential
+	// material; check the actual values survived the legacy->indexed merge.
+	if got, _, err := s.Load(ProviderKey("carol")); err != nil || got.AccessToken != "c" || got.RefreshToken != "cr" {
+		t.Fatalf("Load(carol) = %#v, err=%v, want the legacy access/refresh tokens intact", got, err)
 	}
 	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
 		t.Fatal("legacy entry should be removed once its fresh writes are merged")
@@ -694,14 +714,39 @@ func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load(alpha): ok=%v err=%v", ok, err)
 	}
-	if got.AccessToken != "a-new" || got.RefreshToken != "r-new" {
-		t.Fatalf("Load(alpha) = %#v, want the refreshed legacy value (fresh refresh discarded)", got)
+	if got.AccessToken != "a-new" || got.RefreshToken != "r-new" || !got.ExpiresAt.Equal(fresh) {
+		t.Fatalf("Load(alpha) = %#v, want the refreshed legacy value (tokens and expiry) with ExpiresAt=%v", got, fresh)
 	}
 	if _, ok, _ := s.Load(ProviderKey("beta")); !ok {
 		t.Fatal("Load(beta): not stored")
 	}
 	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
 		t.Fatal("legacy entry should be removed once its refresh is merged")
+	}
+}
+
+// TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock guards the other
+// half of the same hazard as the lease test below: acquireFileLock's own
+// acquisition deadline must be measured against the real wall clock, not the
+// injectable now parameter. StoreOptions.Now may legitimately be a fixed
+// clock (as this test uses), and deadline := now().Add(fileLockTimeout)
+// followed by now().After(deadline) would then never become true, so a
+// contested lock would retry forever instead of returning a timeout error.
+func TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "test.lockfile")
+	// A fresh (non-stale) lock held by someone else: acquireFileLock must not
+	// reclaim it, only wait out fileLockTimeout and report a timeout.
+	if err := os.WriteFile(lockPath, []byte("someone-else"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	start := time.Now()
+	_, err := acquireFileLock(lockPath, func() time.Time { return fixed })
+	if err == nil {
+		t.Fatal("expected a timeout error acquiring an already-held, non-stale lock")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("acquireFileLock took %v with a fixed clock; the deadline must use the wall clock, not now()", elapsed)
 	}
 }
 
@@ -777,8 +822,47 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(unsupported)
+	ckr.gets = 0
 	if _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an unsupported index version to be rejected")
+	}
+	if ckr.gets != 1 {
+		t.Fatalf("readKeyIndex issued %d gets for an unsupported version; want header lookup only", ckr.gets)
+	}
+}
+
+// TestStoreKeyringReadIndexRejectsOversizedKeyList regresses a corrupt index
+// that claims more keys than maxKeyringIndexKeys: maxKeyringIndexChunks alone
+// bounds only how many chunk entries are fetched, not how many keys a single
+// chunk's JSON (or the legacy bare-array format) can claim, so without this
+// check readKeyIndex would hand read()/write() an oversized key list to fan
+// out into one blocking kr.Get per key while holding the store lock.
+func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
+	ckr := &countingKR{fakeKR: newFakeKR()}
+	blob := keyringBlob{kr: ckr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+
+	tooMany := make([]string, maxKeyringIndexKeys+1)
+	for i := range tooMany {
+		tooMany[i] = ProviderKey(fmt.Sprintf("p%d", i))
+	}
+
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Keys: tooMany})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected an oversized key list in a chunk-0 header to be rejected")
+	}
+
+	// The pre-chunking bare-array format must be capped the same way.
+	legacyArray, err := json.Marshal(tooMany)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(legacyArray)
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected an oversized legacy-format key array to be rejected")
 	}
 }
 
