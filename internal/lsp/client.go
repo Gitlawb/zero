@@ -32,7 +32,15 @@ type Client struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 	readErr   error
+	notify    chan notification
 }
+
+type notification struct {
+	method string
+	params json.RawMessage
+}
+
+const notificationQueueSize = 64
 
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -84,7 +92,9 @@ func NewClient(r io.Reader, w io.Writer) *Client {
 		writer:  w,
 		pending: make(map[int64]chan rpcResponse),
 		closed:  make(chan struct{}),
+		notify:  make(chan notification, notificationQueueSize),
 	}
+	go client.notificationLoop()
 	go client.readLoop(bufio.NewReader(r))
 	return client
 }
@@ -166,16 +176,31 @@ func (c *Client) readLoop(reader *bufio.Reader) {
 			// required or the server can block waiting on it (e.g. registerCapability).
 			_ = c.write(outgoingReply{JSONRPC: "2.0", ID: msg.ID, Result: nil})
 		case msg.Method != "":
-			c.mu.Lock()
-			handler := c.handler
-			c.mu.Unlock()
-			if handler != nil {
-				handler(msg.Method, msg.Params)
+			select {
+			case c.notify <- notification{method: msg.Method, params: msg.Params}:
+			case <-c.closed:
+				return
 			}
 		case hasID:
 			var id int64
 			if err := json.Unmarshal(msg.ID, &id); err == nil {
 				c.deliver(id, rpcResponse{Result: msg.Result, Err: msg.Error})
+			}
+		}
+	}
+}
+
+func (c *Client) notificationLoop() {
+	for {
+		select {
+		case <-c.closed:
+			return
+		case notification := <-c.notify:
+			c.mu.Lock()
+			handler := c.handler
+			c.mu.Unlock()
+			if handler != nil {
+				handler(notification.method, notification.params)
 			}
 		}
 	}
