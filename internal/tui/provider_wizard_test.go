@@ -169,6 +169,12 @@ func TestProviderWizardModelsAreProviderScoped(t *testing.T) {
 }
 
 func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
+	// The credential-step footer's "Enter/→ continue" shortcut only appears
+	// once a key is present, whether typed or inherited from the
+	// provider's AuthEnvVars — pin ANTHROPIC_API_KEY empty so the assertion
+	// below doesn't depend on the ambient environment.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
@@ -191,7 +197,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	for _, want := range []string{
 		"Paste API key",
 		"ANTHROPIC_API_KEY",
-		"Enter/→ continue",
+		"Enter continue",
 	} {
 		assertContains(t, view, want)
 	}
