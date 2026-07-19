@@ -7,10 +7,22 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// wrapDialErrno builds the error shape a real dial failure has — a *net.OpError
+// wrapping an *os.SyscallError wrapping the errno — so errors.Is reaches the
+// errno exactly as it does in production. This is the portable way to exercise
+// the Windows path: on Windows the same syscall.Exxx constants carry the WSA*
+// values and the .Error() text is the Windows wording, but the errno match is
+// identical, so the assertion holds on every platform.
+func wrapDialErrno(op string, errno syscall.Errno) error {
+	return &net.OpError{Op: op, Net: "tcp", Err: os.NewSyscallError("connectex", errno)}
+}
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
@@ -44,10 +56,11 @@ func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
 func TestSendWithRetryReplaysProvablyPreSendErrors(t *testing.T) {
 	shrinkBackoff(t)
 	cases := map[string]error{
-		"connection refused":    errors.New("dial tcp 127.0.0.1:1: connect: connection refused"),
-		"network unreachable":   errors.New("dial tcp: connect: network is unreachable"),
-		"tls handshake timeout": errors.New("net/http: TLS handshake timeout"),
-		"dns not found":         &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true},
+		"connection refused":      errors.New("dial tcp 127.0.0.1:1: connect: connection refused"),
+		"network unreachable":     errors.New("dial tcp: connect: network is unreachable"),
+		"tls handshake timeout":   errors.New("net/http: TLS handshake timeout"),
+		"dns not found":           &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true},
+		"errno refused (windows)": wrapDialErrno("dial", syscall.ECONNREFUSED),
 	}
 	for name, transportErr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -112,6 +125,12 @@ func TestIsPreSendTransportError(t *testing.T) {
 		{"network unreachable", errors.New("dial tcp: connect: network is unreachable"), true},
 		{"no route to host", errors.New("dial tcp: connect: no route to host"), true},
 		{"tls handshake timeout", errors.New("net/http: TLS handshake timeout"), true},
+		// Errno-wrapped dials: how a real refused/unreachable dial arrives on
+		// EVERY platform, including Windows where the wording differs entirely.
+		{"errno refused (portable/windows)", wrapDialErrno("dial", syscall.ECONNREFUSED), true},
+		{"errno network unreachable", wrapDialErrno("dial", syscall.ENETUNREACH), true},
+		{"errno host unreachable", wrapDialErrno("dial", syscall.EHOSTUNREACH), true},
+		{"errno reset is post-send", wrapDialErrno("read", syscall.ECONNRESET), false},
 		{"connection reset", errors.New("read tcp: connection reset by peer"), false},
 		{"broken pipe", errors.New("write tcp: broken pipe"), false},
 		{"unexpected eof", io.ErrUnexpectedEOF, false},

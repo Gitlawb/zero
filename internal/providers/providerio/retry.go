@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/trace"
@@ -31,6 +32,8 @@ import (
 // non-idempotent and may already have reached and been processed by the server,
 // so replaying it could duplicate (billable) work. Only the INITIAL request is
 // ever in scope; once the response body starts streaming it is never re-issued.
+// Pre-send classification is by syscall errno (portable across POSIX and
+// Windows), so a refused/unreachable dial retries the same on every platform.
 
 const defaultMaxRetryAttempts = 6
 
@@ -134,12 +137,19 @@ func SendWithRetry(
 // DNS resolution failure, a refused or unreachable dial, and a TLS handshake
 // timeout (the handshake completes before any HTTP request bytes are written).
 //
+// Classification is by syscall errno wherever possible, via errors.Is, which is
+// portable across platforms: Go maps ECONNREFUSED / ENETUNREACH / EHOSTUNREACH
+// / ECONNRESET to the host's real values, including the WSA* codes on Windows,
+// whose human-readable dial wording differs entirely from POSIX. String markers
+// are kept only as a fallback for errors that arrive already flattened to text
+// (no errno in the chain).
+//
 // Ambiguous or post-send failures are deliberately excluded and checked FIRST,
-// so a message that happens to contain both an excluded and an included marker
-// is never treated as pre-send: connection reset and broken pipe can follow a
-// request that was already sent, and a bare "i/o timeout" covers read timeouts
-// after send as well as dial timeouts — none of these prove the request was not
-// received, so a non-idempotent POST must not be replayed on them.
+// so an error that is both is never treated as pre-send: a reset or broken pipe
+// can follow a request that was already sent, and a bare "i/o timeout" covers
+// read timeouts after send as well as dial timeouts, so none of these prove the
+// request was not received and a non-idempotent POST must not be replayed on
+// them.
 func isPreSendTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -150,18 +160,24 @@ func isPreSendTransportError(err error) bool {
 	if errors.As(err, &dnsErr) {
 		return true
 	}
-	// A connection closed mid-exchange (EOF) may well have delivered the request
-	// first, so it is post-send. Matched by identity, not substring, so a
-	// hostname containing "eof" can't be misread.
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	// Post-send / ambiguous failures, excluded first. EOF and reset are matched
+	// by identity so wording (or a hostname containing "eof") can't fool them.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// Exclusions win: never classify an ambiguous/post-send failure as pre-send.
 	if strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "i/o timeout") {
 		return false
+	}
+	// Provably pre-send: the connect never completed, so no request bytes left
+	// this host. Errno match is authoritative and platform-independent; the
+	// string markers only catch a POSIX error already flattened to text.
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) {
+		return true
 	}
 	switch {
 	case strings.Contains(msg, "connection refused"):
