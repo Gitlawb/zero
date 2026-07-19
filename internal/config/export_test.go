@@ -30,7 +30,7 @@ func ValidateFile(path string) (FileConfig, []Issue) {
 
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, []Issue{{Message: fmt.Errorf("invalid config JSON %s: %w", path, err).Error()}}
+		return FileConfig{}, []Issue{{Message: fmt.Sprintf("invalid config JSON %s: %v", path, err)}}
 	}
 
 	issues := validateSemantics(cfg)

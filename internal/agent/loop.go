@@ -271,10 +271,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
 		// the messages, so computing it before compaction is safe.
-		// Build the per-turn tool list first so proactive compaction can include
-		// the tool-definition tokens (they ride on every request) in its estimate.
-		// partitionTools depends only on registry/permissions/options/loaded, not on
-		// the messages, so computing it before compaction is safe.
 		toolPartitionSpan := options.Trace.Span(trace.SpanToolPartition)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
