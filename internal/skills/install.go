@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // LockFileName is the name of the per-directory lockfile that maps an installed
@@ -122,6 +124,34 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 
 	hash := hashContent(data)
 
+	staged, cleanupStage, err := installtxn.StageDir(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer cleanupStage()
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
+	}
+	stagedManifest := filepath.Join(staged, skillFileName)
+	if err := os.WriteFile(stagedManifest, data, 0o644); err != nil {
+		return InstallResult{}, fmt.Errorf("stage SKILL.md: %w", err)
+	}
+	stagedData, err := os.ReadFile(stagedManifest)
+	if err != nil || hashContent(stagedData) != hash {
+		if err != nil {
+			return InstallResult{}, fmt.Errorf("validate staged SKILL.md: %w", err)
+		}
+		return InstallResult{}, errors.New("validate staged SKILL.md: copied content hash differs from source")
+	}
+
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer unlock()
+
+	// Re-read under the cross-process lock. Another install may have updated the
+	// lockfile while this skill was fetched and staged.
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return InstallResult{}, err
@@ -133,23 +163,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create skills dir: %w", err)
-	}
-	// Replace any existing install atomically-enough: write the new SKILL.md after
-	// clearing a prior directory so a re-install never mixes old and new files.
-	if err := os.RemoveAll(target); err != nil {
-		return InstallResult{}, fmt.Errorf("clear previous skill: %w", err)
-	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create skill dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, skillFileName), data, 0o644); err != nil {
-		return InstallResult{}, fmt.Errorf("write SKILL.md: %w", err)
-	}
-
 	lock[name] = LockEntry{Source: source, Hash: hash}
-	if err := writeLock(dir, lock); err != nil {
+	if err := installtxn.CommitDir(target, staged, func() error {
+		return writeLock(dir, lock)
+	}); err != nil {
 		return InstallResult{}, err
 	}
 
@@ -178,6 +195,12 @@ func Remove(dir string, name string) error {
 		return fmt.Errorf("invalid skill name %q", name)
 	}
 
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return err
@@ -191,11 +214,16 @@ func Remove(dir string, name string) error {
 	}
 
 	if present {
-		if err := os.RemoveAll(target); err != nil {
+		if err := installtxn.RemoveDir(target, func() error {
+			if !locked {
+				return nil
+			}
+			delete(lock, name)
+			return writeLock(dir, lock)
+		}); err != nil {
 			return fmt.Errorf("remove skill dir: %w", err)
 		}
-	}
-	if locked {
+	} else if locked {
 		delete(lock, name)
 		if err := writeLock(dir, lock); err != nil {
 			return err
@@ -301,7 +329,7 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+	if err := installtxn.WriteFileAtomically(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", LockFileName, err)
 	}
 	return nil
