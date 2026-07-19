@@ -750,6 +750,49 @@ echo '{"type":"run_end","exitCode":0}'
 	}
 }
 
+// TestOracleAuthoritativeOnIncompleteExit is the companion to the --auto member
+// switch: under member-auto the agent's shell is sandboxed, so on a host without
+// sandbox setup its self-verification (go test/build) can't run and the turn
+// exits INCOMPLETE (nonzero) even after a correct edit. For an ORACLE-bearing
+// task the runner must treat the stamped oracle — not that exit code — as ground
+// truth: here the stub applies the real edit-01 rename but reports
+// exitCode 4, and the task must still pass because the fixture is correct.
+func TestOracleAuthoritativeOnIncompleteExit(t *testing.T) {
+	task := loadBaselineTask(t, "edit-01")
+	outcome := runTurnStub(t, task, `sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":4}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("incomplete-exit with a correct edit should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("a correct edit that exited INCOMPLETE (exit 4) must still pass its oracle: %+v", outcome)
+	}
+	if strings.TrimSpace(outcome.VerifyErr) != "" {
+		t.Fatalf("a passing oracle must clear the exit-code VerifyErr, got %q", outcome.VerifyErr)
+	}
+}
+
+// TestNonzeroExitStillFailsLatencyOnly is the guard on the other side of that
+// change: a latency-only task has no oracle to appeal to, so the exit code is
+// the ONLY correctness signal and a nonzero exit must still fail it. Without
+// this, dropping the exit-code gate for oracle tasks could be misread as
+// dropping it everywhere.
+func TestNonzeroExitStillFailsLatencyOnly(t *testing.T) {
+	task := loadBaselineTask(t, "longproc-01")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("latency-only nonzero exit should be a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("a latency-only task that exited nonzero must not pass: %+v", outcome)
+	}
+	if strings.TrimSpace(outcome.VerifyErr) == "" {
+		t.Fatalf("a latency-only nonzero exit must surface a VerifyErr, got none: %+v", outcome)
+	}
+}
+
 // --- Satisfiable tests: the oracle PASSES the right thing (real fix applied) ---
 
 // TestStampedOraclePassesWhenRefactorHappened proves the refactor-01 oracle is
@@ -1192,22 +1235,30 @@ func TestBuildTurnExecArgsIncludesExecProfile(t *testing.T) {
 	}
 }
 
-// Every benchmark invocation MUST grant the write/shell tool set. Without
-// --skip-permissions-unsafe the agent runs read-only and cannot apply any edit,
-// so the mutating classes measure nothing but oracle/answer contamination. Each
-// task runs in an isolated throwaway fixture copy, so there is nothing to
-// protect. This is a correctness contract, not a preference.
+// Every benchmark invocation MUST grant the write/shell tool set via --auto
+// member. Without a permission grant the agent runs read-only and cannot apply
+// any edit, so the mutating classes measure nothing but oracle/answer
+// contamination. member-auto is the RIGHT grant: it exposes the write +
+// sandboxed-shell tools the benchmark needs while keeping the workspace/network/
+// destructive safeguards, so the args must NOT reach for the broader
+// --skip-permissions-unsafe (which drops those guards). This is a correctness
+// contract, not a preference.
 func TestBuildTurnExecArgsGrantsWriteTools(t *testing.T) {
 	args := buildTurnExecArgs(BenchTask{ID: "t", Prompt: "edit the file"}, RunContext{Model: "m"}, "trace.ndjson", nil)
-	found := false
-	for _, arg := range args {
-		if arg == "--skip-permissions-unsafe" {
-			found = true
+	autoMember := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--auto" && args[i+1] == "member" {
+			autoMember = true
 			break
 		}
 	}
-	if !found {
-		t.Fatalf("benchmark exec args must include --skip-permissions-unsafe so the agent can apply edits, got %v", args)
+	if !autoMember {
+		t.Fatalf("benchmark exec args must include --auto member so the agent can apply edits, got %v", args)
+	}
+	for _, arg := range args {
+		if arg == "--skip-permissions-unsafe" {
+			t.Fatalf("benchmark exec args must NOT use --skip-permissions-unsafe (member-auto keeps the sandbox/network guards), got %v", args)
+		}
 	}
 	if args[len(args)-1] != "edit the file" {
 		t.Fatalf("prompt must stay the last argument, got %v", args)

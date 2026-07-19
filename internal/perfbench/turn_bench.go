@@ -582,8 +582,11 @@ func WriteTurnBenchJSON(w io.Writer, result TurnBenchResult) error {
 // headless `zero exec` with stream-json output AND `--trace <tmpfile>`, then
 // parses the emitted NDJSON trace into a *trace.TurnTrace. binary is the path to
 // the `zero` binary; extraArgs are appended to every invocation. Pass/fail is
-// decided from the stream-json run_end exit code (and the task's
-// VerificationCommand when present), exactly like NewExecRunner.
+// decided by the task's oracle (OracleTest/VerificationCommand) when it has one:
+// the stamped oracle is ground truth, so an oracle-bearing task that applied the
+// right edit but exited INCOMPLETE (its sandboxed self-verification couldn't run)
+// still passes. For a latency-only task (no oracle) the stream-json run_end exit
+// code is the only signal, so a nonzero exit fails it.
 func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
 		// Isolate the workspace: copy the fixture into a fresh temp dir so a
@@ -656,10 +659,20 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 			}
 		}
 
-		// A nonzero agent exit already decided failure; don't run verification or
-		// mark the task passed.
+		// Decide what a nonzero exit means. For a latency-only task (no oracle) the
+		// exit code is the only correctness signal, so a nonzero exit is the verdict
+		// and we stop here. For an oracle-bearing task the oracle below — the
+		// compiled test / grep run against the actual fixture files — is ground
+		// truth: a run that applied the correct edit but exited INCOMPLETE (e.g. it
+		// couldn't self-verify because the sandboxed shell was unavailable under
+		// --auto member) still achieved the task, so we let the oracle decide and
+		// drop the exit-code failure. A run that really did nothing useful just
+		// fails that same oracle, so this can't turn a bad run into a pass.
 		if outcome.VerifyErr != "" {
-			return outcome
+			if len(task.VerificationCommand) == 0 {
+				return outcome
+			}
+			outcome.VerifyErr = ""
 		}
 		// Stamp the compiler-backed oracle and capture the agent's final answer
 		// BEFORE running the verification command. Both write into the fixture
@@ -790,16 +803,23 @@ func stampOracleAndAnswer(task BenchTask, outBuf []byte) error {
 }
 
 func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArgs []string) []string {
-	// --skip-permissions-unsafe is REQUIRED, not optional: without it `zero exec`
-	// runs in its default read-only posture, which exposes no write or shell tools
-	// (no edit_file/apply_patch/write_file/exec_command/bash). The mutating task
-	// classes (edit/fix/refactor) then cannot apply any change, so every run
+	// --auto member is REQUIRED, not optional: without a permission grant `zero
+	// exec` runs in its default read-only posture, which exposes no write or shell
+	// tools (no edit_file/apply_patch/write_file/exec_command/bash). The mutating
+	// task classes (edit/fix/refactor) then cannot apply any change, so every run
 	// grinds to the turn ceiling or reports a no-tool blocker, and the only tasks
 	// that "pass" are ones whose oracle grep matches the stamped answer text rather
-	// than a real edit. Each task already runs in an isolated, throwaway fixture
-	// copy (see NewTurnExecRunner), so granting the full tool set has nothing to
-	// protect and is the whole point: the benchmark must measure real edits.
-	args := []string{"exec", "--skip-permissions-unsafe", "--output-format", "stream-json", "--trace", tracePath}
+	// than a real edit. member-auto grants the write + sandboxed-shell tools the
+	// benchmark needs while keeping the workspace/network/destructive safeguards, so
+	// it is preferred over the broader --skip-permissions-unsafe (which also drops
+	// those guards and auto-retries blocked commands unsandboxed). Note the shell it
+	// grants is sandboxed: on a host without sandbox setup the agent's own
+	// self-verification (go test/build) can't run and the turn exits INCOMPLETE even
+	// after a correct edit — the runner treats the stamped oracle, not that exit
+	// code, as ground truth for oracle-bearing tasks (see NewTurnExecRunner), so a
+	// correct edit still passes. Each task also runs in an isolated, throwaway
+	// fixture copy, so the granted tools have nothing outside the task to harm.
+	args := []string{"exec", "--auto", "member", "--output-format", "stream-json", "--trace", tracePath}
 	if model := strings.TrimSpace(rc.Model); model != "" {
 		args = append(args, "--model", model)
 	}
