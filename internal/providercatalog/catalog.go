@@ -219,7 +219,8 @@ var descriptors = []Descriptor{
 func All() []Descriptor {
 	copied := make([]Descriptor, 0, len(descriptors))
 	for _, descriptor := range descriptors {
-		copied = append(copied, cloneDescriptor(descriptor))
+		// Listing must not mint Kimi's on-disk device identity.
+		copied = append(copied, cloneDescriptor(descriptor, false))
 	}
 	return copied
 }
@@ -228,11 +229,11 @@ func Get(id string) (Descriptor, bool) {
 	normalized := NormalizeID(id)
 	for _, descriptor := range descriptors {
 		if descriptor.ID == normalized {
-			return cloneDescriptor(descriptor), true
+			return cloneDescriptor(descriptor, true), true
 		}
 		for _, alias := range descriptor.Aliases {
 			if NormalizeID(alias) == normalized {
-				return cloneDescriptor(descriptor), true
+				return cloneDescriptor(descriptor, true), true
 			}
 		}
 	}
@@ -248,6 +249,34 @@ func Require(id string) (Descriptor, error) {
 	return descriptor, nil
 }
 
+func ListByTransport(transport Transport) []Descriptor {
+	normalized := Transport(NormalizeID(string(transport)))
+	items := make([]Descriptor, 0)
+	for _, descriptor := range descriptors {
+		if descriptor.Transport == normalized {
+			items = append(items, cloneDescriptor(descriptor, false))
+		}
+	}
+	return items
+}
+
+func ValidTransport(transport Transport) bool {
+	switch Transport(NormalizeID(string(transport))) {
+	case TransportOpenAI, TransportAnthropic, TransportGoogle, TransportBedrock, TransportVertex, TransportOpenAICompatible, TransportAnthropicCompatible:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidAPIFormat(format APIFormat) bool {
+	switch format {
+	case APIFormatOpenAIResponses, APIFormatOpenAIChatCompletions, APIFormatAnthropicMessages, APIFormatGoogleGenerateContent, APIFormatBedrockConverse, APIFormatVertexGenerateContent:
+		return true
+	default:
+		return false
+	}
+}
 func NormalizeID(id string) string {
 	var builder strings.Builder
 	lastDash := false
@@ -344,7 +373,9 @@ func OAuthProviders() []Descriptor {
 	out := []Descriptor{}
 	for _, descriptor := range descriptors {
 		if descriptor.OAuth {
-			out = append(out, cloneDescriptor(descriptor))
+			// Listing only: runtime headers (and the Kimi device-id file they
+			// mint) are applied when Get/Require builds a real profile.
+			out = append(out, cloneDescriptor(descriptor, false))
 		}
 	}
 	return out
@@ -399,21 +430,20 @@ func transportDescriptor(id string, name string, transport Transport, baseURL st
 	}
 }
 
-func cloneDescriptor(descriptor Descriptor) Descriptor {
+// cloneDescriptor returns an independent copy of descriptor. When
+// withRuntimeHeaders is true, kimi-code also receives its X-Msh-* vendor
+// identity headers (including a persistent device ID on disk). Listing paths
+// (All, OAuthProviders, ListByTransport) pass false so merely enumerating
+// providers never mints ~/.config/zero/kimi-device-id for users who never
+// touch Kimi; Get/Require pass true so resolve-time profile building and
+// completions still present the same identity the OAuth login used.
+func cloneDescriptor(descriptor Descriptor, withRuntimeHeaders bool) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
-	// kimi-code's managed endpoint rejects completions that arrive without
-	// the same X-Msh-* device identity its OAuth login presented, so the
-	// descriptor carries those headers into the runtime request path via
-	// CustomHeaders. They are populated lazily here, at access time, rather
-	// than in the package-level descriptor table: the set includes a
-	// persistent device ID backed by a config-dir file, and minting/reading
-	// that file at import time would do filesystem IO in every process
-	// regardless of provider.
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
-	} else if descriptor.ID == "kimi-code" {
+	} else if withRuntimeHeaders && descriptor.ID == "kimi-code" {
 		descriptor.CustomHeaders = kimiidentity.Headers()
 	}
 	return descriptor

@@ -183,9 +183,9 @@ func TestResolveConfigHuggingFaceWithEnvClientID(t *testing.T) {
 // device-code endpoint, so the preset resolves without env. The flow is device
 // only (RFC 8628): no loopback/authorize endpoint, no issuer discovery. The
 // preset key is "kimi-code", not "kimi": moonshot already aliases "kimi" to
-// itself (see TestResolveConfigKimiAliasStillResolvesToMoonshot in the
-// providercatalog package's catalog_test.go), so reusing it here would steal
-// that alias from existing moonshot profiles.
+// itself (see TestKimiAliasStillResolvesToMoonshot in the providercatalog
+// package's catalog_test.go), so reusing it here would steal that alias from
+// existing moonshot profiles.
 func TestResolveConfigKimiCodePreset(t *testing.T) {
 	r := NewRegistry()
 	cfg, flow, err := r.ResolveConfig("kimi-code", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})

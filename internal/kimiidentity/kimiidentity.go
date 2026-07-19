@@ -25,6 +25,13 @@ import (
 
 // Headers returns the X-Msh-* vendor-identity headers, including the stable
 // per-device identifier.
+//
+// X-Msh-Platform is "zero-cli" (honest client name). Upstream kimi-cli hardcodes
+// "kimi_cli". Kimi's coding/v1 endpoint documents a client whitelist ("Kimi CLI,
+// Claude Code, Roo Code, ..."); it is unclear whether that gate keys on this
+// platform header or on the OAuth client_id (which already matches kimi-cli's
+// public ID). If login succeeds but completions are rejected, try confirming
+// with a real account before changing this value.
 func Headers() map[string]string {
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
@@ -114,7 +121,7 @@ func isUUID(s string) bool {
 				return false
 			}
 		default:
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
 				return false
 			}
 		}
