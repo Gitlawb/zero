@@ -21,6 +21,18 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+// featureBranchInspect returns an inspectChanges stub for ensureFeatureBranch:
+// a clean working tree when BaseRef is empty, and the given committed range
+// summary when BaseRef is set (the remote/branch naming path).
+func featureBranchInspect(files []zerogit.FileChange, diff string) func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+	return func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+		if strings.TrimSpace(options.BaseRef) == "" {
+			return zerogit.ChangeSummary{Clean: true}, nil
+		}
+		return zerogit.ChangeSummary{Files: files, Diff: diff}, nil
+	}
+}
+
 func TestRunWorktreesPrepareTextAndJSON(t *testing.T) {
 	cwd := t.TempDir()
 	base := t.TempDir()
@@ -1152,10 +1164,8 @@ func TestEnsureFeatureBranchCreatesBranchOffDefaultWithoutProvider(t *testing.T)
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1182,10 +1192,8 @@ func TestEnsureFeatureBranchUsesLLMSlugWhenProviderConfigured(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
 		},
@@ -1219,10 +1227,8 @@ func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
 		},
@@ -1290,10 +1296,8 @@ func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 					return true, "main", "origin", nil
 				},
-				commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-				inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-					return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
-				},
+				commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+				inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
 				resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 					return execResolvedConfig(), nil
 				},
@@ -1379,10 +1383,8 @@ func TestEnsureFeatureBranchNamesFromHeadCommitAfterCommit(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{}, nil // clean tree: commit already made
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect(nil, ""), // clean tree + empty committed range: name from HEAD
 		headCommitSubject: func(ctx context.Context, cwd string) string {
 			return "fix(parser): handle empty input"
 		},
@@ -1412,10 +1414,8 @@ func TestEnsureFeatureBranchDoesNotCallProviderWithoutAuto(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "login.go", Status: "added"}}, Diff: "+func Login() {}"}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "login.go", Status: "added"}}, "+func Login() {}"),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil // provider IS configured
 		},
@@ -1450,6 +1450,9 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 		},
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			if strings.TrimSpace(options.BaseRef) == "" {
+				return zerogit.ChangeSummary{Clean: true}, nil
+			}
 			gotMaxDiffBytes = options.MaxDiffBytes
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
@@ -1470,10 +1473,9 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 }
 
 func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
-	// On a clean, up-to-date default branch (or one carrying only uncommitted
-	// edits) HEAD is not ahead of the remote default, so a push would publish
-	// nothing. ensureFeatureBranch must refuse instead of creating and pushing
-	// an empty feature branch.
+	// On a clean, up-to-date default branch HEAD is not ahead of the remote
+	// default, so a push would publish nothing. ensureFeatureBranch must refuse
+	// instead of creating and pushing an empty feature branch.
 	cwd := t.TempDir()
 	createBranchCalled := false
 
@@ -1485,8 +1487,10 @@ func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
 			return 0, nil
 		},
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			t.Fatal("inspectChanges should not run when there is nothing to publish")
-			return zerogit.ChangeSummary{}, nil
+			if strings.TrimSpace(options.BaseRef) != "" {
+				t.Fatal("base-ref inspect should not run when there is nothing to publish")
+			}
+			return zerogit.ChangeSummary{Clean: true}, nil
 		},
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			createBranchCalled = true
@@ -1501,13 +1505,47 @@ func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
 	}
 }
 
+func TestEnsureFeatureBranchRefusesDirtyWorkingTree(t *testing.T) {
+	// CreateBranch/Push publish commits only. With an ahead commit plus
+	// uncommitted edits, naming and pushing would leave those edits behind
+	// under a branch/PR that does not include them.
+	cwd := t.TempDir()
+	createBranchCalled := false
+
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			t.Fatal("commitsAhead should not run when the working tree is dirty")
+			return 0, nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			if strings.TrimSpace(options.BaseRef) != "" {
+				t.Fatal("base-ref inspect should not run when the working tree is dirty")
+			}
+			return zerogit.ChangeSummary{
+				Clean: false,
+				Files: []zerogit.FileChange{{Path: "wip.go", Status: "modified"}},
+			}, nil
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("expected an uncommitted-changes error, got %v", err)
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called when the working tree is dirty")
+	}
+}
+
 func TestEnsureFeatureBranchFailsWhenAheadCountUnknown(t *testing.T) {
 	// A missing remote-tracking ref (never fetched) means the ahead count
-	// cannot be determined. Inspect is now asked to diff against that same
-	// unresolved remote/branch ref, so a real git call would fail here too
-	// instead of silently falling back to a working-tree-derived name for a
-	// push that might publish nothing (or that might publish an ahead commit
-	// under a name describing unrelated uncommitted edits).
+	// cannot be determined. Fail closed rather than guessing that there is
+	// something to publish (or naming a branch from a working-tree snapshot).
 	cwd := t.TempDir()
 	createBranchCalled := false
 
@@ -1519,15 +1557,18 @@ func TestEnsureFeatureBranchFailsWhenAheadCountUnknown(t *testing.T) {
 			return 0, errors.New("unknown revision origin/main")
 		},
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{}, errors.New("unknown revision origin/main")
+			if strings.TrimSpace(options.BaseRef) != "" {
+				t.Fatal("base-ref inspect should not run when the ahead count is unknown")
+			}
+			return zerogit.ChangeSummary{Clean: true}, nil
 		},
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			createBranchCalled = true
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "failed to inspect changes") {
-		t.Fatalf("expected an inspect-failure error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cannot determine whether HEAD is ahead") {
+		t.Fatalf("expected an ahead-count-unknown error, got %v", err)
 	}
 	if createBranchCalled {
 		t.Fatal("expected createBranch not to be called when the publishable range is unknown")
@@ -1549,6 +1590,9 @@ func TestEnsureFeatureBranchInspectsAgainstResolvedRemoteBranch(t *testing.T) {
 		},
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			if strings.TrimSpace(options.BaseRef) == "" {
+				return zerogit.ChangeSummary{Clean: true}, nil
+			}
 			gotBaseRef = options.BaseRef
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
@@ -1582,10 +1626,8 @@ func TestRunChangesPushUsesResolvedRemoteForNewBranch(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "upstream", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1618,10 +1660,8 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1663,10 +1703,8 @@ func TestRunChangesPRCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
-		},
+		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
