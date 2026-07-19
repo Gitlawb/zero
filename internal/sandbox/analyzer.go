@@ -83,6 +83,12 @@ func astCommandFields(command string) [][]string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
+		// The program name must be a static literal. A dynamic first word (e.g.
+		// `$(printf foo)vim`, which runs as `foovim`) would otherwise yield a
+		// misleading partial literal ("vim") and fabricate an interactive match.
+		if !isLiteralWord(call.Args[0]) {
+			return true
+		}
 		fields := make([]string, 0, len(call.Args))
 		for _, word := range call.Args {
 			fields = append(fields, wordText(word))
@@ -91,6 +97,31 @@ func astCommandFields(command string) [][]string {
 		return true
 	})
 	return commands
+}
+
+// isLiteralWord reports whether every part of word is a static literal (bare or
+// quoted). A word containing a command substitution, parameter/arithmetic
+// expansion, process substitution, etc. is dynamic — its runtime value is
+// unknown, so its wordText (a partial literal) must not be trusted as a program
+// name.
+func isLiteralWord(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range typed.Parts {
+				if _, ok := inner.(*syntax.Lit); !ok {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // analyzeInto parses script and folds its interactive/destructive/network usage

@@ -436,3 +436,32 @@ func TestDetectInteractiveCommandNoFalsePositiveOnQuotedArgument(t *testing.T) {
 		t.Fatalf("interactive name inside a quoted argument must not be flagged, got %#v", got)
 	}
 }
+
+// The AST second opinion must run the FULL pipeline — multi-word interactive
+// segments and sh -c payload recursion, not just the per-program lookup — so a
+// grouped/nested bypass is caught; and it must not fabricate a program name from
+// a command substitution concatenated with a literal (issue #473, review).
+func TestDetectInteractiveCommandASTPipelineBoundaries(t *testing.T) {
+	interactive := []struct{ cmd, wantCmd string }{
+		{"{ git rebase -i HEAD~1; }", "git rebase -i"}, // multi-word segment in a brace group
+		{"{ sh -c 'vim file.txt'; }", "vim"},           // sh -c payload in a brace group
+	}
+	for _, tc := range interactive {
+		got := DetectInteractiveCommand(tc.cmd, "linux")
+		if !got.Interactive || got.Command != tc.wantCmd {
+			t.Errorf("DetectInteractiveCommand(%q) = %+v, want interactive Command=%q", tc.cmd, got, tc.wantCmd)
+		}
+	}
+}
+
+// The AST pass must not fabricate a program name from a dynamic (non-literal)
+// program word: `$(printf '%s' foo)vim` runs as `foovim`, not vim. Tested at the
+// extractor so the hand-written pass (which pre-empts DetectInteractiveCommand
+// with its own, separate handling of that construct) does not mask the guard.
+func TestAstCommandFieldsSkipsDynamicProgram(t *testing.T) {
+	for _, fields := range astCommandFields("$(printf '%s' foo)vim file.txt") {
+		if firstProgram(fields) == "vim" {
+			t.Fatalf("astCommandFields fabricated a vim command from a substitution: %v", fields)
+		}
+	}
+}
