@@ -253,6 +253,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/rewind",
+		aliases:     []string{"/undo"},
 		usage:       "/rewind [latest|<sequence>]",
 		group:       commandGroupSession,
 		description: "Restore workspace files to a checkpoint and truncate the session.",
