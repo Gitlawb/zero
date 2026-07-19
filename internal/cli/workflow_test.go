@@ -808,7 +808,7 @@ func TestEnsureFeatureBranchCreatesBranchOffDefaultWithoutProvider(t *testing.T)
 	cwd := t.TempDir()
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -838,7 +838,7 @@ func TestEnsureFeatureBranchUsesLLMSlugWhenProviderConfigured(t *testing.T) {
 	mockProv := &mockCommitMsgProvider{response: "add login page"}
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -875,7 +875,7 @@ func TestEnsureFeatureBranchNormalizesMessyLLMSlugResponse(t *testing.T) {
 	mockProv := &mockCommitMsgProvider{response: "\n\"add login page\"\n"}
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -946,7 +946,7 @@ func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 			mockProv := &mockCommitMsgProvider{response: tc.response}
 			var createdName string
 
-			branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
+			branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 0, appDeps{
 				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 					return true, "main", "origin", nil
 				},
@@ -980,7 +980,7 @@ func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return false, "feat/existing", "origin", nil
 		},
@@ -1011,7 +1011,7 @@ func TestEnsureFeatureBranchSkipsWhenAllowDefaultOrDryRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cwd := t.TempDir()
-			branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", tc.allowDefaultBranch, tc.dryRun, false, 0, appDeps{
+			branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", tc.allowDefaultBranch, tc.dryRun, false, 0, appDeps{
 				isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 					t.Fatal("isDefaultBranch should not be called")
 					return false, "", "", nil
@@ -1035,7 +1035,7 @@ func TestEnsureFeatureBranchNamesFromHeadCommitAfterCommit(t *testing.T) {
 	cwd := t.TempDir()
 	var createdName string
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1068,7 +1068,7 @@ func TestEnsureFeatureBranchDoesNotCallProviderWithoutAuto(t *testing.T) {
 	// cause the change diff to be uploaded for naming unless --auto opts in.
 	cwd := t.TempDir()
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1104,7 +1104,7 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 	cwd := t.TempDir()
 	var gotMaxDiffBytes int
 
-	_, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 4096, appDeps{
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 4096, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1137,7 +1137,7 @@ func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false
 
-	_, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1161,13 +1161,17 @@ func TestEnsureFeatureBranchRefusesWhenNothingToPublish(t *testing.T) {
 	}
 }
 
-func TestEnsureFeatureBranchProceedsWhenAheadCountUnknown(t *testing.T) {
+func TestEnsureFeatureBranchFailsWhenAheadCountUnknown(t *testing.T) {
 	// A missing remote-tracking ref (never fetched) means the ahead count
-	// cannot be determined; that must not block a legitimate first push.
+	// cannot be determined. Inspect is now asked to diff against that same
+	// unresolved remote/branch ref, so a real git call would fail here too
+	// instead of silently falling back to a working-tree-derived name for a
+	// push that might publish nothing (or that might publish an ahead commit
+	// under a name describing unrelated uncommitted edits).
 	cwd := t.TempDir()
-	var createdName string
+	createBranchCalled := false
 
-	branch, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1175,6 +1179,37 @@ func TestEnsureFeatureBranchProceedsWhenAheadCountUnknown(t *testing.T) {
 			return 0, errors.New("unknown revision origin/main")
 		},
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return zerogit.ChangeSummary{}, errors.New("unknown revision origin/main")
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to inspect changes") {
+		t.Fatalf("expected an inspect-failure error, got %v", err)
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called when the publishable range is unknown")
+	}
+}
+
+func TestEnsureFeatureBranchInspectsAgainstResolvedRemoteBranch(t *testing.T) {
+	// Push and CreateBranch only publish commits, so the branch (and, with
+	// --auto, the diff sent to a provider) must be named from what HEAD is
+	// actually ahead of the resolved remote branch by, not from the working
+	// tree: Inspect must be asked to diff against "<remote>/<branch>", the
+	// same ref commitsAhead just checked.
+	cwd := t.TempDir()
+	var gotBaseRef string
+
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			gotBaseRef = options.BaseRef
 			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
 		},
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
@@ -1182,15 +1217,14 @@ func TestEnsureFeatureBranchProceedsWhenAheadCountUnknown(t *testing.T) {
 		},
 		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
-			createdName = options.Name
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("ensureFeatureBranch returned error: %v", err)
 	}
-	if branch != "someone/readme-md" || createdName != "someone/readme-md" {
-		t.Fatalf("expected branch creation to proceed, got %q (created %q)", branch, createdName)
+	if gotBaseRef != "origin/main" {
+		t.Fatalf("expected Inspect to diff against %q, got %q", "origin/main", gotBaseRef)
 	}
 }
 
@@ -1236,6 +1270,7 @@ func TestRunChangesPushUsesResolvedRemoteForNewBranch(t *testing.T) {
 func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	var pushedBranch string
+	var requiredNewRemoteBranch bool
 
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
@@ -1256,6 +1291,7 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		},
 		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
 			pushedBranch = options.Branch
+			requiredNewRemoteBranch = options.RequireNewRemoteBranch
 			return zerogit.PushResult{Remote: "origin", Branch: options.Branch}, nil
 		},
 	})
@@ -1268,6 +1304,12 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Created branch someone/readme-md") {
 		t.Fatalf("expected branch-creation message in stdout, got %q", stdout.String())
+	}
+	// CreateBranch's own remote-collision probe runs before this push, so the
+	// push itself must assert the destination is still new, closing the
+	// window for a concurrent creator of the same name.
+	if !requiredNewRemoteBranch {
+		t.Fatal("expected Push to require the destination not already exist on the remote")
 	}
 }
 
@@ -1329,6 +1371,9 @@ func TestRunChangesPushSkipsBranchCreationWithYes(t *testing.T) {
 		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
 			if options.Branch != "" {
 				t.Fatalf("expected empty Branch (defer to current HEAD) with --yes, got %q", options.Branch)
+			}
+			if options.RequireNewRemoteBranch {
+				t.Fatal("expected RequireNewRemoteBranch to be false: no branch was created")
 			}
 			return zerogit.PushResult{Remote: "origin", Branch: "main"}, nil
 		},

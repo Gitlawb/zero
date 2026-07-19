@@ -868,7 +868,7 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, options.maxDiffBytes, deps)
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, options.maxDiffBytes, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -879,6 +879,7 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		Branch:                 branch,
 		Force:                  options.force,
 		DryRun:                 options.dryRun,
+		RequireNewRemoteBranch: created,
 		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
@@ -926,7 +927,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -941,6 +942,7 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		Remote:                 firstNonEmptyString(options.remote, remote),
 		Branch:                 branch,
 		Force:                  options.force,
+		RequireNewRemoteBranch: created,
 		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
@@ -1030,12 +1032,16 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
 // (zerogit.Push already treats an empty Branch that way), plus the remote the
 // preflight resolved (requestedRemote, then the original branch's configured
-// upstream, then "origin"). Callers must pass that remote to Push: a freshly
+// upstream, then "origin"), plus whether this call is the one that just
+// created that branch. Callers must pass the remote to Push: a freshly
 // created branch has no tracking configuration, so Push's own fallback would
 // silently retarget "origin" even when the work came from a branch tracking
-// a different remote. allowDefaultBranch (the --yes flag) and dryRun both opt
-// out via the "" return, leaving Push's own guard/preview behavior on the
-// default branch unaffected.
+// a different remote. Callers must also pass `created` through as Push's
+// RequireNewRemoteBranch: CreateBranch's own remote-collision probe runs
+// before this returns, and closing that race requires Push's push itself to
+// assert the destination is still new. allowDefaultBranch (the --yes flag)
+// and dryRun both opt out via the "" branch / false created return, leaving
+// Push's own guard/preview behavior on the default branch unaffected.
 //
 // autoNaming gates the LLM naming path (--auto): these commands were
 // git-only, and sending the change diff to a configured provider on every
@@ -1044,17 +1050,17 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // information only. maxDiffBytes caps the diff Inspect returns, so a user who
 // passed --diff-bytes to bound the proprietary source sent for LLM naming has
 // that cap honored here just as the commit path does.
-func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, error) {
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
 	if allowDefaultBranch || dryRun {
-		return "", strings.TrimSpace(requestedRemote), nil
+		return "", strings.TrimSpace(requestedRemote), false, nil
 	}
 
 	isDefault, currentBranch, remote, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: requestedRemote})
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if !isDefault {
-		return currentBranch, remote, nil
+		return currentBranch, remote, false, nil
 	}
 
 	// Branching off the default branch only makes sense when HEAD carries a
@@ -1063,24 +1069,31 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// exact default tip, and a branch carrying only uncommitted edits would push
 	// the unchanged HEAD while leaving the edits local; changes pr then leaves
 	// the empty branch behind before the host rejects the empty comparison.
-	// Only refuse when we can prove there is nothing to publish: an error here
-	// (for example the remote-tracking ref was never fetched) means we cannot
-	// tell, so proceed rather than block a legitimate first push.
-	if ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch); aheadErr == nil && ahead == 0 {
-		return "", "", fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
+	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
+	if aheadErr == nil && ahead == 0 {
+		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
 	}
 
-	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, MaxDiffBytes: maxDiffBytes})
+	// Push and CreateBranch publish commits, not the working tree, so the
+	// branch is named (and, with --auto, its diff sent to a provider) from
+	// what HEAD is actually ahead of the resolved remote branch by, using the
+	// same ref commitsAhead just checked, never from a working-tree
+	// snapshot, which can carry edits a commit-only push won't include, or
+	// sit unchanged with nothing committed at all. That also means a
+	// remote-tracking ref that can't be resolved (the same condition that
+	// left ahead above unverified) fails here instead of silently falling
+	// back to a name derived from uncommitted edits for a push that may
+	// publish nothing.
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: remote + "/" + currentBranch, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
-		return "", "", fmt.Errorf("failed to inspect changes: %w", err)
+		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
 	}
 
 	slug := fallbackBranchSlug(summary)
 	if len(summary.Files) == 0 {
-		// The ordinary sequence is `changes commit` then `changes push`, so
-		// the working tree here is clean and the diff-derived fallback would
-		// always be the meaningless "changes". Name the branch from the
-		// commit that is about to be pushed instead.
+		// An empty commit (or one whose only content the diff omits) leaves
+		// nothing to derive a slug from; name the branch from the commit
+		// subject instead.
 		if subject := deps.headCommitSubject(ctx, workspaceRoot); subject != "" {
 			slug = zerogit.SlugifyBranchComponent(subject)
 		}
@@ -1104,12 +1117,12 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
 	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create branch: %w", err)
+		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
 	}
 	if !jsonMode {
 		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
 	}
-	return result.Branch, remote, nil
+	return result.Branch, remote, true, nil
 }
 
 // fallbackBranchSlug derives a deterministic branch-name slug from a change

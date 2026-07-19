@@ -532,11 +532,18 @@ func firstNonEmpty(values ...string) string {
 }
 
 type PushOptions struct {
-	Cwd                    string
-	Remote                 string
-	Branch                 string
-	Force                  bool
-	DryRun                 bool
+	Cwd    string
+	Remote string
+	Branch string
+	Force  bool
+	DryRun bool
+	// RequireNewRemoteBranch guards this push with a zero-value
+	// --force-with-lease, so it is rejected instead of fast-forwarding if
+	// Branch already exists on Remote. CreateBranch's collision probe reads
+	// the remote's branches before this push runs, leaving a window in which
+	// a concurrent creator can publish the same generated name; this closes
+	// it at the one point that actually talks to the remote atomically.
+	RequireNewRemoteBranch bool
 	AllowPushDefaultBranch bool
 	RunGit                 Runner
 	RunGitEnv              EnvRunner
@@ -595,8 +602,15 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	if options.DryRun {
 		args = append(args, "--dry-run")
 	}
-	if options.Force {
+	switch {
+	case options.Force:
 		args = append(args, "--force-with-lease")
+	case options.RequireNewRemoteBranch:
+		// An empty expected value means the ref must not currently exist on
+		// the remote: Git rejects the push if another client created
+		// <branch> after CreateBranch's own remote probe ran, instead of
+		// silently fast-forwarding it with this work.
+		args = append(args, "--force-with-lease="+branch+":")
 	}
 	args = append(args, "-u", "--", remote, branch)
 
@@ -613,9 +627,13 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 }
 
 // isDefaultBranchRemoteLookupTimeout bounds the ls-remote HEAD-symref check
-// below, so a caller passing context.Background() (as ensureFeatureBranch
-// does) can't stall push/pr indefinitely on a slow or unreachable remote; the
-// local main/master fallback below covers the timeout case.
+// below for callers that need one: IsDefaultBranch applies it because
+// ensureFeatureBranch calls it with context.Background() and can't stall
+// push/pr indefinitely on a slow or unreachable remote. Push's own
+// pre-existing guard passes ctx through unbounded instead, so a slow but
+// reachable remote (a legitimate SSH/VPN handshake, say) isn't turned into a
+// "use --yes to override" failure just because ls-remote took longer than
+// this; the local main/master fallback below still covers a genuine timeout.
 const isDefaultBranchRemoteLookupTimeout = 5 * time.Second
 
 func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) (bool, error) {
@@ -625,12 +643,10 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 	if branch == "main" || branch == "master" {
 		return true, nil
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
-	defer cancel()
 	// "--" terminates option parsing: remote comes from --remote/branch config,
 	// and a value like "--upload-pack=/bin/echo" must reach Git as a positional
 	// argument, never as an option.
-	if out, err := gitOutput(lookupCtx, runGit, dir, "ls-remote", "--symref", "--", remote, "HEAD"); err == nil {
+	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", "--", remote, "HEAD"); err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
@@ -640,13 +656,19 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 			}
 		}
 		if strings.TrimSpace(out) == "" {
-			// The remote answered and has no refs at all: it is unborn (a
-			// freshly created empty repository). It cannot have a protected
-			// default branch yet, and `git remote set-head --auto` cannot
-			// record one, so the fail-closed error below would make the very
-			// first feature-branch push a dead end. A non-default first push
-			// is safe; main/master were already caught above.
-			return false, nil
+			// HEAD didn't resolve to anything. A genuinely unborn remote (no
+			// refs at all) answers this way, and it cannot have a protected
+			// default branch yet, so the fail-closed error below would make
+			// the very first feature-branch push a dead end. But a non-empty
+			// remote whose HEAD symref is dangling or missing produces the
+			// same empty output while still possibly having a protected
+			// default under a name this couldn't identify, so confirm the
+			// remote truly has no branches before granting the unborn
+			// exception; a non-default first push is safe, and main/master
+			// were already caught above.
+			if heads, headsErr := gitOutput(ctx, runGit, dir, "ls-remote", "--heads", "--", remote); headsErr == nil && strings.TrimSpace(heads) == "" {
+				return false, nil
+			}
 		}
 	}
 	// The remote lookup failed (unreachable, slow, or gave no symref): the
@@ -714,7 +736,14 @@ func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, s
 			remote = "origin"
 		}
 	}
-	isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
+	// This runs ahead of ensureFeatureBranch's own branch creation, typically
+	// with context.Background(), so bound the network lookup here rather
+	// than inside isDefaultBranch: that keeps Push's own pre-existing guard
+	// (which calls isDefaultBranch directly, with whatever ctx the caller
+	// gave it) from inheriting a timeout it never had before.
+	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
+	defer cancel()
+	isDefault, err := isDefaultBranch(lookupCtx, runGit, root, remote, branch)
 	if err != nil {
 		return false, branch, remote, err
 	}

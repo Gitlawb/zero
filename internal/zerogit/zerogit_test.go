@@ -687,6 +687,34 @@ func TestPushBranchesToRemote(t *testing.T) {
 			t.Fatalf("expected fail-closed error, got %v", err)
 		}
 	})
+
+	t.Run("RequireNewRemoteBranchGuardsAgainstConcurrentCreation", func(t *testing.T) {
+		// CreateBranch's own remote-collision probe runs before this push, so
+		// a concurrent creator of the same name in that window would
+		// otherwise be silently fast-forwarded. RequireNewRemoteBranch closes
+		// it with a zero-value --force-with-lease asserting the destination
+		// still doesn't exist at push time.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "alice/fix-typo\n"},
+			{Stdout: "origin\n"},                                   // config branch.alice/fix-typo.remote
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
+			{Stdout: "Everything up-to-date\n"},
+		}}
+
+		_, err := Push(context.Background(), PushOptions{
+			Cwd:                    root,
+			RunGit:                 runner.Run,
+			RequireNewRemoteBranch: true,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+		if got := runner.commandLine(4); got != "git push --force-with-lease=alice/fix-typo: -u -- origin alice/fix-typo" {
+			t.Fatalf("unexpected push command: %q", got)
+		}
+	})
 }
 
 func TestCreatePRCommandConstruction(t *testing.T) {
@@ -1137,11 +1165,15 @@ func TestIsDefaultBranchAllowsFirstPushToUnbornRemote(t *testing.T) {
 	// A freshly created empty remote has no refs, so ls-remote succeeds with
 	// empty output and `git remote set-head --auto` cannot record a default.
 	// The guard must not turn the very first feature-branch push into a
-	// --yes dead end; main/master stay protected by the name heuristic.
+	// --yes dead end; main/master stay protected by the name heuristic. The
+	// empty symref output must still be confirmed against `ls-remote --heads`
+	// before granting the exception (see the dangling-HEAD test below), so a
+	// genuinely unborn remote answers empty there too.
 	root := t.TempDir()
 	runner := &fakeRunner{results: []CommandResult{
 		{Stdout: root + "\n"},
 		{Stdout: "\n"}, // ls-remote --symref: remote answered, zero refs
+		{Stdout: "\n"}, // ls-remote --heads: confirms no branches at all
 	}}
 
 	isDefault, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
@@ -1155,6 +1187,32 @@ func TestIsDefaultBranchAllowsFirstPushToUnbornRemote(t *testing.T) {
 	}
 	if isDefault {
 		t.Fatal("feature branch on an unborn remote reported as default")
+	}
+}
+
+func TestIsDefaultBranchFailsClosedOnDanglingRemoteHead(t *testing.T) {
+	// A non-empty remote whose HEAD symref is dangling or missing produces
+	// the exact same empty `ls-remote --symref` output as a genuinely unborn
+	// remote, but it may still have a protected default branch under a name
+	// this can't identify. `ls-remote --heads` reporting existing branches
+	// must block the unborn-repository exception and fail closed rather than
+	// silently treat the branch as safe to push.
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "\n"},                         // ls-remote --symref: HEAD didn't resolve
+		{Stdout: "abc123\trefs/heads/trunk\n"}, // ls-remote --heads: remote is NOT empty
+		{ExitCode: 1},                          // no local refs/remotes/origin/HEAD record
+	}}
+
+	_, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		Cwd:    root,
+		Branch: "alice/first-work",
+		Remote: "origin",
+		RunGit: runner.Run,
+	})
+	if err == nil || !strings.Contains(err.Error(), "default branch for remote") {
+		t.Fatalf("expected fail-closed error on dangling remote HEAD, got %v", err)
 	}
 }
 
