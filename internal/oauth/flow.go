@@ -39,6 +39,13 @@ func BuildAuthorizationURL(cfg Config, pkce PKCE, state, redirectURI string, ext
 	if endpoint == "" {
 		return "", errors.New("oauth: no authorization endpoint configured")
 	}
+	// Backstop: validate the authorization endpoint at the shared choke point
+	// both the provider and MCP flows build their browser URL through, so a
+	// discovery-downgraded endpoint can never open in the browser even if a
+	// merge site missed it.
+	if err := ValidateEndpointURL(endpoint); err != nil {
+		return "", err
+	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("oauth: parse authorization endpoint: %w", err)
@@ -83,13 +90,15 @@ func isReservedAuthParam(key string) bool {
 	}
 }
 
-// validateTokenEndpoint refuses to send a credential to a token endpoint that is
-// not https, unless it is a loopback host (mirrors oauth2-client.js
-// validateTokenEndpointURL). This prevents leaking codes/tokens over cleartext.
-func validateTokenEndpoint(endpoint string) error {
+// ValidateEndpointURL refuses an OAuth endpoint that is not https, unless it is
+// a loopback host (mirrors oauth2-client.js validateTokenEndpointURL). Every
+// credential-bearing endpoint — configured OR learned from discovery — must
+// pass this single rule, so discovery metadata can never downgrade a login to
+// cleartext or redirect it to an attacker-controlled http origin.
+func ValidateEndpointURL(endpoint string) error {
 	parsed, err := url.Parse(trimmed(endpoint))
 	if err != nil || parsed.Host == "" {
-		return fmt.Errorf("oauth: invalid token endpoint %q", endpoint)
+		return fmt.Errorf("oauth: invalid endpoint %q", endpoint)
 	}
 	if parsed.Scheme == "https" {
 		return nil
@@ -98,6 +107,13 @@ func validateTokenEndpoint(endpoint string) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrInsecureTokenEndpoint, parsed.Scheme+"://"+parsed.Host)
+}
+
+// validateTokenEndpoint checks a token endpoint against the shared endpoint rule
+// (kept as a named helper for the token-exchange and device call sites). This
+// prevents leaking codes/tokens over cleartext.
+func validateTokenEndpoint(endpoint string) error {
+	return ValidateEndpointURL(endpoint)
 }
 
 func isLoopbackHost(host string) bool {

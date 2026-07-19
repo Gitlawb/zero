@@ -23,6 +23,15 @@ type bashTool struct {
 	scope         PathScope
 }
 
+func (bashTool) outputCategory(args map[string]any) outputCategory {
+	command, _ := bashCommandArg(args)
+	return shellOutputCategory(command)
+}
+
+func bashCommandArg(args map[string]any) (string, error) {
+	return aliasedStringArg(args, []string{"command", "cmd", "script", "shell"}, "", true, false)
+}
+
 func NewBashTool(workspaceRoot string) Tool {
 	return NewScopedBashTool(workspaceRoot, nil)
 }
@@ -63,15 +72,19 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, nil, true)
 }
 
 func (tool bashTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, engine, true)
 }
 
-func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	commandText, err := aliasedStringArg(args, []string{"command", "cmd", "script", "shell"}, "", true, false)
+func (tool bashTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options.Sandbox, false)
+}
+
+func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {
+	commandText, err := bashCommandArg(args)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
 	}
@@ -172,7 +185,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			}
 		}
 		markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
-		outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
+		outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
 		return Result{
 			Status:    StatusError,
 			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
@@ -182,7 +195,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	}
 
 	markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
-	outText, errText, truncated := budgetBashCapture(stdoutText, stdout.total, stderrText, stderrTotal, meta)
+	outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
 	if meta[SandboxLikelyDeniedMeta] == "true" {
 		return Result{
 			Status:    StatusError,
@@ -413,6 +426,28 @@ const bashCaptureBudgetBytes = 96 * 1024
 // scanning) must run on the raw strings before this is applied.
 func budgetBashOutput(stdout string, stderr string, meta map[string]string) (string, string, bool) {
 	return budgetBashCapture(stdout, len(stdout), stderr, len(stderr), meta)
+}
+
+// prepareBashOutput keeps direct callers on the established positional budget.
+// Registry calls retain the existing bounded capture but leave final semantic
+// reduction and spill creation to the post-redaction registry boundary.
+func prepareBashOutput(out string, outTotal int, errStr string, errTotal int, meta map[string]string, directBudget bool) (string, string, bool) {
+	if directBudget {
+		return budgetBashCapture(out, outTotal, errStr, errTotal, meta)
+	}
+	outText := sectionWithCaptureGap(out, outTotal)
+	errText := sectionWithCaptureGap(errStr, errTotal)
+	truncated := outTotal > len(out) || errTotal > len(errStr)
+	if meta != nil {
+		meta["raw_bytes"] = strconv.Itoa(outTotal + errTotal)
+		meta["emitted_bytes"] = strconv.Itoa(len(outText) + len(errText))
+		meta["estimated_tokens"] = strconv.Itoa(estimatedTokensFromBytes(len(outText) + len(errText)))
+		if truncated {
+			meta["truncated"] = "true"
+			meta["truncation_reason"] = "capture_budget"
+		}
+	}
+	return outText, errText, truncated
 }
 
 // budgetBashCapture is budgetBashOutput for the streaming-capture path: outTotal

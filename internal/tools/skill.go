@@ -49,7 +49,7 @@ func NewSkillTool(dir string) *skillTool {
 				AdditionalProperties: false,
 			},
 			safety:       readOnlySafety("Reads a local skill file; gathers reusable instructions only."),
-			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false},
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true},
 		},
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -135,6 +136,33 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		}
 	}
 
+	// Establish the run's turn session — the seam an optimized provider session
+	// (connection reuse, prewarm, native compaction) plugs into without touching
+	// this loop. Default: wrap the passed provider so the session's Stream IS
+	// provider.StreamCompletion, byte-identical to calling it directly. Opened
+	// before dispatchSessionStart so a failed open is a clean run-start error
+	// with no session hooks fired and nothing to unwind.
+	turnSessions := options.TurnSessionProvider
+	if turnSessions == nil {
+		turnSessions = zeroruntime.NewProviderTurnSessionProvider(provider, zeroruntime.ProviderCapabilities{})
+	}
+	session, sessionErr := turnSessions.OpenTurnSession(ctx)
+	if sessionErr != nil {
+		return Result{}, fmt.Errorf("agent: open turn session: %w", sessionErr)
+	}
+	// Closed via closure (not `defer session.Close()`) so after a mid-run model
+	// swap the CURRENT session is the one closed at teardown — the swap closes
+	// the old one inline. Close errors are advisory and never fail the run.
+	defer func() { _ = session.Close() }()
+	// Best-effort prewarm: the default adapter no-ops; a real session may prime
+	// a connection. Failure is ignored by contract (never fatal).
+	_ = session.Prewarm(ctx)
+	// Route ALL provider I/O — per-turn streams, mid-stream retries, the
+	// compaction summarizer, and the final-answer request — through the session
+	// by reassigning the loop's provider local. Every existing call site reads
+	// this local, so no signatures change anywhere downstream.
+	provider = sessionProvider{session: session}
+
 	maxTurns := options.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 12
@@ -157,6 +185,32 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
+	// The execution-profile posture controller. nil Options.Profile (every
+	// existing caller) makes every observe/decide call a no-op, keeping the
+	// loop byte-identical for unprofiled runs.
+	posture := newProfileController(options.Profile)
+	// applyPosture applies at most one posture escalation when an armed trigger
+	// has fired: raise the hoisted turn ceiling, restore effort and the
+	// completion gate, stamp the counter. Shared by the end-of-turn tail and
+	// the completion-gate uncertain path (which continues the loop before the
+	// tail runs). No-op forever after the first escalation and for unprofiled
+	// runs.
+	applyPosture := func() {
+		if target, fired := posture.maybeEscalate(); fired {
+			if target.MaxTurns > maxTurns {
+				maxTurns = target.MaxTurns
+			}
+			if target.ReasoningEffort != "" {
+				options.ReasoningEffort = target.ReasoningEffort
+			} else if target.RestoreDefaultEffort {
+				options.ReasoningEffort = ""
+			}
+			if target.RestoreCompletionGate {
+				options.RequireCompletionSignal = true
+			}
+			options.Trace.Counter(trace.CounterPostureEscalations, 1)
+		}
+	}
 
 	// Background post-edit diagnostics: files changed by mutating tools are
 	// checked off the tool-call critical path and any errors are appended as a
@@ -169,13 +223,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// loaded tool's full schema; it lives only for the run (v1 within-run scope).
 	loaded := map[string]bool{}
 
-	// continueNudges counts how many times the headless completion gate
-	// (Options.RequireCompletionSignal) has re-prompted a no-tool-call turn that
-	// stopped with work still unfinished. Bounded by maxContinueNudges.
-	continueNudges := 0
-	// acceptanceRequested records that the one-time task-grounded acceptance check
-	// has already been demanded this run, so it fires at most once.
-	acceptanceRequested := false
+	// The feature-gated completion policy keeps local completion decisions and its
+	// bounded follow-up state out of the central loop. Self-correcting profiles
+	// opt into the one permitted task-grounded semantic check.
+	completionPolicy := newCompletionPolicy(options.SelfCorrect != nil)
 
 	// toolDefCache memoizes each tool's rendered JSON-schema definition across
 	// turns (a tool's advertised schema is stable for the run), so partitionTools
@@ -520,68 +571,37 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// model's final answer ONLY when the work is actually done. Default off
 			// (RequireCompletionSignal), so interactive runs stay byte-identical.
 			if options.RequireCompletionSignal {
-				// (1) Self-report downgrade (strongest, unambiguous): the model's own
-				// final message admits it guessed / could not meet the objective. Checked
-				// FIRST so an admitted-impossible task is downgraded immediately (no wasted
-				// continue-nudges) and reports the accurate reason.
-				if reason := selfReportedIncompletion(collected.Text); reason != "" {
+				evaluation := completionPolicy.evaluate(collected.Text, guards.pendingPlanItems())
+				switch evaluation.Decision {
+				case CompletionIncomplete:
 					result.Incomplete = true
-					result.IncompleteReason = reason
+					result.IncompleteReason = evaluation.Reason
 					result.FinalAnswer = collected.Text
 					result.Messages = copyMessages(messages)
 					return result, nil
-				}
-
-				// (2) The model stopped without a tool call while work may be unfinished:
-				//   - a continuation cue ("…Let me check the config:") is an unambiguous
-				//     mid-step stop;
-				//   - pending update_plan items are a WEAK, ambiguous signal (the model may
-				//     have finished without re-marking the last step).
-				// Nudge to continue (bounded). After the budget: a persisted continuation
-				// cue finalizes INCOMPLETE; pending-plan WITHOUT a cue does NOT (that would
-				// false-fail a completed run with stale bookkeeping) — fall through to the
-				// acceptance check / success.
-				cue := endsWithContinuationCue(collected.Text)
-				planPending := guards.pendingPlanItems()
-				if cue || planPending {
-					if continueNudges < maxContinueNudges {
-						continueNudges++
+				case CompletionUncertain:
+					// Observe the uncertainty signal and apply any escalation NOW:
+					// this branch continues the turn loop before the end-of-turn
+					// act point, so deferring would skip escalation entirely.
+					posture.observeUncertain()
+					applyPosture()
+					switch evaluation.Action {
+					case completionActionContinue:
 						options.Trace.Counter(trace.CounterCompletionNudges, 1)
-						reason := "your message ended mid-step"
-						if !cue {
-							reason = "pending plan items remain — finish them, or mark them complete with update_plan if you are done"
-						}
 						messages = append(messages, zeroruntime.Message{
 							Role:    zeroruntime.MessageRoleUser,
-							Content: continueNudge(reason),
+							Content: continueNudge(evaluation.Reason),
 						})
-						continue
+					case completionActionSemanticCheck:
+						options.Trace.Counter(trace.CounterAcceptanceChecks, 1)
+						messages = append(messages, zeroruntime.Message{
+							Role:    zeroruntime.MessageRoleUser,
+							Content: acceptanceVerificationNudge(),
+						})
 					}
-					if cue {
-						result.Incomplete = true
-						result.IncompleteReason = "your message ended mid-step"
-						result.FinalAnswer = collected.Text
-						result.Messages = copyMessages(messages)
-						return result, nil
-					}
-					// pending-plan only, budget spent: trust the model's completion claim
-					// over stale plan bookkeeping; fall through.
-				}
-
-				// (3) Task-grounded acceptance: before accepting a "done" turn as success,
-				// require ONE acceptance check grounded in the task's stated criterion
-				// (only when self-correct is on). Rejects "well-formed == correct",
-				// "existing-tests-pass == objective met", and "result == baseline" false
-				// successes. Bounded to a single pass; a genuine post-check completion
-				// (no admission, no cue) then finalizes as success on the next turn.
-				if options.SelfCorrect != nil && !acceptanceRequested {
-					acceptanceRequested = true
-					options.Trace.Counter(trace.CounterAcceptanceChecks, 1)
-					messages = append(messages, zeroruntime.Message{
-						Role:    zeroruntime.MessageRoleUser,
-						Content: acceptanceVerificationNudge(),
-					})
 					continue
+				case CompletionComplete:
+					// Local evidence is sufficient; proceed to final diagnostics.
 				}
 			}
 			// Finalization diagnostics gate: edits from this run may still have
@@ -632,10 +652,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// The scan happens lazily at the run's first index — never ahead of a
 			// pending mutating call — so read-after-write ordering is preserved.
 			if index >= precomputedEnd {
-				runEnd := index
-				for runEnd < len(collected.ToolCalls) && parallelSafeToolCall(registry, collected.ToolCalls[runEnd], options) {
-					runEnd++
-				}
+				// Capability-safe consecutive run (ReadOnly+ThreadSafe, no
+				// resource-key conflicts). See extendParallelRun.
+				runEnd := extendParallelRun(registry, collected.ToolCalls, index, options)
 				if runEnd-index >= 2 {
 					batchSpan := options.Trace.Span(trace.SpanToolExecution)
 					precomputed = executeParallelReadBatch(ctx, registry, collected.ToolCalls, index, runEnd, permissionMode, options)
@@ -657,6 +676,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				toolSpan.End()
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
+			recordOutputBudgetTrace(options.Trace, toolResult)
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
@@ -703,6 +723,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
 			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
+			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -735,7 +756,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the assistant's tool_results stay contiguous (a user message between
 		// tool_results breaks strict provider replay). nil SelfCorrect is a no-op.
 		if options.SelfCorrect != nil && len(changedFilesThisBatch) > 0 {
-			if feedback, _ := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch)); feedback != "" {
+			feedback, selfCorrectOutcome := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch))
+			posture.observeSelfCorrect(selfCorrectOutcome)
+			if feedback != "" {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
 					Content: feedback,
@@ -748,25 +771,53 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// of the run. At most one switch per turn (first request wins). A switcher
 		// error is NON-FATAL — record a brief note and continue on the current
 		// model. nil switcher ⇒ requests are ignored entirely (escalation off).
-		if turnRequestedModel != "" && options.ModelSwitcher != nil {
-			newProvider, switchErr := options.ModelSwitcher(ctx, turnRequestedModel)
+		if turnRequestedModel != "" && (options.ModelSessionSwitcher != nil || options.ModelSwitcher != nil) {
+			// Resolve the escalated model's session source. The target-aware
+			// ModelSessionSwitcher is preferred: its TurnSessionProvider carries an
+			// optimized session (and capabilities) across the swap. The legacy
+			// ModelSwitcher fallback returns a bare Provider, wrapped in the
+			// default no-op session — identical to pre-seam behavior.
+			var newSessions zeroruntime.TurnSessionProvider
+			var switchErr error
+			if options.ModelSessionSwitcher != nil {
+				newSessions, switchErr = options.ModelSessionSwitcher(ctx, turnRequestedModel)
+			} else {
+				var newProvider Provider
+				newProvider, switchErr = options.ModelSwitcher(ctx, turnRequestedModel)
+				if switchErr == nil && newProvider != nil {
+					newSessions = zeroruntime.NewProviderTurnSessionProvider(newProvider, zeroruntime.ProviderCapabilities{})
+				}
+			}
 			if switchErr != nil {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
 					Content: escalationFailedNoticePrefix + " (" + turnRequestedModel + "): " + switchErr.Error() + ". Continuing on " + options.Model + ".",
 				})
-			} else if newProvider != nil {
-				// Reassign the local provider so the next turn's StreamCompletion and
-				// compaction use it; update options.Model so subsequent RunOptions.Model,
-				// context-window sizing, and usage attribution follow the new model.
-				provider = newProvider
-				options.Model = turnRequestedModel
-				options.Trace.Counter(trace.CounterModelSwitches, 1)
-				// KNOWN LIMITATION (deferred): the compactor's context-window budget
-				// is fixed at run start from options.ContextWindow and is NOT updated
-				// here, so a switch to a model with a different window keeps compacting
-				// against the original budget. Fixing it needs a ModelSwitcher contract
-				// change (return the new window) — out of scope for this change.
+			} else if newSessions != nil {
+				// Open the new session and close the old one, so the next turn's
+				// streams and compaction use the new model. For the default adapter
+				// the open never errors and Close is a no-op, so this stays
+				// byte-identical to a direct provider reassignment; the guarded open
+				// and prewarm matter once a session holds real state.
+				newSession, openErr := newSessions.OpenTurnSession(ctx)
+				if openErr != nil {
+					messages = append(messages, zeroruntime.Message{
+						Role:    zeroruntime.MessageRoleUser,
+						Content: escalationFailedNoticePrefix + " (" + turnRequestedModel + "): " + openErr.Error() + ". Continuing on " + options.Model + ".",
+					})
+				} else {
+					_ = session.Close()
+					session = newSession
+					_ = session.Prewarm(ctx)
+					provider = sessionProvider{session: session}
+					options.Model = turnRequestedModel
+					options.Trace.Counter(trace.CounterModelSwitches, 1)
+					// KNOWN LIMITATION (deferred): the compactor's context-window budget
+					// is fixed at run start from options.ContextWindow and is NOT updated
+					// here, so a switch to a model with a different window keeps compacting
+					// against the original budget. Fixing it needs the switcher to also
+					// report the new window — out of scope for this change.
+				}
 			}
 		}
 
@@ -800,6 +851,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Content: reminder,
 			})
 		}
+
+		// One-shot posture escalation: when an armed profile trigger fired this
+		// turn, restore the stricter knob values the profile displaced. Mutates
+		// only per-turn-read policy (the hoisted turn ceiling, reasoning effort,
+		// completion gate); never messages, model, or session. No-op forever
+		// after the first escalation and for every unprofiled run.
+		applyPosture()
 	}
 
 	if ctx.Err() != nil {
@@ -840,6 +898,28 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		result.IncompleteReason = "reached the max-turns limit without a final answer"
 	}
 	return result, nil
+}
+
+func recordOutputBudgetTrace(recorder *trace.Recorder, result ToolResult) {
+	if recorder == nil || result.Meta["output_budget_category"] == "" {
+		return
+	}
+	parseInt := func(key string) int {
+		value, _ := strconv.Atoi(result.Meta[key])
+		return value
+	}
+	spillCreated, _ := strconv.ParseBool(result.Meta["output_budget_spill_created"])
+	recorder.EmitOutputBudget(trace.OutputBudgetEvent{
+		Tool:                    result.Name,
+		Category:                result.Meta["output_budget_category"],
+		OriginalBytes:           parseInt("output_budget_original_bytes"),
+		RetainedBytes:           parseInt("output_budget_retained_bytes"),
+		EstimatedOriginalTokens: parseInt("output_budget_estimated_original_tokens"),
+		EstimatedRetainedTokens: parseInt("output_budget_estimated_retained_tokens"),
+		Truncated:               result.Truncated,
+		Reason:                  result.Meta["output_budget_reason"],
+		SpillCreated:            spillCreated,
+	})
 }
 
 func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
@@ -1296,16 +1376,33 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			if didRedact {
 				result.Redacted = true
 			}
+			result = registry.RebudgetAfterHook(call.Name, args, result)
 		}
 	}
+	// Stamp the sandbox risk classification for this EXECUTED call so run-policy
+	// observers can see the risk of an allowed mutation. Prefer the preflight
+	// decision's classification when the sandbox evaluated the call; otherwise
+	// run the same pure classifier the permission path uses. Denied/canceled
+	// results returned earlier keep the zero value.
+	executedRisk := sandbox.Risk{}
+	if preflightDecision != nil {
+		executedRisk = preflightDecision.Risk
+	} else if toolFound {
+		// Unknown-tool results fall through here with a nil tool; they carry a
+		// denial and keep the zero risk value.
+		executedRisk = sandbox.Classify(sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
+	}
+
 	// Secret scrubbing happens at the registry boundary (the single point both
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
 	return ToolResult{
+		Risk:         executedRisk,
 		ToolCallID:   call.ID,
 		Name:         call.Name,
 		Status:       result.Status,
 		Output:       result.Output,
+		Truncated:    result.Truncated,
 		Meta:         result.Meta,
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
@@ -1616,6 +1713,7 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Name:           call.Name,
 		Status:         result.Status,
 		Output:         output,
+		Truncated:      result.Truncated,
 		Meta:           meta,
 		Redacted:       result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
 		ChangedFiles:   result.ChangedFiles,
@@ -1885,6 +1983,7 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Name:         call.Name,
 			Status:       result.Status,
 			Output:       result.Output,
+			Truncated:    result.Truncated,
 			Meta:         result.Meta,
 			Redacted:     result.Redacted,
 			ChangedFiles: result.ChangedFiles,

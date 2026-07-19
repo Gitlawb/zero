@@ -126,20 +126,25 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	// args/paths) are redacted at the boundary just like tool output. The output
 	// ceiling runs after the scrub so the transcript and the spill file agree on
 	// what was hidden.
-	ceilingExempt := false
+	selfManagedOutput := false
+	var tool Tool
+	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
-		if !ceilingExempt {
+		if selfManagedOutput {
+			result = applySelfManagedOutputBudget(tool, name, args, result)
+		} else {
+			result = applyRegistryOutputBudget(tool, name, args, result)
 			result = enforceOutputCeiling(name, result)
 		}
 	}()
 
-	tool, ok := registry.Get(name)
+	tool, ok = registry.Get(name)
 	if !ok {
 		return errorResult(`Error: Unknown tool "` + name + `".`)
 	}
 	if _, ok := tool.(selfBudgeting); ok {
-		ceilingExempt = true
+		selfManagedOutput = true
 	}
 	if rejecter, ok := tool.(PrePermissionRejecter); ok {
 		if res, rejected := rejecter.RejectBeforePermission(args); rejected {

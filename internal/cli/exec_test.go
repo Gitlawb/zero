@@ -549,10 +549,14 @@ func TestExecMemberAutoToolListIncludesMutators(t *testing.T) {
 }
 
 func TestRunExecAcceptsLegacyModelProfileFlags(t *testing.T) {
+	// --profile (legacy, inert model profile) and --exec-profile (execution
+	// profile) are distinct flags and must coexist on one invocation.
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{
 		"exec",
 		"--profile",
 		"fast",
+		"--exec-profile",
+		"balanced",
 		"--reasoning-effort",
 		"low",
 		"hello",

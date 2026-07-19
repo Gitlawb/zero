@@ -32,6 +32,7 @@ const (
 	SpanToolPartition   = "tool_partition"   // partitioning the tool set for the prompt
 	SpanProviderConnect = "provider_connect" // client.Do in the provider seam
 	SpanProviderQueue   = "provider_queue"   // pre-send OAuth/token resolve
+	SpanProviderPrewarm = "provider_prewarm" // best-effort turn-session prewarm probe
 	SpanGeneration      = "generation"       // streaming a model completion
 	SpanToolExecution   = "tool_execution"   // executing tool calls
 	SpanPermissionWait  = "permission_wait"  // waiting on a permission prompt
@@ -53,6 +54,14 @@ const (
 	CounterInputTokens       = "input_tokens"
 	CounterCachedInputTokens = "cached_input_tokens"
 	CounterOutputTokens      = "output_tokens"
+	CounterPrewarmAttempts   = "prewarm_attempts"
+	CounterPrefixStable      = "prefix_stable"
+	CounterPrefixDrift       = "prefix_drift"
+	// CounterPostureEscalations counts one-shot in-run posture escalations by
+	// the execution-profile controller. Deliberately distinct from
+	// model_switches: a posture escalation changes loop policy knobs, never the
+	// model or session.
+	CounterPostureEscalations = "posture_escalations"
 )
 
 // Span is one named wall interval attributed to part of a run. Each stamp is
@@ -79,20 +88,36 @@ type Counter struct {
 	Value int64  `json:"value"`
 }
 
+// OutputBudgetEvent is compact, content-free metadata for one tool result's
+// output budgeting decision. It deliberately carries no output text, paths, or
+// arguments so tracing cannot become a secret-bearing side channel.
+type OutputBudgetEvent struct {
+	Tool                    string `json:"tool"`
+	Category                string `json:"category"`
+	OriginalBytes           int    `json:"original_bytes"`
+	RetainedBytes           int    `json:"retained_bytes"`
+	EstimatedOriginalTokens int    `json:"estimated_original_tokens"`
+	EstimatedRetainedTokens int    `json:"estimated_retained_tokens"`
+	Truncated               bool   `json:"truncated"`
+	Reason                  string `json:"reason,omitempty"`
+	SpillCreated            bool   `json:"spill_created"`
+}
+
 // TurnTrace is the finished record for one agent.Run. It is the value
 // emitters serialize; it is not mutated after Finish returns a snapshot.
 type TurnTrace struct {
-	SessionID           string       `json:"session_id"`
-	RunID               string       `json:"run_id"`
-	Profile             string       `json:"profile,omitempty"`
-	StartedAt           time.Time    `json:"started_at"`
-	FirstVisibleEventAt time.Time    `json:"first_visible_event_at,omitempty"`
-	FirstUsefulActionAt time.Time    `json:"first_useful_action_at,omitempty"`
-	FirstTokenAt        time.Time    `json:"first_token_at,omitempty"`
-	CompletedAt         time.Time    `json:"completed_at"`
-	Spans               []Span       `json:"spans"`
-	Counters            []Counter    `json:"counters"`
-	PrefixHashes        []PrefixHash `json:"prefix_hashes,omitempty"`
+	SessionID           string              `json:"session_id"`
+	RunID               string              `json:"run_id"`
+	Profile             string              `json:"profile,omitempty"`
+	StartedAt           time.Time           `json:"started_at"`
+	FirstVisibleEventAt time.Time           `json:"first_visible_event_at,omitempty"`
+	FirstUsefulActionAt time.Time           `json:"first_useful_action_at,omitempty"`
+	FirstTokenAt        time.Time           `json:"first_token_at,omitempty"`
+	CompletedAt         time.Time           `json:"completed_at"`
+	Spans               []Span              `json:"spans"`
+	Counters            []Counter           `json:"counters"`
+	PrefixHashes        []PrefixHash        `json:"prefix_hashes,omitempty"`
+	OutputBudgets       []OutputBudgetEvent `json:"output_budgets,omitempty"`
 }
 
 // PrefixHash is one fingerprint of the prompt prefix emitted by an agent run.
@@ -265,6 +290,11 @@ func OptionalEventKeys() []string {
 		"counter:" + CounterAcceptanceChecks,
 		"counter:" + CounterPollingTurn,
 		"counter:" + CounterModelSwitches,
+		"span:" + SpanProviderPrewarm,
+		"counter:" + CounterPrewarmAttempts,
+		"counter:" + CounterPrefixStable,
+		"counter:" + CounterPrefixDrift,
+		"counter:" + CounterPostureEscalations,
 		"event:prefix_hash",
 	}
 }

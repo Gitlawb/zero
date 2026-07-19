@@ -128,20 +128,36 @@ type model struct {
 	permissionMode              agent.PermissionMode
 	selfCorrectTests            bool
 	reasoningEffort             modelregistry.ReasoningEffort
-	responseStyle               string
-	keyBindings                 keyBindings
-	themeMode                   themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                   bool      // last terminal background-detection result (auto mode)
-	userAgent                   string
-	compactRequests             int
-	compactInFlight             bool
-	compactFrame                int
-	lastCompactResult           *CompactResult
-	lastCompactError            string
-	unpricedRequests            int
-	unpricedTokens              int
-	lastUsage                   usage.Normalized
-	lastUsageSeen               bool
+	// Active execution profile (set by /profile; applies to the NEXT run).
+	// The displaced/applied pairs let a switch or /profile balanced restore
+	// exactly what the profile replaced while leaving later manual overrides
+	// (/turns, Ctrl+T, /selfcorrect) alone: each knob is only reverted when it
+	// still holds the value the profile applied.
+	execProfileName              string
+	execProfileDisplacedMaxTurns int
+	execProfileAppliedMaxTurns   int
+	execProfileAppliedEffort     modelregistry.ReasoningEffort
+	execProfileArmedSelfCorrect  bool
+	// The touched bits record explicit user choices made while a profile is
+	// active (/turns, /effort, Ctrl+T, /selfcorrect); a touched knob is never
+	// reverted, even when its value coincides with what the profile applied.
+	execProfileTurnsTouched       bool
+	execProfileEffortTouched      bool
+	execProfileSelfCorrectTouched bool
+	responseStyle                 string
+	keyBindings                   keyBindings
+	themeMode                     themeMode // palette preference: auto (default), dark, light
+	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
+	userAgent                     string
+	compactRequests               int
+	compactInFlight               bool
+	compactFrame                  int
+	lastCompactResult             *CompactResult
+	lastCompactError              string
+	unpricedRequests              int
+	unpricedTokens                int
+	lastUsage                     usage.Normalized
+	lastUsageSeen                 bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -4344,6 +4360,18 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleTurnsCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandProfile:
+		// Same idle-session rule as /turns: switching the profile mutates the
+		// turn budget (and its ZERO_MAX_TURNS propagation), so a change needs
+		// an idle session; bare /profile (status) is always allowed.
+		if m.pending && strings.TrimSpace(command.text) != "" && !strings.EqualFold(strings.TrimSpace(command.text), "status") {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Profile\nFinish or stop the current run before switching the execution profile."})
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleProfileCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:

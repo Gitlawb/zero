@@ -16,6 +16,10 @@ type readMinifiedFileTool struct {
 	scope         PathScope
 }
 
+func (readMinifiedFileTool) outputCategory(map[string]any) outputCategory {
+	return outputCategoryFile
+}
+
 func NewReadMinifiedFileTool(workspaceRoot string) Tool {
 	return NewScopedReadMinifiedFileTool(workspaceRoot, nil)
 }
@@ -34,7 +38,7 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 				AdditionalProperties: false,
 			},
 			safety:       readOnlySafety("Reads a minified view of file contents without modifying files."),
-			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false, ResourceKeys: fileResourceKeys},
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -42,10 +46,14 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool readMinifiedFileTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.RunWithOptions(ctx, args, RunOptions{})
+	return tool.run(args, RunOptions{}, true)
 }
 
 func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(args, options, false)
+}
+
+func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, directBudget bool) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filepath", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
@@ -92,23 +100,21 @@ func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[stri
 		savedTokens = estimatedTokensFromBytes(savedBytes)
 	}
 	output := header + "\n\n" + result.Content
-	budgeted := applyOutputBudget(output, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
-	meta := outputBudgetMeta(budgeted)
+	meta := map[string]string{}
 	meta["path"] = relativePath
 	meta["mode"] = result.Language
 	meta["compacted"] = strconv.FormatBool(result.Applied)
 	meta["raw_bytes"] = strconv.Itoa(rawBytes)
 	meta["compact_bytes"] = strconv.Itoa(compactBytes)
-	meta["emitted_bytes"] = strconv.Itoa(budgeted.EmittedBytes)
+	meta["emitted_bytes"] = strconv.Itoa(len(output))
 	meta["raw_lines"] = strconv.Itoa(rawLines)
 	meta["emitted_lines"] = strconv.Itoa(minLines)
 	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
-	if budgeted.Truncated {
-		meta["truncated"] = "true"
-		meta["truncation_reason"] = "byte_budget"
+	toolResult := Result{Status: StatusOK, Output: output, Meta: meta}
+	if directBudget {
+		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
 	}
-
-	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
+	return toolResult
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string

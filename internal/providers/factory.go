@@ -108,6 +108,57 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	}
 }
 
+// NewTurnSessionProvider builds the default TurnSessionProvider for a resolved
+// profile: it constructs the provider exactly as New does, then wraps it with a
+// ProviderCapabilities projection computed from the same model-registry entry
+// New already resolves. The default session's Stream is the provider's
+// StreamCompletion, so runtime behavior is identical to using New directly.
+func NewTurnSessionProvider(profile config.ProviderProfile, options Options) (zeroruntime.TurnSessionProvider, error) {
+	provider, err := New(profile, options)
+	if err != nil {
+		return nil, err
+	}
+	caps, err := resolveCapabilities(profile, options)
+	if err != nil {
+		return nil, err
+	}
+	return zeroruntime.NewProviderTurnSessionProvider(provider, caps), nil
+}
+
+// resolveCapabilities projects the resolved profile's model-registry entry into
+// the flat zeroruntime.ProviderCapabilities (zeroruntime cannot reference
+// modelregistry types — modelregistry imports zeroruntime, so a typed field
+// would form an import cycle). A model absent from the registry yields only the
+// resolved API model id and max-output tokens; the rest stays zero (unknown).
+func resolveCapabilities(profile config.ProviderProfile, options Options) (zeroruntime.ProviderCapabilities, error) {
+	resolved, err := resolveProfile(profile, options)
+	if err != nil {
+		return zeroruntime.ProviderCapabilities{}, err
+	}
+	caps := zeroruntime.ProviderCapabilities{
+		Model:           resolved.apiModel,
+		MaxOutputTokens: resolved.maxOutputTokens,
+	}
+	registry, err := defaultRegistry(options.ModelRegistry)
+	if err != nil {
+		return zeroruntime.ProviderCapabilities{}, err
+	}
+	if entry, ok := registry.Get(strings.TrimSpace(profile.Model)); ok {
+		caps.ContextWindow = entry.ContextLimits.ContextWindow
+		caps.SupportsVision = entry.Supports(modelregistry.ModelCapabilityVision)
+		caps.SupportsReasoning = entry.Supports(modelregistry.ModelCapabilityReasoning)
+		caps.SupportsPromptCache = entry.Supports(modelregistry.ModelCapabilityPromptCache)
+		// Read efforts through Registry.ReasoningEfforts (not the raw entry) so
+		// the projection matches what the /effort picker and the run-time
+		// resolver advertise — including the name-based fallback for catalog
+		// entries that enumerate no efforts of their own.
+		for _, effort := range registry.ReasoningEfforts(entry.ID) {
+			caps.ReasoningEfforts = append(caps.ReasoningEfforts, string(effort))
+		}
+	}
+	return caps, nil
+}
+
 func parseThinkTagsForProfile(profile config.ProviderProfile, resolved resolvedProfile) bool {
 	if profile.ParseThinkTags != nil {
 		return *profile.ParseThinkTags

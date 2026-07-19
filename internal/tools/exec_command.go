@@ -427,6 +427,15 @@ type execCommandTool struct {
 	manager       *execSessionManager
 }
 
+func (execCommandTool) outputCategory(args map[string]any) outputCategory {
+	command, _ := execCommandArg(args)
+	return shellOutputCategory(command)
+}
+
+func execCommandArg(args map[string]any) (string, error) {
+	return aliasedStringArg(args, []string{"cmd", "command", "script", "shell"}, "", true, false)
+}
+
 func NewExecCommandTool(workspaceRoot string, manager *execSessionManager) Tool {
 	return NewScopedExecCommandTool(workspaceRoot, nil, manager)
 }
@@ -475,11 +484,15 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 }
 
 func (tool execCommandTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, nil, true)
 }
 
 func (tool execCommandTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, engine, true)
+}
+
+func (tool execCommandTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options.Sandbox, false)
 }
 
 func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
@@ -494,8 +507,8 @@ func (tool execCommandTool) StopAllExecSessions() []int {
 	return tool.manager.stopAll()
 }
 
-func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	commandText, err := aliasedStringArg(args, []string{"cmd", "command", "script", "shell"}, "", true, false)
+func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {
+	commandText, err := execCommandArg(args)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
@@ -550,7 +563,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if exited {
 		tool.manager.remove(session.id)
 	}
-	return execToolResult(execToolResultInput{
+	return execToolResultWithBudget(execToolResultInput{
 		commandText:           commandText,
 		output:                output,
 		outputBufferTruncated: outputTruncated,
@@ -561,7 +574,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		tty:                   session.tty,
 		plan:                  session.plan,
 		maxOutputTokens:       maxOutputTokens,
-	})
+	}, directBudget)
 }
 
 func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, ttyRequested bool, engine *zeroSandbox.Engine, sandboxPermissions SandboxPermissionOverride) (*execSession, error) {
@@ -692,6 +705,10 @@ func (session *execSession) collect(ctx context.Context, wait time.Duration) (st
 type writeStdinTool struct {
 	baseTool
 	manager *execSessionManager
+}
+
+func (writeStdinTool) outputCategory(map[string]any) outputCategory {
+	return outputCategoryProcess
 }
 
 func NewWriteStdinTool(manager *execSessionManager) Tool {
@@ -843,7 +860,15 @@ type execToolResultInput struct {
 }
 
 func execToolResult(input execToolResultInput) Result {
-	output, truncated := truncateExecOutput(input.output, input.maxOutputTokens)
+	return execToolResultWithBudget(input, true)
+}
+
+func execToolResultWithBudget(input execToolResultInput, directBudget bool) Result {
+	output := input.output
+	truncated := false
+	if directBudget {
+		output, truncated = truncateExecOutput(input.output, input.maxOutputTokens)
+	}
 	meta := map[string]string{
 		"cwd": input.relativeCwd,
 		"tty": strconv.FormatBool(input.tty),

@@ -272,7 +272,8 @@ sequenceDiagram
         Agent->>Tool: execute(ctx, args)
         Tool-->>Agent: output, error, metadata
         Agent->>Hooks: afterTool hooks
-        Agent->>Agent: redact, truncate, classify success/failure
+        Agent->>Agent: redact secrets, apply semantic output budget, enforce byte ceiling
+        Agent->>Agent: classify success/failure
         Agent-->>Surface: OnToolResult callback
         Agent->>Transcript: append tool result message
     end
@@ -604,9 +605,21 @@ flowchart TD
     Prompt -- Yes --> Decision[Permission callback]
     Prompt -- No --> Run[Registry.RunWithOptions]
     Decision --> Run
-    Run --> Redact[Redact secrets + enforce output ceiling]
-    Redact --> Message[Return tool result to model]
+    Run --> Redact[Redact secrets]
+    Redact --> Budget[Token-aware semantic output budget]
+    Budget --> Ceiling[Existing hard byte ceiling]
+    Ceiling --> Message[Return one tool result to model]
 ```
+
+Oversized results use deterministic, provider-neutral estimated-token budgets.
+Policies retain useful structure for files, search matches, tests, process logs,
+diffs, and worker conclusions; tools without a declared category use a UTF-8-safe
+head/tail fallback. The estimate is intentionally conservative for non-ASCII
+text and is not exact provider tokenization. Existing byte ceilings remain the
+authoritative safety limit. When the existing spill mechanism can persist the
+complete redacted text received by the budgeting layer, the result includes its
+safe spill reference. This does not imply capture of subprocess bytes already
+discarded by a tool's established internal buffer.
 
 Core tool groups include:
 

@@ -57,6 +57,20 @@ func (tool *probeTool) Parameters() tools.Schema {
 func (tool *probeTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tool.sideEffect, Permission: tools.PermissionAllow, Reason: "test"}
 }
+
+// Capabilities maps the probe's SideEffect into the PR5 capability contract so
+// parallelSafeToolCall (CapabilitiesOf) can classify reads vs mutators. Without
+// this, probes default to EffectUnknown and never enter the concurrent path.
+func (tool *probeTool) Capabilities() tools.ToolCapabilities {
+	switch tool.sideEffect {
+	case tools.SideEffectRead:
+		return tools.ToolCapabilities{Effect: tools.EffectReadOnly, ThreadSafe: true}
+	case tools.SideEffectWrite:
+		return tools.ToolCapabilities{Effect: tools.EffectWorkspaceWrite, ThreadSafe: false}
+	default:
+		return tools.UnknownCapabilities()
+	}
+}
 func (tool *probeTool) Run(_ context.Context, args map[string]any) tools.Result {
 	id, _ := args["id"].(string)
 	tool.mu.Lock()
@@ -92,6 +106,11 @@ func TestParallelSafeToolCall(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(&probeTool{name: "probe_read", sideEffect: tools.SideEffectRead})
 	registry.Register(&probeTool{name: "probe_write", sideEffect: tools.SideEffectWrite})
+	// Read-only but not ThreadSafe: must stay sequential under the PR5 gate.
+	registry.Register(&keyedProbeTool{
+		probeTool:  probeTool{name: "probe_read_serial", sideEffect: tools.SideEffectRead},
+		threadSafe: false,
+	})
 
 	call := func(name, args string) ToolCall { return ToolCall{ID: "c", Name: name, Arguments: args} }
 	if !parallelSafeToolCall(registry, call("probe_read", `{"id":"a"}`), Options{}) {
@@ -109,6 +128,91 @@ func TestParallelSafeToolCall(t *testing.T) {
 	if parallelSafeToolCall(registry, call("ask_user", `{}`), Options{}) {
 		t.Fatal("loop-intercepted tools must stay sequential")
 	}
+	if parallelSafeToolCall(registry, call("probe_read_serial", `{"id":"a"}`), Options{}) {
+		t.Fatal("ReadOnly without ThreadSafe must not be parallel-safe")
+	}
+}
+
+func TestResourceKeysConflict(t *testing.T) {
+	if resourceKeysConflict(nil, []string{"file:a"}) {
+		t.Fatal("empty vs non-empty must not conflict")
+	}
+	if resourceKeysConflict([]string{"file:a"}, nil) {
+		t.Fatal("non-empty vs empty must not conflict")
+	}
+	if resourceKeysConflict([]string{"file:a"}, []string{"file:b"}) {
+		t.Fatal("distinct keys must not conflict")
+	}
+	if !resourceKeysConflict([]string{"file:a", "file:b"}, []string{"file:b"}) {
+		t.Fatal("shared key must conflict")
+	}
+	if resourceKeysConflict([]string{"", "file:a"}, []string{""}) {
+		t.Fatal("empty-string keys must be ignored")
+	}
+}
+
+func TestExtendParallelRunResourceKeyBoundary(t *testing.T) {
+	// Two keyed reads on the same path must not share a concurrent window;
+	// distinct paths may batch together.
+	registry := tools.NewRegistry()
+	registry.Register(&keyedProbeTool{
+		probeTool:  probeTool{name: "keyed_read", sideEffect: tools.SideEffectRead},
+		threadSafe: true,
+		keys: func(args map[string]any) []string {
+			id, _ := args["id"].(string)
+			if id == "" {
+				return nil
+			}
+			return []string{"file:" + id}
+		},
+	})
+	calls := []ToolCall{
+		{ID: "1", Name: "keyed_read", Arguments: `{"id":"a"}`},
+		{ID: "2", Name: "keyed_read", Arguments: `{"id":"b"}`},
+		{ID: "3", Name: "keyed_read", Arguments: `{"id":"a"}`}, // conflicts with call 0
+	}
+	// start=0: a and b share no key → run covers [0,2)
+	if end := extendParallelRun(registry, calls, 0, Options{}); end != 2 {
+		t.Fatalf("extend from 0 = %d, want 2 (stop before second file:a)", end)
+	}
+	// start=2: single remaining call
+	if end := extendParallelRun(registry, calls, 2, Options{}); end != 3 {
+		t.Fatalf("extend from 2 = %d, want 3", end)
+	}
+	// Empty keys never conflict: three keyless safe reads form one window.
+	registry.Register(&probeTool{name: "keyless_read", sideEffect: tools.SideEffectRead})
+	keyless := []ToolCall{
+		{ID: "1", Name: "keyless_read", Arguments: `{"id":"x"}`},
+		{ID: "2", Name: "keyless_read", Arguments: `{"id":"y"}`},
+		{ID: "3", Name: "keyless_read", Arguments: `{"id":"z"}`},
+	}
+	if end := extendParallelRun(registry, keyless, 0, Options{}); end != 3 {
+		t.Fatalf("keyless extend = %d, want 3", end)
+	}
+}
+
+// keyedProbeTool is a probe with explicit ResourceKeys / ThreadSafe for
+// planner unit tests.
+type keyedProbeTool struct {
+	probeTool
+	threadSafe bool
+	keys       func(args map[string]any) []string
+}
+
+func (tool *keyedProbeTool) Capabilities() tools.ToolCapabilities {
+	caps := tools.ToolCapabilities{
+		Effect:     tools.EffectReadOnly,
+		ThreadSafe: tool.threadSafe,
+	}
+	if tool.keys != nil {
+		caps.ResourceKeys = tool.keys
+	}
+	// Honor mutator side effects from the embedded probe when used as write.
+	if tool.sideEffect == tools.SideEffectWrite {
+		caps.Effect = tools.EffectWorkspaceWrite
+		caps.ThreadSafe = false
+	}
+	return caps
 }
 
 func TestRunExecutesConsecutiveReadsConcurrently(t *testing.T) {

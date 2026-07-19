@@ -112,6 +112,20 @@ func TestBuildAuthorizationURLRejectsPlain(t *testing.T) {
 	}
 }
 
+// The shared choke point both flows build their browser URL through must refuse
+// an insecure authorization endpoint, so a discovery-downgraded endpoint can
+// never open in the browser even if a merge site missed it (issue #511).
+func TestBuildAuthorizationURLRejectsInsecureEndpoint(t *testing.T) {
+	_, err := BuildAuthorizationURL(
+		Config{AuthorizationEndpoint: "http://evil.example/authorize", ClientID: "c"},
+		PKCE{Method: MethodS256, Challenge: "chal"},
+		"state", "http://127.0.0.1/cb", nil,
+	)
+	if !errors.Is(err, ErrInsecureTokenEndpoint) {
+		t.Fatalf("err = %v, want ErrInsecureTokenEndpoint", err)
+	}
+}
+
 func TestValidateTokenEndpoint(t *testing.T) {
 	cases := map[string]bool{
 		"https://auth.example.com/token": true,

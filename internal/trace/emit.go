@@ -117,6 +117,25 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 			return err
 		}
 	}
+	// Output budget events stay in tool-result emission order. Sorting them by
+	// tool/category would destroy correlation with concurrent calls whose results
+	// are deliberately consumed in original call order.
+	for _, event := range t.OutputBudgets {
+		if err := enc.Encode(map[string]any{
+			"type":                      "output_budget",
+			"tool":                      event.Tool,
+			"category":                  event.Category,
+			"original_bytes":            event.OriginalBytes,
+			"retained_bytes":            event.RetainedBytes,
+			"estimated_original_tokens": event.EstimatedOriginalTokens,
+			"estimated_retained_tokens": event.EstimatedRetainedTokens,
+			"truncated":                 event.Truncated,
+			"reason":                    event.Reason,
+			"spill_created":             event.SpillCreated,
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -176,6 +195,15 @@ func WriteText(w io.Writer, t *TurnTrace) error {
 	write("counters:\n")
 	for _, c := range counters {
 		write("  %-22s %d\n", c.Name, c.Value)
+	}
+	if len(t.OutputBudgets) > 0 {
+		write("output budgets:\n")
+		for _, event := range t.OutputBudgets {
+			write("  tool=%s category=%s bytes=%d/%d tokens=%d/%d truncated=%t reason=%s spill=%t\n",
+				event.Tool, event.Category, event.RetainedBytes, event.OriginalBytes,
+				event.EstimatedRetainedTokens, event.EstimatedOriginalTokens,
+				event.Truncated, event.Reason, event.SpillCreated)
+		}
 	}
 	return firstErr
 }

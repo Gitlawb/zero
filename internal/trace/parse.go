@@ -116,6 +116,21 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 				SchemaHash:             stringField(obj, "schema"),
 				CompletePrefixHash:     stringField(obj, "complete_prefix"),
 			})
+		case "output_budget":
+			if !sawTraceHeader {
+				return nil, errors.New("parse trace: not a valid NDJSON trace (no type:trace header)")
+			}
+			t.OutputBudgets = append(t.OutputBudgets, OutputBudgetEvent{
+				Tool:                    stringField(obj, "tool"),
+				Category:                stringField(obj, "category"),
+				OriginalBytes:           int(parseInt64(obj["original_bytes"])),
+				RetainedBytes:           int(parseInt64(obj["retained_bytes"])),
+				EstimatedOriginalTokens: int(parseInt64(obj["estimated_original_tokens"])),
+				EstimatedRetainedTokens: int(parseInt64(obj["estimated_retained_tokens"])),
+				Truncated:               boolField(obj, "truncated"),
+				Reason:                  stringField(obj, "reason"),
+				SpillCreated:            boolField(obj, "spill_created"),
+			})
 		default:
 			// Unknown event type: tolerate (forward-compat) but only after a
 			// header has been seen.
@@ -136,10 +151,15 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 	if !sawTraceHeader {
 		return nil, errors.New("parse trace: non-empty input had no type:trace header")
 	}
-	if len(t.Spans) == 0 && len(t.Counters) == 0 && len(t.PrefixHashes) == 0 {
+	if len(t.Spans) == 0 && len(t.Counters) == 0 && len(t.PrefixHashes) == 0 && len(t.OutputBudgets) == 0 {
 		return nil, errors.New("parse trace: header present but no spans, counters, or prefix hashes recovered (corrupt or truncated)")
 	}
 	return t, nil
+}
+
+func boolField(obj map[string]any, key string) bool {
+	value, _ := obj[key].(bool)
+	return value
 }
 
 // stringField returns obj[key] as a string, or "" if the key is missing or

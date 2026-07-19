@@ -28,6 +28,12 @@ func Wrapper(name string) string {
 	return GreetByName(name)
 }
 
+// greetWrapped is Wrapper's single caller — refactor-05 inlines Wrapper here
+// and removes the Wrapper function.
+func greetWrapped(name string) string {
+	return Wrapper(name)
+}
+
 // stats is a bare map used across the file — refactor-04 introduces a named type.
 var stats = map[string]int{}
 

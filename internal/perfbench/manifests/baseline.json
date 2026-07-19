@@ -1,62 +1,545 @@
 {
   "id": "zero-baseline-turn",
   "name": "Zero per-turn baseline (Phase 0)",
-  "description": "Latency-first baseline: measures where a turn spends wall time, with pass/fail reported per oracle tier so it cannot be misread as a blanket correctness verdict. Read-only classes (nav, longproc, longctx, parallel) carry no verification oracle — a zero-exit only proves the turn ran, so they count as latency-only and never in any pass rate. Correctness classes (edit, fix) carry a positive oracle (substring grep or a scoped `go test`) and are the only tasks in correctnessPassRate. Build-only classes (refactor) carry `go build ./...`, which proves the edit compiles but not that the refactor achieved its goal, so they are reported as buildPassRate and excluded from correctnessPassRate.",
-  "buildOnlyClasses": ["refactor"],
+  "description": "Latency-first baseline: measures where a turn spends wall time, with pass/fail reported per oracle tier so it cannot be misread as a blanket correctness verdict. Correctness classes (edit, fix, nav, refactor) carry a positive oracle: edit/refactor stamp an oracle_test.go compiled by `go test ./...` (the Go compiler is the structural verifier \u2014 a no-op refactor or a missing field fails to compile), fix runs a scoped `go test -run`, and nav greps the agent's captured final answer (.zero-answer.txt) for determinable facts. tasksVerified/tasksPassed/correctnessPassRate cover exactly these. Latency-only classes (longproc, longctx, parallel) carry no verification oracle \u2014 a zero-exit only proves the turn ran, so they count as latency-only and never in any pass rate. The build tier is empty: refactor graduated to correctness once its oracle became structural-positive. See MANIFEST.md for the per-task oracle specs and known limitations.",
+  "buildOnlyClasses": [],
   "tasks": [
-    {"id": "nav-01", "name": "list repo files", "class": "nav", "prompt": "List the files in this repository and report their count. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-02", "name": "find a function", "class": "nav", "prompt": "Find the function named 'greet' and report the file and line it is defined on. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-03", "name": "summarize module", "class": "nav", "prompt": "Read main.go and summarize what this program does in two sentences. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-04", "name": "count tests", "class": "nav", "prompt": "Count the test functions (functions whose names start with Test) in this repository and report the number. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-05", "name": "locate a string", "class": "nav", "prompt": "Find every occurrence of the string 'TODO' in the repository and report the files. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-06", "name": "describe package", "class": "nav", "prompt": "Describe the exported API of this package by reading the source. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-07", "name": "trace a call", "class": "nav", "prompt": "Trace which function calls which other function starting from main. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-08", "name": "find imports", "class": "nav", "prompt": "List every third-party import used by this repository. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-09", "name": "report config", "class": "nav", "prompt": "Read config.json and report the keys it contains. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-    {"id": "nav-10", "name": "doc lookup", "class": "nav", "prompt": "Find the doc comment on the greet function and quote it. Do not modify anything.", "workspaceFixture": "../testdata/nav"},
-
-    {"id": "edit-01", "name": "rename a constant", "class": "edit", "prompt": "Rename the constant MaxRetries to RetryLimit everywhere it appears.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "grep -R RetryLimit . && ! grep -R MaxRetries ."]},
-    {"id": "edit-02", "name": "fix a typo", "class": "edit", "prompt": "Fix the typo in the comment above the greet function ('receieves' should be 'receives').", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "! grep -R receieves ."]},
-    {"id": "edit-03", "name": "add a field", "class": "edit", "prompt": "Add a string field named Label to the Config struct in main.go.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["grep", "-R", "Label", "."]},
-    {"id": "edit-04", "name": "bump a version", "class": "edit", "prompt": "Change the version string in version.go from 1.0.0 to 1.1.0.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "grep -R 1.1.0 . && ! grep -R 1.0.0 ."]},
-    {"id": "edit-05", "name": "remove a log line", "class": "edit", "prompt": "Remove the line that prints 'debug: starting'.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "! grep -R 'debug: starting' ."]},
-    {"id": "edit-06", "name": "add a license header", "class": "edit", "prompt": "Add a comment line '// SPDX-License-Identifier: MIT' at the top of main.go.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["grep", "-R", "SPDX-License-Identifier", "."]},
-    {"id": "edit-07", "name": "change a default", "class": "edit", "prompt": "Change the default value of the Port constant from 8080 to 9090.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "grep -R 9090 . && ! grep -R 8080 ."]},
-    {"id": "edit-08", "name": "add a getter", "class": "edit", "prompt": "Add a method func (c *Config) GetLabel() string that returns c.Label.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["bash", "-c", "grep -R 'func (c *Config) GetLabel' ."]},
-    {"id": "edit-09", "name": "wrap an error", "class": "edit", "prompt": "In the load function, wrap the returned error with fmt.Errorf so it includes 'load failed'.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["grep", "-R", "load failed", "."]},
-    {"id": "edit-10", "name": "update a message", "class": "edit", "prompt": "Change the printed greeting from 'hello' to 'hello, world'.", "workspaceFixture": "../testdata/edit", "verificationCommand": ["grep", "-R", "hello, world", "."]},
-
-    {"id": "fix-01", "name": "off-by-one", "class": "fix", "prompt": "In bugs.go the Sum function has an off-by-one error that skips the last element; fix the loop so it sums all elements.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestSumIncludesLastElement", "./..."]},
-    {"id": "fix-02", "name": "nil deref", "class": "fix", "prompt": "In bugs.go DefaultConfig returns nil and Port() dereferences it; make DefaultConfig return a valid Config with Port 8080.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestPortReturnsDefault", "./..."]},
-    {"id": "fix-03", "name": "wrong operator", "class": "fix", "prompt": "In bugs.go Max uses the wrong inequality and returns the smaller value; fix it to return the larger.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestMaxReturnsLarger", "./..."]},
-    {"id": "fix-04", "name": "truncated read", "class": "fix", "prompt": "In bugs.go ReadFirst returns only a single character instead of the full content; fix it to return the whole string.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestReadFirstReturnsFullContent", "./..."]},
-    {"id": "fix-05", "name": "swapped args", "class": "fix", "prompt": "In bugs.go Divide swaps its operands; fix the order so Divide(10,2) returns 5.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestDivideOrder", "./..."]},
-    {"id": "fix-06", "name": "missing return", "class": "fix", "prompt": "In bugs.go Classify is missing a return for the high case; add it so Classify(500) returns \"high\".", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestClassifyHigh", "./..."]},
-    {"id": "fix-07", "name": "wrong label prefix", "class": "fix", "prompt": "In bugs.go Label returns 'admin-<name>' but the test expects 'user-<name>'; change the prefix from 'admin-' to 'user-'.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-run", "TestLabelUsesString", "./..."]},
-    {"id": "fix-08", "name": "race on counter", "class": "fix", "prompt": "In bugs.go the global counter is incremented without synchronization; guard it with a mutex.", "workspaceFixture": "../testdata/fix", "verificationCommand": ["go", "test", "-race", "-run", "TestCounterRace", "./..."]},
-
-    {"id": "refactor-01", "name": "extract helper", "class": "refactor", "prompt": "Extract the duplicated greeting logic into a single helper function and call it from both sites.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-02", "name": "split a file", "class": "refactor", "prompt": "Split main.go into two files: one for Config, one for the rest, keeping the package building.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-03", "name": "rename package", "class": "refactor", "prompt": "Rename the package from app to zeroapp everywhere and keep it building.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-04", "name": "introduce a type", "class": "refactor", "prompt": "Introduce a named type for the map[string]int used in main.go and update its users.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-05", "name": "inline a wrapper", "class": "refactor", "prompt": "Inline the thin wrapper function into its single caller and remove it.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-    {"id": "refactor-06", "name": "consolidate errors", "class": "refactor", "prompt": "Consolidate the repeated error-construction blocks into a single helper.", "workspaceFixture": "../testdata/refactor", "verificationCommand": ["go", "build", "./..."]},
-
-    {"id": "longproc-01", "name": "long build", "class": "longproc", "prompt": "Run the build command and report whether it succeeds. Do not modify anything.", "workspaceFixture": "../testdata/longproc"},
-    {"id": "longproc-02", "name": "long test", "class": "longproc", "prompt": "Run go test ./... and report the result. Do not modify anything.", "workspaceFixture": "../testdata/longproc"},
-    {"id": "longproc-03", "name": "bench run", "class": "longproc", "prompt": "Run go test -bench=. -benchtime=1x and report the benchmark numbers. Do not modify anything.", "workspaceFixture": "../testdata/longproc"},
-    {"id": "longproc-04", "name": "vet run", "class": "longproc", "prompt": "Run go vet ./... and report the output. Do not modify anything.", "workspaceFixture": "../testdata/longproc"},
-
-    {"id": "longctx-01", "name": "summarize large file", "class": "longctx", "prompt": "Read the large generated file big.go and summarize its structure. Do not modify anything.", "workspaceFixture": "../testdata/longctx"},
-    {"id": "longctx-02", "name": "find in large file", "class": "longctx", "prompt": "In big.go, find every function that returns an error and list them. Do not modify anything.", "workspaceFixture": "../testdata/longctx"},
-    {"id": "longctx-03", "name": "cross-file question", "class": "longctx", "prompt": "Read all .go files and report which two functions share the same name across files. Do not modify anything.", "workspaceFixture": "../testdata/longctx"},
-    {"id": "longctx-04", "name": "trace through large file", "class": "longctx", "prompt": "Starting from Handle, trace the call path through big.go and report the chain. Do not modify anything.", "workspaceFixture": "../testdata/longctx"},
-
-    {"id": "parallel-01", "name": "read six files", "class": "parallel", "prompt": "Read a.txt, b.txt, c.txt, d.txt, e.txt, and f.txt, then report the first line of each. Do not modify anything.", "workspaceFixture": "../testdata/parallel"},
-    {"id": "parallel-02", "name": "grep six patterns", "class": "parallel", "prompt": "Search for 'alpha', 'beta', 'gamma', 'delta', 'epsilon', and 'zeta' across the repo and report which files contain each. Do not modify anything.", "workspaceFixture": "../testdata/parallel"},
-    {"id": "parallel-03", "name": "list six dirs", "class": "parallel", "prompt": "List the contents of dir1, dir2, dir3, dir4, dir5, and dir6. Do not modify anything.", "workspaceFixture": "../testdata/parallel"},
-    {"id": "parallel-04", "name": "stat six files", "class": "parallel", "prompt": "Report the line count of a.txt, b.txt, c.txt, d.txt, e.txt, and f.txt. Do not modify anything.", "workspaceFixture": "../testdata/parallel"},
-    {"id": "parallel-05", "name": "read configs", "class": "parallel", "prompt": "Read config1.json, config2.json, config3.json, config4.json, config5.json, and config6.json and report each top-level key. Do not modify anything.", "workspaceFixture": "../testdata/parallel"},
-    {"id": "parallel-06", "name": "summarize six", "class": "parallel", "prompt": "Read the six .txt files and give a one-line summary of each. Do not modify anything.", "workspaceFixture": "../testdata/parallel"}
+    {
+      "id": "nav-01",
+      "name": "list repo files",
+      "class": "nav",
+      "prompt": "List the files in this repository and report their count. State the count as 'count: N' on its own line. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'main.go' .zero-answer.txt && grep -iq 'config.json' .zero-answer.txt && grep -iq 'readme' .zero-answer.txt && grep -iqE '^count:[[:space:]]*5$' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-02",
+      "name": "find a function",
+      "class": "nav",
+      "prompt": "Find the function named 'greet' and report the file and line it is defined on. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'main.go' .zero-answer.txt && grep -iqE '\\b1[5-7]\\b' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-03",
+      "name": "summarize module",
+      "class": "nav",
+      "prompt": "Read main.go and summarize what this program does in two sentences. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iqE 'greet|hello|Config' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-04",
+      "name": "count tests",
+      "class": "nav",
+      "prompt": "Count the test functions (functions whose names start with Test) in this repository. Name each one you find and report the number. State the count as 'count: N' on its own line. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'TestGreet' .zero-answer.txt && grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-05",
+      "name": "locate a string",
+      "class": "nav",
+      "prompt": "Find every occurrence of the string 'TODO' in the repository and report the file(s) they appear in. State the count as 'count: N' on its own line. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'main.go' .zero-answer.txt && grep -iqE '^count:[[:space:]]*1$' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-06",
+      "name": "describe package",
+      "class": "nav",
+      "prompt": "Describe the exported API of this package by reading the source. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq config .zero-answer.txt && grep -iq maxretries .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-07",
+      "name": "trace a call",
+      "class": "nav",
+      "prompt": "Trace which function calls which other function starting from main. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq main .zero-answer.txt && grep -iq greet .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-08",
+      "name": "find imports",
+      "class": "nav",
+      "prompt": "List every import used by this repository and classify each as standard library or third-party. State the number of third-party (non-stdlib) imports as 'count: N' on its own line. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'fmt' .zero-answer.txt && grep -iq 'testing' .zero-answer.txt && grep -iqE '^count:[[:space:]]*0$' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-09",
+      "name": "report config",
+      "class": "nav",
+      "prompt": "Read config.json and report the keys it contains. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq port .zero-answer.txt && grep -iq name .zero-answer.txt && grep -iq retries .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "nav-10",
+      "name": "doc lookup",
+      "class": "nav",
+      "prompt": "Find the doc comment on the greet function and quote it. Do not modify anything.",
+      "workspaceFixture": "../testdata/nav",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "grep -iq 'greet returns a greeting' .zero-answer.txt"
+      ]
+    },
+    {
+      "id": "edit-01",
+      "name": "rename a constant",
+      "class": "edit",
+      "prompt": "Rename the constant MaxRetries to RetryLimit everywhere it appears.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && ! grep --exclude=.zero-answer.txt -RIn 'MaxRetries =' ."
+      ],
+      "oracleTest": "package edit\n\nvar _ = RetryLimit\n"
+    },
+    {
+      "id": "edit-02",
+      "name": "fix a typo",
+      "class": "edit",
+      "prompt": "Fix the typo in the comment above the greet function ('receieves' should be 'receives').",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && ! grep --exclude=.zero-answer.txt -R receieves . && grep --exclude=.zero-answer.txt -R receives ."
+      ]
+    },
+    {
+      "id": "edit-03",
+      "name": "add a field",
+      "class": "edit",
+      "prompt": "Add a string field named Label to the Config struct in main.go.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nvar _ string = Config{}.Label\n"
+    },
+    {
+      "id": "edit-04",
+      "name": "bump a version",
+      "class": "edit",
+      "prompt": "Change the version string in version.go from 1.0.0 to 1.1.0.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport \"testing\"\n\nfunc TestVersion(t *testing.T) {\n\tif Version != \"1.1.0\" {\n\t\tt.Fatalf(\"Version=%q\", Version)\n\t}\n}\n"
+    },
+    {
+      "id": "edit-05",
+      "name": "remove a log line",
+      "class": "edit",
+      "prompt": "Remove the line that prints 'debug: starting'.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestNoDebugPrintln(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\t// The greet print is fmt.Println(greet(...)) with no string literal, so a\n\t// remaining fmt.Println(\"...\") call means the debug line was not removed\n\t// (or was only reworded, not deleted).\n\tif strings.Contains(string(b), `fmt.Println(\"`) {\n\t\tt.Fatal(\"main.go still has a fmt.Println string-literal call; the debug line was not removed\")\n\t}\n\t// The task is to remove the line that prints \"debug: starting\", so the\n\t// message text itself must be gone -- this catches a reword onto a different\n\t// call form (fmt.Printf, backticks, log.Println, println) that the\n\t// string-literal check above would miss.\n\tif strings.Contains(string(b), \"debug: starting\") {\n\t\tt.Fatal(\"main.go still prints 'debug: starting'; the line was not removed (only reworded or respelled)\")\n\t}\n}\n"
+    },
+    {
+      "id": "edit-06",
+      "name": "add a license header",
+      "class": "edit",
+      "prompt": "Add a comment line '// SPDX-License-Identifier: MIT' at the top of main.go.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestSPDXHeader(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif !strings.HasPrefix(string(b), \"// SPDX-License-Identifier: MIT\") {\n\t\tt.Fatal(\"main.go must start with the SPDX-License-Identifier: MIT header\")\n\t}\n}\n"
+    },
+    {
+      "id": "edit-07",
+      "name": "change a default",
+      "class": "edit",
+      "prompt": "Change the default value of the Port constant from 8080 to 9090.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport \"testing\"\n\nfunc TestPort(t *testing.T) {\n\tif Port != 9090 {\n\t\tt.Fatalf(\"Port=%d, want 9090\", Port)\n\t}\n}\n"
+    },
+    {
+      "id": "edit-08",
+      "name": "add a getter",
+      "class": "edit",
+      "prompt": "Add a method func (c *Config) GetName() string that returns c.Name.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport \"testing\"\n\nfunc TestGetName(t *testing.T) {\n\tc := Config{Name: \"x\"}\n\tif got := c.GetName(); got != \"x\" {\n\t\tt.Fatalf(\"GetName()=%q, want %q\", got, \"x\")\n\t}\n}\n"
+    },
+    {
+      "id": "edit-09",
+      "name": "wrap an error",
+      "class": "edit",
+      "prompt": "In the load function, wrap the returned error with fmt.Errorf so it includes 'load failed'.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestLoadWrapsError(t *testing.T) {\n\t_, err := load(\"nonexistent-file-xyz\")\n\tif err == nil {\n\t\tt.Fatal(\"want a non-nil error for a missing file\")\n\t}\n\tif !strings.Contains(err.Error(), \"load failed\") {\n\t\tt.Fatalf(\"err=%v, want it to contain 'load failed'\", err)\n\t}\n}\n"
+    },
+    {
+      "id": "edit-10",
+      "name": "update a message",
+      "class": "edit",
+      "prompt": "Change the printed greeting from 'hello' to 'hello, world'.",
+      "workspaceFixture": "../testdata/edit",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package edit\n\nimport \"testing\"\n\nfunc TestGreet(t *testing.T) {\n\tif got := greet(\"x\"); got != \"hello, world\" {\n\t\tt.Fatalf(\"greet()=%q, want %q\", got, \"hello, world\")\n\t}\n}\n"
+    },
+    {
+      "id": "fix-01",
+      "name": "off-by-one",
+      "class": "fix",
+      "prompt": "In bugs.go the Sum function has an off-by-one error that skips the last element; fix the loop so it sums all elements.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestSumIncludesLastElement",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-02",
+      "name": "nil deref",
+      "class": "fix",
+      "prompt": "In bugs.go DefaultConfig returns nil and Port() dereferences it; make DefaultConfig return a valid Config with Port 8080.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestPortReturnsDefault",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-03",
+      "name": "wrong operator",
+      "class": "fix",
+      "prompt": "In bugs.go Max uses the wrong inequality and returns the smaller value; fix it to return the larger.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestMaxReturnsLarger",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-04",
+      "name": "truncated read",
+      "class": "fix",
+      "prompt": "In bugs.go ReadFirst returns only a single character instead of the full content; fix it to return the whole string.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestReadFirstReturnsFullContent",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-05",
+      "name": "swapped args",
+      "class": "fix",
+      "prompt": "In bugs.go Divide swaps its operands; fix the order so Divide(10,2) returns 5.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestDivideOrder",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-06",
+      "name": "missing return",
+      "class": "fix",
+      "prompt": "In bugs.go Classify is missing a return for the high case; add it so Classify(500) returns \"high\".",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestClassifyHigh",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-07",
+      "name": "wrong label prefix",
+      "class": "fix",
+      "prompt": "In bugs.go Label returns 'admin-<name>' but the test expects 'user-<name>'; change the prefix from 'admin-' to 'user-'.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-run",
+        "TestLabelUsesString",
+        "./..."
+      ]
+    },
+    {
+      "id": "fix-08",
+      "name": "race on counter",
+      "class": "fix",
+      "prompt": "In bugs.go the global counter is incremented without synchronization; guard it with a mutex.",
+      "workspaceFixture": "../testdata/fix",
+      "verificationCommand": [
+        "go",
+        "test",
+        "-race",
+        "-run",
+        "TestCounterRace",
+        "./..."
+      ]
+    },
+    {
+      "id": "refactor-01",
+      "name": "extract helper",
+      "class": "refactor",
+      "prompt": "Extract the duplicated fmt.Sprintf(\"hello, %s\", ...) greeting logic into a single helper function named formatGreeting and call it from both GreetFromConfig and GreetByName.",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && [ $(grep -c 'hello, %s' main.go) -eq 1 ]"
+      ],
+      "oracleTest": "package refactor\n\nvar _ = formatGreeting\n"
+    },
+    {
+      "id": "refactor-02",
+      "name": "split a file",
+      "class": "refactor",
+      "prompt": "Move the Config type into a new file named config.go, keeping the package building.",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && grep -q 'type Config' config.go && ! grep -q 'type Config' main.go"
+      ]
+    },
+    {
+      "id": "refactor-03",
+      "name": "rename package",
+      "class": "refactor",
+      "prompt": "Rename the package from refactor to zeroapp everywhere and keep it building.",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && ! grep --exclude=.zero-answer.txt -R 'package refactor' . && grep --exclude=.zero-answer.txt -R 'package zeroapp' ."
+      ],
+      "oracleTest": "package zeroapp\n\nvar _ = Config{}\n"
+    },
+    {
+      "id": "refactor-04",
+      "name": "introduce a type",
+      "class": "refactor",
+      "prompt": "Introduce a named type `type Stats map[string]int` for the bare map used by stats, and update its users (Record, Lookup).",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "oracleTest": "package refactor\n\nimport (\n\t\"os\"\n\t\"regexp\"\n\t\"strings\"\n\t\"testing\"\n)\n\n// TestStatsNamedType proves the bare map was replaced by the named Stats type:\n// the old `var stats = map[string]int` (or `stats := map[string]int{}`) form is\n// gone -- matched with a spacing-tolerant regex so a `var stats=map[string]int`\n// or `stats :=` variant can't dodge it -- and the Stats type is actually\n// referenced in main.go, so a no-op that only adds an unused `type Stats` while\n// keeping the bare map fails. `go test ./...` compiling the fixture proves the\n// type declaration is valid.\nfunc TestStatsNamedType(t *testing.T) {\n\tb, err := os.ReadFile(\"main.go\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tsrc := string(b)\n\tif regexp.MustCompile(`var\\s+stats\\s*=\\s*map\\[string\\]int`).MatchString(src) ||\n\t\tregexp.MustCompile(`stats\\s*:=\\s*map\\[string\\]int`).MatchString(src) {\n\t\tt.Fatal(\"main.go still declares stats as a bare map[string]int; the named Stats type was not adopted\")\n\t}\n\tif !strings.Contains(src, \"Stats\") {\n\t\tt.Fatal(\"main.go does not reference the Stats type; refactor-04 was a no-op\")\n\t}\n}\n"
+    },
+    {
+      "id": "refactor-05",
+      "name": "inline a wrapper",
+      "class": "refactor",
+      "prompt": "Inline the Wrapper function into greetWrapped (its single caller) and remove the Wrapper function.",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && ! grep --exclude=.zero-answer.txt -R 'func Wrapper' ."
+      ],
+      "oracleTest": "package refactor\n\nimport \"testing\"\n\n// TestGreetWrapped proves greetWrapped still exists and behaves as the inlined\n// Wrapper did: deleting both Wrapper and greetWrapped (or stubbing greetWrapped\n// to return \"\") fails to compile or run, so the oracle can't be passed by\n// removing the target along with its caller. Paired with the ! grep 'func\n// Wrapper' verificationCommand that proves Wrapper itself is gone.\nfunc TestGreetWrapped(t *testing.T) {\n\tif got := greetWrapped(\"x\"); got != \"hello, x\" {\n\t\tt.Fatalf(\"greetWrapped(x) = %q, want %q\", got, \"hello, x\")\n\t}\n}\n"
+    },
+    {
+      "id": "refactor-06",
+      "name": "consolidate errors",
+      "class": "refactor",
+      "prompt": "Consolidate the three error-construction functions (firstError, secondError, buildError) into a single helper func makeLoadError(ctx string) error that returns fmt.Errorf(\"load failed: %s\", ctx), and call it from all three.",
+      "workspaceFixture": "../testdata/refactor",
+      "verificationCommand": [
+        "bash",
+        "-c",
+        "go test ./... && [ $(grep -c 'fmt.Errorf(\"load failed' main.go) -eq 1 ]"
+      ],
+      "oracleTest": "package refactor\n\nvar _ = makeLoadError\n"
+    },
+    {
+      "id": "longproc-01",
+      "name": "long build",
+      "class": "longproc",
+      "prompt": "Run the build command and report whether it succeeds. Do not modify anything.",
+      "workspaceFixture": "../testdata/longproc"
+    },
+    {
+      "id": "longproc-02",
+      "name": "long test",
+      "class": "longproc",
+      "prompt": "Run go test ./... and report the result. Do not modify anything.",
+      "workspaceFixture": "../testdata/longproc"
+    },
+    {
+      "id": "longproc-03",
+      "name": "bench run",
+      "class": "longproc",
+      "prompt": "Run go test -bench=. -benchtime=1x and report the benchmark numbers. Do not modify anything.",
+      "workspaceFixture": "../testdata/longproc"
+    },
+    {
+      "id": "longproc-04",
+      "name": "vet run",
+      "class": "longproc",
+      "prompt": "Run go vet ./... and report the output. Do not modify anything.",
+      "workspaceFixture": "../testdata/longproc"
+    },
+    {
+      "id": "longctx-01",
+      "name": "summarize large file",
+      "class": "longctx",
+      "prompt": "Read the large generated file big.go and summarize its structure. Do not modify anything.",
+      "workspaceFixture": "../testdata/longctx"
+    },
+    {
+      "id": "longctx-02",
+      "name": "find in large file",
+      "class": "longctx",
+      "prompt": "In big.go, find every function that returns an error and list them. Do not modify anything.",
+      "workspaceFixture": "../testdata/longctx"
+    },
+    {
+      "id": "longctx-03",
+      "name": "cross-file question",
+      "class": "longctx",
+      "prompt": "Read all .go files and report which two functions share the same name across files. Do not modify anything.",
+      "workspaceFixture": "../testdata/longctx"
+    },
+    {
+      "id": "longctx-04",
+      "name": "trace through large file",
+      "class": "longctx",
+      "prompt": "Starting from Handle, trace the call path through big.go and report the chain. Do not modify anything.",
+      "workspaceFixture": "../testdata/longctx"
+    },
+    {
+      "id": "parallel-01",
+      "name": "read six files",
+      "class": "parallel",
+      "prompt": "Read a.txt, b.txt, c.txt, d.txt, e.txt, and f.txt, then report the first line of each. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    },
+    {
+      "id": "parallel-02",
+      "name": "grep six patterns",
+      "class": "parallel",
+      "prompt": "Search for 'alpha', 'beta', 'gamma', 'delta', 'epsilon', and 'zeta' across the repo and report which files contain each. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    },
+    {
+      "id": "parallel-03",
+      "name": "list six dirs",
+      "class": "parallel",
+      "prompt": "List the contents of dir1, dir2, dir3, dir4, dir5, and dir6. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    },
+    {
+      "id": "parallel-04",
+      "name": "stat six files",
+      "class": "parallel",
+      "prompt": "Report the line count of a.txt, b.txt, c.txt, d.txt, e.txt, and f.txt. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    },
+    {
+      "id": "parallel-05",
+      "name": "read configs",
+      "class": "parallel",
+      "prompt": "Read config1.json, config2.json, config3.json, config4.json, config5.json, and config6.json and report each top-level key. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    },
+    {
+      "id": "parallel-06",
+      "name": "summarize six",
+      "class": "parallel",
+      "prompt": "Read the six .txt files and give a one-line summary of each. Do not modify anything.",
+      "workspaceFixture": "../testdata/parallel"
+    }
   ]
 }

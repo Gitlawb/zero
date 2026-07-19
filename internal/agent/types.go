@@ -61,10 +61,13 @@ const (
 )
 
 type ToolResult struct {
-	ToolCallID   string
-	Name         string
-	Status       tools.Status
-	Output       string
+	ToolCallID string
+	Name       string
+	Status     tools.Status
+	Output     string
+	// Truncated reports that the tool's model-visible output omitted content.
+	// The full result may be recoverable through Meta["spill_path"].
+	Truncated    bool
 	Meta         map[string]string
 	Redacted     bool
 	ChangedFiles []string
@@ -72,6 +75,12 @@ type ToolResult struct {
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
+	// Risk is the sandbox risk classification of this call, stamped for EXECUTED
+	// results so run-policy observers (the execution-profile controller) can see
+	// the risk level of an allowed mutation. It mirrors the classification the
+	// permission path already computes; denied or canceled results keep the zero
+	// value. Pure observation: nothing about permissions or sandboxing changes.
+	Risk sandbox.Risk
 	// LoadedTools carries the deferred-tool names a tool_search call asked the
 	// loop to expose next turn (lifted from Meta["load_tools"]). nil for every
 	// ordinary tool result; only tool_search populates it.
@@ -94,6 +103,54 @@ const (
 	DenialSandboxBlock     DenialCategory = "sandbox_block"     // blocked by the sandbox
 	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )
+
+// ProfilePolicy is the loop-facing slice of a selected execution profile.
+// The surface (exec flag, TUI command) resolves a named profile into this
+// policy; the loop only ever sees the policy, never the catalog.
+type ProfilePolicy struct {
+	// Name labels trace counters and diagnostics (e.g. "fast"). The trace
+	// recorder's profile label is set by the caller at recorder construction.
+	Name string
+	// Escalate, when non-nil, arms one-shot in-run posture escalation.
+	Escalate *PostureEscalation
+}
+
+// PostureEscalation describes a one-shot escalation to stricter knob values,
+// applied mid-run when an armed trigger fires. Targets are the values the
+// selected profile DISPLACED at run start (i.e. "restore the balanced
+// posture"), so escalation can never introduce a value that was not already
+// valid for this run and model. Zero-valued targets leave that knob untouched.
+type PostureEscalation struct {
+	// MaxTurns raises the turn ceiling to this value when greater than the
+	// ceiling in effect. 0 leaves the ceiling untouched.
+	MaxTurns int
+	// ReasoningEffort replaces the run's effort when non-empty.
+	ReasoningEffort string
+	// RestoreDefaultEffort clears the run's effort override (back to the
+	// provider/model default) when true. It exists because the displaced value
+	// of a profile-filled effort is "" — which as a ReasoningEffort target
+	// means "leave untouched" — so restoring the default needs its own signal.
+	// Ignored when ReasoningEffort is non-empty.
+	RestoreDefaultEffort bool
+	// RestoreCompletionGate re-enables RequireCompletionSignal (headless
+	// completion semantics) when true.
+	RestoreCompletionGate bool
+
+	// Triggers. A zero value disables that signal entirely.
+	// OnToolFailureStreak fires when the repeated-failure guard observes a
+	// same-tool retriable-failure streak of at least this length.
+	OnToolFailureStreak int
+	// OnCompletionUncertain fires on the Nth uncertain completion evaluation
+	// (continue nudge or semantic check). Headless only: the completion gate
+	// never runs interactively.
+	OnCompletionUncertain int
+	// OnSelfCorrectFailure fires when a post-edit verification cycle reports a
+	// failing outcome (correcting, reported, or aborted).
+	OnSelfCorrectFailure bool
+	// OnRiskyMutation fires when an EXECUTED tool result carries a sandbox risk
+	// level at or above this threshold. Empty disables the signal.
+	OnRiskyMutation sandbox.RiskLevel
+}
 
 type PermissionRequest struct {
 	ToolCallID         string                     `json:"toolCallId"`
@@ -280,6 +337,27 @@ type Options struct {
 	// request), so every existing caller is unaffected. A returned error is
 	// non-fatal: the run continues on the current model.
 	ModelSwitcher func(ctx context.Context, modelID string) (Provider, error)
+	// TurnSessionProvider, when set, supplies the turn session the run streams
+	// through — the seam an optimized provider session (connection reuse,
+	// prewarm, native compaction) plugs into without touching the loop. nil
+	// keeps the default: the loop wraps the passed provider in a no-op session
+	// whose Stream IS provider.StreamCompletion, so behavior is byte-identical
+	// and every existing caller is unaffected.
+	TurnSessionProvider zeroruntime.TurnSessionProvider
+	// ModelSessionSwitcher, when set, is the target-aware escalation hook: the
+	// loop prefers it over ModelSwitcher, and its TurnSessionProvider keeps an
+	// optimized session (and its capabilities) across a mid-run model switch.
+	// nil falls back to ModelSwitcher, whose bare Provider is wrapped in the
+	// default no-op session — today's behavior, unchanged. Same non-fatal error
+	// contract as ModelSwitcher: a returned error records a note and the run
+	// continues on the current model and session.
+	ModelSessionSwitcher func(ctx context.Context, modelID string) (zeroruntime.TurnSessionProvider, error)
+	// Profile, when set, arms the execution-profile posture controller for this
+	// run (auto-escalation to stricter knob values on failure/uncertainty/risky
+	// mutation signals). nil — the default everywhere today — leaves the loop
+	// byte-identical: no observation, no escalation, no counters. Same opt-in
+	// convention as Trace and SelfCorrect.
+	Profile *ProfilePolicy
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,
@@ -312,8 +390,11 @@ type Options struct {
 	// continuation cue ("…Let me check the config:"). The loop then nudges the
 	// model to continue instead, bounded by maxContinueNudges (and still by
 	// MaxTurns and the run deadline); if the model keeps stalling, the run
-	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. Default
-	// false leaves the loop byte-identical, so the interactive TUI is unaffected.
+	// finalizes as INCOMPLETE (Result.Incomplete) rather than success. When the
+	// run's profile also enables SelfCorrect, an otherwise-complete turn gets one
+	// task-grounded semantic check before success; profiles without SelfCorrect
+	// add no model call. Default false leaves the loop byte-identical, so the
+	// interactive TUI is unaffected.
 	RequireCompletionSignal bool
 
 	runPermissions *permissionRunState

@@ -1341,6 +1341,9 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --max-turns <number>           Override the maximum agent loop turns
+      --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
+                                    posture only (turn budget, effort, self-correction, escalation);
+                                    composes with --mode (which picks the model) and explicit flags win
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools

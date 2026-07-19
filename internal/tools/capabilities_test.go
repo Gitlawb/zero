@@ -300,6 +300,18 @@ func TestInteractiveClassifications(t *testing.T) {
 
 func TestReadOnlyClassifications(t *testing.T) {
 	root := t.TempDir()
+	// PR6 audited concurrent-safe pure reads (mutex-guarded FileTracker,
+	// independent scan I/O, independent HTTP). Others stay sequential until
+	// their shared state is proven safe under concurrent Run.
+	threadSafeReads := map[string]bool{
+		"read_file":          true,
+		"read_minified_file": true,
+		"list_directory":     true,
+		"glob":               true,
+		"grep":               true,
+		"skill":              true,
+		"web_fetch":          true,
+	}
 	for _, name := range []string{"read_file", "read_minified_file", "list_directory", "glob", "grep", "lsp_navigate", "skill", "web_fetch", "web_search", "tool_search"} {
 		var found Tool
 		for _, tool := range BuiltinCatalog(root) {
@@ -315,11 +327,35 @@ func TestReadOnlyClassifications(t *testing.T) {
 		if caps.Effect != EffectReadOnly {
 			t.Errorf("%s effect = %v, want ReadOnly", name, caps.Effect)
 		}
-		// Current catalog intentionally keeps read tools non-thread-safe
-		// until each is audited for shared mutable state (FileTracker, etc.).
-		if caps.ThreadSafe {
-			t.Errorf("%s ThreadSafe=true without explicit audit", name)
+		wantSafe := threadSafeReads[name]
+		if caps.ThreadSafe != wantSafe {
+			t.Errorf("%s ThreadSafe=%v, want %v", name, caps.ThreadSafe, wantSafe)
 		}
+	}
+}
+
+func TestScopedScanResourceKeys(t *testing.T) {
+	// Workspace-wide scan → no keys (do not false-conflict every concurrent scan).
+	if keys := scopedScanResourceKeys(nil); keys != nil {
+		t.Fatalf("nil args = %v, want nil", keys)
+	}
+	if keys := scopedScanResourceKeys(map[string]any{}); keys != nil {
+		t.Fatalf("empty args = %v, want nil", keys)
+	}
+	if keys := scopedScanResourceKeys(map[string]any{"cwd": "."}); keys != nil {
+		t.Fatalf("cwd=. = %v, want nil", keys)
+	}
+	if keys := scopedScanResourceKeys(map[string]any{"path": "."}); keys != nil {
+		t.Fatalf("path=. = %v, want nil", keys)
+	}
+	// Scoped path → directory: key (glob uses cwd; grep uses path).
+	keys := scopedScanResourceKeys(map[string]any{"cwd": "internal/tools"})
+	if len(keys) != 1 || keys[0] != ResourceKeyDirectory+NormalizeResourcePath("internal/tools") {
+		t.Fatalf("cwd scoped = %v", keys)
+	}
+	keys = scopedScanResourceKeys(map[string]any{"path": "./pkg/../pkg/api"})
+	if len(keys) != 1 || keys[0] != ResourceKeyDirectory+NormalizeResourcePath("./pkg/../pkg/api") {
+		t.Fatalf("path scoped = %v", keys)
 	}
 }
 

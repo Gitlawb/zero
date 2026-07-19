@@ -127,6 +127,20 @@ func workspaceResourceKeys(_ map[string]any) []string {
 	return []string{ResourceKeyWorkspace + "root"}
 }
 
+// scopedScanResourceKeys returns conflict keys for directory-scoped scan tools
+// (glob, grep). Workspace-wide scans (missing / empty / ".") return nil so
+// they do not force a false conflict with every other concurrent scan —
+// ThreadSafe is the concurrency gate; keys refine same-directory collisions.
+// A non-default path/cwd yields a single directory: key.
+func scopedScanResourceKeys(args map[string]any) []string {
+	path := firstStringArg(args, "path", "cwd", "dir", "directory")
+	normalized := NormalizeResourcePath(path)
+	if normalized == "" || normalized == "." {
+		return nil
+	}
+	return []string{ResourceKeyDirectory + normalized}
+}
+
 // multiFileResourceKeys collects path and paths[] arguments into file: keys.
 func multiFileResourceKeys(args map[string]any) []string {
 	var keys []string

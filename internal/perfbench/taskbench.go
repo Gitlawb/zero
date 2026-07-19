@@ -51,6 +51,14 @@ type BenchTask struct {
 	Prompt              string   `json:"prompt"`
 	WorkspaceFixture    string   `json:"workspaceFixture,omitempty"`
 	VerificationCommand []string `json:"verificationCommand,omitempty"`
+	// OracleTest is Go source stamped into <fixtureCopy>/oracle_test.go AFTER
+	// the agent run (so it can't interfere with the agent's own go build/test
+	// during the task and can't be pre-seen). The verificationCommand then runs
+	// `go test ./...`, making the Go compiler the structural verifier: a
+	// compile-time reference (e.g. `var _ = Config{}.Label`) or a behavioral call
+	// fails to compile/run when the task wasn't actually done. Empty for tasks
+	// whose verificationCommand is a plain grep/build with no stamped test.
+	OracleTest string `json:"oracleTest,omitempty"`
 }
 
 // TaskConfig is the recorded configuration of a benchmark run. The honest
@@ -77,6 +85,10 @@ type RunContext struct {
 	Model       string
 	Mode        string
 	SelfCorrect bool
+	// ExecProfile, when non-empty, is forwarded to the agent invocation as
+	// --exec-profile (turn benchmark runner; the task benchmark leaves it
+	// empty).
+	ExecProfile string
 }
 
 // TaskRunner runs a single benchmark task and returns its outcome.
@@ -389,14 +401,26 @@ func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	return TaskOutcome{Passed: true}
 }
 
-// streamJSONExitCode scans stream-json output for the terminal run_end event and
-// returns its exit code. ZERO emits one JSON object per line; the last run_end
-// (or final) event carries the exit code. Lines that don't parse are skipped.
-func streamJSONExitCode(output []byte) (int, bool) {
+// streamJSONResult holds the terminal events parsed from one pass over a
+// stream-json output: the last run_end exit code (if any) and the last final
+// event's text (the agent's answer, if any). streamJSONExitCode and
+// streamJSONFinalText both consume this so the scanner limits and
+// malformed-event handling live in exactly one place.
+type streamJSONResult struct {
+	exitCode  int
+	haveExit  bool
+	finalText string
+}
+
+// parseStreamJSON scans stream-json output once and returns the terminal
+// run_end exit code and the final event's text. ZERO emits one JSON object per
+// line; the last run_end carries the exit code and the last final carries the
+// answer. Lines that don't parse are skipped. The scanner buffer is raised so a
+// large single-line event (e.g. a big final answer) doesn't error out.
+func parseStreamJSON(output []byte) streamJSONResult {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	exitCode := 0
-	found := false
+	var r streamJSONResult
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 || line[0] != '{' {
@@ -405,16 +429,40 @@ func streamJSONExitCode(output []byte) (int, bool) {
 		var event struct {
 			Type     string `json:"type"`
 			ExitCode *int   `json:"exitCode"`
+			Text     string `json:"text"`
 		}
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue
 		}
 		if event.Type == "run_end" && event.ExitCode != nil {
-			exitCode = *event.ExitCode
-			found = true
+			r.exitCode = *event.ExitCode
+			r.haveExit = true
+		}
+		if event.Type == "final" {
+			r.finalText = event.Text
 		}
 	}
-	return exitCode, found
+	return r
+}
+
+// streamJSONExitCode scans stream-json output for the terminal run_end event and
+// returns its exit code. The last run_end event carries the exit code. Lines
+// that don't parse are skipped.
+func streamJSONExitCode(output []byte) (int, bool) {
+	r := parseStreamJSON(output)
+	return r.exitCode, r.haveExit
+}
+
+// streamJSONFinalText scans stream-json output for the terminal "final" event
+// and returns its text (the agent's final answer). ZERO emits one final event
+// per run on both the success and incomplete paths (exec.go writer.final), so
+// the last one wins. The turn benchmark writes this to .zero-answer.txt in the
+// fixture copy so nav answer-oracles can grep the captured answer rather than
+// the raw stream. Returns "" when no final event was emitted (e.g. a provider
+// error path) — the caller writes an empty file and a nav grep then fails,
+// which is the correct outcome for a run that produced no answer.
+func streamJSONFinalText(output []byte) string {
+	return parseStreamJSON(output).finalText
 }
 
 func firstLine(text string) string {

@@ -577,3 +577,12 @@ func TestCounterPrecisionRoundTrip(t *testing.T) {
 		t.Fatalf("counter round-trip = %d, want %d (float64 precision loss)", got, big)
 	}
 }
+
+func TestOptionalEventKeysIncludePostureEscalations(t *testing.T) {
+	for _, key := range OptionalEventKeys() {
+		if key == "counter:"+CounterPostureEscalations {
+			return
+		}
+	}
+	t.Fatalf("posture_escalations missing from OptionalEventKeys: %v", OptionalEventKeys())
+}
