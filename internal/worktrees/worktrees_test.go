@@ -29,7 +29,7 @@ func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
 		t.Fatalf("Stderr should be empty on success, got %q", ok.Stderr)
 	}
 
-	// A failing command's diagnostic must land on Stderr, not Stdout — the prior
+	// A failing command's diagnostic must land on Stderr, not Stdout - the prior
 	// CombinedOutput merged them and left Stderr empty.
 	bad, err := defaultRunGit(context.Background(), dir, "not-a-real-subcommand")
 	if err != nil {
@@ -97,11 +97,14 @@ func TestReleaseUnlocksWorktree(t *testing.T) {
 	// physical spelling, so computing repoKey from the lexical spelling here
 	// would produce a different key than verifyZeroOwnedWorktree derives in
 	// production, and Release would reject this genuinely Zero-owned fixture
-	// as not-zero-managed.
+	// as not-zero-managed. The worktree path itself is physicalized for the
+	// same reason: Release compares the registered entry against the
+	// canonical user path, and a lexical /var spelling would not match.
 	repoRoot := physicalTestPath(t, t.TempDir())
 	// path must carry the zero-worktree-<repoKey> ancestor component Prepare
 	// actually creates: Release now refuses to unlock anything else.
-	path := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "task-a")
+	base := physicalTestPath(t, t.TempDir())
+	path := filepath.Join(base, "zero-worktree-"+repoKey(repoRoot), "task-a")
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -141,11 +144,13 @@ func TestReleaseFallsBackToCwdWhenWorktreeDirMissing(t *testing.T) {
 	// TestReleaseUnlocksWorktree: real `git worktree list --porcelain`
 	// reports the physical spelling, so a lexical temp-dir spelling here
 	// would derive a different repoKey than production and reject this
-	// fixture.
+	// fixture. The deleted path must still appear in the porcelain list
+	// (git keeps a prunable entry after a manual rm -rf) with Zero's lease
+	// reason, or the ownership check refuses the unlock.
 	repoRoot := physicalTestPath(t, t.TempDir())
 	missingPath := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "already-deleted")
 	runner := &fakeRunner{results: []CommandResult{
-		{Stdout: "worktree " + repoRoot + "\n"},
+		{Stdout: "worktree " + repoRoot + "\nworktree " + missingPath + "\nlocked " + leaseReasonPrefix + "\n"},
 		{},
 	}}
 
@@ -195,7 +200,11 @@ func TestReleaseRejectsNonZeroOwnedWorktree(t *testing.T) {
 // entry whose recorded lock reason doesn't carry Zero's lease prefix.
 func TestReleaseRejectsManuallyLockedWorktree(t *testing.T) {
 	repoRoot := physicalTestPath(t, t.TempDir())
-	path := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "task-a")
+	// Use a physical base so the porcelain entry path matches the
+	// canonicalizePath comparison Release uses against git's physical
+	// spelling (macOS /var vs /private/var, symlink TMPDIR layouts).
+	base := physicalTestPath(t, t.TempDir())
+	path := filepath.Join(base, "zero-worktree-"+repoKey(repoRoot), "task-a")
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +215,30 @@ func TestReleaseRejectsManuallyLockedWorktree(t *testing.T) {
 	err := Release(context.Background(), Options{RunGit: runner.Run}, path)
 	if err == nil || !strings.Contains(err.Error(), "not a zero lease") {
 		t.Fatalf("Release error = %v, want a not-a-zero-lease rejection", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected only the ownership check, no unlock call, got %#v", runner.calls)
+	}
+}
+
+// TestReleaseRejectsUnregisteredWorktree pins the requirement that Release
+// only unlocks a path git currently has registered for the repository. A
+// same-looking zero-worktree-<repoKey> path that never appeared in
+// `git worktree list` must not reach unlock.
+func TestReleaseRejectsUnregisteredWorktree(t *testing.T) {
+	repoRoot := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
+	path := filepath.Join(base, "zero-worktree-"+repoKey(repoRoot), "not-registered")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: "worktree " + repoRoot + "\n"},
+	}}
+
+	err := Release(context.Background(), Options{RunGit: runner.Run}, path)
+	if err == nil || !strings.Contains(err.Error(), "not a registered worktree") {
+		t.Fatalf("Release error = %v, want a not-registered rejection", err)
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("expected only the ownership check, no unlock call, got %#v", runner.calls)
@@ -729,7 +762,7 @@ func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
 		t.Fatal("expected Clean to report both failed removals")
 	}
 	// Both failures must survive in the returned error, not just the last one
-	// to occur — overwriting lastErr instead of joining would silently drop
+	// to occur - overwriting lastErr instead of joining would silently drop
 	// worktree A's failure once worktree B's removal is also attempted.
 	if !strings.Contains(err.Error(), "unable to remove worktree A") {
 		t.Errorf("error = %q, missing worktree A's failure", err.Error())
@@ -912,7 +945,7 @@ func TestCleanSkipsLockedZeroOwnedWorktree(t *testing.T) {
 // data-loss case: Prepare creates every worktree with `worktree add --detach`,
 // so a commit made there is reachable only through that worktree's own HEAD.
 // If the worktree goes stale and clean before the commit is otherwise
-// referenced, force-removing it must not let the commit become unreachable —
+// referenced, force-removing it must not let the commit become unreachable -
 // Clean has to preserve it under a durable ref first.
 func TestCleanPreservesUnreachableCommitBeforeRemoval(t *testing.T) {
 	ctx := context.Background()
@@ -1021,7 +1054,7 @@ func TestCleanReclaimsReleasedWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 }
 
 // TestCleanRecoversExpiredLease: a Zero lease that records its owning PID is
-// recoverable — if that process died without releasing (SIGKILL, crash), the
+// recoverable - if that process died without releasing (SIGKILL, crash), the
 // lock must not protect the worktree forever. A stale, clean worktree behind
 // a dead-owner lease is unlocked and removed; the dirty probe there keeps
 // --ignored because a crashed task never signaled completion.

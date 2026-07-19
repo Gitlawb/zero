@@ -275,6 +275,9 @@ func Release(ctx context.Context, options Options, path string) error {
 		}
 	}
 	if err := verifyZeroOwnedWorktree(ctx, runGit, dir, path); err != nil {
+		if errors.Is(err, errAlreadyUnlocked) {
+			return nil
+		}
 		return err
 	}
 	if _, err := gitOutput(ctx, runGit, dir, "worktree", "unlock", path); err != nil {
@@ -284,22 +287,22 @@ func Release(ctx context.Context, options Options, path string) error {
 }
 
 // verifyZeroOwnedWorktree confirms path has a zero-worktree-<repoKey> ancestor
-// directory component, and that if git currently has it locked, the lock
-// reason is one Zero itself set, so Release cannot be used to clear the lock
-// on a worktree a user (or another tool) manages by hand: the command is
-// documented as releasing a worktree `prepare` created, not an arbitrary git
-// worktree lock. The ancestor-component check stands in for reconstructing
-// and comparing a full repoDir, because Release has no reliable way to know
-// which --dir a long-gone Prepare call used (the CLI never threads BaseDir
-// through to Release, and a custom --dir is not recorded anywhere the
-// lock/unlock path can read back); the repoKey component is Prepare's actual
-// ownership signature regardless of which directory it was created under.
-// The repository root for that key, and the lock reason for the ownership
-// check, both come from the same `git worktree list --porcelain` call, which
-// works whether dir is the worktree itself or the main repository (its first
-// entry is always the main working tree, from any worktree, regardless of
-// git-dir layout), so this needs no branching on which of Release's two cwd
-// cases is in play.
+// directory component, is a registered worktree of the repository, and (when
+// locked) carries a lock reason Zero itself set, so Release cannot be used to
+// clear the lock on a worktree a user (or another tool) manages by hand: the
+// command is documented as releasing a worktree `prepare` created, not an
+// arbitrary git worktree lock. The ancestor-component check stands in for
+// reconstructing and comparing a full repoDir, because Release has no
+// reliable way to know which --dir a long-gone Prepare call used (the CLI
+// never threads BaseDir through to Release, and a custom --dir is not
+// recorded anywhere the lock/unlock path can read back); the repoKey
+// component is Prepare's actual ownership signature regardless of which
+// directory it was created under. The repository root for that key, and the
+// lock reason for the ownership check, both come from the same `git worktree
+// list --porcelain` call, which works whether dir is the worktree itself or
+// the main repository (its first entry is always the main working tree, from
+// any worktree, regardless of git-dir layout), so this needs no branching on
+// which of Release's two cwd cases is in play.
 func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, path string) error {
 	output, err := gitOutput(ctx, runGit, dir, "worktree", "list", "--porcelain")
 	if err != nil {
@@ -311,13 +314,7 @@ func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, 
 	}
 	want := "zero-worktree-" + repoKey(entries[0].path)
 
-	target := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		target = resolved
-	} else if abs, err := filepath.Abs(path); err == nil {
-		target = abs
-	}
-	target = filepath.Clean(target)
+	target := canonicalizePath(path)
 
 	hasZeroComponent := false
 	for _, component := range strings.Split(target, string(filepath.Separator)) {
@@ -330,16 +327,50 @@ func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, 
 		return fmt.Errorf("refusing to release %s: not a zero-managed worktree (expected an ancestor directory named %q)", path, want)
 	}
 
+	// Require a registered porcelain entry before unlocking. Matching only
+	// the public zero-worktree-<repoKey> path component would let Release
+	// clear a manual lock on any same-named path under that directory.
+	// Path comparison uses canonicalizePath so a lexical user argument
+	// (macOS /var vs /private/var, symlink --worktree-dir) still matches
+	// the physical spelling git worktree list reports.
+	matched := false
 	for _, entry := range entries {
-		if entry.path != target {
+		if canonicalizePath(entry.path) != target {
 			continue
 		}
-		if entry.locked && !strings.HasPrefix(entry.lockReason, leaseReasonPrefix) {
+		matched = true
+		if !entry.locked {
+			// Already unlocked: nothing to release. Treat as success so a
+			// double release is a no-op rather than a git "not locked" error.
+			return errAlreadyUnlocked
+		}
+		if !strings.HasPrefix(entry.lockReason, leaseReasonPrefix) {
 			return fmt.Errorf("refusing to release %s: locked with reason %q, not a zero lease", path, entry.lockReason)
 		}
 		break
 	}
+	if !matched {
+		return fmt.Errorf("refusing to release %s: not a registered worktree of this repository", path)
+	}
 	return nil
+}
+
+// errAlreadyUnlocked is a sentinel for a Zero-managed path whose git lock is
+// already clear; Release returns nil without calling unlock.
+var errAlreadyUnlocked = errors.New("worktree already unlocked")
+
+// canonicalizePath returns the physical, cleaned form of path when it can be
+// resolved (EvalSymlinks), otherwise Abs+Clean. Used so comparisons against
+// `git worktree list --porcelain` (which reports physical paths) succeed for
+// lexical or symlinked user spellings of the same location.
+func canonicalizePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
 }
 
 func DefaultBaseDir(env map[string]string) (string, error) {
@@ -568,15 +599,21 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge)
 	var lastErr error
 	for _, entry := range parseWorktreeList(output) {
+		// Compare against the physical spelling of the entry path. Git's
+		// porcelain listing is normally already physical, but test fixtures
+		// and some symlink layouts can leave a logical spelling that would
+		// otherwise fail the containment check against the resolved repoDir.
+		// Git commands still receive entry.path (the registered spelling).
+		entryPath := canonicalizePath(entry.path)
 		// Only prune worktrees zero created for this repository (i.e. inside
 		// repoDir), using a path-boundary-safe comparison so a sibling
 		// directory that merely shares repoDir as a string prefix (e.g.
 		// "<repoDir>-other") can't match.
-		if !isUnderDir(entry.path, repoDir) {
+		if !isUnderDir(entryPath, repoDir) {
 			continue
 		}
 
-		// A locked worktree is never a prune candidate — with one recovery
+		// A locked worktree is never a prune candidate - with one recovery
 		// carve-out: a Zero lease whose recorded owner process is provably
 		// dead (SIGKILL, crash, power loss skipped the deferred release).
 		// Without it, an abnormal exit leaves the lock in place forever and
@@ -591,7 +628,15 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 			expiredLease = true
 		}
 
-		info, err := os.Stat(entry.path)
+		// Prefer the physical path for filesystem probes when the entry
+		// resolves; fall back to the registered spelling if it does not
+		// (for example a prunable entry whose directory is already gone).
+		statPath := entryPath
+		info, err := os.Stat(statPath)
+		if err != nil && statPath != entry.path {
+			statPath = entry.path
+			info, err = os.Stat(statPath)
+		}
 		if err != nil {
 			if os.IsNotExist(err) {
 				_, _ = runGit(ctx, repoRoot, "worktree", "prune")
@@ -602,14 +647,14 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 			continue
 		}
 
-		if worktreeIsStale(entry.path, cutoff) {
+		if worktreeIsStale(statPath, cutoff) {
 			// An explicit release is the owner's completion signal, so a
 			// worktree holding only gitignored residue (node_modules, build
-			// output) after release is reclaimable — otherwise every released
+			// output) after release is reclaimable - otherwise every released
 			// worktree with such artifacts leaks forever. An expired lease is
 			// NOT a completion signal (the task may have died mid-work), so
 			// there ignored files still count as live data.
-			if worktreeIsDirty(ctx, runGit, entry.path, expiredLease) {
+			if worktreeIsDirty(ctx, runGit, statPath, expiredLease) {
 				// A stale mtime only means nothing changed at the worktree's
 				// top level or below recently; it does not mean the task
 				// holding it is done. Uncommitted or untracked changes are
@@ -618,7 +663,7 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 				// gets committed/cleaned (no longer dirty) or unlocked.
 				continue
 			}
-			if err := preserveUnreachableWorktreeHead(ctx, runGit, repoRoot, entry.path); err != nil {
+			if err := preserveUnreachableWorktreeHead(ctx, runGit, repoRoot, statPath); err != nil {
 				lastErr = errors.Join(lastErr, fmt.Errorf("preserve worktree HEAD %s: %w", entry.path, err))
 				continue
 			}
@@ -702,7 +747,7 @@ func isUnderDir(path, dir string) bool {
 // outside that worktree's own administrative files points at it. If a task
 // committed its result there and the worktree goes stale before that commit
 // is otherwise referenced (merged, pushed, cherry-picked), force-removing it
-// deletes the only ref keeping the commit reachable — it becomes immediately
+// deletes the only ref keeping the commit reachable - it becomes immediately
 // eligible for git gc, exactly as if it had never been committed. This checks
 // whether some OTHER ref in the repository already contains worktreePath's
 // HEAD; if none does, it creates a durable ref for it in the main
@@ -713,7 +758,7 @@ func preserveUnreachableWorktreeHead(ctx context.Context, runGit GitRunner, repo
 	head, err := gitOutput(ctx, runGit, worktreePath, "rev-parse", "HEAD")
 	if err != nil {
 		// No commit to preserve (an empty/unborn worktree, or one already
-		// gone) — nothing for this guard to do; let the caller proceed.
+		// gone) - nothing for this guard to do; let the caller proceed.
 		return nil
 	}
 	head = strings.TrimSpace(head)
@@ -780,7 +825,7 @@ func worktreeIsStale(root string, cutoff time.Time) bool {
 // lease): such files may be all a dead task left behind. It is clear for an
 // explicitly released worktree, where ignored residue like node_modules or
 // build output would otherwise make the released checkout unreclaimable at
-// every age — release is the owner's statement that the task is done.
+// every age - release is the owner's statement that the task is done.
 //
 // An inspection failure fails closed, treating it as dirty rather than clean:
 // an incomplete check must not authorize a forced removal.
