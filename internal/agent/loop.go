@@ -1770,12 +1770,17 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 }
 
 // hooksSuppressed reports whether executable hooks must not run for this
-// run's permission mode. Plan and spec-draft promise a read-only turn, but
-// hooks execute configured host commands outside the advertised-tool and
-// sandbox gates — so dispatching them would let merely starting a plan
-// session or calling read_file mutate the workspace or spawn processes.
+// run's permission mode. Plan mode promises a read-only turn, but hooks
+// execute configured host commands outside the advertised-tool and sandbox
+// gates, so dispatching them would let merely starting a plan session or
+// calling read_file mutate the workspace or spawn processes.
+//
+// Spec-draft keeps the existing trust-gated hook model: project hooks still
+// fire when the workspace (or its worktree trust root) is trusted. That is
+// intentional; trust inheritance for --use-spec --worktree is covered by
+// TestExecSpecWorktreeInheritsTrustEndToEnd.
 func hooksSuppressed(options Options) bool {
-	return options.PermissionMode == PermissionModePlan || options.PermissionMode == PermissionModeSpecDraft
+	return options.PermissionMode == PermissionModePlan
 }
 
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
@@ -3180,10 +3185,21 @@ func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
 // toolAdvertisedInPlan mirrors toolAdvertisedInSpecDraft: the agent may only
 // read the workspace, ask the user, and shape the plan with update_plan. No
 // mutating tool is advertised, so plan mode stays strictly read-only.
+//
+// ask_user and update_plan are validated against Safety like every other
+// tool, never whitelisted by name alone: Registry.Register lets a caller
+// replace either name with a mutating tool, and a name-only match would
+// advertise (and then let executeToolCall run) it under a mode that promises
+// read-only behavior. Both names currently carry SideEffectRead+PermissionAllow,
+// so this changes nothing for the real tools.
+//
+// lsp_navigate is excluded even though it is classified SideEffectRead: its
+// manager lazily starts a real language-server process (internal/lsp/server.go)
+// outside the sandbox and permission gates, which contradicts plan mode's
+// promise that nothing runs.
 func toolAdvertisedInPlan(tool tools.Tool) bool {
-	switch tool.Name() {
-	case "ask_user", "update_plan":
-		return true
+	if tool.Name() == "lsp_navigate" {
+		return false
 	}
 	safety := tool.Safety()
 	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
