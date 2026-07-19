@@ -58,11 +58,30 @@ func loadOrCreateDeviceID() string {
 		}
 	}
 	id := generateDeviceID()
-	if path != "" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err == nil {
-			_ = os.WriteFile(path, []byte(id+"\n"), 0o600)
-		}
+	if path == "" {
+		return id
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return id
+	}
+	// Create exclusively rather than os.WriteFile: two processes racing on
+	// first use must converge on the SAME id, since a login accepted under
+	// one device identity and completions sent under another are rejected
+	// by the backend. The loser reads back the winner's file instead of
+	// overwriting it.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			if raw, readErr := os.ReadFile(path); readErr == nil {
+				if existingID := strings.TrimSpace(string(raw)); isUUID(existingID) {
+					return existingID
+				}
+			}
+		}
+		return id
+	}
+	defer f.Close()
+	_, _ = f.WriteString(id + "\n")
 	return id
 }
 

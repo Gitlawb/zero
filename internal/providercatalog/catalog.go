@@ -411,11 +411,10 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	// persistent device ID backed by a config-dir file, and minting/reading
 	// that file at import time would do filesystem IO in every process
 	// regardless of provider.
-	if descriptor.ID == "kimi-code" && descriptor.CustomHeaders == nil {
-		descriptor.CustomHeaders = kimiidentity.Headers()
-	}
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
+	} else if descriptor.ID == "kimi-code" {
+		descriptor.CustomHeaders = kimiidentity.Headers()
 	}
 	return descriptor
 }
