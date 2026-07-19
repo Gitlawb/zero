@@ -1744,6 +1744,31 @@ func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxEnabledUserConfigDisables(t *testing.T) {
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("user config enabled:false must resolve to a false pointer, got %v", resolved.Sandbox.Enabled)
+	}
+}
+
+func TestResolveSandboxDisableIgnoredFromProjectConfig(t *testing.T) {
+	// Security: a cloned repo's project config must NOT be able to disable the
+	// sandbox that constrains it. Only global config / CLI can turn it off.
+	userPath := writeConfig(t, `{}`)
+	projectPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled != nil {
+		t.Fatalf("project config enabled:false must be ignored, got %v — a repo could disable the sandbox", *resolved.Sandbox.Enabled)
+	}
+}
+
 func TestResolveNotifyValid(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"both","focusMode":"always"}}`)
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})

@@ -939,6 +939,12 @@ func providerSensitiveEnvKeys(resolved config.ResolvedConfig) []string {
 // applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto
 // the default policy.
 func applyConfiguredSandboxPolicy(policy sandbox.Policy, cfg config.SandboxConfig) sandbox.Policy {
+	// An explicit `"sandbox": {"enabled": false}` disables the sandbox: every
+	// request is allowed and commands run unwrapped. Only reachable from global
+	// config / CLI — project config never sets Enabled (see mergeProjectConfig).
+	if cfg.Enabled != nil && !*cfg.Enabled {
+		policy.Mode = sandbox.ModeDisabled
+	}
 	if network := strings.TrimSpace(cfg.Network); network != "" {
 		switch sandbox.NetworkMode(network) {
 		case sandbox.NetworkAllow, sandbox.NetworkDeny:

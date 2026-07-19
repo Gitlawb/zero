@@ -216,6 +216,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP, true)
+	if src.Sandbox.Enabled != nil {
+		dst.Sandbox.Enabled = src.Sandbox.Enabled
+	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -273,6 +276,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if err := mergeProjectMCPConfig(&dst.MCP, src.MCP); err != nil {
 		return err
 	}
+	// Sandbox.Enabled is intentionally NOT merged from project config: a cloned
+	// repo's .zero/config.json must not be able to disable the sandbox that
+	// constrains it. Only global config and CLI can turn the sandbox off.
+	//
 	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
