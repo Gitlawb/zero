@@ -203,6 +203,16 @@ func TestApplyWindowsSharedDescendantDeniesAppliesAndRollsBack(t *testing.T) {
 	if dirDeniesSID(t, writable, caps.ReadOnly) {
 		t.Fatalf("descendant %q still denies %q after rollback", writable, caps.ReadOnly)
 	}
+	// Checking only that the deny disappeared would also pass a rollback that
+	// clobbered the original Users write ACE along with it; reassert the
+	// pre-existing writable state is actually restored, not just any DACL.
+	restoredWritable, err := windowsDirGrantsBroadenedWrite(writable)
+	if err != nil {
+		t.Fatalf("windowsDirGrantsBroadenedWrite after rollback: %v", err)
+	}
+	if !restoredWritable {
+		t.Fatalf("rollback did not restore the original writable DACL on %q", writable)
+	}
 }
 
 // TestWindowsAceSIDLocatesSIDInObjectACE pins the offset arithmetic

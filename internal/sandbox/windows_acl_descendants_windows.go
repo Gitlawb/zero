@@ -38,10 +38,24 @@ import (
 //     surface and is small in practice, while a non-writable directory cannot
 //     have been reached by such a write and so is pruned.
 //   - windowsDescendantScanMaxDepth and windowsDescendantScanMaxDirs are hard
-//     safety caps against a pathological deep or very broad writable tree; if
-//     either is hit the scan stops (leaving deeper writable descendants
-//     unscanned, a bounded residual gap, still strictly smaller than the
-//     root-object-only enforcement it replaces).
+//     safety caps against a pathological deep or very broad writable tree. The
+//     scan fails closed if either is hit: unlike a locked-down directory (see
+//     below), hitting a cap means there IS unexamined territory, so reporting
+//     success would certify an incomplete scan as clean.
+//   - A directory this admin-elevated process cannot list, or whose DACL it
+//     cannot read, is treated as locked down and pruned (not failed closed).
+//     This is deliberate, not a residual gap: every one of the four shared
+//     roots has real, common subdirectories Administrators are denied by
+//     design regardless of privilege — "C:\System Volume Information" is
+//     SYSTEM-exclusive on every NTFS volume (see Microsoft KB2867841) and
+//     sits directly under the system drive root scanned here. Failing closed
+//     on that ubiquitous, expected case would make `zero sandbox setup` fail
+//     on every real machine, not just pathological ones. A directory the
+//     elevated process cannot even open a handle to, or read the DACL of,
+//     cannot have granted BUILTIN\Users or Authenticated Users write either
+//     (that would require WRITE_DAC/READ_CONTROL to be broader than what this
+//     process — running as Administrator — already has), so pruning it here
+//     carries no realistic write-jail risk.
 //
 // Reparse points (junctions/symlinks) are skipped entirely: their target lives
 // outside this subtree, so denying or descending them would touch unrelated
@@ -53,12 +67,14 @@ const (
 )
 
 // windowsBroadenedWriteProbeMask is the set of access-mask bits that let a
-// principal create, delete, or modify content in (or the security of) a
-// directory, i.e. the bits that make a directory a usable write-jail escape.
-// FILE_WRITE_DATA is FILE_ADD_FILE and FILE_APPEND_DATA is FILE_ADD_SUBDIRECTORY
-// for a directory object.
+// principal create, delete, or modify content, attributes, or extended
+// attributes in (or the security of) a directory, i.e. the bits that make a
+// directory a usable write-jail escape. FILE_WRITE_DATA is FILE_ADD_FILE and
+// FILE_APPEND_DATA is FILE_ADD_SUBDIRECTORY for a directory object.
 const windowsBroadenedWriteProbeMask windows.ACCESS_MASK = windows.FILE_WRITE_DATA |
 	windows.FILE_APPEND_DATA |
+	windows.FILE_WRITE_ATTRIBUTES |
+	windows.FILE_WRITE_EA |
 	windowsFileDeleteChild |
 	windows.DELETE |
 	windows.WRITE_DAC |
@@ -109,6 +125,14 @@ func applyWindowsSharedDescendantDenies(root, denySID string, writeRoots []strin
 // much an escape surface as a writable directory — but only directories are
 // descended into. See the package-level comment above for the traversal
 // bounds and their rationale.
+//
+// The scan fails closed on exhausting windowsDescendantScanMaxDirs or
+// windowsDescendantScanMaxDepth: either means there is unexamined territory
+// this call cannot vouch for, so it returns an error rather than a partial
+// result the caller could mistake for a complete one. A directory it cannot
+// list, or a child whose DACL it cannot read, is treated as locked down and
+// pruned instead — see the package-level comment for why that case is safe
+// to skip rather than fail closed.
 func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]string, error) {
 	if windowsCapabilityPathKey(root) == "" {
 		return nil, nil
@@ -141,10 +165,11 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 		entries, err := os.ReadDir(current.path)
 		if err != nil {
 			// A directory the elevated setup cannot even list is locked down
-			// (SYSTEM-owned); the broad groups cannot write there, so skipping
-			// it is safe. Traversal is best-effort so a full system-drive walk
-			// does not abort setup on the normal un-listable system dirs it must
-			// step over.
+			// (SYSTEM-owned, e.g. "System Volume Information" on every shared
+			// root's own volume); the broad groups cannot write there either,
+			// so skipping it is safe. Traversal is best-effort so a full
+			// system-drive walk does not abort setup on the normal
+			// un-listable system dirs it must step over.
 			continue
 		}
 		for _, entry := range entries {
@@ -157,7 +182,7 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 				continue
 			}
 			if visited >= windowsDescendantScanMaxDirs {
-				return out, nil
+				return nil, fmt.Errorf("descendant scan exceeded %d entries below %s", windowsDescendantScanMaxDirs, root)
 			}
 			visited++
 			writable, err := windowsDirGrantsBroadenedWrite(child)
@@ -175,10 +200,10 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 				continue
 			}
 			childDepth := current.depth + 1
-			if childDepth >= windowsDescendantScanMaxDepth {
-				continue
-			}
 			if childDepth < windowsDescendantScanBaselineDepth || writable {
+				if childDepth >= windowsDescendantScanMaxDepth {
+					return nil, fmt.Errorf("descendant scan exceeded depth %d at %s", windowsDescendantScanMaxDepth, child)
+				}
 				queue = append(queue, node{path: child, depth: childDepth})
 			}
 		}

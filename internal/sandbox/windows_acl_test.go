@@ -294,6 +294,45 @@ func TestBuildWindowsACLPlanSkipsSharedDenyPathNestedUnderWriteRoot(t *testing.T
 	}
 }
 
+// TestBuildWindowsACLPlanSkipsSharedDenyPathExactlyEqualToWriteRoot exercises
+// the windowsPathUnderAnyRoot exact-match branch (as opposed to the
+// nested-under-a-write-root case above): a write root configured AT one of
+// the four shared paths themselves must get its Allow entry with no
+// conflicting DenyWrite, or a broadened token could never write there despite
+// the user explicitly configuring it as writable.
+func TestBuildWindowsACLPlanSkipsSharedDenyPathExactlyEqualToWriteRoot(t *testing.T) {
+	home := t.TempDir()
+	_, systemRoot, _, _ := windowsSharedDenyPathsForTest(t)
+	writeRoot := systemRoot + `\Temp`
+
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{writeRoot},
+		SandboxLevel:   WindowsSandboxLevelRestrictedToken,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: writeRoot}},
+				DenyRead:   []string{`C:\workspace\secret-read`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	writeRootSID, err := WindowsWorkspaceCapabilitySID(home, writeRoot)
+	if err != nil {
+		t.Fatalf("WindowsWorkspaceCapabilitySID: %v", err)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLAllowWrite, writeRoot, writeRootSID, false)
+	for _, entry := range plan.Entries {
+		if entry.Action == WindowsACLDenyWrite && windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(writeRoot) {
+			t.Fatalf("plan denies write on %q, which IS the configured write root: %#v", writeRoot, entry)
+		}
+	}
+}
+
 func TestBuildWindowsACLPlanRejectsUnrestrictedProfiles(t *testing.T) {
 	_, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
 		SandboxHome: t.TempDir(),

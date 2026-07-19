@@ -102,6 +102,14 @@ func createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDStrings []string
 // mitigation: those keep the original (narrower) SID scope instead of
 // widening the write jail with nothing to close the gap.
 func createWindowsRestrictedTokenFromBase(base windows.Token, capabilitySIDs []windowsLocalSID, writeRestricted, broadenReadSIDs bool) (windows.Token, error) {
+	// Defensive guardrail for the invariant documented above: combining the
+	// two would silently widen the write jail (broadenReadSIDs's write grants)
+	// with no compensating DenyWrite mitigation (writeRestricted's caller
+	// never applies one), so refuse to build the token rather than let a
+	// future caller-side refactor combine them by accident.
+	if broadenReadSIDs && writeRestricted {
+		return 0, errors.New("broadenReadSIDs cannot be combined with writeRestricted")
+	}
 	logonSID, err := copyWindowsLogonSID(base)
 	if err != nil {
 		return 0, err

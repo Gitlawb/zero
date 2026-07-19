@@ -21,10 +21,19 @@ import (
 // inherited volume-wide. The broadening is therefore only sound when there
 // is no other fixed volume to protect.
 //
+// A second fixed volume need not have a drive letter to be reachable: it can
+// be mounted at an NTFS folder mount point (e.g. C:\mnt\data), which
+// GetLogicalDriveStrings never reports (it only enumerates drive-letter
+// roots). This enumerates every volume on the machine via
+// FindFirstVolume/FindNextVolume and checks ALL of its mount points —
+// drive letters and mounted folders alike — via GetVolumePathNamesForVolumeName,
+// so a fixed volume mounted only as a folder is caught the same as one
+// mounted on a drive letter.
+//
 // Fail closed: an enumeration failure, an unresolvable system drive, or any
-// additional fixed volume all report false, keeping the narrow restricting-
-// SID set (reads of Users-granted system paths stay broken on such hosts,
-// but the write jail holds).
+// additional fixed volume (by any mount path) all report false, keeping the
+// narrow restricting-SID set (reads of Users-granted system paths stay
+// broken on such hosts, but the write jail holds).
 func windowsSystemDriveIsOnlyFixedVolume() bool {
 	windowsDir, err := windows.GetSystemWindowsDirectory()
 	if err != nil || len(windowsDir) < 2 {
@@ -32,24 +41,64 @@ func windowsSystemDriveIsOnlyFixedVolume() bool {
 	}
 	systemDrive := strings.ToUpper(windowsDir[:2]) // e.g. "C:"
 
-	buf := make([]uint16, 1024)
-	n, err := windows.GetLogicalDriveStrings(uint32(len(buf)), &buf[0])
-	if err != nil || n == 0 || int(n) > len(buf) {
+	volumeNameBuf := make([]uint16, 260)
+	handle, err := windows.FindFirstVolume(&volumeNameBuf[0], uint32(len(volumeNameBuf)))
+	if err != nil {
 		return false
 	}
-	for _, root := range windowsSplitNulList(buf[:n]) {
-		rootPtr, err := windows.UTF16PtrFromString(root)
+	defer windows.FindVolumeClose(handle)
+
+	for {
+		volumeName := windows.UTF16ToString(volumeNameBuf)
+		onlySystemDrive, err := windowsVolumeMountsOnlySystemDrive(volumeName, systemDrive)
 		if err != nil {
 			return false
 		}
-		if windows.GetDriveType(rootPtr) != windows.DRIVE_FIXED {
-			continue
+		if !onlySystemDrive {
+			return false
 		}
-		if !strings.EqualFold(strings.ToUpper(strings.TrimSuffix(root, `\`)), systemDrive) {
+		if err := windows.FindNextVolume(handle, &volumeNameBuf[0], uint32(len(volumeNameBuf))); err != nil {
+			if err == windows.ERROR_NO_MORE_FILES {
+				break
+			}
 			return false
 		}
 	}
 	return true
+}
+
+// windowsVolumeMountsOnlySystemDrive reports whether volumeName (a
+// "\\?\Volume{GUID}\" path from FindFirstVolume/FindNextVolume) is either not
+// fixed media, not mounted anywhere, or mounted only at the system drive
+// root. Any OTHER mount path — a different drive letter or a folder mount
+// point — makes it a reachable extra fixed volume, regardless of which path
+// form reaches it.
+func windowsVolumeMountsOnlySystemDrive(volumeName, systemDrive string) (bool, error) {
+	volumeNamePtr, err := windows.UTF16PtrFromString(volumeName)
+	if err != nil {
+		return false, err
+	}
+	if windows.GetDriveType(volumeNamePtr) != windows.DRIVE_FIXED {
+		return true, nil
+	}
+
+	buf := make([]uint16, 1024)
+	var returnLength uint32
+	err = windows.GetVolumePathNamesForVolumeName(volumeNamePtr, &buf[0], uint32(len(buf)), &returnLength)
+	if err == windows.ERROR_MORE_DATA {
+		buf = make([]uint16, returnLength)
+		err = windows.GetVolumePathNamesForVolumeName(volumeNamePtr, &buf[0], uint32(len(buf)), &returnLength)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	for _, mountPath := range windowsSplitNulList(buf) {
+		if !strings.EqualFold(strings.ToUpper(strings.TrimSuffix(mountPath, `\`)), systemDrive) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // windowsSplitNulList splits the double-NUL-terminated UTF-16 string list
