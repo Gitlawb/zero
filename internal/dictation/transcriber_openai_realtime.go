@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -61,6 +60,14 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		},
 	})
 	if err != nil {
+		// Preserve the context.Canceled sentinel (it carries no key) so an
+		// Esc-abort during dial still matches the UI's errors.Is check. Key
+		// on ctx.Err() itself rather than unwrapping err: a cancellation can
+		// surface as a plain transport error (e.g. "closed network
+		// connection") rather than context.Canceled directly.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("connecting to OpenAI Realtime: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 	defer conn.CloseNow()
@@ -76,6 +83,11 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		},
 	}
 	if err := writeJSON(ctx, conn, sessionUpdate); err != nil {
+		// Same cancellation short-circuit as the dial above: an Esc-abort
+		// while the session update is in flight must stay context.Canceled.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("configuring OpenAI Realtime session: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 
@@ -118,7 +130,11 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			// A user abort cancels the streaming context; the UI matches it
 			// with errors.Is(err, context.Canceled), so return the sentinel
 			// itself (it carries no key) instead of a flat redacted string.
-			if errors.Is(err, context.Canceled) {
+			// Key on ctx.Err() rather than unwrapping err: the writeErrCh
+			// swap above can replace err with a plain transport error (e.g.
+			// "closed network connection") that doesn't itself unwrap to
+			// context.Canceled even though the cancellation is what caused it.
+			if ctx.Err() != nil {
 				return compose(), ctx.Err()
 			}
 			return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
@@ -163,6 +179,8 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case werr := <-writeErrCh:
 			if werr == nil {
 				committed = true
+			} else if ctx.Err() != nil {
+				return compose(), ctx.Err()
 			} else {
 				return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(werr.Error(), o.cfg.APIKey))
 			}

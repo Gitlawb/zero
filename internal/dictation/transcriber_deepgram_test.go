@@ -67,6 +67,7 @@ func TestDeepgramStreamTranscribeCancelKeepsSentinel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	chunks := make(chan []byte, 1)
+	defer close(chunks)
 	chunks <- make([]byte, 320)
 	// The channel stays open: the session is live when the user aborts.
 	errCh := make(chan error, 1)
@@ -75,10 +76,14 @@ func TestDeepgramStreamTranscribeCancelKeepsSentinel(t *testing.T) {
 		errCh <- ferr
 	}()
 
-	<-firstFrame
-	cancel()
-	ferr := <-errCh
-	if !errors.Is(ferr, context.Canceled) {
-		t.Fatalf("cancelled stream error lost the context.Canceled sentinel: %v", ferr)
+	select {
+	case <-firstFrame:
+		cancel()
+		ferr := <-errCh
+		if !errors.Is(ferr, context.Canceled) {
+			t.Fatalf("cancelled stream error lost the context.Canceled sentinel: %v", ferr)
+		}
+	case ferr := <-errCh:
+		t.Fatalf("StreamTranscribe failed early instead of blocking: %v", ferr)
 	}
 }
