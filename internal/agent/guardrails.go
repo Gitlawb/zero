@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -127,9 +126,8 @@ func endsWithContinuationCue(text string) bool {
 // which the update_plan tool coerces to "pending") counts as remaining, matching
 // that tool's own status normalization.
 func planStatusRemaining(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]",
-		"failed", "fail", "error", "errored", "blocked", "cancelled", "canceled", "abandoned", "skipped":
+	switch normalizeTaskPlanStatus(status) {
+	case "completed", "failed":
 		return false
 	default:
 		return true
@@ -307,8 +305,8 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // the bug-hunt surfaced: well-formed output treated as correct; pre-existing tests
 // passing treated as the objective being met; and a result that merely matches a
 // baseline the task asked to beat or improve. General — no task-specific content.
-func acceptanceVerificationNudge() string {
-	return "Before this task can be marked complete, " + acceptanceNudgeMarker + " — " +
+func acceptanceVerificationNudge(objective string) string {
+	nudge := "Before this task can be marked complete, " + acceptanceNudgeMarker + " — " +
 		"NOT the shape or format of your output, NOT that pre-existing tests pass, and NOT that your " +
 		"result merely matches a baseline you were asked to beat or improve. " +
 		"Re-read the original task, then run a concrete check that exercises the actual requirement: " +
@@ -316,6 +314,10 @@ func acceptanceVerificationNudge() string {
 		"thing the task asked you to produce, recover, fix, or optimize. " +
 		"If that check passes, reply PASS and cite the evidence. " +
 		"If it does not pass — or you cannot run such a check — say so plainly and keep working; do not claim success."
+	if objective = capTaskObjective(objective); objective != "" {
+		nudge += "\n\nTask objective: " + objective
+	}
+	return nudge
 }
 
 // toolFailureHintMarker is a stable substring for tests.
@@ -553,16 +555,12 @@ func (state *guardState) pendingPlanItems() bool {
 // many items are still remaining. Malformed arguments leave the prior count
 // unchanged (best-effort — the plan panel itself tolerates the same).
 func (state *guardState) observePlanUpdate(arguments string) {
-	var parsed struct {
-		Plan []struct {
-			Status string `json:"status"`
-		} `json:"plan"`
-	}
-	if json.Unmarshal([]byte(arguments), &parsed) != nil {
+	plan, ok := parseTaskPlan(arguments)
+	if !ok {
 		return
 	}
 	pending := 0
-	for _, item := range parsed.Plan {
+	for _, item := range plan {
 		if planStatusRemaining(item.Status) {
 			pending++
 		}

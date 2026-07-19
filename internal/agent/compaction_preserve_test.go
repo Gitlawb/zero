@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -56,6 +57,57 @@ func TestCompactPreservesActivePlan(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("plan item %q not preserved in %q", want, summary)
 		}
+	}
+}
+
+func TestCompactPreservesBoundedTaskContext(t *testing.T) {
+	objective := strings.Repeat("世", maxTaskObjectiveBytes)
+	task := newTaskState(objective)
+	task.observe(taskStateEvent{kind: taskStateEventPlan, arguments: `{"plan":[{"content":"write code","status":"in_progress"},{"content":"add tests","status":"pending"}]}`})
+	messages := stateConversation()
+	compacted, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+		taskState:    task.snapshotForCompaction(messages),
+	})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(compacted[1].Content)
+	if state.Task == nil || state.Task.Status != taskStatusActive || state.Task.InProgress != 1 || state.Task.Pending != 1 {
+		t.Fatalf("unexpected compact task state: %#v", state.Task)
+	}
+	if len(state.Task.Objective) > maxTaskObjectiveBytes || !utf8.ValidString(state.Task.Objective) {
+		t.Fatalf("objective was not safely bounded: %d bytes %q", len(state.Task.Objective), state.Task.Objective)
+	}
+}
+
+func TestCompactDropsCarriedTaskContextAfterParityMismatch(t *testing.T) {
+	prior := preservedState{Task: &preservedTaskState{Objective: "stale objective", Status: taskStatusActive, Pending: 1}}
+	encoded, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: summaryLabel + "\nold\n\n" + preservedStateLabel + "\n" + string(encoded)},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+		{Role: zeroruntime.MessageRoleUser, Content: "more"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "working"},
+		{Role: zeroruntime.MessageRoleUser, Content: "again"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "done"},
+	}
+	compacted, err := Compact(messages, CompactionOptions{
+		PreserveLast:     2,
+		Summarize:        func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+		taskStateChecked: true,
+	})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(compacted[1].Content)
+	if state.Task != nil {
+		t.Fatalf("stale task context survived a parity mismatch: %#v", state.Task)
 	}
 }
 

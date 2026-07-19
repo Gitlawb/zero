@@ -39,7 +39,7 @@ func newCompletionPolicy(requireSemanticCheck bool) *completionPolicy {
 	return &completionPolicy{requireSemanticCheck: requireSemanticCheck}
 }
 
-func (policy *completionPolicy) evaluate(text string, planPending bool) completionEvaluation {
+func (policy *completionPolicy) evaluate(text string, context completionContext) completionEvaluation {
 	// A direct admission is strong local evidence and takes precedence over all
 	// weaker signals, avoiding both continuation nudges and semantic checks.
 	if reason := selfReportedIncompletion(text); reason != "" {
@@ -50,7 +50,7 @@ func (policy *completionPolicy) evaluate(text string, planPending bool) completi
 	// weak evidence because bookkeeping can be stale. Both get a bounded chance
 	// to continue, but only a persisted cue is ultimately incomplete.
 	cue := endsWithContinuationCue(text)
-	if cue || planPending {
+	if cue || context.PlanPending {
 		if policy.continueNudges < maxContinueNudges {
 			policy.continueNudges++
 			reason := "your message ended mid-step"

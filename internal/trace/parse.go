@@ -132,6 +132,27 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 				Reason:                  stringField(obj, "reason"),
 				SpillCreated:            boolField(obj, "spill_created"),
 			})
+		case "task_state":
+			if !sawTraceHeader {
+				return nil, errors.New("parse trace: not a valid NDJSON trace (no type:trace header)")
+			}
+			t.TaskStates = append(t.TaskStates, TaskStateEvent{
+				Revision:            int(parseInt64(obj["revision"])),
+				Status:              stringField(obj, "status"),
+				ObjectiveHash:       stringField(obj, "objective_hash"),
+				PlanPending:         int(parseInt64(obj["plan_pending"])),
+				PlanInProgress:      int(parseInt64(obj["plan_in_progress"])),
+				PlanCompleted:       int(parseInt64(obj["plan_completed"])),
+				PlanFailed:          int(parseInt64(obj["plan_failed"])),
+				ToolsSucceeded:      int(parseInt64(obj["tools_succeeded"])),
+				ToolsFailed:         int(parseInt64(obj["tools_failed"])),
+				VerificationPassed:  int(parseInt64(obj["verification_passed"])),
+				VerificationFailed:  int(parseInt64(obj["verification_failed"])),
+				VerificationOutcome: stringField(obj, "verification_outcome"),
+				ChangedFileCount:    int(parseInt64(obj["changed_file_count"])),
+				CompletionDecision:  stringField(obj, "completion_decision"),
+				TranscriptParity:    stringField(obj, "transcript_parity"),
+			})
 		default:
 			// Unknown event type: tolerate (forward-compat) but only after a
 			// header has been seen.
@@ -152,8 +173,8 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 	if !sawTraceHeader {
 		return nil, errors.New("parse trace: non-empty input had no type:trace header")
 	}
-	if len(t.Spans) == 0 && len(t.Counters) == 0 && len(t.PrefixHashes) == 0 && len(t.OutputBudgets) == 0 {
-		return nil, errors.New("parse trace: header present but no spans, counters, or prefix hashes recovered (corrupt or truncated)")
+	if len(t.Spans) == 0 && len(t.Counters) == 0 && len(t.PrefixHashes) == 0 && len(t.OutputBudgets) == 0 && len(t.TaskStates) == 0 {
+		return nil, errors.New("parse trace: header present but no events recovered (corrupt or truncated)")
 	}
 	return t, nil
 }
