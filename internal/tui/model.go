@@ -104,6 +104,10 @@ type model struct {
 	activeSession        sessions.Metadata
 	sessionEvents        []sessions.Event
 	btw                  btwState
+	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
+	// surface. It survives returning to the parent so a late message from an old
+	// side run can never match a run in a later BTW conversation.
+	btwRunIDSeq int
 	// titledSessions records session ids for which a model-generated title has
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
@@ -1117,6 +1121,9 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m = m.resizeBTWParent(size)
+	}
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
 		return next, cmd
 	}
@@ -4134,7 +4141,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
-	if m.btw.active && btwCommandChangesSession(command.kind) {
+	if m.btw.active && btwCommandUnavailable(command) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: command.name + " is unavailable in a BTW conversation. Return to the main session first with /btw or Ctrl+C.",

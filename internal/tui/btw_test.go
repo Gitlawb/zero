@@ -2,8 +2,12 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
 )
@@ -183,11 +187,15 @@ func TestBTWBlocksCommandsThatWouldReplaceItsSession(t *testing.T) {
 func TestBTWBlocksPersistentConfigurationCommands(t *testing.T) {
 	for _, input := range []string{
 		"/model other",
-		"/provider other",
+		"/provider add",
 		"/turns 100",
 		"/profile fast",
 		"/theme dark",
 		"/config recaps off",
+		"/stt-model",
+		"/mcp",
+		"/rewind",
+		"/compact",
 	} {
 		t.Run(input, func(t *testing.T) {
 			m := newBTWTestModel(t)
@@ -199,6 +207,27 @@ func TestBTWBlocksPersistentConfigurationCommands(t *testing.T) {
 			}
 			if !transcriptContains(got.transcript, "unavailable in a BTW conversation") {
 				t.Fatalf("%s missing blocked-command guidance: %#v", input, got.transcript)
+			}
+		})
+	}
+}
+
+func TestBTWAllowsReadOnlyConfigurationCommands(t *testing.T) {
+	for _, input := range []string{
+		"/model list",
+		"/provider status",
+		"/turns",
+		"/profile status",
+		"/theme list",
+		"/config",
+	} {
+		t.Run(input, func(t *testing.T) {
+			m := newBTWTestModel(t)
+			side, _ := m.handleBTWCommand("")
+			updated, _ := side.dispatchCommand(parseCommand(input))
+			got := updated.(model)
+			if transcriptContains(got.transcript, "unavailable in a BTW conversation") {
+				t.Fatalf("%s was blocked even though it is read-only", input)
 			}
 		})
 	}
@@ -224,19 +253,139 @@ func TestBTWExitBlockedWhileParentRunActive(t *testing.T) {
 }
 
 func TestBTWReturnRestartsParentSpinner(t *testing.T) {
-	m := newBTWTestModel(t)
-	m.reducedMotion = false
-	m.pending = true
-	m.spinnerTicking = true
-	side, _ := m.handleBTWCommand("")
-	side.spinnerTicking = false
+	for _, reducedMotion := range []bool{false, true} {
+		t.Run(map[bool]string{false: "animated", true: "reduced-motion"}[reducedMotion], func(t *testing.T) {
+			m := newBTWTestModel(t)
+			m.reducedMotion = reducedMotion
+			m.pending = true
+			m.spinnerTicking = true
+			side, _ := m.handleBTWCommand("")
+			side.spinnerTicking = false
 
-	returned, cmd := side.leaveBTW()
-	if !returned.pending || !returned.spinnerTicking {
-		t.Fatalf("parent spinner was not restarted: pending=%v ticking=%v", returned.pending, returned.spinnerTicking)
+			returned, cmd := side.leaveBTW()
+			if !returned.pending || !returned.spinnerTicking {
+				t.Fatalf("parent spinner was not restarted: pending=%v ticking=%v", returned.pending, returned.spinnerTicking)
+			}
+			if cmd == nil {
+				t.Fatal("returning to an active parent did not schedule a spinner tick")
+			}
+		})
 	}
-	if cmd == nil {
-		t.Fatal("returning to an active parent did not schedule a spinner tick")
+}
+
+func TestBTWCancelledRunFlushesBeforeReturnAndRunIDsStayUnique(t *testing.T) {
+	m := newBTWTestModel(t)
+	m.provider = &fakeProvider{}
+
+	side1, _ := m.handleBTWCommand("first side question")
+	firstRunID := side1.activeRunID
+	side1.cancelRun()
+	blocked, _ := side1.leaveBTW()
+	if !blocked.btw.active || !transcriptContains(blocked.transcript, "still saving its session events") {
+		t.Fatal("BTW returned before the cancelled side run finished flushing")
+	}
+
+	flushedModel, _ := side1.updateModel(agentResponseMsg{runID: firstRunID})
+	flushed := flushedModel.(model)
+	if len(flushed.flushRunIDs) != 0 {
+		t.Fatalf("cancelled side run did not drain: %#v", flushed.flushRunIDs)
+	}
+	parent, _ := flushed.leaveBTW()
+	side2, _ := parent.handleBTWCommand("second side question")
+	if side2.activeRunID == firstRunID {
+		t.Fatalf("BTW run ID was reused across re-entry: %d", firstRunID)
+	}
+
+	updated, _ := side2.updateModel(agentResponseMsg{
+		runID: firstRunID,
+		rows:  []transcriptRow{{kind: rowAssistant, text: "answer to the FIRST question"}},
+	})
+	got := updated.(model)
+	if !got.pending || transcriptContains(got.transcript, "answer to the FIRST question") {
+		t.Fatal("a stale side response hijacked the next BTW run")
+	}
+}
+
+func TestBTWRejectsExplicitResumeOfSideSession(t *testing.T) {
+	m := newBTWTestModel(t)
+	side, _ := m.handleBTWCommand("")
+
+	if _, err := m.resolveResumeSession(side.activeSession.SessionID); err == nil || !strings.Contains(err.Error(), "not resumable") {
+		t.Fatalf("explicit side-session resume error = %v, want non-resumable rejection", err)
+	}
+}
+
+func TestBTWCannotStartDuringDeferredExit(t *testing.T) {
+	m := newBTWTestModel(t)
+	m.exiting = true
+
+	got, cmd := m.handleBTWCommand("should not run")
+	if cmd != nil || got.btw.active {
+		t.Fatalf("BTW started during deferred exit: active=%v cmd=%v", got.btw.active, cmd)
+	}
+	if !transcriptContains(got.transcript, "cannot start now") {
+		t.Fatalf("missing deferred-exit guidance: %#v", got.transcript)
+	}
+}
+
+func TestBTWStatusAndHelpStayVisible(t *testing.T) {
+	m := newBTWTestModel(t)
+	side, _ := m.handleBTWCommand("")
+
+	if status := plainRender(t, side.statusLine(100)); !strings.Contains(status, "BTW") {
+		t.Fatalf("status line has no persistent BTW indicator: %q", status)
+	}
+	groups := side.buildKeybindingGroups()
+	if got := groups[0].bindings[3].desc; !strings.Contains(got, "return to the main session") {
+		t.Fatalf("BTW Ctrl+C help = %q", got)
+	}
+}
+
+func TestBTWResizeUpdatesHiddenParent(t *testing.T) {
+	m := newBTWTestModel(t)
+	m.width = 80
+	m.height = 24
+	side, _ := m.handleBTWCommand("")
+
+	updated, _ := side.updateModel(tea.WindowSizeMsg{Width: 120, Height: 50})
+	got := updated.(model)
+	if got.btw.parent == nil || got.btw.parent.width != 120 || got.btw.parent.height != 50 {
+		t.Fatalf("hidden parent kept stale geometry: %#v", got.btw.parent)
+	}
+	returned, _ := got.leaveBTW()
+	if returned.width != 120 || returned.height != 50 {
+		t.Fatalf("restored parent geometry = %dx%d, want 120x50", returned.width, returned.height)
+	}
+}
+
+func TestBTWUsesIndependentUsageTracker(t *testing.T) {
+	m := newBTWTestModel(t)
+	parentTracker := m.usageTracker
+	side, _ := m.handleBTWCommand("")
+	if side.usageTracker == nil || side.usageTracker == parentTracker {
+		t.Fatal("BTW conversation shared the main session usage tracker")
+	}
+	returned, _ := side.leaveBTW()
+	if returned.usageTracker != parentTracker {
+		t.Fatal("returning from BTW did not restore the main session usage tracker")
+	}
+}
+
+func TestBTWFailedForkKeepsMainSessionLoops(t *testing.T) {
+	badRoot := filepath.Join(t.TempDir(), "sessions")
+	if err := os.WriteFile(badRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: sessions.NewStore(sessions.StoreOptions{RootDir: badRoot})})
+	m.activeSession = sessions.Metadata{SessionID: "main-session"}
+	m.loops = []*loopState{{id: "loop-1"}}
+
+	got, _ := m.handleBTWCommand("")
+	if len(got.loops) != 1 || got.loops[0].id != "loop-1" {
+		t.Fatalf("failed BTW fork cleared main-session loops: %#v", got.loops)
+	}
+	if !transcriptContains(got.transcript, "Could not open BTW conversation") {
+		t.Fatalf("missing fork failure notice: %#v", got.transcript)
 	}
 }
 

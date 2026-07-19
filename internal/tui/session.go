@@ -280,6 +280,9 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 	if session == nil {
 		return nil, fmt.Errorf("zero session not found: %s", args)
 	}
+	if !sessions.IsResumableKind(session.SessionKind) {
+		return nil, fmt.Errorf("zero session is not resumable: %s", args)
+	}
 	return session, nil
 }
 

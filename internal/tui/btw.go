@@ -7,11 +7,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/usage"
 )
 
 const (
 	btwSessionTag = "btw"
-	btwRunIDGap   = 1_000_000
+	// btwRunIDGap keeps the hidden parent's current run below the first side run.
+	// A parent cannot start another user turn while its surface is hidden; the
+	// monotonic btwRunIDSeq separately prevents collisions across BTW re-entry.
+	btwRunIDGap = 1_000_000
 
 	btwContextBoundary = `You are in an isolated side conversation. The inherited session history is reference context only.
 Do not continue or complete earlier tasks, plans, tool calls, approvals, or requests. Only instructions submitted after this boundary are active.
@@ -40,6 +44,9 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	if m.compactInFlight {
 		return m.appendSystemNotice("Compaction is running. Wait for it to finish before opening a BTW conversation."), nil
 	}
+	if m.exiting {
+		return m.appendSystemNotice("Zero is waiting for the current run to finish saving before exit. A BTW conversation cannot start now."), nil
+	}
 	if m.activeSession.SessionID == "" {
 		return m.appendSystemNotice("Start the main session with a prompt before opening a BTW conversation."), nil
 	}
@@ -47,23 +54,6 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 		return m.appendSystemNotice("BTW conversation unavailable: no session store configured."), nil
 	}
 
-	// Foreground loops are session-scoped. Do not let a hidden main-session loop
-	// launch additional turns while the user is in the side conversation.
-	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
-		m = updated
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{
-			kind: actionAppendSystem,
-			text: fmt.Sprintf("Stopped %d loop(s) before opening the BTW conversation.", cleared),
-		})
-	}
-
-	parent := m
-	parent.btw = btwState{}
-	// A scrollback print that was already scheduled may acknowledge after the
-	// side surface is active. The hidden model does not receive that unscoped
-	// acknowledgement, so clear its print latch and rebuild on return.
-	parent.printInFlight = false
-	parent.flushQueue = nil
 	fork, err := m.sessionStore.Fork(m.activeSession.SessionID, sessions.ForkInput{
 		SessionKind: sessions.SessionKindSide,
 		Title:       btwTitle(m.activeSession.Title),
@@ -80,21 +70,57 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 		return m.appendSystemNotice("Could not load BTW conversation: " + err.Error()), nil
 	}
 
-	side := m
+	// Foreground loops are session-scoped. Stop them only after the side session
+	// is ready, so a failed fork cannot destroy work in the main session.
+	parent := m
+	clearedLoops := 0
+	if updated, cleared := parent.clearLoopsForSessionSwitch(); cleared > 0 {
+		parent = updated
+		clearedLoops = cleared
+		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: fmt.Sprintf("Stopped %d loop(s) before opening the BTW conversation.", cleared),
+		})
+	}
+	parent.btw = btwState{}
+	// A scrollback print that was already scheduled may acknowledge after the
+	// side surface is active. The hidden model does not receive that unscoped
+	// acknowledgement, so clear its print latch and rebuild on return.
+	parent.printInFlight = false
+	parent.flushQueue = nil
+
+	side := parent
 	side.activeSession = fork
 	side.sessionEvents = events
 	side.transcript = initialTranscript()
 	side.transcript = appendRow(side.transcript, rowSystem, "BTW conversation · isolated from the main session · /btw or Ctrl+C to return")
+	if clearedLoops > 0 {
+		side.transcript = appendRow(side.transcript, rowSystem, fmt.Sprintf("Stopped %d main-session loop(s) before opening this conversation.", clearedLoops))
+	}
 	side.transcript = appendTranscriptRowsDedup(side.transcript, transcriptRowsFromSessionEvents(events))
 	side.printInFlight = false
 	side.flushQueue = nil
 	side.resetFlushFrontier("· btw conversation ·")
 	side.pending = false
+	side.exiting = false
 	side.runCancel = nil
 	side.activeRunID = 0
-	side.runID = parent.runID + btwRunIDGap
+	side.runID = maxInt(parent.runID+btwRunIDGap, parent.btwRunIDSeq)
 	side.flushRunIDs = map[int]string{}
 	side.liveUsageCounts = map[int]int{}
+	side.usageTracker = usage.NewTracker(usage.TrackerOptions{Registry: &side.modelCatalog, Now: side.now})
+	side.lastUsage = usage.Normalized{}
+	side.lastUsageSeen = false
+	side.unpricedRequests = 0
+	side.unpricedTokens = 0
+	side.compactRequests = 0
+	side.compactFrame = 0
+	side.lastCompactResult = nil
+	side.lastCompactError = ""
+	side.turnLatencySum = 0
+	side.turnLatencyCount = 0
+	side.turnTTFTSum = 0
+	side.turnTTFTCount = 0
 	side.pendingPermission = nil
 	side.pendingAskUser = nil
 	side.pendingSpecReview = nil
@@ -141,11 +167,15 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	if m.pending {
 		return m.appendSystemNotice("A BTW response is still running. Press Esc twice to cancel it, or wait for it to finish before returning."), nil
 	}
+	if len(m.flushRunIDs) > 0 {
+		return m.appendSystemNotice("The cancelled BTW response is still saving its session events. Wait for it to finish before returning."), nil
+	}
 	if m.compactInFlight {
 		return m.appendSystemNotice("BTW compaction is still running. Wait for it to finish before returning."), nil
 	}
 	m, _ = m.clearLoopsForSessionSwitch()
 	parent := *m.btw.parent
+	parent.btwRunIDSeq = maxInt(parent.btwRunIDSeq, m.runID)
 	parent.btw = btwState{}
 	// A hidden parent completion may have scheduled an unscoped git-sweep result
 	// that landed on the side surface. Re-run it after restoring the parent so
@@ -157,7 +187,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	// still active, explicitly restart that chain after restoring it.
 	parent.spinnerTicking = false
 	var spinnerCmd tea.Cmd
-	if !parent.reducedMotion && (parent.pending || parent.compactInFlight || parent.doctorInFlight || parent.sidebarHasAgents() || parent.aimlapiOnboardAnimating()) {
+	if parent.pending || parent.compactInFlight || parent.doctorInFlight || parent.sidebarHasAgents() || parent.aimlapiOnboardAnimating() {
 		parent.spinnerTicking = true
 		spinnerCmd = parent.spinner.Tick
 	}
@@ -169,14 +199,44 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	return parent, batchCommands(sweepCmd, spinnerCmd)
 }
 
-func btwCommandChangesSession(kind commandKind) bool {
-	switch kind {
+func btwCommandUnavailable(command parsedCommand) bool {
+	arg := strings.ToLower(strings.TrimSpace(command.text))
+	switch command.kind {
 	case commandNew, commandResume, commandRetitle, commandSpec, commandLoop,
-		commandModel, commandProvider, commandTurns, commandProfile, commandTheme, commandConfig:
+		commandRewind, commandCompact, commandSTTModel, commandMCP:
 		return true
+	case commandModel:
+		return arg != "list" && arg != "ls"
+	case commandProvider:
+		return arg != "status"
+	case commandTurns, commandProfile:
+		return arg != "" && arg != "status"
+	case commandTheme:
+		return arg != "list"
+	case commandConfig:
+		return arg != ""
 	default:
 		return false
 	}
+}
+
+// resizeBTWParent carries terminal geometry into the hidden parent. Window-size
+// messages have no run ID, so normal BTW routing intentionally leaves them on
+// the visible side surface; copying the layout fields prevents stale wrapping
+// after the parent is restored.
+func (m model) resizeBTWParent(msg tea.WindowSizeMsg) model {
+	if !m.btw.active || m.btw.parent == nil {
+		return m
+	}
+	parent := *m.btw.parent
+	parent.width = msg.Width
+	parent.height = msg.Height
+	parent = parent.clearHover()
+	parent.lineAges = nil
+	parent.lastStreamActivity = parent.now()
+	parent.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+	m.btw.parent = &parent
+	return m
 }
 
 func btwTitle(parent string) string {

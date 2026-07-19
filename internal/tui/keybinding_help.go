@@ -31,6 +31,10 @@ type keybindingGroup struct {
 // Sourced from the real key cases in model.go (Update) — not invented. When a
 // binding is added/changed there, update this method too.
 func (m model) buildKeybindingGroups() []keybindingGroup {
+	ctrlCDescription := "cancel the run, then quit"
+	if m.btw.active {
+		ctrlCDescription = "return to the main session when the BTW run is idle"
+	}
 	return []keybindingGroup{
 		{
 			title: "Chat",
@@ -38,7 +42,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 				{"Enter", "send the message"},
 				{"Shift+Enter / Alt+Enter", "insert a newline (multi-line compose)"},
 				{"Esc (\u00d72)", "cancel the run / dismiss a popup / clear the input"},
-				{"Ctrl+C", "cancel the run, then quit"},
+				{"Ctrl+C", ctrlCDescription},
 				{"Ctrl+X then letter", "common slash commands (m=/model, p=/provider, r=/resume, \u2026)"},
 				{"Ctrl+X ?", "list every Ctrl+X slash shortcut"},
 				{"?", "show this help (on an empty input)"},
