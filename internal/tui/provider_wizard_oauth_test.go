@@ -144,6 +144,36 @@ func TestProviderWizardEnterStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) 
 	}
 }
 
+// TestProviderWizardMouseAdvanceStartsDeviceFlowForDeviceOnlyProvider covers
+// double-click activation: mouse.go routes to advanceProviderWizard, which
+// bypasses the keyboard handler's OAuthDeviceOnly check. On a desktop (where
+// oauthPreferDeviceFlow is false), advance must still start device login for
+// a device-only provider so the verification URL/user code are not discarded.
+func TestProviderWizardMouseAdvanceStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	t.Setenv("ZERO_OAUTH_DEVICE", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "kimi-code")
+	if !m.providerWizard.currentProvider().OAuthDeviceOnly {
+		t.Fatal("test fixture assumes kimi-code is OAuthDeviceOnly")
+	}
+
+	out, cmd := m.advanceProviderWizard()
+	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
+		t.Fatalf("mouse advance on a device-only provider should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("mouse advance on a device-only provider should return the device-prepare command")
+	}
+}
+
 func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
