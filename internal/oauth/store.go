@@ -417,20 +417,15 @@ func (b fileBlob) write(data []byte) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tempPath)
 	if _, err := temp.Write(data); err != nil {
 		_ = temp.Close()
-		_ = os.Remove(tempPath)
 		return err
 	}
 	if err := temp.Close(); err != nil {
-		_ = os.Remove(tempPath)
 		return err
 	}
-	if err := os.Rename(tempPath, b.path); err != nil {
-		_ = os.Remove(tempPath)
-		return err
-	}
-	return nil
+	return os.Rename(tempPath, b.path)
 }
 
 func (b fileBlob) withLock(now func() time.Time, fn func() error) error {

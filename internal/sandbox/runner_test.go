@@ -533,6 +533,27 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	}
 }
 
+func TestSeatbeltCompatibilityProfileUsesCredentialEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	override := filepath.Join(t.TempDir(), "mcp-tokens.json")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", override)
+
+	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, DefaultPolicy())
+	for _, want := range []string{
+		override,
+		override + ".tmp",
+		override + ".secret",
+		override + ".secret.tmp",
+		override + ".migrated",
+	} {
+		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
+			t.Fatalf("DenyReadIfExists = %#v, want environment override sibling %q", profile.FileSystem.DenyReadIfExists, want)
+		}
+	}
+}
+
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 

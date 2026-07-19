@@ -5,7 +5,6 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,7 +90,7 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 	})
 
 	t.Run("missing protected path fails closed", func(t *testing.T) {
-		missingDenied := fmt.Sprintf("/etc/zero-sandbox-missing-%d-%d/nested", os.Getpid(), time.Now().UnixNano())
+		missingDenied := filepath.Join(t.TempDir(), "missing-parent", "nested")
 		if _, err := os.Stat(filepath.Dir(missingDenied)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("missing deny-path precondition failed: %v", err)
 		}

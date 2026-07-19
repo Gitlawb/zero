@@ -355,7 +355,7 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 		}
 	}
 	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
-	fs.DenyReadIfExists = credentialDenyReadPaths(policy, credentialBaseDir, nil)
+	fs.DenyReadIfExists = credentialDenyReadPaths(policy, credentialBaseDir, os.Environ())
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,

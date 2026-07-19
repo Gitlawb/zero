@@ -277,6 +277,9 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	if tokenPath := strings.TrimSpace(options.MCPOAuthTokens); tokenPath != "" {
 		candidates = append(candidates,
 			tokenPath,
+			tokenPath+".tmp",
+			tokenPath+".secret",
+			tokenPath+".secret.tmp",
 			tokenPath+".migrated",
 		)
 	}

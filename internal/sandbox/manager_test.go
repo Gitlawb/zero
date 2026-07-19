@@ -396,6 +396,9 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		oauthOverride + ".secret",
 		oauthOverride + ".secret.tmp",
 		mcpOverride,
+		mcpOverride + ".tmp",
+		mcpOverride + ".secret",
+		mcpOverride + ".secret.tmp",
 		mcpOverride + ".migrated",
 	}
 	// The migrated legacy MCP token backup and the atomic-write temp siblings
@@ -508,6 +511,9 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 		filepath.Join(commandDir, override),
 		filepath.Join(commandDir, override) + ".tmp",
 		filepath.Join(commandDir, "mcp", "tokens.json"),
+		filepath.Join(commandDir, "mcp", "tokens.json.tmp"),
+		filepath.Join(commandDir, "mcp", "tokens.json.secret"),
+		filepath.Join(commandDir, "mcp", "tokens.json.secret.tmp"),
 		filepath.Join(commandDir, "mcp", "tokens.json.migrated"),
 	} {
 		if !stringSliceContains(paths, want) {
