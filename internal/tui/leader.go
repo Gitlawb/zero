@@ -1,38 +1,22 @@
 package tui
 
 import (
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-// leaderTimeout is how long Ctrl+X waits for a follow-up key before the chord
-// cancels itself. Short enough to not feel sticky; long enough to find the
-// second key without racing.
+// leaderTimeout is how long the leader prefix waits for a follow-up key before
+// the chord cancels itself. Short enough to not feel sticky; long enough to
+// find the second key without racing.
 const leaderTimeout = 2 * time.Second
 
-// leaderCommandByKey maps the second key of a Ctrl+X chord to a builtin slash
-// command. Case-sensitive so m/M and p/P stay distinct. Only bare commands (no
-// args) — same as typing the slash and pressing Enter with an empty argument.
-var leaderCommandByKey = map[rune]string{
-	'm': "/model",
-	'p': "/provider",
-	'P': "/plan",
-	'M': "/stt-model",
-	'v': "/voice",
-	'c': "/clear",
-	'C': "/context",
-	's': "/stop",
-	'i': "/image",
-	'r': "/resume",
-	'u': "/rewind",
-	't': "/tools",
-	'R': "/retry",
-}
-
 // leaderExpiredMsg clears leader-pending when the follow-up window elapses.
-// seq must match m.leaderSeq or the tick is stale (a later Ctrl+X re-armed).
+// seq must match m.leaderSeq or the tick is stale (a later leader re-armed).
 type leaderExpiredMsg struct {
 	seq int
 }
@@ -62,15 +46,15 @@ func (m model) clearLeader() model {
 // (?), or cancels the chord. Ctrl+C is handled before this is called so
 // exit/cancel still works.
 func (m model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Second Ctrl+X cancels (does not re-arm).
-	if keyCtrl(msg, 'x') {
+	// Second press of the same leader key cancels (does not re-arm).
+	if m.matchesLeaderKey(msg) {
 		return m.clearLeader(), nil
 	}
-	if keyIs(msg, tea.KeyEsc) {
+	if keyEsc(msg) {
 		return m.clearLeader(), nil
 	}
-	// Ctrl+X ? opens the full leader-chord map (discoverability for every wired
-	// slash shortcut). Not a letter binding, so handle before leaderSecondKey.
+	// Leader + ? opens the full leader-chord map. Not a letter binding, so
+	// handle before leaderSecondKey.
 	if keyText(msg) == "?" && !keyAlt(msg) && !keyHasMod(msg, tea.ModCtrl) {
 		m = m.clearLeader()
 		m.leaderHelpOverlay = true
@@ -80,7 +64,7 @@ func (m model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m.clearLeader(), nil
 	}
-	slash, mapped := leaderCommandByKey[key]
+	slash, mapped := m.leaderCommands[key]
 	if !mapped {
 		return m.clearLeader(), nil
 	}
@@ -88,36 +72,149 @@ func (m model) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.executeSlash(slash)
 }
 
-// leaderHelpBindings is the stable, display-ordered table of every wired
-// Ctrl+X chord. Keep in sync with leaderCommandByKey.
-func leaderHelpBindings() []keybinding {
-	return []keybinding{
-		{"Ctrl+X m", "open /model"},
-		{"Ctrl+X p", "open /provider"},
-		{"Ctrl+X P", "run /plan"},
-		{"Ctrl+X M", "open /stt-model"},
-		{"Ctrl+X v", "toggle /voice"},
-		{"Ctrl+X c", "run /clear"},
-		{"Ctrl+X C", "run /context"},
-		{"Ctrl+X s", "run /stop"},
-		{"Ctrl+X i", "run /image"},
-		{"Ctrl+X r", "open /resume"},
-		{"Ctrl+X u", "run /rewind"},
-		{"Ctrl+X t", "run /tools"},
-		{"Ctrl+X R", "run /retry"},
-		{"Ctrl+X ?", "show this list"},
+// matchesLeaderKey reports whether msg is the resolved leader prefix.
+// Ctrl-letter leaders also match the C0 control-byte form some terminals emit
+// without ModCtrl (e.g. Ctrl+X as Code 0x18), matching the built-in keyCtrl
+// fallback path for default bindings.
+func (m model) matchesLeaderKey(msg tea.KeyMsg) bool {
+	if m.leaderKey.isZero() {
+		return ctrlLetterMatches(msg, 'x')
+	}
+	if m.leaderKey.Matcher()(msg) {
+		return true
+	}
+	// Custom ctrl+letter only (no alt/shift/cmd): accept control-byte form.
+	if m.leaderKey.ctrl && !m.leaderKey.alt && !m.leaderKey.shift && !m.leaderKey.cmd &&
+		m.leaderKey.code >= 'a' && m.leaderKey.code <= 'z' {
+		return ctrlLetterByte(msg, m.leaderKey.code)
+	}
+	return false
+}
+
+// ctrlLetterMatches is true for Ctrl+letter via ModCtrl or raw C0 control byte.
+func ctrlLetterMatches(msg tea.KeyMsg, letter rune) bool {
+	if letter < 'a' || letter > 'z' {
+		return false
+	}
+	if keyCtrl(msg, letter) {
+		return true
+	}
+	return ctrlLetterByte(msg, letter)
+}
+
+// ctrlLetterByte reports the terminal control-byte encoding of Ctrl+letter
+// (Ctrl+A = 0x01 … Ctrl+Z = 0x1A) with no modifier flags set.
+func ctrlLetterByte(msg tea.KeyMsg, letter rune) bool {
+	if letter < 'a' || letter > 'z' {
+		return false
+	}
+	return keyCode(msg) == (letter-'a'+1) && msg.Key().Mod == 0
+}
+
+// leaderPendingHint is the faint status line while a leader chord is armed.
+// Examples come from the resolved leaderCommands map so remaps/unbindings show
+// correctly; ? list and Esc cancel stay fixed.
+func (m model) leaderPendingHint() string {
+	label := m.leaderKeyLabel()
+	examples := leaderPendingExamples(m.leaderCommands, 2)
+	if len(examples) == 0 {
+		return fmt.Sprintf("%s — await shortcut (? list · Esc cancel)", label)
+	}
+	return fmt.Sprintf("%s — await shortcut (%s · ? list · Esc cancel)", label, strings.Join(examples, " · "))
+}
+
+// leaderPendingExamples returns up to n "letter name" snippets from commands,
+// sorted the same way as the leader help table (stable, lowercase-first).
+func leaderPendingExamples(commands map[rune]string, n int) []string {
+	if n <= 0 || len(commands) == 0 {
+		return nil
+	}
+	letters := make([]rune, 0, len(commands))
+	for r := range commands {
+		letters = append(letters, r)
+	}
+	sort.Slice(letters, func(i, j int) bool {
+		a, b := letters[i], letters[j]
+		al, bl := unicode.ToLower(a), unicode.ToLower(b)
+		if al != bl {
+			return al < bl
+		}
+		return a < b
+	})
+	if len(letters) > n {
+		letters = letters[:n]
+	}
+	out := make([]string, 0, len(letters))
+	for _, r := range letters {
+		slash := commands[r]
+		name := strings.TrimPrefix(slash, "/")
+		if name == "" {
+			name = slash
+		}
+		out = append(out, fmt.Sprintf("%c %s", r, name))
+	}
+	return out
+}
+
+// leaderHelpBindings builds the display-ordered table of every assigned leader
+// chord from the resolved map.
+func leaderHelpBindings(label string, commands map[rune]string) []keybinding {
+	if label == "" {
+		label = "Ctrl+X"
+	}
+	letters := make([]rune, 0, len(commands))
+	for r := range commands {
+		letters = append(letters, r)
+	}
+	sort.Slice(letters, func(i, j int) bool {
+		a, b := letters[i], letters[j]
+		// Lowercase before uppercase for the same base; then by rune.
+		al, bl := unicode.ToLower(a), unicode.ToLower(b)
+		if al != bl {
+			return al < bl
+		}
+		return a < b
+	})
+	out := make([]keybinding, 0, len(letters)+1)
+	for _, r := range letters {
+		slash := commands[r]
+		out = append(out, keybinding{
+			keys: fmt.Sprintf("%s %c", label, r),
+			desc: leaderHelpDesc(slash),
+		})
+	}
+	out = append(out, keybinding{
+		keys: fmt.Sprintf("%s ?", label),
+		desc: "show this list",
+	})
+	return out
+}
+
+func leaderHelpDesc(slash string) string {
+	switch slash {
+	case "/model", "/provider", "/stt-model", "/resume", "/image":
+		return "open " + slash
+	case "/voice":
+		return "toggle " + slash
+	default:
+		return "run " + slash
 	}
 }
 
-const leaderHelpFooter = "? or Esc to close \u00b7 letter after Ctrl+X runs the command"
+func leaderHelpFooter(label string) string {
+	if label == "" {
+		label = "Ctrl+X"
+	}
+	return "? or Esc to close \u00b7 letter after " + label + " runs the command"
+}
 
-// renderLeaderHelpLines builds the body of the Ctrl+X ? overlay — same shape as
-// renderKeybindingHelpLines (group title + key rows + footer) so the two modals
-// share layout and column alignment.
-func renderLeaderHelpLines(innerWidth int) []string {
+// renderLeaderHelpLines builds the body of the leader ? overlay — same shape as
+// renderKeybindingHelpLines so the two modals share layout and column alignment.
+func (m model) renderLeaderHelpLines(innerWidth int) []string {
+	label := m.leaderKeyLabel()
 	groups := []keybindingGroup{{
 		title:    "Slash commands",
-		bindings: leaderHelpBindings(),
+		bindings: leaderHelpBindings(label, m.leaderCommands),
 	}}
 	keyColumn := keybindingKeyColumnWidth(groups)
 	lines := make([]string, 0, 32)
@@ -131,17 +228,17 @@ func renderLeaderHelpLines(innerWidth int) []string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, zeroTheme.faint.Render(leaderHelpFooter))
+	lines = append(lines, zeroTheme.faint.Render(leaderHelpFooter(label)))
 	return lines
 }
 
-// renderLeaderHelpOverlay frames the Ctrl+X ? chord map exactly like the
-// general ? keyboard-shortcut overlay: same width helper, border style
-// (zeroTheme.line), panel fill, and centered block.
+// renderLeaderHelpOverlay frames the leader chord map like the general ?
+// keyboard-shortcut overlay.
 func (m model) renderLeaderHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
-	lines := renderLeaderHelpLines(overlayWidth - 4)
-	block := styledBlockFillTitle(overlayWidth, "Ctrl+X Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
+	lines := m.renderLeaderHelpLines(overlayWidth - 4)
+	title := m.leaderKeyLabel() + " Shortcuts"
+	block := styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.line, zeroTheme.panel)
 	return centerRenderedBlock(block, width)
 }
 

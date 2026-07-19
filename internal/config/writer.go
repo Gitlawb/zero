@@ -775,5 +775,7 @@ func writeConfigFile(path string, cfg FileConfig) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+	// Best-effort: seed sibling keybindings.json when missing (never overwrite).
+	_ = EnsureKeybindingsBesideConfig(path)
 	return nil
 }

@@ -284,7 +284,7 @@ func (m model) renderPlanPanel(width int) string {
 // composer. It returns the full panel when it fits within maxHeight, otherwise
 // a one-line summary (so a long plan can't crowd out the transcript or the
 // input). maxHeight <= 0 means "no budget" and always uses the summary line.
-// Returns "" when the plan is not visible. Ctrl+P (expand) still forces the
+// Returns "" when the plan is not visible. Ctrl+Y (expand) still forces the
 // full list via m.plan.expanded, but the height budget always wins to keep the
 // composer on screen.
 func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {

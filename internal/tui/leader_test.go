@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 func TestLeaderArmsOnCtrlX(t *testing.T) {
@@ -20,6 +22,44 @@ func TestLeaderArmsOnCtrlX(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("arming leader should schedule a timeout tick")
+	}
+}
+
+func TestLeaderArmsOnCtrlXControlByte(t *testing.T) {
+	// Some terminals emit Ctrl+X as C0 byte 0x18 without ModCtrl.
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	msg := tea.KeyPressMsg(tea.Key{Code: 0x18}) // Ctrl+X control byte
+	updated, _ := m.Update(msg)
+	next := updated.(model)
+	if !next.leaderPending {
+		t.Fatal("Ctrl+X control-byte form should arm leader-pending")
+	}
+}
+
+func TestCustomLeaderMatchesControlByte(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4o",
+		KeybindingsFile: config.KeybindingsFile{
+			LeaderKey: "ctrl+k",
+			Leader:    config.DefaultLeaderAssignments(),
+		},
+	})
+	// Matcher path (Code+ModCtrl).
+	if !m.matchesLeaderKey(testKeyCtrl('k')) {
+		t.Fatal("custom ctrl+k should match ModCtrl form")
+	}
+	// Control-byte path: Ctrl+K = 0x0B.
+	if !m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x0B})) {
+		t.Fatal("custom ctrl+k should match control-byte form")
+	}
+	// Unrelated control byte must not match.
+	if m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x18})) {
+		t.Fatal("ctrl+k leader must not match Ctrl+X control byte")
+	}
+	// Alt leaders must not use control-byte matching.
+	m.leaderKey = parseBinding("alt+x")
+	if m.matchesLeaderKey(tea.KeyPressMsg(tea.Key{Code: 0x18})) {
+		t.Fatal("alt+x must not match Ctrl+X control byte")
 	}
 }
 
@@ -278,8 +318,9 @@ func TestLeaderHelpOverlayClosesOnEsc(t *testing.T) {
 }
 
 func TestLeaderHelpBindingsCoverEveryMapEntry(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
 	listed := map[string]bool{}
-	for _, b := range leaderHelpBindings() {
+	for _, b := range leaderHelpBindings(m.leaderKeyLabel(), m.leaderCommands) {
 		// "Ctrl+X m" → last field is the letter (skip the "?" meta row for map check).
 		parts := strings.Fields(b.keys)
 		if len(parts) != 2 || parts[0] != "Ctrl+X" {
@@ -294,13 +335,13 @@ func TestLeaderHelpBindingsCoverEveryMapEntry(t *testing.T) {
 			t.Fatalf("unexpected key label %q", b.keys)
 		}
 		listed[string(runes[0])] = true
-		if _, ok := leaderCommandByKey[runes[0]]; !ok {
-			t.Fatalf("help lists %q but leaderCommandByKey has no entry", b.keys)
+		if _, ok := m.leaderCommands[runes[0]]; !ok {
+			t.Fatalf("help lists %q but leaderCommands has no entry", b.keys)
 		}
 	}
-	for key := range leaderCommandByKey {
+	for key := range m.leaderCommands {
 		if !listed[string(key)] {
-			t.Fatalf("leaderCommandByKey has %q but help table omits it", string(key))
+			t.Fatalf("leaderCommands has %q but help table omits it", string(key))
 		}
 	}
 }
@@ -334,5 +375,35 @@ func TestLeaderSecondKeyFromTextCapital(t *testing.T) {
 	key, ok = leaderSecondKey(testKeyText("m"))
 	if !ok || key != 'm' {
 		t.Fatalf("leaderSecondKey(m) = %q,%v, want m,true", key, ok)
+	}
+}
+
+func TestLeaderPendingHintUsesResolvedCommands(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	// Defaults include /clear on c and /context on C — first two in sort order
+	// are lowercase letters before related uppercase; c clear then C context, etc.
+	// Prefer an explicit map for a stable assertion.
+	m.leaderCommands = map[rune]string{
+		't': "/theme",
+		'n': "/new",
+	}
+	hint := m.leaderPendingHint()
+	if !strings.Contains(hint, "n new") || !strings.Contains(hint, "t theme") {
+		t.Fatalf("hint should list remapped commands, got %q", hint)
+	}
+	if !strings.Contains(hint, "? list") || !strings.Contains(hint, "Esc cancel") {
+		t.Fatalf("hint must keep list/cancel guidance, got %q", hint)
+	}
+	if strings.Contains(hint, "m model") || strings.Contains(hint, "p provider") {
+		t.Fatalf("hint must not hardcode default examples when remapped, got %q", hint)
+	}
+
+	m.leaderCommands = nil
+	hint = m.leaderPendingHint()
+	if !strings.Contains(hint, "? list") || !strings.Contains(hint, "Esc cancel") {
+		t.Fatalf("empty map should still show list/cancel, got %q", hint)
+	}
+	if strings.Contains(hint, " · m ") || strings.Contains(hint, "model") {
+		t.Fatalf("empty map should not invent examples, got %q", hint)
 	}
 }

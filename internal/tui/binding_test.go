@@ -217,7 +217,7 @@ func TestConfigToBindingPipeline(t *testing.T) {
 		ToggleDetailed: "option+o",
 		ToggleMouse:    "ctrl+e",
 		CycleReasoning: "ctrl+t",
-		TogglePlan:     "ctrl+p",
+		TogglePlan:     "ctrl+y",
 		ToggleSidebar:  "option+b",
 	}
 
@@ -231,7 +231,7 @@ func TestConfigToBindingPipeline(t *testing.T) {
 		{"toggleDetailed", bindings.toggleDetailed, "Alt+O"},
 		{"toggleMouse", bindings.toggleMouse, "Ctrl+E"},
 		{"cycleReasoning", bindings.cycleReasoning, "Ctrl+T"},
-		{"togglePlan", bindings.togglePlan, "Ctrl+P"},
+		{"togglePlan", bindings.togglePlan, "Ctrl+Y"},
 		{"toggleSidebar", bindings.toggleSidebar, "Alt+B"},
 	}
 

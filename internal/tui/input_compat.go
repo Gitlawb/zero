@@ -46,6 +46,12 @@ func keyBackspace(msg tea.KeyMsg) bool {
 	return keyIs(msg, tea.KeyBackspace) || keyCtrl(msg, 'h')
 }
 
+// keyEsc reports Escape or Ctrl+G (emacs abort). Ctrl+G is reserved and not
+// assignable as a user shortcut.
+func keyEsc(msg tea.KeyMsg) bool {
+	return keyIs(msg, tea.KeyEsc) || keyCtrl(msg, 'g')
+}
+
 func mouseEvent(msg tea.MouseMsg) tea.Mouse {
 	return msg.Mouse()
 }
