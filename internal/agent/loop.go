@@ -1770,12 +1770,17 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 }
 
 // hooksSuppressed reports whether executable hooks must not run for this
-// run's permission mode. Plan and spec-draft promise a read-only turn, but
-// hooks execute configured host commands outside the advertised-tool and
-// sandbox gates — so dispatching them would let merely starting a plan
-// session or calling read_file mutate the workspace or spawn processes.
+// run's permission mode. Plan mode promises a read-only turn, but hooks
+// execute configured host commands outside the advertised-tool and sandbox
+// gates, so dispatching them would let merely starting a plan session or
+// calling read_file mutate the workspace or spawn processes.
+//
+// Spec-draft keeps the existing trust-gated hook model: project hooks still
+// fire when the workspace (or its worktree trust root) is trusted. That is
+// intentional; trust inheritance for --use-spec --worktree is covered by
+// TestExecSpecWorktreeInheritsTrustEndToEnd.
 func hooksSuppressed(options Options) bool {
-	return options.PermissionMode == PermissionModePlan || options.PermissionMode == PermissionModeSpecDraft
+	return options.PermissionMode == PermissionModePlan
 }
 
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
