@@ -12,6 +12,7 @@ import (
 )
 
 func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
@@ -72,6 +73,69 @@ func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunProvidersUseReportsZERO_PROVIDEROverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
+		{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+	}})
+	t.Setenv(config.ActiveProviderEnv, "runtime")
+
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		args := []string{"providers", "use", "saved"}
+		if jsonOutput {
+			args = append(args, "--json")
+		}
+		if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+			t.Fatalf("json=%t: code=%d stderr=%s", jsonOutput, code, stderr.String())
+		}
+		for _, want := range []string{"saved", "runtime", config.ActiveProviderEnv} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("json=%t: output missing %q: %s", jsonOutput, want, stdout.String())
+			}
+		}
+		if !jsonOutput && !strings.Contains(stdout.String(), "zero providers check runtime") {
+			t.Fatalf("follow-up check did not target effective provider: %s", stdout.String())
+		}
+		if jsonOutput {
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["activeProvider"] != "saved" || payload["effectiveProvider"] != "runtime" || payload["overriddenBy"] != config.ActiveProviderEnv {
+				t.Fatalf("unexpected payload: %#v", payload)
+			}
+		}
+	}
+}
+
+func TestRunProvidersUseMatchingZERO_PROVIDERKeepsNormalOutput(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}}})
+	t.Setenv(config.ActiveProviderEnv, "saved")
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "saved"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Active provider set to saved") || strings.Contains(stdout.String(), "overrides") {
+		t.Fatalf("unexpected matching-env output: %s", stdout.String())
+	}
+}
+
+func TestRunProvidersUseExplainsRuntimeOnlyProfilesAreNotSelectable(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}}})
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "runtime"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitCrash {
+		t.Fatalf("unexpected code %d", code)
+	}
+	for _, want := range []string{"only providers saved in user config are selectable", "providers setup", "providers add"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("error missing %q: %s", want, stderr.String())
+		}
 	}
 }
 

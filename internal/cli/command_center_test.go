@@ -191,6 +191,44 @@ func TestRunProvidersCurrentJSONIncludesRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved"}}})
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profiles := []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}, {Name: "runtime", ProviderKind: config.ProviderKindOpenAICompatible, Model: "runtime-model"}}
+		return config.ResolvedConfig{ActiveProvider: "runtime", Provider: profiles[1], Providers: profiles}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name       string `json:"name"`
+			Selectable bool   `json:"selectable"`
+			Source     string `json:"source"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != "runtime" || !payload.Providers[1].Selectable || payload.Providers[1].Source != "user-config" {
+		t.Fatalf("unexpected providers: %#v", payload.Providers)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "list"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "not selectable via providers use") {
+		t.Fatalf("non-selectable marker missing: %s", stdout.String())
+	}
+}
+
 func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
