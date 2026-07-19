@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	// defaultFramerate specifies the maximum interval at which we should
+	// defaultFPS specifies the maximum interval at which we should
 	// update the view.
 	defaultFPS = 60
 	maxFPS     = 120

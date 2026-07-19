@@ -382,9 +382,14 @@ type model struct {
 	// (ZERO_NO_STREAM_CLEAR=1). lastStreamClear rate-limits the redraws the
 	// workaround schedules so heavy streaming output (code, logs, diffs)
 	// coalesces to a bounded number of repaints per second instead of one
-	// per newline.
+	// per newline. pendingStreamClear tracks a newline that arrived while
+	// throttled: the redraw it would have triggered is deferred (flushed by
+	// a scheduled streamClearFlushMsg, or at stream end) instead of dropped
+	// outright, so a throttled newline that happens to be the last one of
+	// the turn still gets its caret repaired.
 	streamClearDisabled bool
 	lastStreamClear     time.Time
+	pendingStreamClear  bool
 	reducedMotion       bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
@@ -503,6 +508,21 @@ type model struct {
 type agentTextMsg struct {
 	runID int
 	delta string
+}
+
+// streamClearFlushMsg fires once, roughly when the stream-clear throttle
+// window (see lastStreamClear) has elapsed, to flush a ClearScreen that a
+// throttled newline deferred rather than fired directly. It's a no-op if
+// nothing is pending by the time it lands (the common case, since most
+// throttled newlines are followed by another one that flushes them first).
+type streamClearFlushMsg struct{}
+
+// scheduleStreamClearFlush returns a one-shot command that delivers a
+// streamClearFlushMsg after d. Used to guarantee a deferred stream-clear
+// redraw is eventually flushed even if no later newline or stream-end event
+// does it first (see the streamClearFlushMsg case in Update).
+func scheduleStreamClearFlush(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return streamClearFlushMsg{} })
 }
 
 type exitConfirmExpiredMsg struct {
@@ -2011,11 +2031,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// on SSH and slow links. ~10 redraws/second is enough to keep the
 		// caret clean without dominating the write path; terminals that
 		// render scroll regions correctly can opt out entirely with
-		// ZERO_NO_STREAM_CLEAR=1.
-		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled &&
-			time.Since(m.lastStreamClear) >= 100*time.Millisecond {
-			m.lastStreamClear = time.Now()
-			cmds = append(cmds, tea.ClearScreen)
+		// ZERO_NO_STREAM_CLEAR=1. A newline that arrives inside the throttle
+		// window still owes a repair — it's marked pending and a one-shot
+		// timer is scheduled to flush it (see streamClearFlushMsg), instead
+		// of being dropped outright. That covers a throttled newline that
+		// turns out to be the turn's last one (agentResponseMsg also flushes
+		// any still-pending clear at stream end, belt-and-suspenders) as
+		// well as one buried in the middle of a long, still-streaming turn.
+		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled {
+			const throttle = 100 * time.Millisecond
+			if elapsed := time.Since(m.lastStreamClear); elapsed >= throttle {
+				m.lastStreamClear = time.Now()
+				m.pendingStreamClear = false
+				cmds = append(cmds, tea.ClearScreen)
+			} else if !m.pendingStreamClear {
+				m.pendingStreamClear = true
+				cmds = append(cmds, scheduleStreamClearFlush(throttle-elapsed))
+			}
 		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
 		// case schedules the next one). Schedule the FIRST tick only on
@@ -2105,6 +2137,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, streamingFadeTick()
+	case streamClearFlushMsg:
+		// Flush a newline-triggered redraw that the stream-clear throttle
+		// deferred (see agentTextMsg) once its window has elapsed. This runs
+		// independent of the streaming fade (which is unconditionally off —
+		// fadeDisabled is hardcoded true in newModel — so its tick can't be
+		// relied on to drive this), and independent of stream end: a turn
+		// that keeps streaming for a while after the throttled newline would
+		// otherwise leave the ghost caret up for the rest of the turn.
+		if m.pendingStreamClear && time.Since(m.lastStreamClear) >= 100*time.Millisecond {
+			m.lastStreamClear = time.Now()
+			m.pendingStreamClear = false
+			return m, tea.ClearScreen
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -2257,6 +2303,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		m.pending = false
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
+		// A newline-triggered redraw deferred by the stream-clear throttle
+		// (see agentTextMsg) may never get a later newline or fade tick to
+		// flush it if this was the turn's last delta — flush it here so the
+		// ghost caret isn't left behind at stream end.
+		var pendingClearCmd tea.Cmd
+		if m.pendingStreamClear {
+			m.pendingStreamClear = false
+			pendingClearCmd = tea.ClearScreen
+		}
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
 		// the pending streamingFadeTickMsg that lands after this point
@@ -2398,7 +2453,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, loopTickCmd = m.ensureLoopTick()
 		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
