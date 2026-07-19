@@ -707,6 +707,18 @@ type writeStdinTool struct {
 	manager *execSessionManager
 }
 
+// UnknownExecSessionError is the result returned when write_stdin targets a
+// session_id with no live exec session. The stable recovery guidance leads and
+// the numeric id trails on purpose: the agent's repeated-failure guard keys on
+// a normalized, truncated prefix of the error string, so keeping the id out of
+// that prefix makes a model probing ids 1, 2, 3, … produce ONE signature that
+// finally trips the halt instead of a fresh signature per id — while also
+// telling the model how to actually recover. See TestUnknownExecSessionErrorSignatureIsIDInvariant
+// in internal/agent, which pins this invariant against the real guard.
+func UnknownExecSessionError(sessionID int) string {
+	return fmt.Sprintf("Error: write_stdin needs a session_id returned by a still-running exec_command; do not guess or probe session ids. Start a process with exec_command, or use write_file/edit_file/apply_patch for file changes. (no live session %d)", sessionID)
+}
+
 func (writeStdinTool) outputCategory(map[string]any) outputCategory {
 	return outputCategoryProcess
 }
@@ -722,7 +734,7 @@ func NewWriteStdinTool(manager *execSessionManager) Tool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"session_id":        {Type: "integer", Description: "Identifier of the running unified exec session."},
+					"session_id":        {Type: "integer", Description: "Identifier of a running unified exec session, as returned by exec_command. Never guess or probe ids.", Minimum: intPtr(1)},
 					"chars":             {Type: "string", Description: "Bytes to write to stdin. Defaults to empty, which polls without writing.", Default: ""},
 					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.", Default: defaultPollYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxPollYieldTimeMS)},
 					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
@@ -784,7 +796,7 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 	}
 	session, ok := tool.manager.get(sessionID)
 	if !ok {
-		return errorResult(fmt.Sprintf("Error: Unknown exec session_id %d.", sessionID))
+		return errorResult(UnknownExecSessionError(sessionID))
 	}
 	session.touch()
 	interrupted := false

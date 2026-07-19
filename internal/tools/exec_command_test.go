@@ -881,7 +881,7 @@ func TestRegistryHonorsWriteStdinArgumentPermission(t *testing.T) {
 	registry.Register(NewWriteStdinTool(newExecSessionManager()))
 
 	poll := registry.Run(context.Background(), WriteStdinToolName, map[string]any{"session_id": 9999})
-	if poll.Status != StatusError || !strings.Contains(poll.Output, "Unknown exec session_id") {
+	if poll.Status != StatusError || !strings.Contains(poll.Output, "still-running exec_command") {
 		t.Fatalf("empty poll should reach tool without permission prompt, got status=%s output=%q", poll.Status, poll.Output)
 	}
 
@@ -901,8 +901,25 @@ func TestWriteStdinReportsUnknownSession(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("status = %s, want error", result.Status)
 	}
-	if !strings.Contains(result.Output, "Unknown exec session_id 1234") {
-		t.Fatalf("unexpected output: %q", result.Output)
+	// The message must lead with recovery guidance and still identify the id.
+	if !strings.Contains(result.Output, "still-running exec_command") {
+		t.Fatalf("unknown-session error must carry recovery guidance, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "1234") {
+		t.Fatalf("unknown-session error must name the offending id, got: %q", result.Output)
+	}
+}
+
+// The runtime rejects session_id < 1 (intArg min 1); the advertised schema must
+// say the same so a model sees the constraint before it probes id 0.
+func TestWriteStdinSchemaPinsSessionIDMinimum(t *testing.T) {
+	schema := NewWriteStdinTool(nil).(writeStdinTool).parameters
+	prop, ok := schema.Properties["session_id"]
+	if !ok {
+		t.Fatal("session_id property missing from write_stdin schema")
+	}
+	if prop.Minimum == nil || *prop.Minimum != 1 {
+		t.Fatalf("session_id schema Minimum = %v, want 1 to match the runtime floor", prop.Minimum)
 	}
 }
 
