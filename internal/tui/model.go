@@ -1031,7 +1031,7 @@ func (m model) shutdownLSPManager() {
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if m.btw.active {
-		if m.composerValue() != "" && m.noBlockingModal() {
+		if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
 			m.clearComposer()
 			m.clearSuggestions()
 			return m, nil

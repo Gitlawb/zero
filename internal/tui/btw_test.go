@@ -179,3 +179,43 @@ func TestBTWBlocksCommandsThatWouldReplaceItsSession(t *testing.T) {
 		t.Fatalf("missing blocked-command guidance: %#v", got.transcript)
 	}
 }
+
+func TestBTWCommandReturnsToParentSession(t *testing.T) {
+	m := newBTWTestModel(t)
+	parentID := m.activeSession.SessionID
+	side, _ := m.handleBTWCommand("")
+
+	updated, cmd := side.dispatchCommand(parseCommand("/btw"))
+	returned := updated.(model)
+	if cmd != nil {
+		t.Fatal("returning from an idle BTW conversation should not start work")
+	}
+	if returned.btw.active || returned.btw.parent != nil {
+		t.Fatalf("BTW state remained active after /btw: %#v", returned.btw)
+	}
+	if returned.activeSession.SessionID != parentID {
+		t.Fatalf("returned session = %q, want parent %q", returned.activeSession.SessionID, parentID)
+	}
+}
+
+func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
+	m := newBTWTestModel(t)
+	side, _ := m.handleBTWCommand("")
+	side.pending = true
+	side.input.SetValue("keep this draft")
+
+	updated, cmd := side.handleCtrlC()
+	got := updated.(model)
+	if cmd != nil {
+		t.Fatal("Ctrl+C should not start a command while a BTW response is running")
+	}
+	if !got.btw.active {
+		t.Fatal("Ctrl+C returned from BTW while its response was still running")
+	}
+	if got.composerValue() != "keep this draft" {
+		t.Fatalf("Ctrl+C cleared the in-flight BTW draft: %q", got.composerValue())
+	}
+	if !transcriptContains(got.transcript, "BTW response is still running") {
+		t.Fatalf("missing in-flight return guidance: %#v", got.transcript)
+	}
+}
