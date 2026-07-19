@@ -106,6 +106,7 @@ func WriteNDJSON(w io.Writer, t *TurnTrace) error {
 	for _, p := range t.PrefixHashes {
 		if err := enc.Encode(map[string]any{
 			"type":                "prefix_hash",
+			"system_prompt":       p.SystemPromptHash,
 			"base_instructions":   p.BaseInstructionsHash,
 			"confirmation_policy": p.ConfirmationPolicyHash,
 			"project_context":     p.ProjectContextHash,

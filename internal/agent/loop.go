@@ -181,7 +181,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	options.runPermissions = runPermissions
 	defer runPermissions.cleanup()
 
-	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
+	promptParts := buildSystemPromptParts(options)
+	messages := zeroruntime.SeedMessagesWithImages(promptParts.prompt, prompt, options.Images)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
@@ -268,16 +269,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
 
-		// Prompt-prefix fingerprint: hash the seven cacheable sub-components
-		// of this turn's request (system prompt sections, project context,
-		// skills, partitioned tool list, tool schemas) and emit one trace
-		// event. Stable across turns => cacheable. Drift in any sub-hash
-		// names the sub-component that broke the cache for this turn. The
-		// computation is pure and cheap (seven SHA-256s of small strings)
-		// and is a no-op when tracing is off.
+		// Fingerprint the exact system prompt built at run start plus this turn's
+		// provider-visible tool definitions in their emitted order. Reusing the
+		// retained prompt parts avoids rebuilding workspace context while ensuring
+		// the trace describes the same bytes carried by the request.
 		if options.Trace != nil {
-			fp := ComputePrefixFingerprint(options, exposed)
+			fp := computePrefixFingerprint(buildPromptSubstringsFromParts(promptParts, exposed))
 			options.Trace.EmitPrefixHash(trace.PrefixHash{
+				SystemPromptHash:       fp.SystemPromptHash,
 				BaseInstructionsHash:   fp.BaseInstructionsHash,
 				ConfirmationPolicyHash: fp.ConfirmationPolicyHash,
 				ProjectContextHash:     fp.ProjectContextHash,

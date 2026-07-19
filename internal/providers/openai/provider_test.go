@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1373,5 +1374,63 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		if req.PromptCacheKey != "sess_123" {
 			t.Fatalf("ZERO_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
 		}
+	}
+}
+
+func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	tools := []zeroruntime.ToolDefinition{{
+		Name:        "read_file",
+		Description: "Read a file.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+			},
+		},
+	}}
+	firstMessages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "stable system prompt"},
+		{Role: zeroruntime.MessageRoleUser, Content: "first turn"},
+	}
+	secondMessages := append([]zeroruntime.Message(nil), firstMessages...)
+	secondMessages = append(secondMessages,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "first response"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "second turn"},
+	)
+
+	marshalBody := func(messages []zeroruntime.Message) map[string]any {
+		t.Helper()
+		mapped := provider.openAIRequest(zeroruntime.CompletionRequest{
+			Messages:       messages,
+			Tools:          tools,
+			PromptCacheKey: "session-stable-prefix",
+		})
+		data, marshalErr := json.Marshal(mapped)
+		if marshalErr != nil {
+			t.Fatalf("marshal request: %v", marshalErr)
+		}
+		var body map[string]any
+		if unmarshalErr := json.Unmarshal(data, &body); unmarshalErr != nil {
+			t.Fatalf("unmarshal request: %v", unmarshalErr)
+		}
+		return body
+	}
+
+	first := marshalBody(firstMessages)
+	second := marshalBody(secondMessages)
+	firstWireMessages := first["messages"].([]any)
+	secondWireMessages := second["messages"].([]any)
+	if !reflect.DeepEqual(secondWireMessages[:len(firstWireMessages)], firstWireMessages) {
+		t.Fatalf("first wire messages must be an exact prefix of the second:\nfirst=%#v\nsecond=%#v", firstWireMessages, secondWireMessages)
+	}
+	if !reflect.DeepEqual(first["tools"], second["tools"]) {
+		t.Fatalf("wire tool definitions drifted:\nfirst=%#v\nsecond=%#v", first["tools"], second["tools"])
+	}
+	if first["prompt_cache_key"] != second["prompt_cache_key"] || first["prompt_cache_key"] != "session-stable-prefix" {
+		t.Fatalf("wire prompt cache key must remain stable: first=%#v second=%#v", first["prompt_cache_key"], second["prompt_cache_key"])
 	}
 }

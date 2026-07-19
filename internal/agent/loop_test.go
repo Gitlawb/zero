@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1255,6 +1256,46 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	}
 	if len(toolResults) != 1 || toolResults[0].Status != tools.StatusOK {
 		t.Fatalf("expected one ok tool result, got %#v", toolResults)
+	}
+}
+
+func TestRunPreservesRequestPrefixAcrossTurns(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\n")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "read notes", provider, Options{
+		Cwd:       root,
+		Registry:  registry,
+		SessionID: "session-stable-prefix",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(provider.requests))
+	}
+	first, second := provider.requests[0], provider.requests[1]
+	if len(second.Messages) < len(first.Messages) || !reflect.DeepEqual(second.Messages[:len(first.Messages)], first.Messages) {
+		t.Fatalf("first request messages must be an exact prefix of the second:\nfirst=%#v\nsecond=%#v", first.Messages, second.Messages)
+	}
+	if !reflect.DeepEqual(first.Tools, second.Tools) {
+		t.Fatalf("tool definitions drifted between turns:\nfirst=%#v\nsecond=%#v", first.Tools, second.Tools)
+	}
+	if first.PromptCacheKey != "session-stable-prefix" || second.PromptCacheKey != first.PromptCacheKey {
+		t.Fatalf("prompt cache key must remain stable: first=%q second=%q", first.PromptCacheKey, second.PromptCacheKey)
 	}
 }
 

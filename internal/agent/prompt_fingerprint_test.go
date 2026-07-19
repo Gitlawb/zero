@@ -28,38 +28,28 @@ func TestComputePrefixFingerprintStableAcrossCalls(t *testing.T) {
 	}
 }
 
-// TestComputePrefixFingerprintToolsHashIsNameSetSensitive asserts the
-// name-set sensitivity of the ToolsHash. The test name used to read as
-// "reorder changes hash" but the assertion is the opposite: the hash is
-// name-set sensitive, not name-order sensitive (toolSubstrings sorts
-// names before hashing). The partitioner is expected to produce a stable
-// order, so a name-order change is not a hash signal — a name-set change
-// is. The test asserts both: permutation of the same tools produces the
-// same hash, and adding a tool produces a different hash.
-func TestComputePrefixFingerprintToolsHashIsNameSetSensitive(t *testing.T) {
+// Tool order and descriptions are provider-visible and therefore part of the
+// cacheable prefix identity.
+func TestComputePrefixFingerprintToolsHashMatchesEmittedOrderAndDescriptions(t *testing.T) {
 	opts := Options{Cwd: t.TempDir(), SystemPrompt: "core"}
 	a := []zeroruntime.ToolDefinition{
-		{Name: "read_file", Parameters: map[string]any{"schema": "schema-read"}},
-		{Name: "grep", Parameters: map[string]any{"schema": "schema-grep"}},
+		{Name: "read_file", Description: "read", Parameters: map[string]any{"schema": "schema-read"}},
+		{Name: "grep", Description: "search", Parameters: map[string]any{"schema": "schema-grep"}},
 	}
 	b := []zeroruntime.ToolDefinition{
-		{Name: "grep", Parameters: map[string]any{"schema": "schema-grep"}},
-		{Name: "read_file", Parameters: map[string]any{"schema": "schema-read"}},
+		{Name: "grep", Description: "search", Parameters: map[string]any{"schema": "schema-grep"}},
+		{Name: "read_file", Description: "read", Parameters: map[string]any{"schema": "schema-read"}},
 	}
-	// toolSubstrings sorts names internally, so the ToolsHash is identical
-	// for a permutation of the same tools. We assert that here to document
-	// the contract: name-order independence, name-set sensitivity.
 	fpA := ComputePrefixFingerprint(opts, a)
 	fpB := ComputePrefixFingerprint(opts, b)
-	if fpA.ToolsHash != fpB.ToolsHash {
-		t.Fatalf("ToolsHash must be name-set sensitive, not name-order sensitive: a=%s b=%s", fpA.ToolsHash, fpB.ToolsHash)
+	if fpA.ToolsHash == fpB.ToolsHash {
+		t.Fatalf("ToolsHash must change when emitted order changes: a=%s b=%s", fpA.ToolsHash, fpB.ToolsHash)
 	}
-	// A different tool set must produce a different ToolsHash.
-	c := append([]zeroruntime.ToolDefinition{}, a...)
-	c = append(c, zeroruntime.ToolDefinition{Name: "bash", Parameters: map[string]any{"schema": "schema-bash"}})
+	c := append([]zeroruntime.ToolDefinition(nil), a...)
+	c[0].Description = "read a file"
 	fpC := ComputePrefixFingerprint(opts, c)
 	if fpA.ToolsHash == fpC.ToolsHash {
-		t.Fatalf("ToolsHash must change when the tool set changes: a=%s c=%s", fpA.ToolsHash, fpC.ToolsHash)
+		t.Fatalf("ToolsHash must change when a description changes: a=%s c=%s", fpA.ToolsHash, fpC.ToolsHash)
 	}
 }
 
@@ -101,25 +91,35 @@ func TestComputePrefixFingerprintSystemPromptChangeChangesBaseHash(t *testing.T)
 	}
 }
 
-// TestComputePrefixFingerprintCompleteIsAggregateOfSubHashes asserts the
-// canonical-join property: CompletePrefixHash must depend on every sub-hash.
-// This is the regression catch for "did anyone reorder or drop a sub-hash
-// from the canonical join without updating CompletePrefixHash."
+// CompletePrefixHash represents the exact joined system prompt and the ordered
+// tool definitions. Narrower system-section hashes remain diagnostic only.
 func TestComputePrefixFingerprintCompleteIsAggregateOfSubHashes(t *testing.T) {
 	opts := Options{Cwd: t.TempDir(), SystemPrompt: "core"}
 	exposed := []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"k": "v"}}}
 	fp := ComputePrefixFingerprint(opts, exposed)
 	// Manually compute what the canonical join should be.
 	expected := sha256hex(strings.Join([]string{
-		fp.BaseInstructionsHash,
-		fp.ConfirmationPolicyHash,
-		fp.ProjectContextHash,
-		fp.SkillsHash,
+		fp.SystemPromptHash,
 		fp.ToolsHash,
 		fp.SchemaHash,
 	}, "|"))
 	if fp.CompletePrefixHash != expected {
-		t.Fatalf("CompletePrefixHash must equal sha256hex of the canonical join of the other six:\n  got:      %s\n  expected: %s", fp.CompletePrefixHash, expected)
+		t.Fatalf("CompletePrefixHash must equal sha256hex of the exact system, tools, and schema hashes:\n  got:      %s\n  expected: %s", fp.CompletePrefixHash, expected)
+	}
+}
+
+func TestComputePrefixFingerprintCoversEverySystemPromptSection(t *testing.T) {
+	base := Options{Cwd: t.TempDir(), SystemPrompt: "core", Model: "gpt-5"}
+	changed := base
+	changed.ResponseStyle = "concise"
+
+	fpBase := ComputePrefixFingerprint(base, nil)
+	fpChanged := ComputePrefixFingerprint(changed, nil)
+	if fpBase.SystemPromptHash == fpChanged.SystemPromptHash {
+		t.Fatal("SystemPromptHash must change when any rendered system section changes")
+	}
+	if fpBase.CompletePrefixHash == fpChanged.CompletePrefixHash {
+		t.Fatal("CompletePrefixHash must include the exact full system prompt")
 	}
 }
 
@@ -141,6 +141,9 @@ func TestBuildPromptSubstringsDefaultOptions(t *testing.T) {
 	if subs.baseInstructions != "test core" {
 		t.Fatalf("baseInstructions substring must equal the core system prompt: got %q want %q", subs.baseInstructions, "test core")
 	}
+	if subs.systemPrompt != buildSystemPrompt(opts) {
+		t.Fatal("systemPrompt substring must equal the exact joined system prompt")
+	}
 	if subs.confirmationPolicy == "" {
 		t.Fatalf("confirmationPolicy substring must be non-empty (the embedded policy is always present)")
 	}
@@ -151,6 +154,9 @@ func TestBuildPromptSubstringsDefaultOptions(t *testing.T) {
 	// sha256hex of the substrings, with no truncation or reformatting
 	// between the two layers.
 	fp := ComputePrefixFingerprint(opts, nil)
+	if fp.SystemPromptHash != sha256hex(subs.systemPrompt) {
+		t.Fatalf("SystemPromptHash in fingerprint must equal sha256hex of the joined prompt")
+	}
 	if fp.BaseInstructionsHash != sha256hex(subs.baseInstructions) {
 		t.Fatalf("BaseInstructionsHash in fingerprint must equal sha256hex of the substring")
 	}

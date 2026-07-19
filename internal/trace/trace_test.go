@@ -374,6 +374,7 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	// event type. Insertion order is preserved by the parser (no sort
 	// is applied on read or write).
 	r.EmitPrefixHash(PrefixHash{
+		SystemPromptHash:       "system1",
 		BaseInstructionsHash:   "b1",
 		ConfirmationPolicyHash: "c1",
 		ProjectContextHash:     "p1",
@@ -383,6 +384,7 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 		CompletePrefixHash:     "complete1",
 	})
 	r.EmitPrefixHash(PrefixHash{
+		SystemPromptHash:       "system2",
 		BaseInstructionsHash:   "b2",
 		ConfirmationPolicyHash: "c2",
 		ProjectContextHash:     "p2",
@@ -427,10 +429,10 @@ func TestReadNDJSONRoundTrip(t *testing.T) {
 	if parsed.PrefixHashes[0].CompletePrefixHash != "complete1" || parsed.PrefixHashes[1].CompletePrefixHash != "complete2" {
 		t.Fatalf("prefix_hash insertion order lost: got %+v want [complete1, complete2]", parsed.PrefixHashes)
 	}
-	if parsed.PrefixHashes[0].BaseInstructionsHash != "b1" || parsed.PrefixHashes[0].SchemaHash != "x1" {
+	if parsed.PrefixHashes[0].SystemPromptHash != "system1" || parsed.PrefixHashes[0].BaseInstructionsHash != "b1" || parsed.PrefixHashes[0].SchemaHash != "x1" {
 		t.Fatalf("prefix_hash sub-hashes lost on first event: got %+v", parsed.PrefixHashes[0])
 	}
-	if parsed.PrefixHashes[1].BaseInstructionsHash != "b2" || parsed.PrefixHashes[1].SchemaHash != "x2" {
+	if parsed.PrefixHashes[1].SystemPromptHash != "system2" || parsed.PrefixHashes[1].BaseInstructionsHash != "b2" || parsed.PrefixHashes[1].SchemaHash != "x2" {
 		t.Fatalf("prefix_hash sub-hashes lost on second event: got %+v", parsed.PrefixHashes[1])
 	}
 }

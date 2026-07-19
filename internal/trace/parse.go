@@ -101,13 +101,14 @@ func ReadNDJSON(r io.Reader) (*TurnTrace, error) {
 			if !sawTraceHeader {
 				return nil, errors.New("parse trace: not a valid NDJSON trace (no type:trace header)")
 			}
-			// Round-trip the seven prefix-hash fields. Missing fields are
+			// Round-trip the prefix-hash fields. Missing fields are
 			// accepted as empty strings (a partially-written trace from a
 			// crashed emitter must not fatal a parse). The decoder tolerates
-			// any shape the encoder produced and the seven keys are the
+			// any shape the encoder produced and the keys are the
 			// contract — adding a new field is non-breaking; renaming one
 			// requires a schema version bump.
 			t.PrefixHashes = append(t.PrefixHashes, PrefixHash{
+				SystemPromptHash:       stringField(obj, "system_prompt"),
 				BaseInstructionsHash:   stringField(obj, "base_instructions"),
 				ConfirmationPolicyHash: stringField(obj, "confirmation_policy"),
 				ProjectContextHash:     stringField(obj, "project_context"),
