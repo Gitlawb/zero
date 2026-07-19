@@ -898,10 +898,15 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 // only after the header stops referencing them (best-effort: an unreferenced
 // chunk is never read).
 func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) {
+	// Refuse to publish an index the reader would reject: readKeyIndex caps both
+	// total keys and chunk count, and a header beyond either would make every
+	// later Load/Status/Save/Delete fail before it could recover. Check the key
+	// count before chunking so a large set of short keys that still fit under
+	// maxKeyringIndexChunks cannot strand the store unreadable.
+	if len(keys) > maxKeyringIndexKeys {
+		return 0, errKeyringIndexTooManyKeys(len(keys))
+	}
 	chunks := chunkIndexKeys(keys)
-	// Refuse to publish an index the reader would reject: readKeyIndex caps
-	// headers at maxKeyringIndexChunks, and a header beyond it would make
-	// every later Load/Status/Save/Delete fail before it could recover.
 	if len(chunks) > maxKeyringIndexChunks {
 		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunks), maxKeyringIndexChunks)
 	}

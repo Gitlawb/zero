@@ -851,8 +851,12 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 		t.Fatal(err)
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	ckr.gets = 0
 	if _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized key list in a chunk-0 header to be rejected")
+	}
+	if ckr.gets != 1 {
+		t.Fatalf("readKeyIndex issued %d gets for an oversized header keys list; want header lookup only", ckr.gets)
 	}
 
 	// The pre-chunking bare-array format must be capped the same way.
@@ -861,8 +865,33 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 		t.Fatal(err)
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(legacyArray)
+	ckr.gets = 0
 	if _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized legacy-format key array to be rejected")
+	}
+	if ckr.gets != 1 {
+		t.Fatalf("readKeyIndex issued %d gets for an oversized legacy array; want header lookup only", ckr.gets)
+	}
+
+	// Accumulation across continuation chunks must hit the same total cap: a
+	// small header plus an oversized chunk-1 would otherwise fan out past the
+	// bound after the per-header check has already passed.
+	headerOK, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 2, Keys: []string{ProviderKey("seed")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk1, err := json.Marshal(tooMany)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerOK)
+	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
+	ckr.gets = 0
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected an oversized key list accumulated across chunks to be rejected")
+	}
+	if ckr.gets != 2 {
+		t.Fatalf("readKeyIndex issued %d gets for a header+oversize-chunk; want header and chunk-1 only", ckr.gets)
 	}
 }
 
@@ -967,5 +996,25 @@ func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
 	}
 	if len(kr.data) != 0 {
 		t.Fatalf("over-cap index write must publish nothing, found %d entries", len(kr.data))
+	}
+}
+
+// TestStoreKeyringWriteIndexRejectsOverCapKeys: short keys can still fit under
+// the chunk-count cap while exceeding maxKeyringIndexKeys. writeKeyIndex must
+// refuse that set before publishing, matching the reader-side total key cap.
+func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+	keys := make([]string, maxKeyringIndexKeys+1)
+	for i := range keys {
+		// Short keys pack densely into chunks so the chunk-count check alone
+		// would not catch this over-cap set.
+		keys[i] = fmt.Sprintf("p%d", i)
+	}
+	if _, err := b.writeKeyIndex(keys, 0); err == nil {
+		t.Fatal("writeKeyIndex published a key count readKeyIndex would refuse")
+	}
+	if len(kr.data) != 0 {
+		t.Fatalf("over-cap key write must publish nothing, found %d entries", len(kr.data))
 	}
 }
