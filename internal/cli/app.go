@@ -58,7 +58,11 @@ type appDeps struct {
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
 	// inject it). nil ⇒ no export.
-	exportActiveProvider   func(providerName string)
+	exportActiveProvider func(providerName string)
+	// getenv reads a process environment variable (production: os.Getenv, set in
+	// defaultAppDeps — deliberately NOT filled by fillAppDeps, so tests are hermetic
+	// against ambient vars like ZERO_PROVIDER unless they inject it). nil ⇒ empty.
+	getenv                 func(string) string
 	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
@@ -118,6 +122,7 @@ func defaultAppDeps() appDeps {
 		stdin:                os.Stdin,
 		userConfigPath:       config.DefaultUserConfigPath,
 		exportActiveProvider: config.SetActiveProviderEnv,
+		getenv:               os.Getenv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
