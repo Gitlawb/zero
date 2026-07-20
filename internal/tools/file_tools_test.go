@@ -879,12 +879,11 @@ func TestReadFileToolValidRangeUnchangedByRecovery(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("valid range failed: %s: %s", result.Status, result.Output)
 	}
-	if strings.Contains(result.Output, "was before start_line") {
-		t.Fatalf("valid range must carry no recovery note: %q", result.Output)
-	}
-	for _, want := range []string{"File: notes.txt (lines 2-4 of 5)", "2 | beta", "3 | gamma", "4 | delta"} {
-		if !strings.Contains(result.Output, want) {
-			t.Fatalf("expected %q, got %q", want, result.Output)
-		}
+	// Byte-for-byte: header, blank separator, the exact selected lines, and no
+	// recovery note or trailing content. An altered header/separator or a stray
+	// out-of-range line would fail this where a substring check would not.
+	const want = "File: notes.txt (lines 2-4 of 5)\n\n2 | beta\n3 | gamma\n4 | delta"
+	if result.Output != want {
+		t.Fatalf("valid-range output changed by the recovery path:\n got: %q\nwant: %q", result.Output, want)
 	}
 }
