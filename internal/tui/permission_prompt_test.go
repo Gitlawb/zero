@@ -11,6 +11,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func pendingPermissionModel(t *testing.T, decide func(agent.PermissionDecision)) model {
@@ -545,6 +546,9 @@ func TestPermissionFeedbackPreservesComposerDraftOnSubmit(t *testing.T) {
 	after, _ := nm.Update(testKey(tea.KeyEnter))
 	am := after.(model)
 
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one permission decision, got %#v", got)
+	}
 	if got[0].Reason != "use apply_patch" {
 		t.Fatalf("feedback text lost: %q", got[0].Reason)
 	}
@@ -567,5 +571,46 @@ func TestPermissionFeedbackPreservesComposerDraftOnCancel(t *testing.T) {
 	}
 	if am.input.Value() != "my queued next message" {
 		t.Fatalf("composer draft not restored after cancel, got %q", am.input.Value())
+	}
+}
+
+// Backspace on an empty permission feedback field must edit the feedback text,
+// never drop a staged attachment. The keyBackspace case runs before the typing
+// branch and, on an empty composer, would otherwise remove the last staged
+// image/doc — which savedDraft does not restore.
+func TestPermissionFeedbackBackspaceKeepsStagedAttachment(t *testing.T) {
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(agent.PermissionDecision) {})
+	m.pendingImages = []zeroruntime.ImageBlock{{MediaType: "image/png"}}
+	m.pendingImageLabels = []string{"diagram.png"}
+
+	next, _ := m.Update(testKeyText("n")) // open feedback field (clears composer text)
+	after, _ := next.(model).Update(testKey(tea.KeyBackspace))
+	am := after.(model)
+
+	if len(am.pendingImageLabels) != 1 || len(am.pendingImages) != 1 {
+		t.Fatalf("Backspace in feedback mode dropped the staged attachment: labels=%v imgs=%d", am.pendingImageLabels, len(am.pendingImages))
+	}
+	if !am.pendingPermission.typing {
+		t.Fatal("Backspace should stay in the feedback field, not exit it")
+	}
+}
+
+// No permission option row is clickable while the feedback field is open: the
+// renderer registers zero clickable offsets in typing mode, so a stray click
+// (Allow included) has no row to land on. This is the primary safety; the
+// !typing guard on the click resolver in handleTranscriptSelectionMouse is the
+// explicit second layer for if this early-return is ever refactored away.
+func TestPermissionFeedbackRendersNoClickableOptionsWhileTyping(t *testing.T) {
+	request := feedbackRequest()
+
+	// Option mode: rows are clickable.
+	_, optOffsets := renderFocusedPermissionPrompt(request, 0, false, "", 80)
+	if len(optOffsets) == 0 {
+		t.Fatal("precondition: option rows should be clickable in option mode")
+	}
+	// Feedback mode: no clickable rows.
+	_, typingOffsets := renderFocusedPermissionPrompt(request, 0, true, "some feedback", 80)
+	if typingOffsets != nil {
+		t.Fatalf("feedback mode must register no clickable option offsets, got %#v", typingOffsets)
 	}
 }

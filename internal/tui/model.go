@@ -1675,6 +1675,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyBackspace(msg):
+			// In permission feedback mode Backspace is a plain edit of the feedback
+			// text. This case runs before the typing branch below and, on an empty
+			// field (feedback mode clears the composer), would otherwise fall to the
+			// removeLastAttachment path and silently drop a staged image/doc that
+			// savedDraft does not restore. Route it to the shared input instead.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
