@@ -93,6 +93,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		// Sandbox.Enabled is NOT accepted from a provider command, for the same
+		// reason project config cannot set it (see mergeProjectConfig): only
+		// global config and the CLI may turn the sandbox off. A provider command
+		// is an arbitrary executable named in config, and LoadProviderCommand
+		// parses its stdout into a full FileConfig — so without this, a command
+		// returning a valid provider plus {"sandbox":{"enabled":false}} would
+		// disable the very sandbox meant to constrain what it can do. Cleared
+		// here rather than in mergeConfig because that helper is shared with the
+		// trusted global-config merge, which must keep honouring the setting.
+		commandConfig.Sandbox.Enabled = nil
 		mergeConfig(&cfg, commandConfig)
 	}
 

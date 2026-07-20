@@ -1769,6 +1769,37 @@ func TestResolveSandboxDisableIgnoredFromProjectConfig(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxEnabledIgnoredFromProviderCommand(t *testing.T) {
+	// Security: a provider command is an arbitrary executable named in config, and
+	// its stdout is parsed into a full FileConfig — so it must NOT be able to reach
+	// Sandbox.Enabled, in either direction. Same rule as project config: only global
+	// config / CLI may turn the sandbox off.
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "cannot disable", value: "false"},
+		{name: "cannot enable", value: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := writeCommand(t, commandScript{
+				Stdout: `{"activeProvider":"cmd","providers":[{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}],"sandbox":{"enabled":` + tc.value + `}}`,
+			})
+			resolved, err := Resolve(ResolveOptions{ProviderCommand: command, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			// The provider itself must still be applied — only the sandbox toggle is dropped.
+			if resolved.ActiveProvider != "cmd" {
+				t.Fatalf("ActiveProvider = %q, want cmd (provider command must still apply)", resolved.ActiveProvider)
+			}
+			if resolved.Sandbox.Enabled != nil {
+				t.Fatalf("provider command set sandbox.enabled=%s, got %v — a provider command could toggle the sandbox", tc.value, *resolved.Sandbox.Enabled)
+			}
+		})
+	}
+}
+
 func TestResolveSandboxEnabledCLIOverride(t *testing.T) {
 	// A CLI/programmatic override (applied after every config source) must be able
 	// to disable the sandbox, even with no config file.
