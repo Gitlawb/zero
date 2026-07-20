@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -112,6 +113,9 @@ func TestSetEnabledByIDRespectsUserOnlyFilter(t *testing.T) {
 }
 
 func TestSetEnabledPreservesManifestMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve chmod bits in os.Stat mode")
+	}
 	root := t.TempDir()
 	pluginDir := filepath.Join(root, "demo")
 	writePluginManifest(t, pluginDir, map[string]any{
