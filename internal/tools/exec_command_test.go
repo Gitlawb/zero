@@ -923,19 +923,34 @@ func TestWriteStdinSchemaPinsSessionIDMinimum(t *testing.T) {
 	}
 }
 
+// A missing, zero, negative, or non-integer session_id all mean the model has no
+// live session, so write_stdin returns the SAME recovery guidance the no-live-
+// session case uses (start a session with exec_command, or edit files directly),
+// not a terse "session_id must be at least 1" that gives no way forward and names
+// a minimum that nudges the model to probe ids 1, 2, 3... Sharing one id-invariant
+// message also keeps a single repeated-failure signature, so any mix of these
+// mistakes accumulates toward the halt instead of resetting the streak (#749).
 func TestWriteStdinRequiresPositiveSessionID(t *testing.T) {
 	tool := NewWriteStdinTool(newExecSessionManager())
-	for _, args := range []map[string]any{
-		{},
-		{"session_id": 0},
+	want := UnknownExecSessionError(0)
+	for name, args := range map[string]map[string]any{
+		"missing":     {},
+		"zero":        {"session_id": 0},
+		"negative":    {"session_id": -3},
+		"non-integer": {"session_id": "abc"},
 	} {
-		result := tool.Run(context.Background(), args)
-		if result.Status != StatusError {
-			t.Fatalf("Run(%#v) status = %s, want error", args, result.Status)
-		}
-		if !strings.Contains(result.Output, "Invalid arguments for write_stdin") {
-			t.Fatalf("Run(%#v) output = %q, want invalid arguments", args, result.Output)
-		}
+		t.Run(name, func(t *testing.T) {
+			result := tool.Run(context.Background(), args)
+			if result.Status != StatusError {
+				t.Fatalf("status = %s, want error", result.Status)
+			}
+			if result.Output != want {
+				t.Fatalf("output = %q,\n want the recovery message %q", result.Output, want)
+			}
+			if strings.Contains(result.Output, "must be at least 1") {
+				t.Fatalf("still returns the terse minimum error: %q", result.Output)
+			}
+		})
 	}
 }
 

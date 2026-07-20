@@ -775,12 +775,20 @@ func (tool writeStdinTool) Run(ctx context.Context, args map[string]any) Result 
 }
 
 func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]any, _ RunOptions) Result {
-	if value, ok := args["session_id"]; !ok || value == nil {
-		return errorResult("Error: Invalid arguments for write_stdin: session_id is required")
-	}
-	sessionID, err := intArg(args, "session_id", 0, 1, 0)
-	if err != nil {
-		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
+	// A missing, non-integer, or < 1 session_id all mean the same thing: the model
+	// has no live session to write to. Route them to the SAME recovery guidance the
+	// no-live-session case uses (UnknownExecSessionError) instead of a terse
+	// "session_id must be at least 1". The terse error gives no way forward and, by
+	// naming the minimum, nudges the model to try 1, 2, 3... — the exact id-probing
+	// #749 works to suppress. The recovery message instead tells it to start a
+	// session or edit files directly, and because that message is id-invariant, the
+	// missing/zero/non-integer entry points and id-probing collapse to ONE
+	// repeated-failure signature, so any mix of them accumulates toward the halt
+	// rather than resetting the streak on each class of mistake.
+	value, present := args["session_id"]
+	sessionID, sessionErr := intArg(args, "session_id", 0, 1, 0)
+	if !present || value == nil || sessionErr != nil {
+		return errorResult(UnknownExecSessionError(sessionID))
 	}
 	chars, err := stringArgWithEmpty(args, "chars", "", false, true)
 	if err != nil {
