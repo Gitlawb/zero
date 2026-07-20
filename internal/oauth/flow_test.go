@@ -153,7 +153,7 @@ func TestPostTokenRefusesRedirect(t *testing.T) {
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", "the-code")
 	form.Set("client_secret", "shh")
-	_, err := PostToken(context.Background(), http.DefaultClient, endpoint, form, Token{}, nil)
+	_, err := PostToken(context.Background(), http.DefaultClient, endpoint, form, Token{}, nil, nil)
 	if !errors.Is(err, ErrUnsafeRedirect) {
 		t.Fatalf("PostToken err = %v, want ErrUnsafeRedirect", err)
 	}
