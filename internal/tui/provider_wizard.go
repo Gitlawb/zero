@@ -1959,12 +1959,49 @@ func (wizard *providerWizardState) filteredModels() []providerWizardModel {
 	return models
 }
 
-func (model providerWizardModel) displayLabel() string {
-	description := strings.TrimSpace(model.Description)
-	if description != "" && !providerWizardGenericModelDescription(description) {
-		return description
+// A model Description is only a good row label when it reads like a display
+// NAME — "Grok 4.3" for x-ai/grok-4.3 — which is what the field is for, and why
+// the row prefers it over an ugly raw ID.
+//
+// Providers do not all honour that. Aggregators commonly return a prose blurb
+// instead ("Fast DeepSeek model for efficient chat, coding help, and agent
+// loops"), which fails as a label twice over: it overflows the row, and because
+// such blurbs are written per model FAMILY rather than per model, several
+// DIFFERENT models collapse to byte-identical rows. A picker then offers two
+// visually identical entries with the distinguishing ID visible only in the
+// detail line of whichever one is highlighted.
+//
+// providerWizardGenericModelDescription cannot catch these: it rejects
+// descriptions that are vague ("live model", "catalog default"), whereas these
+// are specific — just shared and sentence-shaped. So the test is shape, not
+// wording: a name is short and few-worded; anything longer is prose, and the ID
+// (unique by construction) makes the better label.
+const (
+	providerWizardMaxModelNameChars = 28
+	providerWizardMaxModelNameWords = 4
+)
+
+func providerWizardDescriptionIsDisplayName(description string) bool {
+	trimmed := strings.TrimSpace(description)
+	if trimmed == "" || providerWizardGenericModelDescription(trimmed) {
+		return false
 	}
-	return model.ID
+	if len(trimmed) > providerWizardMaxModelNameChars {
+		return false
+	}
+	return len(strings.Fields(trimmed)) <= providerWizardMaxModelNameWords
+}
+
+func (model providerWizardModel) displayLabel() string {
+	if providerWizardDescriptionIsDisplayName(model.Description) {
+		return strings.TrimSpace(model.Description)
+	}
+	if id := strings.TrimSpace(model.ID); id != "" {
+		return id
+	}
+	// ID-less sentinel rows built in currentModel ("model name required",
+	// "no matching models") would otherwise render blank.
+	return strings.TrimSpace(model.Description)
 }
 
 func (model providerWizardModel) secondaryText() string {
