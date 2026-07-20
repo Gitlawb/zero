@@ -21,7 +21,8 @@ func TestPlatformAdaptersShareExecutionContract(t *testing.T) {
 			t.Fatalf("baseline profile missing protected metadata %q: %#v", name, profile.FileSystem.WriteRoots[0].ProtectedMetadataNames)
 		}
 	}
-	for _, subpath := range []string{filepath.Join(root, ".git", "hooks"), filepath.Join(root, ".git", "config")} {
+	resolvedRoot := profile.FileSystem.WriteRoots[0].Root
+	for _, subpath := range []string{filepath.Join(resolvedRoot, ".git", "hooks"), filepath.Join(resolvedRoot, ".git", "config")} {
 		if !stringSliceContains(profile.FileSystem.WriteRoots[0].ReadOnlySubpaths, subpath) {
 			t.Fatalf("baseline profile missing git metadata carveout %q: %#v", subpath, profile.FileSystem.WriteRoots[0].ReadOnlySubpaths)
 		}

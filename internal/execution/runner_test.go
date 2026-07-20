@@ -2,8 +2,9 @@ package execution
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,14 +15,24 @@ type capturedTestPreparer struct {
 
 func (preparer *capturedTestPreparer) PrepareExecution(_ context.Context, request Request) (PreparedCommand, error) {
 	preparer.request = request
-	name, args := testShellCommand("printf stdout; printf stderr >&2; exit 7")
+	command := exec.Command(os.Args[0], "-test.run=^TestCapturedRunnerHelperProcess$")
+	command.Env = append(os.Environ(), "ZERO_CAPTURED_RUNNER_HELPER=1")
 	return PreparedCommand{
-		Command: exec.Command(name, args...),
+		Command: command,
 		Enforcement: Enforcement{
 			Backend: "test-adapter",
 			Level:   "native",
 		},
 	}, nil
+}
+
+func TestCapturedRunnerHelperProcess(t *testing.T) {
+	if os.Getenv("ZERO_CAPTURED_RUNNER_HELPER") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stdout, "stdout")
+	fmt.Fprint(os.Stderr, "stderr")
+	os.Exit(7)
 }
 
 func TestRunnerExecutesCapturedRequestThroughAdapter(t *testing.T) {
@@ -63,11 +74,4 @@ func TestRunnerWithoutAdapterFailsClosed(t *testing.T) {
 	if result.Outcome.Kind != OutcomeSandboxSetupFailure || !strings.Contains(result.Stderr, "adapter") {
 		t.Fatalf("result = %#v, want fail-closed missing-adapter result", result)
 	}
-}
-
-func testShellCommand(script string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "cmd.exe", []string{"/D", "/S", "/C", `<nul set /p "=stdout" & <nul set /p "=stderr" 1>&2 & exit /b 7`}
-	}
-	return "/bin/sh", []string{"-c", script}
 }
