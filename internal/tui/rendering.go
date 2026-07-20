@@ -1112,7 +1112,14 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	if name == "" {
 		name = "tool"
 	}
-	fill := zeroTheme.onPerm
+	// The card body carries no background fill, matching every other prompt card
+	// (ask_user, spec review, plan) — see the lipgloss.NewStyle() fills below. The
+	// permission card used to tint its whole body with permBg, an amber-family
+	// wash that reads as a warm slab on cool themes (e.g. a brown-yellow box over
+	// dracula's purples) and made it the one outlier. The amber PERMISSION badge
+	// and the amber-mixed border still carry the "this is a permission gate"
+	// signal; the body no longer clashes with the surrounding theme.
+	fill := func(style lipgloss.Style) lipgloss.Style { return style }
 
 	top := zeroTheme.permBadge.Render(" PERMISSION ")
 
@@ -1147,8 +1154,16 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 		hotkey := fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
 		optionLabel := permissionOptionLabel(option, request)
 		if index == cursor {
+			// onSel, not badge. zeroTheme.badge is the brand chip (" 0 ", " ASK ",
+			// " SPEC REVIEW ") — a full-brightness accent fill meant for short
+			// labels. Using it for a selected ROW painted a bright accent slab
+			// across the permission card, fighting the card's amber warning palette
+			// and ignoring the card tint every other line composes onto. selBg is
+			// the tint tuned for exactly this job ("separates from the panel while
+			// ink label contrast stays ~9.4:1"), and onSel is what every other
+			// selectable list in the TUI uses for its highlighted row.
 			marker := fill(zeroTheme.accent).Render("▸ ")
-			label := zeroTheme.badge.Render(" " + optionLabel + " ")
+			label := zeroTheme.onSel(zeroTheme.ink).Bold(true).Render(" " + optionLabel + " ")
 			lines = append(lines, marker+label+hotkey)
 		} else {
 			label := fill(zeroTheme.ink).Render(optionLabel)
@@ -1163,7 +1178,7 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 
-	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), offsets
+	return styledBlockFill(width, lines, zeroTheme.permBorder, lipgloss.NewStyle()), offsets
 }
 
 func permissionScopeLine(request agent.PermissionRequest, scope string) string {

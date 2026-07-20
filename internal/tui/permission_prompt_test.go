@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -375,4 +376,59 @@ func TestShiftDownComposerGuard(t *testing.T) {
 	if got := next.chatScrollOffset; got != 3 {
 		t.Fatalf("Shift+Down with non-empty composer scrolled offset to %d, want 3 (unchanged)", got)
 	}
+}
+
+// The highlighted permission option must use the selected-row tint, not the
+// brand chip. zeroTheme.badge is the accent-filled chip for short labels
+// (" 0 ", " ASK ", " SPEC REVIEW "); using it for a whole row painted a
+// full-brightness accent slab across a card whose palette is deliberately amber
+// (warning), and skipped the card tint every other line composes onto. selBg is
+// the tint tuned for a highlighted row against a panel, and onSel is what every
+// other selectable list in the TUI uses.
+func TestFocusedPermissionSelectedRowUsesSelectionTintNotBrandChip(t *testing.T) {
+	request := agent.PermissionRequest{ToolName: "exec_command", SideEffect: "shell"}
+	card, _ := renderFocusedPermissionPrompt(request, 0, 70)
+
+	var selected string
+	for _, line := range strings.Split(card, "\n") {
+		if strings.Contains(ansiPattern.ReplaceAllString(line, ""), "▸ ") {
+			selected = line
+			break
+		}
+	}
+	if selected == "" {
+		t.Fatal("no highlighted option row rendered")
+	}
+
+	accentBg := backgroundCode(darkPalette.accent)
+	selBg := backgroundCode(darkPalette.selBg)
+	if strings.Contains(selected, accentBg) {
+		t.Errorf("selected row is filled with the brand accent %s (zeroTheme.badge); want the selection tint:\n%q", darkPalette.accent, selected)
+	}
+	if !strings.Contains(selected, selBg) {
+		t.Errorf("selected row should carry the selection tint %s:\n%q", darkPalette.selBg, selected)
+	}
+
+	// The PERMISSION chip keeps its amber fill — the card must still read as a
+	// warning surface, so this fix must not flatten it.
+	if !strings.Contains(card, backgroundCode(darkPalette.amber)) {
+		t.Errorf("PERMISSION badge lost its amber fill:\n%q", card)
+	}
+
+	// The card BODY carries no warm permBg wash any more: it matches the other
+	// prompt cards (ask_user, spec) whose bodies are transparent. Warning identity
+	// comes from the amber badge + border, not a full-body tint that clashes on
+	// cool themes.
+	if strings.Contains(card, backgroundCode(darkPalette.permBg)) {
+		t.Errorf("permission card body still tinted with permBg %s; want a transparent body:\n%q", darkPalette.permBg, card)
+	}
+}
+
+// backgroundCode renders the SGR truecolor background sequence for a #rrggbb
+// palette entry, so assertions compare against the palette rather than
+// hardcoded numbers that drift when a theme is retuned.
+func backgroundCode(hex string) string {
+	var r, g, b int
+	fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b)
+	return fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
 }
