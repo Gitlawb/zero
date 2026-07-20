@@ -134,9 +134,9 @@ type DuplicateName struct {
 // DETERMINISTIC by a documented rule: the skill in the lexicographically-first
 // directory name wins (os.ReadDir returns entries sorted by filename, so the
 // first one encountered is kept and later same-name duplicates are dropped).
-// This guarantees Load/List/Get always resolve a duplicated name to the same
-// winner regardless of sort stability. LoadFromRoots reports the dropped
-// collisions so callers can warn about any such shadowing.
+// This guarantees Load always resolves a duplicated name to the same winner
+// regardless of sort stability. LoadFromRoots reports the dropped collisions
+// so callers can warn about any such shadowing.
 //
 // NOTE: Load scans one root. Runtime discovery uses LoadFromRoots (primary
 // DefaultDir, optional ~/.agents/skills, then plugin skill roots). Prefer

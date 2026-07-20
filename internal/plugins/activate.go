@@ -284,7 +284,7 @@ const skillFileName = "SKILL.md"
 
 // MergedSkills loads the default skills directory, the shared ~/.agents/skills
 // root when present, plus the supplied plugin skill roots and returns one
-// merged, name-deduplicated list (Content stripped, like skills.List) alongside
+// merged, name-deduplicated list (Content stripped, like skills.ListFromRoots) alongside
 // the duplicate-name collisions across all roots. Earlier roots win a name
 // clash, matching skills.Load's first-wins rule; the default dir is always
 // considered first so a user skill shadows agents and plugins. A bad root simply
