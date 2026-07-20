@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -28,6 +29,21 @@ func filesPanelTestModel() model {
 			changedFiles: []string{"internal/tui/sidebar.go"}},
 	)
 	return m
+}
+
+func TestGeneratedTreeSummaryIsVisibleButNotClickable(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript, transcriptRow{
+		kind: rowToolResult, status: tools.StatusOK,
+		changeSummaries: []execution.Change{{Path: "node_modules/", Kind: execution.ChangeCreated, Aggregated: true}},
+	})
+	lines, hits := m.sidebarFileLines(34)
+	if got := plainRender(t, strings.Join(lines, "\n")); !strings.Contains(got, "Σ") || !strings.Contains(got, "node_modules/") {
+		t.Fatalf("generated summary missing from Files panel: %q", got)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("generated tree must not be selectable as a file: %#v", hits)
+	}
 }
 
 // TestTouchedFilesAggregates: the roster is recovered from tool-result rows,

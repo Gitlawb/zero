@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/errhint"
 	"github.com/Gitlawb/zero/internal/execprofile"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -206,6 +207,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	executionRunner := execution.NewRunner(nil)
 	// Register the escalate_model tool only when the run opted into mid-run
 	// escalation. It is registered before --list-tools formatting and
 	// validateExecToolFilters so the tool is both listable and filter-validatable.
@@ -238,16 +240,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
 	}
-	mcpRuntime, mcpSkip, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
-	}
-	defer closeMCPRuntime(stderr, mcpRuntime)
+	var mcpRuntime mcpToolRuntime
+	var mcpSkip trustSkip
 	// Make local plugins live for this run: register their declared tools into the
 	// registry and collect their hooks + skill roots for the dispatcher and skill
 	// tool below. Done before --list-tools and filter validation so plugin tools
 	// are listable and filter-validatable; it fails OPEN (a bad plugin is skipped).
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot)
+	var pluginActivation pluginActivation
 	if options.useSpec {
 		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
 	}
@@ -290,6 +289,29 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
+	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
+		registry.Register(tool)
+	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	if notice, err := sandboxEngine.ConsumeGrantMigrationNotice(); err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", "migrate sandbox grants: "+err.Error())
+	} else if notice != "" {
+		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+	}
+	executionRunner.SetPreparer(sandboxEngine)
+	mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+	}
+	defer closeMCPRuntime(stderr, mcpRuntime)
+	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -356,28 +378,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return exitCrash
 		}
 		images = nil
-	}
-	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
-	}
-	// Re-register the core tools with the run scope, OVERWRITING the nil-scope
-	// instances registered before config resolve (the registry must exist that
-	// early for --list-tools and tool-filter validation, which run without a
-	// provider). This is safe only while two invariants hold:
-	//   1. Registry.Register replaces by NAME, so every path-confining core
-	//      tool is swapped wholesale; and
-	//   2. nothing between the initial registration and this point captures a
-	//      core-tool INSTANCE (tool_search holds the *Registry* and resolves
-	//      names lazily; --list-tools and filter validation use names only).
-	// A new wrapper that snapshots a core tool before this line would silently
-	// ship nil-scope enforcement — add it below this re-registration instead.
-	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
-		registry.Register(tool)
-	}
-	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
 	runReasoningEffort := options.reasoningEffort
 	if options.useSpec && options.specReasoningEffort != "" {
@@ -624,7 +624,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Build the hooks dispatcher out of the struct literal so its trust skip report
 	// can be combined with the plugin activation's, and emit at most one notice when
 	// project hooks/plugins were dropped for an untrusted workspace.
-	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
+	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:             resolved.MaxTurns,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/secrets"
 )
@@ -142,6 +143,8 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	}
 	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
+	executionRequest := execExecutionRequest(command, plan, absoluteCwd, false)
+	changeObserver := execution.NewChangeObserver(plan.WorkspaceRoot)
 
 	// Bound the capture so a command with runaway output (`cat huge.log`, `yes`)
 	// can't grow Zero's memory before truncation: only the head+tail each stream
@@ -161,6 +164,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
 	err = command.Run()
 	exitCode := commandExitCode(err)
+	adapterReport, reportErr := plan.ExecutionReport()
 	meta["exit_code"] = strconv.Itoa(exitCode)
 	stdoutText := stdout.retained()
 	stderrRetained := stderr.retained()
@@ -170,46 +174,68 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	stderrTotal := stderr.total + (len(stderrText) - len(stderrRetained))
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-		return Result{
+		result := Result{
 			Status: StatusError,
 			Output: fmt.Sprintf("Error: Command timed out after %dms.", timeoutMS),
 			Meta:   meta,
 		}
+		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), true)
 	}
 	if err != nil {
 		if exitCode < 0 {
-			return Result{
+			result := Result{
 				Status: StatusError,
 				Output: "Error executing command: " + err.Error(),
 				Meta:   meta,
 			}
+			return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
 		}
-		markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
+		if adapterReport.Denial != nil {
+			markStructuredSandboxDenial(meta, *adapterReport.Denial)
+		}
 		outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
-		return Result{
+		result := Result{
 			Status:    StatusError,
 			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
 			Truncated: truncated,
 			Meta:      meta,
 		}
+		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
 	}
 
-	markLikelySandboxDenial(meta, plan, exitCode, stdoutText, stderrText)
-	outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
-	if meta[SandboxLikelyDeniedMeta] == "true" {
-		return Result{
-			Status:    StatusError,
-			Output:    formatBashOutputWithShellHint(outText, errText, exitCode, meta),
-			Truncated: truncated,
-			Meta:      meta,
-		}
+	if adapterReport.Denial != nil {
+		markStructuredSandboxDenial(meta, *adapterReport.Denial)
 	}
-	return Result{
+	outText, errText, truncated := prepareBashOutput(stdoutText, stdout.total, stderrText, stderrTotal, meta, directBudget)
+	result := Result{
 		Status:    StatusOK,
 		Output:    formatBashOutput(outText, errText, exitCode),
 		Truncated: truncated,
 		Meta:      meta,
 	}
+	return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), false)
+}
+
+func withBashExecution(result Result, request execution.Request, plan zeroSandbox.CommandPlan, exitCode int, report execution.AdapterReport, reportErr error, changes []execution.Change, timedOut bool) Result {
+	input := execToolResultInput{
+		exited:      true,
+		exitCode:    exitCode,
+		enforcement: executionEnforcement(plan),
+		request:     request,
+		report:      report,
+		reportErr:   reportErr,
+		changes:     changes,
+	}
+	outcome := execExecutionOutcome(input)
+	if timedOut && report.Denial == nil && reportErr == nil {
+		outcome.State = execution.StateFailed
+		outcome.Kind = execution.OutcomeTimedOut
+	}
+	result.ExecutionRequest = &request
+	result.ExecutionOutcome = &outcome
+	result.ChangedFiles = executionChangedFiles(changes)
+	result.ChangeSummaries = executionChangeSummaries(changes)
+	return result
 }
 
 func commandEngineForSandboxPermissions(engine *zeroSandbox.Engine, sandboxPermissions SandboxPermissionOverride) *zeroSandbox.Engine {
@@ -287,15 +313,23 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 		}
 		return command, plan, err
 	}
+	directPolicy := zeroSandbox.DefaultPolicy()
+	directPolicy.Mode = zeroSandbox.ModeDisabled
+	directPolicy.Network = zeroSandbox.NetworkAllow
 	plan := zeroSandbox.CommandPlan{
 		Backend: zeroSandbox.Backend{
 			Name:    zeroSandbox.BackendUnavailable,
 			Message: "sandbox engine not provided",
 		},
-		Wrapped: false,
-		Name:    spec.Name,
-		Args:    spec.Args,
-		Dir:     spec.Dir,
+		TargetBackend:     zeroSandbox.BackendNone,
+		WorkspaceRoot:     absoluteCwd,
+		Policy:            directPolicy,
+		PermissionProfile: zeroSandbox.PermissionProfileFromPolicy(absoluteCwd, directPolicy, nil),
+		Wrapped:           false,
+		EnforcementLevel:  zeroSandbox.EnforcementDisabled,
+		Name:              spec.Name,
+		Args:              spec.Args,
+		Dir:               spec.Dir,
 	}
 	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	command.Dir = spec.Dir

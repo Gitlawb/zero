@@ -150,7 +150,7 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	case "go":
 		return firstSubcommand(words, nil) == "get"
 	case "git":
-		return firstSubcommand(words, nil) == "clone"
+		return gitUsesNetwork(words)
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
@@ -159,9 +159,15 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 }
 
 func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
+	if packageManagerOffline(words) {
+		return false
+	}
 	first := firstSubcommand(words, aliases)
 	switch first {
-	case "install", "add", "publish", "login":
+	case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
+		"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
+		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
+		"deprecate", "owner", "org", "team", "token", "profile", "access":
 		return true
 	case "start", "serve", "dev", "preview":
 		return true
@@ -169,17 +175,31 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		second := secondSubcommand(words)
 		return second == "start" || second == "serve" || second == "dev" || second == "preview"
 	case "exec":
-		for _, word := range words {
-			if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
-				continue
-			}
-			if word == "exec" || word == "x" || word == "dlx" {
-				continue
-			}
-			return localServerPrograms[word]
+		// Package-manager exec commands may resolve and download a missing
+		// package before launching it. An explicit offline flag keeps this path
+		// inside the isolated namespace; otherwise request egress up front.
+		return true
+	}
+	return false
+}
+
+func packageManagerOffline(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "--offline", "--no-network":
+			return true
 		}
 	}
 	return false
+}
+
+func gitUsesNetwork(words []string) bool {
+	switch firstSubcommand(words, nil) {
+	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+		return true
+	default:
+		return false
+	}
 }
 
 func npxUsesNetwork(_ []string) bool {

@@ -394,6 +394,9 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 		`(subpath "/tmp")`,
 		`(literal "/dev/null")`,
 		`(deny network*)`,
+		`(allow network-bind (local ip "*:*"))`,
+		`(allow network-inbound (local ip "localhost:*"))`,
+		`(allow network-outbound (remote ip "localhost:*"))`,
 	} {
 		if !strings.Contains(sbpl, want) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)

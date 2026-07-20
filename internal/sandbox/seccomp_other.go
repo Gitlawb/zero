@@ -13,3 +13,6 @@ func ApplyUnixSocketBlock() error { return ErrSeccompUnsupported }
 
 // ApplyLinuxNetworkDeny is a no-op on non-Linux platforms.
 func ApplyLinuxNetworkDeny() error { return ErrSeccompUnsupported }
+
+// ApplyLinuxIsolatedNetworkGuard is a no-op on non-Linux platforms.
+func ApplyLinuxIsolatedNetworkGuard() error { return ErrSeccompUnsupported }

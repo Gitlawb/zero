@@ -3,14 +3,26 @@ package plugins
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/tools"
 )
+
+type pluginExecutionPreparer struct {
+	request execution.Request
+}
+
+func (preparer *pluginExecutionPreparer) PrepareExecution(_ context.Context, request execution.Request) (execution.PreparedCommand, error) {
+	preparer.request = request
+	return execution.PreparedCommand{Command: exec.Command(request.Command.Name, request.Command.Args...)}, nil
+}
 
 // fakeToolRunner records the invocation and returns a canned result so tool
 // activation can be exercised without spawning a real process.
@@ -551,6 +563,21 @@ func TestActivateSkipsDisabledPlugin(t *testing.T) {
 	}
 	if len(result.Tools) != 0 || len(result.Hooks) != 0 {
 		t.Fatalf("disabled plugin should contribute nothing, got %#v", result)
+	}
+}
+
+func TestPluginCommandUsesTypedPluginExecutionOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+	preparer := &pluginExecutionPreparer{}
+	command := pluginCommand{Command: os.Args[0], Args: []string{"-test.run=^$"}, Cwd: t.TempDir()}
+	output := execPluginCommandWithExecution(context.Background(), execution.NewRunner(preparer), command, time.Second)
+	if output.Err != nil || output.ExitCode != 0 {
+		t.Fatalf("plugin execution output = %#v", output)
+	}
+	if preparer.request.Origin != execution.OriginPlugin || preparer.request.Mode != execution.ModeCaptured {
+		t.Fatalf("execution request = %#v", preparer.request)
 	}
 }
 

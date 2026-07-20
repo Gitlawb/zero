@@ -5148,14 +5148,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:         toolResultRowText(result),
-				tool:         result.Name,
-				status:       result.Status,
-				detail:       toolResultDetail(result),
-				runID:        runID,
-				changedFiles: result.ChangedFiles,
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:            toolResultRowText(result),
+				tool:            result.Name,
+				status:          result.Status,
+				detail:          toolResultDetail(result),
+				runID:           runID,
+				changedFiles:    result.ChangedFiles,
+				changeSummaries: result.ChangeSummaries,
 			}
 			// A Task result is shown by the specialist card, and update_plan by the
 			// plan panel/sidebar, so skip both redundant transcript rows.
@@ -5187,6 +5188,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			if len(result.ChangedFiles) > 0 {
 				toolPayload["changedFiles"] = result.ChangedFiles
+			}
+			if len(result.ChangeSummaries) > 0 {
+				toolPayload["changeSummaries"] = result.ChangeSummaries
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,

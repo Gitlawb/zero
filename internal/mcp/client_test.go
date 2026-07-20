@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +17,20 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 )
+
+type mcpExecutionPreparer struct {
+	request execution.Request
+}
+
+func (preparer *mcpExecutionPreparer) PrepareExecution(ctx context.Context, request execution.Request) (execution.PreparedCommand, error) {
+	preparer.request = request
+	command := exec.CommandContext(ctx, request.Command.Name, request.Command.Args...)
+	command.Dir = request.WorkingDirectory
+	command.Env = request.Command.Env
+	return execution.PreparedCommand{Command: command}, nil
+}
 
 func TestStdioClientListsAndCallsTools(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -62,6 +76,34 @@ func TestStdioClientListsAndCallsTools(t *testing.T) {
 	}
 	if got := TextContent(result.Content); got != "lookup: zero" {
 		t.Fatalf("CallTool() text = %q, want lookup result", got)
+	}
+}
+
+func TestStdioClientUsesTypedMCPExecutionOrigin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer := &mcpExecutionPreparer{}
+	workspace := t.TempDir()
+	client, err := ConnectWithOptions(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeStdio,
+		Command: executable,
+		Args:    []string{"-test.run=TestMCPStdioHelperProcess", "--"},
+		Env:     map[string]string{"ZERO_MCP_STDIO_HELPER": "1"},
+	}, ConnectOptions{Execution: execution.NewRunner(preparer), WorkspaceRoot: workspace})
+	if err != nil {
+		t.Fatalf("ConnectWithOptions() error = %v", err)
+	}
+	defer client.Close()
+	if preparer.request.Origin != execution.OriginMCPServer || preparer.request.Mode != execution.ModeDurable {
+		t.Fatalf("execution request = %#v", preparer.request)
+	}
+	if preparer.request.WorkingDirectory != workspace {
+		t.Fatalf("working directory = %q, want %q", preparer.request.WorkingDirectory, workspace)
 	}
 }
 

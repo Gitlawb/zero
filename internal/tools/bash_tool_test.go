@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -101,8 +102,8 @@ func TestCoreToolsExposeShellTools(t *testing.T) {
 		if tool.Safety().Permission != wantPermission {
 			t.Fatalf("%s permission = %s, want %s", name, tool.Safety().Permission, wantPermission)
 		}
-		if name == "write_stdin" && !tool.Safety().AdvertiseInAuto {
-			t.Fatalf("write_stdin should stay visible in auto mode for polling and interrupts")
+		if (name == "exec_command" || name == "write_stdin") && !tool.Safety().AdvertiseInAuto {
+			t.Fatalf("%s should stay visible in auto mode so process creation and interaction are both available", name)
 		}
 	}
 }
@@ -350,6 +351,25 @@ func TestBashToolRunsCommandInWorkspace(t *testing.T) {
 	}
 }
 
+func TestBashToolReportsWorkspaceChangesAfterFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell syntax")
+	}
+	root := t.TempDir()
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": "printf partial > partial.txt; exit 9",
+	})
+	if result.Status != StatusError {
+		t.Fatalf("expected application failure, got %s: %s", result.Status, result.Output)
+	}
+	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != "partial.txt" {
+		t.Fatalf("ChangedFiles = %#v, want partial.txt", result.ChangedFiles)
+	}
+	if result.ExecutionOutcome == nil || len(result.ExecutionOutcome.Changes) != 1 || result.ExecutionOutcome.Changes[0].Kind != execution.ChangeCreated {
+		t.Fatalf("typed changes = %#v, want created partial file", result.ExecutionOutcome)
+	}
+}
+
 // A command with runaway output must not be buffered whole in memory: the capture
 // is bounded to head+tail, yet raw_bytes still reports the true (much larger) size.
 // If capture were unbounded this would balloon Zero's memory before truncation.
@@ -443,6 +463,9 @@ func TestBashToolReturnsNonzeroExitAsError(t *testing.T) {
 	if result.Meta["exit_code"] != "7" {
 		t.Fatalf("expected exit_code metadata 7, got %q", result.Meta["exit_code"])
 	}
+	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
+		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
+	}
 }
 
 func TestBashToolTimesOut(t *testing.T) {
@@ -459,6 +482,9 @@ func TestBashToolTimesOut(t *testing.T) {
 	}
 	if result.Meta["timeout_ms"] != "20" {
 		t.Fatalf("expected timeout_ms metadata 20, got %q", result.Meta["timeout_ms"])
+	}
+	if result.ExecutionOutcome == nil || result.ExecutionOutcome.Kind != execution.OutcomeTimedOut {
+		t.Fatalf("execution outcome = %#v, want timed_out", result.ExecutionOutcome)
 	}
 }
 

@@ -2,17 +2,16 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -25,9 +24,6 @@ const (
 	maxPollYieldTimeMS        = 300000
 	defaultMaxOutputTokens    = 10000
 	maxExecOutputTokenRequest = 200000
-	completedSessionRetention = 30 * time.Second
-	maxExecSessions           = 64
-	recentExecOutputBytes     = 4096
 	// maxExecOutputBufferBytes caps the undrained output an unpolled session can
 	// accumulate. Without a cap, a long-lived background session nobody polls
 	// again (e.g. a dev server left running after its initiating run was
@@ -36,388 +32,23 @@ const (
 	// tens of gigabytes over several hours and got the whole zero process
 	// OOM-killed by the OS.
 	maxExecOutputBufferBytes         = 2 * 1024 * 1024
-	execSessionStopTimeout           = 3 * time.Second
-	execSessionEvictedMessage        = "[zero] session evicted: too many background terminals\n"
 	execOutputBufferTruncatedMessage = "[zero] output buffer truncated: undrained output exceeded 2MiB, oldest output dropped"
 )
 
-type execSessionManager struct {
-	mu                 sync.Mutex
-	nextID             int
-	sessions           map[int]*execSession
-	completedRetention time.Duration
-	maxSessions        int
-}
+type execSessionManager = execution.ProcessManager
 
 func newExecSessionManager() *execSessionManager {
-	return &execSessionManager{
-		nextID:             1000,
-		sessions:           make(map[int]*execSession),
-		completedRetention: completedSessionRetention,
-		maxSessions:        maxExecSessions,
-	}
+	return execution.NewProcessManager(execution.ProcessManagerOptions{})
 }
 
 var defaultExecSessionManager = newExecSessionManager()
 
-func (manager *execSessionManager) allocateID() int {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	id := manager.nextID
-	manager.nextID++
-	return id
-}
-
-func (manager *execSessionManager) store(session *execSession) {
-	manager.mu.Lock()
-	var pruned *execSession
-	removePruned := false
-	if manager.maxSessions > 0 && len(manager.sessions) >= manager.maxSessions {
-		pruned = manager.sessionToPruneLocked()
-		if pruned != nil {
-			removePruned = pruned.doneClosed()
-			if removePruned {
-				delete(manager.sessions, pruned.id)
-			}
-		}
-	}
-	manager.sessions[session.id] = session
-	manager.mu.Unlock()
-	if pruned != nil && !removePruned {
-		pruned.output.Write([]byte(execSessionEvictedMessage))
-		pruned.terminate()
-	}
-}
-
-func (manager *execSessionManager) get(id int) (*execSession, bool) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	session, ok := manager.sessions[id]
-	return session, ok
-}
-
-func (manager *execSessionManager) remove(id int) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	delete(manager.sessions, id)
-}
-
-func (manager *execSessionManager) removeCompletedLater(session *execSession) {
-	retention := manager.completedRetention
-	go func() {
-		<-session.done
-		if retention > 0 {
-			timer := time.NewTimer(retention)
-			<-timer.C
-		}
-		manager.remove(session.id)
-	}()
-}
-
-func (manager *execSessionManager) len() int {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	return len(manager.sessions)
-}
-
-func (manager *execSessionManager) sessionToPruneLocked() *execSession {
-	if len(manager.sessions) == 0 {
-		return nil
-	}
-	// Snapshot each session's lastUsedAt UNDER session.mu before sorting: touch()
-	// writes lastUsedAt under session.mu, so reading it here (under manager.mu only)
-	// was a data race on a multi-word time.Time. Lock order stays manager.mu →
-	// session.mu (no path takes them the other way). (AUDIT-L15)
-	type sessionAge struct {
-		session *execSession
-		last    time.Time
-	}
-	ages := make([]sessionAge, 0, len(manager.sessions))
-	for _, session := range manager.sessions {
-		ages = append(ages, sessionAge{session: session, last: session.lastUsed()})
-	}
-	sort.Slice(ages, func(i, j int) bool {
-		return ages[i].last.Before(ages[j].last)
-	})
-	for _, a := range ages {
-		if a.session.doneClosed() {
-			return a.session
-		}
-	}
-	if len(ages) <= 8 {
-		return nil
-	}
-	return ages[0].session
-}
-
-// lastUsed returns the session's last-used time under its own lock, so the prune
-// comparator never races touch()'s write to lastUsedAt.
-func (session *execSession) lastUsed() time.Time {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	return session.lastUsedAt
-}
-
-func (manager *execSessionManager) list() []ExecSessionSnapshot {
-	manager.mu.Lock()
-	sessions := make([]*execSession, 0, len(manager.sessions))
-	for _, session := range manager.sessions {
-		if !session.doneClosed() {
-			sessions = append(sessions, session)
-		}
-	}
-	manager.mu.Unlock()
-
-	snapshots := make([]ExecSessionSnapshot, 0, len(sessions))
-	for _, session := range sessions {
-		snapshots = append(snapshots, session.snapshot())
-	}
-	sort.Slice(snapshots, func(i, j int) bool {
-		return snapshots[i].ID < snapshots[j].ID
-	})
-	return snapshots
-}
-
-func (manager *execSessionManager) stop(id int) bool {
-	session, ok := manager.get(id)
-	if !ok {
-		return false
-	}
-	session.terminate()
-	return true
-}
-
-func (manager *execSessionManager) stopAll() []int {
-	manager.mu.Lock()
-	sessions := make([]*execSession, 0, len(manager.sessions))
-	for _, session := range manager.sessions {
-		if !session.doneClosed() {
-			sessions = append(sessions, session)
-		}
-	}
-	manager.mu.Unlock()
-	ids := make([]int, 0, len(sessions))
-	for _, session := range sessions {
-		session.terminate()
-		ids = append(ids, session.id)
-	}
-	waitForExecSessions(sessions, execSessionStopTimeout)
-	sort.Ints(ids)
-	return ids
-}
-
-func waitForExecSessions(sessions []*execSession, timeout time.Duration) {
-	if timeout <= 0 || len(sessions) == 0 {
-		return
-	}
-	deadline := time.Now().Add(timeout)
-	for _, session := range sessions {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-session.done:
-		case <-timer.C:
-			return
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
-}
-
-type ExecSessionSnapshot struct {
-	ID           int
-	Command      string
-	Cwd          string
-	RelativeCwd  string
-	StartedAt    time.Time
-	LastUsedAt   time.Time
-	TTY          bool
-	Status       string
-	ExitCode     *int
-	RecentOutput string
-	// OutputTruncated reflects the buffer's last-known truncation state (see
-	// execOutputBuffer.peekTruncated), so a session listing (/ps) still shows
-	// this even if the session is reaped before ever being polled again.
-	OutputTruncated bool
-}
+type ExecSessionSnapshot = execution.ProcessSnapshot
 
 type ExecSessionController interface {
 	ExecSessions() []ExecSessionSnapshot
 	StopExecSession(id int) bool
 	StopAllExecSessions() []int
-}
-
-type execSession struct {
-	id          int
-	commandText string
-	cwd         string
-	relativeCwd string
-	startedAt   time.Time
-	lastUsedAt  time.Time
-	tty         bool
-	command     *exec.Cmd
-	plan        zeroSandbox.CommandPlan
-	cancel      context.CancelFunc
-	stdin       io.WriteCloser
-	cleanup     func()
-	output      *execOutputBuffer
-
-	doneOnce sync.Once
-	done     chan struct{}
-	mu       sync.Mutex
-	exitCode *int
-	waitErr  error
-}
-
-func (session *execSession) markDone(err error, exitCode int) {
-	session.mu.Lock()
-	session.waitErr = err
-	session.exitCode = &exitCode
-	session.mu.Unlock()
-	session.doneOnce.Do(func() { close(session.done) })
-}
-
-func (session *execSession) doneClosed() bool {
-	select {
-	case <-session.done:
-		return true
-	default:
-		return false
-	}
-}
-
-func (session *execSession) exitStatus() (int, bool) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.exitCode == nil {
-		return 0, false
-	}
-	return *session.exitCode, true
-}
-
-func (session *execSession) touch() {
-	session.mu.Lock()
-	session.lastUsedAt = time.Now()
-	session.mu.Unlock()
-}
-
-func (session *execSession) terminate() {
-	if session.cancel != nil {
-		session.cancel()
-	}
-}
-
-func (session *execSession) snapshot() ExecSessionSnapshot {
-	session.mu.Lock()
-	startedAt := session.startedAt
-	lastUsedAt := session.lastUsedAt
-	exitCode := session.exitCode
-	var copiedExit *int
-	if exitCode != nil {
-		value := *exitCode
-		copiedExit = &value
-	}
-	session.mu.Unlock()
-	status := "running"
-	if copiedExit != nil {
-		status = "exited"
-	}
-	return ExecSessionSnapshot{
-		ID:              session.id,
-		Command:         session.commandText,
-		Cwd:             session.cwd,
-		RelativeCwd:     session.relativeCwd,
-		StartedAt:       startedAt,
-		LastUsedAt:      lastUsedAt,
-		TTY:             session.tty,
-		Status:          status,
-		ExitCode:        copiedExit,
-		RecentOutput:    session.output.recentString(),
-		OutputTruncated: session.output.peekTruncated(),
-	}
-}
-
-type execOutputBuffer struct {
-	mu        sync.Mutex
-	data      []byte
-	recent    []byte
-	truncated bool
-	notify    chan struct{}
-}
-
-func newExecOutputBuffer() *execOutputBuffer {
-	return &execOutputBuffer{notify: make(chan struct{}, 1)}
-}
-
-func (buffer *execOutputBuffer) Write(p []byte) (int, error) {
-	buffer.mu.Lock()
-	buffer.data = append(buffer.data, p...)
-	if len(buffer.data) > maxExecOutputBufferBytes {
-		buffer.data = buffer.data[len(buffer.data)-maxExecOutputBufferBytes:]
-		buffer.truncated = true
-	}
-	buffer.recent = append(buffer.recent, p...)
-	if len(buffer.recent) > recentExecOutputBytes {
-		buffer.recent = buffer.recent[len(buffer.recent)-recentExecOutputBytes:]
-	}
-	buffer.mu.Unlock()
-	select {
-	case buffer.notify <- struct{}{}:
-	default:
-	}
-	return len(p), nil
-}
-
-func (buffer *execOutputBuffer) recentString() string {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	return string(buffer.recent)
-}
-
-func (buffer *execOutputBuffer) drainString() string {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	if len(buffer.data) == 0 {
-		return ""
-	}
-	out := string(buffer.data)
-	buffer.data = nil
-	return out
-}
-
-// consumeTruncated reports whether the buffer has dropped output to stay
-// within maxExecOutputBufferBytes since the last call, resetting the flag.
-// Kept as an out-of-band signal rather than text embedded in drainString's
-// result: an earlier version prefixed a notice directly into the drained
-// string, but that notice always sat ~maxExecOutputBufferBytes (2MiB) before
-// the end of the combined output, far outside the byte-budget head/tail
-// window truncateExecOutput keeps afterward (at most 400KB even at the
-// tool's maximum max_output_tokens) — so the notice was reliably swallowed
-// or chopped by that second, unrelated truncation pass. Surfacing it as a
-// separate bool lets the caller report it regardless of where in the byte
-// stream the overflow happened.
-func (buffer *execOutputBuffer) consumeTruncated() bool {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	truncated := buffer.truncated
-	buffer.truncated = false
-	return truncated
-}
-
-// peekTruncated reports the buffer's last-known truncation state without
-// clearing it, for status views (e.g. /ps) that shouldn't consume the signal
-// a subsequent poll is still meant to report via consumeTruncated.
-func (buffer *execOutputBuffer) peekTruncated() bool {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	return buffer.truncated
 }
 
 type execCommandTool struct {
@@ -473,7 +104,12 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectShell, "Shell commands can read, write, or execute programs."),
+			safety: Safety{
+				SideEffect:      SideEffectShell,
+				Permission:      PermissionPrompt,
+				Reason:          "Shell commands can read, write, or execute programs.",
+				AdvertiseInAuto: true,
+			},
 			// PTY/shell session — never concurrent.
 			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: processResourceKeys},
 		},
@@ -496,15 +132,15 @@ func (tool execCommandTool) RunWithOptions(ctx context.Context, args map[string]
 }
 
 func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
-	return tool.manager.list()
+	return tool.manager.List()
 }
 
 func (tool execCommandTool) StopExecSession(id int) bool {
-	return tool.manager.stop(id)
+	return tool.manager.Stop(id)
 }
 
 func (tool execCommandTool) StopAllExecSessions() []int {
-	return tool.manager.stopAll()
+	return tool.manager.StopAll()
 }
 
 func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {
@@ -516,7 +152,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
-	yieldTimeMS, err := intArg(args, "yield_time_ms", defaultExecYieldTimeMS, 1, maxExecYieldTimeMS)
+	yieldTimeMS, err := intArg(args, "yield_time_ms", defaultExecYieldTimeMS, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
@@ -548,157 +184,62 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		return errorResult("Error running exec_command: " + err.Error())
 	}
 
-	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, ttyRequested, engine, sandboxPermissions)
-	if err != nil {
-		return errorResult("Error starting exec_command: " + err.Error())
-	}
-	output, outputTruncated := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
-	if ctx != nil && ctx.Err() != nil && !session.doneClosed() {
-		session.terminate()
-		more, moreTruncated := session.collect(context.Background(), time.Second)
-		output += more
-		outputTruncated = outputTruncated || moreTruncated
-	}
-	exitCode, exited := session.exitStatus()
-	if exited {
-		tool.manager.remove(session.id)
-	}
-	return execToolResultWithBudget(execToolResultInput{
-		commandText:           commandText,
-		output:                output,
-		outputBufferTruncated: outputTruncated,
-		sessionID:             session.id,
-		exitCode:              exitCode,
-		exited:                exited,
-		relativeCwd:           relativeCwd,
-		tty:                   session.tty,
-		plan:                  session.plan,
-		maxOutputTokens:       maxOutputTokens,
-	}, directBudget)
-}
-
-func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, ttyRequested bool, engine *zeroSandbox.Engine, sandboxPermissions SandboxPermissionOverride) (*execSession, error) {
-	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
-	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
 	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
 	if err != nil {
 		cancel()
-		return nil, err
+		return errorResult("Error starting exec_command: " + err.Error())
 	}
-	output := newExecOutputBuffer()
+	executionRequest := execExecutionRequest(command, plan, absoluteCwd, ttyRequested)
+	if err := executionRequest.Validate(); err != nil {
+		plan.Cleanup()
+		cancel()
+		return errorResult("Error starting exec_command: prepare execution request: " + err.Error())
+	}
+	meta := map[string]string{}
+	addSandboxMeta(meta, plan)
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
-	stdin, tty, cleanup, err := startExecProcess(command, output, ttyRequested)
+	processResult, err := tool.manager.Start(ctx, execution.ProcessStart{
+		Prepared: execution.PreparedCommand{
+			Command:     command,
+			Enforcement: executionEnforcement(plan),
+			Report:      plan.ExecutionReport,
+			Cleanup: func() {
+				plan.Cleanup()
+				cancel()
+			},
+		},
+		Request: executionRequest, CommandText: commandText, RelativeCwd: relativeCwd,
+		TTY: ttyRequested, Metadata: meta,
+		AfterWait: func() []byte {
+			blocks := monitor.Stop()
+			if len(blocks) == 0 {
+				return nil
+			}
+			return []byte(appendSandboxBlocks("", blocks))
+		},
+	}, time.Duration(yieldTimeMS)*time.Millisecond)
 	if err != nil {
 		_ = monitor.Stop()
-		plan.Cleanup()
-		cancel()
-		return nil, err
+		return errorResult("Error starting exec_command: " + err.Error())
 	}
-	session := &execSession{
-		id:          id,
-		commandText: commandText,
-		cwd:         absoluteCwd,
-		relativeCwd: relativeCwd,
-		startedAt:   time.Now(),
-		lastUsedAt:  time.Now(),
-		tty:         tty,
-		command:     command,
-		plan:        plan,
-		cancel:      cancel,
-		stdin:       stdin,
-		cleanup:     cleanup,
-		output:      output,
-		done:        make(chan struct{}),
-	}
-	tool.manager.store(session)
-	tool.manager.removeCompletedLater(session)
-	go func() {
-		err := command.Wait()
-		if blocks := monitor.Stop(); len(blocks) > 0 {
-			output.Write([]byte(appendSandboxBlocks("", blocks)))
-		}
-		if session.cleanup != nil {
-			session.cleanup()
-		}
-		plan.Cleanup()
-		cancel()
-		session.markDone(err, commandExitCode(err))
-	}()
-	return session, nil
+	return execToolResultWithBudget(execToolResultInput{
+		commandText: processResult.CommandText, output: processResult.Output,
+		outputBufferTruncated: processResult.OutputTruncated, sessionID: processResult.ProcessID,
+		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
+		tty: processResult.TTY, request: processResult.Request, enforcement: processResult.Enforcement,
+		report: processResult.Report, reportErr: processResult.ReportErr, changes: processResult.Changes,
+		sandboxMeta:     processResult.Metadata,
+		maxOutputTokens: maxOutputTokens,
+	}, directBudget)
 }
 
-// collect drains the session's output buffer, returning the accumulated text
-// and whether the buffer ever had to drop output to stay within
-// maxExecOutputBufferBytes since the last collect call.
-func (session *execSession) collect(ctx context.Context, wait time.Duration) (string, bool) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	deadline := time.Now().Add(wait)
-	var builder strings.Builder
-	truncated := false
-	finish := func() (string, bool) {
-		if session.output.consumeTruncated() {
-			truncated = true
-		}
-		return builder.String(), truncated
-	}
-	for {
-		if chunk := session.output.drainString(); chunk != "" {
-			builder.WriteString(chunk)
-			if session.output.consumeTruncated() {
-				truncated = true
-			}
-			// A background process that keeps writing output faster than this
-			// loop can drain it (a chatty dev server, a watch-mode rebuild loop,
-			// a crash-restart spew) would otherwise never let drainString return
-			// empty, so the deadline check below — only reached on an empty
-			// drain — would never fire. That turns `wait` into an unbounded
-			// block regardless of what the caller asked for. Check it here too,
-			// so continuous output can never starve the timeout.
-			if time.Now().After(deadline) {
-				return finish()
-			}
-			continue
-		}
-		if session.doneClosed() {
-			if chunk := session.output.drainString(); chunk != "" {
-				builder.WriteString(chunk)
-			}
-			return finish()
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return finish()
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-session.output.notify:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-		case <-session.done:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return finish()
-		case <-timer.C:
-			return finish()
-		}
+func executionEnforcement(plan zeroSandbox.CommandPlan) execution.Enforcement {
+	return execution.Enforcement{
+		Backend:         string(plan.TargetBackend),
+		Level:           string(plan.EnforcementLevel),
+		Degraded:        plan.EnforcementLevel == zeroSandbox.EnforcementDegraded,
+		DowngradeReason: plan.DowngradeReason,
 	}
 }
 
@@ -794,7 +335,11 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
 	}
-	yieldTimeMS, err := intArg(args, "yield_time_ms", defaultPollYieldTimeMS, 1, maxPollYieldTimeMS)
+	defaultYieldTimeMS := defaultPollYieldTimeMS
+	if chars != "" {
+		defaultYieldTimeMS = 250
+	}
+	yieldTimeMS, err := intArg(args, "yield_time_ms", defaultYieldTimeMS, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
 	}
@@ -802,41 +347,32 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
 	}
-	session, ok := tool.manager.get(sessionID)
+	snapshot, ok := tool.manager.Snapshot(sessionID)
 	if !ok {
 		return errorResult(UnknownExecSessionError(sessionID))
 	}
-	session.touch()
-	interrupted := false
-	if chars != "" {
-		if shouldInterruptExecSession(chars, session.tty) {
-			interrupted = true
-			session.terminate()
-		} else if !session.tty {
-			return errorResult(fmt.Sprintf("Error: exec session_id %d does not accept stdin. Use empty chars to poll, or send chars \"\\u0003\" to interrupt/stop it.", sessionID))
-		} else if session.stdin != nil {
-			if _, err := io.WriteString(session.stdin, chars); err != nil && !session.doneClosed() {
-				return errorResult("Error writing to exec session: " + err.Error())
-			}
-		}
+	interrupted := chars != "" && shouldInterruptExecSession(chars, snapshot.TTY)
+	processResult, err := tool.manager.Continue(ctx, execution.ProcessContinue{
+		ProcessID: sessionID, Input: []byte(chars), Interrupt: interrupted,
+		Wait: time.Duration(yieldTimeMS) * time.Millisecond,
+	})
+	if errors.Is(err, execution.ErrProcessNotFound) {
+		return errorResult(UnknownExecSessionError(sessionID))
 	}
-	output, outputTruncated := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
-	exitCode, exited := session.exitStatus()
-	if exited {
-		tool.manager.remove(session.id)
+	if errors.Is(err, execution.ErrProcessStdinDisabled) {
+		return errorResult(fmt.Sprintf("Error: exec session_id %d does not accept stdin. Use empty chars to poll, or send chars \"\\u0003\" to interrupt/stop it.", sessionID))
+	}
+	if err != nil {
+		return errorResult("Error writing to exec session: " + err.Error())
 	}
 	return execToolResult(execToolResultInput{
-		commandText:           session.commandText,
-		output:                output,
-		outputBufferTruncated: outputTruncated,
-		sessionID:             session.id,
-		exitCode:              exitCode,
-		exited:                exited,
-		relativeCwd:           session.relativeCwd,
-		tty:                   session.tty,
-		interrupted:           interrupted,
-		plan:                  session.plan,
-		maxOutputTokens:       maxOutputTokens,
+		commandText: processResult.CommandText, output: processResult.Output,
+		outputBufferTruncated: processResult.OutputTruncated, sessionID: processResult.ProcessID,
+		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
+		tty: processResult.TTY, interrupted: processResult.Interrupted, request: processResult.Request,
+		enforcement: processResult.Enforcement, report: processResult.Report, reportErr: processResult.ReportErr,
+		changes: processResult.Changes, sandboxMeta: processResult.Metadata,
+		maxOutputTokens: maxOutputTokens,
 	})
 }
 
@@ -875,7 +411,12 @@ type execToolResultInput struct {
 	relativeCwd           string
 	tty                   bool
 	interrupted           bool
-	plan                  zeroSandbox.CommandPlan
+	request               execution.Request
+	enforcement           execution.Enforcement
+	sandboxMeta           map[string]string
+	report                execution.AdapterReport
+	reportErr             error
+	changes               []execution.Change
 	maxOutputTokens       int
 }
 
@@ -893,14 +434,17 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 		"cwd": input.relativeCwd,
 		"tty": strconv.FormatBool(input.tty),
 	}
-	addSandboxMeta(meta, input.plan)
+	for key, value := range input.sandboxMeta {
+		meta[key] = value
+	}
+	outcome := execExecutionOutcome(input)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
 		if input.interrupted {
 			meta["interrupted"] = "true"
 		}
-		if !input.interrupted {
-			markLikelySandboxDenial(meta, input.plan, input.exitCode, output)
+		if input.report.Denial != nil {
+			markStructuredSandboxDenial(meta, *input.report.Denial)
 		}
 	} else {
 		meta["session_id"] = strconv.Itoa(input.sessionID)
@@ -910,7 +454,7 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	}
 
 	status := StatusOK
-	if input.exited && ((input.exitCode != 0 && !input.interrupted) || meta[SandboxLikelyDeniedMeta] == "true") {
+	if input.exited && input.exitCode != 0 && !input.interrupted {
 		status = StatusError
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
@@ -928,15 +472,111 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 		body += "\n" + execOutputBufferTruncatedMessage
 	}
 	return Result{
-		Status:    status,
-		Output:    body,
-		Truncated: truncated || input.outputBufferTruncated,
-		Meta:      meta,
+		Status:           status,
+		Output:           body,
+		Truncated:        truncated || input.outputBufferTruncated,
+		Meta:             meta,
+		ExecutionRequest: &input.request,
+		ExecutionOutcome: &outcome,
+		ChangedFiles:     executionChangedFiles(input.changes),
+		ChangeSummaries:  executionChangeSummaries(input.changes),
 		Display: Display{
 			Summary: execDisplaySummary(input.commandText, input.sessionID, input.exited, input.exitCode),
 			Kind:    "shell",
 		},
 	}
+}
+
+func execExecutionRequest(command *exec.Cmd, plan zeroSandbox.CommandPlan, cwd string, tty bool) execution.Request {
+	mode := execution.ModeCaptured
+	if tty {
+		mode = execution.ModeInteractive
+	}
+	workspaceRoot := strings.TrimSpace(plan.WorkspaceRoot)
+	if workspaceRoot == "" {
+		workspaceRoot = cwd
+	}
+	workspaceRoots := []string{workspaceRoot}
+	capabilities := []execution.Capability{{Kind: execution.CapabilityProcessSpawn}}
+	if plan.PermissionProfile.FileSystem.Kind == zeroSandbox.FileSystemUnrestricted {
+		capabilities = append(capabilities, execution.Capability{Kind: execution.CapabilityUnrestricted, Scope: "host"})
+	}
+	for _, root := range plan.PermissionProfile.FileSystem.ReadRoots {
+		capabilities = append(capabilities, execution.Capability{Kind: execution.CapabilityRead, Scope: root})
+	}
+	for _, root := range plan.PermissionProfile.FileSystem.WriteRoots {
+		capabilities = append(capabilities, execution.Capability{Kind: execution.CapabilityWorkspaceWrite, Scope: root.Root})
+	}
+	if plan.PermissionProfile.Network.Mode == zeroSandbox.NetworkAllow || plan.Policy.Network == zeroSandbox.NetworkAllow {
+		capabilities = append(capabilities, execution.Capability{Kind: execution.CapabilityExternalNetwork})
+	} else if plan.TargetBackend == zeroSandbox.BackendLinuxBwrap {
+		capabilities = append(capabilities, execution.Capability{Kind: execution.CapabilityIsolatedLoopback, Scope: "sandbox"})
+	}
+	args := append([]string(nil), command.Args...)
+	name := command.Path
+	if len(args) > 0 {
+		name = args[0]
+		args = args[1:]
+	}
+	return execution.Request{
+		Origin:           execution.OriginInteractiveCommand,
+		Mode:             mode,
+		Command:          execution.Command{Name: name, Args: args},
+		WorkingDirectory: cwd,
+		WorkspaceRoots:   workspaceRoots,
+		Capabilities:     capabilities,
+		Approval:         execution.ApprovalContext{PolicyVersion: execution.PolicyVersion},
+	}
+}
+
+func execExecutionOutcome(input execToolResultInput) execution.Outcome {
+	enforcement := input.enforcement
+	if !input.exited {
+		return execution.Outcome{
+			State:       execution.StateRetained,
+			Kind:        execution.OutcomeRunning,
+			ProcessID:   strconv.Itoa(input.sessionID),
+			Enforcement: enforcement,
+		}
+	}
+	exit := &execution.Exit{Code: input.exitCode}
+	if input.reportErr != nil {
+		return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeSandboxSetupFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+	}
+	if input.report.Denial != nil {
+		denial := *input.report.Denial
+		return execution.Outcome{State: execution.StateDenied, Kind: execution.OutcomeEnforcementDenied, Exit: exit, Denial: &denial, Enforcement: enforcement, Changes: input.changes}
+	}
+	if input.interrupted {
+		return execution.Outcome{State: execution.StateCancelled, Kind: execution.OutcomeCancelled, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+	}
+	if input.exitCode == 0 {
+		return execution.Outcome{State: execution.StateCompleted, Kind: execution.OutcomeSuccess, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+	}
+	return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeApplicationFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+}
+
+func executionChangedFiles(changes []execution.Change) []string {
+	if len(changes) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(changes))
+	for _, change := range changes {
+		if !change.Aggregated && strings.TrimSpace(change.Path) != "" {
+			paths = append(paths, change.Path)
+		}
+	}
+	return paths
+}
+
+func executionChangeSummaries(changes []execution.Change) []execution.Change {
+	var summaries []execution.Change
+	for _, change := range changes {
+		if change.Aggregated && strings.TrimSpace(change.Path) != "" {
+			summaries = append(summaries, change)
+		}
+	}
+	return summaries
 }
 
 func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool) string {

@@ -12,10 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const grantSchemaVersion = 2
+const grantSchemaVersion = 3
 
 type Grant struct {
 	ToolName   string        `json:"toolName"`
@@ -51,8 +52,18 @@ type GrantLookup struct {
 
 type grantFile struct {
 	SchemaVersion   int                             `json:"schemaVersion"`
+	PolicyVersion   int                             `json:"policyVersion"`
 	Grants          map[string][]Grant              `json:"grants"`
 	CommandPrefixes map[string][]CommandPrefixGrant `json:"commandPrefixes,omitempty"`
+	Migration       *grantMigration                 `json:"migration,omitempty"`
+}
+
+type grantMigration struct {
+	FromSchemaVersion int    `json:"fromSchemaVersion"`
+	BackupPath        string `json:"backupPath"`
+	Migrated          int    `json:"migrated"`
+	Invalidated       int    `json:"invalidated"`
+	NoticePending     bool   `json:"noticePending"`
 }
 
 type GrantStore struct {
@@ -116,6 +127,31 @@ func NewGrantStore(options StoreOptions) (*GrantStore, error) {
 
 func (store *GrantStore) FilePath() string {
 	return store.filePath
+}
+
+// ConsumeMigrationNotice returns the legacy-grant migration summary once and
+// atomically records it as seen. Frontends call this during startup so users are
+// told when approvals were invalidated instead of encountering unexplained
+// re-prompts. The original file remains available at the reported backup path.
+func (store *GrantStore) ConsumeMigrationNotice() (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state, err := store.readState()
+	if err != nil {
+		return "", err
+	}
+	if state.Migration == nil || !state.Migration.NoticePending {
+		return "", nil
+	}
+	migration := *state.Migration
+	state.Migration.NoticePending = false
+	if err := store.writeState(state); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sandbox grants updated for policy v%d: migrated %d, invalidated %d; backup: %s", execution.PolicyVersion, migration.Migrated, migration.Invalidated, migration.BackupPath), nil
 }
 
 func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
@@ -518,25 +554,26 @@ func (store *GrantStore) readState() (grantFile, error) {
 	// current (v2) map[tool][]Grant shape.
 	var head struct {
 		SchemaVersion   int             `json:"schemaVersion"`
+		PolicyVersion   int             `json:"policyVersion"`
 		Grants          json.RawMessage `json:"grants"`
 		CommandPrefixes json.RawMessage `json:"commandPrefixes"`
+		Migration       *grantMigration `json:"migration"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return grantFile{}, store.invalidGrantFile(err)
 	}
+	if head.SchemaVersion == 1 || head.SchemaVersion == 2 {
+		return store.migrateLegacyState(data, head.SchemaVersion, head.Grants, head.CommandPrefixes)
+	}
+	if head.SchemaVersion != grantSchemaVersion {
+		return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: unsupported schemaVersion", store.filePath)
+	}
+	if head.PolicyVersion != execution.PolicyVersion {
+		return store.migrateChangedPolicy(data, head.PolicyVersion, head.Grants, head.CommandPrefixes)
+	}
 	buckets := map[string][]Grant{}
 	commandPrefixBuckets := map[string][]CommandPrefixGrant{}
 	switch head.SchemaVersion {
-	case 1:
-		legacy := map[string]Grant{}
-		if len(head.Grants) > 0 {
-			if err := json.Unmarshal(head.Grants, &legacy); err != nil {
-				return grantFile{}, store.invalidGrantFile(err)
-			}
-		}
-		for name, grant := range legacy {
-			buckets[name] = []Grant{grant}
-		}
 	case grantSchemaVersion:
 		if len(head.Grants) > 0 {
 			if err := json.Unmarshal(head.Grants, &buckets); err != nil {
@@ -581,7 +618,167 @@ func (store *GrantStore) readState() (grantFile, error) {
 			normalizedPrefixes[key] = append(normalizedPrefixes[key], ng)
 		}
 	}
-	return grantFile{SchemaVersion: grantSchemaVersion, Grants: normalized, CommandPrefixes: normalizedPrefixes}, nil
+	return grantFile{SchemaVersion: grantSchemaVersion, PolicyVersion: execution.PolicyVersion, Grants: normalized, CommandPrefixes: normalizedPrefixes, Migration: head.Migration}, nil
+}
+
+func (store *GrantStore) migrateLegacyState(data []byte, schemaVersion int, grantsJSON json.RawMessage, prefixesJSON json.RawMessage) (grantFile, error) {
+	buckets := map[string][]Grant{}
+	if schemaVersion == 1 {
+		legacy := map[string]Grant{}
+		if len(grantsJSON) > 0 {
+			if err := json.Unmarshal(grantsJSON, &legacy); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+		for name, grant := range legacy {
+			buckets[name] = []Grant{grant}
+		}
+	} else if len(grantsJSON) > 0 {
+		if err := json.Unmarshal(grantsJSON, &buckets); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	prefixes := map[string][]CommandPrefixGrant{}
+	if len(prefixesJSON) > 0 {
+		if err := json.Unmarshal(prefixesJSON, &prefixes); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+
+	backupPath, err := store.writeLegacyBackup(data, schemaVersion)
+	if err != nil {
+		return grantFile{}, err
+	}
+	state := emptyGrantState()
+	migrated, invalidated := 0, 0
+	for name, bucket := range buckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredGrant(key, grant)
+			if err != nil || legacyShellGrant(normalized) {
+				invalidated++
+				continue
+			}
+			state.Grants[key] = append(state.Grants[key], normalized)
+			migrated++
+		}
+	}
+	for name, bucket := range prefixes {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredCommandPrefixGrant(key, grant)
+			if err != nil {
+				invalidated++
+				continue
+			}
+			state.CommandPrefixes[key] = append(state.CommandPrefixes[key], normalized)
+			migrated++
+		}
+	}
+	state.Migration = &grantMigration{FromSchemaVersion: schemaVersion, BackupPath: backupPath, Migrated: migrated, Invalidated: invalidated, NoticePending: true}
+	if err := store.writeState(state); err != nil {
+		return grantFile{}, err
+	}
+	return state, nil
+}
+
+func (store *GrantStore) migrateChangedPolicy(data []byte, policyVersion int, grantsJSON json.RawMessage, prefixesJSON json.RawMessage) (grantFile, error) {
+	buckets := map[string][]Grant{}
+	prefixes := map[string][]CommandPrefixGrant{}
+	if len(grantsJSON) > 0 {
+		if err := json.Unmarshal(grantsJSON, &buckets); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	if len(prefixesJSON) > 0 {
+		if err := json.Unmarshal(prefixesJSON, &prefixes); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	backupPath, err := store.writeBackup(data, fmt.Sprintf("policy-v%d", policyVersion))
+	if err != nil {
+		return grantFile{}, err
+	}
+	state := emptyGrantState()
+	migrated, invalidated := 0, 0
+	for name, bucket := range buckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredGrant(key, grant)
+			if err != nil || normalized.Decision != GrantDeny {
+				invalidated++
+				continue
+			}
+			state.Grants[key] = append(state.Grants[key], normalized)
+			migrated++
+		}
+	}
+	for _, bucket := range prefixes {
+		invalidated += len(bucket)
+	}
+	state.Migration = &grantMigration{FromSchemaVersion: grantSchemaVersion, BackupPath: backupPath, Migrated: migrated, Invalidated: invalidated, NoticePending: true}
+	if err := store.writeState(state); err != nil {
+		return grantFile{}, err
+	}
+	return state, nil
+}
+
+func legacyShellGrant(grant Grant) bool {
+	if grant.Decision == GrantDeny {
+		return false
+	}
+	switch grant.ToolName {
+	case "bash", "exec_command", "write_stdin":
+		return true
+	default:
+		return false
+	}
+}
+
+func (store *GrantStore) writeLegacyBackup(data []byte, schemaVersion int) (string, error) {
+	return store.writeBackup(data, fmt.Sprintf("v%d", schemaVersion))
+}
+
+func (store *GrantStore) writeBackup(data []byte, label string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return "", err
+	}
+	base := fmt.Sprintf("%s.%s.backup", store.filePath, label)
+	for attempt := 0; ; attempt++ {
+		path := base
+		if attempt > 0 {
+			path = fmt.Sprintf("%s.%d", base, attempt)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return path, nil
+	}
 }
 
 func (store *GrantStore) invalidGrantFile(err error) error {
@@ -657,6 +854,7 @@ func normalizeStoredCommandPrefixGrant(name string, grant CommandPrefixGrant) (C
 func emptyGrantState() grantFile {
 	return grantFile{
 		SchemaVersion:   grantSchemaVersion,
+		PolicyVersion:   execution.PolicyVersion,
 		Grants:          map[string][]Grant{},
 		CommandPrefixes: map[string][]CommandPrefixGrant{},
 	}
