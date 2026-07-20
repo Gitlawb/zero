@@ -935,6 +935,7 @@ func TestWriteStdinRequiresPositiveSessionID(t *testing.T) {
 	want := UnknownExecSessionError(0)
 	for name, args := range map[string]map[string]any{
 		"missing":     {},
+		"nil":         {"session_id": nil},
 		"zero":        {"session_id": 0},
 		"negative":    {"session_id": -3},
 		"non-integer": {"session_id": "abc"},
