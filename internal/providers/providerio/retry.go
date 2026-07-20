@@ -207,20 +207,21 @@ func isPreSendTransportError(err error) bool {
 	}
 	// A refused/unreachable connection is provably pre-send ONLY when it was
 	// raised during the DIAL (connection-establishment) phase. The same errnos
-	// (ECONNREFUSED/ENETUNREACH/EHOSTUNREACH, and their POSIX wording) are also
-	// raised by the kernel on an ESTABLISHED connection — when a route drops or an
-	// ICMP unreachable arrives mid-generation — which is post-send. errors.Is
-	// matches an errno anywhere in the chain regardless of the operation, so we
-	// first require an Op=="dial" *net.OpError: that makes "no request bytes left
-	// this host" structural, so a post-send read/write carrying one of these can
-	// never replay a non-idempotent POST. Errno match is authoritative and
-	// platform-independent (Go maps the WSA* codes on Windows too); the string
-	// markers only catch a dial error already flattened past its errno.
+	// are also raised by the kernel on an ESTABLISHED connection — when a route
+	// drops or an ICMP unreachable arrives mid-generation — which is post-send.
+	// errors.Is matches an errno anywhere in the chain regardless of the
+	// operation, so we first require an Op=="dial" *net.OpError: that makes "no
+	// request bytes left this host" structural, so a post-send read/write carrying
+	// one of these can never replay a non-idempotent POST. dialPreSendErrnos is
+	// platform-specific: on Windows a refused dial carries the raw WSA* errno
+	// (WSAECONNREFUSED etc.), which does NOT satisfy errors.Is against the POSIX
+	// syscall.ECONNREFUSED, so the Windows list adds those codes. The string
+	// markers only catch a POSIX dial error already flattened past its errno.
 	if dialOpError(err) != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) ||
-			errors.Is(err, syscall.ENETUNREACH) ||
-			errors.Is(err, syscall.EHOSTUNREACH) {
-			return true
+		for _, errno := range dialPreSendErrnos {
+			if errors.Is(err, errno) {
+				return true
+			}
 		}
 		switch {
 		case strings.Contains(msg, "connection refused"),
