@@ -232,6 +232,15 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 	if policy.Mode == ModeDisabled {
 		return false
 	}
+	// Re-entrancy skips wrapping: when the process carries the sandbox markers,
+	// the runner returns a pass-through (unwrapped) plan, so the native sandbox
+	// is NOT the boundary for THIS command. Because the markers are ambient and
+	// forgeable at an unsandboxed process boundary (issue #727), auto-allowing a
+	// shell command on that basis would run it unwrapped with no prompt. Mirror
+	// the runner: report inactive so the command takes the normal approval path.
+	if IsAlreadySandboxed() {
+		return false
+	}
 	backend := engine.backend
 	if !(backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation) {
 		return false
