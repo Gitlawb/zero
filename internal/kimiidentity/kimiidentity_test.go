@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestHeadersIncludesDeviceIdentity(t *testing.T) {
@@ -88,6 +89,51 @@ func TestLoadOrCreateDeviceIDReadsExisting(t *testing.T) {
 	}
 	if got := loadOrCreateDeviceIDAt(path); got != existing {
 		t.Fatalf("loadOrCreateDeviceIDAt = %q, want existing %q", got, existing)
+	}
+}
+
+// TestLoadOrCreateDeviceIDAdoptsWinnerAfterEmptyCreate covers the
+// multi-process window where the O_EXCL winner has created the file but not
+// yet written the UUID. Concurrent callers must wait and adopt that UUID
+// rather than each minting a divergent identity.
+func TestLoadOrCreateDeviceIDAdoptsWinnerAfterEmptyCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the exclusive-create winner that has not written yet.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const winner = "11111111-2222-4333-8444-555555555555"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(30 * time.Millisecond)
+		_, _ = f.WriteString(winner + "\n")
+		_ = f.Sync()
+		_ = f.Close()
+	}()
+
+	const workers = 4
+	ids := make([]string, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			ids[i] = loadOrCreateDeviceIDAt(path)
+		}(i)
+	}
+	wg.Wait()
+	<-done
+
+	for _, id := range ids {
+		if id != winner {
+			t.Fatalf("worker returned %q, want winner %q (all: %v)", id, winner, ids)
+		}
 	}
 }
 
