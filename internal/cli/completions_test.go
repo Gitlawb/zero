@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -63,11 +64,12 @@ func TestCompletionsRejectsMissingUnknownAndExtraShellArguments(t *testing.T) {
 
 func TestCompletionsGeneratesEverySupportedShell(t *testing.T) {
 	tests := []struct {
-		shell  string
-		marker string
+		shell       string
+		marker      string
+		syntaxShell string
 	}{
-		{shell: "bash", marker: "complete -F _zero zero"},
-		{shell: "zsh", marker: "#compdef zero"},
+		{shell: "bash", marker: "complete -F _zero zero", syntaxShell: "bash"},
+		{shell: "zsh", marker: "#compdef zero", syntaxShell: "zsh"},
 		{shell: "fish", marker: "complete -c zero"},
 		{shell: "powershell", marker: "Register-ArgumentCompleter -Native -CommandName zero"},
 		{shell: "elvish", marker: "edit:completion:arg-completer[zero]"},
@@ -87,7 +89,60 @@ func TestCompletionsGeneratesEverySupportedShell(t *testing.T) {
 					t.Errorf("%s completion missing %q", test.shell, want)
 				}
 			}
+			script := stdout.String()
+			switch test.shell {
+			case "fish":
+				assertBalancedFishBlocks(t, script)
+			case "powershell", "elvish":
+				assertBalancedBraces(t, script)
+			}
+			if test.syntaxShell != "" {
+				assertNativeShellSyntax(t, test.syntaxShell, script)
+			}
 		})
+	}
+}
+
+func assertBalancedBraces(t *testing.T, script string) {
+	t.Helper()
+	if opens, closes := strings.Count(script, "{"), strings.Count(script, "}"); opens != closes {
+		t.Errorf("unbalanced braces: %d opening, %d closing", opens, closes)
+	}
+}
+
+func assertBalancedFishBlocks(t *testing.T, script string) {
+	t.Helper()
+	depth := 0
+	for _, line := range strings.Split(script, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "function", "for", "switch", "if":
+			depth++
+		case "end":
+			depth--
+			if depth < 0 {
+				t.Fatal("fish completion closes a block before one is opened")
+			}
+		}
+	}
+	if depth != 0 {
+		t.Errorf("fish completion has %d unclosed blocks", depth)
+	}
+}
+
+func assertNativeShellSyntax(t *testing.T, shell, script string) {
+	t.Helper()
+	path, err := exec.LookPath(shell)
+	if err != nil {
+		t.Skipf("%s is not installed", shell)
+	}
+	command := exec.Command(path, "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("%s syntax check failed: %v\n%s", shell, err, output)
 	}
 }
 

@@ -381,9 +381,9 @@ func writeElvishCompletions(w io.Writer, contexts []completionContext) error {
 	for index, key := range sortedTransitionKeys(transitions) {
 		keyword := "if"
 		if index > 0 {
-			keyword = "elif"
+			keyword = "} elif"
 		}
-		if _, err := fmt.Fprintf(w, "        %s (== $context'|'$token %q) {\n            set context = %q\n", keyword, key, transitions[key]); err != nil {
+		if _, err := fmt.Fprintf(w, "        %s (eq $context'|'$token %q) {\n            set context = %q\n", keyword, key, transitions[key]); err != nil {
 			return err
 		}
 	}
@@ -393,9 +393,9 @@ func writeElvishCompletions(w io.Writer, contexts []completionContext) error {
 	for index, context := range contexts {
 		keyword := "if"
 		if index > 0 {
-			keyword = "elif"
+			keyword = "} elif"
 		}
-		if _, err := fmt.Fprintf(w, "    %s (== $context %q) {\n        put %s\n", keyword, context.path, shellWords(context.candidates)); err != nil {
+		if _, err := fmt.Fprintf(w, "    %s (eq $context %q) {\n        put %s\n", keyword, context.path, shellWords(context.candidates)); err != nil {
 			return err
 		}
 	}
