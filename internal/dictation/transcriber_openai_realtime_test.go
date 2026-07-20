@@ -84,3 +84,116 @@ func TestOpenAIRealtimeStreamTranscribeCancelKeepsSentinel(t *testing.T) {
 		t.Fatalf("StreamTranscribe failed early instead of blocking: %v", ferr)
 	}
 }
+
+// Esc can cancel while the WebSocket dial is still pending. The dial error is
+// redacted with %s, so we must return ctx.Err() rather than a flat string.
+func TestOpenAIRealtimeStreamTranscribeDialCancelKeepsSentinel(t *testing.T) {
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{
+		APIKey:  "sk-test-key",
+		BaseURL: "ws://127.0.0.1:1", // never reached; ctx is already cancelled
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	chunks := make(chan []byte)
+	defer close(chunks)
+
+	_, ferr := tr.StreamTranscribe(ctx, chunks, nil)
+	if !errors.Is(ferr, context.Canceled) {
+		t.Fatalf("dial-cancel lost the context.Canceled sentinel: %v", ferr)
+	}
+}
+
+// Esc right after accept can hit the session-update write or the first Read;
+// both redaction sites must still yield context.Canceled.
+func TestOpenAIRealtimeStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) {
+	accepted := make(chan struct{})
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		close(accepted)
+		// Do not read: leave the client in session-update write or first Read.
+		<-ctx.Done()
+	})
+
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: "sk-test-key", BaseURL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	chunks := make(chan []byte, 1)
+	defer close(chunks)
+	errCh := make(chan error, 1)
+	go func() {
+		_, ferr := tr.StreamTranscribe(ctx, chunks, nil)
+		errCh <- ferr
+	}()
+
+	select {
+	case <-accepted:
+		cancel()
+		ferr := <-errCh
+		if !errors.Is(ferr, context.Canceled) {
+			t.Fatalf("startup-cancel lost the context.Canceled sentinel: %v", ferr)
+		}
+	case ferr := <-errCh:
+		t.Fatalf("StreamTranscribe failed before accept: %v", ferr)
+	}
+}
+
+// After a server event the client selects writeErrCh. Cancel while the writer
+// is blocked on more chunks so that path observes a cancelled write and must
+// still return context.Canceled rather than a redacted flat string.
+func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
+	deltaSent := make(chan struct{})
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		// Session update, then a delta. Leave the socket open so the client
+		// stays in the event loop rather than failing on Read first.
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(
+			`{"type":"conversation.item.input_audio_transcription.delta","delta":"hi"}`,
+		))
+		close(deltaSent)
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				return
+			}
+		}
+	})
+
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: "sk-test-key", BaseURL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// One frame so the writer can progress past session setup; channel stays
+	// open so a later Write is still pending when we cancel.
+	chunks := make(chan []byte, 1)
+	defer close(chunks)
+	chunks <- make([]byte, 480)
+	errCh := make(chan error, 1)
+	go func() {
+		_, ferr := tr.StreamTranscribe(ctx, chunks, nil)
+		errCh <- ferr
+	}()
+
+	select {
+	case <-deltaSent:
+		// Give the client a moment to process the delta and re-enter Read or
+		// select writeErrCh, then cancel so the blocked writer fails.
+		cancel()
+		ferr := <-errCh
+		if !errors.Is(ferr, context.Canceled) {
+			t.Fatalf("write-path cancel lost the context.Canceled sentinel: %v", ferr)
+		}
+	case ferr := <-errCh:
+		t.Fatalf("StreamTranscribe failed before delta: %v", ferr)
+	}
+}
