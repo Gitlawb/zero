@@ -34,10 +34,8 @@ func terminateCommand(cmd *exec.Cmd) error {
 	if taskkillErr != nil {
 		killErr = cmd.Process.Kill()
 	}
-	waitErr := cmd.Wait()
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		return fmt.Errorf("reap process: %w", waitErr)
+	if err := waitForTerminatedCommandWithin(cmd, commandReapTimeout); err != nil {
+		return err
 	}
 	if taskkillErr == nil {
 		return nil

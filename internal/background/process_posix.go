@@ -123,7 +123,18 @@ func terminateCommand(cmd *exec.Cmd) error {
 	} else if processGoneError(err) {
 		return waitForTerminatedCommand(cmd)
 	} else {
-		return err
+		killErr := cmd.Process.Kill()
+		waitErr := waitForTerminatedCommandWithin(cmd, terminationGracePeriod)
+		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			if waitErr != nil {
+				return fmt.Errorf("get process group: %v (fallback kill failed: %v; %w)", err, killErr, waitErr)
+			}
+			return fmt.Errorf("get process group: %v (fallback kill failed: %w)", err, killErr)
+		}
+		if waitErr != nil {
+			return fmt.Errorf("get process group: %v (%w)", err, waitErr)
+		}
+		return fmt.Errorf("get process group: %w", err)
 	}
 
 	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
@@ -165,9 +176,8 @@ func terminateCommand(cmd *exec.Cmd) error {
 	case <-time.After(terminationGracePeriod):
 		return fmt.Errorf("process %d did not reap after termination", pid)
 	}
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		return fmt.Errorf("reap process: %w", waitErr)
+	if err := classifyWaitError(waitErr); err != nil {
+		return err
 	}
 	if alive() {
 		return fmt.Errorf("process group %d did not exit after SIGKILL", pid)
@@ -176,12 +186,7 @@ func terminateCommand(cmd *exec.Cmd) error {
 }
 
 func waitForTerminatedCommand(cmd *exec.Cmd) error {
-	waitErr := cmd.Wait()
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		return fmt.Errorf("reap process: %w", waitErr)
-	}
-	return nil
+	return classifyWaitError(cmd.Wait())
 }
 
 // processGoneError reports whether an error means the process group has already

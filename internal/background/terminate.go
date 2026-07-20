@@ -1,6 +1,13 @@
 package background
 
-import "os/exec"
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+	"time"
+)
+
+const commandReapTimeout = 3 * time.Second
 
 // TerminateProcess stops a background process by PID — on Windows its process
 // tree; on POSIX its whole process group when the PID leads its own group (the
@@ -20,4 +27,23 @@ func TerminateProcess(pid int) error {
 // the tree before Wait can discard the leader identity needed to find it.
 func TerminateCommand(cmd *exec.Cmd) error {
 	return terminateCommand(cmd)
+}
+
+func classifyWaitError(waitErr error) error {
+	var exitErr *exec.ExitError
+	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+		return fmt.Errorf("reap process: %w", waitErr)
+	}
+	return nil
+}
+
+func waitForTerminatedCommandWithin(cmd *exec.Cmd, timeout time.Duration) error {
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case waitErr := <-waitDone:
+		return classifyWaitError(waitErr)
+	case <-time.After(timeout):
+		return fmt.Errorf("process %d did not reap after termination", cmd.Process.Pid)
+	}
 }

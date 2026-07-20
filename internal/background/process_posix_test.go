@@ -150,10 +150,7 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 	// The forked child must no longer be running. An orphaned zombie is already
 	// dead but may remain visible briefly until the platform's init reaps it.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if processStopped(childPID) {
-			break
-		}
+	for !processStopped(childPID) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 			t.Fatalf("forked child %d survived terminateProcess — group kill failed", childPID)
@@ -193,10 +190,7 @@ func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if processStopped(childPID) {
-			break
-		}
+	for !processStopped(childPID) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 			t.Fatalf("forked child %d survived TerminateCommand", childPID)
