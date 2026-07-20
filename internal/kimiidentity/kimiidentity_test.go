@@ -3,6 +3,7 @@ package kimiidentity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -30,13 +31,11 @@ func TestHeadersIncludesDeviceIdentity(t *testing.T) {
 }
 
 func TestLoadOrCreateDeviceIDExclusiveCreate(t *testing.T) {
+	// Exercise the production loader directly via its path-parameterized
+	// helper. Concurrent first-use must converge on a single persisted ID:
+	// the O_EXCL loser reads back the winner's file instead of overwriting it.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "zero", "kimi-device-id")
-	// Point the loader at the temp config dir for this process.
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	// On macOS/Windows UserConfigDir ignores XDG; force via GOOS-specific
-	// fallback by rewriting through a private path helper is not available,
-	// so exercise the exclusive-create path directly.
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -48,32 +47,7 @@ func TestLoadOrCreateDeviceIDExclusiveCreate(t *testing.T) {
 	for i := range workers {
 		go func(i int) {
 			defer wg.Done()
-			// Concurrent exclusive creates: only one OpenFile succeeds; others
-			// adopt the winner. Call the create path the same way loadOrCreate
-			// does after a missing file.
-			id := generateDeviceID()
-			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-			if err == nil {
-				_, _ = f.WriteString(id + "\n")
-				_ = f.Close()
-				ids[i] = id
-				return
-			}
-			if !os.IsExist(err) {
-				t.Errorf("unexpected open error: %v", err)
-				return
-			}
-			raw, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Errorf("read back: %v", readErr)
-				return
-			}
-			existing := string(raw)
-			// trim newline manually without importing more than needed
-			if len(existing) > 0 && existing[len(existing)-1] == '\n' {
-				existing = existing[:len(existing)-1]
-			}
-			ids[i] = existing
+			ids[i] = loadOrCreateDeviceIDAt(path)
 		}(i)
 	}
 	wg.Wait()
@@ -93,6 +67,27 @@ func TestLoadOrCreateDeviceIDExclusiveCreate(t *testing.T) {
 	}
 	if !isUUID(winner) {
 		t.Fatalf("winner id %q is not a UUID", winner)
+	}
+	// The persisted file carries the winner exactly once.
+	if raw, err := os.ReadFile(path); err != nil {
+		t.Fatalf("read persisted id: %v", err)
+	} else if got := strings.TrimSpace(string(raw)); got != winner {
+		t.Fatalf("persisted id = %q, want %q", got, winner)
+	}
+}
+
+func TestLoadOrCreateDeviceIDReadsExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const existing = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if err := os.WriteFile(path, []byte(existing+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadOrCreateDeviceIDAt(path); got != existing {
+		t.Fatalf("loadOrCreateDeviceIDAt = %q, want existing %q", got, existing)
 	}
 }
 

@@ -53,10 +53,14 @@ func Headers() map[string]string {
 // that, the ID is stored under the user config dir (zero/kimi-device-id) and
 // minted once on first use. When the config dir is unavailable the ID is
 // still stable for the life of the process.
-var DeviceID = sync.OnceValue(loadOrCreateDeviceID)
+var DeviceID = sync.OnceValue(func() string { return loadOrCreateDeviceIDAt(deviceIDPath()) })
 
-func loadOrCreateDeviceID() string {
-	path := deviceIDPath()
+// loadOrCreateDeviceIDAt is the real load-or-create logic behind DeviceID,
+// parameterized by the storage path so tests can exercise production code
+// directly (env var indirection through os.UserConfigDir is not portable to
+// redirect in tests). It reads an existing UUID if present, otherwise mints
+// one and persists it exclusively (see the concurrency note below).
+func loadOrCreateDeviceIDAt(path string) string {
 	if path != "" {
 		if raw, err := os.ReadFile(path); err == nil {
 			if id := strings.TrimSpace(string(raw)); isUUID(id) {

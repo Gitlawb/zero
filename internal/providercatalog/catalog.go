@@ -79,6 +79,13 @@ type Descriptor struct {
 	// device-only provider that generic path has no endpoint to hit at all.
 	OAuthDeviceOnly bool
 
+	// RuntimeHeaders, if set, lazily produces headers (e.g. a vendor's
+	// device-identity headers) to attach to CustomHeaders only when
+	// withRuntimeHeaders is true. Providers that need identity/headers on
+	// runtime requests (not just OAuth) set this instead of hardcoding an ID
+	// check inside cloneDescriptor — keeping the clone helper provider-agnostic.
+	RuntimeHeaders func() map[string]string
+
 	// Recommended marks a provider surfaced at the top and badged in
 	// catalog-ordered lists and pickers. The recommended descriptors are the first
 	// entries in the catalog, in order.
@@ -169,6 +176,10 @@ var descriptors = []Descriptor{
 		d.RequiresAuth = true
 		d = oauthProvider(d, false, true)
 		d.OAuthDeviceOnly = true
+		// Kimi's managed endpoint requires stable vendor-identity headers on
+		// every request; lazily mint them (with a persistent device ID) only
+		// when a runtime request actually needs them, not merely on listing.
+		d.RuntimeHeaders = kimiidentity.Headers
 		return d
 	}(),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
@@ -439,20 +450,21 @@ func transportDescriptor(id string, name string, transport Transport, baseURL st
 }
 
 // cloneDescriptor returns an independent copy of descriptor. When
-// withRuntimeHeaders is true, kimi-code also receives its X-Msh-* vendor
-// identity headers (including a persistent device ID on disk). Listing paths
-// (All, OAuthProviders, ListByTransport) pass false so merely enumerating
-// providers never mints ~/.config/zero/kimi-device-id for users who never
-// touch Kimi; Get/Require pass true so resolve-time profile building and
-// completions still present the same identity the OAuth login used.
+// withRuntimeHeaders is true, a descriptor with RuntimeHeaders set (e.g.
+// kimi-code) also receives its vendor identity headers (including a persistent
+// device ID on disk). Listing paths (All, OAuthProviders, ListByTransport)
+// pass false so merely enumerating providers never mints
+// ~/.config/zero/kimi-device-id for users who never touch Kimi; Get/Require
+// pass true so resolve-time profile building and completions still present the
+// same identity the OAuth login used.
 func cloneDescriptor(descriptor Descriptor, withRuntimeHeaders bool) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
-	} else if withRuntimeHeaders && descriptor.ID == "kimi-code" {
-		descriptor.CustomHeaders = kimiidentity.Headers()
+	} else if withRuntimeHeaders && descriptor.RuntimeHeaders != nil {
+		descriptor.CustomHeaders = descriptor.RuntimeHeaders()
 	}
 	return descriptor
 }
