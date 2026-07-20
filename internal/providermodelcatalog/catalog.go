@@ -123,7 +123,7 @@ var curatedModels = map[string][]Model{
 		{ID: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", Description: "multimodal model"},
 	},
 	"fireworks": {
-		{ID: "accounts/fireworks/models/deepseek-v3", Description: "catalog default"},
+		{ID: "accounts/fireworks/models/deepseek-v3-0324", Description: "catalog default"},
 		{ID: "accounts/fireworks/models/llama-v3p3-70b-instruct", Description: "general model"},
 		{ID: "accounts/fireworks/models/qwen2p5-coder-32b-instruct", Description: "coding model"},
 		{ID: "accounts/fireworks/models/deepseek-r1", Description: "reasoning model"},

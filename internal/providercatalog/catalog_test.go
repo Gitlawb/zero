@@ -166,8 +166,8 @@ func TestFireworksDescriptor(t *testing.T) {
 	if descriptor.DefaultBaseURL != "https://api.fireworks.ai/inference/v1" {
 		t.Fatalf("DefaultBaseURL = %q, want Fireworks OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
 	}
-	if descriptor.DefaultModel != "accounts/fireworks/models/deepseek-v3" {
-		t.Fatalf("DefaultModel = %q, want accounts/fireworks/models/deepseek-v3", descriptor.DefaultModel)
+	if descriptor.DefaultModel != "accounts/fireworks/models/deepseek-v3-0324" {
+		t.Fatalf("DefaultModel = %q, want accounts/fireworks/models/deepseek-v3-0324", descriptor.DefaultModel)
 	}
 	if descriptor.Transport != TransportOpenAICompatible {
 		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)

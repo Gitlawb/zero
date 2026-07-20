@@ -30,7 +30,7 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "fireworks",
-			want:     []string{"accounts/fireworks/models/deepseek-v3", "accounts/fireworks/models/qwen2p5-coder-32b-instruct"},
+			want:     []string{"accounts/fireworks/models/deepseek-v3-0324", "accounts/fireworks/models/qwen2p5-coder-32b-instruct"},
 			notWant:  []string{"gpt-4.1", "llama-3.3-70b-versatile"},
 		},
 		{
