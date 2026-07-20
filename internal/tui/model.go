@@ -695,6 +695,11 @@ type pendingPermissionPrompt struct {
 	// whose Reason is the typed text, so the model reads it as the tool result and
 	// adjusts course in the same turn instead of the run being cancelled.
 	typing bool
+	// savedDraft holds whatever was in the shared composer input when feedback
+	// mode was entered. The field is cleared for typing and restored on both
+	// submit and cancel, so a half-typed or queued next-turn message survives the
+	// detour (permissionRequestMsg, unlike ask_user, does not clear the composer).
+	savedDraft string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the

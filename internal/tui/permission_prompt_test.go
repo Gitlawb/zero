@@ -524,3 +524,48 @@ func TestComposerSuppressedDuringPermissionPrompt(t *testing.T) {
 		t.Errorf("feedback text should appear exactly once (on the card), got %d occurrences:\n%s", strings.Count(tv, "use apply_patch"), tv)
 	}
 }
+
+// Entering feedback mode must not lose a composer draft (a half-typed or queued
+// next-turn message). The draft is restored whether feedback is submitted or
+// cancelled; only the feedback text (delivered via the decision Reason) is
+// consumed.
+func TestPermissionFeedbackPreservesComposerDraftOnSubmit(t *testing.T) {
+	var got []agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(d agent.PermissionDecision) {
+		got = append(got, d)
+	})
+	m.input.SetValue("my queued next message")
+
+	next, _ := m.Update(testKeyText("n"))
+	nm := next.(model)
+	if nm.input.Value() != "" {
+		t.Fatalf("feedback field should start empty, got %q", nm.input.Value())
+	}
+	nm = typeRunes(t, nm, "use apply_patch")
+	after, _ := nm.Update(testKey(tea.KeyEnter))
+	am := after.(model)
+
+	if got[0].Reason != "use apply_patch" {
+		t.Fatalf("feedback text lost: %q", got[0].Reason)
+	}
+	if am.input.Value() != "my queued next message" {
+		t.Fatalf("composer draft not restored after submit, got %q", am.input.Value())
+	}
+}
+
+func TestPermissionFeedbackPreservesComposerDraftOnCancel(t *testing.T) {
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(agent.PermissionDecision) {})
+	m.input.SetValue("my queued next message")
+
+	next, _ := m.Update(testKeyText("n"))
+	nm := typeRunes(t, next.(model), "half a thought")
+	after, _ := nm.Update(testKey(tea.KeyEsc))
+	am := after.(model)
+
+	if am.pendingPermission == nil || am.pendingPermission.typing {
+		t.Fatal("Esc should return to the option list")
+	}
+	if am.input.Value() != "my queued next message" {
+		t.Fatalf("composer draft not restored after cancel, got %q", am.input.Value())
+	}
+}
