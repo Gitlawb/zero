@@ -454,7 +454,7 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				rowIndex:          -1,
 				heightCacheStable: false, // the highlight changes with the cursor
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, perm.typing, m.input.Value(), width)
 					options := permissionOptions(perm.request)
 					selectable := make([]transcriptSelectableLine, 0, len(offsets))
 					for index, offset := range offsets {

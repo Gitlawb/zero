@@ -1107,7 +1107,7 @@ func wrapDetailBlock(detail string, width int) string {
 // renderFocusedPermissionPrompt draws the modal permission card and reports the
 // card-relative Y offset of each option line (in permissionOptions order) so the
 // caller can register those lines as clickable.
-func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, width int) (string, []int) {
+func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, typing bool, feedback string, width int) (string, []int) {
 	name := strings.TrimSpace(request.ToolName)
 	if name == "" {
 		name = "tool"
@@ -1140,6 +1140,17 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 
 	lines = append(lines, "")
+
+	// Feedback mode: the option list is replaced by a free-text field, like the
+	// ask_user "type your own answer" surface. What is typed is sent to the model
+	// as the denial reason, so it reads the instruction and adjusts.
+	if typing {
+		lines = append(lines, fill(zeroTheme.muted).Render("Tell Zero what to do differently:"))
+		lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(feedback)+fill(zeroTheme.accent).Render("▌"))
+		lines = append(lines, "")
+		lines = append(lines, fill(zeroTheme.faint).Render("enter · send to Zero    esc · back to options"))
+		return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), nil
+	}
 
 	// Each option is its own line so a click anywhere on that row selects it (no
 	// per-column hit-testing). The highlighted row gets a ▸ marker and a reverse

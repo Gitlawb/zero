@@ -73,7 +73,7 @@ func TestPermissionOptionsExposeApprovalCancelWhenSupplied(t *testing.T) {
 		t.Fatalf("cancel option = %#v, want cancel on n", options[3])
 	}
 
-	card, _ := renderFocusedPermissionPrompt(request, 3, 80)
+	card, _ := renderFocusedPermissionPrompt(request, 3, false, "", 80)
 	got := plainRender(t, card)
 	for _, want := range []string{"continue without running it", "[d]", "tell Zero what to do differently", "[n]"} {
 		if !strings.Contains(got, want) {
@@ -96,7 +96,7 @@ func TestPermissionOptionsExposeCommandPrefixApproval(t *testing.T) {
 	if len(options) != 3 || options[1].choice != permissionDecisionAllowPrefix || options[1].hotkey != "p" {
 		t.Fatalf("prefix option = %#v, want p hotkey in supplied order", options)
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 1, 100)
+	card, _ := renderFocusedPermissionPrompt(request, 1, false, "", 100)
 	got := plainRender(t, card)
 	for _, want := range []string{"allow `git status` in this session", "[p]"} {
 		if !strings.Contains(got, want) {
@@ -115,7 +115,7 @@ func TestPermissionPromptMapsEscalatedSandboxReason(t *testing.T) {
 			agent.PermissionDecisionDeny,
 		},
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 0, 96)
+	card, _ := renderFocusedPermissionPrompt(request, 0, false, "", 96)
 	got := plainRender(t, card)
 	if !strings.Contains(got, "This command needs to run outside the sandbox.") {
 		t.Fatalf("permission card = %q, missing user-facing sandbox reason", got)
@@ -140,7 +140,7 @@ func TestPermissionOptionsExposePersistentCommandPrefixApproval(t *testing.T) {
 	if len(options) != 4 || options[2].choice != permissionDecisionAlwaysAllowPrefix || options[2].hotkey != "y" {
 		t.Fatalf("persistent prefix option = %#v, want y hotkey in supplied order", options)
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 2, 100)
+	card, _ := renderFocusedPermissionPrompt(request, 2, false, "", 100)
 	got := plainRender(t, card)
 	for _, want := range []string{"always allow `git status`", "[y]"} {
 		if !strings.Contains(got, want) {
@@ -158,7 +158,7 @@ func TestPermissionOptionsCanExposePatchCancelWithoutRecoverableDeny(t *testing.
 			agent.PermissionDecisionCancel,
 		},
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 2, 80)
+	card, _ := renderFocusedPermissionPrompt(request, 2, false, "", 80)
 	got := plainRender(t, card)
 	if !strings.Contains(got, "tell Zero what to do differently") || !strings.Contains(got, "[n]") {
 		t.Fatalf("permission card = %q, missing cancel option", got)
@@ -181,7 +181,7 @@ func TestRequestPermissionsPromptUsesGrantLabelsAndEscDenies(t *testing.T) {
 			agent.PermissionDecisionDeny,
 		},
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 1, 96)
+	card, _ := renderFocusedPermissionPrompt(request, 1, false, "", 96)
 	got := plainRender(t, card)
 	for _, want := range []string{
 		"Grant requested permissions?",
@@ -256,7 +256,9 @@ func TestPermissionHotkeysStillResolveDirectly(t *testing.T) {
 	}
 }
 
-func TestPermissionCancelHotkeyResolvesDirectly(t *testing.T) {
+// feedbackRequest is a bash prompt whose decision set includes Cancel, so the
+// "tell Zero what to do differently" row (and its [n] hotkey) is present.
+func feedbackRequest() agent.PermissionRequest {
 	request := testPromptPermissionRequest()
 	request.ToolName = "bash"
 	request.AvailableDecisions = []agent.PermissionDecisionAction{
@@ -264,21 +266,87 @@ func TestPermissionCancelHotkeyResolvesDirectly(t *testing.T) {
 		agent.PermissionDecisionDeny,
 		agent.PermissionDecisionCancel,
 	}
-	got := []permissionDecision{}
-	m := pendingPermissionModelWithRequest(t, request, func(d agent.PermissionDecision) {
-		got = append(got, permissionDecision(d.Action))
+	return request
+}
+
+// The [n] "tell Zero what to do differently" hotkey no longer resolves cancel
+// immediately: it opens the inline feedback field and sends nothing yet.
+func TestPermissionTellDifferentlyOpensFeedbackField(t *testing.T) {
+	var got []agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(d agent.PermissionDecision) {
+		got = append(got, d)
 	})
-	if _, cmd := m.Update(testKeyText("n")); cmd != nil {
-		t.Fatal("'n' should resolve synchronously")
+	next, _ := m.Update(testKeyText("n"))
+	nm := next.(model)
+	if nm.pendingPermission == nil || !nm.pendingPermission.typing {
+		t.Fatalf("'n' should open the feedback field, got pending=%#v", nm.pendingPermission)
 	}
-	if len(got) != 1 || got[0] != permissionDecisionCancel {
-		t.Fatalf("'n' should resolve cancel directly, got %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("'n' must not resolve anything yet, got %#v", got)
+	}
+}
+
+// Typing an instruction and pressing Enter sends a Deny whose Reason is the
+// text, so the agent surfaces it to the model as the tool result.
+func TestPermissionFeedbackSubmitSendsDenyWithText(t *testing.T) {
+	var got []agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(d agent.PermissionDecision) {
+		got = append(got, d)
+	})
+	next, _ := m.Update(testKeyText("n"))
+	nm := typeRunes(t, next.(model), "use apply_patch instead")
+	after, _ := nm.Update(testKey(tea.KeyEnter))
+	am := after.(model)
+
+	if len(got) != 1 {
+		t.Fatalf("Enter should resolve exactly one decision, got %#v", got)
+	}
+	if got[0].Action != agent.PermissionDecisionDeny {
+		t.Fatalf("feedback should resolve as Deny, got %s", got[0].Action)
+	}
+	if got[0].Reason != "use apply_patch instead" {
+		t.Fatalf("Deny reason should carry the typed text, got %q", got[0].Reason)
+	}
+	if am.pendingPermission != nil {
+		t.Fatal("prompt should be dismissed after submitting feedback")
+	}
+}
+
+// Enter with an empty field falls back to a plain cancel (the option's prior
+// meaning), so opening the field and changing your mind is safe.
+func TestPermissionFeedbackEmptySubmitCancels(t *testing.T) {
+	var got []agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(d agent.PermissionDecision) {
+		got = append(got, d)
+	})
+	next, _ := m.Update(testKeyText("n"))
+	after, _ := next.(model).Update(testKey(tea.KeyEnter))
+	_ = after
+	if len(got) != 1 || got[0].Action != agent.PermissionDecisionCancel {
+		t.Fatalf("empty feedback should resolve Cancel, got %#v", got)
+	}
+}
+
+// Esc in the feedback field returns to the option list without resolving.
+func TestPermissionFeedbackEscReturnsToOptions(t *testing.T) {
+	var got []agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(d agent.PermissionDecision) {
+		got = append(got, d)
+	})
+	next, _ := m.Update(testKeyText("n"))
+	after, _ := typeRunes(t, next.(model), "half a thought").Update(testKey(tea.KeyEsc))
+	am := after.(model)
+	if am.pendingPermission == nil || am.pendingPermission.typing {
+		t.Fatalf("Esc should return to the option list, got pending=%#v", am.pendingPermission)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Esc must not resolve anything, got %#v", got)
 	}
 }
 
 func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
 	request := agent.PermissionRequest{ToolName: "write_file", AvailableDecisions: testAllPermissionDecisions()}
-	card, offsets := renderFocusedPermissionPrompt(request, 2, 60) // cursor on future approval
+	card, offsets := renderFocusedPermissionPrompt(request, 2, false, "", 60) // cursor on future approval
 	if len(offsets) != len(permissionOptions(request)) {
 		t.Fatalf("offsets = %d, want %d", len(offsets), len(permissionOptions(request)))
 	}
@@ -299,7 +367,7 @@ func TestPermissionRenderShowsNetworkTargetAndHostScopedAlways(t *testing.T) {
 		Scope:              "example.com",
 		AvailableDecisions: testAllPermissionDecisions(),
 	}
-	card, _ := renderFocusedPermissionPrompt(request, 1, 72)
+	card, _ := renderFocusedPermissionPrompt(request, 1, false, "", 72)
 	got := plainRender(t, card)
 	for _, want := range []string{"target: example.com", "allow this host for this conversation", "[s]", "allow this host in the future", "[y]"} {
 		if !strings.Contains(got, want) {
@@ -387,7 +455,7 @@ func TestShiftDownComposerGuard(t *testing.T) {
 // other selectable list in the TUI uses.
 func TestFocusedPermissionSelectedRowUsesSelectionTintNotBrandChip(t *testing.T) {
 	request := agent.PermissionRequest{ToolName: "exec_command", SideEffect: "shell"}
-	card, _ := renderFocusedPermissionPrompt(request, 0, 70)
+	card, _ := renderFocusedPermissionPrompt(request, 0, false, "", 70)
 
 	var selected string
 	for _, line := range strings.Split(card, "\n") {
@@ -431,4 +499,28 @@ func backgroundCode(hex string) string {
 	var r, g, b int
 	fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b)
 	return fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
+}
+
+// A focused permission prompt suppresses the composer: keys drive the card, so a
+// "describe a task for zero…" box below it is inert and misleading — and once the
+// feedback field is open, the shared input must not echo in both places.
+func TestComposerSuppressedDuringPermissionPrompt(t *testing.T) {
+	m := pendingPermissionModelWithRequest(t, feedbackRequest(), func(agent.PermissionDecision) {})
+	m.width, m.height = 96, 30
+
+	view := plainRender(t, m.View())
+	if strings.Contains(view, "describe a task for zero") {
+		t.Errorf("composer must be hidden while a permission prompt is focused:\n%s", view)
+	}
+
+	// While typing feedback, the text lives on the card, not in a second box.
+	next, _ := m.Update(testKeyText("n"))
+	typed := typeRunes(t, next.(model), "use apply_patch")
+	tv := plainRender(t, typed.View())
+	if strings.Contains(tv, "describe a task for zero") {
+		t.Errorf("composer must stay hidden in feedback mode:\n%s", tv)
+	}
+	if strings.Count(tv, "use apply_patch") != 1 {
+		t.Errorf("feedback text should appear exactly once (on the card), got %d occurrences:\n%s", strings.Count(tv, "use apply_patch"), tv)
+	}
 }
