@@ -21,6 +21,7 @@ var expectedCatalogIDs = []string{
 	"groq",
 	"deepseek",
 	"together",
+	"fireworks",
 	"dashscope",
 	"moonshot",
 	"longcat",
@@ -122,6 +123,28 @@ func TestLongCatDescriptor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"LONGCAT_API_KEY"}) {
 		t.Fatalf("AuthEnvVars = %#v, want LONGCAT_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestFireworksDescriptor(t *testing.T) {
+	descriptor, err := Require("fireworks")
+	if err != nil {
+		t.Fatalf("Require(fireworks) error = %v", err)
+	}
+	if descriptor.Name != "Fireworks AI" {
+		t.Fatalf("Name = %q, want Fireworks AI", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.fireworks.ai/inference/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Fireworks OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "accounts/fireworks/models/deepseek-v3" {
+		t.Fatalf("DefaultModel = %q, want accounts/fireworks/models/deepseek-v3", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"FIREWORKS_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want FIREWORKS_API_KEY", descriptor.AuthEnvVars)
 	}
 }
 
@@ -293,7 +316,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

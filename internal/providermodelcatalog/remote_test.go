@@ -131,6 +131,7 @@ func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 		"ollama-cloud": "ollama-cloud",
 		"zai-cn":       "zai",
 		"minimaxi-cn":  "minimax",
+		"fireworks":    "fireworks-ai",
 	}
 	for zeroID, want := range tests {
 		provider, ok := providercatalog.Get(zeroID)
