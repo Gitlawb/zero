@@ -125,6 +125,32 @@ func TestSendWithRetryDoesNotReplayAmbiguousTransportErrors(t *testing.T) {
 	}
 }
 
+// A REAL refused dial (nothing listening on the target) must classify as
+// pre-send on every platform. This is the regression the errno-constant fixtures
+// miss: on Windows the kernel raises WSAECONNREFUSED, which errors.Is does NOT
+// match against syscall.ECONNREFUSED, so before dialPreSendErrnos carried the WSA
+// codes a refused dial returned false here and Windows never retried it. Using a
+// real Dial exercises the platform's true error shape.
+func TestIsPreSendTransportErrorRealRefusedDial(t *testing.T) {
+	// Reserve an ephemeral port, then close it, so a dial there is refused.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if cerr := ln.Close(); cerr != nil {
+		t.Fatalf("close listener: %v", cerr)
+	}
+	conn, dialErr := (&net.Dialer{Timeout: 2 * time.Second}).Dial("tcp", addr)
+	if dialErr == nil {
+		_ = conn.Close()
+		t.Skip("expected a refused dial but the port accepted a connection")
+	}
+	if !isPreSendTransportError(dialErr) {
+		t.Fatalf("real refused dial not classified pre-send: %v", dialErr)
+	}
+}
+
 func TestIsPreSendTransportError(t *testing.T) {
 	cases := []struct {
 		name string
