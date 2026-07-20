@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -626,16 +625,6 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}, nil
 }
 
-// isDefaultBranchRemoteLookupTimeout bounds the ls-remote HEAD-symref check
-// below for callers that need one: IsDefaultBranch applies it because
-// ensureFeatureBranch calls it with context.Background() and can't stall
-// push/pr indefinitely on a slow or unreachable remote. Push's own
-// pre-existing guard passes ctx through unbounded instead, so a slow but
-// reachable remote (a legitimate SSH/VPN handshake, say) isn't turned into a
-// "use --yes to override" failure just because ls-remote took longer than
-// this; the local main/master fallback below still covers a genuine timeout.
-const isDefaultBranchRemoteLookupTimeout = 5 * time.Second
-
 func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) (bool, error) {
 	// The conventional default names count without consulting the remote.
 	// This is the safe direction (it can only block a push, never permit
@@ -736,14 +725,12 @@ func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, s
 			remote = "origin"
 		}
 	}
-	// This runs ahead of ensureFeatureBranch's own branch creation, typically
-	// with context.Background(), so bound the network lookup here rather
-	// than inside isDefaultBranch: that keeps Push's own pre-existing guard
-	// (which calls isDefaultBranch directly, with whatever ctx the caller
-	// gave it) from inheriting a timeout it never had before.
-	lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
-	defer cancel()
-	isDefault, err := isDefaultBranch(lookupCtx, runGit, root, remote, branch)
+	// Honor the caller's deadline (or lack of one). A fixed short timeout here
+	// turned slow but reachable remotes (SSH/VPN handshakes) into fail-closed
+	// "use --yes" errors for ordinary feature-branch pushes, because
+	// ensureFeatureBranch always consults this before Push. Callers that need
+	// a bound should pass a context with a deadline.
+	isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
 	if err != nil {
 		return false, branch, remote, err
 	}
@@ -803,14 +790,12 @@ func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, err
 	// Local refs are not enough: a branch that exists only on the target
 	// remote (an old merged-PR branch, or one pruned locally) would be
 	// silently fast-forwarded by the later `push -u`, appending the new work
-	// to an unrelated remote branch. Probe the remote's heads once, bounded,
-	// and fail visibly when the remote cannot be consulted — the push that
-	// follows would need the same connectivity anyway.
+	// to an unrelated remote branch. Probe the remote's heads once under the
+	// caller's context (same connectivity the later push needs) and fail
+	// visibly when the remote cannot be consulted.
 	remoteTaken := map[string]bool{}
 	if remote := strings.TrimSpace(options.Remote); remote != "" {
-		lookupCtx, cancel := context.WithTimeout(ctx, isDefaultBranchRemoteLookupTimeout)
-		defer cancel()
-		out, err := gitOutput(lookupCtx, runGit, root, "ls-remote", "--heads", "--", remote)
+		out, err := gitOutput(ctx, runGit, root, "ls-remote", "--heads", "--", remote)
 		if err != nil {
 			return BranchResult{}, fmt.Errorf("cannot check branch names against remote %q: %w", remote, err)
 		}
