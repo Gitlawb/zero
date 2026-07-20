@@ -368,6 +368,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
 		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+	case "completions":
+		return runCompletions(args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
@@ -1157,6 +1159,7 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  completions Generate shell completion scripts
   daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
