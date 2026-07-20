@@ -195,7 +195,7 @@ func discoverOpenAIModels(ctx context.Context, profile config.ProviderProfile, o
 		AuthHeader:        profile.AuthHeader,
 		AuthScheme:        profile.AuthScheme,
 		AuthHeaderValue:   profile.AuthHeaderValue,
-		CustomHeaders:     profile.CustomHeaders,
+		CustomHeaders:     providerio.CopyHeaders(profile.CustomHeaders),
 	}, nil)
 }
 

@@ -21,6 +21,25 @@ func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
 	assertNotContains(t, view, "fix the failing test in internal/tools")
 }
 
+// TestWordmarkIsPlain guards the --version banner: it must carry no ANSI
+// escapes, because this renderer never resolves --theme/ZERO_THEME and any
+// palette color could be unreadable on the user's background.
+func TestWordmarkIsPlain(t *testing.T) {
+	wordmark := Wordmark()
+	if strings.Contains(wordmark, "\x1b") {
+		t.Fatalf("expected uncolored wordmark, got %q", wordmark)
+	}
+	lines := strings.Split(wordmark, "\n")
+	if len(lines) != len(zeroWordmarkPrefixLines) {
+		t.Fatalf("expected %d wordmark lines, got %d", len(zeroWordmarkPrefixLines), len(lines))
+	}
+	for index, line := range lines {
+		if want := zeroWordmarkPrefixLines[index] + zeroWordmarkOLines[index]; line != want {
+			t.Fatalf("wordmark line %d: expected %q, got %q", index, want, line)
+		}
+	}
+}
+
 func TestEmptyStateShowsVersion(t *testing.T) {
 	m := newModel(context.Background(), Options{Version: "0.2.0"})
 	m.width, m.height = 100, 30

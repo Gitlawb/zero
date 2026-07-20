@@ -61,6 +61,17 @@ var zaiCuratedModels = []Model{
 }
 
 var curatedModels = map[string][]Model{
+	// aimlapi.com aggregates every upstream provider behind one OpenAI-compatible
+	// endpoint, so the curated defaults are a cross-provider "best of" flagship
+	// list. The live /v1/models discovery (when a key is present) replaces this;
+	// these are the offline/pre-key fallback and the picker's default order.
+	"aimlapi": {
+		{ID: "anthropic/claude-sonnet-5", Description: "catalog default (Anthropic Claude Sonnet 5)"},
+		{ID: "google/gemini-3.5-flash", Description: "Google Gemini Flash 3.5"},
+		{ID: "openai/gpt-5.5-2026-04-23", Description: "OpenAI GPT-5.5"},
+		{ID: "qwen/qwen-3.7-max", Description: "Qwen 3.7 Max"},
+		{ID: "deepseek/deepseek-v4-pro", Description: "DeepSeek V4"},
+	},
 	"ollama-cloud": {
 		{ID: "qwen3-coder:480b", Description: "catalog default"},
 		{ID: "gpt-oss:120b", Description: "agentic coding model"},

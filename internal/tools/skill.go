@@ -48,7 +48,8 @@ func NewSkillTool(dir string) *skillTool {
 				// unknown keys (AdditionalProperties:false).
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Reads a local skill file; gathers reusable instructions only."),
+			safety:       readOnlySafety("Reads a local skill file; gathers reusable instructions only."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true},
 		},
 	}
 }

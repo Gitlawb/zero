@@ -42,6 +42,7 @@ import (
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/charmbracelet/x/term"
 )
 
 var version = "dev"
@@ -339,7 +340,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return 0
 			}
 		}
-		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+		// Pipes and redirects keep the machine-readable contract exactly as it
+		// was: a single "zero <version>" line. Scripts, command substitutions,
+		// and the NPM wrapper smoke check all parse that record, so the banner
+		// is strictly a TTY affordance.
+		if !stdoutIsTerminal(stdout) {
+			if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+				return 1
+			}
+			return 0
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n\nzero %s\n", tui.Wordmark(), version); err != nil {
 			return 1
 		}
 		return 0
@@ -755,11 +766,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
-		Store:         sandboxStore,
-		Backend:       sandboxBackend,
-		Scope:         scope,
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
+		Store:            sandboxStore,
+		Backend:          sandboxBackend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
@@ -1115,6 +1127,17 @@ func closeSpecialistRuntime(stderr io.Writer, runtime *agentToolRuntime) {
 	}
 }
 
+// stdoutIsTerminal reports whether w is an interactive terminal. Tests pass
+// bytes.Buffer writers and pipes/redirects fail term.IsTerminal, so both take
+// the machine-readable path.
+func stdoutIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(f.Fd())
+}
+
 func writeAppError(stderr io.Writer, message string, exitCode int) int {
 	if _, err := fmt.Fprintf(stderr, "[zero] %s\n", message); err != nil {
 		return 1
@@ -1318,6 +1341,9 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --max-turns <number>           Override the maximum agent loop turns
+      --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
+                                    posture only (turn budget, effort, self-correction, escalation);
+                                    composes with --mode (which picks the model) and explicit flags win
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools

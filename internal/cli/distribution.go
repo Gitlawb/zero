@@ -118,7 +118,8 @@ func runSkillInfo(args []string, dir string, stdout io.Writer, stderr io.Writer)
 	if name == "" {
 		return writeExecUsageError(stderr, "usage: zero skill info <name> [--json]")
 	}
-	info, ok := skills.Info(dir, name)
+	// Resolve across primary + ~/.agents/skills; lock metadata only from primary.
+	info, ok := skills.InfoFromRoots(dir, skills.GlobalRoots(dir), name)
 	if !ok {
 		return writeAppError(stderr, fmt.Sprintf("skill %q not found", name), exitUsage)
 	}

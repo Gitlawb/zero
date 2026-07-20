@@ -35,7 +35,8 @@ func newDesktopWindowsTool(options localcontrol.DesktopOptions) Tool {
 				},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads native desktop window metadata."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads native desktop window metadata."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}
@@ -81,7 +82,8 @@ func newDesktopSnapshotTool(options localcontrol.DesktopOptions) Tool {
 				Required:             []string{"pid", "window_id"},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads a native desktop window state."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Reads a native desktop window state."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}
@@ -125,7 +127,8 @@ func newDesktopActionTool(options localcontrol.DesktopOptions) Tool {
 				Required:             []string{"command", "input"},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectLocalDesktop, "Interacts with native desktop windows."),
+			safety:       localControlSafety(options.Enabled, SideEffectLocalDesktop, "Interacts with native desktop windows."),
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		desktop: localcontrol.NewDesktop(options),
 	}

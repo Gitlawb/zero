@@ -221,6 +221,52 @@ func Info(dir string, name string) (SkillInfo, bool) {
 	return info, true
 }
 
+// InfoFromRoots resolves the named skill across discovery roots (earlier roots
+// win). Lock source/hash are attached only when the winning skill lives under
+// primaryDir and that dir's lockfile has an entry — agents-only skills return
+// frontmatter + path with empty Source/Hash. primaryDir is typically the Zero
+// write root (DefaultDir / skillsDir).
+func InfoFromRoots(primaryDir string, roots []string, name string) (SkillInfo, bool) {
+	loaded, _, err := LoadFromRoots(roots)
+	if err != nil {
+		return SkillInfo{}, false
+	}
+	target := strings.TrimSpace(name)
+	var skill Skill
+	found := false
+	for _, candidate := range loaded {
+		if candidate.Name == target {
+			skill = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return SkillInfo{}, false
+	}
+	info := SkillInfo{Skill: skill}
+	primaryDir = strings.TrimSpace(primaryDir)
+	if primaryDir == "" {
+		return info, true
+	}
+	// Only attach lock metadata when the winner is from the primary write root.
+	// Compare path prefixes after cleaning so agents-only skills never pick up a
+	// Zero lock entry by name coincidence.
+	skillPath := filepath.Clean(skill.Path)
+	primaryRoot := filepath.Clean(primaryDir)
+	rel, err := filepath.Rel(primaryRoot, skillPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return info, true
+	}
+	if lock, err := ReadLock(primaryDir); err == nil {
+		if entry, found := lock[skill.Name]; found {
+			info.Source = entry.Source
+			info.Hash = entry.Hash
+		}
+	}
+	return info, true
+}
+
 // ReadLock loads the lockfile from dir. A missing lockfile yields an empty map
 // with no error so callers can treat "no lockfile" as "nothing installed".
 func ReadLock(dir string) (map[string]LockEntry, error) {

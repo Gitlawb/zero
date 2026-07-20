@@ -15,11 +15,11 @@ import (
 
 // pluginActivation holds what plugin activation contributed to a bootstrap so the
 // later dispatcher + skill wiring can consume it: the plugin hook definitions and
-// the plugin skill search roots. The zero value (no plugins) is inert — the
-// dispatcher gets no extra hooks and the skill tool keeps only the default dir.
-// The embedded trustSkip reports whether the project plugin layer was dropped for
-// an untrusted workspace, so the caller can fold it into the single combined
-// trust notice.
+// the plugin skill search roots. The zero value (no plugins) still overlays the
+// multi-root skill tool (primary + ~/.agents/skills) so discovery is identical
+// with or without plugins. The embedded trustSkip reports whether the project
+// plugin layer was dropped for an untrusted workspace, so the caller can fold it
+// into the single combined trust notice.
 type pluginActivation struct {
 	hooks      []hooks.Definition
 	skillRoots []string
@@ -52,6 +52,9 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 	loaded, err := deps.loadPlugins(plugins.LoadOptions{Cwd: workspaceRoot, ExcludeProject: excludeProject})
 	if err != nil {
 		writePluginActivationWarning(stderr, "failed to load plugins: "+err.Error())
+		// Still overlay multi-root discovery (primary + agents) so a plugin load
+		// failure cannot hide shared skills.
+		registry.Register(plugins.NewSkillTool(deps.skillsDir(), nil))
 		return pluginActivation{trustSkip: skip}
 	}
 
@@ -67,14 +70,11 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 		writePluginActivationWarning(stderr, warning)
 	}
 
-	// Re-register the skill tool to also resolve plugin-declared skills. The core
-	// skill tool only reads the default skills dir; the plugin-aware replacement
-	// merges the default dir with the plugin skill roots (default dir wins a name
-	// clash), so plugin skills appear in the agent's skill list. With no plugin
-	// skill roots this is byte-equivalent to the default skills surface.
-	if len(result.SkillRoots) > 0 {
-		registry.Register(plugins.NewSkillTool(deps.skillsDir(), result.SkillRoots))
-	}
+	// Always overlay the multi-root skill tool so discovery is identical with or
+	// without plugins: primary DefaultDir + optional ~/.agents/skills + plugin
+	// roots (earlier wins). With empty SkillRoots and no agents dir this is
+	// byte-equivalent to the core single-dir skill surface.
+	registry.Register(plugins.NewSkillTool(deps.skillsDir(), result.SkillRoots))
 
 	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots, trustSkip: skip}
 }
@@ -91,8 +91,8 @@ func projectPluginsDirExists(workspaceRoot string) bool {
 }
 
 // skillInfos resolves the reusable skills the model can load via the skill tool —
-// the default skills dir merged with any plugin skill roots, the same set the
-// plugin-aware skill tool resolves against — as plain data for the agent's system
+// primary dir + optional ~/.agents/skills + plugin skill roots, the same set the
+// multi-root skill tool resolves against — as plain data for the agent's system
 // prompt. It returns nil when no skills are installed, so a skill-less run leaves
 // the prompt byte-identical.
 func (a pluginActivation) skillInfos(defaultDir string) []agent.SkillInfo {

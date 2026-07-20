@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/errhint"
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -25,6 +26,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -68,7 +70,14 @@ type execOptions struct {
 	// intentionally inert: nothing consumes it. Model selection is driven by
 	// --model / --mode instead. See writeExecHelp ("Accept legacy model profile
 	// selection") and TestRunExecAcceptsLegacyModelProfileFlags.
-	modelProfile          string
+	modelProfile string
+	// execProfile selects a named execution profile (balanced, fast, thorough):
+	// a loop-posture bundle (turn budget, reasoning effort, self-correction,
+	// escalation triggers) applied AFTER --mode with the same
+	// fill-only-if-unset rule, so precedence is explicit flag > mode > profile.
+	// Distinct from the mode preset also named "fast" (which picks a model) and
+	// from the legacy inert --profile above. See internal/execprofile.
+	execProfile           string
 	reasoningEffort       string
 	useSpec               bool
 	specModel             string
@@ -124,6 +133,12 @@ type execOptions struct {
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
 	addDirs []string
+	// tracePath, when set, writes a per-turn NDJSON trace (agenteval-compatible)
+	// to the given file path — or to stderr when the value is "-". Falls back to
+	// the ZERO_TRACE env var when the flag is absent. Off by default: a run
+	// without it leaves agent.Options.Trace nil and is byte-identical to before.
+	// The trace is pure observation — enabling it does not change agent behavior.
+	tracePath string
 }
 
 type execUsageError struct {
@@ -158,6 +173,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// notice) path as an explicit --model. Explicit flags still win: applyExecMode
 	// only fills fields the caller left unset.
 	if err := applyExecMode(&options); err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	// A profile tunes loop posture the way a mode tunes model selection, and
+	// runs after it so the mode's fills count as "set" and win. MaxTurns is
+	// deferred to config resolution below, where the displaced resolved budget
+	// is known and becomes the escalation restore target.
+	execProfile, execProfileFilledEffort, err := applyExecProfile(&options)
+	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
@@ -265,6 +288,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	var displacedMaxTurns int
+	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -405,6 +430,36 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 	}
 
+	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off).
+	// nil when gated off or the profile is ineligible: agent.Run then wraps the
+	// provider in its default adapter — the exact code path of today. The
+	// session switcher is installed only when the run START is optimized, so
+	// the legacy ModelSwitcher path above stays untouched otherwise.
+	turnSessions, _ := providers.OptimizedTurnSessions(resolved.Provider, provider, providers.Options{})
+	var modelSessionSwitcher func(context.Context, string) (zeroruntime.TurnSessionProvider, error)
+	if options.allowEscalation && turnSessions != nil {
+		modelSessionSwitcher = func(_ context.Context, modelID string) (zeroruntime.TurnSessionProvider, error) {
+			switchedProfile := resolved.Provider
+			switchedProfile.Model = modelID
+			switchedProvider, err := deps.newProvider(switchedProfile)
+			if err != nil {
+				return nil, err
+			}
+			if switchedProvider == nil {
+				// The loop treats a nil session source as "no swap" — mirror the
+				// legacy closure's (nil, nil) contract.
+				return nil, nil
+			}
+			currentModel = modelID
+			if optimized, ok := providers.OptimizedTurnSessions(switchedProfile, switchedProvider, providers.Options{}); ok {
+				return optimized, nil
+			}
+			// Ineligible switch target: default adapter, but with the switched
+			// model's resolved capability projection preserved.
+			return providers.DefaultTurnSessions(switchedProfile, switchedProvider, providers.Options{}), nil
+		}
+	}
+
 	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
@@ -422,6 +477,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	notify.MaybeAddWebhookSink(notifier, os.Getenv, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "[notify] "+format+"\n", args...)
 	})
+	// Spec-draft runs synthesize a prompt offline and never drive a model turn, so
+	// there is no per-turn trace to emit. Reject --trace / ZERO_TRACE up front with
+	// a clear error rather than silently accepting and writing nothing.
+	if options.useSpec && resolveTracePath(options) != "" {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, "--trace / ZERO_TRACE are not supported for spec-draft runs")
+	}
 	if options.useSpec {
 		return runExecSpecDraft(execSpecDraftRun{
 			options:            options,
@@ -443,6 +504,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			reasoningEffort:    forwardEffort,
 			specPermissionMode: permissionMode,
 			notifier:           notifier,
+			// The profile displaced resolved.MaxTurns above, so the spec-draft
+			// run arms the same escalation policy as the main run (in practice
+			// only the failure-streak and risky-mutation triggers can fire
+			// here: the draft runs without the completion gate or a
+			// self-corrector).
+			profilePolicy: execProfile.Policy(displacedMaxTurns,
+				specProfileEffortFilled(execProfileFilledEffort, options.specReasoningEffort)),
 		})
 	}
 
@@ -473,6 +541,24 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	runID, err := streamjson.CreateRunID(time.Now())
 	if err != nil {
 		return writeAppError(stderr, "failed to create run id: "+err.Error(), exitCrash)
+	}
+	// Per-turn tracing is opt-in (--trace <path> or ZERO_TRACE=<path>). The
+	// recorder is stamped throughout agent.Run and the providerio seam; the run
+	// itself is byte-identical to an untraced run. We finish the recorder at the
+	// agent.Run boundary (below) so the snapshot captures exactly one turn, then
+	// serialize the snapshot on every exit path via the defer. "-" writes NDJSON
+	// to stderr; otherwise the path is created/truncated. A failure to emit is
+	// logged to stderr, never fatal.
+	tracePath := resolveTracePath(options)
+	var traceRecorder *trace.Recorder
+	var traceSnapshot *trace.TurnTrace
+	if tracePath != "" {
+		traceRecorder = trace.NewRecorder(preparedSession.Session.SessionID, runID, execProfile.Name)
+		defer func() {
+			if err := writeTraceSnapshot(traceSnapshot, tracePath, stderr); err != nil {
+				fmt.Fprintf(stderr, "[zero] failed to write trace: %s\n", err)
+			}
+		}()
 	}
 	writer := execEventWriter{
 		stdout:       stdout,
@@ -541,28 +627,32 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
-		MaxTurns:         resolved.MaxTurns,
-		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
-		DeferThreshold:   effectiveDeferThreshold,
-		Specialists:      specialistRuntime.specialistInfos(),
-		Skills:           pluginActivation.skillInfos(deps.skillsDir()),
-		SessionID:        preparedSession.Session.SessionID,
-		CallingSessionID: options.callingSessionID,
-		CallingToolUseID: options.callingToolUseID,
-		Tag:              options.tag,
-		Depth:            options.depth,
-		SessionTitle:     sessionTitle,
-		ProviderName:     resolved.Provider.Name,
-		Model:            resolved.Provider.Model,
-		ModelSwitcher:    modelSwitcher,
-		ReasoningEffort:  forwardEffort,
-		Cwd:              workspaceRoot,
-		Images:           images,
-		Registry:         registry,
-		PermissionMode:   permissionMode,
-		Autonomy:         options.autonomy,
-		SelfCorrect:      selfCorrector,
-		FileDiagnostics:  fileDiagnostics,
+		MaxTurns:             resolved.MaxTurns,
+		ContextWindow:        resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
+		DeferThreshold:       effectiveDeferThreshold,
+		Specialists:          specialistRuntime.specialistInfos(),
+		Skills:               pluginActivation.skillInfos(deps.skillsDir()),
+		SessionID:            preparedSession.Session.SessionID,
+		CallingSessionID:     options.callingSessionID,
+		CallingToolUseID:     options.callingToolUseID,
+		Tag:                  options.tag,
+		Depth:                options.depth,
+		SessionTitle:         sessionTitle,
+		ProviderName:         resolved.Provider.Name,
+		Model:                resolved.Provider.Model,
+		ModelSwitcher:        modelSwitcher,
+		TurnSessionProvider:  turnSessions,
+		ModelSessionSwitcher: modelSessionSwitcher,
+		ReasoningEffort:      forwardEffort,
+		Trace:                traceRecorder,
+		Cwd:                  workspaceRoot,
+		Images:               images,
+		Registry:             registry,
+		PermissionMode:       permissionMode,
+		Autonomy:             options.autonomy,
+		SelfCorrect:          selfCorrector,
+		FileDiagnostics:      fileDiagnostics,
+		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -604,6 +694,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			if len(result.Meta) > 0 {
 				payload["meta"] = result.Meta
 			}
+			if result.Truncated {
+				payload["truncated"] = true
+			}
 			if result.Redacted {
 				payload["redacted"] = true
 			}
@@ -625,6 +718,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	})
+	// Finish the trace now that the turn is done, so the snapshot captures exactly
+	// agent.Run's work and nothing the post-run cleanup stamps. The deferred
+	// writer serializes the snapshot on every exit path.
+	if traceRecorder != nil {
+		traceSnapshot = traceRecorder.Finish()
+	}
 	notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {
 		return exitCrash
@@ -815,12 +914,26 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 	policy := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox)
 	backend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Store:         store,
-		Backend:       backend,
-		Scope:         scope,
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           policy,
+		Store:            store,
+		Backend:          backend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	}), nil
+}
+
+func providerSensitiveEnvKeys(resolved config.ResolvedConfig) []string {
+	keys := make([]string, 0, len(resolved.Providers)+1)
+	for _, profile := range resolved.Providers {
+		if key := strings.TrimSpace(profile.APIKeyEnv); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if key := strings.TrimSpace(resolved.Provider.APIKeyEnv); key != "" {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto
@@ -1046,6 +1159,67 @@ func applyExecMode(options *execOptions) error {
 	return nil
 }
 
+// applyExecProfile expands an --exec-profile selection onto the exec options.
+// Like applyExecMode it only fills fields the caller left unset, and it runs
+// AFTER the mode so a mode-filled field counts as set: precedence is explicit
+// flag > --mode > --exec-profile. Only the options-level knobs are applied here
+// (reasoning effort still flows through the model-supported gating downstream;
+// self-correct is presence-only so a profile can only turn it on). MaxTurns is
+// intentionally NOT applied here — the profile displaces the resolved budget
+// after config resolution, where the displaced value is known and becomes the
+// escalation restore target. An unknown profile is a usage error listing the
+// valid names. Not to be confused with the legacy inert --profile flag.
+// The second return reports whether the profile actually filled the reasoning
+// effort (false when the user set one explicitly), so the escalation policy
+// knows the displaced effort was the provider default and can restore it.
+func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
+	name := strings.TrimSpace(options.execProfile)
+	if name == "" {
+		return execprofile.Profile{}, false, nil
+	}
+	profile, ok := execprofile.Lookup(name)
+	if !ok {
+		return execprofile.Profile{}, false, execUsageError{fmt.Sprintf("unknown execution profile %q. Valid profiles: %s.", options.execProfile, strings.Join(execprofile.Names(), ", "))}
+	}
+	effortFilled := false
+	if options.reasoningEffort == "" && profile.ReasoningEffort != "" {
+		options.reasoningEffort = profile.ReasoningEffort
+		effortFilled = true
+	}
+	// Spec-safe projection: the spec-draft path wires no self-corrector (an
+	// explicit --self-correct --use-spec is rejected at parse time, before
+	// profiles apply), so a profile's self-correct knob is meaningless there.
+	// Project it away rather than erroring: the user asked for a thorough
+	// DRAFT, and the profile's other knobs (budget, effort) apply to it fine.
+	if profile.SelfCorrect && !options.useSpec {
+		options.selfCorrect = true
+	}
+	return profile, effortFilled, nil
+}
+
+// specProfileEffortFilled reports whether the profile's effort fill actually
+// governs the spec-draft run. An explicit --spec-reasoning-effort replaces the
+// filled effort for the draft, so the escalation's effort restore must not arm
+// there: escalation must never clear an effort the user pinned by hand.
+func specProfileEffortFilled(effortFilled bool, specReasoningEffort string) bool {
+	return effortFilled && strings.TrimSpace(specReasoningEffort) == ""
+}
+
+// applyProfileTurnBudget decides the run's turn budget once config is resolved.
+// The profile displaces the RESOLVED value, not the flag: a pinned budget
+// always wins and the profile backs off entirely, while an env/config budget
+// is the "balanced posture" a mid-run escalation can restore. pinnedMaxTurns
+// is any caller-pinned budget — an explicit --max-turns flag OR a mode
+// preset's fill (both land in options.maxTurns, and a mode outranks a profile
+// just like the flag does). displaced is 0 when nothing was displaced, so an
+// escalation leaves the ceiling untouched.
+func applyProfileTurnBudget(profile execprofile.Profile, pinnedMaxTurns int, resolvedMaxTurns int) (effective int, displaced int) {
+	if profile.MaxTurns > 0 && pinnedMaxTurns == 0 {
+		return profile.MaxTurns, resolvedMaxTurns
+	}
+	return resolvedMaxTurns, 0
+}
+
 // resolveSelectedModel routes a user-supplied --model value through the model
 // registry so that fuzzy aliases (e.g. "sonnet 4.5") resolve to canonical ids
 // and deprecated models auto-redirect to their fallback. It returns the model id
@@ -1236,4 +1410,37 @@ func execNotifyMode(options execOptions, resolved config.ResolvedConfig) string 
 		return options.notifyMode
 	}
 	return resolved.Notify.Mode
+}
+
+// resolveTracePath returns the trace destination for this run: the --trace flag
+// value when set, else the ZERO_TRACE env var, else "" (tracing off). A value of
+// "-" means "write to stderr".
+func resolveTracePath(options execOptions) string {
+	if v := strings.TrimSpace(options.tracePath); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("ZERO_TRACE")); v != "" {
+		return v
+	}
+	return ""
+}
+
+// writeTraceSnapshot writes an already-finished trace snapshot to dest ("-" =>
+// stderr, otherwise a file path created/truncated). A nil snapshot is a no-op
+// (tracing off, or the run exited before agent.Run produced a turn). The trace
+// is best-effort: a write error is returned to the caller, which logs it but
+// never fails the run.
+func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer) error {
+	if snapshot == nil || dest == "" {
+		return nil
+	}
+	if strings.TrimSpace(dest) == "-" {
+		return trace.WriteNDJSON(stderr, snapshot)
+	}
+	file, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return trace.WriteNDJSON(file, snapshot)
 }

@@ -53,6 +53,22 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	// SetActiveProvider only ever matches profiles persisted in config.json
+	// (see config.ProviderPersisted), but a provider can be visible in
+	// `zero providers list`/the TUI picker purely because Resolve()
+	// synthesized it in-memory from an ambient env var (e.g. OPENAI_API_KEY)
+	// without ever writing a row to disk. Without this check, switching to
+	// that provider by name always fails with a confusing "not found" even
+	// though it is genuinely usable this session (issue #707).
+	persisted, err := config.ProviderPersisted(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if !persisted {
+		if exit, handled := reportUnpersistedProviderUse(stdout, stderr, deps, options, configPath); handled {
+			return exit
+		}
+	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -352,6 +368,22 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	name := options.names[0]
+	// RemoveProvider only ever matches profiles persisted in config.json (see
+	// config.ProviderPersisted), but a provider can be visible in
+	// `zero providers list`/the TUI picker purely because Resolve()
+	// synthesized it in-memory from an ambient env var (e.g. OPENAI_API_KEY)
+	// without ever writing a row to disk. Without this check, deleting that
+	// provider by name always fails with a confusing "not found" even though
+	// it is genuinely visible/usable this session (issue #707).
+	persisted, err := config.ProviderPersisted(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if !persisted {
+		if exit, handled := reportUnpersistedProviderRemove(stdout, stderr, deps, name, options.json, configPath); handled {
+			return exit
+		}
+	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -428,6 +460,16 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	oldName := options.names[0]
+	persisted, err := config.ProviderPersisted(configPath, oldName)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if !persisted {
+		if exit, handled := reportUnpersistedProviderRename(stdout, stderr, deps, oldName, options.json, configPath); handled {
+			return exit
+		}
+	}
 	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -446,4 +488,121 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// providerResolvedByName reports whether name matches a provider in a
+// resolved provider list — used to tell a genuinely unknown name (a typo)
+// apart from a real, env-derived provider that just has no config.json row.
+func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// reportUnpersistedProviderUse handles `zero providers use <name>` for a
+// provider that is not persisted in config.json. If it's not resolvable at
+// all (an unknown/misspelled name), it returns handled=false so the caller
+// falls through to SetActiveProvider's real "not found" error. If it IS
+// resolvable — an env-derived profile (e.g. ambient OPENAI_API_KEY) —
+// SetActiveProvider would only ever fail "not found" against it, so this
+// reports the situation plainly instead of that confusing error (issue
+// #707).
+func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions, configPath string) (int, bool) {
+	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	if exitCode != exitSuccess {
+		// resolveCommandCenterConfig already wrote its own error to stderr;
+		// stop here instead of letting the caller try SetActiveProvider too.
+		return exitCode, true
+	}
+	if !providerResolvedByName(resolved.Providers, options.name) {
+		return exitCode, false
+	}
+	message := fmt.Sprintf(
+		"Provider %q is not saved in config.json (likely set via an environment variable), so there is no saved profile to switch to.\nIt is available whenever its environment variable is set, but is only active when selected (for example via ZERO_PROVIDER); unset its environment variable to stop Zero from detecting it automatically.",
+		options.name,
+	)
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{
+			"activeProvider": resolved.ActiveProvider,
+			"configPath":     configPath,
+			"persisted":      false,
+			"message":        message,
+		}); err != nil {
+			return exitCrash, true
+		}
+		return exitSuccess, true
+	}
+	if _, err := fmt.Fprintln(stdout, message); err != nil {
+		return exitCrash, true
+	}
+	return exitSuccess, true
+}
+
+// reportUnpersistedProviderRemove handles `zero providers remove <name>` for
+// a provider that is not persisted in config.json, mirroring the TUI
+// provider manager's delete handling (internal/tui/provider_manager.go). If
+// name isn't resolvable at all, it returns handled=false so the caller falls
+// through to RemoveProvider's real "not found" error.
+func reportUnpersistedProviderRemove(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
+	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	if exitCode != exitSuccess {
+		return exitCode, true
+	}
+	if !providerResolvedByName(resolved.Providers, name) {
+		return exitCode, false
+	}
+	message := fmt.Sprintf(
+		"Provider %q is not saved in config.json (likely set via an environment variable) — nothing to remove there.\nUnset its environment variable to stop Zero from detecting it automatically.",
+		name,
+	)
+	if jsonOutput {
+		if err := writePrettyJSON(stdout, map[string]any{
+			"removed":        "",
+			"keyRemoved":     false,
+			"activeProvider": resolved.ActiveProvider,
+			"configPath":     configPath,
+			"persisted":      false,
+			"message":        message,
+		}); err != nil {
+			return exitCrash, true
+		}
+		return exitSuccess, true
+	}
+	if _, err := fmt.Fprintln(stdout, message); err != nil {
+		return exitCrash, true
+	}
+	return exitSuccess, true
+}
+
+func reportUnpersistedProviderRename(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
+	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	if exitCode != exitSuccess {
+		return exitCode, true
+	}
+	if !providerResolvedByName(resolved.Providers, name) {
+		return exitCode, false
+	}
+	message := fmt.Sprintf(
+		"Provider %q is not saved in config.json (likely set via an environment variable), so there is no saved profile to rename.",
+		name,
+	)
+	if jsonOutput {
+		if err := writePrettyJSON(stdout, map[string]any{
+			"renamed":    nil,
+			"configPath": configPath,
+			"persisted":  false,
+			"message":    message,
+		}); err != nil {
+			return exitCrash, true
+		}
+		return exitSuccess, true
+	}
+	if _, err := fmt.Fprintln(stdout, message); err != nil {
+		return exitCrash, true
+	}
+	return exitSuccess, true
 }

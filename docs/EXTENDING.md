@@ -102,13 +102,23 @@ The full format spec (frontmatter fields, tool scopes, prompt conventions) is in
 
 Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`. Standalone project skill directories are not supported in this version (shared project-wide skills must go in `AGENTS.md` or as a hook). However, project plugins (section 6) may bundle skills, which are merged into the active run.
 
-Discovery root: `$ZERO_SKILLS_DIR` → `$XDG_DATA_HOME/zero/skills` → `~/.local/share/zero/skills/`. A missing directory is fine — Zero just reports "no skills".
+Discovery roots (earlier wins on name collisions):
+
+1. **Primary Zero dir** — `$ZERO_SKILLS_DIR` if set, else `$XDG_DATA_HOME/zero/skills`, else `~/.local/share/zero/skills/`
+2. **Shared multi-agent dir** — `~/.agents/skills/` when present (read-only discovery; never an install target)
+3. **Plugin skill roots** — skills bundled by active plugins (section 6)
+
+A missing directory is fine — Zero just omits it. Management commands (`zero skills add` / `remove` / `lock`) always write to the primary Zero dir only; `list` / `info` search primary + `~/.agents/skills`.
 
 ```text
-~/.local/share/zero/skills/
+~/.local/share/zero/skills/          # primary (install/remove/lock target)
   run-benchmarks/
     SKILL.md
   write-changelog/
+    SKILL.md
+
+~/.agents/skills/                    # optional shared multi-agent root
+  shared-review/
     SKILL.md
 ```
 
@@ -126,9 +136,9 @@ description: Run the project's benchmark suite and summarize the deltas.
 3. Report any regression > 5% with the function name and the previous value.
 ```
 
-Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. During an agent run, Zero loads the default skills directory before plugin skill roots; earlier roots win name collisions silently. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
+Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. Across roots, Zero loads the primary directory first, then `~/.agents/skills`, then plugin skill roots; earlier roots win name collisions. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
 
-The `skill` core tool lets the agent load any discovered skill by name.
+The `skill` tool lets the agent load any discovered skill by name (primary, agents, or plugin).
 
 ## 4. Hooks
 
@@ -240,10 +250,13 @@ OAuth server names ending in `.<32 hex chars>` are reserved for token storage.
 
 ```bash
 zero serve --mcp
+zero serve --mcp -C /path/to/workspace
+zero serve --mcp --add-dir /path/to/extra
 ```
 
 The server speaks MCP over stdio. Configure it from the receiving side as a `stdio` server whose command is `zero serve --mcp`.
 
+`-C/--cwd` sets the workspace root exposed as MCP resources and used by core tools. `--add-dir` (repeatable) widens that resource/tool scope beyond the workspace without granting the sandbox temp roots used by interactive runs.
 ## 6. Plugins
 
 A plugin is a self-contained directory that bundles tools, hooks, and skills for one capability. Plugins live at:

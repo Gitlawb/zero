@@ -85,6 +85,14 @@ func TestSchedulerSkipsWhilePreviousRuns(t *testing.T) {
 	waitFor(t, "first done", func() bool { return sw.Coordinator().Summarize().Done == 1 })
 	ticks <- time.Time{}
 	waitFor(t, "second spawn", func() bool { return len(l.recorded()) == 2 })
+	// fireIfIdle's spawn (what "second spawn" observes via the launcher) and
+	// run's subsequent job.incRuns() are sequential but distinct steps in the
+	// scheduler's goroutine; wait for Runs itself rather than assuming the
+	// launcher recording it means the job's counter is updated too.
+	waitFor(t, "second run recorded", func() bool {
+		j, ok := findJob(sched.List(), id)
+		return ok && j.Runs == 2
+	})
 
 	j, ok := findJob(sched.List(), id)
 	if !ok {

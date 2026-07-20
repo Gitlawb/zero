@@ -29,6 +29,9 @@ type CommandSpec struct {
 	Args []string
 	Dir  string
 	Env  []string
+	// sensitiveEnvKeys is populated by Engine from config-derived credential
+	// variable names and carried through SandboxManager to the platform plan.
+	sensitiveEnvKeys []string
 }
 
 type CommandPlan struct {
@@ -122,6 +125,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		return CommandPlan{}, errors.New("sandbox command name is required")
 	}
 	spec.Dir = commandDir
+	spec.sensitiveEnvKeys = engine.sensitiveEnvKeys
 
 	backend := engine.backend
 	if backend.Name == "" {
@@ -207,7 +211,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap, "")
+	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, BackendLinuxBwrap, "", spec.sensitiveEnvKeys)
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
@@ -253,8 +257,25 @@ func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspa
 		Name:              spec.Name,
 		Args:              cloneStrings(spec.Args),
 		Dir:               spec.Dir,
-		Env:               cloneStrings(spec.Env),
+		Env:               directCommandEnv(spec),
 	}
+}
+
+// directCommandEnv scrubs sensitive credentials from the environment for a
+// direct (unwrapped) command plan: the platform sandbox backend is
+// unavailable, disabled, or not required, so this is the actual environment
+// the child process inherits. Without scrubbing here, config-derived
+// apiKeyEnv and dynamic OAuth client-secret variables would leak into
+// commands that fall back to this path (e.g. EnforcementDegraded).
+func directCommandEnv(spec CommandSpec) []string {
+	env := cloneStrings(spec.Env)
+	if spec.Env == nil {
+		// Match the wrapped-plan behavior: an unset spec.Env means "inherit the
+		// caller's environment," so scrub a snapshot of it rather than passing
+		// nil through to exec.Cmd, which would skip scrubbing entirely.
+		env = os.Environ()
+	}
+	return scrubSensitiveEnv(env, spec.sensitiveEnvKeys...)
 }
 
 func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, string, error) {
@@ -318,7 +339,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend, "")
+	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, envBackend, "", spec.sensitiveEnvKeys)
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -377,6 +398,10 @@ func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string
 }
 
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
+	return sandboxEnvironmentForCommandWithSensitiveEnv(specEnv, policy, backend, workspaceRoot, nil)
+}
+
+func sandboxEnvironmentForCommandWithSensitiveEnv(specEnv []string, policy Policy, backend BackendName, workspaceRoot string, sensitiveEnvKeys []string) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. The sandbox
@@ -384,7 +409,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		// command env values still replace inherited values below.
 		env = os.Environ()
 	}
-	env = scrubSensitiveEnv(env)
+	env = scrubSensitiveEnv(env, sensitiveEnvKeys...)
 	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
 		// Preserve standard user tool locations so a bare `python3`/`node`
@@ -967,7 +992,7 @@ func regexpQuoteMeta(value string) string {
 	return replacer.Replace(value)
 }
 
-func scrubSensitiveEnv(env []string) []string {
+func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 	// Secrets not covered by the provider catalog: cloud/VCS credentials and
 	// providers Zero talks to through generic OpenAI-compatible endpoints.
 	sensitiveKeys := []string{
@@ -997,6 +1022,7 @@ func scrubSensitiveEnv(env []string) []string {
 			sensitiveKeys = append(sensitiveKeys, key)
 		}
 	}
+	sensitiveKeys = append(sensitiveKeys, normalizeSensitiveEnvKeys(additionalKeys)...)
 
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
@@ -1005,7 +1031,7 @@ func scrubSensitiveEnv(env []string) []string {
 			out = append(out, kv)
 			continue
 		}
-		drop := false
+		drop := isDynamicSensitiveEnvKey(key)
 		for _, sensitive := range sensitiveKeys {
 			if strings.EqualFold(key, sensitive) {
 				drop = true
@@ -1017,4 +1043,38 @@ func scrubSensitiveEnv(env []string) []string {
 		}
 	}
 	return out
+}
+
+func normalizeSensitiveEnvKeys(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		// A misconfigured value like "COMPANY_LLM_SECRET=..." would never
+		// match a real env key during scrubbing; keep only the name part.
+		if name, _, found := strings.Cut(key, "="); found {
+			key = strings.TrimSpace(name)
+		}
+		folded := strings.ToUpper(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[folded]; ok {
+			continue
+		}
+		seen[folded] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func isDynamicSensitiveEnvKey(key string) bool {
+	const (
+		prefix = "ZERO_OAUTH_"
+		suffix = "_CLIENT_SECRET"
+	)
+	key = strings.ToUpper(strings.TrimSpace(key))
+	return strings.HasPrefix(key, prefix) &&
+		strings.HasSuffix(key, suffix) &&
+		len(key) > len(prefix)+len(suffix)
 }

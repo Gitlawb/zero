@@ -246,11 +246,15 @@ func (m model) sessionPrompt(prompt string) string {
 	if m.activeSession.SessionID == "" || len(m.sessionEvents) == 0 {
 		return prompt
 	}
-	return sessions.FormatExecPrompt(prompt, sessions.PreparedExec{
+	formatted := sessions.FormatExecPrompt(prompt, sessions.PreparedExec{
 		Mode:          sessions.ModeResume,
 		Session:       m.activeSession,
 		ContextEvents: append([]sessions.Event{}, m.sessionEvents...),
 	})
+	if m.activeSession.SessionKind == sessions.SessionKindSide {
+		return btwContextBoundary + "\n\n" + formatted
+	}
+	return formatted
 }
 
 func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
@@ -275,6 +279,9 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 	}
 	if session == nil {
 		return nil, fmt.Errorf("zero session not found: %s", args)
+	}
+	if !sessions.IsResumableKind(session.SessionKind) {
+		return nil, fmt.Errorf("zero session is not resumable: %s", args)
 	}
 	return session, nil
 }

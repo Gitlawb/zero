@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.4.0](https://github.com/Gitlawb/zero/compare/v0.3.0...v0.4.0) (2026-07-17)
+
+
+### Features
+
+* **aimlapi:** AI/ML API provider with guided onboarding (top-up + key issuance) ([#655](https://github.com/Gitlawb/zero/issues/655)) ([6b9c2f0](https://github.com/Gitlawb/zero/commit/6b9c2f0c083e02bcd3aad68fb7af0501a9e7cd61))
+* **cli:** show ZERO wordmark on --version ([#673](https://github.com/Gitlawb/zero/issues/673)) ([9acb411](https://github.com/Gitlawb/zero/commit/9acb4113cc3337b3f361a16278e9cf11ca105e34))
+* **cli:** wire MCP serve WorkspaceRoot and --add-dir scope ([#694](https://github.com/Gitlawb/zero/issues/694)) ([75a78e7](https://github.com/Gitlawb/zero/commit/75a78e715bf23154f69c8c79cb58eb4b535b2a2a))
+* **npm:** ship the native binary as platform optionalDependencies ([#626](https://github.com/Gitlawb/zero/issues/626)) ([5e1405d](https://github.com/Gitlawb/zero/commit/5e1405d0b7abff5b3ccb3cfdb66d64d6d3322922))
+* **perf:** emit prompt-prefix hash fingerprint per turn ([#704](https://github.com/Gitlawb/zero/issues/704)) ([1c5c6e7](https://github.com/Gitlawb/zero/commit/1c5c6e78a8a0e228bdf53d7be90934fbce9d98c3))
+* **providers:** add AI/ML API preset (rebased onto main) ([#621](https://github.com/Gitlawb/zero/issues/621)) ([d66a9dd](https://github.com/Gitlawb/zero/commit/d66a9dda69c32aa59f4bea903cfefe00d4b7adef))
+* **providers:** refresh MiniMax model coverage ([#665](https://github.com/Gitlawb/zero/issues/665)) ([fa3052a](https://github.com/Gitlawb/zero/commit/fa3052a1422a4ad30a3a6295829564f42dee31a8))
+* **skills:** discover shared ~/.agents/skills with multi-root skill loading ([#696](https://github.com/Gitlawb/zero/issues/696)) ([7d57999](https://github.com/Gitlawb/zero/commit/7d579996b43741a2e57e3e38fcdd8484fcfc34e9))
+* **tui:** Ctrl+X leader chords and emacs menu navigation ([#699](https://github.com/Gitlawb/zero/issues/699)) ([7f669f4](https://github.com/Gitlawb/zero/commit/7f669f455021be51319ee3b8298cd48a17f745c7))
+* **tui:** press up to edit queued messages ([#656](https://github.com/Gitlawb/zero/issues/656)) ([4c986d3](https://github.com/Gitlawb/zero/commit/4c986d327b5ed26338d295c23bea5839681db8d0))
+
+
+### Bug Fixes
+
+* **acp:** make truncateHint rune-safe ([#614](https://github.com/Gitlawb/zero/issues/614)) ([ddc4927](https://github.com/Gitlawb/zero/commit/ddc4927aac5544bf4dd2c46615aeda5a81c96576))
+* **agent,tui:** resolve git branch detection when starting Zero in subdirectories ([#613](https://github.com/Gitlawb/zero/issues/613)) ([0184581](https://github.com/Gitlawb/zero/commit/0184581ec234ea414e0a47bc33e8b0f4ddfb497b))
+* **agent:** raise default and deep-mode turn budgets ([#650](https://github.com/Gitlawb/zero/issues/650)) ([635c93a](https://github.com/Gitlawb/zero/commit/635c93af51ebc20f3e0917917e55a79edfe27c35))
+* **cli:** prevent consuming positional arguments as flag values ([#619](https://github.com/Gitlawb/zero/issues/619)) ([5b4f48d](https://github.com/Gitlawb/zero/commit/5b4f48d2dcb66402c13bde0c3cfe9c9371da19fb))
+* **config:** enforce MCP trust boundary so project config cannot override user disable ([#609](https://github.com/Gitlawb/zero/issues/609)) ([4d8c31c](https://github.com/Gitlawb/zero/commit/4d8c31cf16a3080344e3be7039408fcae71c075d)), closes [#512](https://github.com/Gitlawb/zero/issues/512)
+* **config:** surface unknown/typo'd config fields instead of silently dropping them ([#645](https://github.com/Gitlawb/zero/issues/645)) ([893b7b4](https://github.com/Gitlawb/zero/commit/893b7b424cc203a2fcf92327a4e25c84286a90e0))
+* **cron:** prevent cron job Mutate from clobbering concurrent updates ([#630](https://github.com/Gitlawb/zero/issues/630)) ([e4bd703](https://github.com/Gitlawb/zero/commit/e4bd703cfb28dab2dfa3c2ddba46237e1bb2e164))
+* **daemon:** handle os.ErrPermission as collision during O_EXCL lock creation ([#616](https://github.com/Gitlawb/zero/issues/616)) ([8ea5384](https://github.com/Gitlawb/zero/commit/8ea53841a5d54c37a153779ae86bea010659433c))
+* **exec:** stop false INCOMPLETE downgrades on conversational final messages ([#608](https://github.com/Gitlawb/zero/issues/608)) ([b6117af](https://github.com/Gitlawb/zero/commit/b6117af86d6bc87a4ee66910e99d76cb16b03fed))
+* harden MCP credential boundaries ([#597](https://github.com/Gitlawb/zero/issues/597)) ([fdddb05](https://github.com/Gitlawb/zero/commit/fdddb05ba84b1600ae6c3a20028bf83afe474c44))
+* **hooks:** fail closed on launch failures for beforeTool hooks ([#629](https://github.com/Gitlawb/zero/issues/629)) ([dc06fe7](https://github.com/Gitlawb/zero/commit/dc06fe72caf45f72d2cba1e8a835c0f5b405c1e8))
+* **hooks:** run sessionEnd hooks after Esc/Ctrl+C interrupts ([#606](https://github.com/Gitlawb/zero/issues/606)) ([824ecdb](https://github.com/Gitlawb/zero/commit/824ecdbcf9c467c35ef4e2666770fdadcb5bf402))
+* **keyring:** pass generic password via stdin on macOS ([#574](https://github.com/Gitlawb/zero/issues/574)) ([91ea6de](https://github.com/Gitlawb/zero/commit/91ea6ded7503538834a84d090f78670a363c62d3))
+* **lock:** prevent POSIX lock file overwrite and leak on Windows/Unix ([#628](https://github.com/Gitlawb/zero/issues/628)) ([da41c3a](https://github.com/Gitlawb/zero/commit/da41c3a75b782d6e0836fe13346321e40a90fbb4))
+* **openai:** omit prompt_cache_key for openai-compatible providers ([#636](https://github.com/Gitlawb/zero/issues/636)) ([1af5882](https://github.com/Gitlawb/zero/commit/1af58828eb3c22567599c000736c913a290959d2)), closes [#624](https://github.com/Gitlawb/zero/issues/624)
+* **plugins:** resolve relative executable paths against plugin root ([#627](https://github.com/Gitlawb/zero/issues/627)) ([2efe6d5](https://github.com/Gitlawb/zero/commit/2efe6d539e29374b3ef39c2290bdea81f33a228b))
+* **sandbox:** remove windowsWriteRestricted flag to fix DenyRead bypass ([#612](https://github.com/Gitlawb/zero/issues/612)) ([3d96ac7](https://github.com/Gitlawb/zero/commit/3d96ac7e55c760a97f28c0e6ceaf1ec3b4ab717a))
+* **sandbox:** scrub dynamic credential env vars ([#682](https://github.com/Gitlawb/zero/issues/682)) ([9043bae](https://github.com/Gitlawb/zero/commit/9043baedcff7776c7373645b57563cac06b31847))
+* **sandbox:** scrub sensitive credentials from sandbox environment ([#660](https://github.com/Gitlawb/zero/issues/660)) ([6fc1220](https://github.com/Gitlawb/zero/commit/6fc1220f6ac66fb3ae67b637cbbed7068d2213c0))
+* **sandbox:** unblock git fetch/commit/add under the write-restricted sandbox ([#654](https://github.com/Gitlawb/zero/issues/654)) ([5c4815a](https://github.com/Gitlawb/zero/commit/5c4815a66ed07d9cf90b825adfd936d3ac07639d))
+* **sandbox:** use WRITE_RESTRICTED token when no DenyRead paths are configured ([#658](https://github.com/Gitlawb/zero/issues/658)) ([a5d2e32](https://github.com/Gitlawb/zero/commit/a5d2e327c8681671aa8a9e5378801215b747edcf))
+* **securefile,credstore:** call Sync on temp file before close and rename ([#631](https://github.com/Gitlawb/zero/issues/631)) ([212734a](https://github.com/Gitlawb/zero/commit/212734adf3b5f982e22385161205aa1afe4634fe))
+* **securefile:** reclaim stale lock files to prevent permanent DOS ([#615](https://github.com/Gitlawb/zero/issues/615)) ([8536cc8](https://github.com/Gitlawb/zero/commit/8536cc87f7a885f9e436d6ef28f5f325201623dc))
+* **swarm:** wait for job.Runs directly in scheduler skip test ([#667](https://github.com/Gitlawb/zero/issues/667)) ([1bb6b57](https://github.com/Gitlawb/zero/commit/1bb6b5745af90321d1e657a12a1976cded5dd1bd))
+* **tools:** classify silent wrapped Windows command failures as sandbox denials ([#659](https://github.com/Gitlawb/zero/issues/659)) ([8bd9742](https://github.com/Gitlawb/zero/commit/8bd9742fa95c41b93ea4e718628aed0ff3ae9dd0))
+* **tools:** preserve SysProcAttr during PTY fallback ([#618](https://github.com/Gitlawb/zero/issues/618)) ([f78b36c](https://github.com/Gitlawb/zero/commit/f78b36c770daa4577a9f99265b18a354454e36eb))
+* **tui:** resolve pending askUser callbacks to prevent runner hangs ([#620](https://github.com/Gitlawb/zero/issues/620)) ([aa73a76](https://github.com/Gitlawb/zero/commit/aa73a76f1bd1b6fe97bac2fbff2d61b7474139f2))
+* **tui:** stop the composer cursor blinking while typing or unfocused ([#672](https://github.com/Gitlawb/zero/issues/672)) ([2b42cd5](https://github.com/Gitlawb/zero/commit/2b42cd567b96d6f7e0818594e53ff31cce1e42e9))
+* **windows:** resolve absolute path for taskkill to prevent hijacking ([#617](https://github.com/Gitlawb/zero/issues/617)) ([2db00ee](https://github.com/Gitlawb/zero/commit/2db00ee3d57db97e0fbe23cb8628e8bcb47f6f09))
+
+
+### Performance Improvements
+
+* **tools:** add explicit effect metadata for safe concurrency ([#705](https://github.com/Gitlawb/zero/issues/705)) ([8ef8576](https://github.com/Gitlawb/zero/commit/8ef8576df7d0775a5b815bc0776a794cadb75c34))
+
 ## [0.3.0](https://github.com/Gitlawb/zero/compare/v0.2.0...v0.3.0) (2026-07-09)
 
 
@@ -127,14 +181,19 @@ tagged. Until then, source builds report the version `dev`.
 ## [Unreleased]
 
 ### Added
+- Shared multi-agent skills discovery: when present, `~/.agents/skills` is searched after the primary
+  Zero skills dir (and before plugin skill roots). `zero skills list` / `info` and the runtime `skill`
+  tool share one multi-root discovery path; install/remove/lock still target only the Zero skills directory.
 - `SECURITY.md` with a private vulnerability-reporting path, `CODE_OF_CONDUCT.md`, this changelog, and
   GitHub issue/PR templates.
 - Interactive `/theme` picker: bare `/theme` opens a popup that live-previews each palette as you move
   and applies on select (Esc reverts).
-- Ten built-in color themes alongside the `dark`/`light` built-ins — `dracula`, `nord`, `gruvbox`,
-  `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, and
-  `solarized-light` — selectable via `/theme <name>`, `--theme <name>`, or `ZERO_THEME`. Every palette
-  is contrast-audited to WCAG AA. The built-in light theme was reworked for legibility.
+- Twelve built-in color themes alongside the `dark`/`light` built-ins — `dracula`, `nord`, `gruvbox`,
+  `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`,
+  `solarized-light`, `dune`, and `neon` — selectable via `/theme <name>`, `--theme <name>`, or
+  `ZERO_THEME`. Every palette is contrast-audited to WCAG AA, and the new presets are additionally
+  audited after xterm-256 downsampling; see [docs/THEMES.md](docs/THEMES.md). The built-in light
+  theme was reworked for legibility.
 - `--theme <name>` flag for the TUI, accepting `auto` or any registered theme (previously only the
   `ZERO_THEME` env var existed).
 - "Accessibility / Appearance" section in the README documenting `NO_COLOR`, `ZERO_THEME`, `/theme`,

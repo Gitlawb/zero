@@ -137,6 +137,19 @@ func zeroWordmarkLines() []string {
 	return lines
 }
 
+// Wordmark renders the brand ASCII art shown on the TUI's empty state, for
+// reuse outside the TUI (e.g. `zero --version`). It is deliberately
+// uncolored: only newModel resolves --theme/ZERO_THEME, so painting the
+// global palette here would ignore a selected light theme and be unreadable
+// on light terminals. The terminal's default foreground works everywhere.
+func Wordmark() string {
+	lines := make([]string, 0, minInt(len(zeroWordmarkPrefixLines), len(zeroWordmarkOLines)))
+	for index := 0; index < len(zeroWordmarkPrefixLines) && index < len(zeroWordmarkOLines); index++ {
+		lines = append(lines, zeroWordmarkPrefixLines[index]+zeroWordmarkOLines[index])
+	}
+	return strings.Join(lines, "\n")
+}
+
 func borderedBlock(width int, lines []string) string {
 	return styledBlock(width, lines, zeroTheme.line)
 }

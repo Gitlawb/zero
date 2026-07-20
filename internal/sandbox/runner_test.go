@@ -122,6 +122,47 @@ func TestBuildCommandPlanDegradesUnavailableFallback(t *testing.T) {
 	}
 }
 
+// TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv covers the
+// EnforcementDegraded fallback path: when the native backend is
+// unavailable, BuildCommandPlan falls back to a direct (unwrapped) plan
+// whose spec.Env is nil, so exec.Cmd would otherwise inherit the caller's
+// environment — including configured and dynamically named credentials —
+// unscrubbed.
+func TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv(t *testing.T) {
+	t.Setenv("COMPANY_LLM_SECRET", "custom-secret")
+	t.Setenv("ZERO_OAUTH_ACME_CLIENT_SECRET", "oauth-secret")
+	t.Setenv("SAFE_VAR", "hello")
+
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot:    root,
+		Policy:           DefaultPolicy(),
+		Backend:          Backend{Name: BackendUnavailable, Message: "native sandbox unavailable"},
+		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
+	})
+
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "pwd"},
+		Dir:  root,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded {
+		t.Fatalf("plan = %#v, want degraded direct plan", plan)
+	}
+	for _, entry := range plan.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_ACME_CLIENT_SECRET") {
+			t.Fatalf("degraded plan.Env retained sensitive key %q: %v", key, plan.Env)
+		}
+	}
+	if got := envListValue(plan.Env, "SAFE_VAR", ""); got != "hello" {
+		t.Fatalf("SAFE_VAR = %q, want hello", got)
+	}
+}
+
 func TestBuildCommandPlanRejectsOutsideDirectory(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
@@ -653,14 +694,19 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"XAI_API_KEY=xai-12345",
 		"HUGGINGFACE_API_KEY=hf_12345",
 		"GOOGLE_APPLICATION_CREDENTIALS=/home/user/sa-key.json",
+		"COMPANY_LLM_SECRET=custom-secret",
+		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
+		"zero_oauth_second_client_secret=case-insensitive-secret",
+		"ZERO_OAUTH_CLIENT_SECRET=not-a-provider-secret",
 		"AWS_PROFILE=staging",
 		"SAFE_VAR=hello",
 	}
-	scrubbed := scrubSensitiveEnv(inputEnv)
+	scrubbed := scrubSensitiveEnv(inputEnv, " COMPANY_LLM_SECRET ", "company_llm_secret", "GITHUB_TOKEN=ghp_pasted-assignment", "=", "")
 	expected := map[string]string{
-		"PATH":        "/usr/bin",
-		"SAFE_VAR":    "hello",
-		"AWS_PROFILE": "staging",
+		"PATH":                     "/usr/bin",
+		"SAFE_VAR":                 "hello",
+		"AWS_PROFILE":              "staging",
+		"ZERO_OAUTH_CLIENT_SECRET": "not-a-provider-secret",
 	}
 	actual := make(map[string]string, len(scrubbed))
 	for _, entry := range scrubbed {
@@ -672,5 +718,36 @@ func TestScrubSensitiveEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("scrubSensitiveEnv() = %v, want %v", actual, expected)
+	}
+}
+
+func TestEngineScrubsConfiguredSensitiveEnvKeys(t *testing.T) {
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot:    workspace,
+		Policy:           DefaultPolicy(),
+		Backend:          Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
+		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "true",
+		Env: []string{
+			"PATH=/usr/bin",
+			"COMPANY_LLM_SECRET=custom-secret",
+			"ZERO_OAUTH_CUSTOM_CLIENT_SECRET=oauth-secret",
+			"SAFE_VAR=hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	for _, entry := range plan.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_CUSTOM_CLIENT_SECRET") {
+			t.Fatalf("plan.Env retained sensitive key %q: %v", key, plan.Env)
+		}
+	}
+	if got := envListValue(plan.Env, "SAFE_VAR", ""); got != "hello" {
+		t.Fatalf("SAFE_VAR = %q, want hello", got)
 	}
 }

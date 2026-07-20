@@ -21,6 +21,8 @@ type grepTool struct {
 	scope         PathScope
 }
 
+func (grepTool) outputCategory(map[string]any) outputCategory { return outputCategorySearch }
+
 type grepMatch struct {
 	file string
 	line int
@@ -53,7 +55,8 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"pattern"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Searches file paths and matching lines without modifying files."),
+			safety:       readOnlySafety("Searches file paths and matching lines without modifying files."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: scopedScanResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -61,7 +64,15 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{})
+	return tool.runWith(ctx, args, readExcluder{}, true)
+}
+
+func (tool grepTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	exclude := readExcluder{}
+	if options.Sandbox != nil {
+		exclude = sandboxReadExcluder(options.Sandbox)
+	}
+	return tool.runWith(ctx, args, exclude, false)
 }
 
 // RunWithSandbox runs the search while skipping subtrees the sandbox policy
@@ -69,10 +80,10 @@ func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
 // path. With no DenyRead configured the excluder is a no-op and behavior is
 // unchanged.
 func (tool grepTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result {
-	return tool.runWith(ctx, args, sandboxReadExcluder(engine))
+	return tool.runWith(ctx, args, sandboxReadExcluder(engine), true)
 }
 
-func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder) Result {
+func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder, directBudget bool) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "query", "regex", "search", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for grep: " + err.Error())
@@ -153,7 +164,7 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 			}
 			return errorResult("Error running grep: " + err.Error())
 		}
-		return collector.result()
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern to continue")
 	case "files_with_matches":
 		collector := &grepFileListCollector{}
 		if err := scanGrepMatches(ctx, resolvedRoot, target, globMatcher, exclude, absolutePaths, presenceGrepLineMatcher(compiled), collector.collect); err != nil {
@@ -162,7 +173,7 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 			}
 			return errorResult("Error running grep: " + err.Error())
 		}
-		return collector.result()
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern to continue")
 	default:
 		collector := &grepContentCollector{headLimit: headLimit}
 		if err := scanGrepMatches(ctx, resolvedRoot, target, globMatcher, exclude, absolutePaths, presenceGrepLineMatcher(compiled), collector.collect); err != nil {
@@ -171,8 +182,15 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 			}
 			return errorResult("Error running grep: " + err.Error())
 		}
-		return collector.result()
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern or increase head_limit")
 	}
+}
+
+func applyDirectSearchBudget(result Result, directBudget bool, hint string) Result {
+	if !directBudget {
+		return result
+	}
+	return applyLegacyByteBudgetToResult(result, searchOutputBudgetBytes, hint)
 }
 
 // resolveGrepRoot picks the scope root whose EvalSymlinks-resolved path contains
@@ -454,13 +472,7 @@ func (collector *grepFileListCollector) result() Result {
 		return okResult("No matches found.")
 	}
 	sort.Strings(collector.files)
-	budgeted := applyOutputBudget(strings.Join(collector.files, "\n"), searchOutputBudgetBytes, "narrow path/glob/pattern to continue")
-	meta := outputBudgetMeta(budgeted)
-	if budgeted.Truncated {
-		meta["truncated"] = "true"
-		meta["truncation_reason"] = "byte_budget"
-	}
-	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
+	return Result{Status: StatusOK, Output: strings.Join(collector.files, "\n")}
 }
 
 type grepContentCollector struct {
@@ -493,20 +505,15 @@ func (collector *grepContentCollector) result() Result {
 	if truncated {
 		output += fmt.Sprintf("\n\n[truncated: showing first %d matches; narrow path/glob/pattern or increase head_limit]", len(lines))
 	}
-	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "narrow path/glob/pattern or increase head_limit")
-	meta := outputBudgetMeta(budgeted)
-	if truncated || budgeted.Truncated {
+	meta := map[string]string{}
+	if truncated {
 		meta["truncated"] = "true"
-		if budgeted.Truncated {
-			meta["truncation_reason"] = "byte_budget"
-		} else {
-			meta["truncation_reason"] = "head_limit"
-		}
+		meta["truncation_reason"] = "head_limit"
 	}
 	return Result{
 		Status:    StatusOK,
-		Output:    budgeted.Output,
-		Truncated: truncated || budgeted.Truncated,
+		Output:    output,
+		Truncated: truncated,
 		Meta:      meta,
 	}
 }

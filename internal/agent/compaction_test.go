@@ -581,7 +581,7 @@ func TestCompactNeverProducesConsecutiveUserMessages(t *testing.T) {
 }
 
 func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
-	st := newCompactionState(Options{ContextWindow: 1000, CompactionPreserveLast: 2})
+	st := newCompactionState(Options{ContextWindow: 1000, CompactionPreserveLast: 2}, nil)
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
 		{Type: zeroruntime.StreamEventText, Content: "SUMMARY"}, {Type: zeroruntime.StreamEventDone},
 	}}}
@@ -628,7 +628,7 @@ func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
 }
 
 func TestRecoverDisabledIsNoop(t *testing.T) {
-	st := newCompactionState(Options{ContextWindow: 0})
+	st := newCompactionState(Options{ContextWindow: 0}, nil)
 	msgs := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "x"}}
 	called := false
 	// recover must not invoke the provider/summarize when disabled, even on a

@@ -272,7 +272,8 @@ sequenceDiagram
         Agent->>Tool: execute(ctx, args)
         Tool-->>Agent: output, error, metadata
         Agent->>Hooks: afterTool hooks
-        Agent->>Agent: redact, truncate, classify success/failure
+        Agent->>Agent: redact secrets, apply semantic output budget, enforce byte ceiling
+        Agent->>Agent: classify success/failure
         Agent-->>Surface: OnToolResult callback
         Agent->>Transcript: append tool result message
     end
@@ -604,9 +605,21 @@ flowchart TD
     Prompt -- Yes --> Decision[Permission callback]
     Prompt -- No --> Run[Registry.RunWithOptions]
     Decision --> Run
-    Run --> Redact[Redact secrets + enforce output ceiling]
-    Redact --> Message[Return tool result to model]
+    Run --> Redact[Redact secrets]
+    Redact --> Budget[Token-aware semantic output budget]
+    Budget --> Ceiling[Existing hard byte ceiling]
+    Ceiling --> Message[Return one tool result to model]
 ```
+
+Oversized results use deterministic, provider-neutral estimated-token budgets.
+Policies retain useful structure for files, search matches, tests, process logs,
+diffs, and worker conclusions; tools without a declared category use a UTF-8-safe
+head/tail fallback. The estimate is intentionally conservative for non-ASCII
+text and is not exact provider tokenization. Existing byte ceilings remain the
+authoritative safety limit. When the existing spill mechanism can persist the
+complete redacted text received by the budgeting layer, the result includes its
+safe spill reference. This does not imply capture of subprocess bytes already
+discarded by a tool's established internal buffer.
 
 Core tool groups include:
 
@@ -733,9 +746,10 @@ flowchart TD
 - **Skills** are instruction packs the model can load on demand.
 - **Specialists** are sub-agents callable through the `Task` tool.
 - **MCP servers** contribute external tools.
-- **Plugins** can add tools, hooks, and skill roots. Bootstrap merges plugin skill
-  roots into the runtime skill tool and prompt-visible skill list; the base
-  `internal/skills` scanner still scans one root at a time.
+- **Plugins** can add tools, hooks, and skill roots. Bootstrap always registers a
+  multi-root skill tool: primary Zero skills dir, optional `~/.agents/skills`,
+  then plugin skill roots (earlier wins). `internal/skills` owns that merge via
+  `LoadFromRoots` / `DiscoveryRoots`; single-root `Load` remains for install/write.
 - **Hooks** can observe or block tool lifecycle events.
 
 ## End-to-End Data Flow

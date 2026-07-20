@@ -30,6 +30,10 @@ const (
 const (
 	maxRecentEdits   = 20
 	maxEditNoteBytes = 160
+	// maxTaskObjectiveBytes keeps the original objective recognizable after
+	// compaction without allowing an unusually large prompt to recreate the
+	// context pressure the compaction just removed.
+	maxTaskObjectiveBytes = 512
 )
 
 const (
@@ -76,32 +80,14 @@ func extractLatestPlan(messages []zeroruntime.Message) string {
 // ({"plan":[{content,status,...}]}) as terse status-tagged bullet lines. Returns
 // "" on malformed arguments or an empty plan.
 func formatPlanArguments(arguments string) string {
-	var parsed struct {
-		Plan []struct {
-			Content string `json:"content"`
-			Step    string `json:"step"`
-			Status  string `json:"status"`
-			Notes   string `json:"notes"`
-		} `json:"plan"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &parsed); err != nil {
+	plan, ok := parseTaskPlan(arguments)
+	if !ok {
 		return ""
 	}
-	lines := make([]string, 0, len(parsed.Plan))
-	for _, item := range parsed.Plan {
-		content := strings.TrimSpace(item.Content)
-		if content == "" {
-			content = strings.TrimSpace(item.Step)
-		}
-		if content == "" {
-			continue
-		}
-		status := strings.TrimSpace(item.Status)
-		if status == "" {
-			status = "pending"
-		}
-		line := "- [" + status + "] " + content
-		if notes := strings.TrimSpace(item.Notes); notes != "" {
+	lines := make([]string, 0, len(plan))
+	for _, item := range plan {
+		line := "- [" + item.Status + "] " + item.Content
+		if notes := item.Notes; notes != "" {
 			line += "\n  Notes: " + notes
 		}
 		lines = append(lines, line)
@@ -431,10 +417,23 @@ func capBody(body string) string {
 // preservedState is the JSON shape of the carried-across-compaction block.
 type preservedState struct {
 	Plan                string                 `json:"plan,omitempty"`
+	Task                *preservedTaskState    `json:"task,omitempty"`
 	RecentEdits         []preservedEdit        `json:"recent_edits,omitempty"`
 	Tools               []preservedTool        `json:"tools,omitempty"`
 	Skills              []preservedSkill       `json:"skills,omitempty"`
 	ProjectInstructions []preservedInstruction `json:"project_instructions,omitempty"`
+}
+
+type preservedTaskState struct {
+	Objective           string     `json:"objective"`
+	Status              taskStatus `json:"status,omitempty"`
+	Pending             int        `json:"pending,omitempty"`
+	InProgress          int        `json:"in_progress,omitempty"`
+	Completed           int        `json:"completed,omitempty"`
+	Failed              int        `json:"failed,omitempty"`
+	VerificationPassed  int        `json:"verification_passed,omitempty"`
+	VerificationFailed  int        `json:"verification_failed,omitempty"`
+	VerificationOutcome Outcome    `json:"verification_outcome,omitempty"`
 }
 
 type preservedEdit struct {
@@ -464,8 +463,27 @@ type preservedInstruction struct {
 // may live only inside the injected summary message, which on a later compaction
 // lands in middle with no real tool calls left to extract. Fresh tool calls and
 // instruction blocks override the carried-forward copy by name/source.
-func appendPreservedState(summary string, middle []zeroruntime.Message) string {
+func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnapshot *taskStateSnapshot) string {
 	priorState := parsePreservedStateBlock(latestSummaryContent(middle))
+	task := priorState.Task
+	if taskSnapshot != nil {
+		task = &preservedTaskState{
+			Objective: capTaskObjective(taskSnapshot.Objective),
+		}
+		// Plan parity corroborates only the mutable task projection. The objective
+		// comes directly from the run prompt and is immutable, so it must survive
+		// even after compaction removes the plan tool call needed for comparison.
+		if taskSnapshot.PlanParity == taskPlanParityMatch {
+			task.Status = taskSnapshot.Status
+			task.Pending = taskSnapshot.Plan.Pending
+			task.InProgress = taskSnapshot.Plan.InProgress
+			task.Completed = taskSnapshot.Plan.Completed
+			task.Failed = taskSnapshot.Plan.Failed
+			task.VerificationPassed = taskSnapshot.Verification.Passed
+			task.VerificationFailed = taskSnapshot.Verification.Failed
+			task.VerificationOutcome = taskSnapshot.Verification.LastOutcome
+		}
+	}
 
 	// Plan: a fresh update_plan in middle is authoritative; otherwise carry the
 	// plan preserved by an earlier compaction.
@@ -493,10 +511,23 @@ func appendPreservedState(summary string, middle []zeroruntime.Message) string {
 		projectInstructionEntries(middle),
 	)
 
-	if block := formatPreservedState(plan, edits, tools, skills, instructions); block != "" {
+	if block := formatPreservedState(plan, task, edits, tools, skills, instructions); block != "" {
 		summary += "\n\n" + block
 	}
 	return summary
+}
+
+func capTaskObjective(objective string) string {
+	objective = strings.TrimSpace(objective)
+	if len(objective) <= maxTaskObjectiveBytes {
+		return objective
+	}
+	const suffix = "…"
+	limit := maxTaskObjectiveBytes - len(suffix)
+	for limit > 0 && !utf8.RuneStart(objective[limit]) {
+		limit--
+	}
+	return strings.TrimSpace(objective[:limit]) + suffix
 }
 
 // mergeRecentEdits overlays fresh edits onto edits preserved by an earlier
@@ -555,11 +586,11 @@ func preservedEditsToEntries(edits []preservedEdit) []skillEntry {
 
 // formatPreservedState renders state as the labelled, single-line
 // JSON block. Returns "" when there is nothing to preserve.
-func formatPreservedState(plan string, edits, tools, skills, instructions []skillEntry) string {
-	if plan == "" && len(edits) == 0 && len(tools) == 0 && len(skills) == 0 && len(instructions) == 0 {
+func formatPreservedState(plan string, task *preservedTaskState, edits, tools, skills, instructions []skillEntry) string {
+	if plan == "" && task == nil && len(edits) == 0 && len(tools) == 0 && len(skills) == 0 && len(instructions) == 0 {
 		return ""
 	}
-	state := preservedState{Plan: plan}
+	state := preservedState{Plan: plan, Task: task}
 	for _, e := range edits {
 		state.RecentEdits = append(state.RecentEdits, preservedEdit{Path: e.name, Note: e.body})
 	}

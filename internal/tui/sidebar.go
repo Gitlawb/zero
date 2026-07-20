@@ -98,7 +98,7 @@ func (m model) sidebarAvailable() bool {
 	// list) take over the chat column and render at full width; suppress the
 	// second column while any is active so their geometry and mouse hit-testing
 	// stay full-width as before.
-	if m.setup.visible || m.helpOverlay || m.providerWizard != nil || m.mcpAddWizard != nil ||
+	if m.setup.visible || m.helpOverlay || m.leaderHelpOverlay || m.providerWizard != nil || m.mcpAddWizard != nil ||
 		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
 		return false
 	}

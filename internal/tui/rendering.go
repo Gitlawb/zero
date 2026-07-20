@@ -66,6 +66,11 @@ func rcKey(runID int, id string) string {
 }
 
 func buildRowContext(rows []transcriptRow) rowContext {
+	if len(rows) == 0 {
+		// Nil maps are safe for all rowContext lookups. This is the steady-state
+		// frontier-at-tail path, so avoid allocating maps on every View.
+		return rowContext{}
+	}
 	rc := rowContext{
 		resolved: map[string]bool{},
 		hints:    map[string]string{},

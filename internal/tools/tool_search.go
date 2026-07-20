@@ -51,6 +51,8 @@ func NewToolSearchTool(registry *Registry) Tool {
 				Reason:          "Lists and loads already-registered tool schemas; performs no side effects.",
 				AdvertiseInAuto: true,
 			},
+			// Reads registry schemas only; no workspace mutation.
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false},
 		},
 		registry: registry,
 	}
