@@ -37,9 +37,11 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 )
 
-// Vendored fork of bubbletea/v2 with hard scroll optimization disabled
-// unconditionally (see third_party/bubbletea-v2-patched/cursed_renderer.go):
-// it corrupts rendering when zero's output is displayed by Windows Terminal
-// over a remote shell (e.g. running inside a multipass VM), a case the
-// upstream GOOS=="windows" check doesn't catch.
-replace charm.land/bubbletea/v2 => ./third_party/bubbletea-v2-patched
+// Maintained fork of bubbletea/v2 with hard scroll optimization disabled
+// unconditionally (see patches/bubbletea-v2/cursed_renderer.go).
+// Placed under patches/ (not third_party/) because third_party/ is immutable
+// vendored content per AGENTS.md. The hard-scroll path corrupts rendering when
+// zero's output is displayed by Windows Terminal over a remote shell (e.g.
+// running inside a multipass VM), a case the upstream GOOS=="windows" check
+// does not catch.
+replace charm.land/bubbletea/v2 => ./patches/bubbletea-v2
