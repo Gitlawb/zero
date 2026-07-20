@@ -83,11 +83,22 @@ func astCommandFields(command string) [][]string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		// The program name must be a static literal. A dynamic first word (e.g.
-		// `$(printf foo)vim`, which runs as `foovim`) would otherwise yield a
-		// misleading partial literal ("vim") and fabricate an interactive match.
-		if !isLiteralWord(call.Args[0]) {
-			return true
+		// EVERY word must be a static literal, not just the program name.
+		// wordText keeps only the literal/quoted parts of a word and silently
+		// drops expansions, so a dynamic word anywhere in the call reconstructs
+		// to something the shell will never run: `$(printf foo)vim` (runs as
+		// `foovim`) collapses to "vim", and `git $(printf foo)rebase -i` (runs
+		// as `git foorebase -i`, non-interactive) collapses to `git rebase -i`
+		// and fabricates an interactive match. Since the runtime value of an
+		// expansion is unknowable here, skip the whole call rather than classify
+		// a lossy reconstruction. Skipping is the safe direction: the
+		// hand-written passes above already ran, and a missed detection falls
+		// through to the normal permission prompt instead of hard-blocking a
+		// command the user never wrote.
+		for _, word := range call.Args {
+			if !isLiteralWord(word) {
+				return true
+			}
 		}
 		fields := make([]string, 0, len(call.Args))
 		for _, word := range call.Args {

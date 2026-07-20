@@ -465,3 +465,28 @@ func TestAstCommandFieldsSkipsDynamicProgram(t *testing.T) {
 		}
 	}
 }
+
+// The literalness guard covers every word, not just the program name. A dynamic
+// ARGUMENT is dropped by wordText the same way a dynamic program word is, so
+// `git $(printf foo)rebase -i HEAD~1` (which runs as `git foorebase -i`, a
+// non-existent and non-interactive subcommand) would otherwise be reconstructed
+// as `git rebase -i` and blocked — a false positive on a command the user never
+// wrote. Asserted through DetectInteractiveCommand as well as the extractor,
+// because the whole point is what the caller ends up blocking.
+func TestAstCommandFieldsSkipsDynamicArgument(t *testing.T) {
+	const dynamic = "{ git $(printf foo)rebase -i HEAD~1 ; }"
+	for _, fields := range astCommandFields(dynamic) {
+		if firstProgram(fields) == "git" {
+			t.Fatalf("astCommandFields reconstructed a git command from a dynamic argument: %v", fields)
+		}
+	}
+	if got := DetectInteractiveCommand(dynamic, "linux"); got.Interactive {
+		t.Errorf("DetectInteractiveCommand(%q) = %+v, want not interactive", dynamic, got)
+	}
+	// The genuine form must still be detected — the guard skips lossy
+	// reconstructions, it does not weaken real detection.
+	const genuine = "{ git rebase -i HEAD~1 ; }"
+	if got := DetectInteractiveCommand(genuine, "linux"); !got.Interactive || got.Command != "git rebase -i" {
+		t.Errorf("DetectInteractiveCommand(%q) = %+v, want interactive Command=%q", genuine, got, "git rebase -i")
+	}
+}
