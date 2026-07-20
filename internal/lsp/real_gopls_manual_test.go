@@ -14,11 +14,13 @@ import (
 // comes back. It is an OPT-IN integration check: an installed-but-unhealthy
 // gopls (e.g. an unusable persistent-index cache) exits during initialization
 // and would otherwise fail `go test ./...` for every developer who merely has
-// gopls on PATH (issue #684). So it runs only when ZERO_GOPLS_INTEGRATION is
-// set, matching the repo's other real-server opt-ins (internal/dictation smoke
-// tests). The default suite keeps its coverage on the fake server.
+// gopls on PATH (issue #684). So it runs only when ZERO_GOPLS_INTEGRATION=1,
+// matching the repo's other real-server opt-ins (internal/dictation smoke
+// tests). Requiring exactly "1" (not merely non-empty) means an explicit
+// ZERO_GOPLS_INTEGRATION=0 keeps the integration check OFF, as its value implies.
+// The default suite keeps its coverage on the fake server.
 func TestManagerCheckRealGopls(t *testing.T) {
-	if os.Getenv("ZERO_GOPLS_INTEGRATION") == "" {
+	if os.Getenv("ZERO_GOPLS_INTEGRATION") != "1" {
 		t.Skip("set ZERO_GOPLS_INTEGRATION=1 to run the real gopls integration check")
 	}
 	if _, err := exec.LookPath("gopls"); err != nil {
