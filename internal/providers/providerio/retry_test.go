@@ -50,17 +50,20 @@ func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
 }
 
 // A PROVABLY pre-send transport failure (no request bytes left this host) is
-// safe to replay and must be retried up to maxAttempts, unlike an ambiguous
-// post-send failure. Covers the string-marker path (refused dial) and the
-// typed path (net.DNSError via errors.As).
+// safe to replay and must be retried, bounded by preSendMaxAttempts (its own
+// short schedule), unlike an ambiguous post-send failure. Real dial failures
+// arrive as an Op=="dial" *net.OpError, so the errno cases are the production
+// shape on every platform (Windows included); the string case exercises the
+// wording fallback for a dial error already flattened past its errno.
 func TestSendWithRetryReplaysProvablyPreSendErrors(t *testing.T) {
 	shrinkBackoff(t)
 	cases := map[string]error{
-		"connection refused":      errors.New("dial tcp 127.0.0.1:1: connect: connection refused"),
-		"network unreachable":     errors.New("dial tcp: connect: network is unreachable"),
-		"tls handshake timeout":   errors.New("net/http: TLS handshake timeout"),
-		"dns not found":           &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true},
-		"errno refused (windows)": wrapDialErrno("dial", syscall.ECONNREFUSED),
+		"errno refused (dial)":      wrapDialErrno("dial", syscall.ECONNREFUSED),
+		"errno network unreachable": wrapDialErrno("dial", syscall.ENETUNREACH),
+		"errno host unreachable":    wrapDialErrno("dial", syscall.EHOSTUNREACH),
+		"dial string fallback":      &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")},
+		"tls handshake timeout":     errors.New("net/http: TLS handshake timeout"),
+		"dns timeout":               &net.DNSError{Err: "server misbehaving", Name: "nope.invalid", IsTimeout: true},
 	}
 	for name, transportErr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -69,15 +72,17 @@ func TestSendWithRetryReplaysProvablyPreSendErrors(t *testing.T) {
 				atomic.AddInt32(&calls, 1)
 				return nil, transportErr
 			})}
-			resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+			// maxAttempts=6 (the default) proves the pre-send path is bounded by
+			// preSendMaxAttempts, not the caller's 429-tuned maxAttempts.
+			resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 6)
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
 			if err == nil {
 				t.Fatal("expected the transport error to surface after retries are exhausted")
 			}
-			if got := atomic.LoadInt32(&calls); got != 3 {
-				t.Fatalf("pre-send error retried to %d attempts, want 3 (maxAttempts)", got)
+			if got := atomic.LoadInt32(&calls); got != preSendMaxAttempts {
+				t.Fatalf("pre-send error tried %d times, want %d (preSendMaxAttempts)", got, preSendMaxAttempts)
 			}
 		})
 	}
@@ -91,6 +96,14 @@ func TestSendWithRetryDoesNotReplayAmbiguousTransportErrors(t *testing.T) {
 		"generic i/o timeout": errors.New("dial tcp 1.2.3.4:443: i/o timeout"),
 		"broken pipe":         errors.New("write tcp: broken pipe"),
 		"unexpected eof":      io.ErrUnexpectedEOF,
+		// The pre-send errnos are also raised on an ESTABLISHED connection: a route
+		// dropping mid-generation surfaces on the pending read/write, which is
+		// post-send. Scoping to Op=="dial" must keep these from replaying the POST.
+		"host unreachable on read is post-send": wrapDialErrno("read", syscall.EHOSTUNREACH),
+		"net unreachable on write is post-send": wrapDialErrno("write", syscall.ENETUNREACH),
+		// NXDOMAIN is authoritative and deterministic, so retrying it would only
+		// stall the agent before failing anyway.
+		"dns nxdomain": &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var calls int32
@@ -119,26 +132,34 @@ func TestIsPreSendTransportError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"dns not found", &net.DNSError{Err: "no such host", Name: "x.invalid", IsNotFound: true}, true},
+		// DNS: a lookup that could recover is pre-send; NXDOMAIN is permanent.
 		{"dns timeout", &net.DNSError{Err: "server misbehaving", Name: "x.invalid", IsTimeout: true}, true},
-		{"connection refused", errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), true},
-		{"network unreachable", errors.New("dial tcp: connect: network is unreachable"), true},
-		{"no route to host", errors.New("dial tcp: connect: no route to host"), true},
+		{"dns temporary", &net.DNSError{Err: "server misbehaving", Name: "x.invalid", IsTemporary: true}, true},
+		{"dns nxdomain is permanent", &net.DNSError{Err: "no such host", Name: "x.invalid", IsNotFound: true}, false},
 		{"tls handshake timeout", errors.New("net/http: TLS handshake timeout"), true},
-		// Errno-wrapped dials: how a real refused/unreachable dial arrives on
-		// EVERY platform, including Windows where the wording differs entirely.
-		{"errno refused (portable/windows)", wrapDialErrno("dial", syscall.ECONNREFUSED), true},
-		{"errno network unreachable", wrapDialErrno("dial", syscall.ENETUNREACH), true},
-		{"errno host unreachable", wrapDialErrno("dial", syscall.EHOSTUNREACH), true},
+		// Errno-wrapped DIAL failures: how a real refused/unreachable dial arrives
+		// on EVERY platform, including Windows where the wording differs entirely.
+		{"errno refused (dial)", wrapDialErrno("dial", syscall.ECONNREFUSED), true},
+		{"errno network unreachable (dial)", wrapDialErrno("dial", syscall.ENETUNREACH), true},
+		{"errno host unreachable (dial)", wrapDialErrno("dial", syscall.EHOSTUNREACH), true},
+		{"dial operror string fallback", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}, true},
+		// The SAME errnos raised on a post-send read/write are NOT pre-send — the
+		// kernel reports them on an established connection when a route drops.
+		{"host unreachable on read is post-send", wrapDialErrno("read", syscall.EHOSTUNREACH), false},
+		{"net unreachable on write is post-send", wrapDialErrno("write", syscall.ENETUNREACH), false},
 		{"errno reset is post-send", wrapDialErrno("read", syscall.ECONNRESET), false},
+		// A refused/unreachable error already flattened past its *net.OpError can't
+		// be proven pre-send, so it is NOT retried (conservative direction).
+		{"flattened refused, no opError", errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), false},
 		{"connection reset", errors.New("read tcp: connection reset by peer"), false},
 		{"broken pipe", errors.New("write tcp: broken pipe"), false},
 		{"unexpected eof", io.ErrUnexpectedEOF, false},
 		{"eof", io.EOF, false},
 		{"generic io timeout", errors.New("dial tcp: i/o timeout"), false},
 		{"context deadline", context.DeadlineExceeded, false},
-		{"exclusion wins over inclusion", errors.New("connect: connection refused, then i/o timeout"), false},
-		{"host named eof still refused", errors.New("dial tcp eof.example:443: connect: connection refused"), true},
+		// Exclusion is checked before inclusion, even for a dial OpError: an "i/o
+		// timeout" in the message wins over the refused wording.
+		{"exclusion wins over inclusion", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused / i/o timeout")}, false},
 		{"unrelated", errors.New("some other error"), false},
 	}
 	for _, c := range cases {
@@ -207,12 +228,17 @@ func TestBackoffWaitsThenReturnsTrue(t *testing.T) {
 	}
 }
 
-// shrinkBackoff makes retry waits negligible for the duration of a test.
+// shrinkBackoff makes both retry schedules (429 and pre-send) negligible for the
+// duration of a test.
 func shrinkBackoff(t *testing.T) {
 	t.Helper()
-	saved := retryBackoffBase
+	savedRetry, savedPreSend := retryBackoffBase, preSendBackoffBase
 	retryBackoffBase = time.Millisecond
-	t.Cleanup(func() { retryBackoffBase = saved })
+	preSendBackoffBase = time.Millisecond
+	t.Cleanup(func() {
+		retryBackoffBase = savedRetry
+		preSendBackoffBase = savedPreSend
+	})
 }
 
 func TestBackoffWaitSchedule(t *testing.T) {
@@ -235,6 +261,30 @@ func TestBackoffWaitSchedule(t *testing.T) {
 	for _, c := range cases {
 		if got := backoffWait(c.attempt, c.retryAfter); got != c.want {
 			t.Errorf("backoffWait(%d, %v) = %v, want %v", c.attempt, c.retryAfter, got, c.want)
+		}
+	}
+}
+
+// The pre-send schedule is sub-second and doubles, far shorter than the 429
+// schedule: a permanent dial failure fails in ~1.5s across preSendMaxAttempts
+// (500ms + 1s) instead of stalling the agent ~60s on 2/4/8/16/30s. This is the
+// second half of the fix for a mistyped host / dead local daemon hanging a turn.
+func TestPreSendBackoffWaitSchedule(t *testing.T) {
+	cases := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{1, 500 * time.Millisecond},
+		{2, 1 * time.Second},
+		{3, 2 * time.Second},
+		// The exponent clamps at 5 (500ms<<5 = 16s) so a large attempt count can't
+		// overflow; in practice preSendMaxAttempts caps retries at attempt 2, so
+		// only the 500ms/1s rungs are ever reached.
+		{50, 16 * time.Second},
+	}
+	for _, c := range cases {
+		if got := preSendBackoffWait(c.attempt); got != c.want {
+			t.Errorf("preSendBackoffWait(%d) = %v, want %v", c.attempt, got, c.want)
 		}
 	}
 }
