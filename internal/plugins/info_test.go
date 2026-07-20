@@ -31,7 +31,6 @@ func TestInfoReturnsLockMetadataAndHashDrift(t *testing.T) {
 
 	info, err := Info(InfoOptions{
 		LoadOptions: LoadOptions{Roots: []Root{{Source: SourceUser, Path: userRoot}}},
-		LockDir:     userRoot,
 	}, "zero.demo")
 	if err != nil {
 		t.Fatalf("Info: %v", err)
@@ -51,7 +50,6 @@ func TestInfoReturnsLockMetadataAndHashDrift(t *testing.T) {
 	}
 	info, err = Info(InfoOptions{
 		LoadOptions: LoadOptions{Roots: []Root{{Source: SourceUser, Path: userRoot}}},
-		LockDir:     userRoot,
 	}, "zero.demo")
 	if err != nil {
 		t.Fatalf("Info after edit: %v", err)

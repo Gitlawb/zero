@@ -3,6 +3,7 @@ package plugins
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -20,7 +21,6 @@ type PluginInfo struct {
 // InfoOptions controls plugin lookup and lockfile resolution for Info.
 type InfoOptions struct {
 	LoadOptions LoadOptions
-	LockDir     string
 }
 
 // Info returns details for the named plugin after normal discovery precedence.
@@ -47,13 +47,10 @@ func Info(options InfoOptions, id string) (PluginInfo, error) {
 	}
 
 	info := PluginInfo{Plugin: plugin}
-	lockDir := strings.TrimSpace(options.LockDir)
-	if lockDir != "" {
-		if lock, readErr := ReadLock(lockDir); readErr == nil {
-			if entry, ok := lock[plugin.ID]; ok {
-				info.LockSource = entry.Source
-				info.LockHash = entry.Hash
-			}
+	if lock, readErr := ReadLock(filepath.Dir(plugin.PluginDir)); readErr == nil {
+		if entry, ok := lock[plugin.ID]; ok {
+			info.LockSource = entry.Source
+			info.LockHash = entry.Hash
 		}
 	}
 	if info.LockHash != "" {

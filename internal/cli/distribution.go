@@ -273,7 +273,6 @@ func runPluginInfo(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	}
 	info, err := plugins.Info(plugins.InfoOptions{
 		LoadOptions: pluginLoadOptions(deps, cwd, options.user),
-		LockDir:     deps.pluginsDir(),
 	}, id)
 	if err != nil {
 		if errors.Is(err, plugins.ErrNotInstalled) {
@@ -314,8 +313,6 @@ func runPluginInfo(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	}
 	if info.LockHash != "" {
 		lines = append(lines, "  lock hash: "+info.LockHash)
-	}
-	if info.LockHash != "" {
 		lines = append(lines, fmt.Sprintf("  hash drift: %t", info.HashDrift))
 	}
 	lines = append(lines, "  manifest: "+plugin.ManifestPath)
