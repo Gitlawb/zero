@@ -17,6 +17,7 @@ func TestCompletionsHelpAndRootHelp(t *testing.T) {
 		"bash, zsh, fish, powershell, or elvish",
 		"source <(zero completions bash)",
 		"~/.config/fish/completions/zero.fish",
+		"eval (zero completions elvish | slurp)",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("completion help missing %q:\n%s", want, stdout.String())
@@ -102,6 +103,7 @@ func TestCompletionTreeCoversAliasesNestingAndCommonFlags(t *testing.T) {
 	assertCandidates(t, byPath["daemon"], "start", "stop", "status", "run", "attach")
 	assertCandidates(t, byPath["mcp oauth"], "login", "logout", "status")
 	assertCandidates(t, byPath["sandbox grants"], "list", "allow", "deny", "revoke", "clear")
+	assertCandidates(t, byPath["completions"], "bash", "zsh", "fish", "powershell", "elvish")
 }
 
 func assertCandidates(t *testing.T, got []string, wants ...string) {

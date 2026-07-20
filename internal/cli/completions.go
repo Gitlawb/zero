@@ -32,7 +32,11 @@ var completionRoot = completionNode{
 			"--init-session-id", "--skip-permissions-unsafe", "--allow-escalation", "--self-correct",
 			"--notify", "--no-notify", "--no-completion-gate",
 		}},
-		{names: []string{"completions"}, flags: []string{"-h", "--help"}},
+		{
+			names:    []string{"completions"},
+			flags:    []string{"-h", "--help"},
+			children: leafNodes("bash", "zsh", "fish", "powershell", "elvish"),
+		},
 		{names: []string{"daemon"}, children: leafNodes("start", "stop", "status", "run", "attach", "serve-remote", "link")},
 		{names: []string{"setup"}},
 		{names: []string{"config"}},
@@ -156,6 +160,7 @@ Examples:
   source <(zero completions zsh)
   zero completions fish > ~/.config/fish/completions/zero.fish
   zero completions powershell >> $PROFILE
+  eval (zero completions elvish | slurp)
 
 Flags:
   -h, --help  Show this help
