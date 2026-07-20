@@ -37,7 +37,7 @@ before. Tokens are stored 0600 (or the OS keyring with
 Running `/provider` opens a **"How do you want to connect?"** chooser:
 
 ```text
-❯ Sign in with OAuth                 No API key to copy — browser login (OpenRouter, xAI, ChatGPT, Hugging Face) or device code (Kimi Code)
+❯ Sign in with OAuth                 No API key to copy — browser login (OpenRouter, xAI, ChatGPT, Hugging Face) or device code (xAI, Kimi Code, Hugging Face)
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
@@ -106,9 +106,11 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    public kimi-cli client identity (`17e5f671-d194-4dfb-9706-5516cb48c098`) and
    is opt-in via `ZERO_OAUTH_ALLOW_PRESETS=1`; any field is overridable with
    `ZERO_OAUTH_KIMI_CODE_*`. Kimi's backend also requires a handful of
-   vendor-identity `X-Msh-*` headers on every device-authorization/poll/refresh
-   request (reverse-engineered from kimi-cli, not from public documentation —
-   verify against a real login before relying on this).
+   vendor-identity `X-Msh-*` headers across all applicable OAuth and API calls
+   (device authorization, polling, code exchange, refresh, and managed
+   runtime/completions requests). These are reverse-engineered from kimi-cli,
+   not from public documentation — verify against a real login before relying
+   on this.
    This is distinct from the `moonshot` catalog entry, which is the API-key path at
    `https://api.moonshot.ai/v1` (set `MOONSHOT_API_KEY`). To override the managed
    endpoint, set `baseURL` on the provider profile; to override the OAuth host,

@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Headers returns the X-Msh-* vendor-identity headers, including the stable
@@ -62,10 +63,8 @@ var DeviceID = sync.OnceValue(func() string { return loadOrCreateDeviceIDAt(devi
 // one and persists it exclusively (see the concurrency note below).
 func loadOrCreateDeviceIDAt(path string) string {
 	if path != "" {
-		if raw, err := os.ReadFile(path); err == nil {
-			if id := strings.TrimSpace(string(raw)); isUUID(id) {
-				return id
-			}
+		if id := readValidDeviceID(path); id != "" {
+			return id
 		}
 	}
 	id := generateDeviceID()
@@ -79,21 +78,50 @@ func loadOrCreateDeviceIDAt(path string) string {
 	// first use must converge on the SAME id, since a login accepted under
 	// one device identity and completions sent under another are rejected
 	// by the backend. The loser reads back the winner's file instead of
-	// overwriting it.
+	// overwriting it. After O_EXCL succeeds the winner still has to write
+	// content, so a concurrent loser may briefly observe an empty file;
+	// readValidDeviceIDWithRetry waits for the UUID rather than minting a
+	// second divergent identity.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
-			if raw, readErr := os.ReadFile(path); readErr == nil {
-				if existingID := strings.TrimSpace(string(raw)); isUUID(existingID) {
-					return existingID
-				}
+			if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
+				return existingID
 			}
 		}
 		return id
 	}
-	defer f.Close()
 	_, _ = f.WriteString(id + "\n")
+	_ = f.Sync()
+	_ = f.Close()
 	return id
+}
+
+// readValidDeviceID returns a UUID from path, or "" if missing/invalid.
+func readValidDeviceID(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(string(raw)); isUUID(id) {
+		return id
+	}
+	return ""
+}
+
+// readValidDeviceIDWithRetry re-reads path briefly so a process that lost the
+// exclusive create can adopt the winner even if it observed the file before
+// the winner finished writing the UUID.
+func readValidDeviceIDWithRetry(path string) string {
+	const attempts = 40
+	const delay = 5 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		if id := readValidDeviceID(path); id != "" {
+			return id
+		}
+		time.Sleep(delay)
+	}
+	return ""
 }
 
 func deviceIDPath() string {
