@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -35,7 +34,25 @@ const mcpResponseHeaderTimeout = 30 * time.Second
 // Connection setup is bounded here instead of via http.Client.Timeout, so a
 // slow or unreachable server fails fast without capping the total lifetime
 // of a legitimate long-running or streamed tool call.
+//
+// This transport is used for every MCP call EXCEPT tools/call: initialize,
+// tools/list, and notifications are all expected to return response headers
+// quickly, so bounding that wait here is safe and gives fast failure against
+// a dead or misbehaving server.
 var mcpTransport http.RoundTripper = newMCPTransport()
+
+// mcpToolCallTransport is used specifically for tools/call requests. Some MCP
+// tool servers are synchronous and do not write response headers until the
+// (potentially long-running) tool finishes, so reusing mcpTransport's
+// ResponseHeaderTimeout here would fail a slow-but-alive tool call at the
+// transport level -- the same class of premature-timeout regression that the
+// end-to-end http.Client.Timeout previously caused, just relocated. Dial and
+// TLS handshake bounds are kept so a genuinely dead server still fails fast;
+// only the response-header wait is left unbounded. The networkClient guards
+// the resulting unbounded wait with an idle watchdog on the response body
+// (see idleWatchdogReadCloser) instead of a hard deadline, so forward
+// progress is required but total duration is not capped.
+var mcpToolCallTransport http.RoundTripper = newMCPToolCallTransport()
 
 func newMCPTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -45,6 +62,18 @@ func newMCPTransport() *http.Transport {
 	}).DialContext
 	transport.TLSHandshakeTimeout = mcpTLSHandshakeTimeout
 	transport.ResponseHeaderTimeout = mcpResponseHeaderTimeout
+	return transport
+}
+
+func newMCPToolCallTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   mcpDialTimeout,
+		KeepAlive: mcpDialKeepAlive,
+	}).DialContext
+	transport.TLSHandshakeTimeout = mcpTLSHandshakeTimeout
+	// Intentionally no ResponseHeaderTimeout: see the doc comment on
+	// mcpToolCallTransport above.
 	return transport
 }
 
@@ -112,10 +141,4 @@ func mcpOrigin(value *url.URL) string {
 		return host
 	}
 	return strings.ToLower(value.Scheme) + "://" + host
-}
-
-// routeAndDo performs the HTTP request using streaming vs finite semantics based on req.
-// If execTimeout is nil, defaults (30s for finite, unbounded for streaming) apply.
-func routeAndDo(ctx context.Context, req *http.Request, execTimeout *time.Duration) (*http.Response, error) {
-	return DoToolHTTPRequest(ctx, req, execTimeout)
 }

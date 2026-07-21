@@ -12,7 +12,7 @@ on:
       - 'v*'
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
