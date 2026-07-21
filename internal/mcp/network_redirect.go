@@ -49,9 +49,10 @@ var mcpTransport http.RoundTripper = newMCPTransport()
 // transport level -- the same class of premature-timeout regression that the
 // end-to-end http.Client.Timeout previously caused, just relocated. Dial and
 // TLS handshake bounds are kept so a genuinely dead server still fails fast;
-// only the response-header wait is left unbounded. The networkClient guards
-// the resulting unbounded wait with an idle watchdog on the response body
-// (see idleWatchdogReadCloser) instead of a hard deadline, so forward
+// only the response-header wait is left unbounded. networkClient wraps this
+// transport as the Streaming client of a *ToolHTTP (see http_clients.go and
+// connectNetwork), which guards the resulting unbounded wait with an idle
+// watchdog on the response body instead of a hard deadline, so forward
 // progress is required but total duration is not capped.
 var mcpToolCallTransport http.RoundTripper = newMCPToolCallTransport()
 
@@ -148,10 +149,25 @@ func mcpOrigin(value *url.URL) string {
 // If execTimeout is nil, defaults (30s for finite, unbounded for streaming) apply.
 //
 // This bridges to the header/query-based classification in http_clients.go
-// (ClassifyToolCall/DoToolHTTPRequest), a separate mechanism from
-// networkClient's own method-name-based classifyToolCall/httpClientFor. It is
-// not yet called by networkClient -- see the package-level architecture note
-// for the pending decision on consolidating the two.
+// (ClassifyToolCall/DoToolHTTPRequest). It is a generic, server-agnostic
+// entry point for callers with no more specific way to classify a request
+// (e.g. no JSON-RPC method name to inspect), and it builds its own
+// unauthenticated, non-redirect-guarded client pair via NewDefaultToolHTTP on
+// every call.
+//
+// MCP's own networkClient does NOT call routeAndDo. Every MCP POST --
+// tools/call included -- sends an identical
+// `Accept: application/json, text/event-stream` header per the Streamable
+// HTTP spec, so ClassifyToolCall's header-based heuristic cannot distinguish
+// a tools/call request from initialize/tools/list/notifications here.
+// Instead, networkClient builds its own long-lived *ToolHTTP in
+// connectNetwork (see network_client.go) over http.Clients that already
+// carry this server's OAuth bearer round tripper and cross-origin redirect
+// guard (mcpHTTPClient/oauthHTTPClient above), and classifies by JSON-RPC
+// method name (toolCallTypeFor) before calling ToolHTTP.Do directly --
+// reusing the same classify/timeout/idle-watchdog engine as this function,
+// without routing through the request-header path or rebuilding transports
+// per call.
 func routeAndDo(ctx context.Context, req *http.Request, execTimeout *time.Duration) (*http.Response, error) {
 	return DoToolHTTPRequest(ctx, req, execTimeout)
 }

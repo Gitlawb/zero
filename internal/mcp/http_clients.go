@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // ToolCallType classifies HTTP calls for timeout semantics.
@@ -56,8 +54,16 @@ func NewHTTPClients(cfg HTTPClientConfig) *HTTPClients {
 		DisableCompression:    false,
 		ResponseHeaderTimeout: 0,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		// ForceAttemptHTTP2 restores HTTP/2 support using net/http's own
+		// vendored implementation. A custom DialContext/TLSClientConfig
+		// conservatively disables automatic HTTP/2 negotiation unless this
+		// is set (see http.Transport's doc comment); it requires no
+		// external module, unlike golang.org/x/net/http2.ConfigureTransport
+		// (which this package previously depended on without ever adding
+		// golang.org/x/net to go.mod/go.sum -- a guaranteed
+		// "no required module provides package" build failure).
+		ForceAttemptHTTP2: true,
 	}
-	_ = http2.ConfigureTransport(streamingTransport)
 
 	// Bounded requests rely on per-request context deadlines.
 	boundedTransport := &http.Transport{
@@ -71,14 +77,27 @@ func NewHTTPClients(cfg HTTPClientConfig) *HTTPClients {
 		DisableCompression:    false,
 		ResponseHeaderTimeout: 0,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		ForceAttemptHTTP2:     true,
 	}
-	_ = http2.ConfigureTransport(boundedTransport)
 
 	return &HTTPClients{
 		Streaming: &http.Client{Transport: streamingTransport},
 		Bounded:   &http.Client{Transport: boundedTransport},
 		cfg:       cfg,
 	}
+}
+
+// NewHTTPClientsFromClients wraps already-configured streaming and bounded
+// http.Clients so ToolHTTP's classify/timeout/idle-watchdog behavior can be
+// reused by callers that need to preserve additional per-server transport
+// semantics beyond NewHTTPClients' bare defaults -- e.g. the MCP
+// networkClient's OAuth bearer-token round tripper and cross-origin redirect
+// guard (see mcpHTTPClient/oauthHTTPClient in network_client.go and
+// network_redirect.go). Only cfg.StreamIdleTimeout and cfg.DefaultExecTimeout
+// are consulted for clients built this way; DialTimeout/TLSHandshakeTimeout
+// are ignored since the given clients' transports are already fully formed.
+func NewHTTPClientsFromClients(streaming, bounded *http.Client, cfg HTTPClientConfig) *HTTPClients {
+	return &HTTPClients{Streaming: streaming, Bounded: bounded, cfg: cfg}
 }
 
 // ToolHTTP routes requests to the appropriate client and enforces deadlines.
@@ -101,9 +120,21 @@ func (c *ToolHTTP) Do(ctx context.Context, req *http.Request, kind ToolCallType,
 			t = *execTimeout
 		}
 		ctx2, cancel := context.WithTimeout(ctx, t)
-		defer cancel()
 		req = req.WithContext(ctx2)
-		return c.clients.Bounded.Do(req)
+		resp, err := c.clients.Bounded.Do(req)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		// Release ctx2 when the caller closes the body, not as soon as Do()
+		// returns. A bare `defer cancel()` at this call's own scope would
+		// fire the instant Do() returns -- i.e. right after headers arrive,
+		// before the caller has read the body -- cancelling ctx2 and
+		// aborting any real (non-empty) response body with
+		// context.Canceled. The context.WithTimeout deadline still fires on
+		// its own if reading the body takes longer than t.
+		resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
+		return resp, nil
 	case ToolCallStreaming:
 		// Unbounded execution; apply optional idle watchdog.
 		if c.clients.cfg.StreamIdleTimeout > 0 {
@@ -122,6 +153,20 @@ func (c *ToolHTTP) Do(ctx context.Context, req *http.Request, kind ToolCallType,
 	default:
 		return nil, fmt.Errorf("unknown ToolCallType: %d", kind)
 	}
+}
+
+// cancelOnCloseReadCloser defers releasing a ToolCallFinite request's
+// context.WithTimeout cancel func until the response body is closed. See the
+// comment at its construction site in ToolHTTP.Do for why this must not
+// happen any earlier.
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCloseReadCloser) Close() error {
+	defer c.cancel()
+	return c.ReadCloser.Close()
 }
 
 // idleWatchdogReader cancels context if no bytes are read for timeout.
@@ -181,6 +226,16 @@ func NewDefaultToolHTTP() *ToolHTTP {
 
 // ClassifyToolCall determines whether a request should be treated as streaming.
 // Heuristics: SSE (Accept: text/event-stream), WebSocket upgrade, or explicit stream query.
+//
+// Note: this header-based heuristic cannot distinguish an MCP tools/call
+// request from initialize/tools/list/notifications, because the MCP
+// Streamable HTTP spec has the client send the same
+// `Accept: application/json, text/event-stream` header on every POST
+// regardless of JSON-RPC method. MCP's networkClient therefore classifies by
+// method name instead (see toolCallTypeFor in network_client.go) and calls
+// ToolHTTP.Do directly rather than routing through this function. It remains
+// the right classifier for generic (non-MCP-method-aware) callers -- see
+// routeAndDo in network_redirect.go.
 func ClassifyToolCall(req *http.Request) ToolCallType {
 	accept := req.Header.Get("Accept")
 	if strings.Contains(strings.ToLower(accept), "text/event-stream") {

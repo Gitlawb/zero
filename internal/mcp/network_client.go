@@ -18,18 +18,20 @@ import (
 
 type networkClient struct {
 	server Server
-	// client is the bounded client (mcpTransport, 30s ResponseHeaderTimeout)
-	// used for initialize, tools/list, and notifications, which are all
-	// expected to return headers quickly.
-	client *http.Client
-	// toolCallClient is used specifically for tools/call requests. It shares
-	// dial/TLS bounds with client but omits ResponseHeaderTimeout, since a
-	// synchronous tool handler may not write headers until its (potentially
-	// long-running) work completes. See mcpToolCallTransport's doc comment.
-	toolCallClient *http.Client
-	mu             sync.Mutex
-	nextID         int
-	sessionID      string
+	// toolHTTP dispatches every request through http_clients.go's dual
+	// Streaming/Bounded client infrastructure: Bounded (backed by
+	// mcpTransport, 30s ResponseHeaderTimeout) for initialize, tools/list,
+	// and notifications, which are all expected to return headers quickly;
+	// Streaming (backed by mcpToolCallTransport, no ResponseHeaderTimeout)
+	// for tools/call, guarded instead by an idle-read watchdog. Both
+	// underlying clients are already wrapped with this server's OAuth
+	// bearer round tripper and cross-origin redirect guard (see
+	// connectNetwork), which is why they are built here rather than via
+	// http_clients.go's bare NewHTTPClients.
+	toolHTTP  *ToolHTTP
+	mu        sync.Mutex
+	nextID    int
+	sessionID string
 }
 
 type remoteSSEClient struct {
@@ -64,11 +66,14 @@ func connectNetwork(ctx context.Context, server Server) (ToolClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	toolHTTP := NewToolHTTP(NewHTTPClientsFromClients(toolCallClient, httpClient, HTTPClientConfig{
+		StreamIdleTimeout:  toolCallIdleTimeout,
+		DefaultExecTimeout: mcpResponseHeaderTimeout,
+	}))
 	client := &networkClient{
-		server:         server,
-		client:         httpClient,
-		toolCallClient: toolCallClient,
-		nextID:         1,
+		server:   server,
+		toolHTTP: toolHTTP,
+		nextID:   1,
 	}
 	if err := client.initialize(ctx); err != nil {
 		return nil, fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
@@ -341,84 +346,35 @@ func (client *remoteSSEClient) notify(ctx context.Context, method string, params
 	})
 }
 
-// classifyToolCall reports whether method is a tools/call request, which is
-// routed through the unbounded-response-header toolCallClient instead of the
-// bounded client. See mcpToolCallTransport's doc comment for why.
-func classifyToolCall(method string) bool {
+// isToolCallMethod reports whether method is a tools/call request, which is
+// routed through the Streaming client (mcpToolCallTransport, no
+// ResponseHeaderTimeout, idle-watched) instead of the Bounded client. See
+// mcpToolCallTransport's doc comment for why. Named distinctly from
+// http_clients.go's exported ClassifyToolCall -- that function classifies by
+// HTTP request headers and cannot be reused here because MCP sends the same
+// Accept header on every POST regardless of JSON-RPC method (see
+// ClassifyToolCall's doc comment).
+func isToolCallMethod(method string) bool {
 	return method == "tools/call"
+}
+
+// toolCallTypeFor maps a JSON-RPC method name to the ToolCallType consumed by
+// ToolHTTP.Do, so networkClient can reuse http_clients.go's classify/timeout/
+// idle-watchdog engine while classifying by method name instead of request
+// headers.
+func toolCallTypeFor(method string) ToolCallType {
+	if isToolCallMethod(method) {
+		return ToolCallStreaming
+	}
+	return ToolCallFinite
 }
 
 // toolCallIdleTimeout bounds how long a tools/call response body may go
 // without forward read progress before it is aborted. It intentionally does
 // not bound total call duration -- a slow-but-steadily-streaming tool is
-// never cut off -- only a fully stalled connection is.
+// never cut off -- only a fully stalled connection is. Fed into toolHTTP's
+// HTTPClientConfig.StreamIdleTimeout in connectNetwork.
 const toolCallIdleTimeout = 10 * time.Minute
-
-// idleWatchdogReadCloser wraps a response body and cancels the associated
-// request context if no Read makes progress within idle. This guards
-// tools/call responses (which use a transport with no ResponseHeaderTimeout)
-// against a connection that goes completely silent, without imposing any
-// cap on overall response time.
-type idleWatchdogReadCloser struct {
-	body   io.ReadCloser
-	idle   time.Duration
-	cancel context.CancelFunc
-
-	mu      sync.Mutex
-	timer   *time.Timer
-	stopped bool
-}
-
-// newToolCallIdleWatchdog wraps body in an idleWatchdogReadCloser for
-// networkClient's tools/call responses. Named distinctly from
-// http_clients.go's newIdleWatchdogReadCloser (a separate, not-yet-wired
-// mechanism added concurrently in this package) to avoid a duplicate
-// declaration build failure.
-func newToolCallIdleWatchdog(body io.ReadCloser, idle time.Duration, cancel context.CancelFunc) *idleWatchdogReadCloser {
-	watchdog := &idleWatchdogReadCloser{body: body, idle: idle, cancel: cancel}
-	watchdog.timer = time.AfterFunc(idle, watchdog.onIdle)
-	return watchdog
-}
-
-func (watchdog *idleWatchdogReadCloser) onIdle() {
-	watchdog.mu.Lock()
-	defer watchdog.mu.Unlock()
-	if watchdog.stopped {
-		return
-	}
-	// Canceling the request context unblocks the in-flight Read on body with
-	// a context.Canceled error once the transport observes it.
-	if watchdog.cancel != nil {
-		watchdog.cancel()
-	}
-}
-
-func (watchdog *idleWatchdogReadCloser) Read(buffer []byte) (int, error) {
-	n, err := watchdog.body.Read(buffer)
-
-	watchdog.mu.Lock()
-	if !watchdog.stopped {
-		watchdog.timer.Reset(watchdog.idle)
-	}
-	watchdog.mu.Unlock()
-
-	return n, err
-}
-
-func (watchdog *idleWatchdogReadCloser) Close() error {
-	watchdog.mu.Lock()
-	watchdog.stopped = true
-	watchdog.mu.Unlock()
-	watchdog.timer.Stop()
-	return watchdog.body.Close()
-}
-
-func (client *networkClient) httpClientFor(method string) *http.Client {
-	if classifyToolCall(method) && client.toolCallClient != nil {
-		return client.toolCallClient
-	}
-	return client.client
-}
 
 func (client *networkClient) post(ctx context.Context, message rpcMessage, expectResponse bool) (result rpcMessage, err error) {
 	body, err := json.Marshal(message)
@@ -426,34 +382,19 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 		return rpcMessage{}, err
 	}
 
-	// tools/call requests use a cancelable context so the idle watchdog below
-	// can unblock a stalled read; the request itself carries no deadline, so
-	// a slow-but-alive tool is never cut off purely on elapsed time.
-	requestCtx := ctx
-	var cancel context.CancelFunc
-	toolCall := classifyToolCall(message.Method)
-	if toolCall {
-		requestCtx, cancel = context.WithCancel(ctx)
-		defer func() {
-			if cancel != nil {
-				cancel()
-			}
-		}()
-	}
-
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, client.server.URL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.server.URL, bytes.NewReader(body))
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("create MCP %s request for %s: %w", client.server.Type, client.server.Name, err)
 	}
 	client.applyHeaders(request)
 
-	response, err := client.httpClientFor(message.Method).Do(request)
+	// toolHTTP.Do handles both the finite case (bounded client, context
+	// deadline) and the streaming case (unbounded client, idle-read
+	// watchdog) internally -- see http_clients.go -- so no per-call
+	// context/cancel/watchdog wiring is needed here.
+	response, err := client.toolHTTP.Do(ctx, request, toolCallTypeFor(message.Method), nil)
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("call MCP %s server %s: %w", client.server.Type, client.server.Name, err)
-	}
-
-	if toolCall {
-		response.Body = newToolCallIdleWatchdog(response.Body, toolCallIdleTimeout, cancel)
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 
