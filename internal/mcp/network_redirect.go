@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -111,4 +112,10 @@ func mcpOrigin(value *url.URL) string {
 		return host
 	}
 	return strings.ToLower(value.Scheme) + "://" + host
+}
+
+// routeAndDo performs the HTTP request using streaming vs finite semantics based on req.
+// If execTimeout is nil, defaults (30s for finite, unbounded for streaming) apply.
+func routeAndDo(ctx context.Context, req *http.Request, execTimeout *time.Duration) (*http.Response, error) {
+	return DoToolHTTPRequest(ctx, req, execTimeout)
 }
