@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
@@ -67,6 +68,47 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 	}
 	if len(grants) != 0 {
 		t.Fatalf("expected no grants after clear, got %#v", grants)
+	}
+}
+
+func TestGrantStoreSerializesWritesAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := storeB.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("Grant completed while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: storeB is waiting for storeA to release the lock.
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Grant returned error after file lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Grant did not complete after file lock release")
 	}
 }
 

@@ -15,7 +15,11 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const grantSchemaVersion = 2
+const (
+	grantSchemaVersion = 2
+	grantLockTimeout   = 5 * time.Second
+	grantLockRetry     = 10 * time.Millisecond
+)
 
 type Grant struct {
 	ToolName   string        `json:"toolName"`
@@ -125,6 +129,12 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return Grant{}, err
+	}
+	defer unlock()
+
 	state, err := store.readState()
 	if err != nil {
 		return Grant{}, err
@@ -157,6 +167,12 @@ func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPr
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	defer unlock()
+
 	state, err := store.readState()
 	if err != nil {
 		return CommandPrefixGrant{}, err
@@ -301,6 +317,12 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
 	state, err := store.readState()
 	if err != nil {
 		return 0, err
@@ -336,6 +358,12 @@ func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, err
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
 	state, err := store.readState()
 	if err != nil {
 		return 0, err
@@ -371,6 +399,12 @@ func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, err
 func (store *GrantStore) Clear() (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
 	state, err := store.readState()
 	if err != nil {
 		return 0, err
@@ -605,6 +639,36 @@ func (store *GrantStore) writeState(state grantFile) error {
 		return err
 	}
 	return nil
+}
+
+func (store *GrantStore) lockStateFile() (func(), error) {
+	lockPath := store.filePath + ".lockfile"
+	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(grantLockTimeout)
+	for {
+		locked, err := tryLockGrantFile(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if locked {
+			return func() {
+				_ = unlockGrantFile(file)
+				_ = file.Close()
+			}, nil
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf("timed out waiting for sandbox grants lock at %s", lockPath)
+		}
+		time.Sleep(grantLockRetry)
+	}
 }
 
 func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
