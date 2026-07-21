@@ -14,10 +14,11 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	runtimeState, err := prepareSandboxRuntime(workspace)
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
+	defer release()
 	if pathWithinRoot(workspace, runtimeState.Root) {
 		t.Fatalf("runtime root %q must stay outside workspace %q", runtimeState.Root, workspace)
 	}
@@ -50,9 +51,11 @@ func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
 	if err := os.Chtimes(expired, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareSandboxRuntime(workspace); err != nil {
+	_, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
+	release()
 	if _, err := os.Stat(expired); !os.IsNotExist(err) {
 		t.Fatalf("expired runtime still exists: %v", err)
 	}
@@ -64,12 +67,52 @@ func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
 
-	runtimeState, err := prepareSandboxRuntime(workspace)
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
 	if err != nil {
 		t.Fatalf("prepareSandboxRuntime: %v", err)
 	}
+	defer release()
 	if pathWithinRoot(workspace, runtimeState.Root) {
 		t.Fatalf("fallback runtime root %q must stay outside workspace %q", runtimeState.Root, workspace)
+	}
+	if filepath.Clean(filepath.Dir(runtimeState.Root)) == filepath.Clean(os.TempDir()) {
+		t.Fatalf("fallback runtime %q must use a private cleanup parent", runtimeState.Root)
+	}
+}
+
+func TestCleanupSandboxRuntimeSkipsActiveLease(t *testing.T) {
+	workspace := t.TempDir()
+	cacheRoot := t.TempDir()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	originalCache := sandboxUserCacheDir
+	originalNow := sandboxRuntimeNow
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	sandboxRuntimeNow = func() time.Time { return now }
+	t.Cleanup(func() {
+		sandboxUserCacheDir = originalCache
+		sandboxRuntimeNow = originalNow
+	})
+
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	old := now.Add(-sandboxRuntimeMaxAge - time.Hour)
+	if err := os.Chtimes(runtimeState.Root, old, old); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(runtimeState.Root)
+	cleanupSandboxRuntimeRoots(parent, filepath.Join(parent, "other"), now)
+	if _, err := os.Stat(runtimeState.Root); err != nil {
+		release()
+		t.Fatalf("active runtime was removed: %v", err)
+	}
+
+	release()
+	cleanupSandboxRuntimeRoots(parent, filepath.Join(parent, "other"), now)
+	if _, err := os.Stat(runtimeState.Root); !os.IsNotExist(err) {
+		t.Fatalf("released expired runtime still exists: %v", err)
 	}
 }
 
@@ -138,6 +181,14 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	if plan.PermissionProfile.Runtime == nil || plan.PermissionProfile.Runtime.Root == "" {
 		t.Fatal("command plan is missing managed runtime state")
 	}
+	if cleanupLease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(plan.PermissionProfile.Runtime.Root); err != nil {
+		t.Fatalf("inspect active runtime lease: %v", err)
+	} else if cleanupLease != nil {
+		cleanupLease.release()
+		t.Fatal("command plan did not retain its runtime lease")
+	} else if !inUse {
+		t.Fatal("command plan runtime must be marked in use")
+	}
 	if got := envListValue(plan.Env, "HOME", ""); got != plan.PermissionProfile.Runtime.Home {
 		t.Fatalf("HOME = %q, want managed home %q", got, plan.PermissionProfile.Runtime.Home)
 	}
@@ -150,4 +201,10 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	if !foundWriteRoot {
 		t.Fatalf("runtime root is not writable in profile: %#v", plan.PermissionProfile.FileSystem.WriteRoots)
 	}
+	plan.Cleanup()
+	cleanupLease, inUse, err := tryAcquireSandboxRuntimeCleanupLease(plan.PermissionProfile.Runtime.Root)
+	if err != nil || inUse || cleanupLease == nil {
+		t.Fatalf("runtime lease after plan cleanup = lease %v inUse %t err %v", cleanupLease, inUse, err)
+	}
+	cleanupLease.release()
 }

@@ -39,6 +39,7 @@ type ProcessManager struct {
 	processes          map[int]*managedProcess
 	completedRetention time.Duration
 	maxProcesses       int
+	startTransport     processTransportStarter
 }
 
 type ProcessStart struct {
@@ -105,6 +106,7 @@ func NewProcessManager(options ProcessManagerOptions) *ProcessManager {
 		processes:          make(map[int]*managedProcess),
 		completedRetention: retention,
 		maxProcesses:       maxProcesses,
+		startTransport:     startProcessTransport,
 	}
 }
 
@@ -120,14 +122,15 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 	}
 	command := input.Prepared.Command
 	buffer := newProcessOutputBuffer()
-	stdin, tty, transportCleanup, err := startProcessTransport(command, buffer, input.TTY)
+	request := input.Request
+	observer := NewChangeObserver(request.WorkspaceRoots[0])
+	stdin, tty, transportCleanup, err := manager.startTransport(command, buffer, input.TTY)
 	if err != nil {
 		if input.Prepared.Cleanup != nil {
 			input.Prepared.Cleanup()
 		}
 		return ProcessResult{}, err
 	}
-	request := input.Request
 	if tty {
 		request.Mode = ModeInteractive
 	} else {
@@ -152,8 +155,6 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		done:        make(chan struct{}),
 		metadata:    cloneStringMap(input.Metadata),
 	}
-	observerRoot := request.WorkspaceRoots[0]
-	observer := NewChangeObserver(observerRoot)
 	manager.store(process)
 	manager.removeCompletedLater(process)
 	go func() {
@@ -180,10 +181,13 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 	if ctx != nil && ctx.Err() != nil && !result.Exited {
 		process.terminate()
 		more := process.collectResult(context.Background(), time.Second, true)
-		result.Output += more.Output
+		var mergeTruncated bool
+		result.Output, mergeTruncated = appendBoundedProcessOutputString(result.Output, more.Output)
 		result.OutputTruncated = result.OutputTruncated || more.OutputTruncated
+		result.OutputTruncated = result.OutputTruncated || mergeTruncated
 		result.Exited = more.Exited
 		result.ExitCode = more.ExitCode
+		result.Interrupted = result.Interrupted || more.Interrupted
 		result.Report = more.Report
 		result.ReportErr = more.ReportErr
 		result.Changes = more.Changes
@@ -423,7 +427,9 @@ func (process *managedProcess) collect(ctx context.Context, wait time.Duration) 
 	}
 	for {
 		if chunk := process.output.drain(); len(chunk) > 0 {
-			output = append(output, chunk...)
+			var chunkTruncated bool
+			output, chunkTruncated = appendBoundedProcessOutput(output, chunk)
+			truncated = truncated || chunkTruncated
 			truncated = truncated || process.output.consumeTruncated()
 			if time.Now().After(deadline) {
 				return finish()
@@ -431,7 +437,9 @@ func (process *managedProcess) collect(ctx context.Context, wait time.Duration) 
 			continue
 		}
 		if process.doneClosed() {
-			output = append(output, process.output.drain()...)
+			var chunkTruncated bool
+			output, chunkTruncated = appendBoundedProcessOutput(output, process.output.drain())
+			truncated = truncated || chunkTruncated
 			return finish()
 		}
 		remaining := time.Until(deadline)
@@ -460,6 +468,29 @@ func (process *managedProcess) collect(ctx context.Context, wait time.Duration) 
 			}
 		}
 	}
+}
+
+func appendBoundedProcessOutput(output []byte, chunk []byte) ([]byte, bool) {
+	if len(chunk) == 0 {
+		return output, false
+	}
+	if len(chunk) >= maxPendingOutputBytes {
+		bounded := make([]byte, maxPendingOutputBytes)
+		copy(bounded, chunk[len(chunk)-maxPendingOutputBytes:])
+		return bounded, len(output) > 0 || len(chunk) > maxPendingOutputBytes
+	}
+	if len(output)+len(chunk) <= maxPendingOutputBytes {
+		return append(output, chunk...), false
+	}
+	drop := len(output) + len(chunk) - maxPendingOutputBytes
+	copy(output, output[drop:])
+	output = output[:len(output)-drop]
+	return append(output, chunk...), true
+}
+
+func appendBoundedProcessOutputString(output string, chunk string) (string, bool) {
+	bounded, truncated := appendBoundedProcessOutput([]byte(output), []byte(chunk))
+	return string(bounded), truncated
 }
 
 func (process *managedProcess) doneClosed() bool {

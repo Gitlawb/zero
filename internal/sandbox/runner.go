@@ -201,18 +201,20 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		preference = SandboxPreferenceForbid
 	}
 	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	var runtimeCleanup func()
 	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
-		runtimeState, runtimeErr := prepareSandboxRuntime(workspaceRoot)
+		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
 		if runtimeErr != nil {
 			return CommandPlan{}, runtimeErr
 		}
+		runtimeCleanup = cleanup
 		profile = permissionProfileWithRuntime(profile, runtimeState)
 	}
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    backend.Platform,
 		Backend: backend,
 	})
-	return manager.BuildCommandPlan(SandboxManagerRequest{
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     workspaceRoot,
 		Command:           spec,
 		Policy:            policy,
@@ -221,6 +223,14 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		Preference:        preference,
 		ValidateExecution: true,
 	})
+	if err != nil {
+		if runtimeCleanup != nil {
+			runtimeCleanup()
+		}
+		return CommandPlan{}, err
+	}
+	plan.cleanup = combineSandboxCleanups(plan.cleanup, runtimeCleanup)
+	return plan, nil
 }
 
 func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {
@@ -893,10 +903,11 @@ func networkRuleForProfile(network NetworkPolicy) string {
 	case NetworkAllow:
 		return "(allow network*)"
 	default:
-		// External egress remains denied, while localhost bind/connect stays
-		// available for test servers. The inbound rule limits wildcard binds to
-		// loopback clients, so this does not turn an isolated test listener into a
-		// host-visible development server.
+		// External egress remains denied while localhost bind/connect stays
+		// available for test servers. On macOS this is the host's real loopback,
+		// not a private network namespace; that reachability is an intentional
+		// baseline exception. Non-loopback inbound and outbound traffic remains
+		// denied.
 		return strings.Join([]string{
 			"(deny network*)",
 			`(allow network-bind (local ip "*:*"))`,

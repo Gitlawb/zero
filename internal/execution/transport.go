@@ -9,9 +9,11 @@ import (
 
 const processWaitDelay = 2 * time.Second
 
+type processTransportStarter func(*exec.Cmd, io.Writer, bool) (io.WriteCloser, bool, func(), error)
+
 func startProcessTransport(command *exec.Cmd, output io.Writer, ttyRequested bool) (io.WriteCloser, bool, func(), error) {
 	if ttyRequested {
-		original := command.SysProcAttr
+		original := cloneSysProcAttr(command.SysProcAttr)
 		if stdin, cleanup, err := startPTYProcess(command, output); err == nil {
 			return stdin, true, cleanup, nil
 		}
@@ -29,6 +31,14 @@ func startProcessTransport(command *exec.Cmd, output io.Writer, ttyRequested boo
 		return nil, false, nil, err
 	}
 	return stdin, false, func() {}, nil
+}
+
+func cloneSysProcAttr(attributes *syscall.SysProcAttr) *syscall.SysProcAttr {
+	if attributes == nil {
+		return nil
+	}
+	cloned := *attributes
+	return &cloned
 }
 
 func resetCommandAfterPTYFallback(command *exec.Cmd, original *syscall.SysProcAttr) {

@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,10 +22,18 @@ import (
 
 const protectedCreatePollInterval = 10 * time.Millisecond
 
+// An absent protected path cannot be mounted read-only without making it
+// appear inside the child. The monitor preserves workspace path fidelity and
+// treats the kernel's create/move event as the denial signal. The path can
+// briefly appear on the host before the command is killed and it is removed;
+// parsing the event ensures a fast create+unlink is still reported.
+
 type protectedCreateMonitor struct {
 	targets   []string
 	stderr    io.Writer
 	inotifyFD int
+	watches   map[int]string
+	targetSet map[string]struct{}
 	stop      chan struct{}
 	done      chan struct{}
 	violation atomic.Bool
@@ -100,41 +110,46 @@ func newProtectedCreateMonitor(targets []string, stderr io.Writer) (*protectedCr
 		inotifyFD: -1,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
+		watches:   make(map[int]string),
+		targetSet: make(map[string]struct{}),
 	}
 	for _, target := range monitor.targets {
+		target = filepath.Clean(target)
+		monitor.targetSet[target] = struct{}{}
 		if _, err := os.Lstat(target); err == nil {
 			return nil, fmt.Errorf("protected metadata path appeared before sandbox start: %s", target)
 		} else if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("inspect protected metadata path %s: %w", target, err)
 		}
 	}
-	monitor.inotifyFD = openProtectedCreateInotify(monitor.targets)
+	monitor.inotifyFD, monitor.watches = openProtectedCreateInotify(monitor.targets)
 	return monitor, nil
 }
 
-func openProtectedCreateInotify(targets []string) int {
+func openProtectedCreateInotify(targets []string) (int, map[int]string) {
 	fd, err := unix.InotifyInit1(unix.IN_NONBLOCK | unix.IN_CLOEXEC)
 	if err != nil {
-		return -1
+		return -1, nil
 	}
 	parents := make(map[string]struct{}, len(targets))
-	watches := 0
+	watches := make(map[int]string, len(targets))
 	for _, target := range targets {
 		parent := filepath.Dir(target)
 		if _, exists := parents[parent]; exists {
 			continue
 		}
 		parents[parent] = struct{}{}
-		if _, err := unix.InotifyAddWatch(fd, parent, unix.IN_CREATE|unix.IN_MOVED_TO|unix.IN_DELETE_SELF|unix.IN_MOVE_SELF); err != nil {
+		watch, err := unix.InotifyAddWatch(fd, parent, unix.IN_CREATE|unix.IN_MOVED_TO|unix.IN_DELETE_SELF|unix.IN_MOVE_SELF)
+		if err != nil {
 			continue
 		}
-		watches++
+		watches[watch] = parent
 	}
-	if watches == 0 {
+	if len(watches) == 0 {
 		_ = unix.Close(fd)
-		return -1
+		return -1, nil
 	}
-	return fd
+	return fd, watches
 }
 
 func (monitor *protectedCreateMonitor) start(onViolation func()) {
@@ -142,17 +157,17 @@ func (monitor *protectedCreateMonitor) start(onViolation func()) {
 		defer close(monitor.done)
 		for {
 			monitor.scanAndRemove(onViolation)
+			monitor.wait(onViolation)
 			select {
 			case <-monitor.stop:
 				return
 			default:
 			}
-			monitor.wait()
 		}
 	}()
 }
 
-func (monitor *protectedCreateMonitor) wait() {
+func (monitor *protectedCreateMonitor) wait(onViolation func()) {
 	if monitor.inotifyFD < 0 {
 		select {
 		case <-monitor.stop:
@@ -163,11 +178,35 @@ func (monitor *protectedCreateMonitor) wait() {
 	pollFD := []unix.PollFd{{Fd: int32(monitor.inotifyFD), Events: unix.POLLIN}}
 	_, _ = unix.Poll(pollFD, int(protectedCreatePollInterval/time.Millisecond))
 	if pollFD[0].Revents&unix.POLLIN != 0 {
-		var buffer [4096]byte
-		for {
-			if _, err := unix.Read(monitor.inotifyFD, buffer[:]); err != nil {
+		monitor.drainInotifyEvents(onViolation)
+	}
+}
+
+func (monitor *protectedCreateMonitor) drainInotifyEvents(onViolation func()) {
+	var buffer [4096]byte
+	const eventHeaderSize = 16
+	for {
+		read, err := unix.Read(monitor.inotifyFD, buffer[:])
+		if err != nil {
+			return
+		}
+		for offset := 0; offset+eventHeaderSize <= read; {
+			watch := int(int32(binary.NativeEndian.Uint32(buffer[offset : offset+4])))
+			mask := binary.NativeEndian.Uint32(buffer[offset+4 : offset+8])
+			nameLength := int(binary.NativeEndian.Uint32(buffer[offset+12 : offset+16]))
+			next := offset + eventHeaderSize + nameLength
+			if nameLength < 0 || next > read {
 				break
 			}
+			name := strings.TrimRight(string(buffer[offset+eventHeaderSize:next]), "\x00")
+			if parent, ok := monitor.watches[watch]; ok && mask&(unix.IN_CREATE|unix.IN_MOVED_TO) != 0 && name != "" {
+				target := filepath.Clean(filepath.Join(parent, name))
+				if _, protected := monitor.targetSet[target]; protected {
+					monitor.recordViolation(target, onViolation)
+					removeProtectedCreateTarget(target)
+				}
+			}
+			offset = next
 		}
 	}
 }
@@ -179,14 +218,18 @@ func (monitor *protectedCreateMonitor) scanAndRemove(onViolation func()) {
 		} else if err != nil {
 			continue
 		}
-		monitor.once.Do(func() {
-			monitor.violation.Store(true)
-			monitor.path = target
-			fmt.Fprintln(monitor.stderr, "sandbox blocked creation of protected workspace metadata path "+target)
-			onViolation()
-		})
+		monitor.recordViolation(target, onViolation)
 		removeProtectedCreateTarget(target)
 	}
+}
+
+func (monitor *protectedCreateMonitor) recordViolation(target string, onViolation func()) {
+	monitor.once.Do(func() {
+		monitor.violation.Store(true)
+		monitor.path = target
+		fmt.Fprintln(monitor.stderr, "sandbox blocked creation of protected workspace metadata path "+target)
+		onViolation()
+	})
 }
 
 func removeProtectedCreateTarget(target string) bool {

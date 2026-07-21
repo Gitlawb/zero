@@ -2,13 +2,25 @@ package execution
 
 import (
 	"context"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func processManagerRequest(root string, command *exec.Cmd) Request {
+	return Request{
+		Origin: OriginInteractiveCommand, Mode: ModeCaptured,
+		Command:          Command{Name: command.Path, Args: command.Args[1:]},
+		WorkingDirectory: root, WorkspaceRoots: []string{root},
+		Approval: ApprovalContext{PolicyVersion: PolicyVersion},
+	}
+}
 
 func TestProcessManagerRetainsAndContinuesWithStableIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -70,6 +82,55 @@ func TestProcessManagerInterruptsRetainedProcess(t *testing.T) {
 	}
 	if !stopped.Exited || !stopped.Interrupted {
 		t.Fatalf("interrupt result = %#v", stopped)
+	}
+}
+
+func TestProcessManagerCancellationReportsInterrupted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses a POSIX shell")
+	}
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{})
+	command := exec.Command("/bin/sh", "-c", "sleep 30")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := manager.Start(ctx, ProcessStart{
+		Prepared: PreparedCommand{Command: command},
+		Request:  processManagerRequest(root, command),
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !result.Exited || !result.Interrupted {
+		t.Fatalf("cancelled result = %#v, want exited and interrupted", result)
+	}
+}
+
+func TestProcessManagerObservesChangesMadeDuringTransportStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses a POSIX shell")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "created.txt")
+	manager := NewProcessManager(ProcessManagerOptions{})
+	manager.startTransport = func(command *exec.Cmd, output io.Writer, tty bool) (io.WriteCloser, bool, func(), error) {
+		if err := os.WriteFile(target, []byte("created"), 0o600); err != nil {
+			return nil, false, nil, err
+		}
+		return startProcessTransport(command, output, tty)
+	}
+	command := exec.Command("/bin/sh", "-c", "true")
+
+	result, err := manager.Start(context.Background(), ProcessStart{
+		Prepared: PreparedCommand{Command: command},
+		Request:  processManagerRequest(root, command),
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(result.Changes) != 1 || result.Changes[0].Path != "created.txt" || result.Changes[0].Kind != ChangeCreated {
+		t.Fatalf("changes = %#v, want created.txt created", result.Changes)
 	}
 }
 
@@ -137,6 +198,34 @@ func TestManagedProcessCollectRespectsDeadlineUnderContinuousOutput(t *testing.T
 	_, _ = process.collect(context.Background(), wait)
 	if elapsed := time.Since(started); elapsed > 5*wait {
 		t.Fatalf("collect took %v under continuous output, want close to %v", elapsed, wait)
+	}
+}
+
+func TestManagedProcessCollectCapsCumulativeOutput(t *testing.T) {
+	process := &managedProcess{output: newProcessOutputBuffer(), done: make(chan struct{})}
+	chunk := []byte(strings.Repeat("x", maxPendingOutputBytes/2))
+	go func() {
+		for i := 0; i < 5; i++ {
+			_, _ = process.output.Write(chunk)
+			for {
+				process.output.mu.Lock()
+				drained := len(process.output.data) == 0
+				process.output.mu.Unlock()
+				if drained {
+					break
+				}
+				runtime.Gosched()
+			}
+		}
+		close(process.done)
+	}()
+
+	output, truncated := process.collect(context.Background(), time.Second)
+	if len(output) > maxPendingOutputBytes {
+		t.Fatalf("collected %d bytes, want <= %d", len(output), maxPendingOutputBytes)
+	}
+	if !truncated {
+		t.Fatal("cumulative output cap must report truncation")
 	}
 }
 

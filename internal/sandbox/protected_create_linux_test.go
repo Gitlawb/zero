@@ -33,3 +33,35 @@ func TestProtectedCreateMonitorStopsCommandAndRemovesTarget(t *testing.T) {
 		t.Fatalf("protected target remained after denial: %v", err)
 	}
 }
+
+func TestProtectedCreateMonitorRecordsTransientCreateEvent(t *testing.T) {
+	target := filepath.Join(t.TempDir(), ".zero")
+	var stderr bytes.Buffer
+	monitor, err := newProtectedCreateMonitor([]string{target}, &stderr)
+	if err != nil {
+		t.Fatalf("newProtectedCreateMonitor: %v", err)
+	}
+	if monitor.inotifyFD < 0 {
+		monitor.close()
+		t.Skip("inotify is unavailable")
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		monitor.close()
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		monitor.close()
+		t.Fatal(err)
+	}
+	triggered := make(chan struct{}, 1)
+	monitor.start(func() { triggered <- struct{}{} })
+	violated, gotTarget := monitor.stopAndCleanup()
+	if !violated || gotTarget != target {
+		t.Fatalf("transient creation = violated %t target %q, want true %q; stderr=%s", violated, gotTarget, target, stderr.String())
+	}
+	select {
+	case <-triggered:
+	default:
+		t.Fatal("transient create event did not invoke violation callback")
+	}
+}

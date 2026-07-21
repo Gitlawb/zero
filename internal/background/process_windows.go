@@ -8,8 +8,8 @@ import (
 	"github.com/Gitlawb/zero/internal/execution"
 )
 
-// ConfigureChildProcessGroup is a no-op on Windows: terminateProcess uses
-// `taskkill /T` to kill the whole process tree, so no launch-time process-group
+// ConfigureChildProcessGroup is a no-op on Windows: process-tree termination is
+// delegated to execution.TerminateProcessTree, so no launch-time process-group
 // setup is required (the POSIX build sets Setpgid here instead).
 func ConfigureChildProcessGroup(cmd *exec.Cmd) { execution.ConfigureProcessGroup(cmd) }
 
