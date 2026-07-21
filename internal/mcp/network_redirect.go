@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -141,4 +142,16 @@ func mcpOrigin(value *url.URL) string {
 		return host
 	}
 	return strings.ToLower(value.Scheme) + "://" + host
+}
+
+// routeAndDo performs the HTTP request using streaming vs finite semantics based on req.
+// If execTimeout is nil, defaults (30s for finite, unbounded for streaming) apply.
+//
+// This bridges to the header/query-based classification in http_clients.go
+// (ClassifyToolCall/DoToolHTTPRequest), a separate mechanism from
+// networkClient's own method-name-based classifyToolCall/httpClientFor. It is
+// not yet called by networkClient -- see the package-level architecture note
+// for the pending decision on consolidating the two.
+func routeAndDo(ctx context.Context, req *http.Request, execTimeout *time.Duration) (*http.Response, error) {
+	return DoToolHTTPRequest(ctx, req, execTimeout)
 }

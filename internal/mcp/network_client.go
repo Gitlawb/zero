@@ -369,7 +369,12 @@ type idleWatchdogReadCloser struct {
 	stopped bool
 }
 
-func newIdleWatchdogReadCloser(body io.ReadCloser, idle time.Duration, cancel context.CancelFunc) *idleWatchdogReadCloser {
+// newToolCallIdleWatchdog wraps body in an idleWatchdogReadCloser for
+// networkClient's tools/call responses. Named distinctly from
+// http_clients.go's newIdleWatchdogReadCloser (a separate, not-yet-wired
+// mechanism added concurrently in this package) to avoid a duplicate
+// declaration build failure.
+func newToolCallIdleWatchdog(body io.ReadCloser, idle time.Duration, cancel context.CancelFunc) *idleWatchdogReadCloser {
 	watchdog := &idleWatchdogReadCloser{body: body, idle: idle, cancel: cancel}
 	watchdog.timer = time.AfterFunc(idle, watchdog.onIdle)
 	return watchdog
@@ -448,7 +453,7 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 	}
 
 	if toolCall {
-		response.Body = newIdleWatchdogReadCloser(response.Body, toolCallIdleTimeout, cancel)
+		response.Body = newToolCallIdleWatchdog(response.Body, toolCallIdleTimeout, cancel)
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 
