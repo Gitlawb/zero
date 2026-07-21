@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -88,6 +89,38 @@ func TestStoreFileMode0600(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("token file mode = %o, want 600", perm)
+	}
+}
+
+func TestStoreUsesFixedProtectedPublicationSibling(t *testing.T) {
+	s, path := newTestStore(t)
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("publication sibling remains after save: %v", err)
+	}
+}
+
+func TestEncryptedStoreUsesFixedProtectedSecretSibling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	secretTempPath := path + ".secret.tmp"
+	if err := os.WriteFile(secretTempPath, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(StoreOptions{FilePath: path, Storage: "encrypted-file"})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(secretTempPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret publication sibling remains after save: %v", err)
 	}
 }
 

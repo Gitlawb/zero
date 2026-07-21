@@ -574,6 +574,29 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	}
 }
 
+func TestSeatbeltCompatibilityProfileUsesCredentialEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	override := filepath.Join(t.TempDir(), "mcp-tokens.json")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", override)
+
+	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, DefaultPolicy())
+	for _, want := range []string{
+		override,
+		override + ".tmp",
+		override + ".lockfile",
+		override + ".secret",
+		override + ".secret.tmp",
+		override + ".secret.lock",
+		override + ".migrated",
+	} {
+		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
+			t.Fatalf("DenyReadIfExists = %#v, want environment override sibling %q", profile.FileSystem.DenyReadIfExists, want)
+		}
+	}
+}
+
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 
@@ -650,6 +673,23 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
 	extra := tempDirOutsideDefaultTemp(t)
+	for _, root := range []string{workspace, extra} {
+		for _, dir := range []string{filepath.Join(root, ".git", "hooks"), filepath.Join(root, ".zero"), filepath.Join(root, ".agents")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, ".git", "config"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	credentialHome := filepath.Join(workspace, "credential-home")
+	configHome := filepath.Join(credentialHome, "config")
+	for _, dir := range []string{filepath.Join(credentialHome, ".aws"), filepath.Join(credentialHome, ".config", "gcloud"), filepath.Join(credentialHome, ".azure"), filepath.Join(configHome, "zero")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -661,7 +701,7 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	resolvedExtra := scope.Roots()[1]
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra, Env: []string{"HOME=" + credentialHome, "XDG_CONFIG_HOME=" + configHome}})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}

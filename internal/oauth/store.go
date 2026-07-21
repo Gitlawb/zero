@@ -409,15 +409,23 @@ func (b fileBlob) write(data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", b.path, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
+	// Saves are serialized by withLock, so a fixed sibling remains collision-free
+	// while allowing sandbox profiles to protect it without masking the parent.
+	tempPath := b.path + ".tmp"
+	_ = os.Remove(tempPath)
+	temp, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, b.path); err != nil {
-		_ = os.Remove(tempPath)
+	defer os.Remove(tempPath)
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
 		return err
 	}
-	return nil
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, b.path)
 }
 
 func (b fileBlob) withLock(now func() time.Time, fn func() error) error {

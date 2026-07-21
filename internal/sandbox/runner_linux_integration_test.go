@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,12 +22,26 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		t.Skipf("Linux sandbox backend unavailable: %s", backend.Message)
 	}
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatalf("Mkdir .git: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755); err != nil {
+		t.Fatalf("Mkdir .git/hooks: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile .git/config: %v", err)
 	}
+	credentialHome := t.TempDir()
+	configHome := filepath.Join(credentialHome, "config")
+	for _, path := range []string{
+		filepath.Join(credentialHome, ".aws"),
+		filepath.Join(credentialHome, ".config", "gcloud"),
+		filepath.Join(credentialHome, ".azure"),
+		filepath.Join(configHome, "zero"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("Mkdir credential path: %v", err)
+		}
+	}
+	t.Setenv("HOME", credentialHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
 	secretDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(secretDir, "secret.txt"), []byte("hidden\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile secret: %v", err)
@@ -58,6 +73,46 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		}
 		t.Fatalf("allowed smoke command failed: %v\n%s", runErr, output)
 	}
+
+	t.Run("fresh home and non-git workspace launch", func(t *testing.T) {
+		freshRoot := t.TempDir()
+		freshHome := t.TempDir()
+		freshEngine := NewEngine(EngineOptions{WorkspaceRoot: freshRoot, Policy: DefaultPolicy(), Backend: backend})
+		output, runErr := runLinuxSandboxSmokeCommand(t, freshEngine, CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", "echo ok > launched"},
+			Dir:  freshRoot,
+			Env:  []string{"HOME=" + freshHome, "XDG_CONFIG_HOME=" + filepath.Join(freshHome, ".config")},
+		})
+		if runErr != nil {
+			t.Fatalf("fresh environment failed to launch: %v\n%s", runErr, output)
+		}
+	})
+
+	t.Run("missing protected path fails closed", func(t *testing.T) {
+		missingDenied := filepath.Join(t.TempDir(), "missing-parent", "nested")
+		if _, err := os.Stat(filepath.Dir(missingDenied)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing deny-path precondition failed: %v", err)
+		}
+		marker := filepath.Join(root, "missing-path-command-ran")
+		failPolicy := DefaultPolicy()
+		failPolicy.DenyRead = []string{missingDenied}
+		failEngine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: failPolicy, Backend: backend})
+		output, runErr := runLinuxSandboxSmokeCommand(t, failEngine, CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", "touch " + shellQuote(marker)},
+			Dir:  root,
+		})
+		if runErr == nil || !strings.Contains(string(output), missingDenied) {
+			t.Fatalf("missing protected path did not fail closed: err=%v output=%s", runErr, output)
+		}
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("target command ran despite unenforceable path: %v", err)
+		}
+		if _, err := os.Stat(filepath.Dir(missingDenied)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("sandbox launch materialized missing deny path on host: %v", err)
+		}
+	})
 
 	for _, tc := range []struct {
 		name   string

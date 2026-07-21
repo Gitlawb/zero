@@ -143,7 +143,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if policy.Mode == ModeDisabled {
 		preference = SandboxPreferenceForbid
 	}
-	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	profile := permissionProfileFromPolicy(workspaceRoot, policy, engine.scope, spec.Dir, spec.Env)
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    backend.Platform,
 		Backend: backend,
@@ -361,6 +361,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 }
 
 func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
+	credentialBaseDir, _ := os.Getwd()
 	fs := FileSystemPolicy{
 		Kind:                 FileSystemUnrestricted,
 		ReadRoots:            []string{string(filepath.Separator)},
@@ -374,7 +375,8 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
 		}
 	}
-	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
+	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	fs.DenyReadIfExists = credentialDenyReadPaths(policy, credentialBaseDir, os.Environ())
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,
@@ -758,7 +760,7 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 }
 
 func denyReadRules(fs FileSystemPolicy) []string {
-	return denySeatbeltPathRules("file-read*", fs.DenyRead)
+	return denySeatbeltPathRules("file-read*", dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...)))
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {

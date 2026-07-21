@@ -48,7 +48,7 @@ func validateLandlockProfile(profile PermissionProfile) error {
 	if fs.Kind != FileSystemRestricted {
 		return nil
 	}
-	if len(fs.DenyRead) > 0 {
+	if len(fs.DenyRead) > 0 || len(fs.DenyReadIfExists) > 0 {
 		return errors.New("deny-read paths require the bubblewrap helper mode")
 	}
 	if len(fs.DenyWrite) > 0 {

@@ -140,12 +140,12 @@ func writeNewSecretFile(path string) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
 		return nil, fmt.Errorf("oauth: generate token secret: %w", err)
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	tmpPath := path + ".tmp"
+	_ = os.Remove(tmpPath)
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("oauth: create token secret temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
