@@ -147,18 +147,65 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 		t.Fatalf("terminateProcess: %v", err)
 	}
 
-	// The forked child must be gone too (poll until reaped by init).
+	// The forked child must no longer be running. An orphaned zombie is already
+	// dead but may remain visible briefly until the platform's init reaps it.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		// Only ESRCH proves the child is gone; any other error (e.g. EPERM) would
-		// wrongly pass the test, so treat it as still-present and keep polling.
-		if errors.Is(syscall.Kill(childPID, syscall.Signal(0)), syscall.ESRCH) {
-			break // child no longer exists
-		}
+	for !processStopped(childPID) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
 			t.Fatalf("forked child %d survived terminateProcess — group kill failed", childPID)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
+	grace, poll := terminationGracePeriod, terminationPollInterval
+	terminationGracePeriod, terminationPollInterval = 2*time.Second, 20*time.Millisecond
+	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
+
+	// The leader exits immediately after launching the child. TerminateCommand
+	// must capture and signal the process group before Wait reaps the leader and
+	// makes its group identity unavailable.
+	cmd := exec.Command("sh", "-c", "sleep 300 & echo $!; exit 0")
+	ConfigureChildProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read forked child pid: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("parse forked child pid %q: %v", line, err)
+	}
+
+	if err := TerminateCommand(cmd); err != nil {
+		t.Fatalf("TerminateCommand: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !processStopped(childPID) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+			t.Fatalf("forked child %d survived TerminateCommand", childPID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func processStopped(pid int) bool {
+	if errors.Is(syscall.Kill(pid, syscall.Signal(0)), syscall.ESRCH) {
+		return true
+	}
+	state, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return errors.Is(syscall.Kill(pid, syscall.Signal(0)), syscall.ESRCH)
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 }

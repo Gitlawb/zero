@@ -5,6 +5,7 @@ package background
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -101,6 +102,91 @@ func terminateProcess(pid int) error {
 		return fmt.Errorf("process %d did not exit after SIGKILL", pid)
 	}
 	return nil
+}
+
+func terminateCommand(cmd *exec.Cmd) error {
+	pid := cmd.Process.Pid
+	if pid <= 1 {
+		return fmt.Errorf("refusing to terminate invalid pid %d", pid)
+	}
+
+	target := pid
+	// ConfigureChildProcessGroup records that the child leads a group whose ID
+	// is its PID. Use that launch-time fact directly: on Darwin Getpgid can
+	// return ESRCH once the leader exits even while descendants remain alive.
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		target = -pid
+	} else if pgid, err := syscall.Getpgid(pid); err == nil {
+		if pgid == pid {
+			target = -pid
+		}
+	} else if processGoneError(err) {
+		return waitForTerminatedCommand(cmd)
+	} else {
+		killErr := cmd.Process.Kill()
+		waitErr := waitForTerminatedCommandWithin(cmd, terminationGracePeriod)
+		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			if waitErr != nil {
+				return fmt.Errorf("get process group: %v (fallback kill failed: %v; %w)", err, killErr, waitErr)
+			}
+			return fmt.Errorf("get process group: %v (fallback kill failed: %w)", err, killErr)
+		}
+		if waitErr != nil {
+			return fmt.Errorf("get process group: %v (%w)", err, waitErr)
+		}
+		return fmt.Errorf("get process group: %w", err)
+	}
+
+	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
+		if processGoneError(err) {
+			return waitForTerminatedCommand(cmd)
+		}
+		killErr := cmd.Process.Kill()
+		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			return fmt.Errorf("terminate process group: %v (fallback kill failed: %w)", err, killErr)
+		}
+		if waitErr := waitForTerminatedCommand(cmd); waitErr != nil {
+			return waitErr
+		}
+		return fmt.Errorf("terminate process group: %w", err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	alive := func() bool { return syscall.Kill(target, syscall.Signal(0)) == nil }
+	deadline := time.Now().Add(terminationGracePeriod)
+	for time.Now().Before(deadline) && alive() {
+		time.Sleep(terminationPollInterval)
+	}
+	if alive() {
+		if err := syscall.Kill(target, syscall.SIGKILL); err != nil && !processGoneError(err) {
+			return fmt.Errorf("force-kill process group: %w", err)
+		}
+		deadline = time.Now().Add(terminationGracePeriod)
+		for time.Now().Before(deadline) && alive() {
+			time.Sleep(terminationPollInterval)
+		}
+	}
+
+	var waitErr error
+	select {
+	case waitErr = <-waitDone:
+	case <-time.After(terminationGracePeriod):
+		return fmt.Errorf("process %d did not reap after termination", pid)
+	}
+	if err := classifyWaitError(waitErr); err != nil {
+		return err
+	}
+	if alive() {
+		return fmt.Errorf("process group %d did not exit after SIGKILL", pid)
+	}
+	return nil
+}
+
+func waitForTerminatedCommand(cmd *exec.Cmd) error {
+	return classifyWaitError(cmd.Wait())
 }
 
 // processGoneError reports whether an error means the process group has already
