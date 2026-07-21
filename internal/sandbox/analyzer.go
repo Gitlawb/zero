@@ -220,7 +220,12 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	case "go":
 		return firstSubcommand(words, nil) == "get"
 	case "git":
-		return firstSubcommand(words, nil) == "clone"
+		switch firstSubcommand(words, nil) {
+		case "clone", "fetch", "pull", "push":
+			return true
+		default:
+			return false
+		}
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
