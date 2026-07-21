@@ -85,6 +85,22 @@ func TestProcessManagerInterruptsRetainedProcess(t *testing.T) {
 	}
 }
 
+func TestManagedProcessTerminateSkipsReapedProcess(t *testing.T) {
+	reaped := make(chan struct{})
+	close(reaped)
+	called := false
+	process := &managedProcess{
+		command: &exec.Cmd{Process: &os.Process{Pid: 4242}},
+		reaped:  reaped,
+		kill:    func(int) error { called = true; return nil },
+	}
+
+	process.terminate()
+	if called {
+		t.Fatal("terminate signaled an already-reaped process")
+	}
+}
+
 func TestProcessManagerCancellationReportsInterrupted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test command uses a POSIX shell")

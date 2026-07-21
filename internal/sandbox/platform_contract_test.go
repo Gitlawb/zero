@@ -40,13 +40,8 @@ func TestPlatformAdaptersShareExecutionContract(t *testing.T) {
 			t.Fatalf("macOS request = %#v", request)
 		}
 		network := networkRuleForProfile(request.PermissionProfile.Network)
-		for _, rule := range []string{"(deny network*)", "network-bind", "network-inbound", `remote ip "localhost:*"`} {
-			if !strings.Contains(network, rule) {
-				t.Fatalf("macOS restricted network profile missing %q: %s", rule, network)
-			}
-		}
-		if strings.Contains(network, "(allow network-outbound)\n") {
-			t.Fatalf("macOS restricted profile permits general egress: %s", network)
+		if network != "(deny network*)" {
+			t.Fatalf("macOS restricted network profile = %q, want strict deny", network)
 		}
 	})
 

@@ -152,13 +152,16 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		cleanup:     input.Prepared.Cleanup,
 		stdin:       stdin,
 		output:      buffer,
+		reaped:      make(chan struct{}),
 		done:        make(chan struct{}),
+		kill:        KillProcessTree,
 		metadata:    cloneStringMap(input.Metadata),
 	}
 	manager.store(process)
 	manager.removeCompletedLater(process)
 	go func() {
 		waitErr := command.Wait()
+		close(process.reaped)
 		if input.AfterWait != nil {
 			if diagnostic := input.AfterWait(); len(diagnostic) > 0 {
 				_, _ = buffer.Write(diagnostic)
@@ -373,8 +376,10 @@ type managedProcess struct {
 	cleanup      func()
 	stdin        io.WriteCloser
 	output       *processOutputBuffer
+	reaped       chan struct{}
 	doneOnce     sync.Once
 	done         chan struct{}
+	kill         func(int) error
 	mu           sync.Mutex
 	exitCode     *int
 	waitErr      error
@@ -513,8 +518,25 @@ func (process *managedProcess) lastUsed() time.Time {
 	return process.lastUsedAt
 }
 func (process *managedProcess) terminate() {
-	if process.command.Process != nil {
-		_ = KillProcessTree(process.command.Process.Pid)
+	if process.reapedClosed() || process.command.Process == nil {
+		return
+	}
+	kill := process.kill
+	if kill == nil {
+		kill = KillProcessTree
+	}
+	_ = kill(process.command.Process.Pid)
+}
+
+func (process *managedProcess) reapedClosed() bool {
+	if process.reaped == nil {
+		return false
+	}
+	select {
+	case <-process.reaped:
+		return true
+	default:
+		return false
 	}
 }
 

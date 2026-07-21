@@ -394,12 +394,14 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 		`(subpath "/tmp")`,
 		`(literal "/dev/null")`,
 		`(deny network*)`,
-		`(allow network-bind (local ip "*:*"))`,
-		`(allow network-inbound (local ip "localhost:*"))`,
-		`(allow network-outbound (remote ip "localhost:*"))`,
 	} {
 		if !strings.Contains(sbpl, want) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+	for _, forbidden := range []string{"network-bind", "network-inbound", `remote ip "localhost:*"`} {
+		if strings.Contains(sbpl, forbidden) {
+			t.Fatalf("restricted Seatbelt profile must not contain host-local rule %q:\n%s", forbidden, sbpl)
 		}
 	}
 	if strings.Contains(sbpl, "(allow file-read*)\n(allow file-write*)") {

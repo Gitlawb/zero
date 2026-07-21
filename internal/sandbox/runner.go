@@ -903,17 +903,10 @@ func networkRuleForProfile(network NetworkPolicy) string {
 	case NetworkAllow:
 		return "(allow network*)"
 	default:
-		// External egress remains denied while localhost bind/connect stays
-		// available for test servers. On macOS this is the host's real loopback,
-		// not a private network namespace; that reachability is an intentional
-		// baseline exception. Non-loopback inbound and outbound traffic remains
-		// denied.
-		return strings.Join([]string{
-			"(deny network*)",
-			`(allow network-bind (local ip "*:*"))`,
-			`(allow network-inbound (local ip "localhost:*"))`,
-			`(allow network-outbound (remote ip "localhost:*"))`,
-		}, "\n")
+		// Seatbelt has no private network namespace. Its localhost filters can
+		// reach services on the host and host interfaces, so the restricted
+		// profile must deny the entire network surface.
+		return "(deny network*)"
 	}
 }
 
