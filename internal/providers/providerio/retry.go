@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/trace"
@@ -196,7 +195,7 @@ func isPreSendTransportError(err error) bool {
 	}
 	// Post-send / ambiguous failures, excluded first. EOF and reset are matched
 	// by identity so wording (or a hostname containing "eof") can't fool them.
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || isConnResetErrno(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

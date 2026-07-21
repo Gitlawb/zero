@@ -3,6 +3,7 @@
 package providerio
 
 import (
+	"errors"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -23,4 +24,13 @@ var dialPreSendErrnos = []error{
 	windows.WSAECONNREFUSED,
 	windows.WSAENETUNREACH,
 	windows.WSAEHOSTUNREACH,
+}
+
+// isConnResetErrno reports whether err carries a connection-reset errno, the
+// post-send exclusion in isPreSendTransportError. It matches the same
+// syscall.ECONNRESET the shared path used before the errno classification was
+// split out per platform, so behavior on Windows is unchanged; it lives here
+// so retry.go references no syscall constants and stays buildable on Plan 9.
+func isConnResetErrno(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET)
 }
