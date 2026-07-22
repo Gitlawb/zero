@@ -31,10 +31,21 @@ import (
 //   - Hitting windowsDescendantScanMaxDepth or windowsDescendantScanMaxDirs
 //     means unexamined territory remains: the scan returns an error so setup
 //     and pre-broaden revalidation cannot certify a partial walk as clean.
-//   - Reparse points (junctions, symlinks, volume mount points) are fail-closed:
-//     sandboxed access can follow them, but denying/descending them risks
-//     touching unrelated trees or other volumes. Incomplete coverage of a
-//     reparse target aborts broadening rather than pretending the tree is safe.
+//     These bounds must be large enough that a stock C:\ (with its Windows,
+//     Program Files, and WinSxS trees) actually completes — see the comment on
+//     the vars below for the reasoning and the honest limits of that estimate.
+//   - Reparse points (junctions, symlinks, volume mount points) are NOT a
+//     special case: CreateFile/GetNamedSecurityInfo/ReadDir called on a path
+//     without FILE_FLAG_OPEN_REPARSE_POINT already transparently resolve
+//     through a directory junction or symlink to its target (standard NTFS
+//     reparse behavior), so treating a reparse point exactly like a normal
+//     directory here already inspects and descends into whatever it actually
+//     points at. A stock drive has real compatibility junctions (e.g.
+//     C:\Documents and Settings -> C:\Users) that must not hard-fail the scan
+//     (see jatmn's review); this walker no longer special-cases them at all.
+//     What bounds a pathological loop (a junction pointing at an ancestor) is
+//     the same depth/entry cap as everything else — worst case that fails
+//     closed, it does not run forever.
 //   - A directory this process cannot list, or a child whose DACL it cannot
 //     read, is fail-closed UNLESS the basename is a known SYSTEM-exclusive
 //     Windows directory (e.g. "System Volume Information") AND it sits at the
@@ -63,8 +74,24 @@ import (
 // Basename policies live in windows_acl_descendants.go so non-Windows tests can
 // pin them without Win32. Bounds are vars so Windows tests can lower them.
 var (
-	windowsDescendantScanMaxDepth = 24
-	windowsDescendantScanMaxDirs  = 8192
+	windowsDescendantScanMaxDepth = 48
+	// windowsDescendantScanMaxDirs bounds the total files+directories the scan
+	// will inspect below a single shared root. A stock Windows install can
+	// easily have tens to hundreds of thousands of objects under C:\Windows
+	// alone (WinSxS in particular), so the previous 8,192 cap made every
+	// elevated DenyRead setup fail on a normal system drive (jatmn's review).
+	// This is raised to a size intended to comfortably cover a typical stock
+	// C:\Windows + Program Files + Program Files (x86) tree while still
+	// bounding worst-case work to a finite number rather than removing the
+	// cap outright. It is a reasoned estimate, not a measurement: this fix was
+	// written and cross-compiled without access to a real Windows machine, so
+	// the actual object count on any given box (and the wall-clock cost of
+	// walking it, since windowsEnsureSharedDescendantCoverage repeats this
+	// scan before every DenyRead command) could not be verified directly.
+	// Failing closed here only costs functionality (the narrow SID set), never
+	// safety, so an unusually large tree is a safe, if inconvenient, failure
+	// mode rather than a security regression.
+	windowsDescendantScanMaxDirs = 500000
 )
 
 // windowsBroadenedWriteProbeMask is the set of access-mask bits that let a
@@ -185,9 +212,6 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 			if isExcluded(childKey) {
 				continue
 			}
-			if windowsPathIsReparsePoint(child) {
-				return nil, fmt.Errorf("descendant scan hit reparse point %s under %s; cannot establish coverage for its target", child, root)
-			}
 			if visited >= windowsDescendantScanMaxDirs {
 				return nil, fmt.Errorf("descendant scan exceeded %d entries below %s", windowsDescendantScanMaxDirs, root)
 			}
@@ -238,12 +262,20 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 // windowsAccessAllowedObjectAceType and windowsAccessDeniedObjectAceType are
 // the AceType values for ACCESS_ALLOWED_OBJECT_ACE / ACCESS_DENIED_OBJECT_ACE
 // (https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_object_ace).
-// x/sys/windows only models the plain ACCESS_ALLOWED_ACE layout (Header, Mask,
-// SidStart) and exposes just ACCESS_ALLOWED_ACE_TYPE/ACCESS_DENIED_ACE_TYPE, so
-// these two are declared locally.
+// windowsAccessAllowedCallbackAceType and windowsAccessAllowedCallbackObjectAceType
+// are ACCESS_ALLOWED_CALLBACK_ACE_TYPE and ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+// (MS-DTYP 2.4.4.6 / conditional-ACE object variant): a callback ACE carries a
+// conditional expression (e.g. "resource attribute matches") that gates
+// whether the grant applies, appended AFTER the SID, so it does not move the
+// SID's own offset relative to its non-callback sibling. x/sys/windows only
+// models the plain ACCESS_ALLOWED_ACE layout (Header, Mask, SidStart) and
+// exposes just ACCESS_ALLOWED_ACE_TYPE/ACCESS_DENIED_ACE_TYPE, so all four are
+// declared locally.
 const (
-	windowsAccessAllowedObjectAceType = 0x05
-	windowsAccessDeniedObjectAceType  = 0x06
+	windowsAccessAllowedObjectAceType        = 0x05
+	windowsAccessDeniedObjectAceType         = 0x06
+	windowsAccessAllowedCallbackAceType       = 0x09
+	windowsAccessAllowedCallbackObjectAceType = 0x0B
 )
 
 // windowsAceSID locates the trustee SID within ace, an *ACCESS_ALLOWED_ACE
@@ -255,15 +287,24 @@ const (
 // reading &ace.SidStart for one of these — as if it had the plain ACE layout —
 // reinterprets Flags/GUID bytes as SID bytes and silently computes the wrong
 // trustee, both risking a false match and missing a real Users/Authenticated
-// Users grant hidden inside an object ACE. ok is false for any other ACE type
-// (audit, alarm, mandatory label, compound, ...), which does not represent a
-// trustee write grant in the sense this scan cares about and is skipped
-// exactly as it always has been.
+// Users grant hidden inside an object ACE.
+//
+// ACCESS_ALLOWED_CALLBACK_ACE_TYPE and ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+// are recognized the same way as their non-callback counterparts: per MS-DTYP,
+// a callback ACE's conditional expression ("ApplicationData") is appended
+// AFTER the SID, not inserted before it, so the SID offset is identical. Only
+// the ALLOW callback variants are recognized here, deliberately — see
+// windowsDirGrantsBroadenedWrite for why a callback DENY is never trusted to
+// suppress a grant. ok is false for any other ACE type (audit, alarm,
+// mandatory label, compound, callback deny, ...), which either does not
+// represent a trustee write grant in the sense this scan cares about, or (for
+// callback deny) is not safe to rely on, and is skipped exactly as it always
+// has been.
 func windowsAceSID(ace *windows.ACCESS_ALLOWED_ACE) (sid *windows.SID, ok bool) {
 	switch ace.Header.AceType {
-	case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+	case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE, windowsAccessAllowedCallbackAceType:
 		return (*windows.SID)(unsafe.Pointer(&ace.SidStart)), true
-	case windowsAccessAllowedObjectAceType, windowsAccessDeniedObjectAceType:
+	case windowsAccessAllowedObjectAceType, windowsAccessDeniedObjectAceType, windowsAccessAllowedCallbackObjectAceType:
 		// For an object ACE, the memory the Go struct calls SidStart is
 		// actually the ACE's Flags DWORD; the real SID sits further out,
 		// pushed by whichever of the two optional GUIDs Flags says are present.
@@ -296,6 +337,15 @@ func windowsAceSID(ace *windows.ACCESS_ALLOWED_ACE) (sid *windows.SID, ok bool) 
 // grants that would become usable once the restricted token is broadened with
 // those groups, independent of the setup process's own token. INHERIT_ONLY ACEs
 // are skipped because they do not apply to the object itself.
+//
+// A callback allow ACE (ACCESS_ALLOWED_CALLBACK_ACE / _OBJECT_ACE) is treated
+// exactly like an unconditional allow: this static walk cannot evaluate the
+// ACE's conditional expression against the sandbox token, so the only safe
+// assumption is the worst case, that the condition holds and the grant
+// applies (see jatmn's review). The symmetric callback DENY types are
+// deliberately NOT recognized by windowsAceSID at all, so they never reach
+// this switch: trusting an unproven condition to suppress deniedWrite would
+// risk the opposite mistake, misclassifying a writable directory as safe.
 func windowsDirGrantsBroadenedWrite(path string) (bool, error) {
 	// GetNamedSecurityInfo returns a self-relative descriptor copied onto the Go
 	// heap (it LocalFrees the Win32 allocation itself), so it must NOT be
@@ -338,7 +388,8 @@ func windowsDirGrantsBroadenedWrite(path string) (bool, error) {
 		switch ace.Header.AceType {
 		case windows.ACCESS_DENIED_ACE_TYPE, windowsAccessDeniedObjectAceType:
 			deniedWrite |= writeBits
-		case windows.ACCESS_ALLOWED_ACE_TYPE, windowsAccessAllowedObjectAceType:
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windowsAccessAllowedObjectAceType,
+			windowsAccessAllowedCallbackAceType, windowsAccessAllowedCallbackObjectAceType:
 			if writeBits&^deniedWrite != 0 {
 				return true, nil
 			}
@@ -369,9 +420,17 @@ func windowsPathIsReparsePoint(path string) bool {
 // before a command broadens the restricted token so a child created after
 // `zero sandbox setup` cannot remain an uncovered write-jail escape.
 //
-// Prefer reapplying denies (same permanent posture as elevated setup). When
-// reapply fails — typically because the command process lacks WRITE_DAC on a
-// system path — fall back to a read-only hole check: if any writable
+// It also revalidates the direct deny on each shared ROOT itself (C:\,
+// ProgramData, Windows\Temp, Public), not just its descendants: this was
+// previously left unchecked, so an installer or service that removed the root
+// deny after setup would leave the descendant walk reporting no holes while
+// the root itself had silently reopened, and the runner would still broaden
+// the token (see jatmn's review).
+//
+// Prefer reapplying denies (same permanent posture as elevated setup) for both
+// the root and its descendants. When reapply fails — typically because the
+// command process lacks WRITE_DAC on a system path — fall back to a
+// read-only check: if the root's own deny is missing, or any writable
 // descendant still lacks the synthetic deny, coverage is incomplete and the
 // caller must not broaden. Fail closed on enumeration errors either way.
 func windowsEnsureSharedDescendantCoverage(config WindowsSandboxCommandConfig) error {
@@ -390,6 +449,17 @@ func windowsEnsureSharedDescendantCoverage(config WindowsSandboxCommandConfig) e
 				continue
 			}
 			return fmt.Errorf("stat shared deny root %s: %w", group.Path, err)
+		}
+		if _, _, err := applyWindowsACLPathGroup(group); err != nil {
+			denied, denyErr := windowsPathDeniesCapabilitySID(group.Path, denySID)
+			if denyErr != nil {
+				return denyErr
+			}
+			if !denied {
+				return fmt.Errorf("shared root write deny missing on %s: %w", group.Path, err)
+			}
+			// Reapply failed but the root's own deny is still effectively in
+			// place, so the write jail continues to hold for this root.
 		}
 		if _, err := applyWindowsSharedDescendantDenies(group.Path, denySID, writeRoots); err == nil {
 			continue

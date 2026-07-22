@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -57,6 +58,16 @@ func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
 				return nil, err
 			}
 		}
+		// A write root's stale-deny revoke only clears the root path itself;
+		// clear the same stale deny from its existing descendants too, or a
+		// stray direct deny an earlier run left there keeps winning over this
+		// root's new inheritable Allow (see windows_acl.go's RevokeDescendants
+		// doc and jatmn's review). Best-effort: leaving a stale deny in place
+		// only over-restricts an explicitly configured write root, it never
+		// widens access, so this never fails the whole plan apply.
+		if denySID, ok := windowsGroupRevokeDescendantsSID(group); ok && applied {
+			snapshots = append(snapshots, windowsRevokeStaleDescendantDenies(group.Path, denySID)...)
+		}
 	}
 	return func() error {
 		return rollbackWindowsACLSnapshots(snapshots)
@@ -88,6 +99,91 @@ func windowsGroupScanDescendantsSID(group windowsACLPathGroup) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// windowsGroupRevokeDescendantsSID returns the capability SID of a group's
+// write-root stale-deny revoke entry when that entry requests clearing the
+// same stale deny from the root's existing descendants too (see
+// RevokeDescendants).
+func windowsGroupRevokeDescendantsSID(group windowsACLPathGroup) (string, bool) {
+	for _, entry := range group.Entries {
+		if entry.Action == WindowsACLRevokeCapability && entry.RevokeDescendants && strings.TrimSpace(entry.Capability) != "" {
+			return entry.Capability, true
+		}
+	}
+	return "", false
+}
+
+// windowsRevokeStaleDescendantDenies walks a newly-promoted write root's
+// existing descendants and clears any direct DenyWrite ACE they carry for
+// denySID — left over from when an earlier `zero sandbox setup` run found
+// this same subtree writable by Users/Authenticated Users and applied the
+// shared-root compensating deny (windows_acl_descendants_windows.go) before
+// the caller configured this path as an allowed write root. That stale,
+// non-inheriting deny on a descendant still wins over the root's own new,
+// inheritable Allow under Windows' deny-before-allow ACE evaluation, so the
+// root would otherwise remain partly unwritable — see jatmn's review.
+//
+// This is deliberately best-effort, not fail-closed like the writable-
+// descendant scan: leaving a stray stale deny in place only over-restricts an
+// explicitly configured write root (a functionality bug), it never widens
+// access, so an unreadable descendant or a reparse point here is skipped
+// rather than aborting the whole plan apply. Bounded by the same depth/entry
+// caps as the writable-descendant scan so a pathological or cyclic tree
+// cannot make this run unboundedly long.
+func windowsRevokeStaleDescendantDenies(root, denySID string) []windowsACLSnapshot {
+	type node struct {
+		path  string
+		depth int
+	}
+	var snapshots []windowsACLSnapshot
+	visited := 0
+	queue := []node{{path: root, depth: 0}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(current.path)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			child := filepath.Join(current.path, entry.Name())
+			// Unlike the writable-descendant scan, this cleanup pass does not
+			// need to follow reparse points transparently: skipping one just
+			// means a stray deny under it might survive, which is the same
+			// safe-but-inconvenient outcome as any other skip here.
+			if windowsPathIsReparsePoint(child) {
+				continue
+			}
+			if visited >= windowsDescendantScanMaxDirs {
+				return snapshots
+			}
+			visited++
+			if denied, err := windowsPathDeniesCapabilitySID(child, denySID); err == nil && denied {
+				snapshot, applied, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+					Path: child,
+					Entries: []WindowsACLEntry{{
+						Action:     WindowsACLRevokeCapability,
+						Path:       child,
+						Capability: denySID,
+						NoInherit:  true,
+					}},
+				})
+				if err == nil && applied {
+					snapshots = append(snapshots, snapshot)
+				}
+			}
+			if !entry.IsDir() {
+				continue
+			}
+			depth := current.depth + 1
+			if depth >= windowsDescendantScanMaxDepth {
+				continue
+			}
+			queue = append(queue, node{path: child, depth: depth})
+		}
+	}
+	return snapshots
 }
 
 func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {

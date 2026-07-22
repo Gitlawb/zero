@@ -56,6 +56,22 @@ type WindowsACLEntry struct {
 	// descendant enumeration/denies happen as an apply-time side effect in
 	// applyWindowsACLPlan (windows-only), never in the cross-platform plan hash.
 	ScanDescendants bool `json:"-"`
+	// RevokeDescendants marks a write-root's WindowsACLRevokeCapability entry
+	// (see the constant below) as needing the same stale-deny cleanup applied
+	// recursively to the root's existing descendants, not just the root path
+	// itself. A tree scanned and denied by an earlier setup run (either
+	// because it WAS one of the four shared roots, or because it was a
+	// writable descendant applyWindowsSharedDescendantDenies found and denied
+	// elsewhere in the tree) can later be promoted to an allowed write root by
+	// the caller configuring some ANCESTOR of it as a WriteRoot. Revoking only
+	// at the exact configured root leaves any stale direct, non-inheriting
+	// deny on that ancestor's descendants in place, and a stale deny wins over
+	// the newly-added inheritable Allow under Windows' deny-before-allow
+	// evaluation — see jatmn's review. Like ScanDescendants, this is
+	// deliberately NOT serialized (json:"-"): the concrete stale-deny set is
+	// live-filesystem state, and the actual descendant walk/revoke happens as
+	// an apply-time side effect in applyWindowsACLPlan (windows-only).
+	RevokeDescendants bool `json:"-"`
 }
 
 type WindowsACLPlan struct {
@@ -207,12 +223,27 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 		// places a deny for that SID on a write-root path (see the skip above),
 		// so this can never fight an entry this same plan is also adding, and a
 		// revoke against a SID with no matching ACE is a safe no-op.
+		//
+		// RevokeDescendants extends this same reconciliation below the exact
+		// root: promoting C:\Users\shared to a write root when an earlier run
+		// separately denied C:\Users\shared\child (as a discovered writable
+		// descendant of some OTHER shared root, or of a since-reconfigured
+		// write root) must also clear that descendant's stale deny, or it
+		// keeps winning over the root's new inheritable Allow — see jatmn's
+		// review.
 		for _, capability := range writeCapabilities {
 			entries = append(entries, WindowsACLEntry{
 				Action:     WindowsACLRevokeCapability,
 				Path:       capability.Root,
 				Capability: denySID,
 				NoInherit:  true,
+				// A previously-scanned tree can be promoted to a write root by
+				// configuring one of ITS OWN descendants' ancestors — e.g.
+				// C:\Users\shared\child was individually denied by an earlier
+				// run, then the caller configures C:\Users\shared itself as
+				// writable. Revoking only at capability.Root would miss the
+				// stale deny still sitting on child. See RevokeDescendants.
+				RevokeDescendants: true,
 			})
 		}
 	}

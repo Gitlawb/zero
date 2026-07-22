@@ -369,15 +369,24 @@ func TestBuildWindowsACLPlanRevokesStaleSharedDenyOnPromotedWriteRoot(t *testing
 	}
 	for _, root := range []string{publicDir, promotedDescendant} {
 		found := false
+		revokesDescendants := false
 		for _, entry := range plan.Entries {
 			if entry.Action == WindowsACLRevokeCapability &&
 				windowsCapabilityPathKey(entry.Path) == windowsCapabilityPathKey(root) &&
 				strings.EqualFold(entry.Capability, caps.ReadOnly) {
 				found = true
+				revokesDescendants = entry.RevokeDescendants
 			}
 		}
 		if !found {
 			t.Fatalf("plan = %#v, want a WindowsACLRevokeCapability entry for write root %q naming the stable read-only SID %q", plan.Entries, root, caps.ReadOnly)
+		}
+		// jatmn's follow-up P2: the revoke must also reach stale denies on the
+		// root's own descendants (e.g. a previously-scanned C:\Users\shared\child
+		// left denied before C:\Users\shared was promoted to a write root), not
+		// just the exact configured root path.
+		if !revokesDescendants {
+			t.Fatalf("write root %q revoke entry has RevokeDescendants=false, want true so stale descendant denies are also cleared", root)
 		}
 	}
 }
