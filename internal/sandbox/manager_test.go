@@ -385,9 +385,13 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	daemonTokenFile := filepath.Join(home, "daemon-token")
+	if err := os.WriteFile(daemonTokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	paths := credentialDenyReadPathsIn(home, keyFile, nil)
-	for _, want := range normalizeProfilePaths([]string{awsDir, gcloudDir, keyFile}) {
+	paths := credentialDenyReadPathsIn(home, keyFile, daemonTokenFile, nil)
+	for _, want := range normalizeProfilePaths([]string{awsDir, gcloudDir, keyFile, daemonTokenFile}) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
 		}
@@ -399,22 +403,45 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	// An explicit AllowRead entry covering a store is an opt-out.
-	optedOut := credentialDenyReadPathsIn(home, keyFile, []string{awsDir})
+	optedOut := credentialDenyReadPathsIn(home, keyFile, daemonTokenFile, []string{awsDir, daemonTokenFile})
 	if stringSliceContains(optedOut, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut)
 	}
 	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
 	}
+	if stringSliceContains(optedOut, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
+		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop daemon token file", optedOut)
+	}
 
-	if got := credentialDenyReadPathsIn("  ", "", nil); len(got) != 0 {
+	if got := credentialDenyReadPathsIn("  ", "", "", nil); len(got) != 0 {
 		t.Errorf("credential deny paths for blank home = %#v, want none", got)
 	}
 
 	// The GOOGLE_APPLICATION_CREDENTIALS target stays protected even when no
 	// home directory is resolvable.
-	homeless := credentialDenyReadPathsIn("", keyFile, nil)
+	homeless := credentialDenyReadPathsIn("", keyFile, daemonTokenFile, nil)
 	if !stringSliceContains(homeless, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths without home = %#v, want key file included", homeless)
+	}
+	if !stringSliceContains(homeless, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
+		t.Errorf("credential deny paths without home = %#v, want daemon token file included", homeless)
+	}
+}
+
+func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	tokenFile := filepath.Join(t.TempDir(), "daemon-token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", tokenFile)
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{tokenFile})[0]
+	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want daemon token file %q", profile.FileSystem.DenyRead, want)
 	}
 }

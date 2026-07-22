@@ -703,6 +703,7 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
 		"zero_oauth_second_client_secret=case-insensitive-secret",
 		"ZERO_OAUTH_CLIENT_SECRET=not-a-provider-secret",
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE=/home/user/daemon-token",
 		"AWS_PROFILE=staging",
 		"SAFE_VAR=hello",
 	}

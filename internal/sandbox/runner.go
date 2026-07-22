@@ -1079,6 +1079,7 @@ func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 		"GH_TOKEN",
 		"ZERO_WEBSEARCH_API_KEY",
 		"ZERO_DAEMON_REMOTE_TOKEN",
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE",
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {

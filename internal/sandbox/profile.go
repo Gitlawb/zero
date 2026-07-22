@@ -149,9 +149,10 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
-// credential stores (~/.aws, ~/.config/gcloud, ~/.azure, and the file
-// GOOGLE_APPLICATION_CREDENTIALS points to) so sandboxed commands cannot read
-// cloud secrets under the read-all workspace posture. Two deliberate limits:
+// credential stores (~/.aws, ~/.config/gcloud, ~/.azure, and the files named by
+// GOOGLE_APPLICATION_CREDENTIALS and ZERO_DAEMON_REMOTE_TOKEN_FILE) so
+// sandboxed commands cannot read secrets under the read-all workspace posture.
+// Two deliberate limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
@@ -168,14 +169,19 @@ func credentialDenyReadPaths(policy Policy) []string {
 		return nil
 	}
 	// A failed home lookup only drops the home-based candidates; the
-	// GOOGLE_APPLICATION_CREDENTIALS target must be protected regardless.
+	// environment-selected credential targets must be protected regardless.
 	home, _ := os.UserHomeDir()
-	return credentialDenyReadPathsIn(home, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), policy.AllowRead)
+	return credentialDenyReadPathsIn(
+		home,
+		os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+		os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"),
+		policy.AllowRead,
+	)
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
 // separated so tests can exercise it against a synthetic home directory.
-func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead []string) []string {
+func credentialDenyReadPathsIn(home string, googleCredentials string, daemonTokenFile string, allowRead []string) []string {
 	var candidates []string
 	if home = strings.TrimSpace(home); home != "" {
 		candidates = append(candidates,
@@ -185,6 +191,9 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead 
 		)
 	}
 	if target := strings.TrimSpace(googleCredentials); target != "" {
+		candidates = append(candidates, target)
+	}
+	if target := strings.TrimSpace(daemonTokenFile); target != "" {
 		candidates = append(candidates, target)
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
