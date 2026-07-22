@@ -456,10 +456,10 @@ var dunePalette = palette{
 	blue:      "#99ccff", // permission rgb(153,204,255)
 	gitAdd:    "#7db87a",
 	gitDel:    "#b87a7a",
-	addBg:     "#0a1f14", // diff added band — near-black so faintest/green hold AA
-	delBg:     "#240a0e", // diff removed band — near-black so faintest/red hold AA
-	addBgWord: "#1f4d33", // word-level added span — distinct from addBg band
-	delBgWord: "#4d1620", // word-level removed span — distinct from delBg band
+	addBg:     "#003500", // diff added band — quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals (previous #0a1f14/#240a0e both collapsed to #121212)
+	delBg:     "#350000", // diff removed band — quantizes to xterm red #5f0000 (see addBg)
+	addBgWord: "#007400", // word-level added span — quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
+	delBgWord: "#740000", // word-level removed span — quantizes to xterm red #870000 (see addBgWord)
 	permBg:    "#1c1915",
 	selBg:     "#191c1f", // selection — near-black, distinct from panel, AA with faint/faintest
 	addInk:    "#bdeed7",

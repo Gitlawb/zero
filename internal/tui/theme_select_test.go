@@ -408,13 +408,23 @@ func xterm256Hex(t *testing.T, hexColor string) string {
 // terminal, which quantizes every token to its nearest xterm entry first.
 // Guard the pairs that regressed: Dune's selected-row affordances (accent
 // caret/favorite star and blue local-model dot over selBg via onSel) and
-// Neon's diff bands, whose previous values all quantized to the same grays.
+// diff bands (whose previous addBg/delBg and addBgWord/delBgWord values all
+// quantized to the same grays), and Neon's diff bands with the same issue.
 func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	palettes := map[string]palette{}
 	for _, entry := range themeRegistry {
 		palettes[entry.Name] = entry.Palette
 	}
 	q := func(hexColor string) string { return xterm256Hex(t, hexColor) }
+
+	greenish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return g > r && g > b
+	}
+	reddish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return r > g && r > b
+	}
 
 	dune := palettes["dune"]
 	for _, pair := range []struct{ name, fg, bg string }{
@@ -427,16 +437,26 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 			t.Errorf("dune: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
 		}
 	}
+	// Dune's diff row/word bands must keep the same add/del distinctness on
+	// 256-color terminals that Neon's already guard below: the original
+	// addBg/delBg (#0a1f14/#240a0e) both quantized to the same gray (#121212),
+	// making added and removed lines indistinguishable.
+	if q(dune.addBg) == q(dune.delBg) || !greenish(q(dune.addBg)) || !reddish(q(dune.delBg)) {
+		t.Errorf("dune: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
+			dune.addBg, q(dune.addBg), dune.delBg, q(dune.delBg))
+	}
+	if q(dune.addBgWord) == q(dune.delBgWord) || !greenish(q(dune.addBgWord)) || !reddish(q(dune.delBgWord)) {
+		t.Errorf("dune: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
+			dune.addBgWord, q(dune.addBgWord), dune.delBgWord, q(dune.delBgWord))
+	}
+	if q(dune.addBgWord) == q(dune.addBg) {
+		t.Errorf("dune: changed span is indistinguishable from its add row after quantization (both %s)", q(dune.addBg))
+	}
+	if q(dune.delBgWord) == q(dune.delBg) {
+		t.Errorf("dune: changed span is indistinguishable from its del row after quantization (both %s)", q(dune.delBg))
+	}
 
 	neon := palettes["neon"]
-	greenish := func(hexColor string) bool {
-		r, g, b := hexChannels(t, hexColor)
-		return g > r && g > b
-	}
-	reddish := func(hexColor string) bool {
-		r, g, b := hexChannels(t, hexColor)
-		return r > g && r > b
-	}
 	if q(neon.addBg) == q(neon.delBg) || !greenish(q(neon.addBg)) || !reddish(q(neon.delBg)) {
 		t.Errorf("neon: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
 			neon.addBg, q(neon.addBg), neon.delBg, q(neon.delBg))
