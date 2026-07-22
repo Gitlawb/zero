@@ -89,6 +89,92 @@ func grantUsersWrite(t *testing.T, path string) {
 	}
 }
 
+// denyUsersWrite adds a direct (non-inheriting) deny-write ACE for
+// BUILTIN\Users to path's DACL, overriding any inherited write grant from the
+// enclosing t.TempDir() tree. Used to construct a directory that is
+// genuinely non-writable at its own DACL, independent of whatever the test
+// temp tree happens to inherit.
+//
+// Denies the concrete (non-generic) bits of windowsBroadenedWriteProbeMask —
+// the same bits windowsDirGrantsBroadenedWrite itself checks, minus
+// GENERIC_WRITE/GENERIC_ALL. Two things must NOT be in this mask:
+//   - SYNCHRONIZE (part of windows.FILE_GENERIC_WRITE): the test process is
+//     normally a member of BUILTIN\Users, and denying SYNCHRONIZE also blocks
+//     its own later synchronous opens of path (e.g. os.ReadDir), not just
+//     "write" — verified directly against this code path.
+//   - Raw GENERIC_WRITE/GENERIC_ALL bits: stored unmapped in an ACE (as
+//     opposed to being resolved to their constituent FILE_* bits first),
+//     these were empirically observed to make Windows deny EVERY access,
+//     including a plain FILE_LIST_DIRECTORY open, not just generic write.
+func denyUsersWrite(t *testing.T, path string) {
+	t.Helper()
+	usersSID, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatalf("CreateWellKnownSid(Users): %v", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo %s: %v", path, err)
+	}
+	oldDACL, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL %s: %v", path, err)
+	}
+	denyMask := windowsBroadenedWriteProbeMask &^ (windows.GENERIC_WRITE | windows.GENERIC_ALL)
+	newDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: denyMask,
+		AccessMode:        windows.DENY_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(usersSID),
+		},
+	}}, oldDACL)
+	if err != nil {
+		t.Fatalf("ACLFromEntries %s: %v", path, err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, newDACL, nil); err != nil {
+		t.Fatalf("SetNamedSecurityInfo %s: %v", path, err)
+	}
+}
+
+// TestWindowsEnumerateWritableDescendantsDoesNotPruneSystemLookalikeTrees is
+// the real-Windows regression for jatmn's review finding: a directory whose
+// basename matched the old prune list (e.g. "Program Files") and was
+// non-writable at its OWN DACL must still be descended into, because a
+// non-writable root DACL says nothing about a writable descendant several
+// levels down (e.g. an installer-created "Program Files\SomeApp" with a
+// loosened grant). Before the fix, this subtree was silently certified clean
+// from the root DACL alone and never scanned further.
+func TestWindowsEnumerateWritableDescendantsDoesNotPruneSystemLookalikeTrees(t *testing.T) {
+	root := t.TempDir()
+	programFiles := mkdir(t, filepath.Join(root, "Program Files"))
+	// Create and grant the nested descendant BEFORE denying write on
+	// programFiles itself: the deny targets BUILTIN\Users, which the test
+	// process is normally a member of, so denying it on programFiles first
+	// would block the test process from creating anything under it.
+	someApp := mkdir(t, filepath.Join(programFiles, "SomeApp"))
+	grantUsersWrite(t, someApp)
+	denyUsersWrite(t, programFiles)
+
+	rootWritable, err := windowsDirGrantsBroadenedWrite(programFiles)
+	if err != nil {
+		t.Fatalf("windowsDirGrantsBroadenedWrite(programFiles): %v", err)
+	}
+	if rootWritable {
+		t.Fatal("test fixture bug: programFiles must be non-writable at its own DACL to exercise the old prune condition")
+	}
+
+	found, err := windowsEnumerateWritableDescendants(root, nil)
+	if err != nil {
+		t.Fatalf("windowsEnumerateWritableDescendants: %v", err)
+	}
+	if !windowsPathListContains(found, someApp) {
+		t.Fatalf("enumeration = %#v, want it to include writable descendant %q under non-writable %q (must not be pruned by basename)", found, someApp, programFiles)
+	}
+}
+
 // TestWindowsDirGrantsBroadenedWriteDetectsUsersWrite pins the DACL probe the
 // descendant scan relies on: a directory whose DACL grants BUILTIN\Users write
 // is reported writable; one that does not is reported not writable.
@@ -178,6 +264,89 @@ func TestWindowsEnumerateWritableDescendantsFindsExistingWritableChildren(t *tes
 	}
 }
 
+// selfUserSID returns the current process token's own user SID, used by the
+// canonical-root-scoping test below to deny itself directory-listing access
+// (an owner always retains READ_CONTROL/WRITE_DAC implicitly, so this cannot
+// lock the test out of restoring its own change).
+func selfUserSID(t *testing.T) *windows.SID {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser: %v", err)
+	}
+	return user.User.Sid
+}
+
+// setSelfListDirectoryAccess grants or denies the current user FILE_LIST_DIRECTORY
+// on path, restoring/breaking the ability to os.ReadDir it without touching
+// READ_CONTROL/WRITE_DAC (which owners always retain), so the test can always
+// undo its own change.
+//
+// deny=false restores access via SET_ACCESS with a zero mask rather than
+// REVOKE_ACCESS: empirically, SetEntriesInAclW's REVOKE_ACCESS mode does not
+// remove a pre-existing DENY ACE for the trustee (verified directly against
+// this code path — see the same finding in BuildWindowsACLPlan's
+// WindowsACLRevokeCapability, windows_acl_apply_windows.go), so relying on it
+// here would leave the test process permanently denied FILE_LIST_DIRECTORY on
+// its own temp fixture.
+func setSelfListDirectoryAccess(t *testing.T, path string, deny bool) {
+	t.Helper()
+	mode := windows.ACCESS_MODE(windows.SET_ACCESS)
+	permissions := windows.ACCESS_MASK(0)
+	if deny {
+		mode = windows.DENY_ACCESS
+		permissions = windows.FILE_LIST_DIRECTORY
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo %s: %v", path, err)
+	}
+	oldDACL, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL %s: %v", path, err)
+	}
+	newDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: permissions,
+		AccessMode:        mode,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(selfUserSID(t)),
+		},
+	}}, oldDACL)
+	if err != nil {
+		t.Fatalf("ACLFromEntries %s: %v", path, err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, newDACL, nil); err != nil {
+		t.Fatalf("SetNamedSecurityInfo %s: %v", path, err)
+	}
+}
+
+// TestWindowsEnumerateWritableDescendantsFailsClosedOnNonRootLookalikeSystemDir
+// is the real-Windows regression for jatmn's review finding: a directory that
+// shares a basename with a known SYSTEM-exclusive Windows directory (here
+// "Recovery") but sits somewhere other than a genuine drive letter root must
+// fail the scan closed when it cannot be listed, not be silently skipped as
+// if it were the real, stock volume-root object.
+func TestWindowsEnumerateWritableDescendantsFailsClosedOnNonRootLookalikeSystemDir(t *testing.T) {
+	root := t.TempDir()
+	outer := mkdir(t, filepath.Join(root, "outer"))
+	lookalike := mkdir(t, filepath.Join(outer, "Recovery"))
+
+	setSelfListDirectoryAccess(t, lookalike, true)
+	t.Cleanup(func() { setSelfListDirectoryAccess(t, lookalike, false) })
+
+	if _, err := os.ReadDir(lookalike); err == nil {
+		t.Skip("could not deny self directory-listing access on this host; skipping fail-closed assertion")
+	}
+
+	_, err := windowsEnumerateWritableDescendants(root, nil)
+	if err == nil {
+		t.Fatal("windowsEnumerateWritableDescendants: expected a fail-closed error for an unlistable non-root-level lookalike system directory, got nil")
+	}
+}
+
 // TestWindowsEnumerateWritableDescendantsFailsClosedOnEntryCap pins that
 // exhausting the descendant entry budget is an error, not a silent partial
 // success that would still let setup broaden the restricted token.
@@ -230,6 +399,58 @@ func TestWindowsPathDeniesCapabilitySIDRoundTrip(t *testing.T) {
 	}
 	if len(holes) != 0 {
 		t.Fatalf("holes = %#v, want none after apply", holes)
+	}
+}
+
+// TestWindowsPathDeniesCapabilitySIDIgnoresReadOnlyDeny is the real-Windows
+// regression for jatmn's review finding: a pre-existing deny ACE for the
+// stable capability SID that only denies read/execute (the exact shape
+// planWindowsDenyReadPaths applies for a DenyRead path) must NOT be read as
+// "write already denied." Before the fix, any deny ACE naming the SID short-
+// circuited the check regardless of its mask, so a writable descendant that
+// happened to sit under a DenyRead path would be skipped by
+// applyWindowsSharedDescendantDenies and never get the write deny it needs.
+func TestWindowsPathDeniesCapabilitySIDIgnoresReadOnlyDeny(t *testing.T) {
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	root := t.TempDir()
+	writable := mkdir(t, filepath.Join(root, "writable"))
+	grantUsersWrite(t, writable)
+
+	// Apply the same DenyRead entry BuildWindowsACLPlan would generate for a
+	// DenyRead path sharing this stable capability SID.
+	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+		Path: writable,
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLDenyRead,
+			Path:       writable,
+			Capability: caps.ReadOnly,
+		}},
+	}); err != nil {
+		t.Fatalf("apply DenyRead entry: %v", err)
+	}
+
+	deniesWrite, err := windowsPathDeniesCapabilitySID(writable, caps.ReadOnly)
+	if err != nil {
+		t.Fatalf("windowsPathDeniesCapabilitySID: %v", err)
+	}
+	if deniesWrite {
+		t.Fatal("windowsPathDeniesCapabilitySID = true for a read-only deny ACE, want false: a DenyRead ACE does not block writes")
+	}
+
+	// The descendant-denial pass must therefore still add the real write deny
+	// rather than skipping this path as already covered.
+	if _, err := applyWindowsSharedDescendantDenies(root, caps.ReadOnly, nil); err != nil {
+		t.Fatalf("applyWindowsSharedDescendantDenies: %v", err)
+	}
+	deniesWrite, err = windowsPathDeniesCapabilitySID(writable, caps.ReadOnly)
+	if err != nil {
+		t.Fatalf("windowsPathDeniesCapabilitySID after apply: %v", err)
+	}
+	if !deniesWrite {
+		t.Fatal("windowsPathDeniesCapabilitySID = false after applyWindowsSharedDescendantDenies, want true: the write deny should now be present")
 	}
 }
 

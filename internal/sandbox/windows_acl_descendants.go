@@ -19,32 +19,28 @@ var windowsDescendantScanSystemLockedNames = map[string]struct{}{
 	"recovery":                  {},
 }
 
-// windowsDescendantScanPruneNames are basenames of large stock trees that are
-// not Users/AuthUsers-writable at their root on a normal install. When the
-// write probe agrees they are not writable, the scan does not descend into
-// them. This is the only reason a full C:\ walk stays within the entry budget
-// without silently skipping arbitrary user-created trees.
-var windowsDescendantScanPruneNames = map[string]struct{}{
-	"windows":                {},
-	"program files":          {},
-	"program files (x86)":    {},
-	"perflogs":               {},
-	"documents and settings": {},
-	// ProgramData and Users\Public are themselves shared deny roots and are
-	// scanned as separate roots by applyWindowsACLPlan. Pruning them under C:\
-	// avoids double-walking and double-stamping the same descendants.
-	"programdata": {},
-	"users":       {},
-}
-
 func windowsDescendantScanNameIsSystemLocked(name string) bool {
 	_, ok := windowsDescendantScanSystemLockedNames[strings.ToLower(strings.TrimSpace(name))]
 	return ok
 }
 
-func windowsDescendantScanNameIsPruned(name string) bool {
-	_, ok := windowsDescendantScanPruneNames[strings.ToLower(strings.TrimSpace(name))]
-	return ok
+// windowsPathIsDriveRootPath reports whether path is exactly a drive letter
+// root such as "C:\" or "C:" (case-insensitively), with no further path
+// segments. Used to scope the windowsDescendantScanNameIsSystemLocked
+// exception to the one place those basenames are ever legitimately the real,
+// SYSTEM-exclusive Windows directory: directly under an actual volume root.
+// A directory sharing one of those basenames anywhere else in the tree (e.g.
+// nested under ProgramData or Public, whether by installer accident or
+// deliberately) is not the real thing and must not be silently skipped — see
+// jatmn's review. Pure string check so non-Windows tests can pin it without
+// Win32 or filepath's platform-dependent volume parsing.
+func windowsPathIsDriveRootPath(path string) bool {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(path), `\`)
+	if len(trimmed) != 2 || trimmed[1] != ':' {
+		return false
+	}
+	c := trimmed[0]
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // windowsMountPathIsOnlySystemDrive reports whether a volume mount path is the
@@ -55,4 +51,23 @@ func windowsDescendantScanNameIsPruned(name string) bool {
 func windowsMountPathIsOnlySystemDrive(mountPath, systemDrive string) bool {
 	trimmed := strings.TrimSuffix(mountPath, `\`)
 	return strings.EqualFold(strings.ToUpper(trimmed), strings.ToUpper(systemDrive))
+}
+
+// windowsMountPathsAreOnlySystemDrive reports whether mountPaths (a fixed
+// volume's DOS/folder mount points from GetVolumePathNamesForVolumeName) name
+// the system drive root and nothing else. A fixed volume with NO mount paths
+// at all is still directly reachable through its raw "\\?\Volume{GUID}\"
+// path even though it has no conventional mount point, so an empty list
+// fails closed (false) instead of being read as "unreachable." Pure string
+// logic so non-Windows tests can pin the fail-closed cases without Win32.
+func windowsMountPathsAreOnlySystemDrive(mountPaths []string, systemDrive string) bool {
+	if len(mountPaths) == 0 {
+		return false
+	}
+	for _, mountPath := range mountPaths {
+		if !windowsMountPathIsOnlySystemDrive(mountPath, systemDrive) {
+			return false
+		}
+	}
+	return true
 }

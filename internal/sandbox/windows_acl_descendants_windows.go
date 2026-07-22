@@ -37,14 +37,22 @@ import (
 //     reparse target aborts broadening rather than pretending the tree is safe.
 //   - A directory this process cannot list, or a child whose DACL it cannot
 //     read, is fail-closed UNLESS the basename is a known SYSTEM-exclusive
-//     Windows directory (e.g. "System Volume Information") that is present on
-//     every volume and never grants Users/Authenticated Users write. Without
-//     that narrow allowlist, elevated setup would fail on every real machine.
-//   - Stock non-writable system trees under the drive root (Windows, Program
-//     Files, ...) are pruned by basename only when the probe says they are not
-//     Users/AuthUsers-writable. That keeps the C:\ walk from exhausting the
-//     entry budget on trees that are not the write-jail surface; if such a
-//     tree IS Users-writable it is denied and descended like any other.
+//     Windows directory (e.g. "System Volume Information") AND it sits at the
+//     one place that basename is ever legitimately the real thing: directly
+//     under an actual drive letter root (windowsPathIsDriveRootPath). Without
+//     that allowlist, elevated setup would fail on every real machine; without
+//     the root-level scoping, a same-named directory anywhere else in the
+//     tree (nested under ProgramData or Public, whether by installer accident
+//     or deliberately) would be silently skipped instead of failing closed —
+//     see jatmn's review.
+//   - Stock system trees under the drive root (Windows, Program Files, ...)
+//     are NOT pruned by basename: a directory's own DACL being non-writable
+//     says nothing about whether an installer-created descendant several
+//     levels down independently grants Users/AuthUsers write, so certifying
+//     a subtree clean from its root DACL alone would miss exactly that
+//     escape (see jatmn's review). Every directory is descended subject only
+//     to the depth/entry caps above; exhausting those caps on a genuinely
+//     huge stock tree is a fail-closed error, not a silent partial pass.
 //
 // Staleness: setup alone is not enough. Non-inheriting denies only cover the
 // filesystem state at apply time. The elevated command runner revalidates and
@@ -160,7 +168,13 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 		queue = queue[1:]
 		entries, err := os.ReadDir(current.path)
 		if err != nil {
-			if windowsDescendantScanNameIsSystemLocked(filepath.Base(current.path)) {
+			// The system-locked basename allowlist only applies to the real
+			// thing: a canonical root-level system directory directly under an
+			// actual drive letter root. A same-named directory anywhere else in
+			// the tree (e.g. nested under ProgramData or Public) is not the
+			// stock SYSTEM-exclusive object and must fail closed instead of
+			// being silently skipped — see jatmn's review.
+			if windowsPathIsDriveRootPath(filepath.Dir(current.path)) && windowsDescendantScanNameIsSystemLocked(filepath.Base(current.path)) {
 				continue
 			}
 			return nil, fmt.Errorf("list descendants of %s: %w", current.path, err)
@@ -180,7 +194,10 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 			visited++
 			writable, err := windowsDirGrantsBroadenedWrite(child)
 			if err != nil {
-				if windowsDescendantScanNameIsSystemLocked(entry.Name()) {
+				// Same canonical-root-level scoping as the ReadDir case above:
+				// current.path (child's parent) must itself be a drive root for
+				// this to be the real, SYSTEM-exclusive directory.
+				if windowsPathIsDriveRootPath(current.path) && windowsDescendantScanNameIsSystemLocked(entry.Name()) {
 					continue
 				}
 				return nil, fmt.Errorf("inspect DACL of %s: %w", child, err)
@@ -201,16 +218,17 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 				return nil, fmt.Errorf("descendant scan exceeded depth %d at %s", windowsDescendantScanMaxDepth, child)
 			}
 			// Always descend (subject to caps), including through non-writable
-			// ancestors, so a deep writable child is not missed. Stock huge
-			// non-writable system trees are pruned by basename only when the
-			// probe confirmed they are not Users/AuthUsers-writable, and only at
-			// the scan root's direct children: a nested directory several levels
-			// down that happens to share one of these basenames (e.g. a subfolder
-			// literally named "Program Files") must still be descended into, or a
-			// writable descendant beneath it could be missed.
-			if !writable && current.depth == 0 && windowsDescendantScanNameIsPruned(entry.Name()) {
-				continue
-			}
+			// ancestors and stock system trees (Windows, Program Files, ...), so
+			// a deep writable child is not missed. A non-writable directory's OWN
+			// DACL says nothing about a descendant several levels down: an
+			// installer-created child with a loosened, non-inherited grant (e.g.
+			// C:\Users\shared) is exactly the escape this scan exists to find, and
+			// certifying a subtree clean from its root DACL alone would miss it
+			// (see jatmn's review). There is deliberately no basename-based
+			// shortcut here anymore — hitting windowsDescendantScanMaxDepth or
+			// windowsDescendantScanMaxDirs on a genuinely huge stock tree fails
+			// the scan closed (see the caller), which keeps the narrow SID set
+			// rather than certifying an unexamined subtree as safe.
 			queue = append(queue, node{path: child, depth: childDepth})
 		}
 	}
@@ -408,7 +426,14 @@ func windowsUncoveredWritableDescendants(root, denySID string, writeRoots []stri
 
 // windowsPathDeniesCapabilitySID reports whether path's DACL already contains
 // a deny ACE naming the given capability SID string (the synthetic identity
-// used for shared-root / descendant DenyWrite entries).
+// used for shared-root / descendant DenyWrite entries) that covers write
+// access. A deny ACE for the right SID is only "already denies write" if its
+// mask actually includes write-relevant bits: the same stable capability SID
+// is also used for DenyRead entries (planWindowsDenyReadPaths), so a path
+// that only carries a pre-existing DenyRead ACE for wantSID must NOT be
+// mistaken for one that already blocks writes — see jatmn's review, which
+// found this would mask a real writable descendant under a DenyRead path and
+// skip closing it.
 func windowsPathDeniesCapabilitySID(path, wantSID string) (bool, error) {
 	want, err := windows.StringToSid(wantSID)
 	if err != nil {
@@ -445,7 +470,14 @@ func windowsPathDeniesCapabilitySID(path, wantSID string) (bool, error) {
 		if !ok {
 			continue
 		}
-		if sid.Equals(want) {
+		if !sid.Equals(want) {
+			continue
+		}
+		// Require the deny to actually cover write-relevant bits: a deny ACE
+		// for wantSID that only denies, e.g., read/execute (the DenyRead
+		// shape) does not close the write-jail escape this function exists to
+		// detect, and must not be reported as an existing write deny.
+		if ace.Mask&windowsBroadenedWriteProbeMask != 0 {
 			return true, nil
 		}
 	}

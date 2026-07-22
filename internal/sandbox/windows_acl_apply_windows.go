@@ -271,6 +271,16 @@ func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACC
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE, nil
 	case WindowsACLDenyWrite:
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER, nil
+	case WindowsACLRevokeCapability:
+		// SetEntriesInAclW's REVOKE_ACCESS mode is documented to strip a
+		// trustee's existing ACEs, but empirically (verified against this
+		// exact code path) it leaves a pre-existing DENY ACE for the trustee
+		// untouched — the merge simply has nothing to OR into and no ACE gets
+		// added or removed. SET_ACCESS with a zero mask does what REVOKE_ACCESS
+		// is supposed to: it replaces the trustee's entry outright, and
+		// SetEntriesInAclW omits an ACE entirely for a zero-permission SET,
+		// which is what actually clears a stale allow OR deny ACE for this SID.
+		return windows.SET_ACCESS, 0, nil
 	default:
 		return 0, 0, fmt.Errorf("unsupported windows ACL action %q", action)
 	}

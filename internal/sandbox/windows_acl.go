@@ -13,6 +13,20 @@ const (
 	WindowsACLAllowWrite WindowsACLAction = "allow-write"
 	WindowsACLDenyRead   WindowsACLAction = "deny-read"
 	WindowsACLDenyWrite  WindowsACLAction = "deny-write"
+	// WindowsACLRevokeCapability removes any existing ACE (allow or deny) for
+	// Capability at Path, without itself granting or denying anything (applied
+	// via SetEntriesInAclW's SET_ACCESS mode with a zero mask, not
+	// REVOKE_ACCESS — see windowsACLAccess for why). It reconciles stale
+	// shared/descendant DenyWrite ACEs an earlier setup run applied for the
+	// stable read-only capability SID (see BuildWindowsACLPlan) that a later
+	// run no longer intends: if a path previously covered by the
+	// shared-root/descendant DenyWrite mitigation is later configured as an
+	// allowed write root, that old deny is otherwise left on disk and wins
+	// over the new Allow under Windows' deny-before-allow evaluation — see
+	// jatmn's review. Clearing a SID with no matching ACE is a safe no-op, so
+	// this can always be emitted unconditionally alongside every write-root
+	// Allow entry.
+	WindowsACLRevokeCapability WindowsACLAction = "revoke-capability"
 )
 
 type WindowsACLEntry struct {
@@ -176,6 +190,29 @@ func BuildWindowsACLPlan(config WindowsSandboxCommandConfig) (WindowsACLPlan, er
 				// targeted scan that never rewrites the ACL of any descendant
 				// that is not itself already writable by those broad groups.
 				ScanDescendants: true,
+			})
+		}
+
+		// Reconcile stale shared/descendant denies: a write-root path here may
+		// previously have been covered by the shared-root/descendant DenyWrite
+		// mitigation above (either directly, if it IS one of the four shared
+		// paths, or as a discovered writable descendant applyWindowsSharedDescendantDenies
+		// denied in an earlier run) before the caller configured it as an
+		// allowed write root. applyWindowsACLPlan only merges the entries in
+		// THIS plan into the existing DACL; it never removes an ACE that is no
+		// longer requested, so that old deny would otherwise survive and win
+		// over the new Allow under Windows' deny-before-allow evaluation. Every
+		// write-root path unconditionally gets a revoke for the stable
+		// read-only capability SID: BuildWindowsACLPlan never intentionally
+		// places a deny for that SID on a write-root path (see the skip above),
+		// so this can never fight an entry this same plan is also adding, and a
+		// revoke against a SID with no matching ACE is a safe no-op.
+		for _, capability := range writeCapabilities {
+			entries = append(entries, WindowsACLEntry{
+				Action:     WindowsACLRevokeCapability,
+				Path:       capability.Root,
+				Capability: denySID,
+				NoInherit:  true,
 			})
 		}
 	}

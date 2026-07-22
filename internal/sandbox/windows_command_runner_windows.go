@@ -100,26 +100,49 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// a point-in-time snapshot; non-inheriting denies do not cover children
 	// created afterward. If coverage cannot be re-established, keep the narrow
 	// SID set rather than widening the write jail.
+	//
+	// KNOWN LIMITATION (TOCTOU): this scan-then-broaden sequence cannot be made
+	// fully atomic at this layer. Another process could create a new
+	// Users/AuthUsers-writable child under a shared root in the gap between
+	// windowsEnsureSharedDescendantCoverage returning clean and the token
+	// actually being created below; that child would carry no compensating
+	// deny, yet the freshly broadened token could still write it. Closing this
+	// completely would need either a filesystem-level guarantee (e.g. a
+	// minifilter or a lock held across the whole window) or re-checking the
+	// exact same live directories the kernel itself would consult during the
+	// access check, which this process cannot do atomically with token
+	// creation from user mode. What IS done: everything unrelated to the scan
+	// result (SID resolution, capability-file I/O) is resolved BEFORE the
+	// scan, specifically so the scan runs as the LAST thing before
+	// createWindowsRestrictedTokenForCapabilitySIDs, keeping the window to the
+	// minimum a few Go statements and one syscall can achieve — not zero. This
+	// is accepted as a narrow, disclosed residual risk consistent with the
+	// rest of this function's documented tradeoffs (Schannel, MSYS2 above):
+	// the realistic window is a hostile local process winning a race measured
+	// in microseconds against a command that was already about to run inside
+	// the write jail, not a passive gap an attacker can wait out.
 	broadenReadSIDs := config.SandboxLevel == WindowsSandboxLevelRestrictedToken && !writeRestricted &&
 		windowsSystemDriveIsOnlyFixedVolume()
-	if broadenReadSIDs {
-		if err := windowsEnsureSharedDescendantCoverage(config); err != nil {
-			fmt.Fprintf(stderr, "%s: shared descendant write coverage incomplete (%v); keeping narrow restricting SIDs\n",
-				WindowsSandboxCommandRunnerName, err)
-			broadenReadSIDs = false
-		}
-	}
 	if broadenReadSIDs {
 		// The shared-directory DenyWrite mitigation names the one stable
 		// read-only capability SID rather than the per-workspace SIDs (see
 		// BuildWindowsACLPlan), so every broadened token must carry it for
-		// those deny ACEs to bind.
+		// those deny ACEs to bind. Resolved BEFORE the coverage scan (rather
+		// than after, as a prior revision did) so this file I/O cannot widen
+		// the TOCTOU window documented above: the scan below is the last thing
+		// that happens before token creation.
 		caps, err := LoadOrCreateWindowsCapabilitySIDs(config.SandboxHome)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 			return 1
 		}
-		tokenSIDs = append(tokenSIDs, caps.ReadOnly)
+		if err := windowsEnsureSharedDescendantCoverage(config); err != nil {
+			fmt.Fprintf(stderr, "%s: shared descendant write coverage incomplete (%v); keeping narrow restricting SIDs\n",
+				WindowsSandboxCommandRunnerName, err)
+			broadenReadSIDs = false
+		} else {
+			tokenSIDs = append(tokenSIDs, caps.ReadOnly)
+		}
 	}
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs, writeRestricted, broadenReadSIDs)
 	if err != nil {

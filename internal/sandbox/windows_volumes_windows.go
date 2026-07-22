@@ -30,10 +30,12 @@ import (
 // so a fixed volume mounted only as a folder is caught the same as one
 // mounted on a drive letter.
 //
-// Fail closed: an enumeration failure, an unresolvable system drive, or any
-// additional fixed volume (by any mount path) all report false, keeping the
-// narrow restricting-SID set (reads of Users-granted system paths stay
-// broken on such hosts, but the write jail holds).
+// Fail closed: an enumeration failure, an unresolvable system drive, any
+// additional fixed volume (by any mount path, including one with no
+// conventional mount point at all), or any non-fixed volume (removable,
+// optical, RAM disk, or otherwise not confirmed harmless) all report false,
+// keeping the narrow restricting-SID set (reads of Users-granted system
+// paths stay broken on such hosts, but the write jail holds).
 func windowsSystemDriveIsOnlyFixedVolume() bool {
 	windowsDir, err := windows.GetSystemWindowsDirectory()
 	if err != nil || len(windowsDir) < 2 {
@@ -68,18 +70,31 @@ func windowsSystemDriveIsOnlyFixedVolume() bool {
 }
 
 // windowsVolumeMountsOnlySystemDrive reports whether volumeName (a
-// "\\?\Volume{GUID}\" path from FindFirstVolume/FindNextVolume) is either not
-// fixed media, not mounted anywhere, or mounted only at the system drive
-// root. Any OTHER mount path — a different drive letter or a folder mount
-// point — makes it a reachable extra fixed volume, regardless of which path
-// form reaches it.
+// "\\?\Volume{GUID}\" path from FindFirstVolume/FindNextVolume) is a fixed
+// volume mounted ONLY at the system drive root. Fail closed for everything
+// else: a removable drive (USB media) and an optical/RAM-disk volume are
+// reachable extra storage exactly like a second fixed volume — needing no
+// network access to reach — so they are no longer assumed harmless just
+// because GetDriveType says DRIVE_FIXED does not apply. A fixed volume with
+// NO conventional mount point (a bare "\\?\Volume{GUID}\" with no drive
+// letter or folder mount) is also reachable directly through that raw volume
+// path, so an empty mount list fails closed too rather than being read as
+// "unreachable." Any OTHER mount path — a different drive letter or a folder
+// mount point — makes it a reachable extra fixed volume, regardless of which
+// path form reaches it.
 func windowsVolumeMountsOnlySystemDrive(volumeName, systemDrive string) (bool, error) {
 	volumeNamePtr, err := windows.UTF16PtrFromString(volumeName)
 	if err != nil {
 		return false, err
 	}
+	// Only a genuine local fixed disk is examined further. Removable media,
+	// optical drives, RAM disks, and any type Windows cannot positively
+	// classify (DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR, ...) all disqualify
+	// broadening outright rather than being assumed not to matter — see
+	// jatmn's review: treating every non-DRIVE_FIXED volume as safe ignored
+	// reachable removable/remote storage.
 	if windows.GetDriveType(volumeNamePtr) != windows.DRIVE_FIXED {
-		return true, nil
+		return false, nil
 	}
 
 	buf := make([]uint16, 1024)
@@ -93,12 +108,7 @@ func windowsVolumeMountsOnlySystemDrive(volumeName, systemDrive string) (bool, e
 		return false, err
 	}
 
-	for _, mountPath := range windowsSplitNulList(buf) {
-		if !windowsMountPathIsOnlySystemDrive(mountPath, systemDrive) {
-			return false, nil
-		}
-	}
-	return true, nil
+	return windowsMountPathsAreOnlySystemDrive(windowsSplitNulList(buf), systemDrive), nil
 }
 
 // windowsSplitNulList splits the double-NUL-terminated UTF-16 string list
