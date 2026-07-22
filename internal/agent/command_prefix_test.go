@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -159,6 +160,37 @@ func TestMatchCommandPrefixCoversSegmentedCommandWithSafeTail(t *testing.T) {
 	}
 }
 
+func TestMatchCommandPrefixRejectsGrantWhenCdEscapesProject(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "grants.json")})
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Store: store})
+	if _, err := engine.GrantCommandPrefixForProject(sandbox.CommandPrefixInput{ToolName: "bash", Prefix: []string{"go", "test"}}); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	// `cd` into another project must not let the project-scoped `go test` grant
+	// authorize an unsandboxed run outside the granted project.
+	command := "cd " + outside + " && go test ./..."
+	if grant, ok, _ := matchCommandPrefix("bash", map[string]any{"command": command}, Options{Sandbox: engine}); ok {
+		t.Fatalf("expected no match for a cd that escapes the project, got %#v", grant)
+	}
+
+	// A `cd` that stays inside the project still honors the grant.
+	inside := "cd sub && go test ./..."
+	if _, ok, _ := matchCommandPrefix("bash", map[string]any{"command": inside}, Options{Sandbox: engine}); !ok {
+		t.Fatal("expected a within-project cd to still match the grant")
+	}
+
+	// A non-static cd target (home) cannot be proven in-project, so it is refused.
+	if _, ok, _ := matchCommandPrefix("bash", map[string]any{"command": "cd && go test ./..."}, Options{Sandbox: engine}); ok {
+		t.Fatal("expected a bare `cd` (home) to refuse the grant")
+	}
+}
+
 func TestKnownSafeCommandSegmentRejectsMsysProneOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows-only known-safe MSYS guard")
@@ -173,6 +205,32 @@ func TestKnownSafeCommandSegmentRejectsMsysProneOnWindows(t *testing.T) {
 	}
 	if !tools.MsysProneCommandName("head") {
 		t.Fatal("expected head to be MSYS-prone")
+	}
+}
+
+func TestPersistCommandPrefixGrantScopedOrSessionFallsBackToSession(t *testing.T) {
+	// A store with no workspace root cannot scope a project grant, so the project
+	// path must fall back to a session grant instead of recording nothing — a later
+	// matching command then reuses the approval rather than prompting again.
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "grants.json")})
+	if err != nil {
+		t.Fatalf("new grant store: %v", err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{Store: store})
+	options := Options{Sandbox: engine}
+
+	prefix := persistCommandPrefixGrantScopedOrSession(PermissionDecisionAllowPrefixProject, "bash", []string{"yarn", "test:unit"}, "reason", options)
+	if !equalStringSlices(prefix, []string{"yarn", "test:unit"}) {
+		t.Fatalf("fallback prefix = %#v, want [yarn test:unit]", prefix)
+	}
+	if _, ok := engine.LookupCommandPrefixForSession("bash", []string{"yarn", "test:unit"}); !ok {
+		t.Fatal("expected session grant recorded after project scope failed")
+	}
+	// Nothing was persisted at project/global scope.
+	if grants, err := store.ListCommandPrefixes(); err != nil {
+		t.Fatalf("list command prefixes: %v", err)
+	} else if len(grants) != 0 {
+		t.Fatalf("expected no persisted grant, got %#v", grants)
 	}
 }
 
@@ -192,5 +250,89 @@ func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T)
 	})
 	if got != nil {
 		t.Fatalf("unsafe requested launcher prefix should be rejected, got %#v", got)
+	}
+}
+
+func TestCommandPrefixLadderOffersBreadthChoices(t *testing.T) {
+	// test:unit has a namespace separator, so the ladder offers the intra-token
+	// wildcard alongside the exact prefix. The one-token rung ({"yarn"}) is never
+	// offered: a bare launcher grant would approve every later yarn subcommand.
+	got := commandPrefixLadder("bash", map[string]any{"command": "yarn test:unit"})
+	want := [][]string{
+		{"yarn", "test:*"},
+		{"yarn", "test:unit"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ladder = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if !equalStringSlices(got[index], want[index]) {
+			t.Fatalf("ladder[%d] = %#v, want %#v", index, got[index], want[index])
+		}
+	}
+}
+
+func TestCommandPrefixLadderExcludesOneTokenRung(t *testing.T) {
+	// A three-token command still offers the two-token shorter breadth, but never
+	// the one-token launcher rung ({"docker"}).
+	got := commandPrefixLadder("bash", map[string]any{"command": "docker compose up"})
+	want := [][]string{
+		{"docker", "compose"},
+		{"docker", "compose", "up"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ladder = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if !equalStringSlices(got[index], want[index]) {
+			t.Fatalf("ladder[%d] = %#v, want %#v", index, got[index], want[index])
+		}
+	}
+}
+
+func TestCommandPrefixLadderNilForSingleTokenCommand(t *testing.T) {
+	// A single-token prefix has no broader/narrower breadth to choose between.
+	if got := commandPrefixLadder("bash", map[string]any{"command": "go"}); got != nil {
+		t.Fatalf("expected no ladder for single-token command, got %#v", got)
+	}
+}
+
+func TestIntraTokenWildcardPrefix(t *testing.T) {
+	got, ok := intraTokenWildcardPrefix([]string{"yarn", "test:unit"})
+	if !ok || !equalStringSlices(got, []string{"yarn", "test:*"}) {
+		t.Fatalf("wildcard = %#v ok=%v, want [yarn test:*]", got, ok)
+	}
+	// A nested name keeps its deepest namespace segment (last separator wins).
+	if got, ok := intraTokenWildcardPrefix([]string{"yarn", "test:unit:fast"}); !ok || !equalStringSlices(got, []string{"yarn", "test:unit:*"}) {
+		t.Fatalf("nested wildcard = %#v ok=%v, want [yarn test:unit:*]", got, ok)
+	}
+	if _, ok := intraTokenWildcardPrefix([]string{"yarn", "test"}); ok {
+		t.Fatal("token without a separator must not produce a wildcard")
+	}
+	if _, ok := intraTokenWildcardPrefix([]string{"yarn"}); ok {
+		t.Fatal("a lone launcher token must never be wildcarded")
+	}
+}
+
+func TestGrantPrefixForDecisionHonorsOfferedChoice(t *testing.T) {
+	request := PermissionRequest{
+		CommandPrefix:        []string{"yarn", "test:unit"},
+		CommandPrefixOptions: [][]string{{"yarn", "test:*"}, {"yarn", "test:unit"}},
+	}
+	// The intra-token wildcard breadth is honored.
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn", "test:*"}}); !equalStringSlices(got, []string{"yarn", "test:*"}) {
+		t.Fatalf("expected wildcard breadth honored, got %#v", got)
+	}
+	// A one-token breadth is never offered, so it falls back to the default.
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn"}}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+		t.Fatalf("expected default prefix on unoffered one-token choice, got %#v", got)
+	}
+	// An empty choice falls back to the request default.
+	if got := grantPrefixForDecision(request, PermissionDecision{}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+		t.Fatalf("expected default prefix on empty choice, got %#v", got)
+	}
+	// A choice that was never offered falls back to the default (no widening).
+	if got := grantPrefixForDecision(request, PermissionDecision{CommandPrefix: []string{"yarn", "install"}}); !equalStringSlices(got, []string{"yarn", "test:unit"}) {
+		t.Fatalf("expected default prefix on unoffered choice, got %#v", got)
 	}
 }

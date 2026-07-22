@@ -109,11 +109,38 @@ func (engine *Engine) GrantCommandPrefix(input CommandPrefixInput) (CommandPrefi
 	return engine.store.GrantCommandPrefix(input)
 }
 
+// GrantCommandPrefixForProject persists a prefix grant scoped to this engine's
+// configured workspace root, so it only matches inside the current project. It
+// returns an error when no workspace root is configured.
+func (engine *Engine) GrantCommandPrefixForProject(input CommandPrefixInput) (CommandPrefixGrant, error) {
+	if engine == nil || engine.store == nil {
+		return CommandPrefixGrant{}, errors.New("sandbox grant store is not configured")
+	}
+	// A project-scoped grant must be tied to a real workspace root. With no root
+	// configured, persisting an empty Project would silently widen the grant to
+	// global, so refuse instead — the caller keeps the safer session grant.
+	if strings.TrimSpace(engine.workspaceRoot) == "" {
+		return CommandPrefixGrant{}, errors.New("no workspace root for a project-scoped command prefix grant")
+	}
+	input.Project = engine.workspaceRoot
+	return engine.store.GrantCommandPrefix(input)
+}
+
+// WorkspaceRoot returns the engine's confinement root, or "" when unset. Callers
+// use it to bind a project-scoped grant to the command's effective directory, so a
+// grant saved for one project cannot authorize unsandboxed execution in another.
+func (engine *Engine) WorkspaceRoot() string {
+	if engine == nil {
+		return ""
+	}
+	return engine.workspaceRoot
+}
+
 func (engine *Engine) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool) {
 	if engine == nil || engine.store == nil || len(command) == 0 {
 		return CommandPrefixGrant{}, false
 	}
-	grant, matched, err := engine.store.LookupCommandPrefix(toolName, command)
+	grant, matched, err := engine.store.LookupCommandPrefix(toolName, command, engine.workspaceRoot)
 	if err != nil {
 		return CommandPrefixGrant{}, false
 	}

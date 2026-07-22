@@ -143,9 +143,49 @@ func TestPermissionOptionsExposePersistentCommandPrefixApproval(t *testing.T) {
 	}
 	card, _ := renderFocusedPermissionPrompt(request, 2, false, "", 100)
 	got := plainRender(t, card)
-	for _, want := range []string{"always allow `git status`", "[y]"} {
+	for _, want := range []string{"allow `git status` globally", "[y]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestPermissionPromptBreadthRowsAreDistinctAndOmitEmptyHotkey(t *testing.T) {
+	// A multi-breadth prefix grant expands into one row per breadth; each row must
+	// label its OWN breadth (not the request's full default on every line) and must
+	// not render an empty "[]" for the breadths that carry no hotkey.
+	request := agent.PermissionRequest{
+		ToolName:      "bash",
+		SideEffect:    string(tools.SideEffectWrite),
+		CommandPrefix: []string{"git", "push", "origin", "feat/permission-modes-improvements"},
+		CommandPrefixOptions: [][]string{
+			{"git", "push"},
+			{"git", "push", "origin"},
+			{"git", "push", "origin", "feat/permission-modes-improvements"},
+		},
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowPrefix,
+			agent.PermissionDecisionAllowPrefixProject,
+			agent.PermissionDecisionAlwaysAllowPrefix,
+			agent.PermissionDecisionDeny,
+		},
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 0, false, "", 140)
+	got := plainRender(t, card)
+
+	if strings.Contains(got, "[]") {
+		t.Fatalf("permission card rendered an empty hotkey bracket:\n%s", got)
+	}
+	for _, want := range []string{
+		"allow `git push` in this session",
+		"allow `git push origin` in this session",
+		"allow `git push origin feat/permission-modes-improvements` in this session",
+		"allow `git push` in this project",
+		"allow `git push` globally",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card missing distinct breadth label %q:\n%s", want, got)
 		}
 	}
 }
@@ -353,7 +393,7 @@ func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
 	}
 	lines := strings.Split(plainRender(t, card), "\n")
 	future := offsets[2]
-	if future < 0 || future >= len(lines) || !strings.Contains(lines[future], "always") {
+	if future < 0 || future >= len(lines) || !strings.Contains(lines[future], "future") {
 		t.Fatalf("offset[2] (%d) should point at the future line; lines=%#v", future, lines)
 	}
 	if !strings.Contains(lines[future], "▸") {
@@ -370,7 +410,7 @@ func TestPermissionRenderShowsNetworkTargetAndHostScopedAlways(t *testing.T) {
 	}
 	card, _ := renderFocusedPermissionPrompt(request, 1, false, "", 72)
 	got := plainRender(t, card)
-	for _, want := range []string{"target: example.com", "allow this host for this conversation", "[s]", "allow this host in the future", "[y]"} {
+	for _, want := range []string{"target: example.com", "allow this host for this conversation", "[s]", "allow this host in the future", "[f]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
 		}
@@ -612,5 +652,68 @@ func TestPermissionFeedbackRendersNoClickableOptionsWhileTyping(t *testing.T) {
 	_, typingOffsets := renderFocusedPermissionPrompt(request, 0, true, "some feedback", 80)
 	if typingOffsets != nil {
 		t.Fatalf("feedback mode must register no clickable option offsets, got %#v", typingOffsets)
+	}
+}
+
+func TestPermissionOptionsExpandPrefixBreadths(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName: "bash",
+		Action:   agent.PermissionActionPrompt,
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowPrefix,
+			agent.PermissionDecisionDeny,
+		},
+		CommandPrefix:        []string{"npm", "run", "test:unit"},
+		CommandPrefixOptions: [][]string{{"npm"}, {"npm", "run"}, {"npm", "run", "test:*"}, {"npm", "run", "test:unit"}},
+	}
+	prefixOptions := 0
+	hotkeyed := 0
+	for _, option := range permissionOptions(request) {
+		if option.choice != agent.PermissionDecisionAllowPrefix {
+			continue
+		}
+		prefixOptions++
+		if len(option.commandPrefix) == 0 {
+			t.Fatalf("expanded prefix option missing commandPrefix: %#v", option)
+		}
+		if option.hotkey != "" {
+			hotkeyed++
+			if !equalStringPrefix(option.commandPrefix, request.CommandPrefix) {
+				t.Fatalf("hotkey must sit on the default breadth, got %#v", option.commandPrefix)
+			}
+		}
+	}
+	if prefixOptions != 4 {
+		t.Fatalf("expected one option per breadth (4), got %d", prefixOptions)
+	}
+	if hotkeyed != 1 {
+		t.Fatalf("expected exactly one hotkeyed prefix option, got %d", hotkeyed)
+	}
+}
+
+func TestResolvePermissionSendsChosenBreadth(t *testing.T) {
+	var got agent.PermissionDecision
+	request := agent.PermissionRequest{
+		ToolName:             "bash",
+		Action:               agent.PermissionActionPrompt,
+		AvailableDecisions:   []agent.PermissionDecisionAction{agent.PermissionDecisionAllowPrefix, agent.PermissionDecisionDeny},
+		CommandPrefix:        []string{"npm", "run", "test:unit"},
+		CommandPrefixOptions: [][]string{{"npm"}, {"npm", "run"}, {"npm", "run", "test:unit"}},
+	}
+	m := pendingPermissionModelWithRequest(t, request, func(decision agent.PermissionDecision) { got = decision })
+
+	index := -1
+	for position, option := range permissionOptions(request) {
+		if option.choice == agent.PermissionDecisionAllowPrefix && len(option.commandPrefix) == 2 {
+			index = position
+		}
+	}
+	if index < 0 {
+		t.Fatal("expected an npm run breadth option")
+	}
+	m.resolvePermissionAt(index)
+	if !equalStringPrefix(got.CommandPrefix, []string{"npm", "run"}) {
+		t.Fatalf("decision prefix = %#v, want [npm run]", got.CommandPrefix)
 	}
 }

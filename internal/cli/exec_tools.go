@@ -81,15 +81,15 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 	switch strings.ToLower(strings.TrimSpace(options.autonomy)) {
 	case "", "low", "medium":
 		mode = agent.PermissionModeAuto
-	case "member":
-		// Internal autonomy for headless swarm/specialist members: Auto plus
-		// advertised in-workspace mutators (see PermissionModeMemberAuto). The
-		// swarm launcher sets this; it is not part of the public low|medium|high set.
-		mode = agent.PermissionModeMemberAuto
+	case "workspace", "workspace-auto", "member", "member-auto":
+		// Workspace autonomy: Auto plus advertised in-workspace mutators (see
+		// PermissionModeWorkspaceAuto). The legacy member aliases are kept for
+		// headless swarm/specialist launchers.
+		mode = agent.PermissionModeWorkspaceAuto
 	case "high":
 		mode = agent.PermissionModeUnsafe
 	default:
-		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", options.autonomy)}
+		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, high, workspace, workspace-auto, member, or member-auto.", options.autonomy)}
 	}
 	if options.skipPermissionsUnsafe {
 		return agent.PermissionModeUnsafe, nil

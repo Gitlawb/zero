@@ -418,7 +418,7 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, grantStore, runtimeMessageCh)
 
-	next := submitAndDrivePermissionRun(t, m, "write first", "y", runtimeMessageCh, 4)
+	next := submitAndDrivePermissionRun(t, m, "write first", "f", runtimeMessageCh, 4)
 
 	// The always-decision persists a grant scoped to exactly the file written.
 	lookup, err := grantStore.Lookup("write_file", filepath.Join(root, "notes.txt"))

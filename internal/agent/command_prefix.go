@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -49,6 +50,73 @@ func proposedCommandPrefix(toolName string, args map[string]any) []string {
 	return append([]string(nil), segments[0]...)
 }
 
+// commandPrefixLadder returns the breadth choices offered for a shell command's
+// prefix grant, ordered broadest → most specific. The most specific entry equals
+// proposedCommandPrefix (today's default). Broader entries are shorter token
+// prefixes of at least two tokens; a lone launcher/command token (e.g. "yarn")
+// is never offered because a one-token grant is too broad — it would approve every
+// later subcommand of that program (e.g. "yarn add", "yarn publish", arbitrary
+// scripts), exactly the package-manager class that must stay non-grantable. When
+// the final token carries a namespace separator (e.g. "test:unit") an intra-token
+// wildcard level ("test:*") is inserted just before the exact one. Returns nil when
+// there is nothing to choose between (zero or one safe level), so callers keep the
+// single-prefix behavior.
+func commandPrefixLadder(toolName string, args map[string]any) [][]string {
+	base := proposedCommandPrefix(toolName, args)
+	if len(base) == 0 {
+		return nil
+	}
+	ladder := make([][]string, 0, len(base)+1)
+	seen := map[string]bool{}
+	add := func(candidate []string) {
+		if len(candidate) == 0 || !sandbox.ValidCommandPrefix(candidate) {
+			return
+		}
+		key := strings.Join(candidate, "\x00")
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		ladder = append(ladder, append([]string(nil), candidate...))
+	}
+	// Start at two tokens: a one-token prefix (base[:1]) is a bare launcher/command
+	// name, and granting it would approve every subcommand of that program, so it is
+	// never offered as a reusable breadth.
+	for length := 2; length < len(base); length++ {
+		add(base[:length])
+	}
+	if wildcard, ok := intraTokenWildcardPrefix(base); ok {
+		add(wildcard)
+	}
+	add(base)
+	if len(ladder) <= 1 {
+		return nil
+	}
+	return ladder
+}
+
+// intraTokenWildcardPrefix turns a base prefix whose final token has a namespace
+// separator into a trailing-wildcard variant, e.g. ["npm","run","test:unit"] ->
+// ["npm","run","test:*"]. It never wildcards a lone launcher token (a single-token
+// base). ok is false when the final token has no usable separator.
+func intraTokenWildcardPrefix(base []string) ([]string, bool) {
+	if len(base) < 2 {
+		return nil, false
+	}
+	last := base[len(base)-1]
+	// Use the LAST separator so a nested name keeps its deepest namespace segment
+	// (e.g. "test:unit:fast" -> "test:unit:*", not the broader "test:*").
+	index := strings.LastIndexAny(last, ":-/.@")
+	if index <= 0 || index >= len(last)-1 {
+		// No separator, a leading separator, or a trailing separator — nothing
+		// meaningful to widen into a namespace wildcard.
+		return nil, false
+	}
+	wildcard := append([]string(nil), base[:len(base)-1]...)
+	wildcard = append(wildcard, last[:index+1]+"*")
+	return wildcard, true
+}
+
 // otherSegmentsKnownSafe reports whether every segment other than the one at
 // skip is known-safe on its own.
 func otherSegmentsKnownSafe(segments [][]string, skip int) bool {
@@ -61,6 +129,35 @@ func otherSegmentsKnownSafe(segments [][]string, skip int) bool {
 		}
 	}
 	return true
+}
+
+// grantPrefixForDecision resolves which command prefix to grant. It honors the
+// approver's breadth choice (decision.CommandPrefix) only when that choice is a
+// valid prefix AND was one of the options the request offered; otherwise it falls
+// back to the request's default prefix. Because the offered options were derived
+// from this exact command, an offered choice already matches it — so a stale or
+// overbroad selection can never widen the grant beyond what was presented.
+func grantPrefixForDecision(request PermissionRequest, decision PermissionDecision) []string {
+	fallback := append([]string(nil), request.CommandPrefix...)
+	if len(decision.CommandPrefix) == 0 {
+		return fallback
+	}
+	if !sandbox.ValidCommandPrefix(decision.CommandPrefix) {
+		return fallback
+	}
+	if !commandPrefixOffered(request.CommandPrefixOptions, decision.CommandPrefix) {
+		return fallback
+	}
+	return append([]string(nil), decision.CommandPrefix...)
+}
+
+func commandPrefixOffered(options [][]string, prefix []string) bool {
+	for _, option := range options {
+		if equalStringSlices(option, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchCommandPrefix(toolName string, args map[string]any, options Options) (sandbox.CommandPrefixGrant, bool, bool) {
@@ -76,6 +173,16 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	}
 	segments, ok := safeShellCommandSegments(command)
 	if !ok {
+		return sandbox.CommandPrefixGrant{}, false, false
+	}
+	// A prefix grant that matches lets the command run unsandboxed (see
+	// shellExecutionArgsForApproval). `cd` is a known-safe segment, so a composite
+	// like `cd /other && go test` would otherwise honor a grant saved for THIS
+	// project yet execute in another directory outside it. Bind the grant to the
+	// effective directory: if a `cd` moves execution outside the workspace root (or
+	// to a target we cannot prove stays inside it), refuse the match so the command
+	// falls back to the normal sandboxed prompt instead of an out-of-scope bypass.
+	if !commandDirStaysWithinProject(segments, options.Sandbox.WorkspaceRoot()) {
 		return sandbox.CommandPrefixGrant{}, false, false
 	}
 	var matched sandbox.CommandPrefixGrant
@@ -108,6 +215,62 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	return sandbox.CommandPrefixGrant{}, false, false
 }
 
+// commandDirStaysWithinProject reports whether a composite command's `cd`
+// segments keep execution inside root. It starts at root and follows each `cd`;
+// a target that resolves outside root, or one that cannot be resolved statically
+// (no argument, `-`, `~`/home, an environment variable, a glob, or extra args),
+// is treated as leaving the project so the caller refuses the unsandboxed grant.
+// With no root there is no project to bind to, so any `cd` is rejected.
+func commandDirStaysWithinProject(segments [][]string, root string) bool {
+	root = strings.TrimSpace(root)
+	effective := root
+	for _, tokens := range segments {
+		if len(tokens) == 0 || commandName(tokens[0]) != "cd" {
+			continue
+		}
+		if root == "" {
+			return false
+		}
+		target, ok := resolveCdTarget(tokens[1:], effective)
+		if !ok || !pathWithinRoot(target, root) {
+			return false
+		}
+		effective = target
+	}
+	return true
+}
+
+// resolveCdTarget resolves a `cd` argument list to an absolute directory relative
+// to cwd. ok is false for forms whose destination cannot be known statically.
+func resolveCdTarget(args []string, cwd string) (string, bool) {
+	if len(args) != 1 {
+		return "", false // bare `cd` (home) or too many args
+	}
+	arg := args[0]
+	if arg == "" || arg == "-" || arg == "~" || strings.HasPrefix(arg, "~") {
+		return "", false // previous dir or home-relative: not statically knowable
+	}
+	if strings.ContainsAny(arg, "$*?[") {
+		return "", false // variable expansion or glob
+	}
+	if filepath.IsAbs(arg) {
+		return filepath.Clean(arg), true
+	}
+	return filepath.Clean(filepath.Join(cwd, arg)), true
+}
+
+// pathWithinRoot reports whether target is root or a descendant of it.
+func pathWithinRoot(target, root string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func shellExecutionArgsForApproval(toolName string, args map[string]any, action PermissionDecisionAction, options Options) map[string]any {
 	if !isShellCommandTool(toolName) || !shellPrefixApprovalBypassesSandbox(action) {
 		return args
@@ -127,7 +290,18 @@ func shellExecutionArgsForApproval(toolName string, args map[string]any, action 
 }
 
 func shellPrefixApprovalBypassesSandbox(action PermissionDecisionAction) bool {
-	return action == PermissionDecisionAllowPrefix || action == PermissionDecisionAlwaysAllowPrefix
+	return isCommandPrefixDecision(action)
+}
+
+// isCommandPrefixDecision reports whether action is one of the command-prefix
+// grant tiers (session, project, or global).
+func isCommandPrefixDecision(action PermissionDecisionAction) bool {
+	switch action {
+	case PermissionDecisionAllowPrefix, PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix:
+		return true
+	default:
+		return false
+	}
 }
 
 func shellCommandRequiresEscalated(args map[string]any) bool {

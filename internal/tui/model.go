@@ -131,8 +131,15 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
-	selfCorrectTests            bool
-	reasoningEffort             modelregistry.ReasoningEffort
+	autoClassifierConfirmActive bool
+	// autoClassifierAcknowledged records that the user has confirmed the
+	// auto-classifier warning once this process. After that, cycling to
+	// auto-classifier enables it directly without re-prompting (the warning is
+	// about a mode, not a session, so one acknowledgement covers the process —
+	// including cycles after a /resume). Resets when zero is closed.
+	autoClassifierAcknowledged bool
+	selfCorrectTests           bool
+	reasoningEffort            modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -666,14 +673,15 @@ type prWatcherStartedMsg struct {
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
-	permissionDecisionAllow             permissionDecision = agent.PermissionDecisionAllow
-	permissionDecisionAllowStrict       permissionDecision = agent.PermissionDecisionAllowStrict
-	permissionDecisionAllowForSession   permissionDecision = agent.PermissionDecisionAllowForSession
-	permissionDecisionAllowPrefix       permissionDecision = agent.PermissionDecisionAllowPrefix
-	permissionDecisionAlwaysAllowPrefix permissionDecision = agent.PermissionDecisionAlwaysAllowPrefix
-	permissionDecisionDeny              permissionDecision = agent.PermissionDecisionDeny
-	permissionDecisionAlwaysAllow       permissionDecision = agent.PermissionDecisionAlwaysAllow
-	permissionDecisionCancel            permissionDecision = agent.PermissionDecisionCancel
+	permissionDecisionAllow              permissionDecision = agent.PermissionDecisionAllow
+	permissionDecisionAllowStrict        permissionDecision = agent.PermissionDecisionAllowStrict
+	permissionDecisionAllowForSession    permissionDecision = agent.PermissionDecisionAllowForSession
+	permissionDecisionAllowPrefix        permissionDecision = agent.PermissionDecisionAllowPrefix
+	permissionDecisionAllowPrefixProject permissionDecision = agent.PermissionDecisionAllowPrefixProject
+	permissionDecisionAlwaysAllowPrefix  permissionDecision = agent.PermissionDecisionAlwaysAllowPrefix
+	permissionDecisionDeny               permissionDecision = agent.PermissionDecisionDeny
+	permissionDecisionAlwaysAllow        permissionDecision = agent.PermissionDecisionAlwaysAllow
+	permissionDecisionCancel             permissionDecision = agent.PermissionDecisionCancel
 )
 
 type permissionRequestMsg struct {
@@ -1024,7 +1032,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil
+		m.sttKeyPrompt == nil && !m.autoClassifierConfirmActive
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1443,6 +1451,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcriptDetailed = false
 				return m, nil
 			}
+			if m.autoClassifierConfirmActive {
+				// Esc cancels the auto-classifier confirmation; mode is unchanged.
+				m.autoClassifierConfirmActive = false
+				return m, nil
+			}
 			// Esc on an ask-user prompt: from the "type my own" free-text it steps
 			// back to the selector for that question; otherwise it cancels the
 			// questionnaire (not the run), delivering whatever answers were collected
@@ -1530,6 +1543,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.autoClassifierConfirmActive {
+				// Enter confirms enabling auto-classifier mode.
+				m = m.confirmAutoClassifierMode()
+				return m, nil
+			}
 			if m.pendingPermission != nil {
 				// Enter confirms the highlighted option (default: allow once); the
 				// a/y/d hotkeys and a click still resolve directly.
@@ -1609,13 +1627,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.moveAskUserTab(-1), nil
 			}
-			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
-			// is intentionally not reachable by a casual keypress — see
+			// shift+tab toggles permission modes from safest to more autonomous
+			// (Unsafe is intentionally not reachable by a casual keypress — see
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
-				m.permissionMode = nextPermissionMode(m.permissionMode)
+				next := nextPermissionMode(m.permissionMode)
+				// Auto-classifier hands permission decisions to an LLM, so the FIRST
+				// time it is enabled this process it gets an explicit confirmation modal
+				// instead of switching on a single keypress (Enter enables it, Esc
+				// cancels — see the Enter/Esc handlers above). Once acknowledged, later
+				// cycles enable it directly: the warning is about the mode, not the
+				// session, so it must not re-prompt after a /resume.
+				if next == agent.PermissionModeAutoClassifier && !m.autoClassifierAcknowledged {
+					m.autoClassifierConfirmActive = true
+					return m, nil
+				}
+				m.permissionMode = next
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -1874,6 +1903,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil // picker mode: non-navigation keys do nothing
+		}
+		if m.autoClassifierConfirmActive {
+			// Modal over the input: y confirms, n cancels, every other key is
+			// swallowed. Enter/Esc are already handled in their own cases above.
+			switch keyText(msg) {
+			case "y", "Y":
+				m = m.confirmAutoClassifierMode()
+			case "n", "N":
+				m.autoClassifierConfirmActive = false
+			}
+			return m, nil
 		}
 		if m.pendingSpecReview != nil {
 			m.burstCount = 0
@@ -2713,6 +2753,9 @@ func (m model) transcriptView() string {
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	sttKeyOverlay := m.sttKeyPromptOverlay(width)
+	// The auto-classifier confirmation is intentionally NOT in this scrim-overlay
+	// set: it renders in the footer (live-tail region) instead, which repaints
+	// reliably across terminals even over a non-empty (resumed) transcript.
 	viewportOverlay := ""
 	switch {
 	case sttKeyOverlay != "":
@@ -2826,6 +2869,18 @@ func (m model) footerView(width int) string {
 	// input from echoing in two places once "tell Zero what to do differently"
 	// opens the on-card feedback field.
 	if m.pendingPermission != nil {
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
+	// The auto-classifier confirmation renders here in the live-tail region (like
+	// the ask-user questionnaire) rather than as a floating overlay composited into
+	// the scrolled transcript viewport. The overlay-over-transcript path renders
+	// unreliably across terminal multiplexers when the transcript is non-empty (a
+	// resumed session): the modal could stay armed but unpainted until an unrelated
+	// re-render. The footer always repaints, so the modal shows immediately.
+	if m.autoClassifierConfirmActive {
+		footer.WriteString(m.autoClassifierConfirmOverlay(width))
+		footer.WriteString("\n")
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
@@ -3987,27 +4042,38 @@ func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := strings.ToLower(msg.String())
 	for _, option := range permissionOptions(m.pendingPermission.request) {
 		if option.hotkey == key {
-			return m.choosePermissionOption(option.choice)
+			return m.choosePermissionOption(option)
 		}
 	}
 	return m, nil
 }
 
+// confirmAutoClassifierMode enables auto-classifier mode and clears the pending
+// confirmation. Shared by the Enter and y/Y handlers so the state change lives in
+// one place.
+func (m model) confirmAutoClassifierMode() model {
+	m.autoClassifierConfirmActive = false
+	// Remember the acknowledgement for the rest of the process so a later cycle to
+	// auto-classifier (e.g. after switching modes, or after a /resume) enables it
+	// without re-showing the warning.
+	m.autoClassifierAcknowledged = true
+	m.permissionMode = agent.PermissionModeAutoClassifier
+	return m
+}
+
 func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
-	return m.resolvePermissionWithReason(decision, permissionDecisionReason(decision))
+	return m.resolvePermissionOption(permissionOption{choice: decision})
 }
 
 // resolvePermissionWithReason resolves the pending prompt with an explicit reason
-// string. It backs both the fixed-label choices (reason = permissionDecisionReason)
-// and the free-text "tell Zero what to do differently" path, where the reason is
-// the user's typed instruction and the action is Deny so the agent surfaces it as
-// the tool result and keeps going.
+// string. It backs the free-text "tell Zero what to do differently" path, where
+// the reason is the user's typed instruction and the action is Deny so the agent
+// surfaces it as the tool result and keeps going.
 func (m model) resolvePermissionWithReason(decision permissionDecision, reason string) (tea.Model, tea.Cmd) {
 	pending := m.pendingPermission
 	if pending == nil {
 		return m, nil
 	}
-
 	if pending.decide != nil {
 		pending.decide(agent.PermissionDecision{
 			Action: decision,
@@ -4016,6 +4082,42 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	}
 	m.pendingPermission = nil
 	return m, nil
+}
+
+// resolvePermissionOption resolves the prompt with a chosen option, carrying the
+// option's breadth (commandPrefix) when it expands a prefix grant so the loop
+// grants exactly the breadth the approver picked.
+func (m model) resolvePermissionOption(option permissionOption) (tea.Model, tea.Cmd) {
+	pending := m.pendingPermission
+	if pending == nil {
+		return m, nil
+	}
+	if pending.decide != nil {
+		decision := agent.PermissionDecision{
+			Action: option.choice,
+			Reason: permissionDecisionReason(option.choice),
+		}
+		if len(option.commandPrefix) > 0 {
+			decision.CommandPrefix = append([]string(nil), option.commandPrefix...)
+		}
+		pending.decide(decision)
+	}
+	m.pendingPermission = nil
+	return m, nil
+}
+
+// resolvePermissionAt resolves the permission option at the given index (used by
+// clicks, which address options positionally so expanded prefix breadths that
+// share a decision action stay distinct).
+func (m model) resolvePermissionAt(index int) (tea.Model, tea.Cmd) {
+	if m.pendingPermission == nil {
+		return m, nil
+	}
+	options := permissionOptions(m.pendingPermission.request)
+	if index < 0 || index >= len(options) {
+		return m, nil
+	}
+	return m.resolvePermissionOption(options[index])
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4028,8 +4130,10 @@ func permissionDecisionReason(decision permissionDecision) string {
 		return "approved for this session in TUI"
 	case permissionDecisionAllowPrefix:
 		return "approved command prefix for this session in TUI"
+	case permissionDecisionAllowPrefixProject:
+		return "persistently approved command prefix (project) in TUI"
 	case permissionDecisionAlwaysAllowPrefix:
-		return "persistently approved command prefix in TUI"
+		return "persistently approved command prefix (global) in TUI"
 	case permissionDecisionAlwaysAllow:
 		return "persistently approved in TUI"
 	case permissionDecisionCancel:

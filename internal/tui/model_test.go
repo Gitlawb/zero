@@ -397,8 +397,9 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 	text := transcriptText(next.transcript)
 	for _, want := range []string{
 		"Permissions",
-		"ask permissions",
-		"mode  ask",
+		"ask every time permissions",
+		"mode     ask",
+		"label    Ask every time",
 		"Grants",
 		"bash [allow]",
 		"write_file [deny]",
@@ -1600,7 +1601,7 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 		t.Fatalf("expected permission row to preserve scope %q, got %#v", request.Scope, row)
 	}
 	view := plainRender(t, next.View())
-	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[y]", "continue without running it", "[d]", "scope: src/main.go", "Creates or overwrites files."} {
+	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[f]", "continue without running it", "[d]", "scope: src/main.go", "Creates or overwrites files."} {
 		assertContains(t, view, want)
 	}
 	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
@@ -1617,7 +1618,7 @@ func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
 		{name: "allow", key: "a", want: permissionDecisionAllow},
 		{name: "deny", key: "d", want: permissionDecisionDeny},
 		{name: "session", key: "s", want: permissionDecisionAllowForSession},
-		{name: "always", key: "y", want: permissionDecisionAlwaysAllow},
+		{name: "always", key: "f", want: permissionDecisionAlwaysAllow},
 	}
 
 	for _, tc := range cases {
@@ -1852,29 +1853,180 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
 	m.width = 96
 
-	// shift+tab toggles Auto<->Ask only; Unsafe is intentionally NOT reachable by
-	// a casual keypress (it disables permission prompts).
-	for _, want := range []agent.PermissionMode{
-		agent.PermissionModeAsk,
-		agent.PermissionModeAuto,
-	} {
+	shiftTab := func(m model) model {
 		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
-		m = updated.(model)
 		if cmd != nil {
 			t.Fatalf("expected shift+tab to cycle mode synchronously, got command")
 		}
-		if m.permissionMode != want {
-			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
-		}
-		if m.permissionMode == agent.PermissionModeUnsafe {
-			t.Fatalf("shift+tab must never land on Unsafe")
-		}
+		return updated.(model)
+	}
+
+	// Auto -> WorkspaceAuto.
+	m = shiftTab(m)
+	if m.permissionMode != agent.PermissionModeWorkspaceAuto {
+		t.Fatalf("expected workspace-auto after first shift+tab, got %q", m.permissionMode)
+	}
+
+	// WorkspaceAuto -> auto-classifier arms a confirmation modal; the mode does
+	// not change until the user confirms.
+	m = shiftTab(m)
+	if m.permissionMode != agent.PermissionModeWorkspaceAuto {
+		t.Fatalf("expected mode unchanged while confirmation pending, got %q", m.permissionMode)
+	}
+	if !m.autoClassifierConfirmActive {
+		t.Fatal("expected auto-classifier confirmation to be armed")
+	}
+
+	// Shift+tab while the modal is up is swallowed (the modal takes precedence).
+	m = shiftTab(m)
+	if m.permissionMode != agent.PermissionModeWorkspaceAuto || !m.autoClassifierConfirmActive {
+		t.Fatalf("expected confirmation still pending, got mode %q active %v", m.permissionMode, m.autoClassifierConfirmActive)
+	}
+
+	// Enter confirms -> AutoClassifier.
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.permissionMode != agent.PermissionModeAutoClassifier || m.autoClassifierConfirmActive {
+		t.Fatalf("expected auto-classifier enabled after Enter, got mode %q active %v", m.permissionMode, m.autoClassifierConfirmActive)
+	}
+
+	// AutoClassifier -> Ask.
+	m = shiftTab(m)
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected ask after cycling past auto-classifier, got %q", m.permissionMode)
 	}
 
 	// The rendered status label tracks the cycled mode.
 	label, _ := m.modeLabel()
-	if label != "auto-approve" {
+	if label != agent.PermissionModeSummary(agent.PermissionModeAsk) {
 		t.Fatalf("expected mode label to track cycled mode, got %q", label)
+	}
+}
+
+func TestAutoClassifierConfirmationCancels(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeWorkspaceAuto})
+	m.width = 96
+
+	// Shift+tab from workspace-auto arms the confirmation.
+	updated, _ := m.Update(testKeyShift(tea.KeyTab))
+	m = updated.(model)
+	if !m.autoClassifierConfirmActive {
+		t.Fatal("expected auto-classifier confirmation to be armed")
+	}
+
+	// Esc cancels without changing the mode.
+	updated, _ = m.Update(testKey(tea.KeyEsc))
+	m = updated.(model)
+	if m.autoClassifierConfirmActive {
+		t.Fatal("expected confirmation cleared after Esc")
+	}
+	if m.permissionMode != agent.PermissionModeWorkspaceAuto {
+		t.Fatalf("expected mode unchanged after cancel, got %q", m.permissionMode)
+	}
+}
+
+func TestAutoClassifierConfirmationLetterKeys(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        string
+		wantMode   agent.PermissionMode
+		wantActive bool
+	}{
+		{name: "lower confirm", key: "y", wantMode: agent.PermissionModeAutoClassifier},
+		{name: "upper confirm", key: "Y", wantMode: agent.PermissionModeAutoClassifier},
+		{name: "lower cancel", key: "n", wantMode: agent.PermissionModeWorkspaceAuto},
+		{name: "upper cancel", key: "N", wantMode: agent.PermissionModeWorkspaceAuto},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeWorkspaceAuto})
+			m.width = 96
+
+			updated, _ := m.Update(testKeyShift(tea.KeyTab))
+			m = updated.(model)
+			if !m.autoClassifierConfirmActive {
+				t.Fatal("expected auto-classifier confirmation to be armed")
+			}
+
+			updated, _ = m.Update(testKeyText(tc.key))
+			m = updated.(model)
+			if m.permissionMode != tc.wantMode || m.autoClassifierConfirmActive != tc.wantActive {
+				t.Fatalf("after %q got mode %q active %v, want mode %q active %v", tc.key, m.permissionMode, m.autoClassifierConfirmActive, tc.wantMode, tc.wantActive)
+			}
+		})
+	}
+}
+
+func TestAutoClassifierConfirmRendersInFooterOverResumedTranscript(t *testing.T) {
+	// The confirmation must render in the footer (live-tail) region so it paints
+	// reliably even over a non-empty transcript. It must NOT depend on the scrim
+	// overlay composited into the scrolled transcript viewport.
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeWorkspaceAuto})
+	m.width = 100
+	m.height = 30
+	m.altScreen = true
+	// Simulate a resumed session: a non-empty transcript.
+	m.transcript = appendRow(m.transcript, rowSystem, "Resumed Zero session")
+	for i := 0; i < 10; i++ {
+		m.transcript = appendRow(m.transcript, rowUser, "old message")
+	}
+	m.autoClassifierConfirmActive = true
+
+	footer := plainRender(t, m.footerView(m.width))
+	if !strings.Contains(footer, "Enable") {
+		t.Fatalf("expected the confirmation to render in the footer, got:\n%s", footer)
+	}
+
+	// And it still shows in the full view over the non-empty transcript.
+	if !strings.Contains(plainRender(t, m.View()), "Enable") {
+		t.Fatal("expected the confirmation to appear in the full view over a resumed transcript")
+	}
+}
+
+func TestAutoClassifierConfirmationOnlyPromptsOncePerProcess(t *testing.T) {
+	// The warning is about the mode, not the session: once acknowledged, cycling
+	// back to auto-classifier (including after a /resume) must enable it directly
+	// without re-showing the modal.
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeWorkspaceAuto})
+	m.width = 96
+
+	// First cycle arms the confirmation; Enter acknowledges and enables it.
+	updated, _ := m.Update(testKeyShift(tea.KeyTab))
+	m = updated.(model)
+	if !m.autoClassifierConfirmActive {
+		t.Fatal("expected the confirmation to arm on the first cycle")
+	}
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.permissionMode != agent.PermissionModeAutoClassifier || !m.autoClassifierAcknowledged {
+		t.Fatalf("expected auto-classifier enabled and acknowledged, got mode %q ack %v", m.permissionMode, m.autoClassifierAcknowledged)
+	}
+
+	// Cycle away and all the way back around: AutoClassifier -> Ask -> Auto ->
+	// WorkspaceAuto -> (shift+tab) AutoClassifier again.
+	for _, want := range []agent.PermissionMode{
+		agent.PermissionModeAsk,
+		agent.PermissionModeAuto,
+		agent.PermissionModeWorkspaceAuto,
+	} {
+		updated, _ = m.Update(testKeyShift(tea.KeyTab))
+		m = updated.(model)
+		if m.permissionMode != want {
+			t.Fatalf("cycling: got %q, want %q", m.permissionMode, want)
+		}
+		if m.autoClassifierConfirmActive {
+			t.Fatalf("no confirmation should arm while cycling through %q", want)
+		}
+	}
+
+	// This cycle reaches auto-classifier again — it must enable directly, no modal.
+	updated, _ = m.Update(testKeyShift(tea.KeyTab))
+	m = updated.(model)
+	if m.autoClassifierConfirmActive {
+		t.Fatal("second time reaching auto-classifier must not re-prompt")
+	}
+	if m.permissionMode != agent.PermissionModeAutoClassifier {
+		t.Fatalf("expected auto-classifier enabled directly, got %q", m.permissionMode)
 	}
 }
 
@@ -2635,11 +2787,17 @@ func testSessionStore(t *testing.T) *sessions.Store {
 }
 
 func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
-	if got := nextPermissionMode(agent.PermissionModeAuto); got != agent.PermissionModeAsk {
-		t.Fatalf("Auto -> %s, want Ask", got)
-	}
 	if got := nextPermissionMode(agent.PermissionModeAsk); got != agent.PermissionModeAuto {
 		t.Fatalf("Ask -> %s, want Auto", got)
+	}
+	if got := nextPermissionMode(agent.PermissionModeAuto); got != agent.PermissionModeWorkspaceAuto {
+		t.Fatalf("Auto -> %s, want WorkspaceAuto", got)
+	}
+	if got := nextPermissionMode(agent.PermissionModeWorkspaceAuto); got != agent.PermissionModeAutoClassifier {
+		t.Fatalf("WorkspaceAuto -> %s, want AutoClassifier", got)
+	}
+	if got := nextPermissionMode(agent.PermissionModeAutoClassifier); got != agent.PermissionModeAsk {
+		t.Fatalf("AutoClassifier -> %s, want Ask", got)
 	}
 	// Unsafe must fold to the STRICTER Ask, never Auto (toggling an Unsafe session
 	// must not make it less strict).

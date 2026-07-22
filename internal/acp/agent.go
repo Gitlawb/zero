@@ -326,7 +326,7 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, req age
 		}
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission request failed: " + err.Error()}, nil
 	}
-	return decisionFromOutcome(result.Outcome, req.AvailableDecisions), nil
+	return decisionFromOutcome(result.Outcome, req), nil
 }
 
 func (a *Agent) emitPlan(registry *tools.Registry, note *notifier) {
@@ -354,7 +354,7 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk:
+	case agent.PermissionModeAsk, agent.PermissionModeAuto, agent.PermissionModeWorkspaceAuto, agent.PermissionModeAutoClassifier:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
@@ -442,13 +442,20 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
-	// Only auto/ask are offered over ACP; Unsafe is gated to the operator (see
-	// handleSetMode) so a client can't grant itself no-prompt host access.
+	// Only prompt-respecting modes are offered over ACP; Unsafe is gated to the
+	// operator (see handleSetMode) so a client can't grant itself no-prompt host
+	// access.
+	ask := agent.PermissionModeInfoFor(agent.PermissionModeAsk)
+	auto := agent.PermissionModeInfoFor(agent.PermissionModeAuto)
+	workspaceAuto := agent.PermissionModeInfoFor(agent.PermissionModeWorkspaceAuto)
+	autoClassifier := agent.PermissionModeInfoFor(agent.PermissionModeAutoClassifier)
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
-			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
-			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+			{ID: string(ask.ID), Name: ask.Label, Description: ask.Description},
+			{ID: string(auto.ID), Name: auto.Label, Description: auto.Description},
+			{ID: string(workspaceAuto.ID), Name: workspaceAuto.Label, Description: workspaceAuto.Description},
+			{ID: string(autoClassifier.ID), Name: autoClassifier.Label, Description: autoClassifier.Description},
 		},
 	}
 }

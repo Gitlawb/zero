@@ -1661,7 +1661,7 @@ func TestFocusedPermissionCardShowsBadgeAndKeys(t *testing.T) {
 	}
 	card, offsets := renderFocusedPermissionPrompt(request, 0, false, "", 80)
 	got := plainRender(t, card)
-	for _, want := range []string{"PERMISSION", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[y]", "continue without running it", "[d]", "[esc]"} {
+	for _, want := range []string{"PERMISSION", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[f]", "continue without running it", "[d]", "[esc]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
 		}
@@ -1708,6 +1708,16 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 		t.Fatalf("session allow = %q, want allowed for session · bash", got)
 	}
 
+	autoReviewed := transcriptRow{kind: rowPermission, id: "call_auto", permission: &agent.PermissionEvent{
+		ToolCallID: "call_auto", ToolName: "write_file", Action: agent.PermissionActionAllow, DecisionAction: agent.PermissionDecisionAutoClassifierAllow, Reason: "workspace write is allowed", DecisionReason: "auto-reviewed by LLM classifier: workspace write is low risk",
+	}}
+	if rcSession.skip(autoReviewed) {
+		t.Fatal("auto-reviewed allow rows should remain as audit lines")
+	}
+	if got := plainRender(t, m.renderRow(autoReviewed, 96, rcSession)); !strings.Contains(got, "auto-reviewed · write_file") || !strings.Contains(got, "auto-reviewed by LLM classifier") {
+		t.Fatalf("auto-reviewed allow = %q, want label and decision reason", got)
+	}
+
 	grant := &agent.PermissionEvent{ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionAllow}
 	grant.Grant = &sandbox.Grant{ToolName: "bash"}
 	always := transcriptRow{kind: rowPermission, id: "call_2", permission: grant}
@@ -1718,8 +1728,8 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 	if rcTwo.skip(always) {
 		t.Fatal("always allow rows should remain as audit lines")
 	}
-	if got := plainRender(t, m.renderRow(always, 80, rcTwo)); !strings.Contains(got, "always · bash") {
-		t.Fatalf("always allow = %q, want always · bash", got)
+	if got := plainRender(t, m.renderRow(always, 80, rcTwo)); !strings.Contains(got, "saved permission · bash") {
+		t.Fatalf("saved permission allow = %q, want saved permission · bash", got)
 	}
 
 	denied := transcriptRow{kind: rowPermission, id: "call_3", permission: &agent.PermissionEvent{

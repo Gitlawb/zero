@@ -68,10 +68,10 @@ func (m model) updateHoverTarget(msg tea.MouseMsg) model {
 	}
 	if line, ok := m.transcriptLineAtMouse(msg); ok {
 		// A permission option reuses its OWN existing keyboard-cursor highlight
-		// (see hoverPermissionOption) rather than the m.hover mechanism, so there's
-		// nothing further to set here.
+		// (see hoverPermissionOptionAt) rather than the m.hover mechanism, so
+		// there's nothing further to set here.
 		if line.permOption {
-			return m.hoverPermissionOption(line.permChoice).withHover(hoverTarget{})
+			return m.hoverPermissionOptionAt(line.permOptionIndex).withHover(hoverTarget{})
 		}
 		// Only a card or a collapse/expand toggle header is "clickable" here; plain
 		// selectable text (e.g. a user/assistant message) isn't, so hovering over
@@ -83,23 +83,20 @@ func (m model) updateHoverTarget(msg tea.MouseMsg) model {
 	return m.withHover(hoverTarget{})
 }
 
-// hoverPermissionOption moves the pending permission prompt's cursor to the
+// hoverPermissionOptionAt moves the pending permission prompt's cursor to the
 // hovered option, reusing its EXISTING keyboard-navigation highlight (the same
 // one Tab/Shift+Tab/arrow keys move) instead of new styling — the popup already
-// renders whichever option .cursor points at differently. A no-op when no
-// permission prompt is pending or the choice isn't found (defensive; every
-// permOption line's choice always comes from permissionOptions(request) in the
-// first place).
-func (m model) hoverPermissionOption(choice permissionDecision) model {
+// renders whichever option .cursor points at differently. Addressing by index
+// (not decision action) is required because expanded prefix breadths share a
+// decision action. A no-op when no prompt is pending or the index is out of range.
+func (m model) hoverPermissionOptionAt(index int) model {
 	if m.pendingPermission == nil {
 		return m
 	}
-	for index, option := range permissionOptions(m.pendingPermission.request) {
-		if option.choice == choice {
-			m.pendingPermission.cursor = index
-			return m
-		}
+	if index < 0 || index >= len(permissionOptions(m.pendingPermission.request)) {
+		return m
 	}
+	m.pendingPermission.cursor = index
 	return m
 }
 

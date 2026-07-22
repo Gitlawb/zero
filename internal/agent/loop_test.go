@@ -1749,6 +1749,324 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 	}
 }
 
+func TestRunAutoClassifierAllowsSandboxReviewedWorkspaceWrite(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWritePathContentThenAnswer("notes.txt", strings.Repeat("x", autoPermissionClassifierStringLimit+12), "write done")
+	var permissionEvents []PermissionEvent
+	var classifierRequests []AutoPermissionClassifierRequest
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Autonomy:       "medium",
+		// EnforceWorkspace off so the write is an ordinary prompt (not a silent
+		// auto-allow) — that is the case the classifier is meant to review.
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
+		}),
+		AutoPermissionClassifier: func(_ context.Context, request AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+			classifierRequests = append(classifierRequests, request)
+			return AutoPermissionClassifierDecision{Action: AutoPermissionClassifierAllow, Reason: "workspace write is low risk"}, nil
+		},
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			t.Fatal("auto-classifier should not request permission for LLM-reviewed workspace write")
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(classifierRequests) != 1 {
+		t.Fatalf("expected classifier to be invoked once, got %#v", classifierRequests)
+	}
+	if classifierRequests[0].ToolName != "write_file" || classifierRequests[0].SandboxReason != "Creates or overwrites files." {
+		t.Fatalf("unexpected classifier request: %#v", classifierRequests[0])
+	}
+	contentArg, _ := classifierRequests[0].Args["content"].(string)
+	if len([]rune(contentArg)) <= autoPermissionClassifierStringLimit || !strings.Contains(contentArg, "[truncated 12 chars]") {
+		suffix := contentArg
+		if n := len(suffix); n > 32 {
+			suffix = suffix[n-32:]
+		}
+		t.Fatalf("expected classifier request args to be bounded, got content len=%d value suffix=%q", len([]rune(contentArg)), suffix)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one auto-classifier permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || !event.PermissionGranted || event.DecisionAction != PermissionDecisionAutoClassifierAllow {
+		t.Fatalf("expected auto-classifier allow event, got %#v", event)
+	}
+	if event.Reason != "Creates or overwrites files." {
+		t.Fatalf("expected sandbox reason, got %#v", event)
+	}
+	if event.DecisionReason != "auto-reviewed by LLM classifier: workspace write is low risk" {
+		t.Fatalf("expected LLM classifier decision reason, got %#v", event)
+	}
+}
+
+func TestRunAutoClassifierPromptFallsBackToPermissionRequest(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write approved")
+	classifierCalls := 0
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
+		}),
+		AutoPermissionClassifier: func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+			classifierCalls++
+			return AutoPermissionClassifierDecision{Action: AutoPermissionClassifierPrompt, Reason: "ask the user"}, nil
+		},
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approved after classifier prompt"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if classifierCalls != 1 {
+		t.Fatalf("expected one classifier call, got %d", classifierCalls)
+	}
+	if len(requests) != 1 || requests[0].ToolName != "write_file" {
+		t.Fatalf("expected fallback permission request, got %#v", requests)
+	}
+	// The classifier's reason for declining to auto-approve is surfaced on the
+	// prompt and recorded on the emitted permission event.
+	if requests[0].ClassifierReason != "ask the user" {
+		t.Fatalf("expected classifier reason on permission request, got %q", requests[0].ClassifierReason)
+	}
+	if len(permissionEvents) != 1 || permissionEvents[0].ClassifierReason != "ask the user" {
+		t.Fatalf("expected classifier reason on permission event, got %#v", permissionEvents)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "notes.txt")); err != nil || string(content) != "hello" {
+		t.Fatalf("expected fallback approval to run write, content=%q err=%v", content, err)
+	}
+}
+
+func TestRunAutoClassifierErrorFallsBackToPermissionRequest(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write approved")
+	var requests []PermissionRequest
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
+		}),
+		AutoPermissionClassifier: func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+			return AutoPermissionClassifierDecision{}, errors.New("classifier unavailable")
+		},
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approved after classifier error"}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 || requests[0].ToolName != "write_file" {
+		t.Fatalf("expected fallback permission request, got %#v", requests)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "notes.txt")); err != nil || string(content) != "hello" {
+		t.Fatalf("expected fallback approval to run write, content=%q err=%v", content, err)
+	}
+}
+
+func TestRunDefaultAutoClassifierInvalidJSONFallsBackToPermissionRequest(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenClassifyThenAnswer("not json", "write approved")
+	var requests []PermissionRequest
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approved after invalid classifier output"}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 || requests[0].ToolName != "write_file" {
+		t.Fatalf("expected fallback permission request, got %#v", requests)
+	}
+	if len(provider.requests) < 2 || len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("classifier provider request should carry no tools, got %#v", provider.requests)
+	}
+}
+
+func TestRunDefaultAutoClassifierStrictJSONAllowsWorkspaceWrite(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenClassifyThenAnswer(`{"action":"allow","reason":"safe workspace note"}`, "write done")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
+		}),
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			t.Fatal("default classifier allow should skip permission request")
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) < 2 || len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("classifier provider request should carry no tools, got %#v", provider.requests)
+	}
+	if got := provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content; !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("classifier request payload missing bounded args: %s", got)
+	}
+	if len(permissionEvents) != 1 || permissionEvents[0].DecisionReason != "auto-reviewed by LLM classifier: safe workspace note" {
+		t.Fatalf("expected LLM auto-reviewed permission event, got %#v", permissionEvents)
+	}
+}
+
+func TestRunAutoClassifierNotCalledForSandboxPrompt(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"curl https://example.com"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+	var requests []PermissionRequest
+
+	_, err := Run(context.Background(), "fetch", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		AutoPermissionClassifier: func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+			t.Fatal("classifier must not be called for sandbox prompt")
+			return AutoPermissionClassifierDecision{}, nil
+		},
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "network requires prompt"}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].ToolName != "bash" || requests[0].Action != PermissionActionPrompt {
+		t.Fatalf("expected sandbox prompt permission request, got %#v", requests)
+	}
+}
+
+func TestRunAutoClassifierNotCalledForInlineAdditionalPermissions(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo hi","sandbox_permissions":"with_additional_permissions","additional_permissions":{"network":{"enabled":true}}}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+	var requests []PermissionRequest
+
+	_, err := Run(context.Background(), "write", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAutoClassifier,
+		Cwd:            root,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		AutoPermissionClassifier: func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+			t.Fatal("classifier must not be called for inline additional permissions")
+			return AutoPermissionClassifierDecision{}, nil
+		},
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "additional permissions require prompt"}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].ToolName != "bash" || requests[0].Action != PermissionActionPrompt {
+		t.Fatalf("expected additional-permission prompt request, got %#v", requests)
+	}
+}
+
 func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
@@ -3019,12 +3337,37 @@ func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
 	return providerCallingWritePathThenAnswer("notes.txt", answer)
 }
 
-func providerCallingWritePathThenAnswer(path string, answer string) *mockProvider {
+func providerCallingWriteFileThenClassifyThenAnswer(classifierOutput string, answer string) *mockProvider {
 	return &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":` + quoteJSONString(path) + `,"content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: classifierOutput},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: answer},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+}
+
+func providerCallingWritePathThenAnswer(path string, answer string) *mockProvider {
+	return providerCallingWritePathContentThenAnswer(path, "hello", answer)
+}
+
+func providerCallingWritePathContentThenAnswer(path string, content string, answer string) *mockProvider {
+	return &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":` + quoteJSONString(path) + `,"content":` + quoteJSONString(content) + `}`},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 				{Type: zeroruntime.StreamEventDone},
 			},

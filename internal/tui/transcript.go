@@ -401,6 +401,9 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.Reason != "" {
 		parts = append(parts, permissionDisplayReason(event.Reason))
 	}
+	if note := strings.TrimSpace(event.ClassifierReason); note != "" {
+		parts = append(parts, "classifier: "+note)
+	}
 	if event.Block != nil {
 		parts = append(parts, permissionBlockDetail(event))
 	}
@@ -413,14 +416,18 @@ func permissionDecisionDetail(decision agent.PermissionDecisionAction) string {
 		return "approved once"
 	case agent.PermissionDecisionAllowStrict:
 		return "approved with review"
+	case agent.PermissionDecisionAutoClassifierAllow:
+		return "auto-reviewed approval"
 	case agent.PermissionDecisionAllowForSession:
 		return "approved for this session"
 	case agent.PermissionDecisionAllowPrefix:
 		return "approved command prefix for this session"
+	case agent.PermissionDecisionAllowPrefixProject:
+		return "saved command prefix for this project"
 	case agent.PermissionDecisionAlwaysAllowPrefix:
-		return "always approved command prefix"
+		return "saved command prefix permission (global)"
 	case agent.PermissionDecisionAlwaysAllow:
-		return "always approved"
+		return "saved permission"
 	case agent.PermissionDecisionDeny:
 		return "denied by user"
 	case agent.PermissionDecisionCancel:

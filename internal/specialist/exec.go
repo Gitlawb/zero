@@ -68,8 +68,8 @@ type BuildArgsInput struct {
 	// child to unsafe. Authority is therefore never widened beyond the parent.
 	PermissionMode string
 	// MemberAutonomy marks a headless swarm member: when set and the parent is
-	// non-unsafe, the child runs at "--auto member" (PermissionModeMemberAuto) so
-	// it can write/edit + run sandboxed shell IN the workspace, instead of the
+	// non-unsafe, the child runs at "--auto workspace-auto" so it can write/edit +
+	// run sandboxed shell IN the workspace, instead of the
 	// read-only "--auto low". Off by default, so the Task tool's specialists are
 	// unchanged. The sandbox still confines writes to the workspace root.
 	MemberAutonomy bool
@@ -143,14 +143,14 @@ func specialistAutonomy(permissionMode string) string {
 }
 
 // memberAwareAutonomy is specialistAutonomy with one extra rung for headless
-// swarm MEMBERS: a non-unsafe member runs at "member" (PermissionModeMemberAuto)
-// so it can write/edit + run sandboxed shell in the workspace, rather than the
-// read-only "low". An unsafe parent still yields "high" (full unsafe), and a
-// non-member (Task specialist) is unchanged. Authority stays sandbox-confined.
+// swarm MEMBERS: a non-unsafe member runs at "workspace-auto" so it can
+// write/edit + run sandboxed shell in the workspace, rather than the read-only
+// "low". An unsafe parent still yields "high" (full unsafe), and a non-member
+// (Task specialist) is unchanged. Authority stays sandbox-confined.
 func memberAwareAutonomy(permissionMode string, member bool) string {
 	autonomy := specialistAutonomy(permissionMode)
 	if member && autonomy == "low" {
-		return "member"
+		return "workspace-auto"
 	}
 	return autonomy
 }

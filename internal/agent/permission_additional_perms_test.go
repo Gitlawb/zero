@@ -47,7 +47,7 @@ func TestBuildPermissionEventPromptsForAdditionalPermissions(t *testing.T) {
 		t.Fatalf("Action = %q, want prompt — an additional-permissions elevation must ask the user, not auto-allow", event.Action)
 	}
 	// Sanity: shouldRequestPermission agrees the loop blocks on this.
-	if !shouldRequestPermission(promptShellTool{}, args, false, decision) {
+	if !shouldRequestPermission(promptShellTool{}, args, false, PermissionModeAsk, decision) {
 		t.Fatal("shouldRequestPermission must be true for an additional-permissions request")
 	}
 }
@@ -64,7 +64,7 @@ func TestBuildPermissionEventKeepsAllowForOrdinaryAllowedCommand(t *testing.T) {
 	if event.Action == PermissionActionPrompt {
 		t.Fatalf("Action = prompt for an ordinary allowed command; want allow (no spurious prompt)")
 	}
-	if shouldRequestPermission(promptShellTool{}, args, false, decision) {
+	if shouldRequestPermission(promptShellTool{}, args, false, PermissionModeAsk, decision) {
 		t.Fatal("shouldRequestPermission must be false for an ordinary sandbox-allowed command")
 	}
 }
@@ -80,7 +80,7 @@ func TestBuildPermissionEventReusesCoveredAdditionalPermissions(t *testing.T) {
 	}
 	decision := &sandbox.Decision{Action: sandbox.ActionAllow, AutoAllowed: true}
 
-	if shouldRequestPermission(promptShellTool{}, args, true, decision) {
+	if shouldRequestPermission(promptShellTool{}, args, true, PermissionModeAsk, decision) {
 		t.Fatal("an already-covered capability must not trigger another prompt")
 	}
 	event, ok := buildPermissionEvent(call, promptShellTool{}, args, true, PermissionModeAsk, Options{}, decision)

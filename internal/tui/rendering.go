@@ -1039,8 +1039,12 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	switch event.Action {
 	case agent.PermissionActionAllow:
 		label := "allowed once"
-		if event.DecisionAction == agent.PermissionDecisionAlwaysAllowPrefix {
-			label = "always prefix"
+		if event.DecisionAction == agent.PermissionDecisionAutoClassifierAllow {
+			label = "auto-reviewed"
+		} else if event.DecisionAction == agent.PermissionDecisionAlwaysAllowPrefix {
+			label = "saved prefix (global)"
+		} else if event.DecisionAction == agent.PermissionDecisionAllowPrefixProject {
+			label = "saved prefix (project)"
 		} else if event.DecisionAction == agent.PermissionDecisionAllowPrefix {
 			label = "allowed prefix"
 		} else if event.DecisionAction == agent.PermissionDecisionAllowForSession ||
@@ -1048,11 +1052,20 @@ func renderPermissionRow(row transcriptRow, width int) string {
 			label = "allowed for session"
 		} else if event.DecisionAction == agent.PermissionDecisionAlwaysAllow ||
 			event.Grant != nil || event.GrantMatched {
-			label = "always"
+			label = "saved permission"
 		}
 		line := zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(displayName)
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
 			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
+		}
+		if event.DecisionAction == agent.PermissionDecisionAutoClassifierAllow {
+			reasonText := event.DecisionReason
+			if strings.TrimSpace(reasonText) == "" {
+				reasonText = event.Reason
+			}
+			if reason := permissionDisplayReason(reasonText); reason != "" {
+				line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(displayName)-24)))
+			}
 		}
 		return fitStyledLine(line, width)
 	case agent.PermissionActionDeny:
@@ -1138,6 +1151,11 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	if scope := strings.TrimSpace(request.Scope); scope != "" {
 		lines = append(lines, fill(zeroTheme.muted).Render(permissionScopeLine(request, scope)))
 	}
+	// In auto-classifier mode, explain why the LLM declined to auto-approve so the
+	// user knows what the reviewer flagged rather than seeing a bare prompt.
+	if note := permissionDisplayReason(request.ClassifierReason); note != "" {
+		lines = append(lines, fill(zeroTheme.amber).Render("classifier: "+note))
+	}
 
 	lines = append(lines, "")
 
@@ -1162,7 +1180,13 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	offsets := make([]int, len(options))
 	for index, option := range options {
 		offsets[index] = 1 + len(lines)
-		hotkey := fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
+		// Expanded prefix breadths other than the default carry no hotkey (they are
+		// reached with the arrow keys), so skip the bracket entirely rather than
+		// printing an empty "[]".
+		hotkey := ""
+		if option.hotkey != "" {
+			hotkey = fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
+		}
 		optionLabel := permissionOptionLabel(option, request)
 		if index == cursor {
 			// onSel, not badge. zeroTheme.badge is the brand chip (" 0 ", " ASK ",
@@ -1217,6 +1241,14 @@ func permissionOptionLabel(option permissionOption, request agent.PermissionRequ
 			return option.label
 		}
 	}
+	// Prefix decisions expand into one option per breadth, each carrying its own
+	// commandPrefix; label that breadth, not the request's default, so the rows
+	// read as distinct grants (`git push` vs `git push origin` vs …) instead of
+	// repeating the full command on every line.
+	prefix := option.commandPrefix
+	if len(prefix) == 0 {
+		prefix = request.CommandPrefix
+	}
 	switch option.choice {
 	case permissionDecisionAllow:
 		if request.SideEffect == string(tools.SideEffectNetwork) {
@@ -1232,15 +1264,20 @@ func permissionOptionLabel(option permissionOption, request agent.PermissionRequ
 		}
 		return "Yes, and don't ask again for this command in this session"
 	case permissionDecisionAllowPrefix:
-		if len(request.CommandPrefix) > 0 {
-			return "Yes, and allow `" + strings.Join(request.CommandPrefix, " ") + "` in this session"
+		if len(prefix) > 0 {
+			return "Yes, and allow `" + strings.Join(prefix, " ") + "` in this session"
 		}
 		return "Yes, and allow this command prefix in this session"
-	case permissionDecisionAlwaysAllowPrefix:
-		if len(request.CommandPrefix) > 0 {
-			return "Yes, and always allow `" + strings.Join(request.CommandPrefix, " ") + "`"
+	case permissionDecisionAllowPrefixProject:
+		if len(prefix) > 0 {
+			return "Yes, and allow `" + strings.Join(prefix, " ") + "` in this project"
 		}
-		return "Yes, and always allow this command prefix"
+		return "Yes, and allow this command prefix in this project"
+	case permissionDecisionAlwaysAllowPrefix:
+		if len(prefix) > 0 {
+			return "Yes, and allow `" + strings.Join(prefix, " ") + "` globally"
+		}
+		return "Yes, and allow this command prefix globally"
 	case permissionDecisionAlwaysAllow:
 		if request.SideEffect == string(tools.SideEffectNetwork) {
 			return "Yes, and allow this host in the future"

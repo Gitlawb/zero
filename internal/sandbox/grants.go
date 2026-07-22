@@ -200,7 +200,9 @@ func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPr
 	bucket := state.CommandPrefixes[grant.ToolName]
 	replaced := false
 	for i := range bucket {
-		if sameStringSlice(bucket[i].Prefix, grant.Prefix) {
+		// A grant is unique per (prefix, project): the same prefix can be held both
+		// globally and scoped to a specific project without one clobbering the other.
+		if sameStringSlice(bucket[i].Prefix, grant.Prefix) && bucket[i].Project == grant.Project {
 			bucket[i] = grant
 			replaced = true
 			break
@@ -234,13 +236,18 @@ func (store *GrantStore) Lookup(toolName string, reqScope string) (GrantLookup, 
 	return lookupGrantBucket(bucket, reqScope), nil
 }
 
-func (store *GrantStore) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool, error) {
+// LookupCommandPrefix finds a persisted grant that covers command. project is the
+// current workspace root: a grant matches when it is global (empty Project) or its
+// Project equals project, so a project-scoped grant never leaks into other
+// workspaces. A more specific project grant is preferred over a global one.
+func (store *GrantStore) LookupCommandPrefix(toolName string, command []string, project string) (CommandPrefixGrant, bool, error) {
 	if err := ValidateToolName(toolName); err != nil {
 		return CommandPrefixGrant{}, false, err
 	}
 	if _, ok := NormalizeCommandPrefix(command); !ok {
 		return CommandPrefixGrant{}, false, nil
 	}
+	project = strings.TrimSpace(project)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	state, err := store.readState()
@@ -248,11 +255,27 @@ func (store *GrantStore) LookupCommandPrefix(toolName string, command []string) 
 		return CommandPrefixGrant{}, false, err
 	}
 	bucket := state.CommandPrefixes[strings.TrimSpace(toolName)]
-	for _, grant := range bucket {
-		if hasStringPrefix(command, grant.Prefix) {
+	var globalMatch *CommandPrefixGrant
+	for index := range bucket {
+		grant := bucket[index]
+		if !hasStringPrefix(command, grant.Prefix) {
+			continue
+		}
+		if grant.Project == "" {
+			if globalMatch == nil {
+				matched := grant
+				globalMatch = &matched
+			}
+			continue
+		}
+		if grant.Project == project {
 			grant.Prefix = append([]string(nil), grant.Prefix...)
 			return grant, true, nil
 		}
+	}
+	if globalMatch != nil {
+		globalMatch.Prefix = append([]string(nil), globalMatch.Prefix...)
+		return *globalMatch, true, nil
 	}
 	return CommandPrefixGrant{}, false, nil
 }
@@ -502,6 +525,7 @@ func createCommandPrefixGrant(input CommandPrefixInput, now func() time.Time) (C
 	return CommandPrefixGrant{
 		ToolName:   toolName,
 		Prefix:     prefix,
+		Project:    strings.TrimSpace(input.Project),
 		ApprovedAt: now().UTC().Format(time.RFC3339),
 		Reason:     redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
 	}, nil

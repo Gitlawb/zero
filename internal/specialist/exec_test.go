@@ -82,8 +82,8 @@ func TestSpecialistAutonomyByPermissionMode(t *testing.T) {
 }
 
 func TestMemberAwareAutonomy(t *testing.T) {
-	// A non-unsafe member runs at "member" (write/edit + sandboxed shell), a plain
-	// specialist at "low" (read-only), and an unsafe parent at "high" either way.
+	// A non-unsafe member runs at "workspace-auto" (write/edit + sandboxed shell),
+	// a plain specialist at "low" (read-only), and an unsafe parent at "high" either way.
 	cases := []struct {
 		mode   string
 		member bool
@@ -91,10 +91,10 @@ func TestMemberAwareAutonomy(t *testing.T) {
 	}{
 		{"auto", false, "low"},
 		{"ask", false, "low"},
-		{"auto", true, "member"},
-		{"ask", true, "member"},
-		{"", true, "member"},     // member, fail-safe non-unsafe, still write-capable
-		{"unsafe", true, "high"}, // unsafe parent keeps full autonomy
+		{"auto", true, "workspace-auto"},
+		{"ask", true, "workspace-auto"},
+		{"", true, "workspace-auto"}, // member, fail-safe non-unsafe, still write-capable
+		{"unsafe", true, "high"},     // unsafe parent keeps full autonomy
 		{"unsafe", false, "high"},
 	}
 	for _, c := range cases {
@@ -104,17 +104,17 @@ func TestMemberAwareAutonomy(t *testing.T) {
 	}
 }
 
-func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
+func TestBuildArgsMemberAutonomyEmitsWorkspaceAuto(t *testing.T) {
 	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
 	manifest := Manifest{Metadata: Metadata{Name: "subagent"}, SystemPrompt: "x", ResolvedTools: []string{"read_file", "write_file"}}
 
-	// A non-unsafe member → --auto member (write-capable), not the read-only low.
+	// A non-unsafe member → --auto workspace-auto (write-capable), not the read-only low.
 	res, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "auto", MemberAutonomy: true})
 	if err != nil {
 		t.Fatalf("BuildArgs: %v", err)
 	}
-	if !containsSequence(res.Args, []string{"--auto", "member"}) {
-		t.Fatalf("non-unsafe member must yield --auto member, got %v", res.Args)
+	if !containsSequence(res.Args, []string{"--auto", "workspace-auto"}) {
+		t.Fatalf("non-unsafe member must yield --auto workspace-auto, got %v", res.Args)
 	}
 
 	// Without the member flag, the same parent stays --auto low (unchanged).
@@ -122,7 +122,7 @@ func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildArgs(plain): %v", err)
 	}
-	if !containsSequence(plain.Args, []string{"--auto", "low"}) || containsSequence(plain.Args, []string{"--auto", "member"}) {
+	if !containsSequence(plain.Args, []string{"--auto", "low"}) || containsSequence(plain.Args, []string{"--auto", "workspace-auto"}) {
 		t.Fatalf("a plain specialist must stay --auto low, got %v", plain.Args)
 	}
 
