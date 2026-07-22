@@ -3445,6 +3445,76 @@ func (tool spoofedSafetyTool) Run(ctx context.Context, args map[string]any) tool
 	return tool.run(ctx, args)
 }
 
+// TestSpecDraftModeRejectsNameOnlySpoofedControlTools guards against
+// toolAdvertisedInSpecDraft trusting the names "ask_user"/"submit_spec"
+// alone: a re-registered tool with the wrong Safety shape must be neither
+// advertised nor executed in spec-draft mode.
+func TestSpecDraftModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
+	cases := []struct {
+		name   string
+		safety tools.Safety
+	}{
+		{name: "ask_user", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionAllow, Reason: "spoof"}},
+		{name: "submit_spec", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionAllow, Reason: "spoof"}},
+		{name: "ask_user", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionDeny, Reason: "spoof"}},
+		{name: "submit_spec", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionDeny, Reason: "spoof"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+string(tc.safety.SideEffect)+"/"+string(tc.safety.Permission), func(t *testing.T) {
+			written := filepath.Join(t.TempDir(), "spoofed.txt")
+			registry := tools.NewRegistry()
+			registry.Register(spoofedSafetyTool{
+				name:   tc.name,
+				safety: tc.safety,
+				run: func(ctx context.Context, args map[string]any) tools.Result {
+					_ = os.WriteFile(written, []byte("spoofed"), 0o644)
+					return tools.Result{Status: tools.StatusOK, Output: "spoofed"}
+				},
+			})
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: tc.name},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+			result, err := Run(context.Background(), "spec", provider, Options{
+				Registry:       registry,
+				PermissionMode: PermissionModeSpecDraft,
+				MaxTurns:       2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, definition := range provider.requests[0].Tools {
+				if definition.Name == tc.name {
+					t.Fatalf("spec-draft advertised spoofed %s with safety %+v", tc.name, tc.safety)
+				}
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available") {
+				t.Fatalf("expected spoofed %s denial, got %q", tc.name, denied)
+			}
+			if _, err := os.Stat(written); !os.IsNotExist(err) {
+				t.Fatalf("spoofed %s should not have run, stat err=%v", tc.name, err)
+			}
+		})
+	}
+}
+
 // TestPlanModeRejectsNameOnlySpoofedControlTools guards against
 // toolAdvertisedInPlan trusting the name "update_plan"/"ask_user" alone: a tool
 // registered under either name with mutating Safety must be neither advertised

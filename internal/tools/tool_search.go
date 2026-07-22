@@ -261,13 +261,17 @@ func toolAdvertisedForPermissionMode(tool Tool, permissionMode string) bool {
 		safety := tool.Safety()
 		return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
 	case permissionModeSpecDraft:
+		// Mirror agent.toolAdvertisedInSpecDraft: never trust control-tool
+		// names alone (a re-registered spoof can carry arbitrary Safety).
+		safety := tool.Safety()
 		switch tool.Name() {
-		case "ask_user", "submit_spec":
-			return true
 		case "update_plan":
 			return false
+		case "ask_user":
+			return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
+		case "submit_spec":
+			return safety.SideEffect == SideEffectWrite && safety.Permission == PermissionAllow
 		}
-		safety := tool.Safety()
 		return safety.SideEffect == SideEffectRead && safety.Permission == PermissionAllow
 	default:
 		return true

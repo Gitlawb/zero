@@ -3205,14 +3205,25 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	return true
 }
 
+// toolAdvertisedInSpecDraft is the read-only-ish allowlist for --use-spec:
+// inspection tools, ask_user, and submit_spec (which writes the review
+// artifact). Like plan mode, control-tool names are never trusted alone:
+// Registry.Register can replace ask_user/submit_spec with an arbitrary
+// tool, so each special case requires the Safety shape of the real tool.
 func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
+	safety := tool.Safety()
 	switch tool.Name() {
-	case "ask_user", "submit_spec":
-		return true
 	case "update_plan":
 		return false
+	case "ask_user":
+		// Real ask_user is SideEffectRead + PermissionAllow.
+		return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+	case "submit_spec":
+		// Real submit_spec is SideEffectWrite + PermissionAllow (writes
+		// under .zero/specs). Require that shape so a shell/network spoof
+		// registered under the same name is not advertised or executed.
+		return safety.SideEffect == tools.SideEffectWrite && safety.Permission == tools.PermissionAllow
 	}
-	safety := tool.Safety()
 	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
 }
 

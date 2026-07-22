@@ -428,3 +428,55 @@ func TestToolSearchExcludesDeferredMutatorInSpecDraftMode(t *testing.T) {
 		t.Fatalf("deferred mutator schema/description leaked in spec-draft mode: %q", result.Output)
 	}
 }
+
+// TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety guards the
+// name-only allowlist hole CodeRabbit flagged: a tool re-registered as
+// ask_user or submit_spec with the wrong Safety shape must not be
+// advertised or loadable via tool_search in spec-draft mode.
+func TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety(t *testing.T) {
+	cases := []struct {
+		name   string
+		safety Safety
+	}{
+		// ask_user must be SideEffectRead+Allow; a shell spoof fails.
+		{name: "ask_user", safety: Safety{SideEffect: SideEffectShell, Permission: PermissionAllow, Reason: "spoof"}},
+		// submit_spec must be SideEffectWrite+Allow; a shell spoof fails.
+		{name: "submit_spec", safety: Safety{SideEffect: SideEffectShell, Permission: PermissionAllow, Reason: "spoof"}},
+		// Wrong permission also fails even if the side effect matches.
+		{name: "ask_user", safety: Safety{SideEffect: SideEffectRead, Permission: PermissionDeny, Reason: "spoof"}},
+		{name: "submit_spec", safety: Safety{SideEffect: SideEffectWrite, Permission: PermissionDeny, Reason: "spoof"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+string(tc.safety.SideEffect)+"/"+string(tc.safety.Permission), func(t *testing.T) {
+			reg := NewRegistry()
+			reg.Register(searchSpoofedSafetyTool{name: tc.name, safety: tc.safety, description: "spoofed control tool"})
+			tool := NewToolSearchTool(reg).(optionsAwareTool)
+			result := tool.RunWithOptions(context.Background(),
+				map[string]any{"query": "select:" + tc.name}, RunOptions{PermissionMode: "spec-draft"})
+			if got := result.Meta["load_tools"]; got != "" {
+				t.Fatalf("spec-draft must not load spoofed %s (safety=%+v), got load_tools=%q", tc.name, tc.safety, got)
+			}
+			if strings.Contains(result.Output, "spoofed control tool") {
+				t.Fatalf("spoofed %s schema leaked: %q", tc.name, result.Output)
+			}
+		})
+	}
+}
+
+// searchSpoofedSafetyTool is a deferred-eligible tool whose Name and Safety
+// are under test control (used to re-register ask_user/submit_spec shapes).
+type searchSpoofedSafetyTool struct {
+	name, description string
+	safety            Safety
+}
+
+func (t searchSpoofedSafetyTool) Name() string        { return t.name }
+func (t searchSpoofedSafetyTool) Description() string { return t.description }
+func (t searchSpoofedSafetyTool) Parameters() Schema {
+	return Schema{Type: "object", AdditionalProperties: false}
+}
+func (t searchSpoofedSafetyTool) Safety() Safety { return t.safety }
+func (t searchSpoofedSafetyTool) Deferred() bool { return true }
+func (t searchSpoofedSafetyTool) Run(context.Context, map[string]any) Result {
+	return Result{Status: StatusOK, Output: "should not run"}
+}
