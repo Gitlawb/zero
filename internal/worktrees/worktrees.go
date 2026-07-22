@@ -158,6 +158,9 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 			return Result{}, fmt.Errorf("worktree %s is locked by another active run; release it with `zero worktrees release %s` if that run is finished, or use a different --name", target, target)
 		}
 		result.LockAcquired = true
+		if err := writeOwnershipMarker(ctx, runGit, target); err != nil {
+			return Result{}, err
+		}
 		return result, nil
 	}
 	if err := os.MkdirAll(repoDir, 0o700); err != nil {
@@ -205,6 +208,9 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("worktree %s is locked by another active run; release it with `zero worktrees release %s` if that run is finished, or use a different --name", target, target)
 	}
 	result.LockAcquired = true
+	if err := writeOwnershipMarker(ctx, runGit, target); err != nil {
+		return Result{}, err
+	}
 	return result, nil
 }
 
@@ -313,6 +319,62 @@ func Release(ctx context.Context, options Options, path string) error {
 	return nil
 }
 
+// zeroOwnerMarkerFile is the name of the ownership marker Prepare writes into
+// a worktree's own private git admin directory (`git rev-parse
+// --absolute-git-dir`), never into the working tree itself: the working tree
+// is what `git status` inspects for staleness/dirtiness, and a marker living
+// there would either show up as untracked noise (defeating Clean's dirty
+// check) or need a .gitignore entry this package has no business adding to a
+// caller's repository. The admin directory survives even after the worktree
+// directory itself is deleted by hand (git only forgets it on `worktree
+// prune`), and is not something `git worktree add` populates on its own, so
+// its presence is what actually proves Zero's own Prepare created a given
+// worktree - unlike the public zero-worktree-<repoKey> path convention and
+// the leaseReasonPrefix lock-reason string, both of which a user can
+// reproduce by hand for a worktree of the same repository.
+const zeroOwnerMarkerFile = "zero-owner"
+
+// zeroOwnerMarkerContent is the marker's fixed body. Its value carries no
+// meaning beyond "Prepare wrote this"; the file's mere presence at the
+// expected location is the signal Release and Clean check.
+const zeroOwnerMarkerContent = "zero: this worktree was created by `zero worktrees prepare`\n"
+
+// writeOwnershipMarker persists the ownership marker for target, a worktree
+// path that must still exist on disk (Prepare calls this immediately after
+// creating or re-locking it). Overwriting an existing marker is harmless and
+// lets a worktree Prepare created before this marker existed self-heal the
+// next time Prepare reuses it.
+func writeOwnershipMarker(ctx context.Context, runGit GitRunner, target string) error {
+	gitDir, err := gitOutput(ctx, runGit, target, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return fmt.Errorf("resolve worktree git dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, zeroOwnerMarkerFile), []byte(zeroOwnerMarkerContent), 0o600); err != nil {
+		return fmt.Errorf("write worktree ownership marker: %w", err)
+	}
+	return nil
+}
+
+// hasOwnershipMarker reports whether target's own git admin directory carries
+// the marker writeOwnershipMarker persists. It fails closed: any error other
+// than the marker simply not existing is returned rather than treated as
+// "not owned so it's fine to skip," since callers otherwise use false to mean
+// "safe to leave alone."
+func hasOwnershipMarker(ctx context.Context, runGit GitRunner, target string) (bool, error) {
+	gitDir, err := gitOutput(ctx, runGit, target, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return false, fmt.Errorf("resolve worktree git dir: %w", err)
+	}
+	content, err := os.ReadFile(filepath.Join(gitDir, zeroOwnerMarkerFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read worktree ownership marker: %w", err)
+	}
+	return string(content) == zeroOwnerMarkerContent, nil
+}
+
 // verifyZeroOwnedWorktree confirms path has a zero-worktree-<repoKey> ancestor
 // directory component, is a registered worktree of the repository, and (when
 // locked) carries a lock reason Zero itself set, so Release cannot be used to
@@ -376,6 +438,25 @@ func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, 
 		}
 		if !strings.HasPrefix(entry.lockReason, leaseReasonPrefix) {
 			return fmt.Errorf("refusing to release %s: locked with reason %q, not a zero lease", path, entry.lockReason)
+		}
+		// The lease prefix is a public string a user can copy onto their own
+		// `git worktree lock` call for a worktree they created by hand under
+		// this same predictable directory, so it is a cheap first filter, not
+		// proof. When the worktree directory still exists, require the
+		// ownership marker Prepare actually persists before trusting it. If
+		// the directory is already gone (the documented `release -C` recovery
+		// path for a worktree deleted by hand), there is no marker left to
+		// check and nothing left for a forced removal to destroy, so the
+		// prefix match above is enough to let a genuinely orphaned zero lease
+		// still be cleared.
+		if info, statErr := os.Stat(entry.path); statErr == nil && info.IsDir() {
+			owned, err := hasOwnershipMarker(ctx, runGit, entry.path)
+			if err != nil {
+				return fmt.Errorf("verify worktree ownership for %s: %w", path, err)
+			}
+			if !owned {
+				return fmt.Errorf("refusing to release %s: missing zero ownership marker (not created by `zero worktrees prepare`)", path)
+			}
 		}
 		break
 	}
@@ -668,20 +749,34 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 	if resolved, err := filepath.EvalSymlinks(baseDir); err == nil {
 		baseDir = resolved
 	}
-	// Prepare only ever creates worktrees under this per-repository subtree
-	// (mirroring the repoDir it computes). Scoping pruning to baseDir itself
-	// would authorize deleting a worktree a user manages by hand in the same
-	// directory, which Zero never created and has no business force-removing.
-	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
 
 	output, err := gitOutput(ctx, runGit, repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("list git worktrees: %w", err)
 	}
+	entries := parseWorktreeList(output)
+	if len(entries) == 0 {
+		return fmt.Errorf("list git worktrees: git worktree list returned no entries")
+	}
+	// Prepare only ever creates worktrees under this per-repository subtree
+	// (mirroring the repoDir it computes). Scoping pruning to baseDir itself
+	// would authorize deleting a worktree a user manages by hand in the same
+	// directory, which Zero never created and has no business force-removing.
+	//
+	// The bucket must be keyed off the MAIN worktree's root
+	// (entries[0].path, per primaryWorktreeRoot), not repoRoot: repoRoot is
+	// --show-toplevel for whichever worktree Clean itself runs from, which is
+	// a linked checkout's own root when Clean (or the Prepare call that
+	// auto-invokes it) runs there. Prepare keys repoDir off the same
+	// entries[0].path, so using repoRoot here instead would compute a
+	// different repoDir than Prepare's and filter out every actual
+	// zero-owned worktree for this repository whenever either call runs from
+	// a linked worktree.
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(entries[0].path))
 
 	cutoff := time.Now().Add(-maxAge)
 	var lastErr error
-	for _, entry := range parseWorktreeList(output) {
+	for _, entry := range entries {
 		// Compare against the physical spelling of the entry path. Git's
 		// porcelain listing is normally already physical, but test fixtures
 		// and some symlink layouts can leave a logical spelling that would
@@ -744,6 +839,18 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 				// still live work waiting on a model, network, or user, so
 				// force-removing here would discard it. Skip until it either
 				// gets committed/cleaned (no longer dirty) or unlocked.
+				continue
+			}
+			// The zero-worktree-<repoKey> path and (for the expired-lease
+			// branch above) the leaseReasonPrefix lock reason are both public
+			// conventions a user can reproduce by hand for a worktree of the
+			// same repository; neither is proof Zero created this one.
+			// Require the ownership marker Prepare itself persists before
+			// force-touching anything below. Any failure to verify it
+			// (including the marker simply being absent) is treated the same
+			// as "not ours": skip it, the same fail-closed stance as an
+			// unreadable worktree above.
+			if owned, err := hasOwnershipMarker(ctx, runGit, statPath); err != nil || !owned {
 				continue
 			}
 			if err := preserveUnreachableWorktreeHead(ctx, runGit, repoRoot, statPath); err != nil {

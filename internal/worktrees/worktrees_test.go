@@ -109,29 +109,37 @@ func TestReleaseUnlocksWorktree(t *testing.T) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	plantOwnershipMarker(t, path)
 	// The target entry carries Zero's own lease reason (as Prepare's lock
 	// call sets it), so the lock-reason check added alongside the ancestor
 	// check must let this release through rather than treating every locked
 	// entry as a manual, non-zero lock (see
 	// TestReleaseRejectsManuallyLockedWorktree for the rejecting case).
-	runner := &fakeRunner{results: []CommandResult{
-		{Stdout: "worktree " + repoRoot + "\nworktree " + path + "\nlocked " + leaseReasonPrefix + "\n"},
-		{},
-	}}
+	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
+		results: []CommandResult{
+			{Stdout: "worktree " + repoRoot + "\nworktree " + path + "\nlocked " + leaseReasonPrefix + "\n"},
+			{},
+		},
+	}
 
 	if err := Release(context.Background(), Options{RunGit: runner.Run}, path); err != nil {
 		t.Fatalf("Release returned error: %v", err)
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("expected exactly two git calls (ownership check, then unlock), got %#v", runner.calls)
+	// list + absolute-git-dir (marker) + unlock
+	if len(runner.calls) != 3 {
+		t.Fatalf("expected list, marker check, then unlock, got %#v", runner.calls)
 	}
 	if got := runner.commandLine(0); got != "git worktree list --porcelain" {
 		t.Fatalf("ownership-check command = %q", got)
 	}
-	if runner.calls[1].dir != path {
-		t.Fatalf("git worktree unlock dir = %q, want %q", runner.calls[1].dir, path)
+	if got := runner.commandLine(1); got != "git rev-parse --absolute-git-dir" {
+		t.Fatalf("marker-check command = %q", got)
 	}
-	if got := runner.commandLine(1); got != "git worktree unlock "+path {
+	if runner.calls[2].dir != path {
+		t.Fatalf("git worktree unlock dir = %q, want %q", runner.calls[2].dir, path)
+	}
+	if got := runner.commandLine(2); got != "git worktree unlock "+path {
 		t.Fatalf("git worktree unlock command = %q", got)
 	}
 }
@@ -271,6 +279,7 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "worktree " + root + "\n"},
@@ -298,14 +307,18 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	if result.Path != existing {
 		t.Fatalf("Path = %q, want existing %q", result.Path, existing)
 	}
-	if len(runner.calls) != 7 {
-		t.Fatalf("expected metadata git calls plus lock, got %#v", runner.calls)
+	// metadata calls + lock + ownership marker write (absolute-git-dir)
+	if len(runner.calls) != 8 {
+		t.Fatalf("expected metadata git calls plus lock and marker write, got %#v", runner.calls)
 	}
 	// The original lock may have been released by a prior run's exit, which
 	// would leave the reused worktree exposed to Clean's staleness heuristic
 	// while this caller is still using it: reuse must re-establish the lease.
 	if got := runner.commandLine(6); got != "git worktree lock --reason zero: active task worktree "+existing {
 		t.Fatalf("git worktree lock command = %q", got)
+	}
+	if got := runner.commandLine(7); got != "git rev-parse --absolute-git-dir" {
+		t.Fatalf("marker write command = %q", got)
 	}
 	if !result.LockAcquired {
 		t.Fatalf("LockAcquired = false, want true for a lease this call took")
@@ -571,9 +584,31 @@ func TestPrepareValidatesRequestBeforeCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustGit("worktree", "add", "--detach", staleDir)
+	// Plant the ownership marker Clean requires before it will force-remove a
+	// path: without it, a hand-created worktree under the predictable
+	// zero-worktree-* layout must not be pruned. Real linked worktrees keep
+	// their admin dir behind a .git file (gitdir: ...), so resolve it the
+	// same way writeOwnershipMarker does rather than mkdir path/.git.
+	gitDir, err := gitOutput(ctx, defaultRunGit, staleDir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		t.Fatalf("resolve stale worktree git dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, zeroOwnerMarkerFile), []byte(zeroOwnerMarkerContent), 0o600); err != nil {
+		t.Fatalf("plant ownership marker: %v", err)
+	}
 	// Age every filesystem entry past the 24h staleness cutoff.
 	old := time.Now().Add(-48 * time.Hour)
 	if err := filepath.WalkDir(staleDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Also age the admin dir (outside the worktree tree) so nested activity
+	// under the marker file does not keep the worktree "fresh".
+	if err := filepath.WalkDir(gitDir, func(path string, _ os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -694,10 +729,22 @@ func TestDefaultBaseDirFallsBackForWindowsUserProfile(t *testing.T) {
 type fakeRunner struct {
 	calls   []gitCall
 	results []CommandResult
+	// autoAbsoluteGitDir answers `rev-parse --absolute-git-dir` without
+	// consuming a queued result: it ensures dir/.git exists and returns that
+	// path. Tests plant zero-owner markers under that dir when they want
+	// Release/Clean to treat the worktree as Prepare-created.
+	autoAbsoluteGitDir bool
 }
 
 func (runner *fakeRunner) Run(ctx context.Context, dir string, args ...string) (CommandResult, error) {
 	runner.calls = append(runner.calls, gitCall{dir: dir, args: append([]string{}, args...)})
+	if runner.autoAbsoluteGitDir && len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--absolute-git-dir" {
+		gitDir := filepath.Join(dir, ".git")
+		if err := os.MkdirAll(gitDir, 0o700); err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Stdout: gitDir + "\n"}, nil
+	}
 	if len(runner.results) == 0 {
 		return CommandResult{}, nil
 	}
@@ -711,6 +758,19 @@ func (runner *fakeRunner) commandLine(index int) string {
 		return ""
 	}
 	return "git " + strings.Join(runner.calls[index].args, " ")
+}
+
+// plantOwnershipMarker writes Prepare's ownership marker under path's .git
+// admin dir so Release/Clean treat the fixture as zero-created.
+func plantOwnershipMarker(t *testing.T, path string) {
+	t.Helper()
+	gitDir := filepath.Join(path, ".git")
+	if err := os.MkdirAll(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, zeroOwnerMarkerFile), []byte(zeroOwnerMarkerContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type gitCall struct {
@@ -744,17 +804,28 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Markers first, then age the whole tree: planting after Chtimes would
+	// refresh the worktree mtime and make worktreeIsStale skip the prune.
+	plantOwnershipMarker(t, youngPath)
+	plantOwnershipMarker(t, stalePath)
 
-	// Change mtime of stale-task to be in the past (e.g. 2 days ago).
+	// Change mtime of stale-task (and its marker files) to be in the past.
 	twoDaysAgo := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(stalePath, twoDaysAgo, twoDaysAgo); err != nil {
+	if err := filepath.WalkDir(stalePath, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, twoDaysAgo, twoDaysAgo)
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: repoRoot}, // rev-parse --show-toplevel
-			{Stdout: "worktree " + youngPath + "\nworktree " + stalePath + "\n"}, // worktree list --porcelain
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + youngPath + "\nworktree " + stalePath + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
 			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
@@ -774,9 +845,10 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
-	// Verify the calls made by Clean
-	if len(runner.calls) != 7 {
-		t.Fatalf("expected 7 git calls, got %d", len(runner.calls))
+	// toplevel + list + status(stale) + marker + HEAD + for-each-ref + remove + prune
+	// young is skipped as not-stale before any status/marker work.
+	if len(runner.calls) != 8 {
+		t.Fatalf("expected 8 git calls, got %d: %#v", len(runner.calls), runner.calls)
 	}
 	if runner.commandLine(0) != "git rev-parse --show-toplevel" {
 		t.Errorf("call 0 = %q", runner.commandLine(0))
@@ -788,15 +860,18 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 	if runner.commandLine(2) != expectedStatusCall {
 		t.Errorf("call 2 = %q, want %q", runner.commandLine(2), expectedStatusCall)
 	}
-	if runner.commandLine(3) != "git rev-parse HEAD" {
-		t.Errorf("call 3 = %q, want the pre-removal HEAD-preservation check", runner.commandLine(3))
+	if runner.commandLine(3) != "git rev-parse --absolute-git-dir" {
+		t.Errorf("call 3 = %q, want ownership marker check", runner.commandLine(3))
+	}
+	if runner.commandLine(4) != "git rev-parse HEAD" {
+		t.Errorf("call 4 = %q, want the pre-removal HEAD-preservation check", runner.commandLine(4))
 	}
 	expectedRemoveCall := "git worktree remove --force " + filepath.Clean(stalePath)
-	if runner.commandLine(5) != expectedRemoveCall {
-		t.Errorf("call 5 = %q, want %q", runner.commandLine(5), expectedRemoveCall)
+	if runner.commandLine(6) != expectedRemoveCall {
+		t.Errorf("call 6 = %q, want %q", runner.commandLine(6), expectedRemoveCall)
 	}
-	if runner.commandLine(6) != "git worktree prune" {
-		t.Errorf("call 6 = %q", runner.commandLine(6))
+	if runner.commandLine(7) != "git worktree prune" {
+		t.Errorf("call 7 = %q", runner.commandLine(7))
 	}
 }
 
@@ -817,15 +892,22 @@ func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	plantOwnershipMarker(t, stalePath)
 	twoDaysAgo := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(stalePath, twoDaysAgo, twoDaysAgo); err != nil {
+	if err := filepath.WalkDir(stalePath, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, twoDaysAgo, twoDaysAgo)
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + stalePath + "\n"},
+			{Stdout: "worktree " + repoRoot + "\nworktree " + stalePath + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePath> (clean)
 			{Stdout: "deadbeef"},        // rev-parse HEAD <stalePath>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeef (already reachable)
@@ -859,17 +941,26 @@ func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	for _, path := range []string{stalePathA, stalePathB} {
+		plantOwnershipMarker(t, path)
+	}
 	twoDaysAgo := time.Now().Add(-48 * time.Hour)
 	for _, path := range []string{stalePathA, stalePathB} {
-		if err := os.Chtimes(path, twoDaysAgo, twoDaysAgo); err != nil {
+		if err := filepath.WalkDir(path, func(p string, _ os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			return os.Chtimes(p, twoDaysAgo, twoDaysAgo)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
+			{Stdout: "worktree " + repoRoot + "\nworktree " + stalePathA + "\n\nworktree " + stalePathB + "\n"},
 			{ExitCode: 0},               // status --porcelain <stalePathA> (clean)
 			{Stdout: "deadbeefa"},       // rev-parse HEAD <stalePathA>
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains=deadbeefa (already reachable)
@@ -1143,15 +1234,22 @@ func TestCleanReclaimsReleasedWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	plantOwnershipMarker(t, ignoredOnlyPath)
 	twoDaysAgo := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(ignoredOnlyPath, twoDaysAgo, twoDaysAgo); err != nil {
+	if err := filepath.WalkDir(ignoredOnlyPath, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, twoDaysAgo, twoDaysAgo)
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + ignoredOnlyPath + "\n"},
+			{Stdout: "worktree " + repoRoot + "\nworktree " + ignoredOnlyPath + "\n"},
 			{ExitCode: 0},               // status --porcelain: ignored files invisible => clean
 			{Stdout: "deadbeef"},        // rev-parse HEAD
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains (reachable)
@@ -1197,15 +1295,22 @@ func TestCleanRecoversExpiredLease(t *testing.T) {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	plantOwnershipMarker(t, crashedPath)
 	twoDaysAgo := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(crashedPath, twoDaysAgo, twoDaysAgo); err != nil {
+	if err := filepath.WalkDir(crashedPath, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, twoDaysAgo, twoDaysAgo)
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	runner := &fakeRunner{
+		autoAbsoluteGitDir: true,
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + crashedPath + "\nlocked " + leaseReason(deadPID) + "\n"},
+			{Stdout: "worktree " + repoRoot + "\nworktree " + crashedPath + "\nlocked " + leaseReason(deadPID) + "\n"},
 			{ExitCode: 0},               // status --porcelain --ignored: clean
 			{Stdout: "deadbeef"},        // rev-parse HEAD
 			{Stdout: "refs/heads/main"}, // for-each-ref --contains (reachable)
@@ -1219,14 +1324,16 @@ func TestCleanRecoversExpiredLease(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
+	// status is still call 2; ownership marker check is call 3; then HEAD,
+	// for-each-ref, unlock, remove, prune.
 	if got, want := runner.commandLine(2), "git status --porcelain --ignored"; got != want {
 		t.Fatalf("status call = %q, want %q (a crashed lease never signaled completion)", got, want)
 	}
-	if got, want := runner.commandLine(5), "git worktree unlock "+filepath.Clean(crashedPath); got != want {
-		t.Fatalf("call 5 = %q, want lease recovery %q", got, want)
+	if got, want := runner.commandLine(6), "git worktree unlock "+filepath.Clean(crashedPath); got != want {
+		t.Fatalf("call 6 = %q, want lease recovery %q", got, want)
 	}
-	if got, want := runner.commandLine(6), "git worktree remove --force "+filepath.Clean(crashedPath); got != want {
-		t.Fatalf("call 6 = %q, want %q", got, want)
+	if got, want := runner.commandLine(7), "git worktree remove --force "+filepath.Clean(crashedPath); got != want {
+		t.Fatalf("call 7 = %q, want %q", got, want)
 	}
 }
 
