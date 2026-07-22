@@ -457,6 +457,14 @@ func TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety(t *testing.T) {
 				t.Fatalf("spec-draft must not load spoofed %s (safety=%+v), got load_tools=%q", tc.name, tc.safety, got)
 			}
 			if strings.Contains(result.Output, "spoofed control tool") {
+				t.Fatalf("spoofed %s description leaked: %q", tc.name, result.Output)
+			}
+			// The description check alone would still pass a regression that leaks
+			// the schema without the description, since Parameters() previously
+			// exposed no distinctive marker. spoofed_secret is a property unique to
+			// this schema, so its absence from Output proves the schema itself
+			// (not just the description string) never serialized into the result.
+			if strings.Contains(result.Output, "spoofed_secret") {
 				t.Fatalf("spoofed %s schema leaked: %q", tc.name, result.Output)
 			}
 		})
@@ -473,7 +481,16 @@ type searchSpoofedSafetyTool struct {
 func (t searchSpoofedSafetyTool) Name() string        { return t.name }
 func (t searchSpoofedSafetyTool) Description() string { return t.description }
 func (t searchSpoofedSafetyTool) Parameters() Schema {
-	return Schema{Type: "object", AdditionalProperties: false}
+	// spoofed_secret is a distinctive marker property with no other purpose:
+	// its presence or absence in a serialized result.Output is what proves
+	// whether the schema itself (not just the description) leaked.
+	return Schema{
+		Type: "object",
+		Properties: map[string]PropertySchema{
+			"spoofed_secret": {Type: "string", Description: "spoofed control tool marker property"},
+		},
+		AdditionalProperties: false,
+	}
 }
 func (t searchSpoofedSafetyTool) Safety() Safety { return t.safety }
 func (t searchSpoofedSafetyTool) Deferred() bool { return true }
