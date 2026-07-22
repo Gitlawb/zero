@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -125,6 +126,113 @@ func TestPlanCommandOnTwiceDoesNotClobberSavedMode(t *testing.T) {
 func TestNextPermissionModeLeavesPlanUntouched(t *testing.T) {
 	if got := nextPermissionMode(agent.PermissionModePlan); got != agent.PermissionModePlan {
 		t.Fatalf("nextPermissionMode(Plan) = %s, want Plan unchanged", got)
+	}
+}
+
+// TestPlanModeBlocksRewindMutation guards the coderabbitai finding that /plan
+// on only flips the agent permission mode: local TUI commands bypass tool
+// filtering entirely, so /rewind — which restores workspace files straight
+// from a checkpoint — needed its own gate. This drives a real checkpoint and
+// confirms the file on disk is untouched (and no rewind summary appears)
+// while plan mode is active.
+func TestPlanModeBlocksRewindMutation(t *testing.T) {
+	store := testSessionStore(t)
+	ws := t.TempDir()
+	session, err := store.Create(sessions.CreateInput{Title: "plan rewind", Cwd: ws, ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	path := filepath.Join(ws, "a.txt")
+	writeTestFile(t, ws, "a.txt", "original")
+	if _, err := store.CaptureToolCheckpoint(session.SessionID, ws, "write_file", []string{"a.txt"}); err != nil {
+		t.Fatalf("CaptureToolCheckpoint: %v", err)
+	}
+	writeTestFile(t, ws, "a.txt", "changed while planning")
+
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: ws, PermissionMode: agent.PermissionModePlan})
+	m.activeSession = session
+
+	updated, cmd := m.dispatchCommand(parseCommand("/rewind"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /rewind to be blocked synchronously in plan mode")
+	}
+	if !transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("expected plan-mode denial, got %#v", next.transcript)
+	}
+	if transcriptContains(next.transcript, "Rewound") {
+		t.Fatalf("rewind should not have run in plan mode, got %#v", next.transcript)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(got) != "changed while planning" {
+		t.Fatalf("rewind mutated the workspace despite plan mode gate: %q", got)
+	}
+}
+
+// TestPlanModeBlocksExportMutation guards the same finding for /export, which
+// writes a transcript file to disk outside the agent tool gate.
+func TestPlanModeBlocksExportMutation(t *testing.T) {
+	dir := t.TempDir()
+	m := newModel(context.Background(), Options{Cwd: dir, PermissionMode: agent.PermissionModePlan})
+
+	updated, cmd := m.dispatchCommand(parseCommand("/export out.txt"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /export to be blocked synchronously in plan mode")
+	}
+	if !transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("expected plan-mode denial, got %#v", next.transcript)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out.txt")); !os.IsNotExist(err) {
+		t.Fatalf("export should not have written a file in plan mode, stat err=%v", err)
+	}
+}
+
+// TestPlanModeBlocksSandboxSetupProcess guards the same finding for
+// /sandbox-setup, which spawns a native host process outside the agent tool
+// gate: the injected SandboxSetupCommand must never run while plan mode is
+// active, and the command must be handled synchronously (no async tea.Cmd).
+func TestPlanModeBlocksSandboxSetupProcess(t *testing.T) {
+	called := false
+	m := newModel(context.Background(), Options{
+		PermissionMode: agent.PermissionModePlan,
+		SandboxSetupCommand: func(context.Context) SandboxSetupCommandResult {
+			called = true
+			return SandboxSetupCommandResult{ExitCode: 0}
+		},
+	})
+
+	updated, cmd := m.dispatchCommand(parseCommand("/sandbox-setup"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /sandbox-setup to be blocked synchronously in plan mode")
+	}
+	if called {
+		t.Fatal("sandbox setup process must not run in plan mode")
+	}
+	if !transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("expected plan-mode denial, got %#v", next.transcript)
+	}
+}
+
+// TestPlanModeCommandGuardDoesNotBlockOutsideMode confirms the guard is
+// scoped to plan mode: the same commands must behave normally (not be
+// swallowed by the new check) once plan mode is off.
+func TestPlanModeCommandGuardDoesNotBlockOutsideMode(t *testing.T) {
+	dir := t.TempDir()
+	m := newModel(context.Background(), Options{Cwd: dir, PermissionMode: agent.PermissionModeAuto})
+	m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "hello"})
+
+	updated, _ := m.dispatchCommand(parseCommand("/export out.txt"))
+	next := updated.(model)
+	if transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("export should not be gated outside plan mode, got %#v", next.transcript)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out.txt")); err != nil {
+		t.Fatalf("expected export to write the file outside plan mode: %v", err)
 	}
 }
 
