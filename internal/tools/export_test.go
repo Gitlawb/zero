@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // newWebFetchToolWithClient is a test seam: it builds the live web_fetch tool
@@ -130,16 +128,6 @@ func shortenDescription(desc string, max int) string {
 	return truncateDescription(meaningful, max)
 }
 
-func (manager *execSessionManager) len() int {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	return len(manager.sessions)
-}
-
-func likelySandboxDenied(plan zeroSandbox.CommandPlan, exitCode int, sections ...string) bool {
-	kind, _ := sandboxDenialKind(plan, exitCode, sections...)
-	return kind != ""
-}
 func isGenericDescriptionHeading(line string) bool {
 	return genericHeading.MatchString(line)
 }
