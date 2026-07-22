@@ -54,19 +54,24 @@ type setupState struct {
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
-	stage                 setupStage
-	err                   string
-	baseURL               string
-	name                  string
-	apiKey                textinput.Model
-	models                []providerWizardModel
-	modelIndex            int
-	modelQuery            string
-	modelForID            string
-	modelLoad             bool
-	modelErr              string
-	modelSrc              string
-	modelGen              uint64
+	// deviceLoginCancel cancels the background context backing an in-flight
+	// device-code poll (setupDevicePollCmd), so abandoning setup (Esc) actually
+	// stops the poll instead of leaving it to run for up to 10 minutes and
+	// silently save a credential the user backed out of.
+	deviceLoginCancel context.CancelFunc
+	stage             setupStage
+	err               string
+	baseURL           string
+	name              string
+	apiKey            textinput.Model
+	models            []providerWizardModel
+	modelIndex        int
+	modelQuery        string
+	modelForID        string
+	modelLoad         bool
+	modelErr          string
+	modelSrc          string
+	modelGen          uint64
 	// aimlapi holds the shared aimlapi.com onboarding sub-flow while
 	// setup is on setupStageAimlapi.
 	aimlapi *aimlapiOnboardState
@@ -158,6 +163,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case keyIs(msg, tea.KeyEsc):
 			m.setup.oauthPending = false
 			m.setup.oauthDevice = false
+			// Stop a device-code poll actually running in the background instead
+			// of merely dismissing the UI — otherwise completing the login later
+			// in the browser still silently saves the credential.
+			m.setup.cancelDeviceLogin()
 		}
 		return m, nil
 	}
@@ -587,10 +596,23 @@ func setupDevicePrepareCmd(name string) tea.Cmd {
 	}
 }
 
-func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+// setupDevicePollCmd runs phase 2 (poll for the token + store) off the UI
+// goroutine and reports completion as a regular OAuth result. ctx must be
+// cancelable by the caller so abandoning setup actually stops the poll.
+func setupDevicePollCmd(ctx context.Context, name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth)}
+		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(ctx, name, cfg, auth)}
 	}
+}
+
+// cancelDeviceLogin stops an in-flight device-code poll, if any, and clears
+// the stored cancel func. Safe to call even when no poll is running.
+func (setup *setupState) cancelDeviceLogin() {
+	if setup == nil || setup.deviceLoginCancel == nil {
+		return
+	}
+	setup.deviceLoginCancel()
+	setup.deviceLoginCancel = nil
 }
 
 // startSetupDeviceLogin begins the device-code flow for the selected OAuth
@@ -599,6 +621,8 @@ func (m model) startSetupDeviceLogin(descriptor providercatalog.Descriptor) (tea
 	if !descriptor.OAuth || !descriptor.OAuthDeviceFlow {
 		return m, nil
 	}
+	// A new attempt supersedes any poll left over from a previous one.
+	m.setup.cancelDeviceLogin()
 	m.setup.oauthPending = true
 	m.setup.oauthDevice = true
 	m.setup.oauthErr = ""
@@ -626,7 +650,13 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 	}
 	m.setup.deviceUserCode = msg.userCode
 	m.setup.deviceVerificationURI = msg.verifyURL
-	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
+	// The poll runs off the UI goroutine for up to 10 minutes; give it a
+	// context setup can cancel (Esc) so abandoning the flow actually stops it
+	// instead of leaving it to complete in the background. m.ctx is the
+	// parent so quitting zero entirely also unblocks the poll.
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.setup.deviceLoginCancel = cancel
+	return m, setupDevicePollCmd(ctx, msg.providerID, msg.cfg, msg.auth)
 }
 
 // applySetupOAuth folds an OAuth login result into the first-run setup: on success
@@ -642,6 +672,9 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.setup.oauthPending = false
+	// The poll (if this was a device-code login) is done either way; release
+	// its context.
+	m.setup.cancelDeviceLogin()
 	if msg.err != nil {
 		m.setup.oauthErr = redaction.RedactString(msg.err.Error(), redaction.Options{})
 		return m, nil

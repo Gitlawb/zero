@@ -45,6 +45,9 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 		return m, nil
 	}
 	m.providerWizard.oauthPending = false
+	// The poll (if this was a device-code login) is done either way; release
+	// its context.
+	m.providerWizard.cancelDeviceLogin()
 	if msg.err != nil {
 		m.providerWizard.oauthErr = redaction.ErrorMessage(msg.err, redaction.Options{})
 		return m, nil
@@ -137,7 +140,13 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
+	// The poll runs off the UI goroutine for up to 10 minutes; give it a
+	// context the wizard can cancel (Esc) so abandoning the flow actually
+	// stops it instead of leaving it to complete in the background. m.ctx is
+	// the parent so quitting zero entirely also unblocks the poll.
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.providerWizard.deviceLoginCancel = cancel
+	return m, providerWizardDevicePollCmd(ctx, msg.providerID, msg.attemptID, msg.cfg, msg.auth)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -315,10 +324,11 @@ func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 }
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
-// UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+// UI goroutine and reports completion as a regular OAuth result. ctx must be
+// cancelable by the caller so abandoning the wizard actually stops the poll.
+func providerWizardDevicePollCmd(ctx context.Context, name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(ctx, name, cfg, auth)}
 	}
 }
 
@@ -439,6 +449,11 @@ type providerWizardState struct {
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
+	// deviceLoginCancel cancels the background context backing an in-flight
+	// device-code poll (providerWizardDevicePollCmd), so abandoning the wizard
+	// (Esc) actually stops the poll instead of leaving it to run for up to 10
+	// minutes and silently save a credential the user backed out of.
+	deviceLoginCancel context.CancelFunc
 	// aimlapi holds the shared aimlapi.com onboarding sub-flow while
 	// the wizard is on providerWizardStepAimlapi.
 	aimlapi *aimlapiOnboardState
@@ -500,6 +515,8 @@ func (wizard *providerWizardState) currentProvider() providercatalog.Descriptor 
 }
 
 func (wizard *providerWizardState) beginOAuthAttempt(device bool) int {
+	// A new attempt supersedes any poll left over from a previous one.
+	wizard.cancelDeviceLogin()
 	wizard.oauthAttemptID++
 	wizard.oauthPending = true
 	wizard.oauthDevice = device
@@ -514,6 +531,16 @@ func (wizard *providerWizardState) oauthResultMatches(providerID string, attempt
 		return false
 	}
 	return wizard.currentProvider().ID == providerID && wizard.oauthAttemptID == attemptID
+}
+
+// cancelDeviceLogin stops an in-flight device-code poll, if any, and clears
+// the stored cancel func. Safe to call even when no poll is running.
+func (wizard *providerWizardState) cancelDeviceLogin() {
+	if wizard == nil || wizard.deviceLoginCancel == nil {
+		return
+	}
+	wizard.deviceLoginCancel()
+	wizard.deviceLoginCancel = nil
 }
 
 // resetAimlapiOnboard drops any in-flight aimlapi.com sub-flow (cancelling a
@@ -591,6 +618,7 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.modelLoading = false
 		wizard.modelLoadError = ""
 		wizard.oauthPending = false
+		wizard.cancelDeviceLogin()
 		wizard.oauthErr = ""
 		wizard.resetAimlapiOnboard()
 		wizard.refreshModels()
@@ -818,13 +846,17 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// provider list instead of destroying the overlay — and with it the user's
 	// cursor and status — from a step deep in the flow. An in-flight OAuth login
 	// is abandoned the same way; bumping the attempt id makes its late result
-	// stale so applyProviderWizardOAuth drops it.
+	// stale so applyProviderWizardOAuth drops it, and cancelDeviceLogin stops a
+	// device-code poll actually running in the background — otherwise
+	// completing the login later in the browser still silently saves the
+	// credential even though the wizard message is discarded.
 	if m.providerWizard.manage && !m.providerWizard.managerStep() && keyIs(msg, tea.KeyEsc) {
 		wizard := m.providerWizard
 		if wizard.oauthPending {
 			wizard.oauthPending = false
 			wizard.oauthAttemptID++
 		}
+		wizard.cancelDeviceLogin()
 		wizard.oauthDevice = false
 		wizard.deviceUserCode = ""
 		wizard.deviceVerificationURI = ""
@@ -838,9 +870,12 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	// While a browser/device OAuth login is in flight, ignore input except Esc,
-	// which abandons the wizard (the background flow times out and is dropped).
+	// which abandons the wizard. cancelDeviceLogin stops a device-code poll
+	// actually running in the background (the browser OAuth flow still relies
+	// on its own timeout, since it does not persist anything mid-flight).
 	if m.providerWizard.oauthPending {
 		if keyIs(msg, tea.KeyEsc) {
+			m.providerWizard.cancelDeviceLogin()
 			m.providerWizard = nil
 		}
 		return m, nil
@@ -2092,12 +2127,25 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		APIFormat:    providerWizardAPIFormat(provider),
 		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
 	}
-	// Catalog custom headers (e.g. aimlapi.com's partner attribution) belong to the
-	// catalog endpoint: the resolver only applies them when the base URL is the
-	// default, so a profile built against a staging/proxy/custom override must not
-	// bake them in either — otherwise attribution leaks to an arbitrary host.
+	// Catalog custom headers (e.g. aimlapi.com's partner attribution, or Kimi
+	// Code's X-Msh-* vendor-identity headers) belong to the catalog endpoint:
+	// the resolver only applies them when the base URL is the default, so a
+	// profile built against a staging/proxy/custom override must not bake
+	// them in either — otherwise attribution leaks to an arbitrary host.
 	if sameProviderBaseURL(resolvedBaseURL, provider.DefaultBaseURL) {
-		profile.CustomHeaders = maps.Clone(provider.CustomHeaders)
+		// `provider` here normally comes from a listing call (OAuthProviders()/
+		// All()), which deliberately leaves RuntimeHeaders-backed CustomHeaders
+		// (Kimi's device-identity headers) unset so merely browsing providers
+		// doesn't mint Kimi's on-disk device id. Re-resolve through Get(), which
+		// runs RuntimeHeaders the same way profile-resolve time does (see
+		// cloneDescriptor / applyCatalogDescriptor), so the wizard's first
+		// authenticated /models call and the profile it activates immediately
+		// afterward carry those headers without requiring a restart.
+		customHeaders := provider.CustomHeaders
+		if runtimeDescriptor, ok := providercatalog.Get(provider.ID); ok {
+			customHeaders = runtimeDescriptor.CustomHeaders
+		}
+		profile.CustomHeaders = maps.Clone(customHeaders)
 		if providerWizardIsAimlapi(provider) {
 			profile.CustomHeaders = aimlapi.WithResolvedPartnerHeader(profile.CustomHeaders)
 		}

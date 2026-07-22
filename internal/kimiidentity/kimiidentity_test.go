@@ -3,13 +3,36 @@ package kimiidentity
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
+// setUserConfigRoot redirects os.UserConfigDir() to a throwaway temp dir so a
+// test that calls the process-global Headers()/DeviceID() never creates or
+// touches the real ~/.config/zero (or AppData\zero) kimi-device-id file.
+// Mirrors internal/workspacetrust/trust_test.go: os.UserConfigDir reads
+// APPDATA on Windows, HOME on darwin, and XDG_CONFIG_HOME on Linux, so a
+// single env var isn't portable. Must be called before the first call to
+// Headers()/DeviceID() in the process — DeviceID is a sync.OnceValue, so a
+// call before the redirect is in place would permanently cache the real path.
+func setUserConfigRoot(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+}
+
 func TestHeadersIncludesDeviceIdentity(t *testing.T) {
+	setUserConfigRoot(t)
 	headers := Headers()
 	for _, key := range []string{
 		"X-Msh-Platform",
@@ -23,8 +46,8 @@ func TestHeadersIncludesDeviceIdentity(t *testing.T) {
 			t.Fatalf("Headers()[%q] empty", key)
 		}
 	}
-	if headers["X-Msh-Platform"] != "zero-cli" {
-		t.Fatalf("X-Msh-Platform = %q, want zero-cli", headers["X-Msh-Platform"])
+	if headers["X-Msh-Platform"] != "kimi_code_cli" {
+		t.Fatalf("X-Msh-Platform = %q, want kimi_code_cli", headers["X-Msh-Platform"])
 	}
 	if !isUUID(headers["X-Msh-Device-Id"]) {
 		t.Fatalf("X-Msh-Device-Id = %q, want UUID", headers["X-Msh-Device-Id"])

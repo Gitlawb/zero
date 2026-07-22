@@ -27,19 +27,21 @@ import (
 // Headers returns the X-Msh-* vendor-identity headers, including the stable
 // per-device identifier.
 //
-// X-Msh-Platform is "zero-cli" (honest client name). Upstream kimi-cli hardcodes
-// "kimi_cli". Kimi's coding/v1 endpoint documents a client whitelist ("Kimi CLI,
-// Claude Code, Roo Code, ..."); it is unclear whether that gate keys on this
-// platform header or on the OAuth client_id (which already matches kimi-cli's
-// public ID). If login succeeds but completions are rejected, try confirming
-// with a real account before changing this value.
+// X-Msh-Platform is "kimi_code_cli". That is the value Moonshot's own Kimi
+// Code CLI sends (packages/oauth/src/identity.ts, KIMI_CODE_PLATFORM) as of
+// its oauth package changelog entry correcting the header from an earlier
+// "kimi-code-cli" typo (PR MoonshotAI/kimi-code#52, commit 064343a); the
+// older, separate open-source kimi-cli client instead hardcodes "kimi_cli".
+// Kimi's coding/v1 endpoint documents a client whitelist ("Kimi CLI, Claude
+// Code, Roo Code, ..."); sending the wrong platform value risks the managed
+// endpoint rejecting completions even after a successful login.
 func Headers() map[string]string {
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "unknown-host"
 	}
 	return map[string]string{
-		"X-Msh-Platform":     "zero-cli",
+		"X-Msh-Platform":     "kimi_code_cli",
 		"X-Msh-Version":      "unknown",
 		"X-Msh-Device-Name":  asciiHeaderValue(hostname),
 		"X-Msh-Device-Model": asciiHeaderValue(runtime.GOOS + " " + runtime.GOARCH),
