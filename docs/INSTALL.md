@@ -127,13 +127,6 @@ go build -o zero ./cmd/zero
 
 Source builds require Go 1.26.5+.
 
-`go install github.com/Gitlawb/zero/cmd/zero@<version>` is not supported. The
-root `go.mod` carries a local `replace charm.land/bubbletea/v2 =>
-./patches/bubbletea-v2` directive for the vendored TUI fork, and `go install`
-against a versioned module can't resolve a `replace` that points at a path on
-disk, that path only exists in a full checkout. Use `git clone` plus `go
-build`/`go run` above instead.
-
 ### Sandbox Helpers For Source Builds
 
 Release archives include the platform sandbox helpers. If you build directly

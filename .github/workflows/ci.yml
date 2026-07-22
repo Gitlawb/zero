@@ -48,18 +48,6 @@ jobs:
       - name: Test
         run: go test ./...
 
-      # patches/bubbletea-v2 is its own Go module (kept separate from the
-      # main module's dependency graph on purpose, see go.mod's replace
-      # directive) so `go test ./...` above never reaches it. Run its suite
-      # explicitly so the vendored fork's own tests are part of required CI.
-      # -race: the patches in this fork specifically target a concurrency bug
-      # (charmbracelet/bubbletea#1690), so its regression test needs the race
-      # detector to actually catch a reintroduced race rather than passing on
-      # a benign-looking but still-racy run.
-      - name: Test vendored bubbletea fork (patches/bubbletea-v2)
-        working-directory: patches/bubbletea-v2
-        run: go test -race ./...
-
       - name: Build binary
         run: go run ./cmd/zero-release build
 

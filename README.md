@@ -102,10 +102,6 @@ Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`
 Windows source builds can use the main `zero.exe` as their sandbox helper; release
 archives still ship standalone Windows helper executables.
 
-`go install github.com/Gitlawb/zero/cmd/zero@<version>` is not supported (the
-root `go.mod` has a local `replace` for the vendored TUI fork); clone and build
-as shown above instead.
-
 More install details: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## First Run
