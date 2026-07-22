@@ -149,6 +149,12 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			if onPartial != nil {
 				onPartial(compose(), false)
 			}
+			// onPartial may deliver the partial that makes the TUI cancel
+			// (Esc). Observe that before the next Read, which can already
+			// have a racing OpenAI error frame buffered.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
 		case realtimeCompleted:
 			// A completed item replaces the in-progress delta buffer with the
 			// server's authoritative transcript for that segment.
@@ -162,6 +168,9 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			if onPartial != nil {
 				onPartial(compose(), true)
 			}
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
 			// Once we've committed the buffer (user stopped) and the server has
 			// returned a completed transcription, the utterance is done.
 			if committed {
@@ -171,6 +180,14 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case realtimeCommitted:
 			committed = true
 		case realtimeError:
+			// Esc can race an incoming error event: conn.Read may already have
+			// the OpenAI error in hand by the time cancellation lands. Key on
+			// ctx.Err() first, same as every other return point in this loop,
+			// so a cancel that wins the race still surfaces as context.Canceled
+			// instead of a spurious redacted failure alongside it.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
 			return compose(), fmt.Errorf("OpenAI Realtime error: %s", providerio.Redact(evt.text, o.cfg.APIKey))
 		}
 		// The writer signals commit completion out of band; observe it so a
