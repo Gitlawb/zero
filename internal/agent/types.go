@@ -21,21 +21,87 @@ type PermissionMode string
 type PermissionAction string
 type PermissionDecisionAction string
 
+type PermissionModeInfo struct {
+	ID          PermissionMode
+	Label       string
+	Summary     string
+	Description string
+	Unsafe      bool
+}
+
 const (
-	PermissionModeAuto      PermissionMode = "auto"
-	PermissionModeAsk       PermissionMode = "ask"
-	PermissionModeUnsafe    PermissionMode = "unsafe"
-	PermissionModeSpecDraft PermissionMode = "spec-draft"
-	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
-	// advertises the in-workspace mutators a member needs to build (write/edit +
-	// shell) on top of the Auto set, while the sandbox engine still gates them at
-	// call time — in-workspace writes and sandbox-backed shell auto-allow, but
-	// out-of-workspace writes, network, and destructive commands still prompt (and
-	// a headless member has no approver, so they are denied). It normalizes to Auto
-	// everywhere except ToolAdvertised, so authority is never widened beyond what an
-	// interactive auto agent already has inside the sandbox.
-	PermissionModeMemberAuto PermissionMode = "member-auto"
+	PermissionModeAuto           PermissionMode = "auto"
+	PermissionModeAsk            PermissionMode = "ask"
+	PermissionModeAutoClassifier PermissionMode = "auto-classifier"
+	PermissionModeUnsafe         PermissionMode = "unsafe"
+	PermissionModeSpecDraft      PermissionMode = "spec-draft"
+	// PermissionModeWorkspaceAuto advertises sandbox-safe in-workspace mutators
+	// (write/edit + shell) on top of the Auto set, while the sandbox engine still
+	// gates them at call time — in-workspace writes and sandbox-backed shell
+	// auto-allow, but out-of-workspace writes, network, and destructive commands
+	// still prompt (and a headless member has no approver, so they are denied). It
+	// normalizes to Auto everywhere except ToolAdvertised, so authority is never
+	// widened beyond what an interactive auto agent already has inside the sandbox.
+	PermissionModeWorkspaceAuto PermissionMode = "workspace-auto"
+	// PermissionModeMemberAuto is a legacy alias for the old internal name.
+	PermissionModeMemberAuto PermissionMode = PermissionModeWorkspaceAuto
 )
+
+func PermissionModeInfoFor(mode PermissionMode) PermissionModeInfo {
+	switch mode {
+	case PermissionModeAsk:
+		return PermissionModeInfo{
+			ID:          PermissionModeAsk,
+			Label:       "Ask every time",
+			Summary:     "ask every time",
+			Description: "Ask before every tool that can change state; read-only actions can still run without a prompt.",
+		}
+	case PermissionModeUnsafe:
+		return PermissionModeInfo{
+			ID:          PermissionModeUnsafe,
+			Label:       "Dangerously skip permissions (YOLO mode)",
+			Summary:     "unsafe YOLO",
+			Description: "Skip permission prompts for prompt-gated tools. Sandbox and hard safety blocks may still apply.",
+			Unsafe:      true,
+		}
+	case PermissionModeSpecDraft:
+		return PermissionModeInfo{
+			ID:          PermissionModeSpecDraft,
+			Label:       "Spec draft",
+			Summary:     "spec draft",
+			Description: "Draft a spec first and stop for review before implementation tools are advertised.",
+		}
+	case PermissionModeWorkspaceAuto:
+		return PermissionModeInfo{
+			ID:          PermissionModeWorkspaceAuto,
+			Label:       "Auto-approve trusted workspace",
+			Summary:     "trusted workspace",
+			Description: "Allow sandbox-safe workspace edits and shell; prompt-required escalation is still reviewed or denied when no approver is available.",
+		}
+	case PermissionModeAutoClassifier:
+		return PermissionModeInfo{
+			ID:          PermissionModeAutoClassifier,
+			Label:       "Let Zero cook (auto reviewed)",
+			Summary:     "let Zero cook (auto reviewed)",
+			Description: "Auto-run low-risk workspace actions only after an LLM classifier reviews each one; anything the classifier is unsure about, plus high-risk actions, still ask.",
+		}
+	default:
+		return PermissionModeInfo{
+			ID:          PermissionModeAuto,
+			Label:       "Auto-approve safe actions",
+			Summary:     "auto-approve safe actions",
+			Description: "Run read-only and sandbox-safe actions automatically; ask before risky commands, network, installs, destructive actions, or access outside the granted workspace.",
+		}
+	}
+}
+
+func PermissionModeLabel(mode PermissionMode) string {
+	return PermissionModeInfoFor(mode).Label
+}
+
+func PermissionModeSummary(mode PermissionMode) string {
+	return PermissionModeInfoFor(mode).Summary
+}
 
 type StopReason string
 
@@ -51,14 +117,16 @@ const (
 )
 
 const (
-	PermissionDecisionAllow             PermissionDecisionAction = "allow"
-	PermissionDecisionAllowStrict       PermissionDecisionAction = "allow_with_strict_auto_review"
-	PermissionDecisionAllowForSession   PermissionDecisionAction = "allow_for_session"
-	PermissionDecisionAllowPrefix       PermissionDecisionAction = "allow_prefix_for_session"
-	PermissionDecisionAlwaysAllowPrefix PermissionDecisionAction = "always_allow_prefix"
-	PermissionDecisionDeny              PermissionDecisionAction = "deny"
-	PermissionDecisionAlwaysAllow       PermissionDecisionAction = "always_allow"
-	PermissionDecisionCancel            PermissionDecisionAction = "cancel"
+	PermissionDecisionAllow               PermissionDecisionAction = "allow"
+	PermissionDecisionAllowStrict         PermissionDecisionAction = "allow_with_strict_auto_review"
+	PermissionDecisionAutoClassifierAllow PermissionDecisionAction = "auto_classifier_allow"
+	PermissionDecisionAllowForSession     PermissionDecisionAction = "allow_for_session"
+	PermissionDecisionAllowPrefix         PermissionDecisionAction = "allow_prefix_for_session"
+	PermissionDecisionAllowPrefixProject  PermissionDecisionAction = "always_allow_prefix_for_project"
+	PermissionDecisionAlwaysAllowPrefix   PermissionDecisionAction = "always_allow_prefix"
+	PermissionDecisionDeny                PermissionDecisionAction = "deny"
+	PermissionDecisionAlwaysAllow         PermissionDecisionAction = "always_allow"
+	PermissionDecisionCancel              PermissionDecisionAction = "cancel"
 )
 
 type ToolResult struct {
@@ -173,12 +241,51 @@ type PermissionRequest struct {
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
+	// CommandPrefixOptions offers breadth choices for a prefix grant, ordered
+	// broadest → most specific (the last entry equals CommandPrefix). Empty when
+	// there is only one safe prefix, so the approver just grants CommandPrefix.
+	CommandPrefixOptions [][]string `json:"commandPrefixOptions,omitempty"`
+	// ClassifierReason is the LLM auto-classifier's explanation for why this call
+	// is being prompted instead of auto-approved (auto-classifier mode only).
+	ClassifierReason string `json:"classifierReason,omitempty"`
 }
 
 type PermissionDecision struct {
 	Action PermissionDecisionAction `json:"action"`
 	Reason string                   `json:"reason,omitempty"`
+	// CommandPrefix, when set on an allow-prefix decision, is the breadth the
+	// approver chose from PermissionRequest.CommandPrefixOptions. Empty means use
+	// the request's default CommandPrefix. The loop validates it still matches the
+	// command before granting, so a stale or overbroad choice cannot widen a grant.
+	CommandPrefix []string `json:"commandPrefix,omitempty"`
 }
+
+type AutoPermissionClassifierAction string
+
+const (
+	AutoPermissionClassifierAllow  AutoPermissionClassifierAction = "allow"
+	AutoPermissionClassifierPrompt AutoPermissionClassifierAction = "prompt"
+)
+
+type AutoPermissionClassifierRequest struct {
+	ToolCallID     string         `json:"toolCallId"`
+	ToolName       string         `json:"name"`
+	PermissionMode PermissionMode `json:"permissionMode"`
+	SideEffect     string         `json:"sideEffect"`
+	Reason         string         `json:"reason,omitempty"`
+	Scope          string         `json:"scope,omitempty"`
+	Risk           sandbox.Risk   `json:"risk"`
+	Args           map[string]any `json:"args,omitempty"`
+	SandboxReason  string         `json:"sandboxReason,omitempty"`
+	SandboxRisk    sandbox.Risk   `json:"sandboxRisk"`
+}
+
+type AutoPermissionClassifierDecision struct {
+	Action AutoPermissionClassifierAction `json:"action"`
+	Reason string                         `json:"reason,omitempty"`
+}
+
+type AutoPermissionClassifier func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error)
 
 type PermissionEvent struct {
 	ToolCallID        string                   `json:"toolCallId"`
@@ -193,11 +300,15 @@ type PermissionEvent struct {
 	Reason            string                   `json:"reason,omitempty"`
 	Scope             string                   `json:"scope,omitempty"`
 	DecisionReason    string                   `json:"decisionReason,omitempty"`
-	Risk              sandbox.Risk             `json:"risk"`
-	Block             *sandbox.Block           `json:"block,omitempty"`
-	GrantMatched      bool                     `json:"grantMatched,omitempty"`
-	Grant             *sandbox.Grant           `json:"grant,omitempty"`
-	CommandPrefix     []string                 `json:"commandPrefix,omitempty"`
+	// ClassifierReason is the LLM auto-classifier's explanation for why it asked
+	// the user instead of auto-approving (auto-classifier mode only). Empty for
+	// every other path, including a classifier auto-approval.
+	ClassifierReason string         `json:"classifierReason,omitempty"`
+	Risk             sandbox.Risk   `json:"risk"`
+	Block            *sandbox.Block `json:"block,omitempty"`
+	GrantMatched     bool           `json:"grantMatched,omitempty"`
+	Grant            *sandbox.Grant `json:"grant,omitempty"`
+	CommandPrefix    []string       `json:"commandPrefix,omitempty"`
 }
 
 // AskUserQuestion is one clarifying question the agent wants answered. Options are
@@ -319,13 +430,14 @@ type Options struct {
 	// OnToolCallDelta for each argument fragment. A surface can render the
 	// in-progress call (e.g. a file being written) instead of waiting for
 	// OnToolCall, which only fires once the whole call has accumulated. nil no-ops.
-	OnToolCallStart     func(id, name string)
-	OnToolCallDelta     func(id, fragment string)
-	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
-	OnPermission        func(PermissionEvent)
-	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
-	OnToolResult        func(ToolResult)
-	OnUsage             func(Usage)
+	OnToolCallStart          func(id, name string)
+	OnToolCallDelta          func(id, fragment string)
+	OnPermissionRequest      func(context.Context, PermissionRequest) (PermissionDecision, error)
+	AutoPermissionClassifier AutoPermissionClassifier
+	OnPermission             func(PermissionEvent)
+	OnAskUser                func(context.Context, AskUserRequest) (AskUserResponse, error)
+	OnToolResult             func(ToolResult)
+	OnUsage                  func(Usage)
 	// OnToolProgress, when set, is called with each stream-json event a
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.

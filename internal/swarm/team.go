@@ -231,10 +231,12 @@ func resolvePermissionMode(pol Policy, def Definition) string {
 // importing it, to avoid an import cycle). These are the actual values that flow
 // through tools.RunOptions.PermissionMode — NOT the TUI display names.
 const (
-	permissionModeAsk       = "ask"        // prompts for every tool (most restrictive)
-	permissionModeSpecDraft = "spec-draft" // spec-drafting only
-	permissionModeAuto      = "auto"       // auto-approve low-risk
-	permissionModeUnsafe    = "unsafe"     // approve everything (most permissive)
+	permissionModeAsk            = "ask"             // prompts for every tool (most restrictive)
+	permissionModeSpecDraft      = "spec-draft"      // spec-drafting only
+	permissionModeAuto           = "auto"            // auto-approve low-risk
+	permissionModeWorkspaceAuto  = "workspace-auto"  // auto + sandbox-safe workspace mutators
+	permissionModeAutoClassifier = "auto-classifier" // workspace auto + classifier-reviewed allows
+	permissionModeUnsafe         = "unsafe"          // approve everything (most permissive)
 )
 
 // permissionRank orders permission modes from least to most permissive so the
@@ -251,8 +253,12 @@ func permissionRank(mode string) int {
 		return 2
 	case permissionModeAuto:
 		return 3
-	case permissionModeUnsafe:
+	case permissionModeWorkspaceAuto:
 		return 4
+	case permissionModeAutoClassifier:
+		return 5
+	case permissionModeUnsafe:
+		return 6
 	default:
 		return 0
 	}

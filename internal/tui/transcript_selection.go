@@ -70,10 +70,12 @@ type transcriptSelectableLine struct {
 	toggle    bool
 	live      bool
 	// permOption marks a clickable permission-popup choice; permChoice is the
-	// decision a left-click on this row resolves. These rows carry no selectable
-	// text (they are buttons, not content).
-	permOption bool
-	permChoice permissionDecision
+	// decision a left-click on this row resolves and permOptionIndex is the
+	// option's position (breadths that share a decision action stay distinct by
+	// index). These rows carry no selectable text (they are buttons, not content).
+	permOption      bool
+	permChoice      permissionDecision
+	permOptionIndex int
 	// specialistCard marks a clickable specialist card row. specialistID is
 	// the childSessionID to drill into on click or Enter.
 	specialistCard bool
@@ -462,10 +464,11 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 							break
 						}
 						selectable = append(selectable, transcriptSelectableLine{
-							bodyY:      startBodyY + offset,
-							rowIndex:   -1,
-							permOption: true,
-							permChoice: options[index].choice,
+							bodyY:           startBodyY + offset,
+							rowIndex:        -1,
+							permOption:      true,
+							permChoice:      options[index].choice,
+							permOptionIndex: index,
 						})
 					}
 					return transcriptBodyRenderedItem{lines: viewLines(block), selectable: selectable}
@@ -1402,14 +1405,11 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			return m, nil, false
 		}
 		if line.permOption && !(m.pendingPermission != nil && m.pendingPermission.typing) {
-			// A left-click on a permission-popup option resolves it directly. The
-			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
-			// returns nil offsets in feedback mode, so no option row is registered as
-			// clickable then — but that single early-return is the only thing keeping
-			// a stray click (Allow included) off the decision path, and it lives in a
-			// function other PRs also edit. Guarding here makes the safety explicit
-			// rather than emergent.
-			next, cmd := m.resolvePermission(line.permChoice)
+			// A left-click on a permission-popup option resolves it directly. Address
+			// by index so expanded prefix breadths that share a decision action are
+			// distinguished. The typing guard defends the feedback field: no option row
+			// is registered as clickable in feedback mode, and this makes that explicit.
+			next, cmd := m.resolvePermissionAt(line.permOptionIndex)
 			return next.(model), cmd, true
 		}
 		if line.specialistCard {

@@ -198,14 +198,14 @@ func TestGrantStorePersistsCommandPrefixes(t *testing.T) {
 	if len(prefixes) != 1 || prefixes[0].ToolName != "bash" || !sameStringSlice(prefixes[0].Prefix, []string{"git", "status"}) || prefixes[0].Reason != "updated" {
 		t.Fatalf("unexpected command prefixes: %#v", prefixes)
 	}
-	match, matched, err := reopened.LookupCommandPrefix("bash", []string{"git", "status", "--short"})
+	match, matched, err := reopened.LookupCommandPrefix("bash", []string{"git", "status", "--short"}, "")
 	if err != nil {
 		t.Fatalf("LookupCommandPrefix returned error: %v", err)
 	}
 	if !matched || !sameStringSlice(match.Prefix, []string{"git", "status"}) {
 		t.Fatalf("lookup = (%#v,%t), want git status match", match, matched)
 	}
-	if _, matched, err := reopened.LookupCommandPrefix("bash", []string{"git", "diff"}); err != nil || matched {
+	if _, matched, err := reopened.LookupCommandPrefix("bash", []string{"git", "diff"}, ""); err != nil || matched {
 		t.Fatalf("git diff lookup = matched %t err %v, want no match", matched, err)
 	}
 	text := FormatGrantListWithCommandPrefixes(nil, prefixes)

@@ -52,7 +52,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			title: "Model & run controls",
 			bindings: []keybinding{
 				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
-				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
+				{"Shift+Tab", "cycle permission mode (ask \u2192 auto \u2192 trusted workspace \u2192 let Zero cook)"},
 				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel (when no menu is open)"},
 			},
 		},

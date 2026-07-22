@@ -380,7 +380,7 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
-	// auto/ask are accepted.
+	// Prompt-respecting modes are accepted.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAsk)}, &SetSessionModeResult{}); err != nil {
 		t.Fatalf("set_mode ask: %v", err)
 	}
@@ -392,10 +392,14 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	}
 	if got := configured.ConfigOptions[1].CurrentValue; got != string(agent.PermissionModeAuto) {
 		t.Fatalf("configured mode = %q", got)
-	}
-	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
+	} // Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")
+	}
+	// Auto-classifier requires an in-app confirmation the ACP protocol cannot
+	// represent, so a client must not be able to enable it over the wire.
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAutoClassifier)}, &SetSessionModeResult{}); err == nil {
+		t.Fatal("expected auto-classifier mode to be rejected over ACP")
 	}
 	// An unknown mode must be rejected.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{}); err == nil {

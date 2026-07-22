@@ -680,6 +680,7 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		Reason:            payloadString(payload, "reason"),
 		Scope:             payloadString(payload, "scope"),
 		DecisionReason:    payloadString(payload, "decisionReason"),
+		ClassifierReason:  payloadString(payload, "classifierReason"),
 		GrantMatched:      payloadBool(payload, "grantMatched"),
 	}
 	if risk, ok := payloadMap(payload, "risk"); ok {

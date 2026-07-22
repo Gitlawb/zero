@@ -15,6 +15,10 @@ type permissionOption struct {
 	label  string
 	hotkey string
 	choice permissionDecision
+	// commandPrefix, when set, is the exact breadth this option grants — used
+	// when a prefix decision is expanded into one option per breadth choice.
+	// Empty means the loop grants the request's default CommandPrefix.
+	commandPrefix []string
 }
 
 // permissionOptions returns the ordered choices the popup offers. The backend
@@ -43,11 +47,13 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 		case agent.PermissionDecisionAllowForSession:
 			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
 		case agent.PermissionDecisionAllowPrefix:
-			options = append(options, permissionOption{label: "allow command prefix for session", hotkey: "p", choice: permissionDecisionAllowPrefix})
+			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefix, "p", "allow command prefix for session", "prefix (session)")
+		case agent.PermissionDecisionAllowPrefixProject:
+			options = appendPrefixOptions(options, request, permissionDecisionAllowPrefixProject, "j", "allow command prefix for this project", "prefix (project)")
 		case agent.PermissionDecisionAlwaysAllowPrefix:
-			options = append(options, permissionOption{label: "always allow command prefix", hotkey: "y", choice: permissionDecisionAlwaysAllowPrefix})
+			options = appendPrefixOptions(options, request, permissionDecisionAlwaysAllowPrefix, "y", "allow command prefix globally", "prefix (global)")
 		case agent.PermissionDecisionAlwaysAllow:
-			options = append(options, permissionOption{label: "always", hotkey: "y", choice: permissionDecisionAlwaysAllow})
+			options = append(options, permissionOption{label: "allow in future", hotkey: "f", choice: permissionDecisionAlwaysAllow})
 		case agent.PermissionDecisionDeny:
 			options = append(options, permissionOption{label: "deny", hotkey: "d", choice: permissionDecisionDeny})
 		case agent.PermissionDecisionCancel:
@@ -58,6 +64,42 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 		return []permissionOption{{label: "deny", hotkey: "d", choice: permissionDecisionDeny}}
 	}
 	return options
+}
+
+// appendPrefixOptions adds prefix-grant choices. With a single safe prefix it
+// keeps one option carrying the request's default label and hotkey. When the
+// request offers several breadths it expands into one option per breadth (e.g.
+// "prefix (session): npm run *"), so the approver can pick how wide the grant is;
+// the breadth equal to the request's default prefix keeps the hotkey.
+func appendPrefixOptions(options []permissionOption, request agent.PermissionRequest, choice permissionDecision, hotkey, singleLabel, verb string) []permissionOption {
+	ladder := request.CommandPrefixOptions
+	if len(ladder) <= 1 {
+		return append(options, permissionOption{label: singleLabel, hotkey: hotkey, choice: choice})
+	}
+	for _, prefix := range ladder {
+		option := permissionOption{
+			label:         verb + ": " + strings.Join(prefix, " "),
+			choice:        choice,
+			commandPrefix: append([]string(nil), prefix...),
+		}
+		if equalStringPrefix(prefix, request.CommandPrefix) {
+			option.hotkey = hotkey
+		}
+		options = append(options, option)
+	}
+	return options
+}
+
+func equalStringPrefix(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // clampPermissionCursor keeps a cursor index within the option range.
@@ -102,18 +144,18 @@ func (m model) confirmPermissionCursor() (tea.Model, tea.Cmd) {
 		return m.submitPermissionFeedback()
 	}
 	option := permissionOptions(m.pendingPermission.request)[clampPermissionCursor(m.pendingPermission.cursor, m.pendingPermission.request)]
-	return m.choosePermissionOption(option.choice)
+	return m.choosePermissionOption(option)
 }
 
-// choosePermissionOption applies a chosen decision. The cancel choice (the
-// "tell Zero what to do differently" row and its [n] hotkey) opens the inline
-// feedback field rather than aborting the run; every other choice resolves
-// immediately as before.
-func (m model) choosePermissionOption(choice permissionDecision) (tea.Model, tea.Cmd) {
+// choosePermissionOption applies a chosen option. The cancel choice (the "tell
+// Zero what to do differently" row and its [n] hotkey) opens the inline feedback
+// field rather than aborting the run; every other choice resolves immediately,
+// carrying the option's command-prefix breadth through resolvePermissionOption.
+func (m model) choosePermissionOption(option permissionOption) (tea.Model, tea.Cmd) {
 	if m.pendingPermission == nil {
 		return m, nil
 	}
-	if choice == permissionDecisionCancel {
+	if option.choice == permissionDecisionCancel {
 		m.pendingPermission.typing = true
 		// Preserve whatever the user had drafted/queued in the composer so it is
 		// restored when they leave feedback mode (submit or cancel).
@@ -121,7 +163,7 @@ func (m model) choosePermissionOption(choice permissionDecision) (tea.Model, tea
 		m.input.SetValue("")
 		return m, nil
 	}
-	return m.resolvePermission(choice)
+	return m.resolvePermissionOption(option)
 }
 
 // submitPermissionFeedback ends the feedback field. Non-empty text is sent as a

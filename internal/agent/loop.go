@@ -178,6 +178,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	if permissionMode == "" {
 		permissionMode = PermissionModeAuto
 	}
+	if permissionMode == PermissionModeAutoClassifier && options.AutoPermissionClassifier == nil {
+		options.AutoPermissionClassifier = defaultAutoPermissionClassifier(provider)
+	}
 	runPermissions := &permissionRunState{}
 	options.runPermissions = runPermissions
 	defer runPermissions.cleanup()
@@ -1188,12 +1191,25 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		decision := options.Sandbox.Evaluate(ctx, sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
 		preflightDecision = &decision
 	}
+	var classifierAskReason string
+	if decision, ok := autoClassifierDecision(ctx, call, tool, args, permissionGranted, permissionMode, options, preflightDecision); ok {
+		if decision.Action == AutoPermissionClassifierAllow {
+			permissionGranted = true
+			decisionAction = PermissionDecisionAutoClassifierAllow
+			decisionReason = "auto-reviewed by LLM classifier: " + strings.TrimSpace(decision.Reason)
+		} else {
+			// Classifier chose to ask; remember why so the prompt (and session log)
+			// can show what made it decline to auto-approve.
+			classifierAskReason = strings.TrimSpace(decision.Reason)
+		}
+	}
 
-	if toolFound && options.OnPermissionRequest != nil && shouldRequestPermission(tool, args, permissionGranted, preflightDecision) {
+	if toolFound && options.OnPermissionRequest != nil && shouldRequestPermission(tool, args, permissionGranted, permissionMode, preflightDecision) {
 		requestEvent, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, preflightDecision)
 		if !ok {
 			requestEvent = fallbackPermissionEvent(call, tool, args, permissionMode, options)
 		}
+		requestEvent.ClassifierReason = classifierAskReason
 		request := permissionRequestFromEvent(requestEvent, args, options)
 		decision, err := requestPermission(ctx, request, options)
 		if err != nil {
@@ -1263,13 +1279,14 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				}
 			}
 		case PermissionDecisionAllowPrefix:
-			if len(request.CommandPrefix) == 0 {
+			grantPrefix := grantPrefixForDecision(request, decision)
+			if len(grantPrefix) == 0 {
 				emitDeniedPermission(options, call, requestEvent, decisionReason)
 				return deniedPermissionResult(call, decisionReason, requestEvent), nil
 			}
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
-			decisionCommandPrefix = append([]string(nil), request.CommandPrefix...)
+			decisionCommandPrefix = grantPrefix
 			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
 				options.Sandbox.GrantCommandPrefixForSession(call.Name, decisionCommandPrefix)
 			}
@@ -1280,18 +1297,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				return deniedPermissionResult(call, reason, requestEvent), nil
 			}
 			permissionCleanups = append(permissionCleanups, cleanup)
-		case PermissionDecisionAlwaysAllowPrefix:
-			if len(request.CommandPrefix) == 0 {
+		case PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix:
+			grantPrefix := grantPrefixForDecision(request, decision)
+			if len(grantPrefix) == 0 {
 				emitDeniedPermission(options, call, requestEvent, decisionReason)
 				return deniedPermissionResult(call, decisionReason, requestEvent), nil
 			}
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
-			decisionCommandPrefix = append([]string(nil), request.CommandPrefix...)
+			decisionCommandPrefix = grantPrefix
 			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
-				if grant, err := persistCommandPrefixGrant(call.Name, decisionCommandPrefix, decisionReason, options); err == nil {
-					decisionCommandPrefix = append([]string(nil), grant.Prefix...)
-				}
+				decisionCommandPrefix = persistCommandPrefixGrantScopedOrSession(decision.Action, call.Name, decisionCommandPrefix, decisionReason, options)
 			}
 			cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeTurn, options)
 			if err != nil {
@@ -1392,6 +1408,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			if decisionAction != "" {
 				event.DecisionAction = decisionAction
 			}
+			if classifierAskReason != "" {
+				event.ClassifierReason = classifierAskReason
+			}
 			if len(decisionCommandPrefix) > 0 {
 				event.CommandPrefix = append([]string(nil), decisionCommandPrefix...)
 			}
@@ -1474,21 +1493,20 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 		reason = request.Reason
 	}
 	switch decision.Action {
-	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAlwaysAllowPrefix:
+	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix:
 		prefix := []string(nil)
-		if decision.Action == PermissionDecisionAllowPrefix || decision.Action == PermissionDecisionAlwaysAllowPrefix {
-			if len(request.CommandPrefix) == 0 {
+		if isCommandPrefixDecision(decision.Action) {
+			prefix = grantPrefixForDecision(request, decision)
+			if len(prefix) == 0 {
 				emitDeniedPermission(options, call, requestEvent, reason)
 				denied := deniedPermissionResult(call, reason, requestEvent)
 				return result, &denied, true, decision.Action, reason, nil, nil
 			}
-			prefix = append([]string(nil), request.CommandPrefix...)
 			if options.Sandbox != nil {
-				if decision.Action == PermissionDecisionAlwaysAllowPrefix {
-					if grant, err := persistCommandPrefixGrant(call.Name, prefix, reason, options); err == nil {
-						prefix = append([]string(nil), grant.Prefix...)
-					}
-				} else {
+				switch decision.Action {
+				case PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix:
+					prefix = persistCommandPrefixGrantScopedOrSession(decision.Action, call.Name, prefix, reason, options)
+				default:
 					options.Sandbox.GrantCommandPrefixForSession(call.Name, prefix)
 				}
 			}
@@ -2084,8 +2102,11 @@ func effectivePermission(tool tools.Tool, args map[string]any) tools.Permission 
 	return tool.Safety().Permission
 }
 
-func shouldRequestPermission(tool tools.Tool, args map[string]any, permissionGranted bool, decision *sandbox.Decision) bool {
-	if decision != nil && decision.Action == sandbox.ActionPrompt {
+func shouldRequestPermission(tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, decision *sandbox.Decision) bool {
+	// A prompt decision asks the user unless something already granted this call
+	// — a matched command prefix or the auto-classifier's LLM approval both set
+	// permissionGranted, and either one is enough to run without re-asking.
+	if decision != nil && decision.Action == sandbox.ActionPrompt && !permissionGranted {
 		return true
 	}
 	if tool.Safety().Permission != tools.PermissionPrompt {
@@ -2109,6 +2130,97 @@ func shouldRequestPermission(tool tools.Tool, args map[string]any, permissionGra
 	return true
 }
 
+func autoClassifierDecision(ctx context.Context, call ToolCall, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) (AutoPermissionClassifierDecision, bool) {
+	if !canAutoClassifierReview(tool, args, permissionGranted, permissionMode, options, decision) {
+		return AutoPermissionClassifierDecision{}, false
+	}
+	request := autoPermissionClassifierRequest(call, tool, args, permissionMode, options, decision)
+	classifierDecision, err := options.AutoPermissionClassifier(ctx, request)
+	if err != nil {
+		return AutoPermissionClassifierDecision{}, false
+	}
+	classifierDecision.Reason = strings.TrimSpace(classifierDecision.Reason)
+	if classifierDecision.Reason == "" {
+		return AutoPermissionClassifierDecision{}, false
+	}
+	// Return both outcomes so the caller can auto-approve an allow or surface the
+	// reason behind a prompt; ok reports only that the classifier ran and gave a
+	// usable decision, not that it approved.
+	return classifierDecision, true
+}
+
+func canAutoClassifierReview(tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) bool {
+	if permissionMode != PermissionModeAutoClassifier || permissionGranted || decision == nil || options.AutoPermissionClassifier == nil {
+		return false
+	}
+	if tool.Safety().Permission != tools.PermissionPrompt {
+		return false
+	}
+	// A shell command may only be reviewed when the native sandbox would actually
+	// wrap it. With isolation unavailable the command runs unwrapped on the host,
+	// so an LLM allow there is an unsandboxed-execution bypass — keep it a prompt.
+	// (File tools like write_file are confined by path validation, not native
+	// shell isolation, so this gate applies to shell commands only.)
+	if isShellCommandTool(tool.Name()) && !options.Sandbox.ShellSandboxActive() {
+		return false
+	}
+	// A write under protected workspace metadata (.git/**, .zero/**, .agents/**)
+	// stays an explicit prompt: an LLM allow must not be able to write
+	// .git/hooks/pre-commit or .git/config and defeat that boundary (which would
+	// enable later Git-triggered code execution).
+	if decision.TouchesProtectedMetadata {
+		return false
+	}
+	// Auto-classifier trades autonomy for an LLM check: it reviews only actions
+	// the sandbox would OTHERWISE prompt for, and may auto-approve the ones it
+	// judges safe. Actions the sandbox already auto-allows run without LLM
+	// friction (same as workspace-auto); denials are never eligible.
+	if decision.Action != sandbox.ActionPrompt {
+		return false
+	}
+	// Escalation, network, and destructive actions always ask, no matter how
+	// confident the LLM is — the classifier can never rescue these.
+	if shellCommandAdditionalPermissionsRequested(args) || shellCommandRequiresEscalated(args) {
+		return false
+	}
+	if sandboxDecisionRequiresExplicitPermission(decision) || decision.Reason == sandbox.ReasonEscalatedSandboxRequired {
+		return false
+	}
+	// A path block (e.g. out-of-workspace access) always asks — the classifier
+	// never widens the workspace boundary.
+	if decision.Block != nil {
+		return false
+	}
+	if sandbox.HasRiskCategory(decision.Risk, "destructive") || sandbox.HasRiskCategory(decision.Risk, "network") {
+		return false
+	}
+	return true
+}
+
+func autoPermissionClassifierRequest(call ToolCall, tool tools.Tool, args map[string]any, permissionMode PermissionMode, options Options, decision *sandbox.Decision) AutoPermissionClassifierRequest {
+	safety := tool.Safety()
+	reason := safety.Reason
+	risk := sandbox.Classify(sandboxRequest(call.Name, tool, args, false, permissionMode, options))
+	if decision != nil {
+		if decision.Reason != "" {
+			reason = decision.Reason
+		}
+		risk = decision.Risk
+	}
+	return AutoPermissionClassifierRequest{
+		ToolCallID:     call.ID,
+		ToolName:       call.Name,
+		PermissionMode: permissionMode,
+		SideEffect:     string(safety.SideEffect),
+		Reason:         userFacingPermissionReason(call.Name, args, reason, safety.Reason),
+		Scope:          permissionScope(call.Name, args),
+		Risk:           risk,
+		Args:           autoPermissionClassifierArgs(args),
+		SandboxReason:  strings.TrimSpace(decision.Reason),
+		SandboxRisk:    decision.Risk,
+	}
+}
+
 func sandboxDecisionRequiresExplicitPermission(decision *sandbox.Decision) bool {
 	return decision != nil && decision.Action == sandbox.ActionPrompt && decision.Reason == sandbox.ReasonNetworkBlocked
 }
@@ -2125,7 +2237,7 @@ func requestPermission(ctx context.Context, request PermissionRequest, options O
 
 func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
 	switch action {
-	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAlwaysAllowPrefix, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
+	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAutoClassifierAllow, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
 		return action
 	default:
 		return PermissionDecisionDeny
@@ -2409,6 +2521,46 @@ func persistCommandPrefixGrant(toolName string, prefix []string, reason string, 
 	})
 }
 
+// persistCommandPrefixGrantForProject persists a prefix grant scoped to the
+// current workspace root, so it only matches inside this project.
+func persistCommandPrefixGrantForProject(toolName string, prefix []string, reason string, options Options) (sandbox.CommandPrefixGrant, error) {
+	if options.Sandbox == nil {
+		return sandbox.CommandPrefixGrant{}, errors.New("sandbox engine is not configured")
+	}
+	return options.Sandbox.GrantCommandPrefixForProject(sandbox.CommandPrefixInput{
+		ToolName: toolName,
+		Prefix:   prefix,
+		Reason:   reason,
+	})
+}
+
+// persistCommandPrefixGrantScoped persists a prefix grant at the scope the
+// decision selected: project-only for AllowPrefixProject, global otherwise.
+func persistCommandPrefixGrantScoped(action PermissionDecisionAction, toolName string, prefix []string, reason string, options Options) (sandbox.CommandPrefixGrant, error) {
+	if action == PermissionDecisionAllowPrefixProject {
+		return persistCommandPrefixGrantForProject(toolName, prefix, reason, options)
+	}
+	return persistCommandPrefixGrant(toolName, prefix, reason, options)
+}
+
+// persistCommandPrefixGrantScopedOrSession persists the prefix at the decision's
+// scope and returns the prefix to advertise on the decision. When scoped
+// persistence fails — e.g. a project-scoped grant on an engine with no workspace
+// root, or a missing grant store — it falls back to a session-scoped grant so a
+// later matching command still reuses the approval instead of prompting again
+// (the safer session fallback the engine documents). Returns the persisted grant's
+// normalized prefix on success, otherwise the input prefix used for the fallback.
+func persistCommandPrefixGrantScopedOrSession(action PermissionDecisionAction, toolName string, prefix []string, reason string, options Options) []string {
+	if options.Sandbox == nil {
+		return prefix
+	}
+	if grant, err := persistCommandPrefixGrantScoped(action, toolName, prefix, reason, options); err == nil {
+		return append([]string(nil), grant.Prefix...)
+	}
+	options.Sandbox.GrantCommandPrefixForSession(toolName, prefix)
+	return prefix
+}
+
 func emitDeniedPermission(options Options, call ToolCall, requestEvent PermissionEvent, reason string) {
 	if options.OnPermission == nil {
 		return
@@ -2668,22 +2820,24 @@ func fallbackPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any
 
 func permissionRequestFromEvent(event PermissionEvent, args map[string]any, options Options) PermissionRequest {
 	return PermissionRequest{
-		ToolCallID:         event.ToolCallID,
-		ToolName:           event.ToolName,
-		Action:             event.Action,
-		Permission:         event.Permission,
-		PermissionMode:     event.PermissionMode,
-		Autonomy:           event.Autonomy,
-		SideEffect:         event.SideEffect,
-		Reason:             event.Reason,
-		Scope:              event.Scope,
-		Risk:               event.Risk,
-		Args:               cloneArgs(args),
-		Block:              event.Block,
-		GrantMatched:       event.GrantMatched,
-		Grant:              event.Grant,
-		CommandPrefix:      append([]string(nil), event.CommandPrefix...),
-		AvailableDecisions: availablePermissionDecisions(event, args, options),
+		ToolCallID:           event.ToolCallID,
+		ToolName:             event.ToolName,
+		Action:               event.Action,
+		Permission:           event.Permission,
+		PermissionMode:       event.PermissionMode,
+		Autonomy:             event.Autonomy,
+		SideEffect:           event.SideEffect,
+		Reason:               event.Reason,
+		Scope:                event.Scope,
+		Risk:                 event.Risk,
+		Args:                 cloneArgs(args),
+		Block:                event.Block,
+		GrantMatched:         event.GrantMatched,
+		Grant:                event.Grant,
+		CommandPrefix:        append([]string(nil), event.CommandPrefix...),
+		AvailableDecisions:   availablePermissionDecisions(event, args, options),
+		CommandPrefixOptions: commandPrefixLadder(event.ToolName, args),
+		ClassifierReason:     event.ClassifierReason,
 	}
 }
 
@@ -2698,7 +2852,9 @@ func availablePermissionDecisions(event PermissionEvent, args map[string]any, op
 		if isShellCommandTool(event.ToolName) && len(event.CommandPrefix) > 0 && !networkSandboxPrompt(event) && !inlineAdditionalPermissions {
 			decisions = append(decisions, PermissionDecisionAllowPrefix)
 			if options.Sandbox.CanPersistGrants() {
-				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
+				// Persisted prefix grants come in two scopes: this project only, and
+				// global (every project). Session (above) is the ephemeral third.
+				decisions = append(decisions, PermissionDecisionAllowPrefixProject, PermissionDecisionAlwaysAllowPrefix)
 			}
 		}
 		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) && !filesystemSandboxPrompt(event) && !inlineAdditionalPermissions {
@@ -2853,6 +3009,59 @@ func cloneArgs(args map[string]any) map[string]any {
 		copied[key] = value
 	}
 	return copied
+}
+
+const autoPermissionClassifierStringLimit = 2048
+
+func autoPermissionClassifierArgs(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(args))
+	for key, value := range args {
+		copied[key] = autoPermissionClassifierValue(value)
+	}
+	return copied
+}
+
+func autoPermissionClassifierValue(value any) any {
+	switch v := value.(type) {
+	case string:
+		return truncateClassifierString(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = autoPermissionClassifierValue(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = autoPermissionClassifierValue(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func truncateClassifierString(value string) string {
+	// Scan runes in place rather than materializing the whole value as a []rune
+	// (which allocates ~4 bytes per rune for large tool arguments). Record the
+	// byte offset where the limit-th rune begins, then keep counting to report the
+	// exact truncated-rune total in the message.
+	count := 0
+	cut := -1
+	for offset := range value {
+		if count == autoPermissionClassifierStringLimit {
+			cut = offset
+		}
+		count++
+	}
+	if count <= autoPermissionClassifierStringLimit {
+		return value
+	}
+	return value[:cut] + fmt.Sprintf("… [truncated %d chars]", count-autoPermissionClassifierStringLimit)
 }
 
 func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
@@ -3121,12 +3330,12 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
-	if permissionMode == PermissionModeMemberAuto {
-		// Like Auto, plus the in-workspace mutators a headless member needs to
-		// build. The sandbox engine still decides at call time: in-workspace writes
-		// and sandbox-backed shell auto-allow, while out-of-workspace writes,
-		// network, and destructive commands prompt → denied headless. So this
-		// advertises capability without widening sandbox authority.
+	if permissionMode == PermissionModeWorkspaceAuto || permissionMode == PermissionModeAutoClassifier {
+		// Like Auto, plus the sandbox-safe in-workspace mutators needed to build.
+		// The sandbox engine still decides at call time: in-workspace writes and
+		// sandbox-backed shell auto-allow, while out-of-workspace writes, network,
+		// and destructive commands prompt → denied headless. So this advertises
+		// capability without widening sandbox authority.
 		if tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto {
 			return true
 		}
