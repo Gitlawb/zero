@@ -895,27 +895,67 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	}
 }
 
-// TestKeyringFallbackLockPathIsPerUser covers the fallback taken when no config
-// location resolves. It must not be the single shared temp path that any account
-// on a multi-user host could pre-create or hold, and the last-resort temp name
-// must be scoped by uid so different users never collide on one lock file.
-func TestKeyringFallbackLockPathIsPerUser(t *testing.T) {
-	got := keyringFallbackLockPath()
-	if got == filepath.Join(os.TempDir(), "zero-oauth-keyring.lockfile") {
-		t.Fatalf("fallback lock path is the shared temp path %q; a co-tenant could grief it", got)
+// TestKeyringLockPathIsPerUser covers the lock path used for every keyring
+// Store regardless of file-backend config. It must not be the single shared
+// temp path that any account on a multi-user host could pre-create or hold,
+// and the last-resort temp name must be scoped by uid so different users
+// never collide on one lock file.
+func TestKeyringLockPathIsPerUser(t *testing.T) {
+	got := keyringLockPath(keyringService, keyringIndexAccount)
+	name := keyringLockFileName(keyringService, keyringIndexAccount)
+	if got == filepath.Join(os.TempDir(), "zero-"+name) {
+		t.Fatalf("lock path is the shared temp path %q; a co-tenant could grief it", got)
 	}
 	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
-		if want := filepath.Join(cache, "zero", "oauth-keyring.lockfile"); got != want {
-			t.Fatalf("fallback = %q, want per-user cache path %q", got, want)
+		if want := filepath.Join(cache, "zero", name); got != want {
+			t.Fatalf("lock path = %q, want per-user cache path %q", got, want)
 		}
 	}
-	name := keyringTempLockName()
+	tempName := keyringTempLockName(keyringService, keyringIndexAccount)
 	if uid := os.Getuid(); uid >= 0 {
-		if !strings.Contains(name, fmt.Sprintf("%d", uid)) {
-			t.Fatalf("temp lock name %q is not scoped by uid %d", name, uid)
+		if !strings.Contains(tempName, fmt.Sprintf("%d", uid)) {
+			t.Fatalf("temp lock name %q is not scoped by uid %d", tempName, uid)
 		}
-	} else if name == "" {
+	} else if tempName == "" {
 		t.Fatal("temp lock name is empty")
+	}
+}
+
+// TestKeyringLockPathDerivedFromKeyringIdentityNotFileConfig is the
+// regression test for the cross-process lock racing bug: the lock guarding
+// the shared keyring index must be keyed off the keyring's own identity
+// (service + index account), never off the file-backend path config
+// (ZERO_OAUTH_TOKENS_PATH / XDG_CONFIG_HOME). Two zero processes with
+// different config roots but pointed at the SAME keyring entry (the service
+// and account are fixed per binary, not per config root) must resolve to the
+// identical lock path, or they can race a read-modify-write on the shared
+// index and silently drop one process's token write.
+func TestKeyringLockPathDerivedFromKeyringIdentityNotFileConfig(t *testing.T) {
+	dirA := filepath.Join(t.TempDir(), "config-root-a")
+	dirB := filepath.Join(t.TempDir(), "config-root-b")
+
+	storeA, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR(), Env: map[string]string{"XDG_CONFIG_HOME": dirA}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR(), Env: map[string]string{"XDG_CONFIG_HOME": dirB}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobA, okA := storeA.blob.(keyringBlob)
+	blobB, okB := storeB.blob.(keyringBlob)
+	if !okA || !okB {
+		t.Fatal("Store.blob is not keyringBlob")
+	}
+	if blobA.lockPath == "" || blobB.lockPath == "" {
+		t.Fatal("lockPath should never be empty for the keyring backend")
+	}
+	if blobA.lockPath != blobB.lockPath {
+		t.Fatalf("two processes on the SAME keyring entry got different lock paths for different config roots: %q vs %q (they can race the shared keyring index)", blobA.lockPath, blobB.lockPath)
+	}
+	// And it must not be derived from either config root's resolved store path.
+	if strings.Contains(blobA.lockPath, dirA) || strings.Contains(blobA.lockPath, dirB) {
+		t.Fatalf("lock path %q is still derived from file-backend config, not the keyring identity", blobA.lockPath)
 	}
 }
 

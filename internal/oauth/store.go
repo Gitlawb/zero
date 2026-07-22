@@ -210,15 +210,14 @@ func NewStore(options StoreOptions) (*Store, error) {
 			kr = osKeyring
 		}
 		// Serialize the keyring's read-modify-write across processes with a lock
-		// file beside where the file backend would live. Cross-process exclusion
-		// must not silently disappear when no config location resolves (withLock
-		// would be a no-op and a concurrent save could delete another process's
-		// newly written entry), so fall back to a per-user location that always
-		// exists, rather than to in-process serialization only.
-		lockPath := keyringFallbackLockPath()
-		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
-			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
-		}
+		// file keyed off the keyring identity itself (service + index account),
+		// never off the file-backend's path config: two processes with different
+		// ZERO_OAUTH_TOKENS_PATH / XDG_CONFIG_HOME roots but pointed at the SAME
+		// OS keyring entry (the service/account is fixed per binary, not per
+		// config root) must still serialize against each other, or they can race
+		// a read-modify-write on the shared keyring index and silently drop one
+		// process's token write.
+		lockPath := keyringLockPath(keyringService, keyringIndexAccount)
 		return &Store{blob: keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount, lockPath: lockPath}, now: now}, nil
 	default:
 		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\", \"encrypted-file\", or \"keyring\")", storage)
@@ -244,28 +243,55 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 	return filepath.Clean(filePath), nil
 }
 
-// keyringFallbackLockPath returns a per-user location for the keyring lock when
-// no config location resolves. A single shared ${TMPDIR}/zero-oauth-keyring.lockfile
-// let any other account on a multi-user host pre-create or keep refreshing the
-// victim's lock and time out their Load/Status/Save/Delete, even though each user
-// has a separate OS keychain. Prefer the per-user OS cache directory (created
-// 0700 by acquireFileLock); only if that cannot be resolved fall back to a temp
-// file scoped by uid so two different users never collide on one path.
-func keyringFallbackLockPath() string {
+// keyringLockPath returns the cross-process lock file location for the
+// keyring backend's read-modify-write, derived from the keyring identity
+// itself (the service/account the index is stored under) rather than from
+// the unrelated file-backend path config (ZERO_OAUTH_TOKENS_PATH /
+// XDG_CONFIG_HOME): the file backend's location has nothing to do with which
+// OS keyring entry a process is about to read-modify-write, so a lock keyed
+// off it let two processes with different config roots but the SAME keyring
+// entry race the shared index and silently drop one process's token write.
+// A single shared ${TMPDIR}/zero-oauth-keyring.lockfile would also let any
+// other account on a multi-user host pre-create or keep refreshing the
+// victim's lock and time out their Load/Status/Save/Delete, even though each
+// user has a separate OS keychain, so this prefers the per-user OS cache
+// directory (created 0700 by acquireFileLock); only if that cannot be
+// resolved does it fall back to a temp file scoped by uid so two different
+// users never collide on one path.
+func keyringLockPath(service, account string) string {
+	name := keyringLockFileName(service, account)
 	if dir, err := os.UserCacheDir(); err == nil && strings.TrimSpace(dir) != "" {
-		return filepath.Join(dir, "zero", "oauth-keyring.lockfile")
+		return filepath.Join(dir, "zero", name)
 	}
-	return filepath.Join(os.TempDir(), keyringTempLockName())
+	return filepath.Join(os.TempDir(), keyringTempLockName(service, account))
+}
+
+// keyringLockFileName names the lock file after the keyring identity it
+// guards, so distinct (service, account) pairs never share a lock and the
+// same pair always resolves to the same lock regardless of caller config.
+func keyringLockFileName(service, account string) string {
+	return fmt.Sprintf("oauth-keyring-%s-%s.lockfile", sanitizeLockComponent(service), sanitizeLockComponent(account))
+}
+
+// lockComponentSafe keeps a service/account string safe as one path segment:
+// alphanumerics, dot, underscore, and hyphen pass through; anything else
+// (a path separator, especially) is replaced so a crafted identity can never
+// escape the lock directory.
+var lockComponentSafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func sanitizeLockComponent(s string) string {
+	return lockComponentSafe.ReplaceAllString(s, "_")
 }
 
 // keyringTempLockName names the last-resort temp lock file, scoping it by uid so
 // concurrently running different users do not share one path. os.Getuid returns
 // -1 where uids do not apply (Windows), where os.TempDir is already per-user.
-func keyringTempLockName() string {
+func keyringTempLockName(service, account string) string {
+	name := keyringLockFileName(service, account)
 	if uid := os.Getuid(); uid >= 0 {
-		return fmt.Sprintf("zero-oauth-keyring-%d.lockfile", uid)
+		return fmt.Sprintf("zero-%d-%s", uid, name)
 	}
-	return "zero-oauth-keyring.lockfile"
+	return "zero-" + name
 }
 
 // FilePath returns the resolved token store location (a path for the file
