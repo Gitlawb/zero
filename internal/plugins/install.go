@@ -8,16 +8,19 @@ package plugins
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/fscopy"
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // manifestFileName is the plugin manifest filename, matching the loader.
@@ -96,79 +99,63 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, err
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create plugins dir: %w", err)
-	}
-	// Converge any interrupted replace from a prior install into this root before
-	// we create a new staging dir; otherwise a kill between the two renames of a
-	// previous swap would leave target absent with the old tree stranded under a
-	// deterministic backup name — this restores it and sweeps any orphaned
-	// staging before a new install can clash with either.
-	if err := RecoverPending(dir); err != nil {
-		return InstallResult{}, err
-	}
-	// Stage the new tree outside the scanned plugins root, but still on the SAME
-	// filesystem (the root's parent directory), so the swap into place is a
-	// single atomic rename and concurrent loaders cannot discover a partial
-	// tree. We copy FIRST and only clear the previous install AFTER the copy
-	// succeeds, so a failed copy (full disk, permission denied) leaves the
-	// previously installed plugin and its lockfile entry completely intact
-	// instead of wiping them and stranding the lockfile pointing at a deleted
-	// directory.
-	// Copy the whole plugin tree (entry scripts, prompts, skills) so the installed
-	// plugin is runnable through activation. Copy DATA only — never execute it.
-	stagingParent := filepath.Dir(filepath.Clean(dir))
-	staging, err := os.MkdirTemp(stagingParent, ".zero-plugin-install-")
+	manifestPath := filepath.Join(pluginDir, manifestFileName)
+	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("create staging dir: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	if err := fscopy.CopyTree(pluginDir, staging); err != nil {
-		return InstallResult{}, fmt.Errorf("copy plugin: %w", err)
-	}
-
-	// Validate the manifest from the STAGING copy — not from the source — so
-	// the parsed plugin and install target describe the bytes that will actually
-	// be installed. This also catches source manifests that were symlinks skipped
-	// by CopyTree.
-	stagingManifest := filepath.Join(staging, manifestFileName)
-	data, err := os.ReadFile(stagingManifest)
-	if err != nil {
-		return InstallResult{}, fmt.Errorf("staged %s missing (source may contain only symlinks): %w", manifestFileName, err)
+		return InstallResult{}, fmt.Errorf("read %s: %w", manifestFileName, err)
 	}
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return InstallResult{}, fmt.Errorf("parse staged %s: %w", manifestFileName, err)
+		return InstallResult{}, fmt.Errorf("parse %s: %w", manifestFileName, err)
 	}
 
 	// Validate against the same schema the loader uses. The install target id is
-	// derived from the staged, validated manifest id, so it is safe as a directory
-	// name.
+	// derived from the (validated) manifest id, so it is safe as a directory name.
 	parsed, err := ParseManifest(raw, ParseManifestOptions{
 		Source:       SourceUser,
 		Root:         dir,
-		PluginDir:    staging,
-		ManifestPath: stagingManifest,
+		PluginDir:    filepath.Join(dir, "pending"),
+		ManifestPath: manifestPath,
 	})
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("invalid plugin manifest: %w", err)
 	}
 	id := parsed.ID
 
-	// Hash the staging tree — the actual installed content — not the source.
-	// This ensures the recorded hash matches what is on disk after the swap, so
-	// a change to any installed file (a tool script, prompt, or bundled skill)
+	// Hash the SAME filtered tree that copyTree installs (not just the manifest),
+	// so a change to any installed file — a tool script, prompt, or bundled skill —
 	// is reflected in the lock hash and reported as an update.
-	hash, err := fscopy.HashTree(staging)
+	hash, err := hashTree(pluginDir)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("hash plugin: %w", err)
 	}
 
+	staged, cleanupStage, err := installtxn.StageDir(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer cleanupStage()
+	// Copy the whole plugin tree (entry scripts, prompts, skills) into a sibling
+	// staging area. Copy DATA only — never execute it.
+	if err := copyTree(pluginDir, staged); err != nil {
+		return InstallResult{}, fmt.Errorf("stage plugin: %w", err)
+	}
+	stagedHash, err := hashTree(staged)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("validate staged plugin: %w", err)
+	}
+	if stagedHash != hash {
+		return InstallResult{}, errors.New("validate staged plugin: copied content hash differs from source")
+	}
+
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer unlock()
+
+	// Re-read under the cross-process lock. Another install may have updated the
+	// lockfile while this plugin was fetched and staged.
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return InstallResult{}, err
@@ -179,13 +166,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, id)
-	if err := swapStagedPluginIntoPlace(staging, target); err != nil {
-		return InstallResult{}, err
-	}
-	committed = true
-
 	lock[id] = LockEntry{Source: source, Hash: hash}
-	if err := writeLock(dir, lock); err != nil {
+	if err := installtxn.CommitDir(target, staged, func() error {
+		return writeLock(dir, lock)
+	}); err != nil {
 		return InstallResult{}, err
 	}
 
@@ -204,171 +188,6 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	return result, nil
 }
 
-// copyAndSwapIntoPlace copies src into a temp staging dir on the same filesystem
-// as target (typically outside the scanned plugin root), then atomically swaps
-// the staging dir into place at target. The copy happens before the previous
-// install is touched, so a copy failure leaves the existing target (if any)
-// intact. On success the old install (if any) is removed; on a swap failure
-// it is rolled back into place, so an install never ends with the plugin gone
-// but the lockfile still pointing at it.
-func copyAndSwapIntoPlace(src, dirParent, target string) error {
-	staging, err := os.MkdirTemp(dirParent, ".zero-plugin-install-")
-	if err != nil {
-		return fmt.Errorf("create staging dir: %w", err)
-	}
-	if err := fscopy.CopyTree(src, staging); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("copy plugin: %w", err)
-	}
-	return swapStagedPluginIntoPlace(staging, target)
-}
-
-// swapPrefix marks a staged-replacement backup directory. A swap moves the
-// existing target aside under a name derived from this prefix plus the plugin
-// id; the deterministic suffix lets RecoverPending recognize a backup a crashed
-// swap left behind and either complete (commit) or undo (rollback) it.
-const swapPrefix = ".zero-plugin-replace-"
-
-// swapBackupPath is the deterministic path swapStagedPluginIntoPlace stashes
-// the existing install at, and the path RecoverPending must look for it under.
-// It is a sibling of target in the install dir's PARENT (the same dir staging
-// is created in), never inside target — a move-into-self would be EINVAL — and
-// it lives where RecoverPending scans (filepath.Dir(dir)), so a stranded backup
-// is always recoverable. Both sides go through this helper so a crash between
-// the two renames is guaranteed convergent: the backup can never be written
-// where recovery does not look.
-func swapBackupPath(target string) string {
-	return filepath.Join(filepath.Dir(filepath.Dir(filepath.Clean(target))), swapPrefix+filepath.Base(target))
-}
-
-// swapStagedPluginIntoPlace atomically renames a prepared staging dir into the
-// final target. The staging tree must already be fully copied and validated by
-// the caller.
-//
-// The replace is a two-rename sequence (stash old → move new in → drop old),
-// not a single atomic syscall. To stay recoverable across a kill or power loss
-// between those renames, the existing install is stashed under a DETERMINISTIC
-// name (swapPrefix + id) rather than staging+".old", and recoverSwap runs first
-// to converge any interrupted prior replace for this target to a known state.
-// That makes the window between the two renames idempotent to replay: a crash
-// after step 1 leaves target absent with the old tree stranded under a known
-// name, and the next recoverSwap (Install or Load) restores it.
-func swapStagedPluginIntoPlace(staging, target string) error {
-	// backup lives in the install dir's PARENT (the same dir staging was created
-	// in), not inside target and not inside the install dir. It must be a SIBLING
-	// of target so the stash rename (target → backup) is a same-directory rename,
-	// never a move-into-self (EINVAL); and it must live where RecoverPending
-	// scans, which is filepath.Dir(dir) — i.e. this parent. The parent is on the
-	// same filesystem as target, so the rename stays atomic.
-	backup := swapBackupPath(target)
-	if err := recoverSwap(backup, target); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	// No existing install: a plain rename is already atomic.
-	if _, err := os.Stat(target); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			_ = os.RemoveAll(staging)
-			return fmt.Errorf("stat target: %w", err)
-		}
-		if err := os.Rename(staging, target); err != nil {
-			_ = os.RemoveAll(staging)
-			return fmt.Errorf("install plugin: %w", err)
-		}
-		return nil
-	}
-	// Existing install: move it aside, swap the new tree in, then drop the old
-	// one — only after the swap succeeds, so a failed rename rolls the previous
-	// install back into place and the failure stays non-destructive.
-	if err := os.Rename(target, backup); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("stash previous plugin: %w", err)
-	}
-	if err := os.Rename(staging, target); err != nil {
-		// Roll the previous install back so the failure leaves the old plugin intact.
-		_ = os.Rename(backup, target)
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("install plugin: %w", err)
-	}
-	return os.RemoveAll(backup)
-}
-
-// recoverSwap converges an interrupted replace of target to a known state. It
-// is idempotent — safe to run any number of times, and safe after a crash of
-// its own — because it branches purely on which of {backup, target} currently
-// exist:
-//
-//	backup absent                 → nothing to recover
-//	target present + backup present → crashed after the new tree landed; commit by dropping backup
-//	target absent  + backup present → crashed after stashing the old tree but before the new one landed; roll the old tree back to target
-//
-// backup must be the deterministic name swapStagedPluginIntoPlace uses.
-func recoverSwap(backup, target string) error {
-	if _, err := os.Stat(backup); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("stat swap backup: %w", err)
-	}
-	// Backup present — the old tree (or the new one, if the crash happened post-land) lives there.
-	if _, err := os.Stat(target); err == nil {
-		// New tree already landed; the backup is the now-superseded old tree.
-		return os.RemoveAll(backup)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat target: %w", err)
-	}
-	// Target absent, backup present: the old tree was stashed but the new one
-	// never landed. Restore it so the canonical install (and the lockfile entry
-	// pointing at it) is whole again.
-	if err := os.Rename(backup, target); err != nil {
-		return fmt.Errorf("restore previous plugin: %w", err)
-	}
-	return nil
-}
-
-// RecoverPending converges every interrupted plugin replace under dir to a
-// known state, and sweeps orphaned staging dirs a crashed install left behind.
-// It is safe and no-op when nothing is pending. Call it before discovering the
-// plugins root (Load) and at the start of any install into the same root, so a
-// kill or power loss between the two renames of a prior install never leaves the
-// canonical install absent with the old tree stranded under a random name and
-// the lockfile pointing at a missing target.
-func RecoverPending(dir string) error {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return nil
-	}
-	parent := filepath.Dir(filepath.Clean(dir))
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("scan install parent: %w", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		switch {
-		case strings.HasPrefix(name, swapPrefix):
-			id := strings.TrimPrefix(name, swapPrefix)
-			if !validInstallID(id) {
-				continue
-			}
-			if err := recoverSwap(filepath.Join(parent, name), filepath.Join(dir, id)); err != nil {
-				return err
-			}
-		case strings.HasPrefix(name, stagingPrefix):
-			// Orphaned staging from a crashed install: no transaction to
-			// converge, just reclaim the space.
-			_ = os.RemoveAll(filepath.Join(parent, name))
-		}
-	}
-	return nil
-}
-
-// stagingPrefix marks a transient staging directory created during install.
-const stagingPrefix = ".zero-plugin-install-"
-
 // Remove deletes an installed plugin directory and its lockfile entry. It errors
 // if the named plugin is not present in either the dir or the lockfile.
 func Remove(dir string, id string) error {
@@ -380,6 +199,12 @@ func Remove(dir string, id string) error {
 	if !validInstallID(id) {
 		return fmt.Errorf("invalid plugin id %q", id)
 	}
+
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	lock, err := ReadLock(dir)
 	if err != nil {
@@ -393,11 +218,16 @@ func Remove(dir string, id string) error {
 		return fmt.Errorf("plugin %q is not installed", id)
 	}
 	if present {
-		if err := os.RemoveAll(target); err != nil {
+		if err := installtxn.RemoveDir(target, func() error {
+			if !locked {
+				return nil
+			}
+			delete(lock, id)
+			return writeLock(dir, lock)
+		}); err != nil {
 			return fmt.Errorf("remove plugin dir: %w", err)
 		}
-	}
-	if locked {
+	} else if locked {
 		delete(lock, id)
 		if err := writeLock(dir, lock); err != nil {
 			return err
@@ -438,7 +268,7 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+	if err := installtxn.WriteFileAtomically(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", LockFileName, err)
 	}
 	return nil
@@ -521,6 +351,67 @@ func locatePluginDir(root string) (string, error) {
 	}
 }
 
+// copyTree recursively copies regular files and directories from src to dst. It
+// skips the .git directory (clone metadata) and refuses symlinks so a malicious
+// source cannot smuggle a link that escapes the install dir. Copying is pure
+// I/O — it never executes anything it copies.
+func copyTree(src string, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" {
+			continue
+		}
+		srcPath := filepath.Join(src, name)
+		dstPath := filepath.Join(dst, name)
+		info, err := os.Lstat(srcPath)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			// Never recreate a symlink: it could point outside the install dir and
+			// turn a copy into a write/read primitive elsewhere.
+			continue
+		case info.IsDir():
+			if err := copyTree(srcPath, dstPath); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			if err := copyFile(srcPath, dstPath, info.Mode().Perm()); err != nil {
+				return err
+			}
+		default:
+			// Skip FIFOs, sockets, devices.
+			continue
+		}
+	}
+	return nil
+}
+
+func copyFile(src string, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
@@ -592,4 +483,77 @@ func validInstallID(id string) bool {
 		return false
 	}
 	return id == filepath.Base(id) && !strings.ContainsAny(id, `/\`) && !strings.Contains(id, "..")
+}
+
+// hashTree computes a content hash over the same filtered tree that copyTree
+// installs: regular files only, .git and symlinks skipped, walked in a stable
+// sorted order. Each file contributes its plugin-relative path, executable bit,
+// and bytes, so renames, mode flips, and content edits all change the hash.
+func hashTree(root string) (string, error) {
+	hasher := sha256.New()
+	if err := hashTreeInto(hasher, root, root); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func hashTreeInto(hasher io.Writer, root string, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name == ".git" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			// Skipped by copyTree, so excluded from the hash too.
+			continue
+		case info.IsDir():
+			if err := hashTreeInto(hasher, root, path); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			executable := 0
+			if info.Mode().Perm()&0o111 != 0 {
+				executable = 1
+			}
+			// Null-delimited header keeps file boundaries unambiguous (paths cannot
+			// contain null bytes) so two trees cannot collide by shifting bytes.
+			header := fmt.Sprintf("%s\x00%d\x00", filepath.ToSlash(rel), executable)
+			if _, err := io.WriteString(hasher, header); err != nil {
+				return err
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(hasher, file); err != nil {
+				_ = file.Close()
+				return err
+			}
+			if err := file.Close(); err != nil {
+				return err
+			}
+		default:
+			// FIFOs, sockets, devices: skipped by copyTree, excluded here.
+			continue
+		}
+	}
+	return nil
 }

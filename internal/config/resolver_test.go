@@ -1744,6 +1744,85 @@ func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxEnabledUserConfigDisables(t *testing.T) {
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("user config enabled:false must resolve to a false pointer, got %v", resolved.Sandbox.Enabled)
+	}
+}
+
+func TestResolveSandboxDisableIgnoredFromProjectConfig(t *testing.T) {
+	// Security: a cloned repo's project config must NOT be able to disable the
+	// sandbox that constrains it. Only global config / CLI can turn it off.
+	userPath := writeConfig(t, `{}`)
+	projectPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled != nil {
+		t.Fatalf("project config enabled:false must be ignored, got %v — a repo could disable the sandbox", *resolved.Sandbox.Enabled)
+	}
+}
+
+func TestResolveSandboxEnabledIgnoredFromProviderCommand(t *testing.T) {
+	// Security: a provider command is an arbitrary executable named in config, and
+	// its stdout is parsed into a full FileConfig — so it must NOT be able to reach
+	// Sandbox.Enabled, in either direction. Same rule as project config: only global
+	// config / CLI may turn the sandbox off.
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "cannot disable", value: "false"},
+		{name: "cannot enable", value: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := writeCommand(t, commandScript{
+				Stdout: `{"activeProvider":"cmd","providers":[{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}],"sandbox":{"enabled":` + tc.value + `}}`,
+			})
+			resolved, err := Resolve(ResolveOptions{ProviderCommand: command, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			// The provider itself must still be applied — only the sandbox toggle is dropped.
+			if resolved.ActiveProvider != "cmd" {
+				t.Fatalf("ActiveProvider = %q, want cmd (provider command must still apply)", resolved.ActiveProvider)
+			}
+			if resolved.Sandbox.Enabled != nil {
+				t.Fatalf("provider command set sandbox.enabled=%s, got %v — a provider command could toggle the sandbox", tc.value, *resolved.Sandbox.Enabled)
+			}
+		})
+	}
+}
+
+func TestResolveSandboxEnabledCLIOverride(t *testing.T) {
+	// A CLI/programmatic override (applied after every config source) must be able
+	// to disable the sandbox, even with no config file.
+	disabled := false
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &disabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:false must disable the sandbox, got %v", resolved.Sandbox.Enabled)
+	}
+	// An explicit true override must win over a lower-precedence global-config false.
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	enabled := true
+	resolved2, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &enabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved2.Sandbox.Enabled == nil || !*resolved2.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:true must win over config false, got %v", resolved2.Sandbox.Enabled)
+	}
+}
+
 func TestResolveNotifyValid(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"both","focusMode":"always"}}`)
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})

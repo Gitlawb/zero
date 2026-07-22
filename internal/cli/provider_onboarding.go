@@ -74,11 +74,18 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 
+	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
 	if options.json {
-		if err := writePrettyJSON(stdout, map[string]any{
+		payload := map[string]any{
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
-		}); err != nil {
+		}
+		if override != "" {
+			// A JSON consumer must not read this as an effective switch either.
+			payload["effectiveProvider"] = override
+			payload["overriddenByEnv"] = config.ActiveProviderEnv
+		}
+		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
@@ -86,7 +93,30 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if _, err := fmt.Fprintf(stdout, "Active provider set to %s\nnext: %s\n", cfg.ActiveProvider, providerCheckCommand(cfg.ActiveProvider, false)); err != nil {
 		return exitCrash
 	}
+	if override != "" {
+		if _, err := fmt.Fprintf(stderr, "Note: %s=%s is set and overrides config.json, so %s stays the active provider until you unset %s.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv); err != nil {
+			return exitCrash
+		}
+	}
 	return exitSuccess
+}
+
+// activeProviderEnvOverride returns the ZERO_PROVIDER value when it is set and
+// names a DIFFERENT provider than the one just selected, meaning the saved
+// `providers use` selection will NOT be the effective active provider until the
+// env var is unset. applyEnv (resolver.go) makes ZERO_PROVIDER win over
+// config.json unconditionally, so reporting the write as a plain success reads as
+// a switch that silently has no effect (issue #721). Empty when nothing overrides
+// (including when getenv is nil, e.g. a test that did not inject the environment).
+func activeProviderEnvOverride(getenv func(string) string, selected string) string {
+	if getenv == nil {
+		return ""
+	}
+	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
+	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+		return ""
+	}
+	return override
 }
 
 func runProvidersSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

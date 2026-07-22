@@ -2,12 +2,13 @@ package skills
 
 // Distribution: install a skill from a git URL or a local path into the skills
 // directory, with a content hash recorded in a lockfile (skills.lock) so every
-// install/update is verifiable. Install copies the full skill directory tree
-// (SKILL.md plus any scripts, assets, or subdirectories) but NEVER executes
-// fetched content.
+// install/update is verifiable. Skills are markdown, so install NEVER executes
+// fetched content — it copies and validates the SKILL.md and nothing else.
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/fscopy"
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // LockFileName is the name of the per-directory lockfile that maps an installed
@@ -54,7 +55,7 @@ type InstallOptions struct {
 // InstallResult reports what an install did.
 type InstallResult struct {
 	Name string `json:"name"`
-	// Path is the absolute path to the installed skill directory.
+	// Path is the absolute path to the installed SKILL.md.
 	Path string `json:"path"`
 	// Hash is the content hash recorded for the installed skill.
 	Hash string `json:"hash"`
@@ -80,8 +81,7 @@ type SkillInfo struct {
 	Hash   string `json:"hash,omitempty"`
 }
 
-// Install fetches the skill at options.Source and copies its full directory tree
-// (SKILL.md plus any scripts, assets, or subdirectories) into
+// Install fetches the skill at options.Source and copies its SKILL.md into
 // options.Dir/<name>/, validating the frontmatter and recording a content hash
 // in the lockfile. A git URL is fetched via the (injectable) GitRunner into a
 // temp dir; a local path is read in place. Fetched content is never executed.
@@ -109,80 +109,49 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, err
 	}
 
-	// Quick sanity check: reject a symlinked SKILL.md in the source early, so
-	// the error message names the problem rather than failing deep inside
-	// CopyTree (which silently skips symlinks, staging without a manifest).
+	// Validate by parsing the SKILL.md through the same loader the runtime uses;
+	// reject anything without a usable frontmatter/dir name.
 	manifestPath := filepath.Join(skillDir, skillFileName)
-	if info, err := os.Lstat(manifestPath); err != nil {
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
 		return InstallResult{}, fmt.Errorf("read SKILL.md: %w", err)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		return InstallResult{}, fmt.Errorf("SKILL.md is a symlink (refusing to install)")
 	}
-
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create skills dir: %w", err)
-	}
-	// Converge any interrupted replace from a prior install into this root before
-	// we create a new staging dir; otherwise a kill between the two renames of a
-	// previous swap would leave target absent with the old tree stranded under a
-	// deterministic backup name — this restores it and sweeps any orphaned
-	// staging before a new install can clash with either.
-	if err := RecoverPending(dir); err != nil {
-		return InstallResult{}, err
-	}
-	// Stage the new tree outside the scanned skills root, but still on the SAME
-	// filesystem (the root's parent directory), so the swap into place is a
-	// single atomic rename and concurrent loaders cannot discover a partial
-	// tree. We copy FIRST and only clear the previous install AFTER the copy
-	// succeeds, so a failed copy (full disk, permission denied) leaves the
-	// previously installed skill and its lockfile entry completely intact
-	// instead of wiping them and stranding the lockfile pointing at a deleted
-	// directory.
-	stagingParent := filepath.Dir(filepath.Clean(dir))
-	staging, err := os.MkdirTemp(stagingParent, ".zero-skill-install-")
-	if err != nil {
-		return InstallResult{}, fmt.Errorf("create staging dir: %w", err)
-	}
-	// A single deferred cleanup collapses the otherwise-repeated RemoveAll on
-	// every error path below. committed is set to true only once the staging
-	// tree has been renamed into place by swapDirIntoPlace, at which point the
-	// staging path no longer exists and the deferred RemoveAll is a no-op. The
-	// post-swap lock-failure path must NOT remove `target` (the installed skill)
-	// — the defer only ever touches `staging`, so that invariant is preserved.
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	// Copy the full skill tree (SKILL.md, scripts, assets, subdirectories).
-	// Copy DATA only — never execute anything.
-	if err := fscopy.CopyTree(skillDir, staging); err != nil {
-		return InstallResult{}, fmt.Errorf("copy skill: %w", err)
-	}
-
-	// Validate the manifest from the STAGING copy — not from the source — so
-	// the validated object is the same tree that will be installed. This
-	// eliminates the gap where a source-tree mutation between validation and
-	// copy could install something different from what was validated.
-	stagingManifest := filepath.Join(staging, skillFileName)
-	data, err := os.ReadFile(stagingManifest)
-	if err != nil {
-		return InstallResult{}, fmt.Errorf("staged SKILL.md missing (source may contain only symlinks): %w", err)
-	}
-	parsed := parseSkill(filepath.Base(skillDir), stagingManifest, string(data))
+	parsed := parseSkill(filepath.Base(skillDir), manifestPath, string(data))
 	name := strings.TrimSpace(parsed.Name)
 	if name == "" || !validSkillName(name) {
 		return InstallResult{}, fmt.Errorf("skill has no usable name (set a frontmatter `name:` or use a directory name of letters, numbers, dots, dashes, or underscores)")
 	}
 
-	// Hash the staging tree — the actual installed content — not the source.
-	// This ensures the recorded hash matches what is on disk after the swap.
-	hash, err := fscopy.HashTree(staging)
+	hash := hashContent(data)
+
+	staged, cleanupStage, err := installtxn.StageDir(dir)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("hash skill: %w", err)
+		return InstallResult{}, err
+	}
+	defer cleanupStage()
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
+	}
+	stagedManifest := filepath.Join(staged, skillFileName)
+	if err := os.WriteFile(stagedManifest, data, 0o644); err != nil {
+		return InstallResult{}, fmt.Errorf("stage SKILL.md: %w", err)
+	}
+	stagedData, err := os.ReadFile(stagedManifest)
+	if err != nil || hashContent(stagedData) != hash {
+		if err != nil {
+			return InstallResult{}, fmt.Errorf("validate staged SKILL.md: %w", err)
+		}
+		return InstallResult{}, errors.New("validate staged SKILL.md: copied content hash differs from source")
 	}
 
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer unlock()
+
+	// Re-read under the cross-process lock. Another install may have updated the
+	// lockfile while this skill was fetched and staged.
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return InstallResult{}, err
@@ -194,23 +163,16 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, name)
-	if err := swapDirIntoPlace(staging, target); err != nil {
-		return InstallResult{}, err
-	}
-	// staging has been renamed into place (path no longer exists); mark
-	// committed so the deferred RemoveAll skips it. The deferred no-op remains
-	// safe even if a later step (writeLock) fails — `target`, not `staging`,
-	// is the installed skill and is never touched by the defer.
-	committed = true
-
 	lock[name] = LockEntry{Source: source, Hash: hash}
-	if err := writeLock(dir, lock); err != nil {
+	if err := installtxn.CommitDir(target, staged, func() error {
+		return writeLock(dir, lock)
+	}); err != nil {
 		return InstallResult{}, err
 	}
 
 	result := InstallResult{
 		Name:   name,
-		Path:   target,
+		Path:   filepath.Join(target, skillFileName),
 		Hash:   hash,
 		Source: source,
 	}
@@ -219,153 +181,6 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		result.PreviousHash = previous.Hash
 	}
 	return result, nil
-}
-
-// swapPrefix marks a staged-replacement backup directory. A swap moves the
-// existing target aside under a name derived from this prefix plus the skill
-// name; the deterministic suffix lets RecoverPending recognize a backup a
-// crashed swap left behind and either complete (commit) or undo (rollback) it.
-const swapPrefix = ".zero-skill-replace-"
-
-// stagingPrefix marks a transient staging directory created during install.
-const stagingPrefix = ".zero-skill-install-"
-
-// swapBackupPath is the deterministic path swapDirIntoPlace stashes the
-// existing install at, and the path RecoverPending must look for it under. It
-// is a sibling of target in the install dir's PARENT (the same dir staging is
-// created in), never inside target — a move-into-self would be EINVAL — and it
-// lives where RecoverPending scans (filepath.Dir(dir)), so a stranded backup is
-// always recoverable. Both sides go through this helper so a crash between the
-// two renames is guaranteed convergent: the backup can never be written where
-// recovery does not look.
-func swapBackupPath(target string) string {
-	return filepath.Join(filepath.Dir(filepath.Dir(filepath.Clean(target))), swapPrefix+filepath.Base(target))
-}
-
-// swapDirIntoPlace atomically replaces target with the already-complete staging
-// directory. staging must live on the same filesystem as target (Install creates
-// it in the target's parent). On success staging is consumed (renamed) and target
-// holds the new skill. On any failure target is left untouched and an error is
-// returned, so a half-copied install never destroys the previous one.
-//
-// The replace is a two-rename sequence (stash old → move new in → drop old), not
-// a single atomic syscall. To be recoverable across a kill or power loss between
-// those renames, the existing install is stashed under a DETERMINISTIC name
-// (swapPrefix + name) rather than staging+".old", and recoverSwap runs first to
-// converge any interrupted prior replace for this target. A crash after the stash
-// leaves target absent with the old tree stranded under a known name, and the next
-// recoverSwap (Install or Load) restores it.
-func swapDirIntoPlace(staging string, target string) error {
-	// backup lives in the install dir's PARENT (the same dir staging was created
-	// in), not inside target and not inside the install dir. It must be a SIBLING
-	// of target so the stash rename (target → backup) is a same-directory rename,
-	// never a move-into-self (EINVAL); and it must live where RecoverPending
-	// scans, which is filepath.Dir(dir) — i.e. this parent. The parent is on the
-	// same filesystem as target, so the rename stays atomic.
-	backup := swapBackupPath(target)
-	if err := recoverSwap(backup, target); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	// No existing install: a plain rename is already atomic.
-	if _, err := os.Stat(target); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			_ = os.RemoveAll(staging)
-			return fmt.Errorf("stat target: %w", err)
-		}
-		if err := os.Rename(staging, target); err != nil {
-			_ = os.RemoveAll(staging)
-			return fmt.Errorf("install skill: %w", err)
-		}
-		return nil
-	}
-
-	// Existing install present: move it aside, swap the new tree in, then drop
-	// the old one — but only after the swap succeeds, so a failed rename rolls
-	// the previous install back into place and the failure stays non-destructive.
-	if err := os.Rename(target, backup); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("stash previous skill: %w", err)
-	}
-	if err := os.Rename(staging, target); err != nil {
-		// Roll the previous install back so the failure leaves the old skill intact.
-		_ = os.Rename(backup, target)
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("install skill: %w", err)
-	}
-	return os.RemoveAll(backup)
-}
-
-// recoverSwap converges an interrupted replace of target to a known state. It
-// is idempotent — safe to run any number of times, and safe after a crash of
-// its own — because it branches purely on which of {backup, target} currently
-// exist:
-//
-//	backup absent                  → nothing to recover
-//	target present + backup present → crashed after the new tree landed; commit by dropping backup
-//	target absent  + backup present → crashed after stashing the old tree but before the new one landed; roll the old tree back to target
-//
-// backup must be the deterministic name swapDirIntoPlace uses.
-func recoverSwap(backup, target string) error {
-	if _, err := os.Stat(backup); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("stat swap backup: %w", err)
-	}
-	if _, err := os.Stat(target); err == nil {
-		// New tree already landed; the backup is the now-superseded old tree.
-		return os.RemoveAll(backup)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat target: %w", err)
-	}
-	// Target absent, backup present: the old tree was stashed but the new one
-	// never landed. Restore it so the canonical install (and the lockfile entry
-	// pointing at it) is whole again.
-	if err := os.Rename(backup, target); err != nil {
-		return fmt.Errorf("restore previous skill: %w", err)
-	}
-	return nil
-}
-
-// RecoverPending converges every interrupted skill replace under dir to a known
-// state, and sweeps orphaned staging dirs a crashed install left behind. It is
-// safe and no-op when nothing is pending. Call it before discovering the skills
-// root (Load) and at the start of any install into the same root, so a kill or
-// power loss between the two renames of a prior install never leaves the
-// canonical install absent with the old tree stranded under a random name and
-// the lockfile pointing at a missing target.
-func RecoverPending(dir string) error {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return nil
-	}
-	parent := filepath.Dir(filepath.Clean(dir))
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("scan install parent: %w", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		switch {
-		case strings.HasPrefix(name, swapPrefix):
-			skillName := strings.TrimPrefix(name, swapPrefix)
-			if !validSkillName(skillName) {
-				continue
-			}
-			if err := recoverSwap(filepath.Join(parent, name), filepath.Join(dir, skillName)); err != nil {
-				return err
-			}
-		case strings.HasPrefix(name, stagingPrefix):
-			// Orphaned staging from a crashed install: no transaction to
-			// converge, just reclaim the space.
-			_ = os.RemoveAll(filepath.Join(parent, name))
-		}
-	}
-	return nil
 }
 
 // Remove deletes an installed skill directory and its lockfile entry. It errors
@@ -380,6 +195,12 @@ func Remove(dir string, name string) error {
 		return fmt.Errorf("invalid skill name %q", name)
 	}
 
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return err
@@ -393,11 +214,16 @@ func Remove(dir string, name string) error {
 	}
 
 	if present {
-		if err := os.RemoveAll(target); err != nil {
+		if err := installtxn.RemoveDir(target, func() error {
+			if !locked {
+				return nil
+			}
+			delete(lock, name)
+			return writeLock(dir, lock)
+		}); err != nil {
 			return fmt.Errorf("remove skill dir: %w", err)
 		}
-	}
-	if locked {
+	} else if locked {
 		delete(lock, name)
 		if err := writeLock(dir, lock); err != nil {
 			return err
@@ -503,7 +329,7 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+	if err := installtxn.WriteFileAtomically(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", LockFileName, err)
 	}
 	return nil
@@ -666,4 +492,9 @@ func validSkillName(name string) bool {
 		return false
 	}
 	return name == filepath.Base(name)
+}
+
+func hashContent(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

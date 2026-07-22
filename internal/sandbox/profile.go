@@ -18,6 +18,7 @@ const (
 type PermissionProfile struct {
 	FileSystem FileSystemPolicy `json:"fileSystem"`
 	Network    NetworkPolicy    `json:"network"`
+	Runtime    *SandboxRuntime  `json:"runtime,omitempty"`
 }
 
 type FileSystemPolicy struct {

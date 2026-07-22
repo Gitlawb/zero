@@ -219,7 +219,63 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 		}
 	}
 
+	// AST second opinion (issue #473): the hand-written segment split above
+	// mis-handles interactive programs hidden by unusual quoting, command
+	// substitution, subshells, or newline separators. Re-extract the real simple
+	// commands from the parsed shell tree and apply the SAME full pipeline
+	// (interactive segments, sh -c payload recursion, per-program lookup), so a
+	// bypass is caught while every program stays classified exactly as before
+	// (ssh with a trailing command, python -c, etc. remain allowed). A command
+	// the parser cannot handle (Windows cmd.exe, obfuscation) yields no commands
+	// and falls through unchanged — the guard never hard-blocks on a parse error.
+	for _, fields := range astCommandFields(command) {
+		if result, ok := inspectCommandFields(fields, goos); ok {
+			return result
+		}
+	}
+
 	return InteractiveCommandResult{}
+}
+
+// inspectCommandFields applies the full interactive-detection pipeline to one
+// already-split command's fields: the multi-word interactive segments, then the
+// `sh -c <payload>` recursion, then the per-program lookup with its
+// non-interactive suppressions (hasNonInteractiveFlag covers REPL flags and
+// trailing-command clients like ssh). It mirrors the hand-written passes above
+// so an AST-extracted command is classified identically to a plainly-split one.
+func inspectCommandFields(fields []string, goos string) (InteractiveCommandResult, bool) {
+	body := strings.ToLower(commandBody(fields))
+	for _, seg := range interactiveSegments {
+		if body == seg.match || strings.HasPrefix(body, seg.match+" ") {
+			suggestion := seg.suggestion
+			if goos == "windows" && seg.windowsSuggestion != "" {
+				suggestion = seg.windowsSuggestion
+			}
+			return InteractiveCommandResult{Interactive: true, Command: seg.command, Reason: seg.reason, Suggestion: suggestion}, true
+		}
+	}
+	first := firstProgram(fields)
+	if first == "" {
+		return InteractiveCommandResult{}, false
+	}
+	if payload := shellDashCPayload(first, fields); payload != "" {
+		if inner := DetectInteractiveCommand(payload, goos); inner.Interactive {
+			return inner, true
+		}
+		return InteractiveCommandResult{}, false
+	}
+	program, ok := interactivePrograms[first]
+	if !ok || (program.windowsOnly && goos != "windows") {
+		return InteractiveCommandResult{}, false
+	}
+	if hasNonInteractiveFlag(first, fields) {
+		return InteractiveCommandResult{}, false
+	}
+	suggestion := program.suggestion
+	if goos == "windows" && program.windowsSuggestion != "" {
+		suggestion = program.windowsSuggestion
+	}
+	return InteractiveCommandResult{Interactive: true, Command: first, Reason: program.reason, Suggestion: suggestion}, true
 }
 
 // wrapperPrograms are launcher prefixes that precede the real program. After

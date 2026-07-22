@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -250,6 +251,115 @@ func runPluginRemove(args []string, dir string, stdout io.Writer, stderr io.Writ
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func runPluginInfo(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	id, options, help, err := parsePluginInfoArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writePluginInfoHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if id == "" {
+		return writeExecUsageError(stderr, "usage: zero plugins info <id> [--user] [--json]")
+	}
+
+	cwd, err := deps.getwd()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+	}
+	info, err := plugins.Info(plugins.InfoOptions{
+		LoadOptions: pluginLoadOptions(deps, cwd, options.user),
+	}, id)
+	if err != nil {
+		if errors.Is(err, plugins.ErrNotInstalled) {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(info, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	plugin := info.Plugin
+	lines := []string{fmt.Sprintf("%s (%s) %s", plugin.ID, plugin.Name, plugin.Version)}
+	state := "enabled"
+	if !plugin.Enabled {
+		state = "disabled"
+	}
+	lines = append(lines, "  state: "+state)
+	lines = append(lines, "  source: "+string(plugin.Source))
+	if len(plugin.Tools) > 0 {
+		lines = append(lines, fmt.Sprintf("  tools: %d", len(plugin.Tools)))
+	}
+	if len(plugin.Hooks) > 0 {
+		lines = append(lines, fmt.Sprintf("  hooks: %d", len(plugin.Hooks)))
+	}
+	if len(plugin.Skills) > 0 {
+		lines = append(lines, fmt.Sprintf("  skills: %d", len(plugin.Skills)))
+	}
+	if len(plugin.Prompts) > 0 {
+		lines = append(lines, fmt.Sprintf("  prompts: %d", len(plugin.Prompts)))
+	}
+	if info.LockSource != "" {
+		lines = append(lines, "  lock source: "+info.LockSource)
+	}
+	if info.LockHash != "" {
+		lines = append(lines, "  lock hash: "+info.LockHash)
+		lines = append(lines, fmt.Sprintf("  hash drift: %t", info.HashDrift))
+	}
+	lines = append(lines, "  manifest: "+plugin.ManifestPath)
+	if _, err := fmt.Fprintln(stdout, redaction.RedactString(strings.Join(lines, "\n"), redaction.Options{})); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+type pluginInfoOptions struct {
+	json bool
+	user bool
+}
+
+func parsePluginInfoArgs(args []string) (string, pluginInfoOptions, bool, error) {
+	options := pluginInfoOptions{}
+	id := ""
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return "", options, true, nil
+		case "--json":
+			options.json = true
+		case "--user":
+			options.user = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", options, false, execUsageError{fmt.Sprintf("unknown plugins info flag %q", arg)}
+			}
+			if id != "" {
+				return "", options, false, execUsageError{"plugins info takes a single id"}
+			}
+			id = arg
+		}
+	}
+	return id, options, false, nil
+}
+
+func pluginLoadOptions(deps appDeps, cwd string, userOnly bool) plugins.LoadOptions {
+	opts := plugins.LoadOptions{Cwd: cwd, ExcludeProject: userOnly}
+	roots := []plugins.Root{{Source: plugins.SourceUser, Path: deps.pluginsDir()}}
+	if !userOnly {
+		roots = append(roots, plugins.Root{Source: plugins.SourceProject, Path: filepath.Join(cwd, ".zero", "plugins")})
+	}
+	opts.Roots = roots
+	return opts
 }
 
 // --- tools make / list ---
@@ -563,6 +673,18 @@ func writePluginRemoveHelp(w io.Writer) error {
   zero plugin remove <id>
 
 Removes an installed plugin directory and its plugins.lock entry.
+`)
+	return err
+}
+
+func writePluginInfoHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero plugins info <id> [flags]
+
+Flags:
+      --user    Target only user plugins (ignore ./.zero/plugins)
+      --json    Print plugin info as JSON
+  -h, --help    Show this help
 `)
 	return err
 }

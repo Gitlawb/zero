@@ -311,6 +311,38 @@ func (engine *Engine) GrantRequestPermissions(profile RequestPermissionProfile, 
 	}
 }
 
+// CoversRequestPermissions reports whether the engine's current effective
+// policy already includes every capability in profile. Callers use this before
+// prompting for an explicit per-command permission request: asking for a
+// capability that was granted for the session is not a new elevation.
+func (engine *Engine) CoversRequestPermissions(profile RequestPermissionProfile) bool {
+	if engine == nil {
+		return false
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if profile.Network != nil && profile.Network.Enabled != nil && *profile.Network.Enabled &&
+		NormalizeNetworkMode(policy.Network) != NetworkAllow {
+		return false
+	}
+	if profile.FileSystem == nil {
+		return true
+	}
+	workspaceRoot := engine.workspaceRoot
+	scope := engine.scopeFor(workspaceRoot)
+	enforceWorkspace := policy.EnforceWorkspace && workspaceRoot != ""
+	for _, path := range profile.FileSystem.Read {
+		if validatePathWithPolicy(scope, policy, SideEffectRead, enforceWorkspace, workspaceRoot, path) != nil {
+			return false
+		}
+	}
+	for _, path := range profile.FileSystem.Write {
+		if validatePathWithPolicy(scope, policy, SideEffectWrite, enforceWorkspace, workspaceRoot, path) != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func permissionRoot(path string) string {
 	clean := filepath.Clean(path)
 	if info, err := os.Stat(clean); err == nil && info.IsDir() {

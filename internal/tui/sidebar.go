@@ -94,12 +94,26 @@ func (m model) sidebarAvailable() bool {
 	if widthTier(m.width) < tierMedium {
 		return false
 	}
-	// Full-screen overlays (setup, wizards, pickers, the empty-state suggestion
-	// list) take over the chat column and render at full width; suppress the
-	// second column while any is active so their geometry and mouse hit-testing
-	// stay full-width as before.
+	// Full-screen overlays (setup, wizards, pickers) take over the chat column and
+	// render at full width; suppress the second column while any is active so
+	// their geometry and mouse hit-testing stay full-width as before.
+	//
+	// The `/` command palette is deliberately NOT in this list. It is not a
+	// full-screen overlay: suggestionOverlay draws it via centerRenderedBlock at
+	// minInt(width, suggestionPaletteMaxWidth) — a centred box capped at 76 cells
+	// — floating over the chat column rather than replacing it. Suppressing the
+	// sidebar for it collapsed the whole layout on every keystroke of `/`: the
+	// plan panel dropped out of the sidebar and re-rendered inline at the bottom
+	// and the transcript re-wrapped to full width, which is at its most jarring
+	// mid-run with a live plan on screen. Since the sidebar already requires the
+	// medium tier (>= 80 cells) the palette is always strictly narrower than the
+	// chat column here, so the two never contend for the same cells.
+	//
+	// Mouse hit-testing is unaffected: sidebarLineAtMouse carries its own
+	// suggestionsActive() guard, so clicks still go to the palette and not to the
+	// sidebar rows underneath it.
 	if m.setup.visible || m.helpOverlay || m.leaderHelpOverlay || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
 	// Home/welcome screen: stay single-column until there's real conversation, so
