@@ -1059,6 +1059,106 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringReadIndexDedupesDuplicateKeys is the regression test for the
+// index fan-out DoS: a corrupted or adversarially crafted index that repeats
+// the same key many times must collapse to its distinct, valid keys before
+// read()/write() fan them out into one blocking keyring lookup per key.
+func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
+	ckr := &countingKR{fakeKR: newFakeKR()}
+	blob := keyringBlob{kr: ckr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+
+	dup := ProviderKey("demo")
+	many := make([]string, 2000)
+	for i := range many {
+		many[i] = dup
+	}
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Keys: many})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+
+	keys, ok, _, err := blob.readKeyIndex()
+	if err != nil {
+		t.Fatalf("readKeyIndex: %v", err)
+	}
+	if !ok {
+		t.Fatal("readKeyIndex: expected an index to be found")
+	}
+	if len(keys) != 1 {
+		t.Fatalf("readKeyIndex returned %d keys for a 2000-duplicate index, want 1 (deduplicated)", len(keys))
+	}
+
+	// A malformed (non-ValidateKey-shaped) entry must also be dropped rather
+	// than fanned out into a lookup.
+	mixed, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Keys: []string{dup, dup, "not a valid key", ProviderKey("other")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(mixed)
+	keys, _, _, err = blob.readKeyIndex()
+	if err != nil {
+		t.Fatalf("readKeyIndex: %v", err)
+	}
+	want := map[string]bool{dup: true, ProviderKey("other"): true}
+	if len(keys) != len(want) {
+		t.Fatalf("readKeyIndex = %v, want exactly %v", keys, want)
+	}
+	for _, k := range keys {
+		if !want[k] {
+			t.Fatalf("readKeyIndex returned unexpected key %q", k)
+		}
+	}
+}
+
+// TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry is the end-to-end
+// regression test for the same DoS: a duplicate-heavy index must not drive
+// one keyring Get per listed entry. Before the index is deduplicated at its
+// source, a corrupted index holding thousands of copies of the same key would
+// hold the store lock for one blocking keyring lookup (each up to the 10s
+// command timeout) per copy, even though the cap on total distinct credentials
+// this bug was meant to bound was never actually exceeded.
+func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ckr := &countingKR{fakeKR: newFakeKR()}
+
+	dup := ProviderKey("demo")
+	raw, err := json.Marshal(Token{AccessToken: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+dup] = base64.StdEncoding.EncodeToString(raw)
+
+	many := make([]string, 3000)
+	for i := range many {
+		many[i] = dup
+	}
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 1, Keys: many})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: ckr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ckr.gets = 0
+	statuses, err := s.Status("")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("Status returned %d entries for a 3000-duplicate index of one key, want 1", len(statuses))
+	}
+	// One Get for the index header, one Get for the single deduplicated key's
+	// own entry — not one per (duplicate) index entry.
+	if ckr.gets > 2 {
+		t.Fatalf("Status issued %d keyring gets for a 3000-entry duplicate index, want <= 2 (fan-out DoS regression)", ckr.gets)
+	}
+}
+
 // legacyGetFailKR fails Get for the legacy combined entry only, simulating a
 // transient keyring read error (as opposed to the entry genuinely not
 // existing, which fakeKR's normal Get reports as ok=false, err=nil).

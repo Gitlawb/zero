@@ -899,7 +899,7 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		if len(keys) > maxKeyringIndexKeys {
 			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
 		}
-		return keys, true, 1, nil
+		return dedupeValidKeys(keys), true, 1, nil
 	}
 	var header keyIndexHeader
 	if err := json.Unmarshal(raw, &header); err != nil {
@@ -940,7 +940,34 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		}
 		keys = append(keys, more...)
 	}
-	return keys, true, header.Chunks, nil
+	return dedupeValidKeys(keys), true, header.Chunks, nil
+}
+
+// dedupeValidKeys drops duplicates and malformed entries from a decoded
+// index's key list before it is fanned out into one keyring lookup per key by
+// read()/write() (via Load/Status/Save/Delete). maxKeyringIndexKeys already
+// bounds the raw decode, but that bound does nothing against a corrupted or
+// adversarially crafted index that packs its budget with repeats of the same
+// key (or garbage that was never a real ValidateKey-shaped entry): every
+// duplicate or malformed key would otherwise still cost its own blocking
+// keyring lookup (up to the 10s command timeout) while the store lock is
+// held, reintroducing the fan-out DoS the index cap was meant to close.
+// Order is preserved (first occurrence wins) so callers that sort or display
+// keys see stable results.
+func dedupeValidKeys(keys []string) []string {
+	seen := make(map[string]bool, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if seen[key] {
+			continue
+		}
+		if ValidateKey(key) != nil {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	return out
 }
 
 // writeKeyIndex persists keys as a chunked index and reports how many chunk
