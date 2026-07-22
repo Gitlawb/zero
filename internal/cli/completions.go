@@ -24,7 +24,7 @@ var completionRoot = completionNode{
 	children: []completionNode{
 		{names: []string{"exec"}, flags: []string{
 			"-h", "--help", "-f", "--file", "--image", "--add-dir", "--mode", "-m", "--model",
-			"--use-spec", "--spec-model", "--spec-reasoning-effort", "--max-turns", "--exec-profile",
+			"--use-spec", "--spec-model", "--spec-reasoning-effort", "--plan", "--max-turns", "--exec-profile",
 			"--auto", "--enabled-tools", "--disabled-tools", "--list-tools", "--profile", "-r",
 			"--reasoning-effort", "-C", "--cwd", "-w", "--worktree", "--worktree-dir", "-i",
 			"--input-format", "-o", "--output-format", "--prompt", "--resume", "--fork",

@@ -351,7 +351,7 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk:
+	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
@@ -383,7 +383,7 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 	case configIDMode:
 		mode := agent.PermissionMode(p.Value)
 		switch mode {
-		case agent.PermissionModeAuto, agent.PermissionModeAsk:
+		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 			sess.setMode(mode)
 			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		case agent.PermissionModeUnsafe:
@@ -439,13 +439,16 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
-	// Only auto/ask are offered over ACP; Unsafe is gated to the operator (see
-	// handleSetMode) so a client can't grant itself no-prompt host access.
+	// auto/ask/plan are offered over ACP; Unsafe is gated to the operator (see
+	// handleSetMode) so a client can't grant itself no-prompt host access. Plan
+	// only narrows what a client can do (read-only, no write/shell tools), so
+	// unlike Unsafe there is no elevation risk in letting a client select it.
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
 			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+			{ID: string(agent.PermissionModePlan), Name: "Plan", Description: "Read-only planning; write and shell tools are hidden."},
 		},
 	}
 }
@@ -516,6 +519,7 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 		Options: []SessionConfigOptionValue{
 			{Value: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{Value: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+			{Value: string(agent.PermissionModePlan), Name: "Plan", Description: "Read-only planning; write and shell tools are hidden."},
 		},
 	}}
 }
