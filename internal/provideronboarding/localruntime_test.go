@@ -43,8 +43,11 @@ func TestLocalRuntimeCandidatesCoverOllamaLMStudioAndAtomicChat(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected an atomic-chat-local candidate, got %#v", candidates)
 	}
-	if !strings.Contains(atomicChat.BaseURL, "1337") {
-		t.Fatalf("atomic-chat-local candidate must probe default port 1337, got %q", atomicChat.BaseURL)
+	if atomicChat.BaseURL != "http://127.0.0.1:1337/v1" {
+		t.Fatalf("atomic-chat-local candidate BaseURL = %q, want http://127.0.0.1:1337/v1", atomicChat.BaseURL)
+	}
+	if atomicChat.DefaultModel != "local-model" {
+		t.Fatalf("atomic-chat-local candidate DefaultModel = %q, want local-model", atomicChat.DefaultModel)
 	}
 	if atomicChat.RequiresKey {
 		t.Fatalf("atomic-chat-local candidate must not require an API key: %#v", atomicChat)
