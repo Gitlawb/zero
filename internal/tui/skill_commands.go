@@ -39,7 +39,7 @@ func (m model) handleSkillCommand(raw string) (model, tea.Cmd, bool) {
 		})
 		return m, nil, true
 	}
-	return m.launchOrDeferExpandedPrompt(raw, skillInvocationPrompt(body, args))
+	return m.launchOrDeferExpandedPrompt(raw, skillInvocationPrompt(skills.FormatOutput(skill), args))
 }
 
 // bareSkillInvocationNote is appended when a skill is invoked with no request.
@@ -145,7 +145,7 @@ func (m model) invokeSkillByName(name string) (model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		next, teaCmd, _ := m.launchOrDeferExpandedPrompt("", skillInvocationPrompt(body, ""))
+		next, teaCmd, _ := m.launchOrDeferExpandedPrompt("", skillInvocationPrompt(skills.FormatOutput(skill), ""))
 		return next, teaCmd
 	}
 	// The picker row came from a slightly older load (TTL cache) and the skill

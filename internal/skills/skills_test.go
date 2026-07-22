@@ -2,10 +2,14 @@ package skills
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func writeSkill(t *testing.T, dir string, name string, content string) {
@@ -580,5 +584,662 @@ func TestInfoFromRootsPrimaryLockMetadata(t *testing.T) {
 	}
 	if info.Source != "file:///src" || info.Hash != "sha256:abc" {
 		t.Fatalf("lock metadata missing: %#v", info)
+	}
+}
+
+// writeSkillWithAssets creates a skill at dir/name with SKILL.md plus the given
+// extra files (relative paths under the skill dir) — used to exercise asset
+// discovery.
+func writeSkillWithAssets(t *testing.T, dir, name, skillmd string, extras map[string]string) {
+	t.Helper()
+	skillDir := filepath.Join(dir, name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", skillDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillmd), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	for rel, content := range extras {
+		full := filepath.Join(skillDir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", full, err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+	}
+}
+
+// #2: loadAssets must recurse into subdirectories so files like scripts/run.sh
+// — which fscopy.CopyTree installs to disk — are listed in Skill.Assets. Issue
+// #584 asks for "contents of subdirectories" in the skill context.
+func TestLoadDiscoversAssetsRecursively(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillWithAssets(t, dir, "deploy",
+		"---\nname: deploy\ndescription: d\n---\nbody",
+		map[string]string{
+			"lint.sh":        "#!/bin/sh\necho lint\n",
+			"config.yaml":    "key: value\n",
+			"scripts/run.sh": "#!/bin/sh\necho run\n",
+			"lib/util.py":    "def util():\n    pass\n",
+		},
+	)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "deploy" {
+		t.Fatalf("expected deploy skill, got %+v", loaded)
+	}
+	skill := loaded[0]
+	wantNames := map[string]bool{
+		"config.yaml":    true,
+		"lint.sh":        true,
+		"scripts/run.sh": true, // slash-form, matching filepath.ToSlash
+		"lib/util.py":    true,
+	}
+	gotNames := map[string]bool{}
+	for _, a := range skill.Assets {
+		gotNames[a.Name] = true
+	}
+	for want := range wantNames {
+		if !gotNames[want] {
+			t.Errorf("expected asset %q in Skill.Assets, got %v", want, skill.Assets)
+		}
+	}
+	if len(skill.Assets) != len(wantNames) {
+		t.Errorf("expected %d assets, got %d (%v)", len(wantNames), len(skill.Assets), skill.Assets)
+	}
+	// SKILL.md must not be listed as an asset (it's the Content).
+	for _, a := range skill.Assets {
+		if strings.EqualFold(a.Name, "SKILL.md") {
+			t.Errorf("SKILL.md must not appear in Assets")
+		}
+	}
+}
+
+// Regression: assets nested deeper than any reasonable fixed depth cap must
+// still be discovered, because fscopy.CopyTree installs files at ANY depth and
+// the loader must keep every installed file discoverable. A depth cap that
+// hides installed assets would make a skill silently appear asset-free while
+// files the skill references exist on disk. This nests assets two ways and
+// confirms both are listed:
+//   - 25 levels deep (well past the old maxAssetDepth=8).
+//   - 90 levels deep, past the old maxTraversalDepth=64 — which used to make
+//     loadAssets silently drop the asset. Discovery no longer caps depth.
+func TestLoadDiscoversDeeplyNestedAssets(t *testing.T) {
+	dir := t.TempDir()
+	// 25 levels of subdirectories — exceeds any shallow fixed cap, stays well
+	// under the filesystem PATH_MAX.
+	deep25 := strings.Repeat("d/", 25) + "leaf.sh"
+	// 90 levels — past the old maxTraversalDepth=64. Use short path components
+	// so the leaf's absolute path stays under the filesystem PATH_MAX.
+	deep90 := strings.Repeat("d/", 90) + "deep.sh"
+	writeSkillWithAssets(t, dir, "nested",
+		"---\nname: nested\n---\nbody",
+		map[string]string{
+			deep25: "#!/bin/sh\necho deep\n",
+			deep90: "#!/bin/sh\necho deeper\n",
+		},
+	)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	want := map[string]bool{"leaf.sh": false, "deep.sh": false}
+	for _, a := range loaded[0].Assets {
+		s := filepath.ToSlash(a.Name)
+		for suffix := range want {
+			if strings.HasSuffix(s, suffix) {
+				want[suffix] = true
+			}
+		}
+	}
+	for suffix, found := range want {
+		if !found {
+			t.Fatalf("deeply nested asset not discovered (%s); Assets=%v", suffix, loaded[0].Assets)
+		}
+	}
+}
+
+// Regression: a file named SKILL.md nested below the skill root is NOT the
+// loaded manifest (the root SKILL.md is), so it must remain in Skill.Assets as
+// an ordinary asset. Examples: templates/SKILL.md (a copied template the skill
+// references) or subskill/SKILL.md (an embedded sub-skill manifest). The loader
+// previously skipped every recursively encountered SKILL.md by basename, which
+// silently dropped these from model-facing output. Only the root manifest is
+// excluded now.
+func TestLoadKeepsNestedSkillMdAsAsset(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillWithAssets(t, dir, "tmpl",
+		"---\nname: tmpl\ndescription: d\n---\nbody",
+		map[string]string{
+			"templates/SKILL.md": "# template manifest\n",
+			"subskill/SKILL.md":  "---\nname: sub\n---\nsub body\n",
+			"README.md":          "docs\n",
+		},
+	)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "tmpl" {
+		t.Fatalf("expected tmpl skill, got %+v", loaded)
+	}
+	skill := loaded[0]
+	gotNames := map[string]bool{}
+	for _, a := range skill.Assets {
+		gotNames[a.Name] = true
+	}
+	wantNames := []string{
+		"templates/SKILL.md",
+		"subskill/SKILL.md",
+		"README.md",
+	}
+	for _, want := range wantNames {
+		if !gotNames[want] {
+			t.Errorf("expected nested asset %q in Skill.Assets, got %v", want, skill.Assets)
+		}
+	}
+	// The root manifest must still be excluded — only nested SKILL.md survives.
+	for _, a := range skill.Assets {
+		if a.Name == "SKILL.md" {
+			t.Errorf("root SKILL.md must not appear in Assets")
+		}
+	}
+	if len(skill.Assets) != len(wantNames) {
+		t.Errorf("expected %d assets, got %d (%v)", len(wantNames), len(skill.Assets), skill.Assets)
+	}
+}
+
+// maxAssetCount bounds discovery: a skill with more than maxAssetCount eligible
+// files must stop discovering after the cap rather than traversing the whole
+// tree, so a huge directory cannot stall skill load.
+func TestLoadAssetsCountCapStopsDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	extras := make(map[string]string, maxAssetCount+50)
+	for i := 0; i < maxAssetCount+50; i++ {
+		extras[fmt.Sprintf("asset-%04d.txt", i)] = "d"
+	}
+	writeSkillWithAssets(t, dir, "many", "---\nname: many\n---\nbody", extras)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded[0].Assets) > maxAssetCount {
+		t.Fatalf("discovery exceeded cap: got %d assets, cap %d", len(loaded[0].Assets), maxAssetCount)
+	}
+}
+
+// maxVisitedEntries bounds total nodes examined: a skill tree with many empty
+// subdirectories (where assets count does not grow) still terminates quickly.
+// This guards against a pathological tree where thousands of dirs are created but
+// no eligible assets are found in any of them (len(assets) stays at 0).
+func TestLoadAssetsVisitedEntriesBudget(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "tree")
+	skillMd := filepath.Join(skillDir, "SKILL.md")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillMd, []byte("---\nname: tree\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create 6000 empty subdirectories — well above maxVisitedEntries=4096 —
+	// each with a SKILL.md (to match locateSkillDir's expectation of a skill
+	// tree) so ReadDir on each sees entries that are not eligible assets.
+	for i := 0; i < 6000; i++ {
+		d := filepath.Join(skillDir, fmt.Sprintf("dir-%04d", i))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	loaded, err := Load(dir)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	// Should complete well under 1 second (bounded traversal).
+	if elapsed > 5*time.Second {
+		t.Fatalf("discovery took %v — visited-entries budget may not be enforced", elapsed)
+	}
+	// No assets expected (all dirs are empty), but the point is termination.
+	if len(loaded[0].Assets) != 0 {
+		t.Fatalf("expected 0 assets in empty-tree skill, got %d", len(loaded[0].Assets))
+	}
+}
+
+// FormatOutput must never exceed maxSkillOutputSize on any overflow path,
+// including the assets-overflow branch where the body is near the cap and the
+// truncation note would otherwise push it over.
+func TestFormatOutputAssetsOverflowStaysUnderHardLimit(t *testing.T) {
+	// The framed body lands just under maxSkillOutputSize, so the body-overflow
+	// branch is skipped. Assets push the total over the cap, forcing the
+	// assets-overflow branch. Adding the truncation note would exceed the cap,
+	// so appendTruncationNote must make room while preserving valid UTF-8.
+	openTag := fmt.Sprintf("<skill name=%q dir=%q>\n", "s", "/d")
+	closeTag := "\n</skill>"
+	bodyContent := strings.Repeat("A", maxSkillOutputSize-len(openTag)-len(closeTag)-1)
+	skill := Skill{
+		Name:    "s",
+		Dir:     "/d",
+		Content: bodyContent,
+		Assets: []Asset{
+			{Name: "a.txt", Path: "/d/a.txt", Size: 1},
+			{Name: "b.txt", Path: "/d/b.txt", Size: 2},
+			{Name: "c.txt", Path: "/d/c.txt", Size: 3},
+			{Name: "d.txt", Path: "/d/d.txt", Size: 4},
+		},
+	}
+	out := FormatOutput(skill)
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("assets-overflow output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !strings.Contains(out, "(output truncated)") {
+		t.Fatalf("truncation note missing: %q", out[len(out)-60:])
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8 after truncation")
+	}
+	// Assets block must be dropped entirely — no <skill_assets> fragment.
+	if strings.Contains(out, "<skill_assets") {
+		t.Fatalf("assets block not dropped on overflow: %q", out[len(out)-120:])
+	}
+}
+
+// Body exactly at the hard limit: body = maxSkillOutputSize (openTag + content
+// + closeTag), assets non-empty. Since len(body) > cap is false (equal, not
+// greater), the body-overflow branch is skipped. Assets push the total over →
+// assets-overflow branch. Since len(body) + note > cap, body must be truncated
+// to make room for the note, and the result must stay under the cap.
+func TestFormatOutputBodyExactlyAtCapWithAssets(t *testing.T) {
+	// Compute content length so body (openTag + content + closeTag) is exactly
+	// maxSkillOutputSize.
+	const open = "<skill name=\"s\" dir=\"/d\">\n"
+	const close = "\n</skill>"
+	contentLen := maxSkillOutputSize - len(open) - len(close)
+	bodyContent := strings.Repeat("B", contentLen)
+	skill := Skill{
+		Name:    "s",
+		Dir:     "/d",
+		Content: bodyContent,
+		Assets:  []Asset{{Name: "a.txt", Path: "/d/a.txt", Size: 1}},
+	}
+	out := FormatOutput(skill)
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("body-at-cap output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !strings.Contains(out, "(output truncated)") {
+		t.Fatalf("truncation note missing on body-at-cap path")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8 after truncation")
+	}
+}
+
+// FormatOutput must stay under the hard limit even when the open tag is so
+// large that reserving note+closeTag leaves no room for content.
+func TestFormatOutputHugeOpenTagStaysUnderHardLimit(t *testing.T) {
+	// A name so long the open tag alone approaches the cap.
+	huge := strings.Repeat("n", maxSkillOutputSize-5)
+	skill := Skill{
+		Name:    huge,
+		Dir:     "/d",
+		Content: strings.Repeat("B", maxSkillOutputSize*2),
+	}
+	out := FormatOutput(skill)
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("huge-openTag output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8 after truncation")
+	}
+}
+
+// FormatOutput must stay under the hard limit even when the open tag ALONE
+// exceeds the cap (name + dir longer than maxSkillOutputSize). The frame is
+// truncated mid-tag; no note or close tag is appended.
+func TestFormatOutputOpenTagExceedsCapAlone(t *testing.T) {
+	skill := Skill{
+		Name:    strings.Repeat("n", maxSkillOutputSize+200),
+		Dir:     "/" + strings.Repeat("d", maxSkillOutputSize),
+		Content: "body",
+	}
+	out := FormatOutput(skill)
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("openTag-exceeds-cap output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8 after truncation")
+	}
+}
+
+// #2/#5: hidden files and subdirectories are skipped at every level (.git,
+// .env, .DS_Store), so a .git inside a subdirectory does not leak assets.
+func TestLoadSkipsHiddenFilesAndDirsAtEveryLevel(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillWithAssets(t, dir, "s",
+		"---\nname: s\n---\nbody",
+		map[string]string{
+			".env":            "SECRET=1\n",
+			".git/config":     "[remote]\n",
+			"scripts/.secret": "x\n",
+		},
+	)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	for _, a := range loaded[0].Assets {
+		if strings.Contains(a.Name, ".env") || strings.Contains(a.Name, ".git") || strings.Contains(a.Name, ".secret") {
+			t.Errorf("hidden file/dir leaked into Assets: %q", a.Name)
+		}
+	}
+}
+
+// #6: FormatOutput must NOT emit the absolute install path (which contains the
+// user's home directory) for each asset. Asset names are skill-relative; the
+// skill directory is exposed once via dir= and assets are listed by relative
+// path only. The skill tool is permission-allow and its output flows to the
+// provider, so the absolute home path must not leak per-asset.
+func TestFormatOutputDoesNotLeakAbsoluteAssetPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillWithAssets(t, dir, "s",
+		"---\nname: s\n---\nbody",
+		map[string]string{"scripts/run.sh": "#!/bin/sh\necho\n"},
+	)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	out := FormatOutput(loaded[0])
+	// The relative asset name must appear; the absolute skills dir must not be
+	// repeated per-asset (it appears once in dir=).
+	if !strings.Contains(out, "scripts/run.sh") {
+		t.Errorf("expected relative asset name in output, got:\n%s", out)
+	}
+	// Count occurrences of the skills root path: it should appear exactly once
+	// (in dir=), never inside the <skill_assets> block. FormatOutput emits dir=
+	// via fmt's %q, which escapes backslashes (e.g. C:\Users -> C:\\Users on
+	// Windows), so we must match the quoted form — matching the raw path would
+	// fail on Windows and, on POSIX, would over-count because dir= is a parent
+	// of the asset relative paths.
+	skillsRoot := strconv.Quote(loaded[0].Dir)
+	count := strings.Count(out, skillsRoot)
+	if count != 1 {
+		t.Errorf("expected skills root %q to appear exactly once (in dir=), got %d times:\n%s", loaded[0].Dir, count, out)
+	}
+}
+
+// #1: FormatOutput truncation must stay on a UTF-8 rune boundary so a large
+// multi-byte body does not produce invalid UTF-8, and must not split an asset
+// line mid-entry. A body of CJK characters that exceeds the cap is the
+// regression case.
+func TestFormatOutputTruncatesOnRuneBoundary(t *testing.T) {
+	// Build a skill whose total output comfortably exceeds maxSkillOutputSize
+	// using multi-byte (CJK) content, so the cut boundary lands inside a rune.
+	dir := t.TempDir()
+	// "中" is 3 bytes; repeat well past the 100KB cap.
+	body := strings.Repeat("中", (maxSkillOutputSize/3)+200)
+	writeSkill(t, dir, "big", "---\nname: big\n---\n"+body)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	out := FormatOutput(loaded[0])
+	if !strings.HasSuffix(out, "\n(output truncated)\n</skill>") {
+		t.Fatalf("expected truncation note + closing frame at end, got suffix %q", out[len(out)-60:])
+	}
+	// utf8.ValidString catches a split multi-byte rune.
+	if !utf8.ValidString(out) {
+		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation (split rune)")
+	}
+}
+
+// Regression: a single-line body (no internal newline) that exceeds the cap must
+// NOT collapse to "<skill ...>\n" + the truncation note — that erases every
+// instruction byte. Body content must survive between the opening tag and the
+// note, and the closing </skill> frame must still be emitted so the document
+// stays well-formed (the package doc promises closing tags stay intact).
+func TestFormatOutputTruncatesSingleLineBodyKeepsFrame(t *testing.T) {
+	dir := t.TempDir()
+	// One long line of ASCII with no '\n', well past the 100KB cap.
+	body := strings.Repeat("A", maxSkillOutputSize*2)
+	writeSkill(t, dir, "big", "---\nname: big\n---\n"+body)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	out := FormatOutput(loaded[0])
+
+	// The closing frame must survive.
+	if !strings.HasSuffix(out, "\n</skill>") {
+		t.Fatalf("closing </skill> frame lost; tail=%q", out[len(out)-60:])
+	}
+	// The truncation note must be present.
+	if !strings.Contains(out, "(output truncated)") {
+		t.Fatalf("truncation note missing in output:\n...%s", out[len(out)-80:])
+	}
+	// At least one body byte must survive between the opening tag and the note;
+	// the whole output must not be "<skill ...>\n" + note.
+	openTagEnd := strings.Index(out, ">\n") + 2 // end of "<skill ...>\n"
+	noteIdx := strings.Index(out, "\n(output truncated)")
+	if noteIdx <= openTagEnd {
+		t.Fatalf("body erased: output is just opening tag + note = %q", out)
+	}
+	// Total stays under the cap.
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation")
+	}
+}
+
+// Regression: when a skill has a small body but enough assets that the total
+// output exceeds the cap, the truncator must NOT cut into the <skill_assets>
+// block — that used to emit a dangling open <skill_assets> with no closing
+// </skill_assets> AND duplicate the body's </skill> (one in output[:cut], one in
+// the appended closeFrame). On truncation, assets are dropped entirely so the
+// result carries exactly one </skill> and no partial asset fragment.
+func TestFormatOutputTruncationOmitsAssetsBlock(t *testing.T) {
+	dir := t.TempDir()
+	// Enough asset files with long relative paths (via nested subdirectories)
+	// so the rendered listing at the discovery cap exceeds maxSkillOutputSize.
+	// Each line ≈ 280 bytes × 500 assets ≈ 140KB > 100KB cap.
+	// macOS filename limit is 255 bytes, so we use deep subdirectory nesting
+	// to build long relative names. 100 levels of "d/" × 500 assets renders
+	// ~105KB, which clears the 100KB cap and triggers the drop-assets branch.
+	extras := make(map[string]string, maxAssetCount+100)
+	deepDir := strings.Repeat("d/", 100) // long relative path using short components
+	for i := 0; i < maxAssetCount+100; i++ {
+		extras[deepDir+fmt.Sprintf("asset-%04d.txt", i)] = "d"
+	}
+	writeSkillWithAssets(t, dir, "big", "---\nname: big\n---\nsmall body\n", extras)
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	if len(loaded[0].Assets) == 0 {
+		t.Fatalf("assets at depth 90 not discovered; depth cap may have been reintroduced (Assets=%v)", loaded[0].Assets)
+	}
+	out := FormatOutput(loaded[0])
+
+	// Exactly one closing </skill> — the body's own; assets dropped carry no
+	// extra close tag.
+	if c := strings.Count(out, "</skill>"); c != 1 {
+		t.Fatalf("expected exactly one </skill>, got %d; output tail:\n%s", c, out[len(out)-200:])
+	}
+	// No partial/dangling <skill_assets> open tag on the truncated path.
+	if strings.Contains(out, "<skill_assets") || strings.Contains(out, "</skill_assets>") {
+		t.Fatalf("truncation leaked a <skill_assets> fragment; output tail:\n%s", out[len(out)-200:])
+	}
+	// Priority rule: a body that fits is kept COMPLETE, then assets are dropped
+	// and the note is appended AFTER the body's own </skill>. So the body close
+	// tag directly precedes the note (no duplicated close tag appended).
+	if !strings.HasSuffix(out, "</skill>\n(output truncated)") {
+		t.Fatalf("expected body's </skill> + truncation note at end, got tail=%q", out[len(out)-60:])
+	}
+	// The complete body content must survive (not erased): the open-tag
+	// content precedes the close tag.
+	if i := strings.Index(out, "small body"); i < 0 {
+		t.Fatalf("body content erased on assets-overflow truncation: %q", out)
+	}
+	if len(out) > maxSkillOutputSize {
+		t.Fatalf("output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("FormatOutput produced invalid UTF-8 after truncation")
+	}
+}
+
+// TestFormatOutputTruncationPriority locks the documented priority order — keep
+// body complete > drop assets > truncate body — across the three branches.
+func TestFormatOutputTruncationPriority(t *testing.T) {
+	t.Run("fits_body_and_assets_kept", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSkillWithAssets(t, dir, "s", "---\nname: s\n---\nbody",
+			map[string]string{"a.txt": "x"})
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := FormatOutput(loaded[0])
+		if !strings.Contains(out, "body") || !strings.Contains(out, "a.txt") {
+			t.Fatalf("expected both body and asset kept, got:\n%s", out)
+		}
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		// No truncation note when everything fits.
+		if strings.Contains(out, "(output truncated)") {
+			t.Fatalf("unexpected truncation note when output fits")
+		}
+	})
+
+	t.Run("body_fits_assets_overflow_assets_dropped_body_intact", func(t *testing.T) {
+		dir := t.TempDir()
+		// Small body, enough assets with long relative paths to exceed the cap
+		// when rendered at the discovery cap (maxAssetCount). 100 levels of
+		// "d/" × 500 assets renders ~105KB, clearing the 100KB cap.
+		extras := make(map[string]string, maxAssetCount+100)
+		deepDir := strings.Repeat("d/", 100)
+		for i := 0; i < maxAssetCount+100; i++ {
+			extras[deepDir+fmt.Sprintf("asset-%04d.txt", i)] = "d"
+		}
+		writeSkillWithAssets(t, dir, "s", "---\nname: s\n---\nUNIQUE_BODY_MARKER", extras)
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded[0].Assets) == 0 {
+			t.Fatalf("assets at depth 90 not discovered; depth cap may have been reintroduced (Assets=%v)", loaded[0].Assets)
+		}
+		out := FormatOutput(loaded[0])
+		// Body must remain COMPLETE and intact.
+		if !strings.Contains(out, "UNIQUE_BODY_MARKER") {
+			t.Fatalf("body content not preserved intact: %q", out)
+		}
+		// Assets dropped entirely — no fragment.
+		if strings.Contains(out, "<skill_assets") {
+			t.Fatalf("assets leaked on overflow: %q", out[len(out)-120:])
+		}
+		// Exactly one </skill> and a note after it.
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		if !strings.HasSuffix(out, "</skill>\n(output truncated)") {
+			t.Fatalf("expected </skill> + note tail, got %q", out[len(out)-60:])
+		}
+	})
+
+	t.Run("body_overflow_truncates_body_assets_omitted", func(t *testing.T) {
+		dir := t.TempDir()
+		// Body alone over the cap; also carry assets to confirm they never appear.
+		writeSkillWithAssets(t, dir, "s",
+			"---\nname: s\n---\n"+strings.Repeat("A", maxSkillOutputSize*2),
+			map[string]string{"a.txt": "x", "b.txt": "y"})
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := FormatOutput(loaded[0])
+		if strings.Contains(out, "<skill_assets") {
+			t.Fatalf("assets leaked while truncating body: %q", out)
+		}
+		if c := strings.Count(out, "</skill>"); c != 1 {
+			t.Fatalf("expected exactly one </skill>, got %d", c)
+		}
+		if !strings.HasSuffix(out, "\n(output truncated)\n</skill>") {
+			t.Fatalf("expected note + close frame tail, got %q", out[len(out)-60:])
+		}
+		if len(out) > maxSkillOutputSize {
+			t.Fatalf("output exceeds cap: %d > %d", len(out), maxSkillOutputSize)
+		}
+		if !utf8.ValidString(out) {
+			t.Fatalf("invalid UTF-8 after truncation")
+		}
+	})
+}
+
+// #5 sanity: loadAssets uses confineSkillPath's returned FileInfo and does not
+// re-stat, so a symlinked asset pointing OUTSIDE the skills root is skipped
+// (not just the SKILL.md symlink path). Guards the permission-allow skill tool.
+func TestLoadSkipsSymlinkedAssetEscapingRoot(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOP SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(dir, "s")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: s\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(skillDir, "leak.txt")); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	for _, a := range loaded[0].Assets {
+		if a.Name == "leak.txt" || strings.Contains(a.Path, "secret.txt") {
+			t.Fatalf("symlinked asset escaping the root must be skipped, got %+v", a)
+		}
 	}
 }
