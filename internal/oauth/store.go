@@ -152,13 +152,9 @@ func ResolveStorePath(env map[string]string) (string, error) {
 	}
 	configHome := strings.TrimSpace(envValue(env, "XDG_CONFIG_HOME"))
 	if configHome == "" {
-		home := strings.TrimSpace(firstNonEmpty(envValue(env, "HOME"), envValue(env, "USERPROFILE")))
-		if home == "" {
-			var err error
-			home, err = os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("oauth: resolve user home: %w", err)
-			}
+		home, err := resolveHomeDir(env)
+		if err != nil {
+			return "", err
 		}
 		configHome = filepath.Join(home, ".config")
 	} else if !filepath.IsAbs(configHome) {
@@ -169,6 +165,24 @@ func ResolveStorePath(env map[string]string) (string, error) {
 		configHome = resolved
 	}
 	return filepath.Join(configHome, "zero", "oauth-tokens.json"), nil
+}
+
+// resolveHomeDir returns the user's home directory, honoring HOME/USERPROFILE
+// hermetically (via env) before falling back to os.UserHomeDir(). Shared by
+// ResolveStorePath's config-root fallback and by keyringLockPath, which
+// anchors on this same identity so the keyring lock never varies with a
+// per-process override like XDG_CACHE_HOME/XDG_CONFIG_HOME/TMPDIR that two
+// processes of the same real user commonly set differently (sandboxes, CI,
+// per-shell env).
+func resolveHomeDir(env map[string]string) (string, error) {
+	if home := strings.TrimSpace(firstNonEmpty(envValue(env, "HOME"), envValue(env, "USERPROFILE"))); home != "" {
+		return home, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("oauth: resolve user home: %w", err)
+	}
+	return home, nil
 }
 
 // NewStore builds a token store with the configured backend (file by default,
@@ -209,16 +223,20 @@ func NewStore(options StoreOptions) (*Store, error) {
 			}
 			kr = osKeyring
 		}
-		// Serialize the keyring's read-modify-write across processes with a lock
-		// file keyed off the keyring identity itself (service + index account),
-		// never off the file-backend's path config: two processes with different
-		// ZERO_OAUTH_TOKENS_PATH / XDG_CONFIG_HOME roots but pointed at the SAME
-		// OS keyring entry (the service/account is fixed per binary, not per
-		// config root) must still serialize against each other, or they can race
-		// a read-modify-write on the shared keyring index and silently drop one
-		// process's token write.
-		lockPath := keyringLockPath(keyringService, keyringIndexAccount)
-		return &Store{blob: keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount, lockPath: lockPath}, now: now}, nil
+		// lockPath serializes this binary's own keyring read-modify-write across
+		// processes, keyed off the keyring identity itself (service + index
+		// account) and anchored on the user's home directory (see
+		// keyringLockPath), never off a per-process cache/temp/config override:
+		// two processes with different roots but pointed at the SAME OS keyring
+		// entry (the service/account is fixed per binary, not per config root)
+		// must still serialize against each other, or they can race a
+		// read-modify-write on the shared keyring index and silently drop one
+		// process's token write. legacyLockPath additionally coordinates with a
+		// still-running pre-PR binary during the supported mixed-version window
+		// (see legacyKeyringLockPath).
+		lockPath := keyringLockPath(options.Env, keyringService, keyringIndexAccount)
+		legacyLockPath := legacyKeyringLockPath(options.Env)
+		return &Store{blob: keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount, lockPath: lockPath, legacyLockPath: legacyLockPath}, now: now}, nil
 	default:
 		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\", \"encrypted-file\", or \"keyring\")", storage)
 	}
@@ -245,25 +263,44 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 
 // keyringLockPath returns the cross-process lock file location for the
 // keyring backend's read-modify-write, derived from the keyring identity
-// itself (the service/account the index is stored under) rather than from
-// the unrelated file-backend path config (ZERO_OAUTH_TOKENS_PATH /
-// XDG_CONFIG_HOME): the file backend's location has nothing to do with which
-// OS keyring entry a process is about to read-modify-write, so a lock keyed
-// off it let two processes with different config roots but the SAME keyring
-// entry race the shared index and silently drop one process's token write.
-// A single shared ${TMPDIR}/zero-oauth-keyring.lockfile would also let any
-// other account on a multi-user host pre-create or keep refreshing the
-// victim's lock and time out their Load/Status/Save/Delete, even though each
-// user has a separate OS keychain, so this prefers the per-user OS cache
-// directory (created 0700 by acquireFileLock); only if that cannot be
-// resolved does it fall back to a temp file scoped by uid so two different
-// users never collide on one path.
-func keyringLockPath(service, account string) string {
+// itself (the service/account the index is stored under) and anchored on the
+// user's home directory (see resolveHomeDir) rather than os.UserCacheDir() or
+// os.TempDir(): those pick XDG_CACHE_HOME/TMPDIR per PROCESS, so two
+// processes of the SAME real user with different cache/temp roots (a common
+// case: sandboxes, CI, per-shell overrides) computed different lock files,
+// both read the same fixed keyring index, and could publish competing
+// updates that silently hid one process's token. HOME does not vary this way
+// for a given real user. A single shared ${TMPDIR}/zero-oauth-keyring.lockfile
+// would also let any other account on a multi-user host pre-create or keep
+// refreshing the victim's lock and time out their Load/Status/Save/Delete,
+// even though each user has a separate OS keychain, so only when even the
+// home directory can't be resolved does this fall back to a temp file scoped
+// by uid so two different users never collide on one path.
+func keyringLockPath(env map[string]string, service, account string) string {
 	name := keyringLockFileName(service, account)
-	if dir, err := os.UserCacheDir(); err == nil && strings.TrimSpace(dir) != "" {
-		return filepath.Join(dir, "zero", name)
+	if home, err := resolveHomeDir(env); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".cache", "zero", name)
 	}
 	return filepath.Join(os.TempDir(), keyringTempLockName(service, account))
+}
+
+// legacyKeyringLockPath returns the lock file a pre-PR binary acquires around
+// its own read-modify-write of the single combined keyring entry, beside
+// wherever ResolveStorePath resolves the file-backend location for that
+// process's env. A new binary must take this SAME lock (not just its own
+// keyringLockPath) around any write that reconciles or deletes the legacy
+// entry: an old binary observes no other lock, so only sharing its exact
+// lock file stops it from writing a fresh legacy login/refresh in the window
+// between this binary's reconciliation read and its legacy-blob delete,
+// which would otherwise discard that write permanently. Best-effort: ""
+// when the file-backend location can't be resolved at all, matching the
+// legacy code's own best-effort fallback (no cross-process lock at all).
+func legacyKeyringLockPath(env map[string]string) string {
+	storePath, err := ResolveStorePath(env)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 }
 
 // keyringLockFileName names the lock file after the keyring identity it
@@ -586,6 +623,12 @@ type keyringBlob struct {
 	// lockPath, when set, is a cross-process lock file serializing the keyring's
 	// read-modify-write so concurrent processes don't clobber each other's tokens.
 	lockPath string
+	// legacyLockPath, when set, is the lock file a pre-PR binary acquires around
+	// its own read-modify-write of the legacy combined entry (see
+	// legacyKeyringLockPath). write() holds it too, so a live old binary can't
+	// write a fresh legacy credential in the window between this write's legacy
+	// reconciliation and its legacy-blob delete.
+	legacyLockPath string
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
@@ -1039,20 +1082,30 @@ func chunkIndexKeys(keys []string) [][]string {
 // exists to prevent. A var so tests can shorten it.
 var fileLockRefreshInterval = 10 * time.Second
 
-// withLock serializes the keyring's read-modify-write. Store.mu covers the
-// in-process case; lockPath (when set) adds cross-process exclusion so two
-// processes can't both read the blob, modify, and write — dropping a token.
-// While fn runs, the lock file's mtime is refreshed so the stale-reclaim
-// threshold only ever expires for a genuinely crashed holder.
-func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
-	if b.lockPath == "" {
+// withLeasedLocks acquires every non-empty path in order, refreshes all of
+// their mtimes on a ticker while fn runs (so a legitimately slow multi-entry
+// keyring pass never looks like a crashed holder to another process), and
+// releases them in reverse order once fn returns.
+func withLeasedLocks(paths []string, now func() time.Time, fn func() error) error {
+	var unlocks []func()
+	var held []string
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		unlock, err := acquireFileLock(p, now)
+		if err != nil {
+			for i := len(unlocks) - 1; i >= 0; i-- {
+				unlocks[i]()
+			}
+			return err
+		}
+		unlocks = append(unlocks, unlock)
+		held = append(held, p)
+	}
+	if len(held) == 0 {
 		return fn()
 	}
-	unlock, err := acquireFileLock(b.lockPath, now)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -1066,22 +1119,42 @@ func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 			case <-ticker.C:
 				// Lease with wall-clock time, never the injectable now: acquireFileLock
 				// judges staleness with real time.Since(mtime), so a fixed or stale
-				// StoreOptions.Now would stamp the live lock with an old mtime that
+				// StoreOptions.Now would stamp a live lock with an old mtime that
 				// another process would immediately reclaim, reviving the token-loss
-				// race this lease prevents.
+				// race these locks prevent.
 				at := time.Now()
-				_ = os.Chtimes(b.lockPath, at, at)
+				for _, p := range held {
+					_ = os.Chtimes(p, at, at)
+				}
 			}
 		}
 	}()
-	err = fn()
+	err := fn()
 	close(stop)
 	<-done
+	for i := len(unlocks) - 1; i >= 0; i-- {
+		unlocks[i]()
+	}
 	return err
 }
 
+// withLock serializes the keyring's read-modify-write. Store.mu covers the
+// in-process case; lockPath adds cross-process exclusion between this
+// binary's own instances so two of them can't both read the blob, modify,
+// and write — dropping a token. legacyLockPath is held for the same
+// duration so a live pre-PR binary, which only ever locks there (see
+// legacyKeyringLockPath), can't write a fresh legacy credential in the
+// window between this write's legacy reconciliation and its legacy-blob
+// delete.
+func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
+	return withLeasedLocks([]string{b.lockPath, b.legacyLockPath}, now, fn)
+}
+
+// withReadLock only takes lockPath: a pre-PR binary never locks for a read
+// (see legacyKeyringLockPath), so a read here has nothing to coordinate with
+// on the legacy side.
 func (b keyringBlob) withReadLock(now func() time.Time, fn func() error) error {
-	return b.withLock(now, fn)
+	return withLeasedLocks([]string{b.lockPath}, now, fn)
 }
 
 func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.indexAccount }

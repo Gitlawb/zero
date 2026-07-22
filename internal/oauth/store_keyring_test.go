@@ -901,14 +901,14 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 // and the last-resort temp name must be scoped by uid so different users
 // never collide on one lock file.
 func TestKeyringLockPathIsPerUser(t *testing.T) {
-	got := keyringLockPath(keyringService, keyringIndexAccount)
+	got := keyringLockPath(nil, keyringService, keyringIndexAccount)
 	name := keyringLockFileName(keyringService, keyringIndexAccount)
 	if got == filepath.Join(os.TempDir(), "zero-"+name) {
 		t.Fatalf("lock path is the shared temp path %q; a co-tenant could grief it", got)
 	}
-	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
-		if want := filepath.Join(cache, "zero", name); got != want {
-			t.Fatalf("lock path = %q, want per-user cache path %q", got, want)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		if want := filepath.Join(home, ".cache", "zero", name); got != want {
+			t.Fatalf("lock path = %q, want per-user home-anchored path %q", got, want)
 		}
 	}
 	tempName := keyringTempLockName(keyringService, keyringIndexAccount)
@@ -918,6 +918,119 @@ func TestKeyringLockPathIsPerUser(t *testing.T) {
 		}
 	} else if tempName == "" {
 		t.Fatal("temp lock name is empty")
+	}
+}
+
+// TestKeyringLockPathIndependentOfCacheAndTempRoots is the regression test
+// for [P1] Make the keyring lock path independent of XDG_CACHE_HOME
+// (2026-07-22): os.UserCacheDir() (and its os.TempDir() fallback) is chosen
+// per PROCESS from XDG_CACHE_HOME/TMPDIR, so two zero processes belonging to
+// the SAME real user but with different cache/temp roots (sandboxes, CI,
+// per-shell overrides) computed different lock files, both read the shared
+// keyring index, and could publish competing updates that hid one process's
+// token. The lock must resolve identically regardless of those roots, since
+// it is anchored on the user's home directory instead.
+func TestKeyringLockPathIndependentOfCacheAndTempRoots(t *testing.T) {
+	home := t.TempDir()
+	envA := map[string]string{
+		"HOME":           home,
+		"XDG_CACHE_HOME": filepath.Join(t.TempDir(), "cache-a"),
+		"TMPDIR":         filepath.Join(t.TempDir(), "tmp-a"),
+	}
+	envB := map[string]string{
+		"HOME":           home,
+		"XDG_CACHE_HOME": filepath.Join(t.TempDir(), "cache-b"),
+		"TMPDIR":         filepath.Join(t.TempDir(), "tmp-b"),
+	}
+
+	storeA, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR(), Env: envA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := NewStore(StoreOptions{Storage: "keyring", Keyring: newFakeKR(), Env: envB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobA, okA := storeA.blob.(keyringBlob)
+	blobB, okB := storeB.blob.(keyringBlob)
+	if !okA || !okB {
+		t.Fatal("Store.blob is not keyringBlob")
+	}
+	if blobA.lockPath == "" || blobB.lockPath == "" {
+		t.Fatal("lockPath should never be empty for the keyring backend")
+	}
+	if blobA.lockPath != blobB.lockPath {
+		t.Fatalf("two same-user processes with different cache/temp roots got different lock paths: %q vs %q (they can race the shared keyring index)", blobA.lockPath, blobB.lockPath)
+	}
+	if strings.Contains(blobA.lockPath, "cache-a") || strings.Contains(blobA.lockPath, "cache-b") ||
+		strings.Contains(blobA.lockPath, "tmp-a") || strings.Contains(blobA.lockPath, "tmp-b") {
+		t.Fatalf("lock path %q is still derived from XDG_CACHE_HOME/TMPDIR", blobA.lockPath)
+	}
+}
+
+// TestStoreKeyringWriteWaitsForLegacyLockDuringReconciliation is the
+// regression test for [P1] Coordinate migration with the legacy lock used by
+// old binaries (2026-07-22): a pre-PR binary locks beside ResolveStorePath
+// around its own read-modify-write of the legacy combined entry, but this
+// binary's write() used to lock only under the cache-derived keyring path, so
+// the two never excluded each other. A new save could reconcile the legacy
+// blob, an old process could then save a fresh legacy credential, and the new
+// save would unconditionally delete that blob without ever having observed
+// the old write, losing it permanently.
+//
+// This simulates a live old binary by holding the exact lock file
+// legacyKeyringLockPath computes (the same one a pre-PR binary's Save takes)
+// and asserting that Store.Save — which must reconcile and then drop the
+// legacy entry here, since one is seeded below — blocks until that lock is
+// released, and that the seeded legacy token survives the reconciliation.
+func TestStoreKeyringWriteWaitsForLegacyLockDuringReconciliation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	kr := newFakeKR()
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "legacy-alpha"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, ok := s.blob.(keyringBlob)
+	if !ok || blob.legacyLockPath == "" {
+		t.Fatal("keyring store has no legacy-compat lock path")
+	}
+
+	// Simulate an old binary holding the legacy lock for its own in-flight Save.
+	unlock, err := acquireFileLock(blob.legacyLockPath, s.now)
+	if err != nil {
+		t.Fatalf("acquire simulated legacy lock: %v", err)
+	}
+
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- s.Save(ProviderKey("beta"), Token{AccessToken: "beta"})
+	}()
+
+	select {
+	case err := <-saveDone:
+		t.Fatalf("Save proceeded (err=%v) while an old binary held the legacy lock; it can race the reconcile-then-delete window and lose a concurrent legacy write", err)
+	case <-time.After(200 * time.Millisecond):
+		// Still blocked, as expected.
+	}
+
+	unlock()
+	if err := <-saveDone; err != nil {
+		t.Fatalf("Save after the legacy lock was released: %v", err)
+	}
+
+	got, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok || got.AccessToken != "legacy-alpha" {
+		t.Fatalf("legacy alpha token lost across reconciliation: ok=%v err=%v got=%#v", ok, err, got)
 	}
 }
 
