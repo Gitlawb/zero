@@ -367,22 +367,16 @@ variable unset and set.
 
 ### Code Quality and Security Checks
 
-Before committing any changes, ensure all Go code quality and security checks pass. Pinned `go run` commands matching CI constraints can be used directly without prior installation:
+Before committing any changes, ensure all Go code quality and security checks pass. The `make` targets below pin each tool to this module's Go version, so they load correctly even when your default `go` toolchain is older — running the plain `go run ...@version` form yourself can select the tool module's own (older) toolchain and fail to load this module instead.
 
-1. **Formatting**: Run `go fmt ./...` (or `make fmt`).
-2. **Vetting**: Run `go vet ./...` (or `make vet`).
-3. **Linting**: Run `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
-4. **Vulnerability Scan**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
+1. **Formatting**: Run `make fmt` (or `go fmt ./...`).
+2. **Vetting**: Run `make vet` (or `go vet ./...`).
+3. **Linting**: Run `make lint-static`.
+4. **Vulnerability Scan**: Run `make vulncheck`.
 
-If you prefer to install these tools globally on your path, you can run:
-
-```bash
-# Install golangci-lint
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-
-# Install govulncheck
-go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-```
+Use the repository-managed targets rather than globally installed binaries:
+the targets apply the module's required Go toolchain as well as the reviewed,
+pinned tool versions.
 
 The installed binaries land in `$GOBIN` when it is set, otherwise in
 `$GOPATH/bin` (default `~/go/bin`). That directory must be on your `PATH` to
