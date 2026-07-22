@@ -392,7 +392,17 @@ func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Mode
 	}
 	m.dictation.reset()
 
-	if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+	if errors.Is(msg.err, context.Canceled) {
+		// cancelDictation already discarded the live region, reset the
+		// session, and posted "Dictation cancelled." A streaming transcriber
+		// can still race a buffered event past that cancel and report back a
+		// nonempty compose()+context.Canceled; treat that as terminal here,
+		// before the auto-submit branch below, so Esc can never fall through
+		// to msg.submit and fire the composer's restored pre-existing text.
+		return m, nil
+	}
+
+	if msg.err != nil {
 		// A cloud auth failure (missing/invalid key) is fixable in place: reopen the
 		// API-key prompt for the current provider so the user can paste a key and
 		// retry, instead of hitting a dead-end "run zero auth" line.
