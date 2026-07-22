@@ -92,6 +92,26 @@ func SendWithRetry(
 	if maxAttempts <= 0 {
 		maxAttempts = defaultMaxRetryAttempts
 	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	// Redirects are NOT followed on this path. Otherwise client.Do could transmit
+	// the original POST to the first host, follow a 307/308 to a redirect target,
+	// and if the dial to that target then failed, return an Op=="dial" error that
+	// isPreSendTransportError would wrongly treat as pre-send and replay, re-billing
+	// a completion the first host already received. With redirects off, any
+	// dial/DNS/TLS error from Do can only come from the single initial request, so
+	// "no request bytes left this host" holds. A 3xx is returned as the response
+	// (ErrUseLastResponse) for the caller's existing non-2xx status handling.
+	noRedirectClient := *client
+	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	// preSendAttempts bounds the pre-send retries independently of the loop-wide
+	// attempt counter, which also counts 429/503 retries: sharing it let a couple
+	// of status retries exhaust the pre-send budget so the first dial/DNS/TLS blip
+	// after them got no retry at all.
+	preSendAttempts := 0
 	for attempt := 1; ; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 		if err != nil {
@@ -102,7 +122,7 @@ func SendWithRetry(
 		}
 
 		connectSpan := trace.FromContext(ctx).Span(trace.SpanProviderConnect)
-		response, err := client.Do(request)
+		response, err := noRedirectClient.Do(request)
 		connectSpan.End()
 		if err != nil {
 			// Context cancellation always surfaces as cancellation, never a retry.
@@ -120,14 +140,17 @@ func SendWithRetry(
 			// its own short bound and sub-second schedule (preSendMaxAttempts /
 			// preSendBackoff), not the seconds-long 429 schedule, so a permanent
 			// dial failure fails fast instead of stalling the agent for ~60s.
-			if isPreSendTransportError(err) && attempt < preSendMaxAttempts {
-				if r := trace.FromContext(ctx); r != nil {
-					r.Counter(trace.CounterRetryCount, 1)
+			if isPreSendTransportError(err) {
+				preSendAttempts++
+				if preSendAttempts < preSendMaxAttempts {
+					if r := trace.FromContext(ctx); r != nil {
+						r.Counter(trace.CounterRetryCount, 1)
+					}
+					if preSendBackoff(ctx, preSendAttempts) {
+						continue
+					}
+					return nil, ctx.Err()
 				}
-				if preSendBackoff(ctx, attempt) {
-					continue
-				}
-				return nil, ctx.Err()
 			}
 			return nil, err
 		}
