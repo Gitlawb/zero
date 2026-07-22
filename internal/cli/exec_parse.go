@@ -445,6 +445,13 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if options.plan && options.skipPermissionsUnsafe {
 		return options, false, execUsageError{"Use either --plan or --skip-permissions-unsafe, not both."}
 	}
+	if options.plan && options.worktree {
+		// Worktree prep (copying/branching the workspace) runs before the plan
+		// permission mode is assigned, so it would happen even under --plan's
+		// read-only, no-side-effects promise. Reject the combination outright
+		// rather than let a mutation slip in ahead of the mode gate.
+		return options, false, execUsageError{"--plan cannot be combined with --worktree."}
+	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}
 	}

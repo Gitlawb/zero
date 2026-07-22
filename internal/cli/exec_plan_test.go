@@ -33,6 +33,18 @@ func TestParseExecArgsRejectsPlanWithSkipPermissionsUnsafe(t *testing.T) {
 	}
 }
 
+// TestParseExecArgsRejectsPlanWithWorktree guards against worktree
+// preparation (a filesystem mutation) running ahead of the plan mode gate:
+// options.worktree is processed in runExec before the plan permission mode is
+// assigned, so the combination must be rejected during option validation,
+// before any worktree prep can occur.
+func TestParseExecArgsRejectsPlanWithWorktree(t *testing.T) {
+	_, _, err := parseExecArgs([]string{"--plan", "--worktree", "draft a plan"})
+	if err == nil || !strings.Contains(err.Error(), "--worktree") {
+		t.Fatalf("expected --plan/--worktree validation, got %v", err)
+	}
+}
+
 // TestRunExecPlanHidesWriteAndShellToolsFromListing drives the real --plan
 // flag through runExec (via --list-tools, so no provider is needed) and
 // confirms write_file and bash — advertised under every other mode covered by
