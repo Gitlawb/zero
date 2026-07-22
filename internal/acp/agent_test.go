@@ -396,6 +396,11 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")
 	}
+	// Auto-classifier requires an in-app confirmation the ACP protocol cannot
+	// represent, so a client must not be able to enable it over the wire.
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAutoClassifier)}, &SetSessionModeResult{}); err == nil {
+		t.Fatal("expected auto-classifier mode to be rejected over ACP")
+	}
 	// An unknown mode must be rejected.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected error for unknown mode")
