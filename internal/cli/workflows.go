@@ -1127,16 +1127,21 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
 // (zerogit.Push already treats an empty Branch that way), plus the remote the
 // preflight resolved (requestedRemote, then the original branch's configured
-// upstream, then "origin"), plus whether this call is the one that just
-// created that branch. Callers must pass the remote to Push: a freshly
-// created branch has no tracking configuration, so Push's own fallback would
-// silently retarget "origin" even when the work came from a branch tracking
-// a different remote. Callers must also pass `created` through as Push's
-// RequireNewRemoteBranch: CreateBranch's own remote-collision probe runs
-// before this returns, and closing that race requires Push's push itself to
-// assert the destination is still new. allowDefaultBranch (the --yes flag)
-// and dryRun both opt out via the "" branch / false created return, leaving
-// Push's own guard/preview behavior on the default branch unaffected.
+// upstream, then "origin"), plus whether Push should require that branch not
+// already exist on that remote. Callers must pass the remote to Push: a
+// freshly created branch has no tracking configuration, so Push's own
+// fallback would silently retarget "origin" even when the work came from a
+// branch tracking a different remote. Callers must also pass that third value
+// through as Push's RequireNewRemoteBranch: CreateBranch's own
+// remote-collision probe runs before this returns, and closing that race
+// requires Push's push itself to assert the destination is still new. That
+// requirement also carries across a retry: if the current branch is already
+// non-default (this call didn't create it) but has no configured upstream
+// yet, it's either a fresh manual branch or this exact generated branch after
+// a lost force-with-lease race, and either way the lease still needs to be
+// asserted rather than silently dropped. allowDefaultBranch (the --yes flag)
+// and dryRun both opt out via the "" branch / false return, leaving Push's own
+// guard/preview behavior on the default branch unaffected.
 //
 // autoNaming gates the LLM naming path (--auto): these commands were
 // git-only, and sending the change diff to a configured provider on every
@@ -1161,7 +1166,21 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return "", "", false, err
 	}
 	if !isDefault {
-		return currentBranch, remote, false, nil
+		// A retry after a lost force-with-lease race leaves this generated
+		// branch checked out locally with the push never having landed.
+		// Dropping RequireNewRemoteBranch here (the ordinary "already off the
+		// default branch, nothing to do" case) would let a plain retry
+		// silently fast-forward whatever a concurrent creator published under
+		// the same name in the meantime. A branch with a configured upstream
+		// has already been pushed successfully at least once, so that case is
+		// an ordinary subsequent push, not a collision retry, and does not
+		// need the lease reapplied.
+		requireNewRemoteBranch := false
+		if deps.branchHasUpstream != nil {
+			hasUpstream, upstreamErr := deps.branchHasUpstream(ctx, workspaceRoot, currentBranch)
+			requireNewRemoteBranch = upstreamErr != nil || !hasUpstream
+		}
+		return currentBranch, remote, requireNewRemoteBranch, nil
 	}
 
 	// CreateBranch and Push publish commits only. A dirty working tree would
@@ -1175,6 +1194,20 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return "", "", false, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
 	}
 
+	// Refresh the local remote-tracking ref before trusting it: IsDefaultBranch
+	// already contacted the remote for its symref check, but the tracking ref
+	// commitsAhead reads from is only a local cache (written at clone or the
+	// last fetch) and can sit behind the remote's live tip. Left stale, a real
+	// publishable range could look like zero commits ahead, and the diff
+	// derived below (which reuses this same ref as its base) would be stale
+	// too. A failure here (offline, or a genuinely unborn remote with no such
+	// ref to fetch yet) is folded into the same fail-closed path as an
+	// unresolvable ahead count below.
+	var fetchErr error
+	if deps.refreshTrackingRef != nil {
+		fetchErr = deps.refreshTrackingRef(ctx, workspaceRoot, remote, currentBranch)
+	}
+
 	// Branching off the default branch only makes sense when HEAD carries a
 	// commit that is not already on the remote default branch. A clean,
 	// up-to-date default branch would otherwise publish a feature branch at the
@@ -1186,11 +1219,15 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// an unknown state, and every commit on HEAD is new relative to it.
 	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
 	unbornRemote := false
-	if aheadErr != nil {
+	if fetchErr != nil || aheadErr != nil {
 		var unbornErr error
 		unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
 		if unbornErr != nil || !unbornRemote {
-			return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, aheadErr)
+			cause := aheadErr
+			if cause == nil {
+				cause = fetchErr
+			}
+			return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, cause)
 		}
 	} else if ahead == 0 {
 		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)

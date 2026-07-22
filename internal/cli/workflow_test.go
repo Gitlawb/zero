@@ -1164,8 +1164,9 @@ func TestEnsureFeatureBranchCreatesBranchOffDefaultWithoutProvider(t *testing.T)
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
+		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1324,9 +1325,13 @@ func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	cwd := t.TempDir()
 	createBranchCalled := false
 
-	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	branch, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return false, "feat/existing", "origin", nil
+		},
+		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
+			// An ordinary, already-published feature branch: no lease needed.
+			return true, nil
 		},
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			createBranchCalled = true
@@ -1338,6 +1343,9 @@ func TestEnsureFeatureBranchSkipsWhenNotOnDefault(t *testing.T) {
 	}
 	if branch != "feat/existing" {
 		t.Fatalf("expected existing branch to be returned unchanged, got %q", branch)
+	}
+	if created {
+		t.Fatal("expected an already-published branch not to require the nonexistence lease")
 	}
 	if createBranchCalled {
 		t.Fatal("expected createBranch not to be called when already off the default branch")
@@ -1719,8 +1727,9 @@ func TestRunChangesPushUsesResolvedRemoteForNewBranch(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "upstream", nil
 		},
-		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
+		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1753,8 +1762,9 @@ func TestRunChangesPushCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
+		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1796,8 +1806,9 @@ func TestRunChangesPRCreatesFeatureBranchWhenOnDefault(t *testing.T) {
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
-		commitsAhead:   func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
-		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
+		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{}, nil
 		},
@@ -1855,5 +1866,184 @@ func TestRunChangesPushSkipsBranchCreationWithYes(t *testing.T) {
 	}
 	if isDefaultBranchCalled {
 		t.Fatal("expected isDefaultBranch not to be consulted when --yes is passed")
+	}
+}
+
+// TestRunChangesPushPreservesLeaseOnRetryAfterCollision covers jatmn's P1
+// finding: the initial auto-branch push lost a force-with-lease race against
+// a concurrent creator of the same branch name, but the local generated
+// branch is left checked out with no successful push behind it. A retry of
+// `changes push` takes ensureFeatureBranch's non-default early return (it's
+// already off the default branch), and must still require the destination
+// not already exist on the remote - dropping that requirement would let the
+// retry silently fast-forward whatever the concurrent creator published.
+func TestRunChangesPushPreservesLeaseOnRetryAfterCollision(t *testing.T) {
+	cwd := t.TempDir()
+	var requireNewRemoteBranch bool
+	var pushedBranch string
+	createBranchCalled := false
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			// HEAD is already on the branch generated by the previous,
+			// lease-rejected attempt.
+			return false, "someone/readme-md", "origin", nil
+		},
+		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
+			if branch != "someone/readme-md" {
+				t.Fatalf("unexpected branch queried for upstream: %q", branch)
+			}
+			// The first push never landed (it lost the lease), so this
+			// branch has no upstream recorded yet.
+			return false, nil
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{}, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			pushedBranch = options.Branch
+			requireNewRemoteBranch = options.RequireNewRemoteBranch
+			return zerogit.PushResult{Remote: options.Remote, Branch: options.Branch}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called on a retry already off the default branch")
+	}
+	if pushedBranch != "someone/readme-md" {
+		t.Fatalf("expected the retry to target the same generated branch, got %q", pushedBranch)
+	}
+	if !requireNewRemoteBranch {
+		t.Fatal("expected the retry to preserve the nonexistence lease (RequireNewRemoteBranch)")
+	}
+}
+
+// TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch is the
+// companion case: a branch with a configured upstream has already been
+// pushed successfully at least once, so an ordinary subsequent push is not a
+// collision retry and must not have the nonexistence lease reasserted.
+func TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch(t *testing.T) {
+	cwd := t.TempDir()
+	var requireNewRemoteBranch bool
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "someone/readme-md", "origin", nil
+		},
+		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
+			return true, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			requireNewRemoteBranch = options.RequireNewRemoteBranch
+			return zerogit.PushResult{Remote: options.Remote, Branch: options.Branch}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if requireNewRemoteBranch {
+		t.Fatal("expected an already-published branch not to require the nonexistence lease")
+	}
+}
+
+// TestEnsureFeatureBranchRefreshesTrackingRefBeforeCheckingAhead covers
+// jatmn's P2 finding: validate publishability against the live default, not a
+// stale local tracking ref. IsDefaultBranch already contacted the remote for
+// its symref check, but a merely-cached origin/main (last fetched earlier)
+// can sit behind the remote's live tip. Before the fix, commitsAhead ran
+// straight against that stale ref: this simulates the stale ref reporting
+// zero commits ahead until the tracking ref is refreshed, matching the
+// scenario where the remote has already advanced past what was last fetched.
+func TestEnsureFeatureBranchRefreshesTrackingRefBeforeCheckingAhead(t *testing.T) {
+	cwd := t.TempDir()
+	refreshed := false
+	var createdName string
+
+	branch, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			if remote != "origin" || branch != "main" {
+				t.Fatalf("unexpected refresh target: %s/%s", remote, branch)
+			}
+			refreshed = true
+			return nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			if !refreshed {
+				// The stale, unrefreshed local origin/main is behind and
+				// would report zero commits ahead even though HEAD carries
+				// real, unpublished work relative to the remote's live tip.
+				return 0, nil
+			}
+			return 2, nil
+		},
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createdName = options.Name
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if !refreshed {
+		t.Fatal("expected the tracking ref to be refreshed before the ahead check")
+	}
+	if branch != "someone/readme-md" || createdName != "someone/readme-md" {
+		t.Fatalf("unexpected branch: got %q (created %q)", branch, createdName)
+	}
+}
+
+// TestEnsureFeatureBranchFailsClosedWhenTrackingRefCannotBeRefreshed asserts
+// that a failed refresh is never silently ignored in favor of trusting
+// whatever commitsAhead reports against the (potentially stale, unrefreshed)
+// local ref: the command must fail closed instead of risking a false "no
+// changes to publish" from comparing against a tracking ref that could not be
+// confirmed fresh.
+func TestEnsureFeatureBranchFailsClosedWhenTrackingRefCannotBeRefreshed(t *testing.T) {
+	cwd := t.TempDir()
+	createBranchCalled := false
+
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			return errors.New("remote unreachable")
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 0, nil
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return false, nil
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			return zerogit.ChangeSummary{Clean: true}, nil
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot determine whether HEAD is ahead") {
+		t.Fatalf("expected a fail-closed error when the tracking ref could not be refreshed, got %v", err)
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called when the tracking ref could not be refreshed")
 	}
 }
