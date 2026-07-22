@@ -16,12 +16,15 @@ import (
 	"time"
 )
 
-// wrapDialErrno builds the error shape a real dial failure has — a *net.OpError
-// wrapping an *os.SyscallError wrapping the errno — so errors.Is reaches the
-// errno exactly as it does in production. This is the portable way to exercise
-// the Windows path: on Windows the same syscall.Exxx constants carry the WSA*
-// values and the .Error() text is the Windows wording, but the errno match is
-// identical, so the assertion holds on every platform.
+// wrapDialErrno builds the error shape a dial failure has (a *net.OpError
+// wrapping an *os.SyscallError wrapping the errno) so errors.Is reaches the
+// errno exactly as in production. These fixtures use the POSIX syscall.Exxx
+// constants, which do NOT reproduce a real Windows dial: that carries distinct
+// windows.WSA* errnos (Go's syscall.ECONNREFUSED is a value the net package
+// never produces on Windows). They still classify on Windows only because
+// dialPreSendErrnos there also lists the POSIX constants for exactly this
+// fixture reason; the real Windows dial branch is covered separately by
+// TestIsPreSendTransportErrorRealRefusedDial, which makes an actual refused dial.
 func wrapDialErrno(op string, errno syscall.Errno) error {
 	return &net.OpError{Op: op, Net: "tcp", Err: os.NewSyscallError("connectex", errno)}
 }
@@ -382,5 +385,63 @@ func TestSendWithRetryReturnsLastResponseAfterMaxAttempts(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
 		t.Fatalf("server hit %d times, want 2 (maxAttempts)", got)
+	}
+}
+
+// A redirect is NOT followed on the completion path. If it were, client.Do could
+// transmit the original POST to the first host, follow the 307/308, and then a
+// dial failure to the redirect target would arrive as an Op=="dial" error that
+// isPreSendTransportError treats as pre-send, replaying a completion the first
+// host already received. With redirects off, the 3xx surfaces as the response and
+// the POST is sent exactly once.
+func TestSendWithRetryDoesNotFollowRedirects(t *testing.T) {
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return &http.Response{
+			StatusCode: http.StatusTemporaryRedirect,
+			Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
+			Body:       http.NoBody,
+			Request:    r,
+		}, nil
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 3)
+	if err != nil {
+		t.Fatalf("a 307 must surface as a response, not an error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("want the 307 surfaced unfollowed, got status %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("redirect was followed and/or the POST replayed: transport called %d times, want 1", got)
+	}
+}
+
+// The pre-send retry budget is independent of the 429/503 status retries: two
+// rate-limit responses must not consume the pre-send allowance, so the first
+// refused dial after them still gets its own preSendMaxAttempts tries.
+func TestSendWithRetryPreSendBudgetSurvivesStatusRetries(t *testing.T) {
+	shrinkBackoff(t)
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody, Request: r}, nil
+		}
+		return nil, wrapDialErrno("dial", syscall.ECONNREFUSED)
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://x.invalid/v1", []byte("{}"), nil, 6)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected the exhausted pre-send failure to surface as an error")
+	}
+	// Two status responses (calls 1-2), then the pre-send failure gets its own
+	// budget: preSendMaxAttempts=3 means it retries twice more before returning.
+	if got := atomic.LoadInt32(&calls); got != 2+preSendMaxAttempts {
+		t.Fatalf("pre-send budget eaten by status retries: transport called %d times, want %d (2 status + %d pre-send)", got, 2+preSendMaxAttempts, preSendMaxAttempts)
 	}
 }
