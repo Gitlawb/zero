@@ -136,6 +136,44 @@ func TestDictationStreamingPartialReplacesRegion(t *testing.T) {
 	}
 }
 
+func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
+	// Esc can race an already-buffered realtime event: cancelDictation discards
+	// the live region and resets state synchronously, but the streaming
+	// goroutine's dictationTranscribedMsg (a nonempty compose() alongside
+	// context.Canceled) can still arrive afterward. With stt.autoSubmit on,
+	// that must never fall through to msg.submit and fire the composer's
+	// restored pre-existing text.
+	m := model{}
+	m.setComposerState(composerState{text: "existing prompt", cursor: len("existing prompt")})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+
+	m = m.handleDictationPartial(sttPartialMsg{text: "half-formed transcript"})
+	if m.composer.text != "existing prompt half-formed transcript" {
+		t.Fatalf("partial did not render into composer: %q", m.composer.text)
+	}
+
+	m, _ = m.cancelDictation()
+	if m.composer.text != "existing prompt" {
+		t.Fatalf("cancel should restore the pre-existing composer text, got %q", m.composer.text)
+	}
+
+	// The already-buffered event's message arrives after the cancel above.
+	next, cmd := m.handleDictationTranscribed(dictationTranscribedMsg{
+		text:      "half-formed transcript",
+		err:       context.Canceled,
+		submit:    true,
+		streaming: true,
+	})
+	got := next.(model)
+	if got.composer.text != "existing prompt" {
+		t.Errorf("a raced cancellation must not auto-submit the restored composer text, got %q", got.composer.text)
+	}
+	if cmd != nil {
+		t.Error("a raced cancellation must not return a submit command")
+	}
+}
+
 func TestDictationCommitKeepsStreamedText(t *testing.T) {
 	m := model{}
 	m.setComposerState(composerState{text: "", cursor: 0})
