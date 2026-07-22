@@ -617,7 +617,15 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			// gone) skip rather than fail the whole read, since the next
 			// Save/Delete will reconcile the index.
 			if !legacyLoaded {
-				legacyTokens = b.readLegacyTokens()
+				// A best-effort recovery source for a read: a transient failure
+				// here must not fail the whole Load/Status, only skip recovering
+				// this particular desynced key. The next Save/Delete will
+				// reconcile it once the legacy blob is legible again (and,
+				// unlike here, will refuse to delete the legacy blob until it
+				// can actually read it — see write()).
+				if lt, lerr := b.readLegacyTokens(); lerr == nil {
+					legacyTokens = lt
+				}
 				legacyLoaded = true
 			}
 			if token, has := legacyTokens[key]; has {
@@ -657,20 +665,28 @@ func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 	return data, true, nil
 }
 
-// readLegacyTokens returns the tokens held in the legacy combined entry, or an
-// empty map when there is no readable legacy blob. It is a best-effort recovery
-// source (read() falls back to it, write() reconciles against it), so a missing
-// or malformed legacy entry is reported as "no tokens" rather than a hard error.
-func (b keyringBlob) readLegacyTokens() map[string]Token {
+// readLegacyTokens returns the tokens held in the legacy combined entry. A
+// nil map with a nil error means the entry genuinely does not exist (readLegacy
+// returned ok=false, err=nil) — the one case callers may treat as "no tokens"
+// and proceed. Any other failure (a transient keyring read error, undecodable
+// base64, invalid JSON) is returned as err and must NOT be collapsed into "no
+// tokens": write() deletes the legacy blob once it believes reconciliation is
+// complete, so mistaking a transient read failure for an empty blob would
+// delete a still-unread, still-live credential that belongs to an older,
+// still-installed zero binary.
+func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 	data, ok, err := b.readLegacy()
-	if err != nil || !ok {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
 	}
 	var legacyState storeFile
-	if json.Unmarshal(data, &legacyState) != nil {
-		return nil
+	if err := json.Unmarshal(data, &legacyState); err != nil {
+		return nil, fmt.Errorf("oauth: invalid legacy keyring token blob: %w", err)
 	}
-	return legacyState.Tokens
+	return legacyState.Tokens, nil
 }
 
 // legacyIsFresher reports whether the legacy copy of an already-indexed key
@@ -724,7 +740,17 @@ func (b keyringBlob) write(data []byte) error {
 	//   - a key that was in the prior index but is absent from this write was
 	//     deliberately removed (a logout); it is left removed, not resurrected.
 	if indexExisted {
-		for key, legacyToken := range b.readLegacyTokens() {
+		// Unlike read()'s best-effort fallback, a failure here must abort the
+		// whole write rather than proceed as though the legacy blob were empty:
+		// step 4 below deletes it, and a transient read error (the legacy blob
+		// genuinely exists but couldn't be read right now) must never be
+		// mistaken for "nothing to reconcile," or a still-live credential from
+		// an older, still-installed zero binary is destroyed irrecoverably.
+		legacyTokens, err := b.readLegacyTokens()
+		if err != nil {
+			return fmt.Errorf("oauth: read legacy keyring token blob for reconciliation: %w", err)
+		}
+		for key, legacyToken := range legacyTokens {
 			if ValidateKey(key) != nil {
 				continue
 			}

@@ -1058,3 +1058,83 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 		t.Fatalf("over-cap key write must publish nothing, found %d entries", len(kr.data))
 	}
 }
+
+// legacyGetFailKR fails Get for the legacy combined entry only, simulating a
+// transient keyring read error (as opposed to the entry genuinely not
+// existing, which fakeKR's normal Get reports as ok=false, err=nil).
+type legacyGetFailKR struct {
+	*fakeKR
+	fail bool
+}
+
+func (f *legacyGetFailKR) Get(service, account string) (string, bool, error) {
+	if f.fail && account == keyringLegacyAccount {
+		return "", false, errKRInjected
+	}
+	return f.fakeKR.Get(service, account)
+}
+
+// TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError is the
+// regression test for finding #2: during mixed-version reconciliation (an old
+// zero binary's legacy blob alongside the new keyring-based index), a
+// transient error reading the legacy blob must not be treated as "the legacy
+// blob is empty." write() must refuse to reconcile-and-delete it in that case,
+// or an unread credential belonging to an older, still-installed zero binary
+// is destroyed irrecoverably.
+func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := &legacyGetFailKR{fakeKR: newFakeKR()}
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A first save publishes the index, so indexExisted is true for the next
+	// write and exercises the mixed-version reconciliation path in write()
+	// where the bug lived.
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A legacy blob still carries a credential written by an older,
+	// still-installed binary.
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("stale-binary-login"): {AccessToken: "still-live"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// A transient failure reading it: Get returns a real error, not
+	// ok=false/err=nil ("doesn't exist").
+	kr.fail = true
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err == nil {
+		t.Fatal("Save succeeded despite a transient legacy-blob read failure; it must refuse rather than silently treat the blob as empty")
+	}
+	// The legacy blob must still be present, not deleted out from under a
+	// read failure.
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy blob was deleted despite a transient read failure (data loss)")
+	}
+	// Nothing else the aborted write touched should be visible either.
+	if _, ok, _ := s.Load(ProviderKey("beta")); ok {
+		t.Fatal("beta should not be visible: the write should have aborted entirely, not partially applied")
+	}
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok {
+		t.Fatalf("alpha lost after an aborted write: ok=%v err=%v", ok, err)
+	}
+
+	// Once the transient failure clears, the legacy credential is recovered
+	// and the blob is cleaned up normally.
+	kr.fail = false
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatalf("retried Save: %v", err)
+	}
+	if _, ok, err := s.Load(ProviderKey("stale-binary-login")); err != nil || !ok {
+		t.Fatalf("Load(stale-binary-login): ok=%v err=%v (legacy credential lost)", ok, err)
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
+		t.Fatal("legacy blob should be removed once it was actually read and reconciled")
+	}
+}
