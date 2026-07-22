@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1554,6 +1555,49 @@ func TestApplyCatalogDescriptorStripsAimlapiAttributionFromRetargetedProfile(t *
 	for key := range profile.CustomHeaders {
 		if strings.HasPrefix(strings.ToLower(key), "x-aimlapi-") {
 			t.Fatalf("catalog attribution survived retargeting: %#v", profile.CustomHeaders)
+		}
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+}
+
+// setKimiUserConfigRoot redirects os.UserConfigDir() to a throwaway temp dir
+// before the kimi-code descriptor's RuntimeHeaders (kimiidentity.Headers) run,
+// so this test never creates or touches the real kimi-device-id file.
+func setKimiUserConfigRoot(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+}
+
+func TestApplyCatalogDescriptorStripsKimiIdentityFromRetargetedProfile(t *testing.T) {
+	setKimiUserConfigRoot(t)
+	descriptor, err := providercatalog.Require("kimi-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"x-msh-platform":  "kimi_code_cli",
+			"X-Msh-Device-Id": "persisted-device-id",
+			"X-Environment":   "staging",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-msh-") {
+			t.Fatalf("kimi identity headers survived retargeting: %#v", profile.CustomHeaders)
 		}
 	}
 	if profile.CustomHeaders["X-Environment"] != "staging" {
