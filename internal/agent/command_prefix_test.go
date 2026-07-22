@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -180,9 +181,22 @@ func TestMatchCommandPrefixRejectsGrantWhenCdEscapesProject(t *testing.T) {
 	}
 
 	// A `cd` that stays inside the project still honors the grant.
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
 	inside := "cd sub && go test ./..."
 	if _, ok, _ := matchCommandPrefix("bash", map[string]any{"command": inside}, Options{Sandbox: engine}); !ok {
 		t.Fatal("expected a within-project cd to still match the grant")
+	}
+
+	// A symlink inside the workspace that points outside it must not satisfy the
+	// containment check: the real path is resolved before comparison, so this
+	// cannot smuggle an unsandboxed grant out of the project.
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if grant, ok, _ := matchCommandPrefix("bash", map[string]any{"command": "cd escape && go test ./..."}, Options{Sandbox: engine}); ok {
+		t.Fatalf("expected a symlinked-out cd to refuse the grant, got %#v", grant)
 	}
 
 	// A non-static cd target (home) cannot be proven in-project, so it is refused.

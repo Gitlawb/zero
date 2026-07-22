@@ -223,21 +223,46 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 // With no root there is no project to bind to, so any `cd` is rejected.
 func commandDirStaysWithinProject(segments [][]string, root string) bool {
 	root = strings.TrimSpace(root)
-	effective := root
+	if root == "" {
+		// No project to bind to: only safe if the command never changes directory.
+		return !commandChangesDirectory(segments)
+	}
+	// Resolve the root's real path once. Containment is checked against real paths
+	// (EvalSymlinks) so a symlink inside the workspace pointing outside it cannot
+	// satisfy a lexical prefix check and smuggle an unsandboxed grant out of scope.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	effective := realRoot
 	for _, tokens := range segments {
 		if len(tokens) == 0 || commandName(tokens[0]) != "cd" {
 			continue
 		}
-		if root == "" {
-			return false
-		}
 		target, ok := resolveCdTarget(tokens[1:], effective)
-		if !ok || !pathWithinRoot(target, root) {
+		if !ok {
 			return false
 		}
-		effective = target
+		// The target must exist and, once symlinks are resolved, stay within the
+		// real workspace root. A non-existent target or a broken/escaping symlink
+		// cannot be proven in-project, so it fails closed.
+		realTarget, err := filepath.EvalSymlinks(target)
+		if err != nil || !pathWithinRoot(realTarget, realRoot) {
+			return false
+		}
+		effective = realTarget
 	}
 	return true
+}
+
+// commandChangesDirectory reports whether any segment is a `cd`.
+func commandChangesDirectory(segments [][]string) bool {
+	for _, tokens := range segments {
+		if len(tokens) > 0 && commandName(tokens[0]) == "cd" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveCdTarget resolves a `cd` argument list to an absolute directory relative
