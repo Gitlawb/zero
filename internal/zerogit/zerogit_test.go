@@ -597,11 +597,18 @@ func TestPushBranchesToRemote(t *testing.T) {
 	})
 
 	t.Run("RejectsDefaultBranch", func(t *testing.T) {
+		// The conventional main/master name is only a fallback for when the
+		// remote's actual default cannot be determined live or from the local
+		// cache, so the remote is consulted (and found unreachable, with no
+		// cached record either) before the name heuristic applies.
 		for _, branch := range []string{"main", "master"} {
 			root := t.TempDir()
 			runner := &fakeRunner{results: []CommandResult{
 				{Stdout: root + "\n"},
 				{Stdout: branch + "\n"},
+				{ExitCode: 1},                     // config branch.<branch>.remote unset → origin
+				{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+				{ExitCode: 1},                     // no local refs/remotes/origin/HEAD record
 			}}
 
 			_, err := Push(context.Background(), PushOptions{
@@ -914,11 +921,15 @@ func TestCreateBranch(t *testing.T) {
 
 func TestIsDefaultBranch(t *testing.T) {
 	t.Run("ResolvesCurrentBranchByConventionalName", func(t *testing.T) {
+		// The live symref confirms main is genuinely the remote's default here;
+		// the conventional-name fallback below only applies when the remote
+		// can't answer at all (see FallbackToConventionalNameWhenRemoteUnknown).
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
 			{Stdout: root + "\n"},
 			{Stdout: "main\n"},
 			{ExitCode: 1}, // config branch.main.remote unset → origin
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 		}}
 
 		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
@@ -930,6 +941,60 @@ func TestIsDefaultBranch(t *testing.T) {
 		}
 		if !isDefault || branch != "main" || remote != "origin" {
 			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
+		}
+	})
+
+	t.Run("FallbackToConventionalNameWhenRemoteUnknown", func(t *testing.T) {
+		// The conventional main/master name only decides the result when the
+		// remote's actual default genuinely cannot be determined, live or
+		// cached.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "main\n"},
+			{ExitCode: 1},                     // config branch.main.remote unset → origin
+			{ExitCode: 128, Stderr: "fatal:"}, // ls-remote fails
+			{ExitCode: 1},                     // no local refs/remotes/origin/HEAD record
+		}}
+
+		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("IsDefaultBranch returned error: %v", err)
+		}
+		if !isDefault || branch != "main" || remote != "origin" {
+			t.Fatalf("unexpected result: isDefault=%v branch=%q remote=%q", isDefault, branch, remote)
+		}
+	})
+
+	// This is the regression test for jatmn's P2 finding: resolve main/master
+	// against the selected remote before treating it as protected. A
+	// repository whose remote default is genuinely "trunk" can have a
+	// legitimate non-default local "main" (e.g. tracking origin/trunk); the
+	// live symref result must win over the conventional-name fallback.
+	t.Run("NonDefaultLocalMainTrackingADifferentRemoteDefault", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "main\n"},
+			{Stdout: "origin\n"}, // config branch.main.remote
+			{Stdout: "ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is trunk
+		}}
+
+		isDefault, branch, remote, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("IsDefaultBranch returned error: %v", err)
+		}
+		if isDefault {
+			t.Fatal("local main tracking a remote whose live default is trunk must not be treated as protected")
+		}
+		if branch != "main" || remote != "origin" {
+			t.Fatalf("unexpected result: branch=%q remote=%q", branch, remote)
 		}
 	})
 

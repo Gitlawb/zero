@@ -626,12 +626,6 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 }
 
 func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) (bool, error) {
-	// The conventional default names count without consulting the remote.
-	// This is the safe direction (it can only block a push, never permit
-	// one), and it keeps the guard meaningful with no network at all.
-	if branch == "main" || branch == "master" {
-		return true, nil
-	}
 	// "--" terminates option parsing: remote comes from --remote/branch config,
 	// and a value like "--upload-pack=/bin/echo" must reach Git as a positional
 	// argument, never as an option.
@@ -653,8 +647,7 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 			// same empty output while still possibly having a protected
 			// default under a name this couldn't identify, so confirm the
 			// remote truly has no branches before granting the unborn
-			// exception; a non-default first push is safe, and main/master
-			// were already caught above.
+			// exception; a non-default first push is safe.
 			if heads, headsErr := gitOutput(ctx, runGit, dir, "ls-remote", "--heads", "--", remote); headsErr == nil && strings.TrimSpace(heads) == "" {
 				return false, nil
 			}
@@ -666,11 +659,21 @@ func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch str
 	// proves branch is the recorded default) but never to *clear* the guard. If
 	// the server renamed its default (main -> trunk) the stale record still
 	// names main, so a mismatch here is not evidence that pushing trunk is safe;
-	// fall through to the fail-closed error below instead of returning false.
+	// fall through instead of returning false.
 	if out, err := gitOutput(ctx, runGit, dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
 		if name, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"); ok && name == branch {
 			return true, nil
 		}
+	}
+	// The conventional default names are only a fallback for when the remote's
+	// actual default genuinely could not be determined above (live or cached).
+	// Applying this before consulting the remote at all would misidentify a
+	// repository whose real default is e.g. "trunk" but that also happens to
+	// have a local/tracked "main": the live symref result must win whenever
+	// it's available. This is still safe-direction only (it can block a push,
+	// never permit one) since it's the last resort before failing closed.
+	if branch == "main" || branch == "master" {
+		return true, nil
 	}
 	// Fail closed: before this, a lookup timeout silently downgraded the
 	// check to the main/master name heuristic, so a repository whose default
@@ -852,6 +855,38 @@ func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner
 		return 0, fmt.Errorf("parse commit count %q: %w", out, err)
 	}
 	return count, nil
+}
+
+// RefreshTrackingRef updates the local remote-tracking ref for <remote>/<branch>
+// from the remote's current advertised tip. ensureFeatureBranch calls this
+// before CommitsAhead: IsDefaultBranch already contacted the remote for its
+// symref check, but a merely-cached origin/main (last written at clone or a
+// previous fetch) can sit behind the remote's live tip, making a local-only
+// rev-list comparison report nothing to publish when the remote has actually
+// advanced. The explicit refspec updates the tracking ref regardless of the
+// remote's configured fetch refspec.
+func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit Runner) error {
+	runGit, _ = resolveRunners(runGit, nil)
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
+	// "--" terminates option parsing so a remote value shaped like an option
+	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
+	_, err := gitOutput(ctx, runGit, cwd, "fetch", "--", remote, refspec)
+	return err
+}
+
+// HasUpstream reports whether branch has a configured upstream/tracking ref,
+// meaning a push has already succeeded for it at least once. ensureFeatureBranch
+// consults this when it is called again with a non-default current branch: a
+// generated branch that just lost a force-with-lease race against a
+// concurrent creator is left checked out locally with no upstream recorded, so
+// a retry must not treat it the same as an ordinary, already-published feature
+// branch and drop the nonexistence lease. Any failure to resolve the upstream
+// (including "no upstream configured") reports false so the caller keeps
+// requiring the lease, which is the safe direction.
+func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	_, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	return err == nil, nil
 }
 
 // IsUnbornRemote reports whether remote is a freshly created repository with
