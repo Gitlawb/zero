@@ -1337,11 +1337,6 @@ func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
 	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
 }
 
-func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
 func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
 	window := transcriptViewportForBody(body, frame, scrollOffset).window()
 	return window.start, window.height, frame.bodyRect.y

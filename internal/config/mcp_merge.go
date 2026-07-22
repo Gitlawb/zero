@@ -87,7 +87,7 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig, canReenable bool
 		// server the user explicitly enabled. The only layer allowed to
 		// override an explicit higher-scope decision is the CLI override scope
 		// (canReenable=true).
-		if canReenable || !(baseDisabledSet && baseDisabled != next.Disabled) {
+		if canReenable || !baseDisabledSet || baseDisabled == next.Disabled {
 			base.Disabled = next.Disabled
 		}
 	}

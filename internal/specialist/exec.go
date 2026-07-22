@@ -827,7 +827,7 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string, prog
 				// ExitCode() is -1 when the child was terminated by a signal rather
 				// than exiting. ProcessState.String() is the portable description
 				// (e.g. "signal: killed") — capture it so the failure isn't opaque.
-				signalDesc = exitErr.ProcessState.String()
+				signalDesc = exitErr.String()
 			}
 		} else {
 			return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: -1, Started: started}, fmt.Errorf("run specialist child: %w", err)

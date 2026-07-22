@@ -1467,7 +1467,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
 	// diff tools whose body must stay reviewable, and short output.
 	collapsedFooter := ""
-	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && !(!failed && (isExploreTool(name) || isLocalControlTool(name))) {
+	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && (failed || (!isExploreTool(name) && !isLocalControlTool(name))) {
 		collapsedFooter = collapsedToolFooter(row.detail)
 	}
 	if collapsedFooter != "" && !row.expanded {

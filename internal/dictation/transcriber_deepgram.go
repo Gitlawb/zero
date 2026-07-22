@@ -100,7 +100,7 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("Deepgram stream error: %w", err)
+			return compose(), fmt.Errorf("Deepgram stream error: %w", err) //nolint:staticcheck // Preserve established user-facing error text.
 		}
 		if typ != websocket.MessageText {
 			continue

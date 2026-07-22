@@ -1396,7 +1396,7 @@ func TestBeginRunPreparesRunCompletionWarningEachTurn(t *testing.T) {
 	})
 
 	m = m.beginRun(nil)
-	m = m.beginRun(nil)
+	_ = m.beginRun(nil)
 
 	if prepares != 2 {
 		t.Fatalf("PrepareRunCompletionWarning called %d times, want once per run", prepares)

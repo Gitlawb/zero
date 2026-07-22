@@ -414,10 +414,10 @@ func toolCallSummary(event streamjson.Event) string {
 	case "write_stdin":
 		sessionID := toolCallIntArg(args, "session_id")
 		chars, _ := args["chars"].(string)
-		switch {
-		case chars == "":
+		switch chars {
+		case "":
 			return fmt.Sprintf("poll session %d", sessionID)
-		case chars == "\x03":
+		case "\x03":
 			return fmt.Sprintf("interrupt session %d", sessionID)
 		default:
 			return fmt.Sprintf("send input to session %d", sessionID)

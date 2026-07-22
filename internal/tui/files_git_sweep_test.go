@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,7 +193,7 @@ func TestGitSweepCmdAgainstRealRepo(t *testing.T) {
 	run("commit", "-q", "-m", "seed")
 	write("pre-existing.txt", "dirt\n") // dirty BEFORE the TUI "opens"
 
-	baseline := gitSweepCmd(nil, dir, true)().(gitSweepMsg)
+	baseline := gitSweepCmd(context.TODO(), dir, true)().(gitSweepMsg)
 	if !baseline.ok || len(baseline.files) != 1 || baseline.files[0].path != "pre-existing.txt" {
 		t.Fatalf("baseline should see only the pre-existing dirt: %+v", baseline)
 	}
@@ -201,7 +202,7 @@ func TestGitSweepCmdAgainstRealRepo(t *testing.T) {
 	write("scaffolded.txt", "hello\n")
 	write("tracked.txt", "one\ntwo\nthree\nfour\n")
 
-	sweep := gitSweepCmd(nil, dir, false)().(gitSweepMsg)
+	sweep := gitSweepCmd(context.TODO(), dir, false)().(gitSweepMsg)
 	if !sweep.ok {
 		t.Fatal("sweep failed")
 	}
@@ -224,7 +225,7 @@ func TestGitSweepCmdAgainstRealRepo(t *testing.T) {
 	run("commit", "-q", "-m", "second")
 	run("mv", "tracked.txt", "renamed.txt")
 	write("renamed.txt", "one\ntwo\nthree\nfour\nfive\n")
-	renameSweep := gitSweepCmd(nil, dir, false)().(gitSweepMsg)
+	renameSweep := gitSweepCmd(context.TODO(), dir, false)().(gitSweepMsg)
 	if !renameSweep.ok {
 		t.Fatal("rename sweep failed")
 	}
@@ -237,7 +238,7 @@ func TestGitSweepCmdAgainstRealRepo(t *testing.T) {
 	}
 
 	// Not-a-repo → ok=false (the sweep latches off).
-	if msg := gitSweepCmd(nil, t.TempDir(), false)().(gitSweepMsg); msg.ok {
+	if msg := gitSweepCmd(context.TODO(), t.TempDir(), false)().(gitSweepMsg); msg.ok {
 		t.Fatal("a non-repo should report ok=false")
 	}
 }

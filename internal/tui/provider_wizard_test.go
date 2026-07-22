@@ -683,7 +683,7 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
+	_ = updated.(model)
 
 	if captured.APIKey != secret {
 		t.Fatalf("captured APIKey = %q, want pasted secret", captured.APIKey)
