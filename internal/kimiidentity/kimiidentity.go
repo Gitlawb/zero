@@ -83,19 +83,42 @@ func loadOrCreateDeviceIDAt(path string) string {
 	// overwriting it. After O_EXCL succeeds the winner still has to write
 	// content, so a concurrent loser may briefly observe an empty file;
 	// readValidDeviceIDWithRetry waits for the UUID rather than minting a
-	// second divergent identity.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
+	// second divergent identity. If the winner dies mid-publish leaving an
+	// empty/invalid file, the next caller removes that abandoned file once
+	// and retries exclusive create so the identity is repaired instead of
+	// permanently stuck on a divergent in-memory id.
+	return createOrAdoptDeviceID(path, id)
+}
+
+// createOrAdoptDeviceID publishes id at path or adopts a concurrent winner.
+// A second attempt runs only when an abandoned empty/invalid file is found.
+func createOrAdoptDeviceID(path, id string) string {
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if !os.IsExist(err) {
+				return id
+			}
 			if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
 				return existingID
 			}
+			// path exists but never became a valid UUID (abandoned create,
+			// corrupt file). Remove once and retry exclusive create.
+			if attempt == 0 {
+				_ = os.Remove(path)
+				continue
+			}
+			return id
+		}
+		_, _ = f.WriteString(id + "\n")
+		_ = f.Sync()
+		_ = f.Close()
+		// Re-read so a racing repair that replaced us still converges.
+		if existingID := readValidDeviceID(path); existingID != "" {
+			return existingID
 		}
 		return id
 	}
-	_, _ = f.WriteString(id + "\n")
-	_ = f.Sync()
-	_ = f.Close()
 	return id
 }
 

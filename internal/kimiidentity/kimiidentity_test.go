@@ -160,6 +160,35 @@ func TestLoadOrCreateDeviceIDAdoptsWinnerAfterEmptyCreate(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateDeviceIDRepairsAbandonedEmptyFile covers the case where
+// a previous process exclusive-created the path and died before writing a
+// UUID. Callers must not permanently diverge: after the retry window the
+// empty file is removed and a new exclusive create publishes a valid id.
+func TestLoadOrCreateDeviceIDRepairsAbandonedEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close() // abandoned: never written
+
+	got := loadOrCreateDeviceIDAt(path)
+	if !isUUID(got) {
+		t.Fatalf("repaired id %q is not a UUID", got)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired file: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != got {
+		t.Fatalf("persisted %q, want repaired %q", persisted, got)
+	}
+}
+
 func TestAsciiHeaderValueStripsNonPrintable(t *testing.T) {
 	if got := asciiHeaderValue("linux#6.1"); got != "linux#6.1" {
 		// printable ASCII including # is kept; the kimi-cli bug was a different
