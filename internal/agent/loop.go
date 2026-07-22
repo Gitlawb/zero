@@ -2156,6 +2156,21 @@ func canAutoClassifierReview(tool tools.Tool, args map[string]any, permissionGra
 	if tool.Safety().Permission != tools.PermissionPrompt {
 		return false
 	}
+	// A shell command may only be reviewed when the native sandbox would actually
+	// wrap it. With isolation unavailable the command runs unwrapped on the host,
+	// so an LLM allow there is an unsandboxed-execution bypass — keep it a prompt.
+	// (File tools like write_file are confined by path validation, not native
+	// shell isolation, so this gate applies to shell commands only.)
+	if isShellCommandTool(tool.Name()) && !options.Sandbox.ShellSandboxActive() {
+		return false
+	}
+	// A write under protected workspace metadata (.git/**, .zero/**, .agents/**)
+	// stays an explicit prompt: an LLM allow must not be able to write
+	// .git/hooks/pre-commit or .git/config and defeat that boundary (which would
+	// enable later Git-triggered code execution).
+	if decision.TouchesProtectedMetadata {
+		return false
+	}
 	// Auto-classifier trades autonomy for an LLM check: it reviews only actions
 	// the sandbox would OTHERWISE prompt for, and may auto-approve the ones it
 	// judges safe. Actions the sandbox already auto-allows run without LLM

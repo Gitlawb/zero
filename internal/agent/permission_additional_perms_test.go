@@ -24,6 +24,54 @@ func (promptShellTool) Run(context.Context, map[string]any) tools.Result {
 	return tools.Result{Status: tools.StatusOK}
 }
 
+// promptWriteTool is a non-shell, prompt-gated write tool used to exercise the
+// auto-classifier eligibility rules for file writes (not shell commands).
+type promptWriteTool struct{}
+
+func (promptWriteTool) Name() string        { return "write_file" }
+func (promptWriteTool) Description() string { return "write a file" }
+func (promptWriteTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (promptWriteTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, Reason: "writes a file"}
+}
+func (promptWriteTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+
+func TestCanAutoClassifierReviewExcludesProtectedMetadataWrite(t *testing.T) {
+	classifier := func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+		return AutoPermissionClassifierDecision{}, nil
+	}
+	options := Options{AutoPermissionClassifier: classifier, Sandbox: sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})}
+	args := map[string]any{"path": ".git/config", "content": "x"}
+
+	ordinary := &sandbox.Decision{Action: sandbox.ActionPrompt}
+	if !canAutoClassifierReview(promptWriteTool{}, args, false, PermissionModeAutoClassifier, options, ordinary) {
+		t.Fatal("an ordinary workspace-write prompt should be classifier-eligible")
+	}
+
+	protected := &sandbox.Decision{Action: sandbox.ActionPrompt, TouchesProtectedMetadata: true}
+	if canAutoClassifierReview(promptWriteTool{}, args, false, PermissionModeAutoClassifier, options, protected) {
+		t.Fatal("a protected-metadata write must not be classifier-eligible")
+	}
+}
+
+func TestCanAutoClassifierReviewRequiresActiveShellSandbox(t *testing.T) {
+	classifier := func(context.Context, AutoPermissionClassifierRequest) (AutoPermissionClassifierDecision, error) {
+		return AutoPermissionClassifierDecision{}, nil
+	}
+	// A disabled sandbox never wraps a shell command, so an LLM allow would run it
+	// unwrapped on the host: the classifier must not be eligible in that case.
+	inactive := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.Policy{Mode: sandbox.ModeDisabled}})
+	options := Options{AutoPermissionClassifier: classifier, Sandbox: inactive}
+	decision := &sandbox.Decision{Action: sandbox.ActionPrompt}
+	if canAutoClassifierReview(promptShellTool{}, map[string]any{"command": "echo hi"}, false, PermissionModeAutoClassifier, options, decision) {
+		t.Fatal("a shell command must not be classifier-eligible without an active native sandbox")
+	}
+}
+
 // A command whose sandbox decision is Allow but that explicitly requests
 // additional sandbox permissions is an ELEVATION: it must be surfaced as a
 // prompt, never Action=allow. Previously it carried allow while the loop still

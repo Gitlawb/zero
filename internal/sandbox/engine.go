@@ -291,6 +291,18 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 	return true
 }
 
+// ShellSandboxActive reports whether a shell command would actually be wrapped by
+// the native sandbox under the engine's effective policy. Callers use it to gate
+// autonomy that assumes confinement (e.g. auto-classifier review): when native
+// isolation is unavailable, an auto-approved shell command would run unwrapped on
+// the host, so that path must stay an explicit prompt instead.
+func (engine *Engine) ShellSandboxActive() bool {
+	if engine == nil {
+		return false
+	}
+	return engine.shellSandboxActive(engine.effectivePolicy(engine.policy))
+}
+
 // Precheck reports the sandbox blocks that would block a tool request BEFORE
 // it executes, so a caller (e.g. a batch confirmation or a "would this run?"
 // check) can fail fast and surface the reason instead of discovering it mid-run.
@@ -456,7 +468,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
-	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+	prompt := Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+	// Flag a write that targets protected workspace metadata so autonomy layers
+	// keep prompting for it instead of auto-approving a .git/.zero/.agents change.
+	if request.SideEffect == SideEffectWrite && requestPathsTouchProtectedMetadata(scope, request.WorkspaceRoot, requestPaths(request)) {
+		prompt.TouchesProtectedMetadata = true
+	}
+	return prompt
 }
 
 func requestRequiresEscalatedSandbox(request Request) bool {
