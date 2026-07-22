@@ -189,6 +189,64 @@ func TestLoadOrCreateDeviceIDRepairsAbandonedEmptyFile(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateDeviceIDConcurrentAbandonedFileRepairConverges covers
+// multiple racing processes all finding the same abandoned/invalid file at
+// once. Repair must be mutually exclusive: only one racer may remove and
+// recreate the file, so every caller ends up with the same id and that id is
+// exactly what is persisted (no caller returns an in-memory id that a later
+// repair silently unlinked and replaced).
+func TestLoadOrCreateDeviceIDConcurrentAbandonedFileRepairConverges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close() // abandoned: never written
+
+	const workers = 16
+	ids := make([]string, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			ids[i] = loadOrCreateDeviceIDAt(path)
+		}(i)
+	}
+	wg.Wait()
+
+	winner := ""
+	for _, id := range ids {
+		if id == "" {
+			t.Fatal("worker returned empty id")
+		}
+		if winner == "" {
+			winner = id
+			continue
+		}
+		if id != winner {
+			t.Fatalf("workers diverged repairing abandoned file: got %q and %q", winner, id)
+		}
+	}
+	if !isUUID(winner) {
+		t.Fatalf("winner id %q is not a UUID", winner)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted id: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != winner {
+		t.Fatalf("persisted %q, want winner %q", persisted, winner)
+	}
+	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("repair lock file left behind: err=%v", err)
+	}
+}
+
 func TestAsciiHeaderValueStripsNonPrintable(t *testing.T) {
 	if got := asciiHeaderValue("linux#6.1"); got != "linux#6.1" {
 		// printable ASCII including # is kept; the kimi-cli bug was a different

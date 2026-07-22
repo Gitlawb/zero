@@ -91,33 +91,77 @@ func loadOrCreateDeviceIDAt(path string) string {
 }
 
 // createOrAdoptDeviceID publishes id at path or adopts a concurrent winner.
-// A second attempt runs only when an abandoned empty/invalid file is found.
 func createOrAdoptDeviceID(path, id string) string {
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			if !os.IsExist(err) {
-				return id
-			}
-			if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
-				return existingID
-			}
-			// path exists but never became a valid UUID (abandoned create,
-			// corrupt file). Remove once and retry exclusive create.
-			if attempt == 0 {
-				_ = os.Remove(path)
-				continue
-			}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if !os.IsExist(err) {
 			return id
 		}
-		_, _ = f.WriteString(id + "\n")
-		_ = f.Sync()
-		_ = f.Close()
-		// Re-read so a racing repair that replaced us still converges.
-		if existingID := readValidDeviceID(path); existingID != "" {
+		if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
+			return existingID
+		}
+		// path exists but never became a valid UUID (abandoned create,
+		// corrupt file). Repair it rather than removing it ourselves: an
+		// unlocked remove here could unlink another racer's just-published
+		// winner between our failed read and the remove call, handing that
+		// racer back an id that is no longer the one on disk.
+		return repairAbandonedDeviceID(path, id)
+	}
+	_, _ = f.WriteString(id + "\n")
+	_ = f.Sync()
+	_ = f.Close()
+	// Re-read so a racing repair that replaced us still converges.
+	if existingID := readValidDeviceID(path); existingID != "" {
+		return existingID
+	}
+	return id
+}
+
+// repairAbandonedDeviceID fixes an invalid/empty device-id file left behind
+// by a process that exclusive-created path and died before writing a UUID.
+// Repair itself is serialized through an exclusive lock file so only one
+// racing process ever removes and recreates path: without that, one process
+// could unlink another's freshly published replacement and mint a second,
+// divergent id, leaving the first process holding an id that stops matching
+// what is actually persisted. Callers that lose the lock wait for the holder
+// to publish instead of attempting their own repair.
+func repairAbandonedDeviceID(path, id string) string {
+	lockPath := path + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if !os.IsExist(err) {
+			return id
+		}
+		if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
 			return existingID
 		}
 		return id
+	}
+	defer func() {
+		_ = lock.Close()
+		_ = os.Remove(lockPath)
+	}()
+	// Recheck under the lock: another process may have started repairing
+	// (and published a valid id) between our failed read above and our
+	// getting the lock.
+	if existingID := readValidDeviceID(path); existingID != "" {
+		return existingID
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return id
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
+			return existingID
+		}
+		return id
+	}
+	_, _ = f.WriteString(id + "\n")
+	_ = f.Sync()
+	_ = f.Close()
+	if existingID := readValidDeviceID(path); existingID != "" {
+		return existingID
 	}
 	return id
 }
