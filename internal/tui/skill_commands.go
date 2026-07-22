@@ -29,7 +29,8 @@ func (m model) handleSkillCommand(raw string) (model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
-	if strings.TrimSpace(skill.Content) == "" {
+	body := strings.TrimSpace(skill.Content)
+	if body == "" {
 		// The name matched a real skill, so falling through to "unknown command"
 		// would mislead; surface the actual problem instead.
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -136,7 +137,8 @@ func (m model) invokeSkillByName(name string) (model, tea.Cmd) {
 		if strings.TrimSpace(skill.Name) != name {
 			continue
 		}
-		if strings.TrimSpace(skill.Content) == "" {
+		body := strings.TrimSpace(skill.Content)
+		if body == "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
 				text: "skill " + name + " has an empty SKILL.md body (" + skill.Path + ")",

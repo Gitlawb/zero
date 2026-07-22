@@ -570,14 +570,6 @@ func load(dir string) ([]Skill, []DuplicateName, error) {
 	if dir == "" {
 		return []Skill{}, nil, nil
 	}
-	// Converge any interrupted replace in this root before scanning it. A kill
-	// or power loss between the two renames of a swap leaves the canonical
-	// install absent and the old tree stranded under a backup name the lockfile
-	// no longer matches; RecoverPending restores/commits it so discovery never
-	// observes a half-replaced root.
-	if err := RecoverPending(dir); err != nil {
-		return nil, nil, err
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

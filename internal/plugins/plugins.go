@@ -231,21 +231,6 @@ func Load(options LoadOptions) (LoadResult, error) {
 			continue
 		}
 
-		// Converge any interrupted replace in this root before scanning it. A
-		// kill or power loss between the two renames of a swap leaves the
-		// canonical install absent and the old tree stranded under a backup name
-		// the lockfile no longer matches; RecoverPending restores/commits it so
-		// discovery never observes a half-replaced root.
-		if recErr := RecoverPending(rootPath); recErr != nil {
-			diagnostics = append(diagnostics, Diagnostic{
-				Kind:    DiagnosticIO,
-				Source:  root.Source,
-				Root:    rootPath,
-				Message: recErr.Error(),
-			})
-			continue
-		}
-
 		entries, err := os.ReadDir(rootPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
