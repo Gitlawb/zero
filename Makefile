@@ -1,7 +1,7 @@
 # Zero build/test/lint targets. AGENTS.md says "Build with `make`" and "Run `make
 # lint` before opening a PR" — these targets back those instructions.
 .DEFAULT_GOAL := build
-.PHONY: build build-all test test-race vet fmt fmt-check lint tidy clean baseline help
+.PHONY: build build-all test test-race test-patches vet fmt fmt-check lint tidy clean baseline help
 
 # Build the main CLI binary into ./zero.
 build:
@@ -18,6 +18,12 @@ test:
 # Faster, no race detector.
 test-quick:
 	go test ./...
+
+# patches/bubbletea-v2 is a separate Go module (see the replace directive in
+# go.mod), so it's outside the `./...` pattern above and needs its own
+# invocation. Mirrors the CI step that runs it.
+test-patches:
+	cd patches/bubbletea-v2 && go test ./...
 
 vet:
 	go vet ./...
@@ -55,4 +61,4 @@ baseline: build
 		--output internal/perfbench/reports/baseline.json
 
 help:
-	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, tidy, clean, baseline"
+	@echo "Targets: build (default), build-all, test, test-quick, test-patches, vet, fmt, fmt-check, lint, tidy, clean, baseline"
