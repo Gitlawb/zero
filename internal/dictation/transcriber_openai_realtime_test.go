@@ -197,3 +197,45 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 		t.Fatalf("StreamTranscribe failed before delta: %v", ferr)
 	}
 }
+
+// jatmn (review, PR #710): Esc can race an incoming OpenAI error event.
+// conn.Read may already have the error frame in hand by the time the
+// cancellation lands. The server fires a delta immediately followed by
+// the error, back to back. Cancel from inside the delta callback (same
+// path the TUI uses when a partial triggers Esc handling) so the cancel
+// is observed before the next event is processed. The returned error
+// must still be context.Canceled, not the redacted OpenAI error.
+func TestOpenAIRealtimeStreamTranscribeErrorRaceKeepsSentinel(t *testing.T) {
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(
+			`{"type":"conversation.item.input_audio_transcription.delta","delta":"hi"}`,
+		))
+		_ = c.Write(ctx, websocket.MessageText, []byte(
+			`{"type":"error","error":{"message":"invalid API key sk-test-key"}}`,
+		))
+		<-ctx.Done()
+	})
+
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: "sk-test-key", BaseURL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	chunks := make(chan []byte, 1)
+	defer close(chunks)
+	chunks <- make([]byte, 480)
+	var once sync.Once
+	_, ferr := tr.StreamTranscribe(ctx, chunks, func(string, bool) {
+		// Cancel synchronously from the partial callback, before the
+		// stream loop continues to the already-buffered error frame.
+		once.Do(cancel)
+	})
+	if !errors.Is(ferr, context.Canceled) {
+		t.Fatalf("StreamTranscribe error = %v, want context.Canceled (cancel must win over a racing OpenAI error event)", ferr)
+	}
+}
