@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -2033,6 +2034,106 @@ func TestApplySetupOAuthDeviceCodeShowsCodeAndPolls(t *testing.T) {
 	view := strings.Join(m.setupOAuthWaitingLines(72), "\n")
 	if !strings.Contains(view, "WXYZ-9") || !strings.Contains(view, "x.ai/device") {
 		t.Fatalf("waiting render missing device code/uri:\n%s", view)
+	}
+}
+
+// TestSetupCtrlCCancelsDeviceLoginPoll regression-tests a bug where Ctrl+C
+// during a first-run device-code poll (phase 2) quit the whole program
+// without canceling the background context the poll command runs on. Since
+// the TUI's parent context is context.Background(), the poll (up to 10
+// minutes) kept running after the process later exited via os.Exit, and if
+// the user then finished authorizing in the browser, a completed-in-flight
+// write could still land. Ctrl+C must cancel the poll before quitting.
+func TestSetupCtrlCCancelsDeviceLoginPoll(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
+
+	m := setupAtOAuthList(t)
+	for i, p := range m.setup.providers {
+		if p.ID == "xai" {
+			m.setup.selected = i
+			break
+		}
+	}
+	m.setup.oauthPending = true
+	m.setup.oauthDevice = true
+	attemptID := m.setup.oauthAttemptID
+
+	res, cmd := m.applySetupOAuthDeviceCode(setupOAuthDeviceMsg{
+		providerID: "xai", attemptID: attemptID, userCode: "WXYZ-9", verifyURL: "https://x.ai/device",
+	})
+	m = res.(model)
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	if m.setup.deviceLoginCancel == nil {
+		t.Fatal("starting the poll should store a cancel func on setup")
+	}
+
+	updated, _ := m.Update(testKeyCtrl('c'))
+	m = updated.(model)
+	if m.setup.deviceLoginCancel != nil {
+		t.Fatal("Ctrl+C should cancel the in-flight device-code poll")
+	}
+
+	msg, ok := cmd().(setupOAuthMsg)
+	if !ok {
+		t.Fatalf("poll command returned %T, want setupOAuthMsg", msg)
+	}
+	if !errors.Is(msg.err, context.Canceled) {
+		t.Fatalf("poll error = %v, want context.Canceled (Ctrl+C should have canceled the background poll)", msg.err)
+	}
+}
+
+// TestSetupStaleDeviceCodeAttemptRejected regression-tests a bug where
+// abandoning a device-code login with Esc and immediately restarting it for
+// the same provider let a late phase-one result from the FIRST attempt
+// overwrite the second attempt's displayed code and start polling an
+// authorization the user had already backed out of: setupOAuthDeviceMsg only
+// carried providerID, which is identical across both attempts.
+func TestSetupStaleDeviceCodeAttemptRejected(t *testing.T) {
+	m := setupAtOAuthList(t)
+	for i, p := range m.setup.providers {
+		if p.ID == "xai" {
+			m.setup.selected = i
+			break
+		}
+	}
+
+	updated, cmd := m.Update(testKeyText("d")) // attempt 1
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("'d' should return the device-prepare command")
+	}
+	staleAttemptID := m.setup.oauthAttemptID
+
+	// Abandon attempt 1 with Esc, then immediately restart against the same
+	// provider (attempt 2).
+	updated, _ = m.Update(testKey(tea.KeyEsc))
+	m = updated.(model)
+	if m.setup.oauthPending {
+		t.Fatal("Esc should abandon the pending device login")
+	}
+	updated, cmd = m.Update(testKeyText("d")) // attempt 2
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("restarting should return a new device-prepare command")
+	}
+	if m.setup.oauthAttemptID == staleAttemptID {
+		t.Fatal("restarting the device flow should assign a new attempt id")
+	}
+
+	// The stale phase-one result from attempt 1 lands after attempt 2 is
+	// already in flight — same provider, so providerID alone can't reject it.
+	res, pollCmd := m.applySetupOAuthDeviceCode(setupOAuthDeviceMsg{
+		providerID: "xai", attemptID: staleAttemptID, userCode: "STALE-1", verifyURL: "https://x.ai/device/stale",
+	})
+	m = res.(model)
+	if pollCmd != nil {
+		t.Fatal("stale attempt's phase-one result must not start a poll")
+	}
+	if m.setup.deviceUserCode == "STALE-1" {
+		t.Fatalf("stale attempt overwrote the current attempt's device code: %+v", m.setup)
 	}
 }
 

@@ -247,6 +247,49 @@ func TestProviderWizardEscCancelsDeviceLoginPoll(t *testing.T) {
 	}
 }
 
+// TestModelQuitCancelsProviderWizardDeviceLoginPoll regression-tests a bug
+// where model.quit() (the path every Ctrl+C-to-exit and "q"-to-exit
+// eventually reaches) only reset the aimlapi.com sub-flow, never the
+// provider wizard's device-code poll. Since the TUI runs on
+// context.Background(), quitting via Ctrl+C left the poll running in the
+// background: authorizing the abandoned login afterward could still save a
+// credential the user had just quit to avoid.
+func TestModelQuitCancelsProviderWizardDeviceLoginPoll(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard()
+	m = selectWizardOAuthProvider(t, next, "xai")
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: providerID, attemptID: attemptID, userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
+	})
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	if out.providerWizard.deviceLoginCancel == nil {
+		t.Fatal("starting the poll should store a cancel func on the wizard")
+	}
+
+	quit, _ := out.quit()
+	quitModel := quit.(model)
+	if quitModel.providerWizard != nil && quitModel.providerWizard.deviceLoginCancel != nil {
+		t.Fatal("quit should cancel the in-flight device-code poll")
+	}
+
+	msg, ok := cmd().(providerWizardOAuthMsg)
+	if !ok {
+		t.Fatalf("poll command returned %T, want providerWizardOAuthMsg", msg)
+	}
+	if !errors.Is(msg.err, context.Canceled) {
+		t.Fatalf("poll error = %v, want context.Canceled (quit should have canceled the background poll)", msg.err)
+	}
+}
+
 // A failed OAuth attempt leaves the wizard on the provider list; the error must be
 // rendered there (not just on the credential step) so a click isn't a silent
 // no-op, and Hugging Face gets an actionable client_id hint.
