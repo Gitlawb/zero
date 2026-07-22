@@ -25,9 +25,25 @@ func (state ProviderState) Actions() []Action {
 }
 
 func SetupCommand(descriptor providercatalog.Descriptor, name string, setActive bool) string {
+	return setupCommand(descriptor, name, "", setActive)
+}
+
+// SetupCommandWithModel is SetupCommand with an explicit --model. A local
+// runtime serves whichever model the user loaded, so its catalog DefaultModel is
+// only a placeholder: an adopt command that omits --model persists that
+// placeholder and the first completion fails with an unknown-model response.
+// An empty model falls back to SetupCommand's behaviour.
+func SetupCommandWithModel(descriptor providercatalog.Descriptor, name string, model string, setActive bool) string {
+	return setupCommand(descriptor, name, model, setActive)
+}
+
+func setupCommand(descriptor providercatalog.Descriptor, name string, model string, setActive bool) string {
 	parts := []string{"zero", "providers", "add", strings.TrimSpace(descriptor.ID)}
 	if name = strings.TrimSpace(name); name != "" {
 		parts = append(parts, "--name", name)
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		parts = append(parts, "--model", model)
 	}
 	if descriptor.RequiresAuth && len(descriptor.AuthEnvVars) > 0 {
 		if env := strings.TrimSpace(descriptor.AuthEnvVars[0]); env != "" {
