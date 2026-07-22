@@ -4220,6 +4220,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
+	if m.permissionMode == agent.PermissionModePlan && planModeCommandUnavailable(command) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: command.name + " is unavailable in plan mode — it mutates the workspace or spawns a process outside the read-only gate. Exit with /plan off first.",
+		})
+		return m, nil
+	}
 	switch command.kind {
 	case commandEmpty:
 		return m, nil

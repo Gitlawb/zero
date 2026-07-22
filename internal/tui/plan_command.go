@@ -44,6 +44,22 @@ func (m model) handlePlanCommand(args string) (model, string) {
 	}
 }
 
+// planModeCommandUnavailable reports whether a local (non-tool) TUI command
+// must be blocked while plan mode is active. Plan mode's tool-advertisement
+// gate only covers agent tool calls; these commands run entirely inside the
+// TUI process and would mutate the workspace or spawn a host process outside
+// that gate: /rewind restores files from a checkpoint, /export writes a
+// transcript file to disk, and /sandbox-setup runs native platform setup.
+// Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
+func planModeCommandUnavailable(command parsedCommand) bool {
+	switch command.kind {
+	case commandRewind, commandExport, commandSandboxSetup:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m model) planText() string {
 	tool, ok := m.registry.Get("update_plan")
 	if !ok {
