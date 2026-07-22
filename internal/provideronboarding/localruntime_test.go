@@ -39,15 +39,20 @@ func TestLocalRuntimeCandidatesCoverOllamaLMStudioAndAtomicChat(t *testing.T) {
 	if lmstudio.RequiresKey {
 		t.Fatalf("lmstudio candidate must not require an API key: %#v", lmstudio)
 	}
-	atomicChat, ok := byCatalog["atomic-chat"]
+	atomicChat, ok := byCatalog["atomic-chat-local"]
 	if !ok {
-		t.Fatalf("expected an atomic-chat candidate, got %#v", candidates)
+		t.Fatalf("expected an atomic-chat-local candidate, got %#v", candidates)
 	}
 	if !strings.Contains(atomicChat.BaseURL, "1337") {
-		t.Fatalf("atomic-chat candidate must probe default port 1337, got %q", atomicChat.BaseURL)
+		t.Fatalf("atomic-chat-local candidate must probe default port 1337, got %q", atomicChat.BaseURL)
 	}
 	if atomicChat.RequiresKey {
-		t.Fatalf("atomic-chat candidate must not require an API key: %#v", atomicChat)
+		t.Fatalf("atomic-chat-local candidate must not require an API key: %#v", atomicChat)
+	}
+	// The hosted atomic-chat preset stays remote and key-gated, so it must never
+	// be probed as a local runtime.
+	if _, ok := byCatalog["atomic-chat"]; ok {
+		t.Fatalf("hosted atomic-chat must not be a local-runtime candidate, got %#v", candidates)
 	}
 }
 
