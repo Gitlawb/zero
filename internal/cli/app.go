@@ -96,6 +96,7 @@ type appDeps struct {
 	currentGitUser         func(context.Context, string) string
 	headCommitSubject      func(context.Context, string) string
 	commitsAhead           func(context.Context, string, string, string) (int, error)
+	isUnbornRemote         func(context.Context, string, string) (bool, error)
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -213,6 +214,9 @@ func defaultAppDeps() appDeps {
 		},
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
 			return zerogit.CommitsAhead(ctx, cwd, remote, branch, nil)
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return zerogit.IsUnbornRemote(ctx, cwd, remote, nil)
 		},
 		runTUI:      tui.Run,
 		runEditor:   openEditor,
@@ -592,6 +596,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.commitsAhead == nil {
 		deps.commitsAhead = defaults.commitsAhead
+	}
+	if deps.isUnbornRemote == nil {
+		deps.isUnbornRemote = defaults.isUnbornRemote
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI

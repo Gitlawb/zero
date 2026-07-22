@@ -1556,6 +1556,11 @@ func TestEnsureFeatureBranchFailsWhenAheadCountUnknown(t *testing.T) {
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
 			return 0, errors.New("unknown revision origin/main")
 		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			// Not unborn: the remote exists and has branches, it just was
+			// never fetched locally. This must still fail closed.
+			return false, nil
+		},
 		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
 			if strings.TrimSpace(options.BaseRef) != "" {
 				t.Fatal("base-ref inspect should not run when the ahead count is unknown")
@@ -1572,6 +1577,94 @@ func TestEnsureFeatureBranchFailsWhenAheadCountUnknown(t *testing.T) {
 	}
 	if createBranchCalled {
 		t.Fatal("expected createBranch not to be called when the publishable range is unknown")
+	}
+}
+
+func TestEnsureFeatureBranchFailsWhenUnbornCheckErrors(t *testing.T) {
+	// The ahead count is unknown AND the unborn probe itself fails (remote
+	// unreachable): this must still fail closed exactly like the plain
+	// unknown-ahead-count case, not be treated as a confirmed-unborn remote.
+	cwd := t.TempDir()
+	createBranchCalled := false
+
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 0, errors.New("unknown revision origin/main")
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return false, errors.New("remote unreachable")
+		},
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			if strings.TrimSpace(options.BaseRef) != "" {
+				t.Fatal("base-ref inspect should not run when the ahead count is unknown")
+			}
+			return zerogit.ChangeSummary{Clean: true}, nil
+		},
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createBranchCalled = true
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot determine whether HEAD is ahead") {
+		t.Fatalf("expected an ahead-count-unknown error, got %v", err)
+	}
+	if createBranchCalled {
+		t.Fatal("expected createBranch not to be called when the unborn state is unconfirmed")
+	}
+}
+
+// TestEnsureFeatureBranchCreatesBranchOnConfirmedUnbornRemote covers the P1
+// review finding on PR 671: a brand-new empty remote has no
+// <remote>/<branch> tracking ref, so commitsAhead's rev-list lookup fails
+// not because HEAD has nothing to publish but because the ref it needs
+// cannot exist yet. Before the fix this dead-ended `zero changes push`/`pr`
+// on the very first invocation from a local default branch against a fresh
+// remote - exactly the scenario the auto-branch feature was written to
+// unblock. A confirmed-unborn remote must bypass the ahead-count check (and
+// the equally impossible diff-base inspect) and still create the branch.
+func TestEnsureFeatureBranchCreatesBranchOnConfirmedUnbornRemote(t *testing.T) {
+	cwd := t.TempDir()
+	var createdName string
+	var isUnbornRemoteCalled bool
+
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 0, errors.New("unknown revision origin/main..HEAD")
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			isUnbornRemoteCalled = true
+			if remote != "origin" {
+				t.Fatalf("expected the resolved remote %q, got %q", "origin", remote)
+			}
+			return true, nil
+		},
+		inspectChanges: featureBranchInspect(nil, ""), // no tracking ref to diff against; name from HEAD
+		headCommitSubject: func(ctx context.Context, cwd string) string {
+			return "init"
+		},
+		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			createdName = options.Name
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	}
+	if !isUnbornRemoteCalled {
+		t.Fatal("expected isUnbornRemote to be consulted after commitsAhead failed")
+	}
+	if !created || branch != createdName || remote != "origin" {
+		t.Fatalf("expected a created branch on origin, got branch=%q remote=%q created=%v", branch, remote, created)
+	}
+	if !strings.HasPrefix(branch, "someone/init") {
+		t.Fatalf("expected a name derived from the HEAD commit subject, got %q", branch)
 	}
 }
 

@@ -854,6 +854,24 @@ func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner
 	return count, nil
 }
 
+// IsUnbornRemote reports whether remote is a freshly created repository with
+// no refs at all (no branches, no HEAD). ensureFeatureBranch consults this
+// when CommitsAhead fails to determine why: a genuinely empty remote has no
+// <remote>/<branch> tracking ref for CommitsAhead to diff against, and that
+// is proof there is nothing published yet, not an unknown state to fail
+// closed on. An error here (unreachable remote, timeout) leaves the state
+// unconfirmed, so callers must treat that the same as a non-empty remote.
+func IsUnbornRemote(ctx context.Context, cwd, remote string, runGit Runner) (bool, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	// "--" terminates option parsing so a remote value shaped like an option
+	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
+	out, err := gitOutput(ctx, runGit, cwd, "ls-remote", "--heads", "--", remote)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "", nil
+}
+
 // CurrentGitUser resolves an identity to prefix generated branch names with:
 // git config user.name, falling back to the OS account username, falling
 // back to the literal "user" so BuildBranchName always gets a non-empty

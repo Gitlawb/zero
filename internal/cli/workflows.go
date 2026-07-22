@@ -1147,7 +1147,10 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // sent for LLM naming has that cap honored here just as the commit path does.
 // The working tree must be clean and HEAD must be ahead of the resolved remote
 // default before a branch is created; otherwise the push would either leave
-// uncommitted edits behind or publish an empty comparison.
+// uncommitted edits behind or publish an empty comparison. The one exception
+// is a confirmed-unborn remote (freshly created, zero refs): it has no
+// tracking ref to check ahead-ness or diff against at all, so that check is
+// bypassed rather than failing the very first push a new remote will ever see.
 func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
 	if allowDefaultBranch || dryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
@@ -1176,20 +1179,36 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// commit that is not already on the remote default branch. A clean,
 	// up-to-date default branch would otherwise publish a feature branch at the
 	// exact default tip. If the ahead count cannot be determined (for example
-	// the remote-tracking ref was never fetched), fail rather than guess.
+	// the remote-tracking ref was never fetched), fail rather than guess -
+	// unless the remote is confirmed unborn (freshly created, zero refs): it
+	// then has no <remote>/<currentBranch> tracking ref for commitsAhead to
+	// exist against, which is proof there is nothing published yet rather than
+	// an unknown state, and every commit on HEAD is new relative to it.
 	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
+	unbornRemote := false
 	if aheadErr != nil {
-		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, aheadErr)
-	}
-	if ahead == 0 {
+		var unbornErr error
+		unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
+		if unbornErr != nil || !unbornRemote {
+			return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, aheadErr)
+		}
+	} else if ahead == 0 {
 		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
 	}
 
 	// Name the branch (and, with --auto, send the provider) from what HEAD is
 	// actually ahead of the resolved remote branch by, using the same ref
 	// commitsAhead just checked. A working-tree snapshot can describe edits a
-	// commit-only push will never include.
-	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: remote + "/" + currentBranch, MaxDiffBytes: maxDiffBytes})
+	// commit-only push will never include. A confirmed-unborn remote has no
+	// such ref to diff against either, so leave BaseRef empty: Inspect falls
+	// back to the (already known clean) working-tree snapshot, summary.Files
+	// comes back empty, and the headCommitSubject fallback below names the
+	// branch instead.
+	baseRef := remote + "/" + currentBranch
+	if unbornRemote {
+		baseRef = ""
+	}
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
 	}
