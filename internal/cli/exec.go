@@ -78,11 +78,18 @@ type execOptions struct {
 	// fill-only-if-unset rule, so precedence is explicit flag > mode > profile.
 	// Distinct from the mode preset also named "fast" (which picks a model) and
 	// from the legacy inert --profile above. See internal/execprofile.
-	execProfile           string
-	reasoningEffort       string
-	useSpec               bool
-	specModel             string
-	specReasoningEffort   string
+	execProfile         string
+	reasoningEffort     string
+	useSpec             bool
+	specModel           string
+	specReasoningEffort string
+	// plan selects PermissionModePlan for this run: the same read-only,
+	// in-session planning mode the TUI enters with /plan on. Unlike --use-spec
+	// (a separate draft session with its own review flow), this only swaps the
+	// permission mode for the run already being made — ToolAdvertised gates
+	// write/shell tools generically for any mode, so no other exec plumbing
+	// needs to know about it.
+	plan                  bool
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat
@@ -239,6 +246,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
+	}
+	if options.plan {
+		permissionMode = agent.PermissionModePlan
 	}
 	var mcpRuntime mcpToolRuntime
 	var mcpSkip trustSkip

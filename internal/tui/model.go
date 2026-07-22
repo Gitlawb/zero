@@ -131,8 +131,12 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
-	selfCorrectTests            bool
-	reasoningEffort             modelregistry.ReasoningEffort
+	// permissionModeBeforePlan holds whatever mode was active when /plan on
+	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
+	// the execProfile displaced/applied pattern below).
+	permissionModeBeforePlan agent.PermissionMode
+	selfCorrectTests         bool
+	reasoningEffort          modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -4361,7 +4365,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		text := ""
+		m, text = m.handlePlanCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)

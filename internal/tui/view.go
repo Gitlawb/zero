@@ -306,12 +306,18 @@ func providerDisplayNameIsGenericCustom(name string) bool {
 // on it would let prompt-required tools run with no decision. Unsafe stays an
 // explicit opt-in (the launch/--skip-permissions-unsafe path), not a UI toggle.
 // Unsafe is folded back to Ask so the toggle always lands somewhere safe.
+// Plan is left untouched: folding it to Ask would be a LESS strict landing
+// (Ask allows write/shell tools with a prompt; Plan hides them entirely), so
+// the read-only guarantee must only be given up through the explicit /plan
+// off exit, never a stray shift+tab.
 func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 	switch mode {
 	case agent.PermissionModeAuto:
 		return agent.PermissionModeAsk
 	case agent.PermissionModeAsk:
 		return agent.PermissionModeAuto
+	case agent.PermissionModePlan:
+		return agent.PermissionModePlan
 	default:
 		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
 		// landing, so toggling never makes an Unsafe session less strict.
@@ -327,6 +333,8 @@ func (m model) modeLabel() (string, lipgloss.Style) {
 		return "ask", zeroTheme.modeAsk
 	case agent.PermissionModeUnsafe:
 		return "unsafe", zeroTheme.modeUnsafe
+	case agent.PermissionModePlan:
+		return "plan", zeroTheme.modePlan
 	default:
 		mode := strings.TrimSpace(string(m.permissionMode))
 		if mode == "" {

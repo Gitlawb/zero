@@ -79,6 +79,7 @@ type tuiTheme struct {
 	modeAuto   lipgloss.Style
 	modeAsk    lipgloss.Style
 	modeUnsafe lipgloss.Style
+	modePlan   lipgloss.Style
 
 	// Raw colors a few renderers paint/interpolate with directly (the streaming
 	// fade interpolates accent→ink; panel-backed prompts paint on bgPanel), kept
@@ -192,6 +193,7 @@ func buildTheme(p palette) tuiTheme {
 		// tool is actually asking right now — a glance separates state from event.
 		modeAsk:    fg(p.amber),
 		modeUnsafe: fg(p.red).Bold(true),
+		modePlan:   fg(p.blue).Bold(true),
 
 		accentColor: col(p.accent),
 		inkColor:    col(p.ink),

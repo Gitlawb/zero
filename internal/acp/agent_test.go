@@ -393,6 +393,11 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if got := configured.ConfigOptions[1].CurrentValue; got != string(agent.PermissionModeAuto) {
 		t.Fatalf("configured mode = %q", got)
 	}
+	// Plan is accepted: it only narrows capability (read-only), so unlike Unsafe
+	// there is no elevation risk in letting a client select it.
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModePlan)}, &SetSessionModeResult{}); err != nil {
+		t.Fatalf("set_mode plan: %v", err)
+	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")
@@ -400,6 +405,37 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	// An unknown mode must be rejected.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected error for unknown mode")
+	}
+}
+
+// TestACPPlanModeWiresPermissionModeIntoAgentOptions confirms selecting "plan"
+// over ACP actually reaches agent.Options.PermissionMode for the next turn —
+// the same gap this test's TUI counterpart covers for /plan on.
+func TestACPPlanModeWiresPermissionModeIntoAgentOptions(t *testing.T) {
+	deps := testDeps(t)
+	var captured agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		captured = opts
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModePlan)}, &SetSessionModeResult{}); err != nil {
+		t.Fatalf("set_mode plan: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: newRes.SessionID, Prompt: []ContentBlock{TextBlock("plan it out")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.PermissionMode != agent.PermissionModePlan {
+		t.Fatalf("agent.Options.PermissionMode = %q, want plan", captured.PermissionMode)
 	}
 }
 

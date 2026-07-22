@@ -1358,6 +1358,7 @@ Flags:
       --spec-model <model>           Override the draft model when --use-spec is set
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
+      --plan                         Read-only planning mode: write and shell tools are hidden
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);
