@@ -103,8 +103,11 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    `moonshot` provider already uses `kimi` as an alias for its separate,
    API-key-based endpoint, so `zero auth kimi` is CLI sugar that forwards to
    `kimi-code` rather than reusing that name. Like xAI, the preset ships the
-   public kimi-cli client identity (`17e5f671-d194-4dfb-9706-5516cb48c098`) and
-   is opt-in via `ZERO_OAUTH_ALLOW_PRESETS=1`; any field is overridable with
+   public kimi-cli client identity (`17e5f671-d194-4dfb-9706-5516cb48c098`).
+   Unlike the raw `ZERO_OAUTH_XAI_*`-only path, no `ZERO_OAUTH_ALLOW_PRESETS=1`
+   is needed for Kimi: both `zero auth kimi` and `zero auth login kimi-code`
+   run through the `auth login` engine, which enables presets unconditionally.
+   Any field is still overridable with
    `ZERO_OAUTH_KIMI_CODE_*`. Kimi's backend also requires a handful of
    vendor-identity `X-Msh-*` headers across all applicable OAuth and API calls
    (device authorization, polling, code exchange, refresh, and managed
