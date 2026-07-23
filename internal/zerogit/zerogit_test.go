@@ -1255,6 +1255,28 @@ func TestIsDefaultBranchAllowsFirstPushToUnbornRemote(t *testing.T) {
 	}
 }
 
+func TestIsDefaultBranchClassifiesConventionalDefaultOnUnbornRemote(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "\n"}, // ls-remote --symref: remote answered, zero refs
+		{Stdout: "\n"}, // ls-remote --heads: confirms no branches at all
+	}}
+
+	isDefault, _, _, err := IsDefaultBranch(context.Background(), DefaultBranchOptions{
+		Cwd:    root,
+		Branch: "main",
+		Remote: "origin",
+		RunGit: runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("IsDefaultBranch on an unborn remote: %v", err)
+	}
+	if !isDefault {
+		t.Fatal("conventional main branch on an unborn remote should be reported as default")
+	}
+}
+
 func TestIsDefaultBranchFailsClosedOnDanglingRemoteHead(t *testing.T) {
 	// A non-empty remote whose HEAD symref is dangling or missing produces
 	// the exact same empty `ls-remote --symref` output as a genuinely unborn
