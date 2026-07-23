@@ -434,6 +434,15 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
 		}
 	}
+	// atomic-chat-local serves whichever model the user loaded into the Atomic
+	// Chat desktop app, so its catalog DefaultModel ("local-model") is only a
+	// placeholder. Persisting it makes the first completion fail with an
+	// unknown-model error, so require an explicit --model (surfaced by
+	// `zero providers detect`). Scoped to this provider so other local runtimes
+	// keep their existing behavior.
+	if descriptor.ID == "atomic-chat-local" && strings.TrimSpace(options.model) == "" {
+		return config.ProviderProfile{}, fmt.Errorf("provider %q serves a locally loaded model; pass --model <id> (run `zero providers detect` to see the served model)", descriptor.ID)
+	}
 	profile := config.ProviderProfile{
 		Name:            name,
 		ProviderKind:    providerKindForDescriptor(descriptor),

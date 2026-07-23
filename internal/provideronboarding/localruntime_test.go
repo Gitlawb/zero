@@ -135,6 +135,24 @@ func TestSetupActionOmitsModelWhenProbeFoundNone(t *testing.T) {
 	}
 }
 
+// jatmn's P1: the pinned model id comes from an untrusted /v1/models response,
+// so the adopt command must render it shell-safely. A command-substitution id
+// must be single-quoted, never left inside double quotes where it still runs.
+func TestSetupActionQuotesShellMetacharactersInProbedModel(t *testing.T) {
+	runtime := DetectedLocalRuntime{
+		LocalRuntime: LocalRuntime{CatalogID: "atomic-chat-local", Name: "Atomic Chat Local", BaseURL: "http://127.0.0.1:1337/v1", DefaultModel: "local-model"},
+		Reachable:    true,
+		Models:       []string{"$(touch pwned)"},
+	}
+	command := runtime.SetupAction().Command
+	if strings.Contains(command, `"$(touch pwned)"`) {
+		t.Fatalf("model rendered inside double quotes still executes on paste: %q", command)
+	}
+	if !strings.Contains(command, `'$(touch pwned)'`) {
+		t.Fatalf("model must be single-quoted so the shell cannot expand it, got %q", command)
+	}
+}
+
 // A server that advertises the catalog default alongside other ids keeps the
 // default, so an existing Ollama setup does not silently switch models.
 func TestAdoptModelPrefersCatalogDefaultWhenServed(t *testing.T) {
