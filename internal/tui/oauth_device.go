@@ -59,7 +59,13 @@ func oauthDevicePrepare(name string) (oauth.DeviceAuth, oauth.Config, error) {
 // oauthDeviceComplete polls for the token authorized via oauthDevicePrepare and
 // stores it under provider:<name> (phase 2). The runtime resolver then attaches
 // the refreshable token to model calls.
-func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) error {
+//
+// parent must be cancelable by the caller (not context.Background()): the poll
+// can run for up to 10 minutes waiting on the user to finish authorizing in
+// their browser, and if the caller has since abandoned the flow (e.g. Esc in
+// the TUI), canceling parent is the only way to stop this from silently
+// completing and persisting a credential the user believed they'd canceled.
+func oauthDeviceComplete(parent context.Context, name string, cfg oauth.Config, auth oauth.DeviceAuth) error {
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -72,7 +78,7 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) e
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 	_, err = manager.CompleteDeviceLogin(ctx, name, cfg, auth)
 	return err

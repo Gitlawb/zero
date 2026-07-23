@@ -1088,11 +1088,12 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 			merged[key] = value
 		}
 		profile.CustomHeaders = merged
-	} else if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") && !canonicalCatalogEndpoint {
-		// AIMLAPI attribution is owned by the catalog endpoint. A profile can retain
-		// those generated headers after its base URL is edited; strip their names
-		// before sending requests to an arbitrary staging/proxy host while preserving
-		// unrelated headers explicitly supplied by the user.
+	} else if len(descriptor.CustomHeaders) > 0 && !canonicalCatalogEndpoint {
+		// Catalog-owned headers (AIMLAPI attribution, Kimi's X-Msh-* device
+		// identity, etc.) are only valid against the catalog endpoint. A profile
+		// can retain those generated headers after its base URL is edited; strip
+		// their names before sending requests to an arbitrary staging/proxy host
+		// while preserving unrelated headers explicitly supplied by the user.
 		for profileKey := range profile.CustomHeaders {
 			for catalogKey := range descriptor.CustomHeaders {
 				if strings.EqualFold(profileKey, catalogKey) {

@@ -1,8 +1,11 @@
 package oauth
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 func TestScopesOrPresetReturnsACopy(t *testing.T) {
@@ -176,6 +179,62 @@ func TestResolveConfigHuggingFaceWithEnvClientID(t *testing.T) {
 	}
 	if len(cfg.Scopes) != 2 || cfg.Scopes[0] != "openid" || cfg.Scopes[1] != "inference-api" {
 		t.Fatalf("env should override scopes, got %v", cfg.Scopes)
+	}
+}
+
+// Kimi Code ships a baked-in client_id (the public kimi-cli identity) AND a
+// device-code endpoint, so the preset resolves without env. The flow is device
+// only (RFC 8628): no loopback/authorize endpoint, no issuer discovery. The
+// preset key is "kimi-code", not "kimi": moonshot already aliases "kimi" to
+// itself (see TestKimiAliasStillResolvesToMoonshot in the providercatalog
+// package's catalog_test.go), so reusing it here would steal that alias from
+// existing moonshot profiles.
+func TestResolveConfigKimiCodePreset(t *testing.T) {
+	tempDir := t.TempDir()
+	cleanup := kimiidentity.SetDeviceIDPathForTest(filepath.Join(tempDir, "kimi-device-id"))
+	t.Cleanup(cleanup)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	t.Setenv("APPDATA", tempDir)
+	r := NewRegistry()
+	cfg, flow, err := r.ResolveConfig("kimi-code", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
+	if err != nil {
+		t.Fatalf("ResolveConfig(kimi-code): %v", err)
+	}
+	if cfg.ClientID != "17e5f671-d194-4dfb-9706-5516cb48c098" {
+		t.Fatalf("client_id = %q", cfg.ClientID)
+	}
+	if cfg.DeviceAuthorizationEndpoint != "https://auth.kimi.com/api/oauth/device_authorization" {
+		t.Fatalf("device endpoint = %q", cfg.DeviceAuthorizationEndpoint)
+	}
+	if cfg.TokenEndpoint != "https://auth.kimi.com/api/oauth/token" {
+		t.Fatalf("token = %q", cfg.TokenEndpoint)
+	}
+	if cfg.AuthorizationEndpoint != "" {
+		t.Fatalf("authorize endpoint = %q, want empty (Kimi has no loopback flow)", cfg.AuthorizationEndpoint)
+	}
+	if flow != FlowDevice {
+		t.Fatalf("flow = %q, want device (RFC 8628 only)", flow)
+	}
+	if len(cfg.Scopes) == 0 {
+		t.Fatal("preset scopes should be populated")
+	}
+	for _, header := range []string{"X-Msh-Platform", "X-Msh-Version", "X-Msh-Device-Name", "X-Msh-Device-Model", "X-Msh-Os-Version", "X-Msh-Device-Id"} {
+		if cfg.ExtraHeaders[header] == "" {
+			t.Fatalf("ExtraHeaders[%q] = %q, want a non-empty vendor-identity header (Kimi's backend rejects requests missing these)", header, cfg.ExtraHeaders[header])
+		}
+	}
+}
+
+// A provider with no ExtraHeaders requirement (e.g. xAI) must not pick up
+// Kimi's headers or any other provider's.
+func TestResolveConfigWithoutExtraHeadersRequirement(t *testing.T) {
+	r := NewRegistry()
+	cfg, _, err := r.ResolveConfig("xai", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
+	if err != nil {
+		t.Fatalf("ResolveConfig(xai): %v", err)
+	}
+	if len(cfg.ExtraHeaders) != 0 {
+		t.Fatalf("ExtraHeaders = %#v, want none for a provider with no header requirement", cfg.ExtraHeaders)
 	}
 }
 

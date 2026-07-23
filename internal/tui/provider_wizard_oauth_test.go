@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -106,6 +109,72 @@ func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
 	}
 }
 
+// TestProviderWizardEnterStartsDeviceFlowForDeviceOnlyProvider pins the fix
+// for a device-only provider (Kimi Code has no loopback/authorize endpoint at
+// all): the generic Enter path assumes a browser flow exists and would
+// otherwise hang or error, so Enter must behave exactly like the "d" shortcut
+// for a provider with OAuthDeviceOnly set.
+func TestProviderWizardEnterStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	// oauthPreferDeviceFlow() already defaults to device flow on a headless
+	// box (no DISPLAY/WAYLAND_DISPLAY, an SSH session, or ZERO_OAUTH_DEVICE
+	// set) — exactly the environment this test suite runs in — which would
+	// mask the bug this test exists to catch. Force a "normal desktop with a
+	// browser available" environment so Enter actually exercises the
+	// otherwise-loopback-preferring path.
+	t.Setenv("ZERO_OAUTH_DEVICE", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "kimi-code")
+	if !m.providerWizard.currentProvider().OAuthDeviceOnly {
+		t.Fatal("test fixture assumes kimi-code is OAuthDeviceOnly")
+	}
+
+	out, cmd := m.handleProviderWizardKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
+		t.Fatalf("Enter on a device-only provider should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on a device-only provider should return the device-prepare command")
+	}
+}
+
+// TestProviderWizardMouseAdvanceStartsDeviceFlowForDeviceOnlyProvider covers
+// double-click activation: mouse.go routes to advanceProviderWizard, which
+// bypasses the keyboard handler's OAuthDeviceOnly check. On a desktop (where
+// oauthPreferDeviceFlow is false), advance must still start device login for
+// a device-only provider so the verification URL/user code are not discarded.
+func TestProviderWizardMouseAdvanceStartsDeviceFlowForDeviceOnlyProvider(t *testing.T) {
+	t.Setenv("ZERO_OAUTH_DEVICE", "")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "kimi-code")
+	if !m.providerWizard.currentProvider().OAuthDeviceOnly {
+		t.Fatal("test fixture assumes kimi-code is OAuthDeviceOnly")
+	}
+
+	out, cmd := m.advanceProviderWizard()
+	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
+		t.Fatalf("mouse advance on a device-only provider should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("mouse advance on a device-only provider should return the device-prepare command")
+	}
+}
+
 func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
@@ -126,6 +195,98 @@ func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
 	view := strings.Join(out.providerWizard.renderOAuthWaiting(72), "\n")
 	if !strings.Contains(view, "ABCD-1234") || !strings.Contains(view, "x.ai/device") {
 		t.Fatalf("waiting render missing device code/uri:\n%s", view)
+	}
+}
+
+// TestProviderWizardEscCancelsDeviceLoginPoll regression-tests a bug where
+// abandoning the wizard with Esc during a device-code poll (phase 2) never
+// canceled the background context the poll command runs on. The wizard
+// message was made stale so the UI wouldn't show a stray login, but the
+// underlying poll kept running for up to 10 minutes: if the user then
+// finished authorizing in their browser, it would still silently succeed and
+// save a credential the user believed they had backed out of. Esc must
+// actually cancel the context, not just discard the eventual result.
+func TestProviderWizardEscCancelsDeviceLoginPoll(t *testing.T) {
+	// Isolate the oauth token store the poll command touches (see
+	// managerTestModel), even though the canceled-context path exercised here
+	// returns before any read/write reaches it.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard()
+	m = selectWizardOAuthProvider(t, next, "xai")
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: providerID, attemptID: attemptID, userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
+	})
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	if out.providerWizard.deviceLoginCancel == nil {
+		t.Fatal("starting the poll should store a cancel func on the wizard")
+	}
+
+	escaped, _ := out.handleProviderWizardKey(testKey(tea.KeyEsc))
+	if escaped.providerWizard != nil {
+		t.Fatal("Esc while oauthPending should close the wizard")
+	}
+
+	// The poll command captured the context created for this attempt; run it
+	// now (after Esc) and confirm CompleteDeviceLogin actually observed
+	// cancellation instead of running to completion in the background.
+	msg, ok := cmd().(providerWizardOAuthMsg)
+	if !ok {
+		t.Fatalf("poll command returned %T, want providerWizardOAuthMsg", msg)
+	}
+	if !errors.Is(msg.err, context.Canceled) {
+		t.Fatalf("poll error = %v, want context.Canceled (Esc should have canceled the background poll)", msg.err)
+	}
+}
+
+// TestModelQuitCancelsProviderWizardDeviceLoginPoll regression-tests a bug
+// where model.quit() (the path every Ctrl+C-to-exit and "q"-to-exit
+// eventually reaches) only reset the aimlapi.com sub-flow, never the
+// provider wizard's device-code poll. Since the TUI runs on
+// context.Background(), quitting via Ctrl+C left the poll running in the
+// background: authorizing the abandoned login afterward could still save a
+// credential the user had just quit to avoid.
+func TestModelQuitCancelsProviderWizardDeviceLoginPoll(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(t.TempDir(), "oauth-tokens.json"))
+
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard()
+	m = selectWizardOAuthProvider(t, next, "xai")
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: providerID, attemptID: attemptID, userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
+	})
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	if out.providerWizard.deviceLoginCancel == nil {
+		t.Fatal("starting the poll should store a cancel func on the wizard")
+	}
+
+	quit, _ := out.quit()
+	quitModel := quit.(model)
+	if quitModel.providerWizard != nil && quitModel.providerWizard.deviceLoginCancel != nil {
+		t.Fatal("quit should cancel the in-flight device-code poll")
+	}
+
+	msg, ok := cmd().(providerWizardOAuthMsg)
+	if !ok {
+		t.Fatalf("poll command returned %T, want providerWizardOAuthMsg", msg)
+	}
+	if !errors.Is(msg.err, context.Canceled) {
+		t.Fatalf("poll error = %v, want context.Canceled (quit should have canceled the background poll)", msg.err)
 	}
 }
 
@@ -447,5 +608,35 @@ func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
 	// Unknown catalog id: no-op.
 	if got := appendOAuthLoginProfile(nil, "no-such-provider"); got != nil {
 		t.Fatalf("unknown provider must not append, got %+v", got)
+	}
+}
+
+// TestProviderWizardProfileAppliesKimiRuntimeHeaders regression-tests a bug
+// where the /provider wizard built its profile straight from the descriptor
+// OAuthProviders() returns. That listing call deliberately omits
+// RuntimeHeaders-backed CustomHeaders (Kimi's X-Msh-* vendor-identity
+// headers) so merely browsing providers doesn't mint Kimi's on-disk device
+// id — but that meant the wizard's first authenticated /models call and the
+// profile it activated immediately after finishing were missing those
+// headers until zero was restarted. providerWizardProfile must re-resolve
+// through providercatalog.Get (which does run RuntimeHeaders) instead of
+// using the listing descriptor's CustomHeaders directly.
+func TestProviderWizardProfileAppliesKimiRuntimeHeaders(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "kimi-code")
+	provider := m.providerWizard.currentProvider()
+	if len(provider.CustomHeaders) != 0 {
+		t.Fatalf("test fixture assumes the OAuth listing omits runtime headers, got %#v", provider.CustomHeaders)
+	}
+
+	profile := providerWizardProfile(provider, provider.DefaultModel, "", "", "")
+	if profile.CustomHeaders["X-Msh-Platform"] != "kimi_code_cli" {
+		t.Fatalf("providerWizardProfile CustomHeaders[X-Msh-Platform] = %q, want kimi_code_cli", profile.CustomHeaders["X-Msh-Platform"])
+	}
+	if profile.CustomHeaders["X-Msh-Device-Id"] == "" {
+		t.Fatal("providerWizardProfile should carry Kimi's device id header")
 	}
 }

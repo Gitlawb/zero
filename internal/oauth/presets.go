@@ -3,6 +3,8 @@ package oauth
 import (
 	"os"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 // envWithPresetsAllowed returns an env map that opts into the baked-in presets
@@ -99,6 +101,26 @@ var builtinOAuthPresets = map[string]providerPreset{
 		Scopes:                []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
 		Flow:                  FlowLoopback,
 	},
+	// Kimi Code uses the same public OAuth client identity the open-source
+	// kimi-cli ships (github.com/MoonshotAI/kimi-cli,
+	// src/kimi_cli/auth/oauth.py). The flow is device-code only (RFC 8628)
+	// against auth.kimi.com — there is no loopback/authorize path — and the
+	// resulting access token is accepted directly as a bearer on the managed
+	// coding endpoint https://api.kimi.com/coding/v1 (an OpenAI-compatible
+	// endpoint). No ID-token claim extraction is needed; the bearer is the
+	// whole credential. The preset (and catalog descriptor) key is
+	// "kimi-code", not "kimi": the existing `moonshot` entry already aliases
+	// "kimi" to itself (its API-key path at api.moonshot.ai), and Get()
+	// matches an exact descriptor ID before it ever reaches another
+	// descriptor's aliases, so reusing "kimi" here would silently steal that
+	// alias out from under existing moonshot profiles.
+	"kimi-code": {
+		ClientID:                    "17e5f671-d194-4dfb-9706-5516cb48c098",
+		DeviceAuthorizationEndpoint: "https://auth.kimi.com/api/oauth/device_authorization",
+		TokenEndpoint:               "https://auth.kimi.com/api/oauth/token",
+		Scopes:                      []string{"openid", "profile", "email", "offline_access"},
+		Flow:                        FlowDevice,
+	},
 }
 
 // lookupOAuthPreset returns the baked-in preset for a provider name (if any).
@@ -127,4 +149,29 @@ func scopesOrPreset(envScopes string, preset []string) []string {
 	}
 	// Copy so a caller appending to cfg.Scopes can't mutate the shared preset slice.
 	return append([]string(nil), preset...)
+}
+
+// providerExtraHeaders returns the Config.ExtraHeaders a provider's OAuth
+// requests need beyond the generic RFC 8628/OAuth2 form bodies this package
+// builds. This is a protocol requirement of the provider's OWN backend
+// (not tied to whether its preset client_id or an operator-supplied one is in
+// use), so unlike the presets above it applies regardless of
+// ZERO_OAUTH_ALLOW_PRESETS.
+func providerExtraHeaders(name string) map[string]string {
+	if strings.ToLower(strings.TrimSpace(name)) == "kimi-code" {
+		return kimiExtraHeaders()
+	}
+	return nil
+}
+
+// kimiExtraHeaders returns the X-Msh-* vendor-identity headers Kimi Code's
+// OAuth/API backend requires on every device-authorization, poll, and refresh
+// request — reported to reject all of them with 401 otherwise. They come from
+// the shared kimiidentity package so login/refresh and the catalog's
+// managed-endpoint completions (kimi-code CustomHeaders) present the SAME
+// persistent device identity; values are reverse-engineered from the
+// open-source kimi-cli client, not from published documentation, and should
+// be confirmed against a real login before this ships.
+func kimiExtraHeaders() map[string]string {
+	return kimiidentity.Headers()
 }

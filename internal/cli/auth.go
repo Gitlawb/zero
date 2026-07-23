@@ -78,6 +78,18 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return runAuthOpenRouter(args[1:], stdout, stderr, deps)
 	case "chatgpt":
 		return runAuthChatGPT(args[1:], stdout, stderr, deps)
+	case "kimi":
+		// Kimi Code is a standard device-code OAuth preset (no bespoke client
+		// like ChatGPT's Codex flow), so it reuses the generic `auth login`
+		// engine — which already opts into presets and resolves the baked-in
+		// kimi-code client_id/endpoints. `zero auth kimi` is sugar for
+		// `zero auth login kimi-code`, forwarding whatever flags the caller
+		// passed after "kimi" (--device, --scope, --help) through the real
+		// parser instead of discarding them: `zero auth kimi --help` must show
+		// help, not silently start a real device authorization, and an unknown
+		// flag or extra positional must be rejected the same way `zero auth
+		// login` rejects one.
+		return runAuthLogin(append([]string{"kimi-code"}, args[1:]...), stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown auth subcommand %q", args[0]))
 	}
@@ -591,12 +603,15 @@ Commands:
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
   chatgpt                                         Log in to ChatGPT in the browser (Codex backend, ChatGPT Plus/Pro)
+  kimi                                            Log in to Kimi Code via device code (managed coding endpoint)
 
 A provider is any OAuth 2.0 / OIDC server. "openrouter" ('zero auth openrouter')
-works out of the box. "xai" ('zero auth login xai') uses a built-in preset that is
-off by default — enable it with ZERO_OAUTH_ALLOW_PRESETS=1, or set the
-ZERO_OAUTH_XAI_* vars yourself. "chatgpt" ('zero auth login chatgpt' or
-'zero auth chatgpt') uses a fixed-port loopback flow against the Codex backend.
+and "kimi-code" ('zero auth login kimi-code' or 'zero auth kimi') work out of the
+box. "xai" ('zero auth login xai') uses a built-in preset that is off by
+default — enable it with ZERO_OAUTH_ALLOW_PRESETS=1, or set the
+ZERO_OAUTH_XAI_* vars yourself. "chatgpt" ('zero auth
+login chatgpt' or 'zero auth chatgpt') uses a fixed-port loopback flow against
+the Codex backend.
 Any preset field is overridable via the env vars below. For a custom provider named <name>, set:
   ZERO_OAUTH_<NAME>_CLIENT_ID       (required)
   ZERO_OAUTH_<NAME>_CLIENT_SECRET   (optional)

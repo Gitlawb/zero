@@ -2,9 +2,12 @@ package providercatalog
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 var expectedCatalogIDs = []string{
@@ -19,6 +22,7 @@ var expectedCatalogIDs = []string{
 	"openrouter",
 	"huggingface",
 	"chatgpt",
+	"kimi-code",
 	"groq",
 	"deepseek",
 	"together",
@@ -346,7 +350,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "kimi-code", "groq", "deepseek", "together", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
@@ -405,7 +409,7 @@ func TestReturnedDescriptorsAreCopies(t *testing.T) {
 
 func TestOAuthProviderClassification(t *testing.T) {
 	oauthIDs := descriptorIDs(OAuthProviders())
-	if want := []string{"openrouter", "huggingface", "chatgpt", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
+	if want := []string{"openrouter", "huggingface", "chatgpt", "kimi-code", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {
@@ -414,11 +418,81 @@ func TestOAuthProviderClassification(t *testing.T) {
 	if d, _ := Get("xai"); !d.OAuthDeviceFlow {
 		t.Fatal("xai should advertise device-code flow")
 	}
+	if d, _ := Get("kimi-code"); !d.OAuthDeviceFlow || !d.OAuthDeviceOnly {
+		t.Fatal("kimi-code should advertise device-only code flow")
+	}
 	if d, _ := Get("huggingface"); !d.OAuthDeviceFlow {
 		t.Fatal("huggingface should advertise device-code flow")
 	}
 	if d, _ := Get("chatgpt"); d.OAuthDeviceFlow {
 		t.Fatal("chatgpt should NOT advertise device-code flow (loopback only)")
+	}
+}
+
+// TestKimiAliasStillResolvesToMoonshot pins the alias-collision fix: moonshot
+// already exposes "kimi" as an alias for its API-key endpoint. The Kimi Code
+// OAuth descriptor must use a non-conflicting ID ("kimi-code") so resolving
+// "kimi" continues to land on moonshot (endpoint, default model, MOONSHOT_API_KEY).
+func TestKimiAliasStillResolvesToMoonshot(t *testing.T) {
+	d, ok := Get("kimi")
+	if !ok {
+		t.Fatal(`Get("kimi") returned false`)
+	}
+	if d.ID != "moonshot" {
+		t.Fatalf(`Get("kimi").ID = %q, want "moonshot" (kimi-code must not steal this alias)`, d.ID)
+	}
+	if d.DefaultBaseURL != "https://api.moonshot.ai/v1" {
+		t.Fatalf(`Get("kimi").DefaultBaseURL = %q, want moonshot API-key endpoint`, d.DefaultBaseURL)
+	}
+	if len(d.AuthEnvVars) == 0 || d.AuthEnvVars[0] != "MOONSHOT_API_KEY" {
+		t.Fatalf(`Get("kimi").AuthEnvVars = %#v, want MOONSHOT_API_KEY`, d.AuthEnvVars)
+	}
+	if d.OAuth {
+		t.Fatal(`Get("kimi") must not be OAuth (that is kimi-code, not the moonshot alias)`)
+	}
+
+	code, ok := Get("kimi-code")
+	if !ok {
+		t.Fatal(`Get("kimi-code") returned false`)
+	}
+	if code.ID != "kimi-code" {
+		t.Fatalf(`Get("kimi-code").ID = %q`, code.ID)
+	}
+	if code.DefaultBaseURL != "https://api.kimi.com/coding/v1" {
+		t.Fatalf(`Get("kimi-code").DefaultBaseURL = %q, want managed coding endpoint`, code.DefaultBaseURL)
+	}
+	if !code.OAuth || !code.OAuthDeviceOnly {
+		t.Fatalf(`Get("kimi-code") oauth flags wrong: OAuth=%v OAuthDeviceOnly=%v`, code.OAuth, code.OAuthDeviceOnly)
+	}
+}
+
+// TestKimiRuntimeHeadersOnlyOnGet ensures listing providers (All / OAuthProviders)
+// does not populate kimi-code's CustomHeaders (which mints a device-id file),
+// while Get does so resolve-time request building still gets the vendor headers.
+func TestKimiRuntimeHeadersOnlyOnGet(t *testing.T) {
+	tempDir := t.TempDir()
+	cleanup := kimiidentity.SetDeviceIDPathForTest(filepath.Join(tempDir, "kimi-device-id"))
+	t.Cleanup(cleanup)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	t.Setenv("APPDATA", tempDir)
+	for _, d := range All() {
+		if d.ID == "kimi-code" && d.CustomHeaders != nil {
+			t.Fatalf("All() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
+		}
+	}
+	for _, d := range OAuthProviders() {
+		if d.ID == "kimi-code" && d.CustomHeaders != nil {
+			t.Fatalf("OAuthProviders() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
+		}
+	}
+	d, ok := Get("kimi-code")
+	if !ok {
+		t.Fatal(`Get("kimi-code") returned false`)
+	}
+	for _, header := range []string{"X-Msh-Platform", "X-Msh-Version", "X-Msh-Device-Name", "X-Msh-Device-Model", "X-Msh-Os-Version", "X-Msh-Device-Id"} {
+		if d.CustomHeaders[header] == "" {
+			t.Fatalf("Get(kimi-code).CustomHeaders[%q] empty, want vendor-identity header for completions", header)
+		}
 	}
 }
 

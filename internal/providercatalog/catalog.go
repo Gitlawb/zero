@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 type Transport string
@@ -70,6 +72,19 @@ type Descriptor struct {
 	// OAuthDeviceFlow reports that RFC 8628 device-code login is supported (for
 	// headless / SSH use) in addition to the browser flow.
 	OAuthDeviceFlow bool
+	// OAuthDeviceOnly reports that device-code is the ONLY OAuth path this
+	// provider has — there is no browser/loopback authorize endpoint to fall
+	// back to (Kimi Code). Callers that default a plain Enter/click to the
+	// browser flow for OAuthDeviceFlow providers must check this first: for a
+	// device-only provider that generic path has no endpoint to hit at all.
+	OAuthDeviceOnly bool
+
+	// RuntimeHeaders, if set, lazily produces headers (e.g. a vendor's
+	// device-identity headers) to attach to CustomHeaders only when
+	// withRuntimeHeaders is true. Providers that need identity/headers on
+	// runtime requests (not just OAuth) set this instead of hardcoding an ID
+	// check inside cloneDescriptor — keeping the clone helper provider-agnostic.
+	RuntimeHeaders func() map[string]string
 
 	// Recommended marks a provider surfaced at the top and badged in
 	// catalog-ordered lists and pickers. The recommended descriptors are the first
@@ -135,6 +150,38 @@ var descriptors = []Descriptor{
 		d.RequiresAuth = true
 		return oauthProvider(d, false, false)
 	}(),
+	// Kimi Code (managed OAuth) — the bearer from a Kimi Code device-code OAuth
+	// login routes to the managed coding endpoint at https://api.kimi.com/coding/v1
+	// (NOT api.moonshot.ai/v1, which is the API-key path for the `moonshot`
+	// catalog entry). Kimi only supports the RFC 8628 device-code flow against
+	// auth.kimi.com; the access token is accepted directly as a bearer on the
+	// managed endpoint, so no client spoofing is involved. The baked-in preset
+	// ships the public Kimi Code client_id and endpoints (off by default, like
+	// the other presets); env overrides via ZERO_OAUTH_KIMI_CODE_* win.
+	//
+	// Descriptor ID is "kimi-code", not "kimi": the `moonshot` entry below
+	// already aliases "kimi" to itself, and Get() matches an exact descriptor
+	// ID before it reaches another descriptor's aliases, so reusing "kimi"
+	// here would silently steal that alias out from under any existing
+	// moonshot profile (changing its endpoint, default model, and
+	// MOONSHOT_API_KEY auth without the user asking for it).
+	//
+	// Default model is "kimi-for-coding" — the managed endpoint's standard
+	// tier, available to every Kimi Code member. "kimi-for-coding-highspeed"
+	// also exists but requires a higher subscription tier (Allegretto+); a
+	// user who has it can select it explicitly rather than have a fresh
+	// `zero auth kimi-code` default to a model their plan may not include.
+	func() Descriptor {
+		d := openAICompat("kimi-code", "Kimi Code", "https://api.kimi.com/coding/v1", "kimi-for-coding", nil)
+		d.RequiresAuth = true
+		d = oauthProvider(d, false, true)
+		d.OAuthDeviceOnly = true
+		// Kimi's managed endpoint requires stable vendor-identity headers on
+		// every request; lazily mint them (with a persistent device ID) only
+		// when a runtime request actually needs them, not merely on listing.
+		d.RuntimeHeaders = kimiidentity.Headers
+		return d
+	}(),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
@@ -182,7 +229,8 @@ var descriptors = []Descriptor{
 func All() []Descriptor {
 	copied := make([]Descriptor, 0, len(descriptors))
 	for _, descriptor := range descriptors {
-		copied = append(copied, cloneDescriptor(descriptor))
+		// Listing must not mint Kimi's on-disk device identity.
+		copied = append(copied, cloneDescriptor(descriptor, false))
 	}
 	return copied
 }
@@ -199,11 +247,11 @@ func Get(id string) (Descriptor, bool) {
 	normalized := NormalizeID(id)
 	for _, descriptor := range descriptors {
 		if descriptor.ID == normalized {
-			return cloneDescriptor(descriptor), true
+			return cloneDescriptor(descriptor, true), true
 		}
 		for _, alias := range descriptor.Aliases {
 			if NormalizeID(alias) == normalized {
-				return cloneDescriptor(descriptor), true
+				return cloneDescriptor(descriptor, true), true
 			}
 		}
 	}
@@ -224,7 +272,7 @@ func ListByTransport(transport Transport) []Descriptor {
 	items := make([]Descriptor, 0)
 	for _, descriptor := range descriptors {
 		if descriptor.Transport == normalized {
-			items = append(items, cloneDescriptor(descriptor))
+			items = append(items, cloneDescriptor(descriptor, false))
 		}
 	}
 	return items
@@ -344,7 +392,9 @@ func OAuthProviders() []Descriptor {
 	out := []Descriptor{}
 	for _, descriptor := range descriptors {
 		if descriptor.OAuth {
-			out = append(out, cloneDescriptor(descriptor))
+			// Listing only: runtime headers (and the Kimi device-id file they
+			// mint) are applied when Get/Require builds a real profile.
+			out = append(out, cloneDescriptor(descriptor, false))
 		}
 	}
 	return out
@@ -399,12 +449,22 @@ func transportDescriptor(id string, name string, transport Transport, baseURL st
 	}
 }
 
-func cloneDescriptor(descriptor Descriptor) Descriptor {
+// cloneDescriptor returns an independent copy of descriptor. When
+// withRuntimeHeaders is true, a descriptor with RuntimeHeaders set (e.g.
+// kimi-code) also receives its vendor identity headers (including a persistent
+// device ID on disk). Listing paths (All, OAuthProviders, ListByTransport)
+// pass false so merely enumerating providers never mints
+// ~/.config/zero/kimi-device-id for users who never touch Kimi; Get/Require
+// pass true so resolve-time profile building and completions still present the
+// same identity the OAuth login used.
+func cloneDescriptor(descriptor Descriptor, withRuntimeHeaders bool) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
+	} else if withRuntimeHeaders && descriptor.RuntimeHeaders != nil {
+		descriptor.CustomHeaders = descriptor.RuntimeHeaders()
 	}
 	return descriptor
 }
