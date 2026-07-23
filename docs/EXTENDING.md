@@ -108,10 +108,10 @@ Discovery roots (earlier wins on name collisions):
 2. **Shared multi-agent dir** — `~/.agents/skills/` when present (read-only discovery; never an install target)
 3. **Plugin skill roots** — skills bundled by active plugins (section 6)
 
-A missing directory is fine — Zero just omits it. Management commands (`zero skills add` / `remove` / `lock`) always write to the primary Zero dir only; `list` / `info` search primary + `~/.agents/skills`.
+A missing directory is fine — Zero just omits it. Management commands (`zero skills add` / `remove`) always write to the primary Zero dir only; `list` / `info` search primary + `~/.agents/skills`. `skill info` reports lock source/hash when present and whether the on-disk `SKILL.md` has drifted from the recorded hash.
 
 ```text
-~/.local/share/zero/skills/          # primary (install/remove/lock target)
+~/.local/share/zero/skills/          # primary (install/remove target)
   run-benchmarks/
     SKILL.md
   write-changelog/

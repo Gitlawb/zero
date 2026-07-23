@@ -407,4 +407,18 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	if info.Hash != installed.Hash {
 		t.Fatalf("Info hash = %q, want %q", info.Hash, installed.Hash)
 	}
+	if info.HashDrift {
+		t.Fatal("expected no hash drift immediately after install")
+	}
+
+	if err := os.WriteFile(info.Skill.Path, []byte("---\nname: demo\ndescription: described\n---\nedited body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, ok = Info(destDir, "demo")
+	if !ok {
+		t.Fatal("Info(demo) not found after edit")
+	}
+	if !info.HashDrift {
+		t.Fatal("expected hash drift after SKILL.md edit")
+	}
 }
