@@ -1,7 +1,6 @@
 package provideronboarding
 
 import (
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -188,8 +187,23 @@ func joinCommand(parts []string) string {
 }
 
 func commandArg(value string) string {
+	if shellSafeArg(value) {
+		return value
+	}
+	// Wrap anything else in POSIX single quotes so the shell treats it
+	// literally: no parameter, command ($(...)), or backtick expansion. An
+	// embedded single quote is emitted by closing the quote, escaping it, and
+	// reopening ('\''). strconv.Quote would use double quotes, which still
+	// expand $(...) and backticks, so a model id from an untrusted local
+	// /v1/models response could then execute when the adopt command is pasted.
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// shellSafeArg reports whether value can appear unquoted in a POSIX shell
+// command line. Only characters that never trigger shell processing qualify.
+func shellSafeArg(value string) bool {
 	if value == "" {
-		return strconv.Quote(value)
+		return false
 	}
 	for _, r := range value {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -199,8 +213,8 @@ func commandArg(value string) string {
 		case '-', '_', '.', '/', ':', '@':
 			continue
 		default:
-			return strconv.Quote(value)
+			return false
 		}
 	}
-	return value
+	return true
 }
