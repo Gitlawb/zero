@@ -59,7 +59,7 @@ var completionRoot = completionNode{
 			{names: []string{"delete", "rm"}}, {names: []string{"edit"}}, {names: []string{"path"}},
 		}},
 		{names: []string{"plugins", "plugin"}, children: []completionNode{
-			{names: []string{"list"}}, {names: []string{"add"}}, {names: []string{"remove", "rm"}},
+			{names: []string{"list"}}, {names: []string{"add"}}, {names: []string{"info"}}, {names: []string{"remove", "rm"}},
 		}},
 		{names: []string{"backends", "backend"}, children: leafNodes("doctor")},
 		{names: []string{"skills", "skill"}, children: []completionNode{

@@ -159,6 +159,8 @@ func TestCompletionTreeCoversAliasesNestingAndCommonFlags(t *testing.T) {
 	assertCandidates(t, byPath["mcp oauth"], "login", "logout", "status")
 	assertCandidates(t, byPath["sandbox grants"], "list", "allow", "deny", "revoke", "clear")
 	assertCandidates(t, byPath["completions"], "bash", "zsh", "fish", "powershell", "elvish")
+	assertCandidates(t, byPath["plugins"], "list", "add", "info", "remove", "rm")
+	assertCandidates(t, byPath["plugin"], "list", "add", "info", "remove", "rm")
 }
 
 func assertCandidates(t *testing.T, got []string, wants ...string) {
