@@ -1,0 +1,35 @@
+name: Release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  compute-target:
+    name: Compute release target key
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.k.outputs.key }}
+    steps:
+      - id: k
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "key=prod-${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "key=canary-main" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=pre-${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: compute-target
+    concurrency:
+      group: ${{ github.workflow }}-${{ needs.compute-target.outputs.key }}
+      cancel-in-progress: true
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4

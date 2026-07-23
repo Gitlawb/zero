@@ -17,8 +17,18 @@ import (
 )
 
 type networkClient struct {
-	server    Server
-	client    *http.Client
+	server Server
+	// toolHTTP dispatches every request through http_clients.go's dual
+	// Streaming/Bounded client infrastructure: Bounded (backed by
+	// mcpTransport, 30s ResponseHeaderTimeout) for initialize, tools/list,
+	// and notifications, which are all expected to return headers quickly;
+	// Streaming (backed by mcpToolCallTransport, no ResponseHeaderTimeout)
+	// for tools/call, guarded instead by an idle-read watchdog. Both
+	// underlying clients are already wrapped with this server's OAuth
+	// bearer round tripper and cross-origin redirect guard (see
+	// connectNetwork), which is why they are built here rather than via
+	// http_clients.go's bare NewHTTPClients.
+	toolHTTP  *ToolHTTP
 	mu        sync.Mutex
 	nextID    int
 	sessionID string
@@ -48,14 +58,22 @@ type sseEvent struct {
 }
 
 func connectNetwork(ctx context.Context, server Server) (ToolClient, error) {
-	httpClient, err := oauthHTTPClient(server)
+	httpClient, err := oauthHTTPClient(server, mcpTransport)
 	if err != nil {
 		return nil, err
 	}
+	toolCallClient, err := oauthHTTPClient(server, mcpToolCallTransport)
+	if err != nil {
+		return nil, err
+	}
+	toolHTTP := NewToolHTTP(NewHTTPClientsFromClients(toolCallClient, httpClient, HTTPClientConfig{
+		StreamIdleTimeout:  toolCallIdleTimeout,
+		DefaultExecTimeout: mcpResponseHeaderTimeout,
+	}))
 	client := &networkClient{
-		server: server,
-		client: httpClient,
-		nextID: 1,
+		server:   server,
+		toolHTTP: toolHTTP,
+		nextID:   1,
 	}
 	if err := client.initialize(ctx); err != nil {
 		return nil, fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
@@ -64,13 +82,17 @@ func connectNetwork(ctx context.Context, server Server) (ToolClient, error) {
 }
 
 func connectRemoteSSE(ctx context.Context, server Server) (ToolClient, error) {
-	httpClient, err := oauthHTTPClient(server)
+	httpClient, err := oauthHTTPClient(server, mcpTransport)
 	if err != nil {
 		return nil, err
 	}
+	// Shallow-copy the shared client to inherit its transport configuration
+	// while stripping the end-to-end timeout for persistent SSE streaming.
+	sseClient := *httpClient
+	sseClient.Timeout = 0
 	client := &remoteSSEClient{
 		server:  server,
-		client:  httpClient,
+		client:  &sseClient,
 		nextID:  1,
 		pending: map[string]chan ssePendingResponse{},
 	}
@@ -324,18 +346,53 @@ func (client *remoteSSEClient) notify(ctx context.Context, method string, params
 	})
 }
 
+// isToolCallMethod reports whether method is a tools/call request, which is
+// routed through the Streaming client (mcpToolCallTransport, no
+// ResponseHeaderTimeout, idle-watched) instead of the Bounded client. See
+// mcpToolCallTransport's doc comment for why. Named distinctly from
+// http_clients.go's exported ClassifyToolCall -- that function classifies by
+// HTTP request headers and cannot be reused here because MCP sends the same
+// Accept header on every POST regardless of JSON-RPC method (see
+// ClassifyToolCall's doc comment).
+func isToolCallMethod(method string) bool {
+	return method == "tools/call"
+}
+
+// toolCallTypeFor maps a JSON-RPC method name to the ToolCallType consumed by
+// ToolHTTP.Do, so networkClient can reuse http_clients.go's classify/timeout/
+// idle-watchdog engine while classifying by method name instead of request
+// headers.
+func toolCallTypeFor(method string) ToolCallType {
+	if isToolCallMethod(method) {
+		return ToolCallStreaming
+	}
+	return ToolCallFinite
+}
+
+// toolCallIdleTimeout bounds how long a tools/call response body may go
+// without forward read progress before it is aborted. It intentionally does
+// not bound total call duration -- a slow-but-steadily-streaming tool is
+// never cut off -- only a fully stalled connection is. Fed into toolHTTP's
+// HTTPClientConfig.StreamIdleTimeout in connectNetwork.
+const toolCallIdleTimeout = 10 * time.Minute
+
 func (client *networkClient) post(ctx context.Context, message rpcMessage, expectResponse bool) (result rpcMessage, err error) {
 	body, err := json.Marshal(message)
 	if err != nil {
 		return rpcMessage{}, err
 	}
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.server.URL, bytes.NewReader(body))
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("create MCP %s request for %s: %w", client.server.Type, client.server.Name, err)
 	}
 	client.applyHeaders(request)
 
-	response, err := client.client.Do(request)
+	// toolHTTP.Do handles both the finite case (bounded client, context
+	// deadline) and the streaming case (unbounded client, idle-read
+	// watchdog) internally -- see http_clients.go -- so no per-call
+	// context/cancel/watchdog wiring is needed here.
+	response, err := client.toolHTTP.Do(ctx, request, toolCallTypeFor(message.Method), nil)
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("call MCP %s server %s: %w", client.server.Type, client.server.Name, err)
 	}
@@ -388,6 +445,14 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 	}
 }
 
+// sseFinitePostTimeout bounds a single finite POST to the SSE endpoint. The
+// remoteSSEClient's underlying *http.Client carries no timeout of its own
+// because it is shared with openStream's long-lived GET request, which must
+// stay open for the life of the connection. Deriving a bounded context here
+// ensures a stalled POST fails the individual tool call instead of hanging
+// indefinitely on the connection reserved for the open-ended stream.
+const sseFinitePostTimeout = 30 * time.Second
+
 func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (err error) {
 	endpointURL, err := client.currentEndpoint()
 	if err != nil {
@@ -397,7 +462,11 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (er
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+
+	postCtx, cancel := context.WithTimeout(ctx, sseFinitePostTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(postCtx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
 	}
@@ -630,7 +699,7 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 		}
 		// The POST's event stream may carry server-initiated notifications or
 		// requests (which have a method) before the response to our request. Skip
-		// those — the response has no method — and keep scanning. Previously the
+		// those -- the response has no method -- and keep scanning. Previously the
 		// first message event was returned unconditionally, so a leading
 		// notification surfaced to the caller as an id mismatch and failed the call.
 		if candidate.Method != "" {
@@ -877,10 +946,16 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 
 // oauthHTTPClient returns an HTTP client whose transport attaches OAuth bearer
 // tokens and refreshes them on 401 for OAuth-configured servers. Servers that do
-// not declare OAuth use the default transport with the same MCP redirect guard.
-func oauthHTTPClient(server Server) (*http.Client, error) {
+// not declare OAuth use the given transport directly with the same MCP
+// redirect guard. transport selects the connection-boundary policy (see
+// mcpTransport vs mcpToolCallTransport); pass nil to use the default bounded
+// mcpTransport.
+func oauthHTTPClient(server Server, transport http.RoundTripper) (*http.Client, error) {
+	if transport == nil {
+		transport = mcpTransport
+	}
 	if !strings.EqualFold(strings.TrimSpace(server.Auth), ServerAuthOAuth) {
-		return mcpHTTPClient(server, nil), nil
+		return mcpHTTPClient(server, transport), nil
 	}
 	store, err := NewTokenStore(TokenStoreOptions{})
 	if err != nil {
@@ -892,5 +967,5 @@ func oauthHTTPClient(server Server) (*http.Client, error) {
 		httpClient: http.DefaultClient,
 		now:        time.Now,
 	}
-	return mcpHTTPClient(server, newOAuthRoundTripper(http.DefaultTransport, source, server.Name)), nil
+	return mcpHTTPClient(server, newOAuthRoundTripper(transport, source, server.Name)), nil
 }
