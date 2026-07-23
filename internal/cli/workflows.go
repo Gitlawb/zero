@@ -932,6 +932,13 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	targetRemote := firstNonEmptyString(options.remote, remote)
+	if deps.isUnbornRemote != nil {
+		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
+			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
+		}
+	}
+
 	if !options.json {
 		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
 			return exitCrash
@@ -1071,19 +1078,11 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return "", "", false, err
 	}
 	if !isDefault {
-		// A retry after a lost force-with-lease race leaves this generated
-		// branch checked out locally with the push never having landed.
-		// Dropping RequireNewRemoteBranch here (the ordinary "already off the
-		// default branch, nothing to do" case) would let a plain retry
-		// silently fast-forward whatever a concurrent creator published under
-		// the same name in the meantime. A branch with a configured upstream
-		// has already been pushed successfully at least once, so that case is
-		// an ordinary subsequent push, not a collision retry, and does not
-		// need the lease reapplied.
 		requireNewRemoteBranch := false
-		if deps.branchHasUpstream != nil {
+		if deps.branchHasUpstream != nil && deps.isGeneratedBranch != nil {
 			hasUpstream, upstreamErr := deps.branchHasUpstream(ctx, workspaceRoot, currentBranch)
-			requireNewRemoteBranch = upstreamErr != nil || !hasUpstream
+			isGenerated := deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch)
+			requireNewRemoteBranch = isGenerated && (upstreamErr != nil || !hasUpstream)
 		}
 		return currentBranch, remote, requireNewRemoteBranch, nil
 	}
@@ -1184,6 +1183,9 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
+	}
+	if deps.markGeneratedBranch != nil {
+		_ = deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch)
 	}
 	if !jsonMode {
 		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)

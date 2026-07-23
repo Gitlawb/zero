@@ -1559,6 +1559,9 @@ func TestRunChangesPushPreservesLeaseOnRetryAfterCollision(t *testing.T) {
 			// branch has no upstream recorded yet.
 			return false, nil
 		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
 			createBranchCalled = true
 			return zerogit.BranchResult{}, nil

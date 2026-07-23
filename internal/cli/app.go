@@ -97,6 +97,8 @@ type appDeps struct {
 	isUnbornRemote         func(context.Context, string, string) (bool, error)
 	refreshTrackingRef     func(context.Context, string, string, string) error
 	branchHasUpstream      func(context.Context, string, string) (bool, error)
+	markGeneratedBranch    func(context.Context, string, string) error
+	isGeneratedBranch      func(context.Context, string, string) bool
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -222,6 +224,12 @@ func defaultAppDeps() appDeps {
 		},
 		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
 			return zerogit.HasUpstream(ctx, cwd, branch, nil)
+		},
+		markGeneratedBranch: func(ctx context.Context, cwd, branch string) error {
+			return zerogit.MarkGeneratedBranch(ctx, cwd, branch, nil)
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return zerogit.IsGeneratedBranch(ctx, cwd, branch, nil)
 		},
 		runTUI:      tui.Run,
 		runEditor:   openEditor,
@@ -607,6 +615,12 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.branchHasUpstream == nil {
 		deps.branchHasUpstream = defaults.branchHasUpstream
+	}
+	if deps.markGeneratedBranch == nil {
+		deps.markGeneratedBranch = defaults.markGeneratedBranch
+	}
+	if deps.isGeneratedBranch == nil {
+		deps.isGeneratedBranch = defaults.isGeneratedBranch
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
