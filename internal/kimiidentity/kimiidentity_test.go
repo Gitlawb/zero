@@ -247,6 +247,43 @@ func TestLoadOrCreateDeviceIDConcurrentAbandonedFileRepairConverges(t *testing.T
 	}
 }
 
+func TestLoadOrCreateDeviceIDRepairsStaleRepairLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero", "kimi-device-id")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close() // abandoned target file
+
+	lockPath := path + ".lock"
+	lockF, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lockF.Close() // abandoned lock file
+	// Backdate lock file mtime to make it stale (> 1s)
+	oldTime := time.Now().Add(-5 * time.Second)
+	if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got := loadOrCreateDeviceIDAt(path)
+	if !isUUID(got) {
+		t.Fatalf("repaired id %q is not a UUID", got)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired file: %v", err)
+	}
+	if persisted := strings.TrimSpace(string(raw)); persisted != got {
+		t.Fatalf("persisted %q, want repaired %q", persisted, got)
+	}
+}
+
 func TestAsciiHeaderValueStripsNonPrintable(t *testing.T) {
 	if got := asciiHeaderValue("linux#6.1"); got != "linux#6.1" {
 		// printable ASCII including # is kept; the kimi-cli bug was a different

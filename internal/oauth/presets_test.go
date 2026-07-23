@@ -187,6 +187,7 @@ func TestResolveConfigHuggingFaceWithEnvClientID(t *testing.T) {
 // package's catalog_test.go), so reusing it here would steal that alias from
 // existing moonshot profiles.
 func TestResolveConfigKimiCodePreset(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	r := NewRegistry()
 	cfg, flow, err := r.ResolveConfig("kimi-code", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
 	if err != nil {

@@ -135,7 +135,17 @@ func repairAbandonedDeviceID(path, id string) string {
 		if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
 			return existingID
 		}
-		return id
+		// If lockPath exists but is stale (owner crashed), break lock and retry once.
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 1*time.Second {
+			_ = os.Remove(lockPath)
+			lock, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		}
+		if err != nil {
+			if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
+				return existingID
+			}
+			return id
+		}
 	}
 	defer func() {
 		_ = lock.Close()

@@ -467,6 +467,7 @@ func TestKimiAliasStillResolvesToMoonshot(t *testing.T) {
 // does not populate kimi-code's CustomHeaders (which mints a device-id file),
 // while Get does so resolve-time request building still gets the vendor headers.
 func TestKimiRuntimeHeadersOnlyOnGet(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, d := range All() {
 		if d.ID == "kimi-code" && d.CustomHeaders != nil {
 			t.Fatalf("All() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
