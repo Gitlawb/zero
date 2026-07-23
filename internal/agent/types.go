@@ -26,6 +26,12 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModePlan is an interactive, read-only planning mode toggled from
+	// the TUI with /plan. It applies to the CURRENT session (unlike spec-draft,
+	// which drafts in a separate session): the agent may inspect the workspace
+	// and shape the plan with update_plan/ask_user, but no mutating tool is
+	// advertised, so it cannot write files, run shell, or implement while planning.
+	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at
@@ -425,13 +431,6 @@ type Result struct {
 	// marked Incomplete (e.g. "pending plan items remain"). Empty when Incomplete
 	// is false. Surfaced in logs / run_end so an abandoned run is debuggable.
 	IncompleteReason string
-}
-
-// Truncated reports whether the final response ended abnormally (cut off at the
-// output token cap or withheld by a content filter) rather than completing
-// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
-func (result Result) Truncated() bool {
-	return result.FinishReason != ""
 }
 
 // TruncationNotice returns a user-facing warning when the final response was

@@ -24,6 +24,7 @@ import (
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/planmode"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
@@ -131,8 +132,14 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
-	selfCorrectTests            bool
-	reasoningEffort             modelregistry.ReasoningEffort
+	// permissionModeBeforePlan is the mode active before /plan entered plan
+	// mode, restored on /plan off instead of hardcoding Auto.
+	permissionModeBeforePlan agent.PermissionMode
+	// program is the live Bubble Tea program, set right before Run so /plan open
+	// can suspend the TUI, launch $EDITOR, and resume on exit.
+	program          *tea.Program
+	selfCorrectTests bool
+	reasoningEffort  modelregistry.ReasoningEffort
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -1188,6 +1195,46 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transcriptCopyStatusExpiredMsg:
 		if msg.seq == m.copyStatusSeq {
 			m.copyStatus = ""
+		}
+		return m, nil
+	case planEditorFinishedMsg:
+		if msg.err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
+			return m, nil
+		}
+		// The user may have edited the plan file in $EDITOR; sync it back into
+		// the in-memory update_plan so the edited plan drives execution, and
+		// refresh the sticky plan panel to match.
+		items, ok := m.reloadPlanFromFile()
+		if !ok {
+			return m, nil
+		}
+		m.plan.updateFromItems(items, m.now())
+		// The sticky-panel refresh above is the only visible sign the edit was
+		// taken up; a /plan open with no other output would otherwise look like
+		// nothing happened. Confirm the reload (or a clear) in the transcript.
+		reloadNote := "Reloaded the edited plan."
+		if len(items) == 0 {
+			reloadNote = "Cleared the plan (the edited plan file is empty)."
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: reloadNote})
+		// SetPlan (inside reloadPlanFromFile) only changes the update_plan
+		// tool's in-memory state; the model has no way to observe that on its
+		// own. Record it as a session event too, so a user-authored edit
+		// actually reaches the next turn's context — whether that turn is
+		// more planning or, after /plan off, the implementation run the
+		// feature is supposed to drive.
+		content := "I edited the plan file directly and cleared the plan."
+		if plan := formatPlanItems(items); plan != "" {
+			content = "I edited the plan file directly. Updated plan:\n\n" + plan
+		}
+		var err error
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+			"role":    "user",
+			"content": content,
+		})
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:
@@ -2247,7 +2294,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// BEFORE the reset below clears them, and skip spec-draft reviews — those
 		// are legitimate mid-plan err==nil yields where the plan is NOT done.
 		if msg.err == nil && msg.specReview == nil &&
-			m.pendingAskUser == nil && m.pendingPermission == nil {
+			m.pendingAskUser == nil && m.pendingPermission == nil &&
+			m.permissionMode != agent.PermissionModePlan {
 			m.plan.completeRemaining(m.now())
 		}
 		m.pendingPermission = nil
@@ -4361,8 +4409,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
-		return m, nil
+		return m.handlePlanCommand(command.text)
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
@@ -4911,8 +4958,22 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
-		if runOptions.systemPrompt != "" {
+		switch {
+		case runOptions.systemPrompt != "":
 			options.SystemPrompt = runOptions.systemPrompt
+		case options.PermissionMode == agent.PermissionModePlan:
+			// Plan mode is toggled via /plan on the normal submit path (not a
+			// dedicated run-launch command like /spec), so there is no call site
+			// to pass planmode.DraftSystemPrompt through runOptions: set it here
+			// from the active permission mode instead. Layer it onto (rather
+			// than replace) any configured options.SystemPrompt: an embedder's
+			// system prompt encodes product policy that must still apply while
+			// planning, not just on ordinary turns.
+			if configured := strings.TrimSpace(options.SystemPrompt); configured != "" {
+				options.SystemPrompt = configured + "\n\n" + planmode.DraftSystemPrompt
+			} else {
+				options.SystemPrompt = planmode.DraftSystemPrompt
+			}
 		}
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
@@ -5218,12 +5279,33 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Sync the sticky plan panel when update_plan runs.
-			if result.Name == "update_plan" && m.registry != nil {
-				if planTool, ok := m.registry.Get("update_plan"); ok {
-					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
-						if m.runtimeMessageSink != nil {
-							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: reader.CurrentPlan()})
+			// Sync the sticky plan panel when update_plan runs. Only on a
+			// successful result: an errored call (including one refused
+			// because its run was already cancelled) must not re-read the
+			// shared plan and write it into this run's session file, which
+			// could clobber that file with a later session's state.
+			if result.Name == "update_plan" && result.Status == tools.StatusOK {
+				// Use the plan snapshot the successful call carried with its
+				// result, never a fresh CurrentPlan() read: this callback runs
+				// after update_plan released its mutex, so a cancel plus
+				// /new or /resume in that window can clear or hydrate the
+				// shared tool, and re-reading it here would persist the wrong
+				// session's plan (or an empty reset) under this run's session.
+				if items, ok := planSnapshotFromResult(result); ok {
+					if m.runtimeMessageSink != nil {
+						m.runtimeMessageSink(planUpdateMsg{runID: runID, items: items})
+					}
+					// Persist every update_plan call to the durable plan store
+					// (under the user config directory, outside the workspace):
+					// it is the single source of truth /plan reads from, so a
+					// plan built entirely through update_plan still survives a
+					// restart/resume, and one seeded by /plan open keeps
+					// reflecting later agent updates. Storing outside the
+					// workspace keeps the tool's read-only / auto-allow
+					// contract honest: no workspace write grant is required.
+					if m.activeSession.SessionID != "" {
+						if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+							m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
 						}
 					}
 				}

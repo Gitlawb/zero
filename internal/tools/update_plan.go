@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -69,22 +70,50 @@ func NewUpdatePlanTool() *updatePlanTool {
 	}
 }
 
-func (tool *updatePlanTool) Run(_ context.Context, args map[string]any) Result {
+func (tool *updatePlanTool) Run(ctx context.Context, args map[string]any) Result {
 	plan, err := parsePlanItems(args["plan"])
 	if err != nil {
 		return errorResult("Error: Invalid arguments for update_plan: " + err.Error())
 	}
 	plan = enforceSingleInProgress(plan)
 	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	// The context check shares the mutex with SetPlan/ClearPlan: a cancelled
+	// run's goroutine can reach this point after the UI has already reset the
+	// shared plan for a new session (its loop only checks cancellation
+	// between calls), and a late write here would repopulate the next
+	// session's plan with the cancelled run's state. Refusing under the lock
+	// means either this write lands before the reset (and the reset clears
+	// it) or the cancellation is visible here and nothing is written.
+	if ctx.Err() != nil {
+		return errorResult("Error: update_plan skipped: the run was cancelled.")
+	}
 	tool.currentPlan = plan
-	tool.mu.Unlock()
-	return okResult(formatPlan(plan))
+	result := okResult(formatPlan(plan))
+	// Carry this call's plan with its result: the TUI persists the plan from
+	// the result callback, which runs after Run releases the mutex, so
+	// re-reading CurrentPlan there could observe a later session's state.
+	if data, err := json.Marshal(plan); err == nil {
+		result.Meta = map[string]string{PlanSnapshotMeta: string(data)}
+	}
+	return result
 }
 
 func (tool *updatePlanTool) CurrentPlan() []PlanItem {
 	tool.mu.Lock()
 	defer tool.mu.Unlock()
 	return append([]PlanItem{}, tool.currentPlan...)
+}
+
+// SetPlan replaces the in-memory plan with already-parsed items. It is used to
+// sync a user-edited plan file (opened via /plan open) back into the agent's
+// source of truth; the file is only ever the seed/target, the in-memory plan
+// drives execution.
+func (tool *updatePlanTool) SetPlan(plan []PlanItem) {
+	plan = enforceSingleInProgress(plan)
+	tool.mu.Lock()
+	tool.currentPlan = plan
+	tool.mu.Unlock()
 }
 
 func (tool *updatePlanTool) ClearPlan() {
@@ -127,7 +156,7 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
 		}
-		status = normalizePlanStatus(status)
+		status = NormalizePlanStatus(status)
 		notes, err := stringArgWithEmpty(object, "notes", "", false, true)
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
@@ -143,10 +172,10 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 	return plan, nil
 }
 
-// normalizePlanStatus coerces a free-form status into one of the four canonical
+// NormalizePlanStatus coerces a free-form status into one of the four canonical
 // values. Unknown/empty input maps to "pending" so a weak model's stray status
 // never fails the whole update_plan call (which would freeze the plan panel).
-func normalizePlanStatus(status string) string {
+func NormalizePlanStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]":
 		return "completed"

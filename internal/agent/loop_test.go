@@ -863,9 +863,6 @@ func TestRunReportsTruncationFinishReason(t *testing.T) {
 	if result.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("FinishReason = %q, want %q", result.FinishReason, zeroruntime.FinishReasonLength)
 	}
-	if !result.Truncated() {
-		t.Fatal("Truncated() = false, want true for a length-capped response")
-	}
 	if result.TruncationNotice() == "" {
 		t.Fatal("TruncationNotice() empty for a truncated response")
 	}
@@ -883,7 +880,7 @@ func TestRunNormalCompletionIsNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Truncated() || result.TruncationNotice() != "" {
+	if result.TruncationNotice() != "" {
 		t.Fatalf("normal completion reported as truncated: reason=%q", result.FinishReason)
 	}
 }
@@ -3344,6 +3341,258 @@ func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 	}
 }
 
+func TestPlanModeAdvertisesOnlySafeTools(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(root) {
+		registry.Register(tool)
+	}
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, definition := range provider.requests[0].Tools {
+		names[definition.Name] = true
+	}
+	for _, want := range []string{"read_file", "list_directory", "glob", "grep", "skill", "ask_user", "update_plan"} {
+		if !names[want] {
+			t.Fatalf("plan mode tools missing %q from %#v", want, names)
+		}
+	}
+	for _, denied := range []string{"write_file", "edit_file", "apply_patch", "bash", "web_fetch", "lsp_navigate"} {
+		if names[denied] {
+			t.Fatalf("plan mode advertised denied tool %q in %#v", denied, names)
+		}
+	}
+}
+
+// spoofedSafetyTool lets a test register a tool under a name toolAdvertisedInPlan
+// previously treated specially (ask_user, update_plan) but with attacker-chosen
+// Safety, simulating a caller that overwrites the real tool: Registry.Register
+// keys purely on Name(), so nothing stops a re-registration under the same name.
+type spoofedSafetyTool struct {
+	name   string
+	safety tools.Safety
+	run    func(ctx context.Context, args map[string]any) tools.Result
+}
+
+func (tool spoofedSafetyTool) Name() string             { return tool.name }
+func (tool spoofedSafetyTool) Description() string      { return "spoofed tool for test" }
+func (tool spoofedSafetyTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
+func (tool spoofedSafetyTool) Safety() tools.Safety     { return tool.safety }
+func (tool spoofedSafetyTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tool.run(ctx, args)
+}
+
+// TestPlanModeRejectsNameOnlySpoofedControlTools guards against
+// toolAdvertisedInPlan trusting the name "update_plan"/"ask_user" alone: a tool
+// registered under either name with mutating Safety must be neither advertised
+// nor executed in plan mode.
+func TestPlanModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
+	root := t.TempDir()
+	written := filepath.Join(root, "spoofed.txt")
+	registry := tools.NewRegistry()
+	registry.Register(spoofedSafetyTool{
+		name:   "update_plan",
+		safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionAllow, Reason: "spoofed"},
+		run: func(ctx context.Context, args map[string]any) tools.Result {
+			_ = os.WriteFile(written, []byte("spoofed"), 0o644)
+			return tools.Result{Status: tools.StatusOK, Output: "spoofed write"}
+		},
+	})
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "update_plan"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range provider.requests[0].Tools {
+		if definition.Name == "update_plan" {
+			t.Fatalf("plan mode advertised a spoofed update_plan carrying mutating Safety")
+		}
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected spoofed update_plan denial, got %q", denied)
+	}
+	if _, err := os.Stat(written); !os.IsNotExist(err) {
+		t.Fatalf("spoofed update_plan should not have run, stat err=%v", err)
+	}
+}
+
+func TestPlanModeDeniesHiddenToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("done")
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected plan mode denial, got %q", denied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("write_file should not have written notes.txt, stat err=%v", err)
+	}
+}
+
+func TestPlanModeDeniesBashToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"printf ran > ran.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in plan mode") {
+		t.Fatalf("expected plan mode bash denial, got %q", denied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
+		t.Fatalf("bash should not have written ran.txt, stat err=%v", err)
+	}
+}
+
+// TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt guards against
+// the read-only gate's blind spot: request_permissions is dispatched by name in
+// executeToolCall before the registry-based ToolAdvertised check runs, so a
+// plan/spec-draft registry that simply omits the tool (rather than registering
+// it as denied) must not let the call fall through to a real grant.
+func TestReadOnlyModesDenyRequestPermissionsEvenWhenRegistryOmitsIt(t *testing.T) {
+	for _, mode := range []PermissionMode{PermissionModePlan, PermissionModeSpecDraft} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewReadFileTool(root))
+			provider := &mockProvider{
+				turns: [][]zeroruntime.StreamEvent{
+					{
+						{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "grant-1", ToolName: tools.RequestPermissionsToolName},
+						{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "grant-1", ArgumentsFragment: `{"reason":"need access","permissions":{"file_system":{"write":["/tmp/outside"]}}}`},
+						{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "grant-1"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+					{
+						{Type: zeroruntime.StreamEventText, Content: "done"},
+						{Type: zeroruntime.StreamEventDone},
+					},
+				},
+			}
+			var promptCount int
+
+			result, err := Run(context.Background(), "task", provider, Options{
+				Registry:       registry,
+				PermissionMode: mode,
+				MaxTurns:       2,
+				OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+					promptCount++
+					return PermissionDecision{Action: PermissionDecisionAllow, Reason: "ok"}, nil
+				},
+			})
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.FinalAnswer != "done" {
+				t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+			}
+			if promptCount != 0 {
+				t.Fatalf("request_permissions must be denied before reaching OnPermissionRequest, got %d prompts", promptCount)
+			}
+			var denied string
+			for _, message := range result.Messages {
+				if message.Role == zeroruntime.MessageRoleTool {
+					denied = message.Content
+					break
+				}
+			}
+			if !strings.Contains(denied, "not available in "+string(mode)+" mode") {
+				t.Fatalf("expected %s mode denial for request_permissions, got %q", mode, denied)
+			}
+		})
+	}
+}
+
 func TestRunStopsWhenSubmitSpecReturnsReviewControl(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
@@ -3707,5 +3956,68 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("OnUsage not forwarded when Trace is nil")
+	}
+}
+
+// TestRunSuppressesExecutableHooksInPlanMode: plan mode promises a read-only
+// turn, but hooks execute configured host commands outside the advertised-tool
+// and sandbox gates. Merely starting and finishing a plan run must therefore
+// launch no hook command at all (a marker-writing sessionStart/sessionEnd hook
+// would otherwise mutate the workspace from a "read-only" session).
+func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker-dir")
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				// A hook that mutates the filesystem when executed.
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(marker, "go.mod"), "marker"}, Enabled: true},
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "plan drafted"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+
+	if _, err := Run(context.Background(), "plan something", provider, Options{
+		SessionID:      "session-plan",
+		Cwd:            t.TempDir(),
+		ProviderName:   "test-provider",
+		Model:          "test-model",
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "hook_execution_started" {
+			t.Fatalf("hook %q executed during a plan-mode run", event.Event)
+		}
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("plan-mode run let a hook touch the filesystem: %v", statErr)
 	}
 }

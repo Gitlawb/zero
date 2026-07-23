@@ -54,6 +54,15 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
+	// Plan mode (and the mode /plan off would restore) belongs to the session
+	// that entered it — carrying it into a fresh session would silently make
+	// the new session read-only, or later restore the old session's mode into
+	// it. Exit it here rather than leaving it to a same-session-only /plan off.
+	// The plan itself belongs to the old session too, so clear it rather than
+	// leaking it into a session that never drafted it.
+	m = m.exitPlanMode()
+	m = m.resetPlanForSessionSwitch()
+
 	m.activeSession = sessions.Metadata{}
 	m.sessionEvents = nil
 
@@ -216,7 +225,24 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// on a real change — `/resume latest` or `/resume <currentID>` can resolve to
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
+	if session.SessionID != previousID {
+		// Plan mode (and the mode /plan off would restore) belongs to the
+		// session that entered it, not to whatever session becomes active —
+		// see the matching guard in startNewSession.
+		m = m.exitPlanMode()
+		m = m.resetPlanForSessionSwitch()
+	}
 	m.activeSession = *session
+	if session.SessionID != previousID {
+		// resetPlanForSessionSwitch cleared the previous session's plan; now
+		// hydrate the destination session's own persisted plan file (if any),
+		// so the sticky panel and update_plan reflect what THIS session had
+		// saved instead of starting empty and risking an overwrite on the
+		// next update_plan call.
+		if items, ok := m.reloadPlanFromFile(); ok {
+			m.plan.updateFromItems(items, m.now())
+		}
+	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
 		m.providerName = session.Provider
