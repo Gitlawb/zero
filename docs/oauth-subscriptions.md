@@ -91,7 +91,7 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
    fully overridable by `ZERO_OAUTH_XAI_*` (env wins), and it requires a
    SuperGrok / X Premium+ subscription; the client_id is an undocumented public
    Grok-CLI client that may change without notice.
-- **Kimi Code — opt-in preset, device-code only** — `zero auth kimi` (or
+- **Kimi Code — built-in preset, device-code only** — `zero auth kimi` (or
    `zero auth login kimi-code --device`) runs the RFC 8628 device-code flow
    against `https://auth.kimi.com`. You approve on another device and enter the
    code; the returned access token is stored and used **directly** as a bearer

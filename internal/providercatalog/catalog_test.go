@@ -2,9 +2,12 @@ package providercatalog
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/kimiidentity"
 )
 
 var expectedCatalogIDs = []string{
@@ -490,7 +493,11 @@ func TestKimiAliasStillResolvesToMoonshot(t *testing.T) {
 // does not populate kimi-code's CustomHeaders (which mints a device-id file),
 // while Get does so resolve-time request building still gets the vendor headers.
 func TestKimiRuntimeHeadersOnlyOnGet(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	tempDir := t.TempDir()
+	cleanup := kimiidentity.SetDeviceIDPathForTest(filepath.Join(tempDir, "kimi-device-id"))
+	t.Cleanup(cleanup)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	t.Setenv("APPDATA", tempDir)
 	for _, d := range All() {
 		if d.ID == "kimi-code" && d.CustomHeaders != nil {
 			t.Fatalf("All() must not populate kimi-code CustomHeaders: %#v", d.CustomHeaders)
