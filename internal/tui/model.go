@@ -103,6 +103,11 @@ type model struct {
 	doctorFrame          int
 	activeSession        sessions.Metadata
 	sessionEvents        []sessions.Event
+	btw                  btwState
+	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
+	// surface. It survives returning to the parent so a late message from an old
+	// side run can never match a run in a later BTW conversation.
+	btwRunIDSeq int
 	// titledSessions records session ids for which a model-generated title has
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
@@ -128,30 +133,52 @@ type model struct {
 	permissionMode              agent.PermissionMode
 	selfCorrectTests            bool
 	reasoningEffort             modelregistry.ReasoningEffort
-	responseStyle               string
-	keyBindings                 keyBindings
-	themeMode                   themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                   bool      // last terminal background-detection result (auto mode)
-	userAgent                   string
-	compactRequests             int
-	compactInFlight             bool
-	compactFrame                int
-	lastCompactResult           *CompactResult
-	lastCompactError            string
-	unpricedRequests            int
-	unpricedTokens              int
-	lastUsage                   usage.Normalized
-	lastUsageSeen               bool
+	// Active execution profile (set by /profile; applies to the NEXT run).
+	// The displaced/applied pairs let a switch or /profile balanced restore
+	// exactly what the profile replaced while leaving later manual overrides
+	// (/turns, Ctrl+T, /selfcorrect) alone: each knob is only reverted when it
+	// still holds the value the profile applied.
+	execProfileName              string
+	execProfileDisplacedMaxTurns int
+	execProfileAppliedMaxTurns   int
+	execProfileAppliedEffort     modelregistry.ReasoningEffort
+	execProfileArmedSelfCorrect  bool
+	// The touched bits record explicit user choices made while a profile is
+	// active (/turns, /effort, Ctrl+T, /selfcorrect); a touched knob is never
+	// reverted, even when its value coincides with what the profile applied.
+	execProfileTurnsTouched       bool
+	execProfileEffortTouched      bool
+	execProfileSelfCorrectTouched bool
+	responseStyle                 string
+	keyBindings                   keyBindings
+	themeMode                     themeMode // palette preference: auto (default), dark, light
+	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
+	userAgent                     string
+	compactRequests               int
+	compactInFlight               bool
+	compactFrame                  int
+	lastCompactResult             *CompactResult
+	lastCompactError              string
+	unpricedRequests              int
+	unpricedTokens                int
+	lastUsage                     usage.Normalized
+	lastUsageSeen                 bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
-	turnLatencySum        time.Duration
-	turnLatencyCount      int
-	turnTTFTSum           time.Duration
-	turnTTFTCount         int
-	transcript            []transcriptRow
-	transcriptDetailed    bool
-	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
+	turnLatencySum     time.Duration
+	turnLatencyCount   int
+	turnTTFTSum        time.Duration
+	turnTTFTCount      int
+	transcript         []transcriptRow
+	transcriptDetailed bool
+	helpOverlay        bool // the `?` keyboard-shortcut overlay is open
+	// leaderHelpOverlay is the Ctrl+X ? modal listing every leader slash chord.
+	leaderHelpOverlay bool
+	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
+	// resolves the chord (see leader.go). leaderSeq invalidates a stale tick.
+	leaderPending         bool
+	leaderSeq             int
 	transcriptBodyHeights *transcriptBodyHeightCache
 	input                 textinput.Model
 	composer              composerState
@@ -199,8 +226,13 @@ type model struct {
 	// lastKeyTime tracks every keypress timestamp for burst calculation.
 	lastKeyTime time.Time
 	// burstCount counts consecutive keypresses within 100ms (paste mode).
-	burstCount    int
-	queuedMessage string
+	burstCount int
+	// terminalFocused tracks whether the terminal window currently has focus, per
+	// tea.FocusMsg/tea.BlurMsg. Defaults to true since many terminals/multiplexers
+	// never send focus events at all, and defaulting to "unfocused" would wrongly
+	// hide the cursor for those users.
+	terminalFocused bool
+	queuedMessage   string
 	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
 	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
 	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
@@ -280,16 +312,23 @@ type model struct {
 	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
-	// is already in native scrollback; in alt-screen mode this frontier stays
-	// idle so history cannot reveal prior shell output.
+	// is already in native scrollback. Alt-screen mode advances the same
+	// frontier, but keeps the settled prefix as cached body items so fullscreen
+	// scrolling still exposes the complete transcript without rebuilding it on
+	// every frame.
 	// flushedAny gates the first turn-separator blank line; flushQueue/
 	// printInFlight serialize ordered scrollback prints; headerPrinted records
 	// the one-time inline title-bar print at startup.
-	flushed       int
-	flushedAny    bool
-	flushQueue    []string
-	printInFlight bool
-	headerPrinted bool
+	flushed                  int
+	flushedAny               bool
+	flushedPreviousKind      rowKind
+	flushedHavePreviousKind  bool
+	flushQueue               []string
+	printInFlight            bool
+	headerPrinted            bool
+	altScreenSettledItems    []transcriptBodyItem
+	altScreenSettledWidth    int
+	altScreenSettledFrontier int
 
 	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
 	// lastPrompt is the verbatim text of the most recent submitted prompt, so
@@ -369,8 +408,9 @@ type model struct {
 	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
 	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
 	// (clickable suggestions, right-click paste, transcript select) pause while on.
-	mouseReleased       bool
-	transcriptSelection transcriptSelectionState
+	mouseReleased         bool
+	transcriptSelection   transcriptSelectionState
+	transcriptInteraction *transcriptRenderInteraction
 	// hover identifies the single clickable row (if any) currently under the
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
@@ -649,6 +689,17 @@ type pendingPermissionPrompt struct {
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
+	// typing is true once the user chose "tell Zero what to do differently": the
+	// card replaces its option list with a free-text field (sharing the composer
+	// input, like the ask_user questionnaire). Submitting sends a Deny decision
+	// whose Reason is the typed text, so the model reads it as the tool result and
+	// adjusts course in the same turn instead of the run being cancelled.
+	typing bool
+	// savedDraft holds whatever was in the shared composer input when feedback
+	// mode was entered. The field is cleared for typing and restored on both
+	// submit and cancel, so a half-typed or queued next-turn message survives the
+	// detour (permissionRequestMsg, unlike ask_user, does not clear the composer).
+	savedDraft string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -770,6 +821,7 @@ func newModel(ctx context.Context, options Options) model {
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
+		terminalFocused:             true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
 		projectConfigPath:           options.ProjectConfigPath,
@@ -808,6 +860,7 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
 		transcriptBodyHeights:       newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
+		transcriptInteraction:       &transcriptRenderInteraction{},
 		prService:                   prService,
 		prState:                     prService.GetState(),
 		input:                       input,
@@ -880,6 +933,11 @@ const (
 
 // composerCursorBlinkInterval is the on/off period of the composer text cursor.
 const composerCursorBlinkInterval = 530 * time.Millisecond
+
+// composerTypingIdleThreshold is how long a typing pause must last before the
+// cursor resumes blinking; comfortably above normal inter-keystroke gaps
+// (~150-300ms) so it won't flicker mid-sentence.
+const composerTypingIdleThreshold = 500 * time.Millisecond
 
 // composerBlinkMsg toggles the composer cursor's visibility each tick. The custom
 // composer render draws its own cursor (not textinput's), so it drives its own
@@ -970,6 +1028,9 @@ func (m model) noBlockingModal() bool {
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
+	if m.providerWizard != nil {
+		m.providerWizard.resetAimlapiOnboard()
+	}
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()
@@ -993,6 +1054,14 @@ func (m model) shutdownLSPManager() {
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if m.btw.active {
+		if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
+			m.clearComposer()
+			m.clearSuggestions()
+			return m, nil
+		}
+		return m.leaveBTW()
+	}
 	if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
 		m.clearComposer()
 		m.clearSuggestions()
@@ -1072,9 +1141,22 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m = m.resizeBTWParent(size)
+	}
+	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
+		return next, cmd
+	}
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
-		m.composerCursorVisible = !m.composerCursorVisible
+		switch {
+		case !m.terminalFocused:
+			m.composerCursorVisible = false // hidden while unfocused
+		case m.now().Sub(m.lastCharTime) < composerTypingIdleThreshold:
+			m.composerCursorVisible = true // solid while actively typing
+		default:
+			m.composerCursorVisible = !m.composerCursorVisible // idle + focused: blink as before
+		}
 		return m, composerBlinkCmd()
 	case tea.BackgroundColorMsg:
 		// Terminal background-color reply (from Init's RequestBackgroundColor). In
@@ -1118,6 +1200,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelConfirmActive = false
 		}
 		return m, nil
+	case leaderExpiredMsg:
+		if msg.seq == m.leaderSeq {
+			m.leaderPending = false
+		}
+		return m, nil
 	case dragEdgeScrollTickMsg:
 		if msg.seq != m.edgeScrollSeq || m.edgeScrollDelta == 0 || !m.transcriptSelection.active {
 			return m, nil // stale, or the chain was stopped since this tick was scheduled
@@ -1126,6 +1213,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
+	case aimlapiOnboardMsg:
+		return m.applyAimlapiOnboard(msg)
+	case aimlapiExistingBalanceMsg:
+		return m.applyExistingAimlapiBalance(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
 	case providerManagerCredsMsg:
@@ -1203,6 +1294,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !keyIs(msg, tea.KeyEnter) {
 			m.lastCharTime = now
 		}
+		// Enter the solid-while-typing state right away: only composerBlinkMsg
+		// evaluates the typing threshold, so if the blink phase had just hidden
+		// the caret, the typed character would render caret-less for up to a
+		// full tick before the timer catches up.
+		m.composerCursorVisible = true
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
@@ -1233,9 +1329,44 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.burstCount = 0
 			return m, nil
 		}
-		switch {
-		case keyCtrl(msg, 'c'):
+		// Ctrl+X ? leader-chord map: same dismiss keys as the general help overlay.
+		if m.leaderHelpOverlay {
+			if keyText(msg) == "?" || keyText(msg) == "q" || keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyEnter) || keyCtrl(msg, 'c') {
+				m.leaderHelpOverlay = false
+			}
+			m.burstCount = 0
+			return m, nil
+		}
+		if keyCtrl(msg, 'c') {
+			if m.leaderPending {
+				m = m.clearLeader()
+			}
 			return m.handleCtrlC()
+		}
+		if m.leaderPending {
+			// Leader owns every keystroke until resolved; never type into the composer.
+			return m.handleLeaderKey(msg)
+		}
+		if keyCtrl(msg, 'x') && m.canArmLeader() {
+			return m.armLeader()
+		}
+		// Emacs Ctrl+P / Ctrl+N move selection in open menus. Runs before the
+		// switch so menus win over global Ctrl+P (plan toggle). Idle Ctrl+P
+		// falls through to that binding; idle Ctrl+N is a reserved no-op so it
+		// never reaches remapped configurable bindings (e.g. toggleSidebar).
+		if !m.transcriptDetailed && (keyCtrl(msg, 'p') || keyCtrl(msg, 'n')) {
+			delta := 1
+			if keyCtrl(msg, 'p') {
+				delta = -1
+			}
+			if next, cmd, ok := m.moveModalSelection(delta); ok {
+				return next, cmd
+			}
+			if keyCtrl(msg, 'n') {
+				return m, nil
+			}
+		}
+		switch {
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
@@ -1319,6 +1450,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.escapeAskUser()
 			}
+			// Esc in the permission feedback field steps back to the option list
+			// rather than resolving, so a stray keystroke is recoverable.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				return m.cancelPermissionTyping()
+			}
 			if m.pendingSpecReview != nil {
 				m.burstCount = 0
 				return m.cancelSpecReview()
@@ -1361,7 +1497,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// selection is a passive highlight, so Esc dropping it is cheap and
 			// expected (mirrors how editors clear selection on Esc).
 			if m.selectedFile != "" {
-				m.selectedFile = ""
+				m.setSelectedFile("")
 				return m, nil
 			}
 			if m.hasQueuedMessage() {
@@ -1497,6 +1633,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
 			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
+			// Modal selection is handled before this switch so menus win over toggle.
 			if m.noBlockingModal() && !m.plan.isEmpty() {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
@@ -1538,6 +1675,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyBackspace(msg):
+			// In permission feedback mode Backspace is a plain edit of the feedback
+			// text. This case runs before the typing branch below and, on an empty
+			// field (feedback mode clears the composer), would otherwise fall to the
+			// removeLastAttachment path and silently drop a staged image/doc that
+			// savedDraft does not restore. Route it to the shared input instead.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -1594,33 +1741,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
-			if m.pendingPermission != nil {
-				return m.movePermissionCursor(-1), nil
-			}
-			if m.pendingAskUser != nil {
-				return m.moveAskUserCursor(-1), nil
-			}
-			if m.providerWizard != nil {
-				m.burstCount = 0
-				return m.handleProviderWizardKey(msg)
-			}
-			if m.mcpAddWizard != nil {
-				m.burstCount = 0
-				return m.handleMCPAddWizardKey(msg)
-			}
-			if m.mcpManager != nil {
-				m.burstCount = 0
-				return m.handleMCPManagerKey(msg)
-			}
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.pickerMoved(-1)
-				return m, nil
-			}
+			// Suggestions keep Shift+arrows for the composer path (unchanged); plain
+			// ↑/↓ and Ctrl+P/N still move the palette via moveModalSelection.
 			if m.suggestionsActive() {
 				break
+			}
+			if next, cmd, ok := m.moveModalSelection(-1); ok {
+				return next, cmd
 			}
 			if m.composerValue() != "" {
 				break // let the input handle multiline navigation
@@ -1633,33 +1760,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
-			if m.pendingPermission != nil {
-				return m.movePermissionCursor(1), nil
-			}
-			if m.pendingAskUser != nil {
-				return m.moveAskUserCursor(1), nil
-			}
-			if m.providerWizard != nil {
-				m.burstCount = 0
-				return m.handleProviderWizardKey(msg)
-			}
-			if m.mcpAddWizard != nil {
-				m.burstCount = 0
-				return m.handleMCPAddWizardKey(msg)
-			}
-			if m.mcpManager != nil {
-				m.burstCount = 0
-				return m.handleMCPManagerKey(msg)
-			}
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.pickerMoved(1)
-				return m, nil
-			}
 			if m.suggestionsActive() {
 				break
+			}
+			if next, cmd, ok := m.moveModalSelection(1); ok {
+				return next, cmd
 			}
 			if m.composerValue() != "" {
 				break // let the input handle multiline navigation
@@ -1671,34 +1776,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.clearHover()
 				return m.scrollChat(-1), nil
 			}
-			if m.pendingPermission != nil {
-				return m.movePermissionCursor(1), nil
-			}
-			if m.pendingAskUser != nil {
-				return m.moveAskUserCursor(1), nil
-			}
-			if m.providerWizard != nil {
-				m.burstCount = 0
-				return m.handleProviderWizardKey(msg)
-			}
-			if m.mcpAddWizard != nil {
-				m.burstCount = 0
-				return m.handleMCPAddWizardKey(msg)
-			}
-			if m.mcpManager != nil {
-				m.burstCount = 0
-				return m.handleMCPManagerKey(msg)
-			}
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.pickerMoved(1)
-				return m, nil
-			}
-			if m.suggestionsActive() {
-				m.moveSuggestion(1)
-				return m, nil
+			if next, cmd, ok := m.moveModalSelection(1); ok {
+				return next, cmd
 			}
 			if next, ok := m.moveComposerVisualCursor(1); ok {
 				return next, nil
@@ -1717,34 +1796,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.clearHover()
 				return m.scrollChat(1), nil
 			}
-			if m.pendingPermission != nil {
-				return m.movePermissionCursor(-1), nil
-			}
-			if m.pendingAskUser != nil {
-				return m.moveAskUserCursor(-1), nil
-			}
-			if m.providerWizard != nil {
-				m.burstCount = 0
-				return m.handleProviderWizardKey(msg)
-			}
-			if m.mcpAddWizard != nil {
-				m.burstCount = 0
-				return m.handleMCPAddWizardKey(msg)
-			}
-			if m.mcpManager != nil {
-				m.burstCount = 0
-				return m.handleMCPManagerKey(msg)
-			}
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.pickerMoved(-1)
-				return m, nil
-			}
-			if m.suggestionsActive() {
-				m.moveSuggestion(-1)
-				return m, nil
+			if next, cmd, ok := m.moveModalSelection(-1); ok {
+				return next, cmd
 			}
 			if next, ok := m.moveComposerVisualCursor(-1); ok {
 				return next, nil
@@ -1827,6 +1880,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSpecReviewKey(msg)
 		}
 		if m.pendingPermission != nil {
+			// Feedback mode: a printable keystroke (and editing keys like
+			// backspace) types into the shared composer input, mirroring the
+			// ask_user free-text path above. Enter/Esc/↑/↓ were already handled
+			// earlier in this switch; the remaining keys reach the input here.
+			if m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			m.burstCount = 0
 			return m.handlePermissionKey(msg)
 		}
@@ -1870,11 +1932,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recomputeSuggestions()
 		return m, cmd
 	case tea.FocusMsg:
+		m.terminalFocused = true
+		// Sync the caret with focus immediately: leaving it to the next
+		// composerBlinkMsg tick can keep it hidden for up to a tick after the
+		// terminal regains focus (and, on blur below, leave it visible in an
+		// unfocused terminal for the same window).
+		m.composerCursorVisible = true
 		if m.notifier != nil {
 			m.notifier.SetFocused(true)
 		}
 		return m, nil
 	case tea.BlurMsg:
+		m.terminalFocused = false
+		m.composerCursorVisible = false
 		if m.notifier != nil {
 			m.notifier.SetFocused(false)
 		}
@@ -1952,11 +2022,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// advancing even when no run is pending, so the tick loop stays alive while
 		// sidebarHasAgents() holds (and stops the moment the agents/sidebar clear).
 		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
-			if m.sidebarHasAgents() && !m.reducedMotion {
-				m.spinner, _ = m.spinner.Update(msg)
+			// The tick also keeps advancing while the aimlapi.com onboarding sub-flow is
+			// busy (its progress screen is spinner-only), even though no agent run is in
+			// flight, so its shared MiniDot spinner keeps animating.
+			//
+			// Return the FPS-throttled tick that Update hands back — NOT m.spinner.Tick,
+			// which fires immediately and busy-loops the frame at event-loop speed. That
+			// makes the glyph spin far too fast (and burns CPU) on screens that sit here
+			// for a while, e.g. the aimlapi checkout wait. The active-run path below
+			// already does this; this keeps idle animation at the same cadence.
+			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating()) && !m.reducedMotion {
+				var cmd tea.Cmd
+				m.spinner, cmd = m.spinner.Update(msg)
 				m.spinnerPhase++
 				m.spinnerTicking = true
-				return m, m.spinner.Tick
+				return m, cmd
 			}
 			m.spinnerTicking = false
 			return m, nil
@@ -2433,7 +2513,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
+		beforeCollapse := len(m.transcript)
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
+		if removed := beforeCollapse - len(m.transcript); removed > 0 {
+			m.flushed = max(0, m.flushed-removed)
+			m.altScreenSettledWidth = 0
+		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		m = m.captureStepWork(msg.row)
 		// A finished command tool may have mutated files git can see but no
@@ -2519,9 +2604,9 @@ func (m model) View() tea.View {
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))
-	} else if m.helpOverlay || !m.transcriptDetailed {
-		// When helpOverlay is active the help panel is composited into the normal
-		// transcript view as a true overlay (scrim + vertical centering), matching
+	} else if m.helpOverlay || m.leaderHelpOverlay || !m.transcriptDetailed {
+		// When helpOverlay / leaderHelpOverlay is active the panel is composited into
+		// the normal transcript view as a true overlay (scrim + vertical centering), matching
 		// how the suggestion picker / provider wizard / pickers are drawn.
 		content = m.transcriptView()
 	} else {
@@ -2541,7 +2626,11 @@ func (m model) View() tea.View {
 	if m.altScreen {
 		view.BackgroundColor = zeroTheme.bgPanel
 	}
-	view.ReportFocus = m.notifier != nil
+	// Always requested, independent of the notifier: the composer cursor's
+	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
+	// regardless of notification config. A standard, widely supported DEC
+	// private mode (CSI ?1004h) that unsupported terminals silently ignore.
+	view.ReportFocus = true
 	// Voice mode's Space-hold gesture needs key-release events (Kitty protocol).
 	// Request them only while voice mode is on — the renderer re-sends the request
 	// only when the value changes, so gating this costs nothing (§10).
@@ -2613,6 +2702,10 @@ func (m model) transcriptView() string {
 	if m.helpOverlay {
 		helpOverlayContent = m.renderKeybindingHelpOverlay(width)
 	}
+	leaderHelpOverlayContent := ""
+	if m.leaderHelpOverlay {
+		leaderHelpOverlayContent = m.renderLeaderHelpOverlay(width)
+	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
@@ -2626,6 +2719,8 @@ func (m model) transcriptView() string {
 		viewportOverlay = sttKeyOverlay
 	case helpOverlayContent != "":
 		viewportOverlay = helpOverlayContent
+	case leaderHelpOverlayContent != "":
+		viewportOverlay = leaderHelpOverlayContent
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -2724,6 +2819,16 @@ func (m model) footerView(width int) string {
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
+	// A focused permission prompt owns the keyboard: its options (and the feedback
+	// field) consume every key, so the composer is inert. Suppress it and the idle
+	// hints/plan panel like the ask_user modal above, keeping only the status line.
+	// The card itself renders in the transcript body. This also keeps the shared
+	// input from echoing in two places once "tell Zero what to do differently"
+	// opens the on-card feedback field.
+	if m.pendingPermission != nil {
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
 	// Pinned plan panel: sits directly above the composer so it stays visible
 	// while the transcript scrolls underneath (a streaming turn no longer pushes
 	// the plan off-screen). Budgeted to at most a third of the screen height; a
@@ -2770,6 +2875,11 @@ func (m model) footerView(width int) string {
 // full-screen transcript, or under any modal/overlay so it never competes for
 // attention. Width-tiered so a narrow terminal only shows the essential pointer.
 func (m model) composerIdleHint() string {
+	// Leader-pending is always shown (even mid-type) so the user knows the next
+	// key is a chord, not composer input.
+	if m.leaderPending {
+		return zeroTheme.faint.Render("Ctrl+X — await shortcut (m model · p provider · ? list · Esc cancel)")
+	}
 	// Managed (alt-screen) mode only: inline mode prints to native scrollback where
 	// this footer row isn't a stable surface. Hidden while typing, during a run, in
 	// the full-screen transcript, or under any modal/overlay.
@@ -2788,9 +2898,9 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
+		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar", sidebarKey)
 	default:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -3475,7 +3585,7 @@ func (m model) composerLine(width int) string {
 	}
 	if argumentHint != "" {
 		input.SetWidth(0)
-		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint), width)
+		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint, m.composerCursorVisible), width)
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
@@ -3751,16 +3861,23 @@ func composerCursorForVisualColumn(state composerState, segment composerVisualLi
 	return segment.end
 }
 
-func commandArgumentHintComposerLine(input textinput.Model, argumentHint string) string {
+func commandArgumentHintComposerLine(input textinput.Model, argumentHint string, cursorVisible bool) string {
 	hintRunes := []rune(argumentHint)
 	if len(hintRunes) == 0 {
 		return input.View()
 	}
 	displayValue := strings.TrimRightFunc(input.Value(), unicode.IsSpace)
+	// This alternate composer path must follow the same caret contract as
+	// renderComposerInput: hidden while the terminal is unfocused and blinking
+	// per composerCursorVisible, not a permanently painted cursor cell.
+	cursor := zeroTheme.faint.Render(string(hintRunes[0]))
+	if cursorVisible {
+		cursor = composerCursor(cursor)
+	}
 	return zeroTheme.userPrompt.Render(input.Prompt) +
 		zeroTheme.ink.Inline(true).Render(displayValue) +
 		zeroTheme.faint.Render(" ") +
-		composerCursor(zeroTheme.faint.Render(string(hintRunes[0]))) +
+		cursor +
 		zeroTheme.faint.Render(string(hintRunes[1:]))
 }
 
@@ -3870,13 +3987,22 @@ func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := strings.ToLower(msg.String())
 	for _, option := range permissionOptions(m.pendingPermission.request) {
 		if option.hotkey == key {
-			return m.resolvePermission(option.choice)
+			return m.choosePermissionOption(option.choice)
 		}
 	}
 	return m, nil
 }
 
 func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
+	return m.resolvePermissionWithReason(decision, permissionDecisionReason(decision))
+}
+
+// resolvePermissionWithReason resolves the pending prompt with an explicit reason
+// string. It backs both the fixed-label choices (reason = permissionDecisionReason)
+// and the free-text "tell Zero what to do differently" path, where the reason is
+// the user's typed instruction and the action is Deny so the agent surfaces it as
+// the tool result and keeps going.
+func (m model) resolvePermissionWithReason(decision permissionDecision, reason string) (tea.Model, tea.Cmd) {
 	pending := m.pendingPermission
 	if pending == nil {
 		return m, nil
@@ -3885,7 +4011,7 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 	if pending.decide != nil {
 		pending.decide(agent.PermissionDecision{
 			Action: decision,
-			Reason: permissionDecisionReason(decision),
+			Reason: reason,
 		})
 	}
 	m.pendingPermission = nil
@@ -4069,6 +4195,27 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.chatScrollOffset = 0
 	}
 
+	return m.dispatchCommand(command)
+}
+
+// dispatchCommand runs a parsed slash/prompt command after submit/leader
+// preamble (history, composer clear, leave-prompt disarm) has already run.
+func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
+	if m.btw.active && command.kind == commandExit && m.btw.parent != nil &&
+		(m.btw.parent.pending || m.btw.parent.compactInFlight || len(m.btw.parent.flushRunIDs) > 0) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: "The main session is still running. Return to it first with /btw or Ctrl+C before exiting.",
+		})
+		return m, nil
+	}
+	if m.btw.active && btwCommandUnavailable(command) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: command.name + " is unavailable in a BTW conversation. Return to the main session first with /btw or Ctrl+C.",
+		})
+		return m, nil
+	}
 	switch command.kind {
 	case commandEmpty:
 		return m, nil
@@ -4107,6 +4254,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.startNewSession(), nil
+	case commandBTW:
+		return m.handleBTWCommand(command.text)
 	case commandLoop:
 		return m.handleLoopCommand(command.text)
 	case commandExit:
@@ -4317,6 +4466,18 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleTurnsCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandProfile:
+		// Same idle-session rule as /turns: switching the profile mutates the
+		// turn budget (and its ZERO_MAX_TURNS propagation), so a change needs
+		// an idle session; bare /profile (status) is always allowed.
+		if m.pending && strings.TrimSpace(command.text) != "" && !strings.EqualFold(strings.TrimSpace(command.text), "status") {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Profile\nFinish or stop the current run before switching the execution profile."})
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleProfileCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
 	case commandTheme:
 		// Bare `/theme` opens the popup picker (live preview on move, apply on
 		// Enter), matching /model and /effort. An explicit `/theme auto|dark|light`
@@ -4443,6 +4604,23 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	}
 }
 
+// executeSlash runs a builtin slash command as if the user typed it and pressed
+// Enter, without clearing the composer draft. Used by Ctrl+X leader chords so a
+// mid-type prompt is preserved while /model (etc.) still opens.
+func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
+	command := parseCommand(input)
+	if command.kind == commandEmpty || command.kind == commandPrompt {
+		return m, nil
+	}
+	if m.loopLeavePrompt != commandEmpty && command.kind != m.loopLeavePrompt {
+		m.loopLeavePrompt = commandEmpty
+	}
+	m.rememberInput(input)
+	m.clearSuggestions()
+	m.chatScrollOffset = 0
+	return m.dispatchCommand(command)
+}
+
 // launchPrompt starts a normal agent turn from text already accepted by the
 // composer. Queued prompts use this path too, so session and image behavior
 // stays identical to immediate submissions.
@@ -4562,7 +4740,10 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 // loop is already alive, when reduced motion is set, or when there is nothing to
 // animate, so an idle plain session schedules no timer.
 func (m *model) ensureSpinnerTick() tea.Cmd {
-	if m.spinnerTicking || m.reducedMotion || !m.sidebarHasAgents() {
+	if m.spinnerTicking || m.reducedMotion {
+		return nil
+	}
+	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() {
 		return nil
 	}
 	m.spinnerTicking = true
@@ -5021,14 +5202,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:         toolResultRowText(result),
-				tool:         result.Name,
-				status:       result.Status,
-				detail:       toolResultDetail(result),
-				runID:        runID,
-				changedFiles: result.ChangedFiles,
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:            toolResultRowText(result),
+				tool:            result.Name,
+				status:          result.Status,
+				detail:          toolResultDetail(result),
+				runID:           runID,
+				changedFiles:    result.ChangedFiles,
+				changeSummaries: result.ChangeSummaries,
 			}
 			// A Task result is shown by the specialist card, and update_plan by the
 			// plan panel/sidebar, so skip both redundant transcript rows.
@@ -5060,6 +5242,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			if len(result.ChangedFiles) > 0 {
 				toolPayload["changedFiles"] = result.ChangedFiles
+			}
+			if len(result.ChangeSummaries) > 0 {
+				toolPayload["changeSummaries"] = result.ChangeSummaries
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,

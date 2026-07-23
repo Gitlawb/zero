@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 func TestResolveAppliesLayerPrecedence(t *testing.T) {
@@ -554,7 +555,7 @@ func TestResolveReplacesMCPServerOverlayCollections(t *testing.T) {
 	}
 }
 
-func TestResolveMCPServerLayersCanClearAndReenable(t *testing.T) {
+func TestResolveMCPServerLayersCannotReenableUserDisabled(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"mcp": {
 			"servers": {
@@ -588,14 +589,135 @@ func TestResolveMCPServerLayersCanClearAndReenable(t *testing.T) {
 	}
 
 	docs := resolved.MCP.Servers["docs"]
-	if docs.Disabled {
-		t.Fatalf("docs.Disabled = true, want project layer to re-enable")
+	// A user-level disable is sticky: project config must not re-enable it.
+	if !docs.Disabled {
+		t.Fatal("docs.Disabled = false, want user-level disable to remain sticky")
 	}
+	// Non-disable fields from the project layer still merge normally.
 	if len(docs.Args) != 0 {
 		t.Fatalf("docs.Args = %#v, want project layer to clear inherited args", docs.Args)
 	}
 	if len(docs.Env) != 0 {
 		t.Fatalf("docs.Env = %#v, want project layer to clear inherited env", docs.Env)
+	}
+}
+
+func TestMergeMCPStickyDisableReenable(t *testing.T) {
+	disabled := MCPServerConfig{Disabled: true, disabledSet: true}
+
+	// A lower-trust (project) layer must not lift a sticky user disable.
+	project := MCPServerConfig{Disabled: false, disabledSet: true}
+	if got := mergeMCPServer(disabled, project, false); !got.Disabled {
+		t.Fatal("project layer re-enabled a sticky user disable")
+	}
+
+	// The user scope (explicit mcp enable command / CLI override) may re-enable.
+	override := MCPServerConfig{Disabled: false, disabledSet: true}
+	if got := mergeMCPServer(disabled, override, true); got.Disabled {
+		t.Fatal("user-scope override must be able to re-enable")
+	}
+
+	// A user-scope disable stacked on a project attempt still sticks.
+	if got := mergeMCPServer(disabled, project, false); !got.Disabled {
+		t.Fatal("sticky disable must survive a project re-enable attempt")
+	}
+
+	// Baseline: a project layer may disable a default-enabled server when no
+	// higher-trust scope has explicitly set disabled (the trust boundary must
+	// not block legitimate project disables). Regression guard for the
+	// disabledSet-before-check ordering bug.
+	defaultEnabled := MCPServerConfig{Disabled: false, disabledSet: false}
+	projectDisable := MCPServerConfig{Disabled: true, disabledSet: true}
+	if got := mergeMCPServer(defaultEnabled, projectDisable, false); !got.Disabled {
+		t.Fatal("project layer should be able to disable a default-enabled server")
+	}
+
+	// And an empty project layer must not flip an unconfigured server to disabled.
+	if got := mergeMCPServer(MCPServerConfig{}, MCPServerConfig{}, false); got.Disabled {
+		t.Fatal("an empty project layer must not disable an unconfigured server")
+	}
+}
+
+// TestResolveMCPCannotReenableUserDisabled exercises the trust boundary at the
+// actual ResolveMCP entry point: a project config (project scope) must not lift
+// a disable the user set in their higher-trust user config.
+func TestResolveMCPCannotReenableUserDisabled(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"mcp": {
+			"servers": {
+				"docs": {
+					"type": "stdio",
+					"command": "docs-mcp",
+					"disabled": true
+				}
+			}
+		}
+	}`)
+	// Project config tries to re-enable it.
+	projectPath := writeConfig(t, `{
+		"mcpServers": {
+			"docs": {
+				"disabled": false
+			}
+		}
+	}`)
+
+	resolved, err := ResolveMCP(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMCP() error = %v", err)
+	}
+
+	docs, ok := resolved.Servers["docs"]
+	if !ok {
+		t.Fatal("docs server missing from resolved config")
+	}
+	if !docs.Disabled {
+		t.Fatalf("docs.Disabled = false, want user-level disable to remain sticky across project re-enable")
+	}
+}
+
+// TestResolveMCPUserLiftsProjectDisabled asserts the reverse direction is open:
+// a user config (higher-trust scope) re-enabling a server the project config
+// disabled must be permitted, since user > project in the trust hierarchy.
+func TestResolveMCPUserLiftsProjectDisabled(t *testing.T) {
+	// Project config disables the server.
+	projectPath := writeConfig(t, `{
+		"mcpServers": {
+			"docs": {
+				"type": "stdio",
+				"command": "docs-mcp",
+				"disabled": true
+			}
+		}
+	}`)
+	// User config re-enables it.
+	userPath := writeConfig(t, `{
+		"mcp": {
+			"servers": {
+				"docs": {
+					"disabled": false
+				}
+			}
+		}
+	}`)
+
+	resolved, err := ResolveMCP(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMCP() error = %v", err)
+	}
+
+	docs, ok := resolved.Servers["docs"]
+	if !ok {
+		t.Fatal("docs server missing from resolved config")
+	}
+	if docs.Disabled {
+		t.Fatalf("docs.Disabled = true, want user scope to lift the project-level disable")
 	}
 }
 
@@ -1374,6 +1496,71 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 	}
 }
 
+func TestApplyCatalogDescriptorFoldsCustomHeadersCaseInsensitively(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_env")
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: descriptor.DefaultBaseURL,
+		CustomHeaders: map[string]string{
+			"x-aimlapi-partner-id": "part_override",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	if got := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("canonical header value = %q, want override", got)
+	}
+	if _, duplicate := profile.CustomHeaders["x-aimlapi-partner-id"]; duplicate {
+		t.Fatalf("case-colliding header survived merge: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestApplyCatalogDescriptorUsesAimlapiPartnerEnvironmentOverride(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_env")
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{BaseURL: descriptor.DefaultBaseURL}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	if got := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_env" {
+		t.Fatalf("partner header = %q, want part_env", got)
+	}
+}
+
+func TestApplyCatalogDescriptorStripsAimlapiAttributionFromRetargetedProfile(t *testing.T) {
+	descriptor, err := providercatalog.Require("aimlapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ProviderProfile{
+		BaseURL: "https://proxy.example.test/v1",
+		CustomHeaders: map[string]string{
+			"x-aimlapi-partner-id":          "persisted-partner",
+			"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+			"X-AIMLAPI-Integration-Version": "zero",
+			"X-Environment":                 "staging",
+		},
+	}
+
+	applyCatalogDescriptor(&profile, descriptor, true)
+
+	for key := range profile.CustomHeaders {
+		if strings.HasPrefix(strings.ToLower(key), "x-aimlapi-") {
+			t.Fatalf("catalog attribution survived retargeting: %#v", profile.CustomHeaders)
+		}
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("user header was removed: %#v", profile.CustomHeaders)
+	}
+}
+
 func TestResolveProviderProfileParseThinkTagsFalseAlias(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",
@@ -1554,6 +1741,85 @@ func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
 	}
 	if resolved2.Sandbox.Network != "deny" {
 		t.Fatalf("resolved.Sandbox.Network = %q, want deny (project config allowed to tighten)", resolved2.Sandbox.Network)
+	}
+}
+
+func TestResolveSandboxEnabledUserConfigDisables(t *testing.T) {
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("user config enabled:false must resolve to a false pointer, got %v", resolved.Sandbox.Enabled)
+	}
+}
+
+func TestResolveSandboxDisableIgnoredFromProjectConfig(t *testing.T) {
+	// Security: a cloned repo's project config must NOT be able to disable the
+	// sandbox that constrains it. Only global config / CLI can turn it off.
+	userPath := writeConfig(t, `{}`)
+	projectPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled != nil {
+		t.Fatalf("project config enabled:false must be ignored, got %v — a repo could disable the sandbox", *resolved.Sandbox.Enabled)
+	}
+}
+
+func TestResolveSandboxEnabledIgnoredFromProviderCommand(t *testing.T) {
+	// Security: a provider command is an arbitrary executable named in config, and
+	// its stdout is parsed into a full FileConfig — so it must NOT be able to reach
+	// Sandbox.Enabled, in either direction. Same rule as project config: only global
+	// config / CLI may turn the sandbox off.
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "cannot disable", value: "false"},
+		{name: "cannot enable", value: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := writeCommand(t, commandScript{
+				Stdout: `{"activeProvider":"cmd","providers":[{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}],"sandbox":{"enabled":` + tc.value + `}}`,
+			})
+			resolved, err := Resolve(ResolveOptions{ProviderCommand: command, Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			// The provider itself must still be applied — only the sandbox toggle is dropped.
+			if resolved.ActiveProvider != "cmd" {
+				t.Fatalf("ActiveProvider = %q, want cmd (provider command must still apply)", resolved.ActiveProvider)
+			}
+			if resolved.Sandbox.Enabled != nil {
+				t.Fatalf("provider command set sandbox.enabled=%s, got %v — a provider command could toggle the sandbox", tc.value, *resolved.Sandbox.Enabled)
+			}
+		})
+	}
+}
+
+func TestResolveSandboxEnabledCLIOverride(t *testing.T) {
+	// A CLI/programmatic override (applied after every config source) must be able
+	// to disable the sandbox, even with no config file.
+	disabled := false
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &disabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.Sandbox.Enabled == nil || *resolved.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:false must disable the sandbox, got %v", resolved.Sandbox.Enabled)
+	}
+	// An explicit true override must win over a lower-precedence global-config false.
+	userPath := writeConfig(t, `{"sandbox": {"enabled": false}}`)
+	enabled := true
+	resolved2, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}, Overrides: Overrides{Sandbox: SandboxConfig{Enabled: &enabled}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved2.Sandbox.Enabled == nil || !*resolved2.Sandbox.Enabled {
+		t.Fatalf("CLI override enabled:true must win over config false, got %v", resolved2.Sandbox.Enabled)
 	}
 }
 

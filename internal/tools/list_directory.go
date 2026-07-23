@@ -15,6 +15,10 @@ type listDirectoryTool struct {
 	scope         PathScope
 }
 
+func (listDirectoryTool) outputCategory(map[string]any) outputCategory {
+	return outputCategorySearch
+}
+
 func NewListDirectoryTool(workspaceRoot string) Tool {
 	return NewScopedListDirectoryTool(workspaceRoot, nil)
 }
@@ -33,7 +37,8 @@ func NewScopedListDirectoryTool(workspaceRoot string, scope PathScope) Tool {
 				},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Lists directory entries without modifying files."),
+			safety:       readOnlySafety("Lists directory entries without modifying files."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: directoryResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -41,6 +46,14 @@ func NewScopedListDirectoryTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result {
+	return tool.run(args, true)
+}
+
+func (tool listDirectoryTool) RunWithOptions(_ context.Context, args map[string]any, _ RunOptions) Result {
+	return tool.run(args, false)
+}
+
+func (tool listDirectoryTool) run(args map[string]any, directBudget bool) Result {
 	// Optional with a "." default: treat an explicit empty path (a common
 	// weak-model quirk) the same as the key being absent rather than erroring.
 	requestedPath, err := aliasedStringArg(args, []string{"path", "directory", "dir"}, ".", false, true)
@@ -75,13 +88,11 @@ func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result
 		return okResult("Directory is empty: " + relativePath)
 	}
 	output := "Contents of " + relativePath + ":\n\n" + strings.Join(entries, "\n")
-	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "use path, recursive=false, or a smaller max_depth to narrow the listing")
-	meta := outputBudgetMeta(budgeted)
-	if budgeted.Truncated {
-		meta["truncated"] = "true"
-		meta["truncation_reason"] = "byte_budget"
+	result := Result{Status: StatusOK, Output: output}
+	if directBudget {
+		return applyLegacyByteBudgetToResult(result, searchOutputBudgetBytes, "use path, recursive=false, or a smaller max_depth to narrow the listing")
 	}
-	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
+	return result
 }
 
 func listDirectoryEntries(path string, depth int, maxDepth int) ([]string, error) {

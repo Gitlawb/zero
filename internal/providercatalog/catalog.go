@@ -34,6 +34,9 @@ const (
 
 var ErrUnknownProvider = errors.New("unknown provider")
 
+// AIMLAPIID is the provider catalog identifier for the aimlapi.com preset.
+const AIMLAPIID = "aimlapi"
+
 type Descriptor struct {
 	ID                  string
 	Name                string
@@ -41,6 +44,7 @@ type Descriptor struct {
 	DefaultBaseURL      string
 	DefaultModel        string
 	AuthEnvVars         []string
+	CustomHeaders       map[string]string
 	RequiresAuth        bool
 	UsesAmbientAuth     bool
 	Public              bool
@@ -67,9 +71,9 @@ type Descriptor struct {
 	// headless / SSH use) in addition to the browser flow.
 	OAuthDeviceFlow bool
 
-	// Recommended marks the provider that should be surfaced first and badged
-	// (★ … (recommended)) in every catalog-ordered list and picker. At most one
-	// descriptor should set this.
+	// Recommended marks a provider surfaced at the top and badged in
+	// catalog-ordered lists and pickers. The recommended descriptors are the first
+	// entries in the catalog, in order.
 	Recommended bool
 }
 
@@ -100,6 +104,11 @@ var descriptors = []Descriptor{
 	// minimax, qwen, google, nvidia, tencent, z-ai). Flat /v1/chat/completions
 	// with a Bearer ogw_live_… key; listed first and badged in every picker.
 	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
+	// aimlapi.com — OpenAI-compatible aggregating gateway, also badged as
+	// recommended (second, right after the OpenGateway default). The built-in TUI
+	// onboarding can register/top up an account and save the issued key; the partner
+	// headers attribute usage for the rebate.
+	recommended(aimlapi()),
 	openAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1", []string{"OPENAI_API_KEY"}),
 	anthropic("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4.5", []string{"ANTHROPIC_API_KEY"}),
 	google("google", "Google", "https://generativelanguage.googleapis.com", "gemini-2.5-pro", []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}, "gemini"),
@@ -131,6 +140,7 @@ var descriptors = []Descriptor{
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
+	openAICompat("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "qwen/qwen3.5-flash", []string{"ATLASCLOUD_API_KEY"}, "atlas cloud", "atlas"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
@@ -298,8 +308,21 @@ func google(id string, name string, baseURL string, model string, env []string, 
 	}
 }
 
-// recommended marks a descriptor as the recommended default so list/picker
-// surfaces sort it first and render the ★ … (recommended) badge.
+func aimlapi() Descriptor {
+	descriptor := openAICompat(AIMLAPIID, "aimlapi.com", "https://api.aimlapi.com/v1", "anthropic/claude-sonnet-5", []string{"AIMLAPI_API_KEY"}, "aimlapi", "aiml api", "ai/ml api", "ai ml api")
+	descriptor.CustomHeaders = map[string]string{
+		"X-AIMLAPI-Partner-ID":          "part_62yQoGYDq4Yqnrj2R1iGrDNJ",
+		"X-AIMLAPI-Integration-Repo":    "Gitlawb/zero",
+		"X-AIMLAPI-Integration-Version": "zero",
+	}
+	// Onboarding is key-based only: the TUI sub-flow takes an existing key or an
+	// email top-up (internal/aimlapi Paths A/B). Not flagged
+	// OAuth-capable, so it does not appear in the wizard's "Sign in with OAuth" list.
+	return descriptor
+}
+
+// recommended marks a descriptor as a recommended default so list/picker
+// surfaces sort it to the top and render a provider-specific badge.
 func recommended(descriptor Descriptor) Descriptor {
 	descriptor.Recommended = true
 	return descriptor
@@ -380,5 +403,19 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
+	if descriptor.CustomHeaders != nil {
+		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
+	}
 	return descriptor
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }

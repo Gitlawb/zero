@@ -8,18 +8,18 @@ import (
 	"testing"
 )
 
-func TestLinuxSandboxInnerStageAppliesNetworkDenySeccomp(t *testing.T) {
-	originalNetworkDeny := applyLinuxNetworkDenyFilter
+func TestLinuxSandboxInnerStageReliesOnOuterNamespaceForNetworkDeny(t *testing.T) {
+	originalNetworkGuard := applyLinuxIsolatedNetworkGuardFilter
 	originalUnixBlock := applyUnixSocketBlockFilter
 	t.Cleanup(func() {
-		applyLinuxNetworkDenyFilter = originalNetworkDeny
+		applyLinuxIsolatedNetworkGuardFilter = originalNetworkGuard
 		applyUnixSocketBlockFilter = originalUnixBlock
 	})
 
-	networkDenyCalls := 0
+	networkGuardCalls := 0
 	unixBlockCalls := 0
-	applyLinuxNetworkDenyFilter = func() error {
-		networkDenyCalls++
+	applyLinuxIsolatedNetworkGuardFilter = func() error {
+		networkGuardCalls++
 		return nil
 	}
 	applyUnixSocketBlockFilter = func() error {
@@ -35,24 +35,24 @@ func TestLinuxSandboxInnerStageAppliesNetworkDenySeccomp(t *testing.T) {
 	}, &stderr)
 
 	if code != 127 {
-		t.Fatalf("exit code = %d, want lookup failure 127 after filters; stderr=%s", code, stderr.String())
+		t.Fatalf("exit code = %d, want lookup failure 127 after Unix-socket filter; stderr=%s", code, stderr.String())
 	}
-	if networkDenyCalls != 1 {
-		t.Fatalf("network deny filter calls = %d, want 1", networkDenyCalls)
+	if networkGuardCalls != 1 {
+		t.Fatalf("isolated network guard calls = %d, want 1", networkGuardCalls)
 	}
 	if unixBlockCalls != 1 {
 		t.Fatalf("unix socket filter calls = %d, want 1", unixBlockCalls)
 	}
 }
 
-func TestLinuxSandboxInnerStageSkipsNetworkDenySeccompWhenAllowed(t *testing.T) {
-	originalNetworkDeny := applyLinuxNetworkDenyFilter
+func TestLinuxSandboxInnerStageSkipsIsolatedNetworkGuardWhenNetworkAllowed(t *testing.T) {
+	originalNetworkGuard := applyLinuxIsolatedNetworkGuardFilter
 	t.Cleanup(func() {
-		applyLinuxNetworkDenyFilter = originalNetworkDeny
+		applyLinuxIsolatedNetworkGuardFilter = originalNetworkGuard
 	})
 
-	applyLinuxNetworkDenyFilter = func() error {
-		return errors.New("network deny filter should not run")
+	applyLinuxIsolatedNetworkGuardFilter = func() error {
+		return errors.New("isolated network guard should not run")
 	}
 
 	var stderr bytes.Buffer
@@ -62,6 +62,6 @@ func TestLinuxSandboxInnerStageSkipsNetworkDenySeccompWhenAllowed(t *testing.T) 
 	}, &stderr)
 
 	if code != 127 {
-		t.Fatalf("exit code = %d, want lookup failure 127 without network filter; stderr=%s", code, stderr.String())
+		t.Fatalf("exit code = %d, want lookup failure 127 without isolated network guard; stderr=%s", code, stderr.String())
 	}
 }

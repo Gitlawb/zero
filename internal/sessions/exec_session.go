@@ -89,7 +89,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 	if resumeID != "" || options.ResumeLatest {
 		sessionID := resumeID
 		if sessionID == "" && options.ResumeLatest {
-			latest, err := store.Latest()
+			latest, err := store.LatestResumable()
 			if err != nil {
 				return PreparedExec{}, err
 			}
@@ -104,6 +104,9 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		}
 		if session == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + sessionID}
+		}
+		if !IsResumableKind(session.SessionKind) {
+			return PreparedExec{}, ExecError{"Zero session is not resumable: " + sessionID}
 		}
 		contextEvents, err := readExecContextEvents(store, session.SessionID)
 		if err != nil {

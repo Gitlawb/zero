@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,23 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 	if !seen[RequestPermissionsToolName] {
 		t.Fatalf("expected %s in core read-only tools", RequestPermissionsToolName)
+	}
+}
+
+func TestRegistryAllReturnsToolsSortedByName(t *testing.T) {
+	registry := NewRegistry()
+	for _, name := range []string{"write_file", "bash", "read_file"} {
+		registry.Register(fakePlainTool{baseTool: baseTool{name: name, description: name}})
+	}
+
+	all := registry.All()
+	got := make([]string, 0, len(all))
+	for _, tool := range all {
+		got = append(got, tool.Name())
+	}
+	want := []string{"bash", "read_file", "write_file"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Registry.All() order = %v, want %v", got, want)
 	}
 }
 

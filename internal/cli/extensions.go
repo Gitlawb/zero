@@ -79,6 +79,8 @@ func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return exitSuccess
 	case "add":
 		return runPluginAdd(args[1:], deps.pluginsDir(), stdout, stderr)
+	case "info":
+		return runPluginInfo(args[1:], stdout, stderr, deps)
 	case "remove", "rm":
 		return runPluginRemove(args[1:], deps.pluginsDir(), stdout, stderr)
 	case "enable":
@@ -645,6 +647,7 @@ func writePluginsHelp(w io.Writer) error {
 
 Commands:
   list                 List local Zero plugins
+  info <id>            Show plugin details and lockfile metadata
   add <git-url|path>   Install a plugin (manifest-validated, pinned in plugins.lock)
   remove <id>          Remove an installed plugin and its lockfile entry
   enable <id>          Enable a plugin via its plugin.json

@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,25 @@ func TestLoadMissingDirYieldsEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadNotDirectoryErrors(t *testing.T) {
+	// Portable across Unix and Windows: a regular file is not a skills root.
+	// Windows reports ReadDir(file) as ErrNotExist; load must reclassify it.
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(notDir)
+	if err == nil {
+		t.Fatalf("expected error for non-directory skills root, got loaded=%#v", loaded)
+	}
+	if errors.Is(err, os.ErrNotExist) && !errors.Is(err, errNotDirectory) {
+		t.Fatalf("non-directory skills root must not look missing: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("expected nil skills on non-directory root, got %#v", loaded)
+	}
+}
+
 func TestLoadSortsByName(t *testing.T) {
 	dir := t.TempDir()
 	writeSkill(t, dir, "zeta", "body")
@@ -290,5 +310,275 @@ func TestDefaultDirFallsBackToHome(t *testing.T) {
 	want := filepath.Join("/home/zero", ".local", "share", "zero", "skills")
 	if got != want {
 		t.Fatalf("DefaultDir = %q, want %q", got, want)
+	}
+}
+
+func TestAgentsDirReturnsExistingDirectory(t *testing.T) {
+	home := t.TempDir()
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := AgentsDir(map[string]string{"HOME": home})
+	if got != agents {
+		t.Fatalf("AgentsDir = %q, want %q", got, agents)
+	}
+}
+
+func TestAgentsDirMissingIsEmpty(t *testing.T) {
+	home := t.TempDir()
+	got := AgentsDir(map[string]string{"HOME": home})
+	if got != "" {
+		t.Fatalf("AgentsDir for missing path = %q, want empty", got)
+	}
+}
+
+func TestAgentsDirFileNotDirIsEmpty(t *testing.T) {
+	home := t.TempDir()
+	agentsParent := filepath.Join(home, ".agents")
+	if err := os.MkdirAll(agentsParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// skills is a file, not a directory
+	if err := os.WriteFile(filepath.Join(agentsParent, "skills"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := AgentsDir(map[string]string{"HOME": home})
+	if got != "" {
+		t.Fatalf("AgentsDir for file = %q, want empty", got)
+	}
+}
+
+func TestAgentsDirHonorsUserProfile(t *testing.T) {
+	home := t.TempDir()
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := AgentsDir(map[string]string{"USERPROFILE": home})
+	if got != agents {
+		t.Fatalf("AgentsDir via USERPROFILE = %q, want %q", got, agents)
+	}
+}
+
+func TestAgentsDirIgnoresZeroSkillsDir(t *testing.T) {
+	home := t.TempDir()
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// ZERO_SKILLS_DIR must not redirect or suppress AgentsDir.
+	got := AgentsDir(map[string]string{
+		"HOME":            home,
+		"ZERO_SKILLS_DIR": filepath.Join(home, "zero-only"),
+	})
+	if got != agents {
+		t.Fatalf("AgentsDir with ZERO_SKILLS_DIR set = %q, want %q", got, agents)
+	}
+}
+
+func TestAgentsDirUnresolvableHomeIsEmpty(t *testing.T) {
+	// Empty env map values + no real UserHomeDir fallback is hard to force, but
+	// empty HOME/USERPROFILE with an empty home should still not panic.
+	// When UserHomeDir works this may return a host path; only assert no panic
+	// and that a deliberately empty-looking override path is not invented from ZERO.
+	_ = AgentsDir(map[string]string{"HOME": "", "USERPROFILE": ""})
+}
+
+func TestDiscoveryRootsOrderAndOmission(t *testing.T) {
+	home := t.TempDir()
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	primary := filepath.Join(home, "zero-skills")
+	env := map[string]string{
+		"HOME":            home,
+		"ZERO_SKILLS_DIR": primary,
+	}
+	roots := DiscoveryRoots(env, []string{"", " /plugin/a ", "plugin/b"})
+	want := []string{primary, agents, "/plugin/a", "plugin/b"}
+	if len(roots) != len(want) {
+		t.Fatalf("DiscoveryRoots = %#v, want %#v", roots, want)
+	}
+	for i := range want {
+		if roots[i] != want[i] {
+			t.Fatalf("DiscoveryRoots[%d] = %q, want %q (full %#v)", i, roots[i], want[i], roots)
+		}
+	}
+}
+
+func TestDiscoveryRootsOmitsMissingAgents(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "zero-skills")
+	env := map[string]string{
+		"HOME":            home,
+		"ZERO_SKILLS_DIR": primary,
+	}
+	roots := DiscoveryRoots(env, nil)
+	if len(roots) != 1 || roots[0] != primary {
+		t.Fatalf("DiscoveryRoots without agents = %#v, want only primary", roots)
+	}
+}
+
+func TestLoadFromRootsPrimaryWinsOverAgents(t *testing.T) {
+	primary := t.TempDir()
+	agents := t.TempDir()
+	writeSkill(t, primary, "shared", "---\nname: shared\n---\nprimary body\n")
+	writeSkill(t, agents, "shared", "---\nname: shared\n---\nagents body\n")
+	writeSkill(t, agents, "agents-only", "---\nname: agents-only\n---\nagents only\n")
+
+	loaded, dups, err := LoadFromRoots([]string{primary, agents})
+	if err != nil {
+		t.Fatalf("LoadFromRoots: %v", err)
+	}
+	byName := map[string]Skill{}
+	for _, skill := range loaded {
+		byName[skill.Name] = skill
+	}
+	if byName["shared"].Content != "primary body" {
+		t.Fatalf("primary should win shared, got %q", byName["shared"].Content)
+	}
+	if byName["agents-only"].Content != "agents only" {
+		t.Fatalf("agents-only missing: %#v", loaded)
+	}
+	if len(dups) != 1 || dups[0].Name != "shared" {
+		t.Fatalf("expected one shared duplicate, got %#v", dups)
+	}
+}
+
+func TestLoadFromRootsSkipsEmptyAndMissing(t *testing.T) {
+	primary := t.TempDir()
+	writeSkill(t, primary, "solo", "---\nname: solo\n---\nbody\n")
+	loaded, dups, err := LoadFromRoots([]string{"", filepath.Join(t.TempDir(), "missing"), primary})
+	if err != nil {
+		t.Fatalf("LoadFromRoots: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "solo" {
+		t.Fatalf("expected only solo, got %#v", loaded)
+	}
+	if len(dups) != 0 {
+		t.Fatalf("unexpected dups: %#v", dups)
+	}
+}
+
+func TestLoadFromRootsBubblesPrimaryError(t *testing.T) {
+	// A regular file is not a directory. On Unix ReadDir fails with ENOTDIR; on
+	// Windows that case is aliased to ErrNotExist, so load must reclassify an
+	// existing non-directory and bubble it from the first non-empty root.
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	optional := t.TempDir()
+	writeSkill(t, optional, "fallback", "---\nname: fallback\n---\nbody\n")
+
+	loaded, dups, err := LoadFromRoots([]string{notDir, optional})
+	if err == nil {
+		t.Fatalf("expected primary root error, got loaded=%#v dups=%#v", loaded, dups)
+	}
+	// Unix returns ENOTDIR; Windows reclassifies via errNotDirectory because
+	// ENOTDIR aliases ErrNotExist there. Either way it must not look missing.
+	if errors.Is(err, os.ErrNotExist) && !errors.Is(err, errNotDirectory) {
+		t.Fatalf("primary non-directory must not look missing: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("expected nil skills on primary error, got %#v", loaded)
+	}
+	if dups != nil {
+		t.Fatalf("expected nil dups on primary error, got %#v", dups)
+	}
+}
+
+func TestLoadFromRootsOptionalRootFailOpen(t *testing.T) {
+	primary := t.TempDir()
+	writeSkill(t, primary, "keep", "---\nname: keep\n---\nbody\n")
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agents := t.TempDir()
+	writeSkill(t, agents, "agents-only", "---\nname: agents-only\n---\nbody\n")
+
+	loaded, dups, err := LoadFromRoots([]string{primary, notDir, agents})
+	if err != nil {
+		t.Fatalf("optional root failure must not fail merge: %v", err)
+	}
+	byName := map[string]Skill{}
+	for _, skill := range loaded {
+		byName[skill.Name] = skill
+	}
+	if byName["keep"].Name != "keep" {
+		t.Fatalf("primary skill missing: %#v", loaded)
+	}
+	if byName["agents-only"].Name != "agents-only" {
+		t.Fatalf("later optional skill should still load: %#v", loaded)
+	}
+	if len(dups) != 0 {
+		t.Fatalf("unexpected dups: %#v", dups)
+	}
+}
+
+func TestListFromRootsStripsContent(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "demo", "---\nname: demo\n---\nbody content\n")
+	listed, _, err := ListFromRoots([]string{dir})
+	if err != nil {
+		t.Fatalf("ListFromRoots: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Name != "demo" {
+		t.Fatalf("unexpected listed: %#v", listed)
+	}
+	if listed[0].Content != "" {
+		t.Fatalf("ListFromRoots must strip Content, got %q", listed[0].Content)
+	}
+}
+
+func TestGlobalRootsIncludesAgents(t *testing.T) {
+	home := t.TempDir()
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Point HOME so AgentsDir finds the temp agents root.
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	primary := filepath.Join(home, "primary")
+	roots := GlobalRoots(primary)
+	if len(roots) != 2 || roots[0] != primary || roots[1] != agents {
+		t.Fatalf("GlobalRoots = %#v, want [primary, agents]", roots)
+	}
+}
+
+func TestInfoFromRootsAgentsOnlyHasNoLock(t *testing.T) {
+	primary := t.TempDir()
+	agents := t.TempDir()
+	writeSkill(t, agents, "shared-agents", "---\nname: agents-skill\ndescription: from agents\n---\nbody\n")
+	info, ok := InfoFromRoots(primary, []string{primary, agents}, "agents-skill")
+	if !ok {
+		t.Fatal("expected agents skill to resolve")
+	}
+	if info.Skill.Name != "agents-skill" || info.Skill.Description != "from agents" {
+		t.Fatalf("unexpected skill: %#v", info.Skill)
+	}
+	if info.Source != "" || info.Hash != "" {
+		t.Fatalf("agents-only skill must not carry lock metadata, got source=%q hash=%q", info.Source, info.Hash)
+	}
+}
+
+func TestInfoFromRootsPrimaryLockMetadata(t *testing.T) {
+	primary := t.TempDir()
+	writeSkill(t, primary, "demo", "---\nname: demo\n---\nbody\n")
+	// Write a lockfile entry the way install would.
+	lockPath := filepath.Join(primary, LockFileName)
+	if err := os.WriteFile(lockPath, []byte(`{"demo":{"source":"file:///src","hash":"sha256:abc"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, ok := InfoFromRoots(primary, []string{primary}, "demo")
+	if !ok {
+		t.Fatal("expected primary skill")
+	}
+	if info.Source != "file:///src" || info.Hash != "sha256:abc" {
+		t.Fatalf("lock metadata missing: %#v", info)
 	}
 }

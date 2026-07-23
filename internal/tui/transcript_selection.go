@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -36,6 +37,29 @@ type transcriptSelectionState struct {
 	dragging bool
 	anchor   transcriptSelectionPoint
 	cursor   transcriptSelectionPoint
+}
+
+// transcriptRenderInteraction lets settled-item render closures read the
+// current selection and hover state without rebuilding the cached descriptors.
+// The mutex keeps the shared cache state safe even if a renderer inspects a
+// model copy concurrently with an update.
+type transcriptRenderInteraction struct {
+	mu        sync.Mutex
+	selection transcriptSelectionState
+	hover     hoverTarget
+}
+
+func (s *transcriptRenderInteraction) set(selection transcriptSelectionState, hover hoverTarget) {
+	s.mu.Lock()
+	s.selection = selection
+	s.hover = hover
+	s.mu.Unlock()
+}
+
+func (s *transcriptRenderInteraction) get() (transcriptSelectionState, hoverTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selection, s.hover
 }
 
 type transcriptSelectableLine struct {
@@ -167,6 +191,9 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 // so the highlight is computed in the same shifted coordinate the mouse maps to
 // and lands exactly where the user selected (instead of gutter cells off).
 func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcriptSelectableLine, gutter int, startBodyY int) transcriptBodyRenderedItem {
+	if m.transcriptInteraction != nil {
+		m.transcriptSelection, m.hover = m.transcriptInteraction.get()
+	}
 	lines := padTranscriptBodyLines(viewLines(rendered), gutter)
 	shifted := shiftSelectableX(selectable, gutter)
 	if m.transcriptSelection.active {
@@ -211,6 +238,21 @@ func (m model) renderHoverHighlight(rendered string, selectable []transcriptSele
 }
 
 func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool) []transcriptBodyItem {
+	if m.transcriptInteraction != nil {
+		m.transcriptInteraction.set(m.transcriptSelection, m.hover)
+	}
+	// Steady-state alt-screen frames (notably the idle cursor blink) can reuse
+	// the settled list directly. Keeping this fast path outside the closure-heavy
+	// builder also prevents the large model receiver from escaping to the heap.
+	if m.altScreen && !detailed && !m.fileView.active && !m.pending && m.pendingSpecReview == nil &&
+		m.flushedAny && m.flushed == len(m.transcript) &&
+		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
+		return m.altScreenSettledItems
+	}
+	return m.buildTranscriptBodyItems(width, emptyOverlay, detailed)
+}
+
+func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed bool) []transcriptBodyItem {
 	// File drill-in: the chat column's body swaps to the viewed file's
 	// diff/content. Swapping HERE (the single source every consumer reads) keeps
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
@@ -239,7 +281,6 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 			items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, m.emptyState(width)))
 		}
 	} else {
-		rc := buildRowContext(m.transcript)
 		shownAny := false
 		// The detailed view shows the full transcript from index 0, not
 		// the managed region after m.flushed.
@@ -247,11 +288,32 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 		if detailed {
 			startIdx = 0
 		}
+		useSettledCache := m.altScreen && !detailed &&
+			m.altScreenSettledWidth == width &&
+			m.altScreenSettledFrontier == m.flushed
+		if useSettledCache {
+			// The cache reserves scratch capacity for live-tail descriptors, avoiding
+			// an O(history) slice copy on every streaming/spinner frame.
+			items = m.altScreenSettledItems[:len(m.altScreenSettledItems)]
+		} else if m.altScreen && !detailed {
+			// A directly-constructed model (not yet passed through Update), or an
+			// explicitly invalidated cache, must still render complete history.
+			// The next settle rebuilds the cache for subsequent frames.
+			startIdx = 0
+		}
+		// Dependencies for an unflushed row cannot live wholly before the
+		// frontier: such a row would have blocked the frontier. Build context only
+		// for the live tail instead of rescanning settled history each frame.
+		rc := buildRowContext(m.transcript[startIdx:])
 		renderRowFn := transcriptRowDispatchFn(m.renderTranscriptRow)
 		if detailed {
 			renderRowFn = transcriptRowDispatchFn(m.renderTranscriptDetailedRow)
 		}
-		previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
+		if startIdx > 0 {
+			previousKind, havePreviousKind = m.flushedPreviousKind, m.flushedHavePreviousKind
+		} else {
+			previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
+		}
 		specialistSummaryEmitted := false
 		for index := startIdx; index < len(m.transcript); index++ {
 			row := m.transcript[index]
@@ -392,7 +454,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 				rowIndex:          -1,
 				heightCacheStable: false, // the highlight changes with the cursor
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, perm.typing, m.input.Value(), width)
 					options := permissionOptions(perm.request)
 					selectable := make([]transcriptSelectableLine, 0, len(offsets))
 					for index, offset := range offsets {
@@ -1326,7 +1388,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// opens/switches the file view.
 		if path, ok := m.fileRowAtMouse(msg); ok {
 			if m.fileView.active || m.selectedFile == path {
-				m.selectedFile = path
+				m.setSelectedFile(path)
 				return m.openFileView(path), nil, true
 			}
 			return m.selectFile(path), nil, true
@@ -1339,8 +1401,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
-		if line.permOption {
-			// A left-click on a permission-popup option resolves it directly.
+		if line.permOption && !(m.pendingPermission != nil && m.pendingPermission.typing) {
+			// A left-click on a permission-popup option resolves it directly. The
+			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
+			// returns nil offsets in feedback mode, so no option row is registered as
+			// clickable then — but that single early-return is the only thing keeping
+			// a stray click (Allow included) off the decision path, and it lives in a
+			// function other PRs also edit. Guarding here makes the safety explicit
+			// rather than emergent.
 			next, cmd := m.resolvePermission(line.permChoice)
 			return next.(model), cmd, true
 		}
@@ -1442,6 +1510,11 @@ func (m model) toggleTranscriptRow(rowIndex int) model {
 	switch m.transcript[rowIndex].kind {
 	case rowReasoning, rowToolResult:
 		m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+		// Settled alt-screen rows are cached across frames; force a rebuild so an
+		// expand/collapse interaction is reflected immediately.
+		if rowIndex < m.flushed {
+			m.altScreenSettledWidth = 0
+		}
 	}
 	return m
 }

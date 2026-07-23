@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-// ErrNotInstalled is returned when SetEnabledByID cannot find a plugin with
-// the requested id under the given LoadOptions.
-var ErrNotInstalled = errors.New("plugin is not installed")
-
 // SetEnabledResult describes a successful enable/disable of one plugin manifest.
 type SetEnabledResult struct {
 	ID           string `json:"id"`

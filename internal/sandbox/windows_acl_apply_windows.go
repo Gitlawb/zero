@@ -77,11 +77,18 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	if path == "" || len(group.Entries) == 0 {
 		return windowsACLSnapshot{}, false, nil
 	}
+	// Open ONE no-follow handle to the target and drive every ACL operation
+	// (read + write) through it, so the read and the write hit the same kernel
+	// object. The previous pathname-based Stat/GetNamedSecurityInfo/
+	// SetNamedSecurityInfo each re-resolved the path independently, so during
+	// elevated setup a lower-privileged local user could swap the target for a
+	// symlink/junction between operations and redirect the ACL change onto a
+	// system object it never validated (issue #728, a TOCTOU privilege boundary).
 	materialized := false
-	info, err := os.Stat(path)
+	handle, isDir, err := openWindowsACLTarget(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return windowsACLSnapshot{}, false, fmt.Errorf("stat windows ACL target %s: %w", path, err)
+			return windowsACLSnapshot{}, false, err
 		}
 		if !group.Materialize {
 			if windowsACLGroupRequiresExistingTarget(group) {
@@ -93,46 +100,86 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 			return windowsACLSnapshot{}, false, fmt.Errorf("materialize windows ACL target %s: %w", path, err)
 		}
 		materialized = true
-		info, err = os.Stat(path)
+		handle, isDir, err = openWindowsACLTarget(path)
 		if err != nil {
-			return windowsACLSnapshot{}, false, fmt.Errorf("stat materialized windows ACL target %s: %w", path, err)
-		}
-	}
-	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		if materialized {
 			_ = os.RemoveAll(path)
+			return windowsACLSnapshot{}, false, fmt.Errorf("open materialized windows ACL target %s: %w", path, err)
 		}
-		return windowsACLSnapshot{}, false, fmt.Errorf("read windows ACL for %s: %w", path, err)
 	}
-	oldDACL, _, err := descriptor.DACL()
-	if err != nil {
-		if materialized {
-			_ = os.RemoveAll(path)
-		}
-		return windowsACLSnapshot{}, false, fmt.Errorf("read windows DACL for %s: %w", path, err)
-	}
-	accessEntries, err := windowsExplicitAccessEntries(group.Entries, info.IsDir())
-	if err != nil {
+	// From here the handle is open; every early return must close it first (and
+	// remove a freshly materialized target) so a failure leaks neither.
+	fail := func(err error) (windowsACLSnapshot, bool, error) {
+		_ = windows.CloseHandle(handle)
 		if materialized {
 			_ = os.RemoveAll(path)
 		}
 		return windowsACLSnapshot{}, false, err
 	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fail(fmt.Errorf("read windows ACL for %s: %w", path, err))
+	}
+	oldDACL, _, err := descriptor.DACL()
+	if err != nil {
+		return fail(fmt.Errorf("read windows DACL for %s: %w", path, err))
+	}
+	accessEntries, err := windowsExplicitAccessEntries(group.Entries, isDir)
+	if err != nil {
+		return fail(err)
+	}
 	nextDACL, err := windows.ACLFromEntries(accessEntries, oldDACL)
 	if err != nil {
-		if materialized {
-			_ = os.RemoveAll(path)
-		}
-		return windowsACLSnapshot{}, false, fmt.Errorf("build windows ACL for %s: %w", path, err)
+		return fail(fmt.Errorf("build windows ACL for %s: %w", path, err))
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, nextDACL, nil); err != nil {
-		if materialized {
-			_ = os.RemoveAll(path)
-		}
-		return windowsACLSnapshot{}, false, fmt.Errorf("apply windows ACL for %s: %w", path, err)
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, nextDACL, nil); err != nil {
+		return fail(fmt.Errorf("apply windows ACL for %s: %w", path, err))
 	}
+	// The apply is committed; the retained descriptor is the rollback baseline.
+	// The handle has served its purpose (read+write bound to one object) and is
+	// closed now — rollback re-opens no-follow rather than holding a handle for
+	// the whole sandbox lifetime, since one caller discards the rollback closure.
+	_ = windows.CloseHandle(handle)
 	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Materialized: materialized}, true, nil
+}
+
+// openWindowsACLTarget opens path for reading and rewriting its DACL without
+// following a final-component reparse point (FILE_FLAG_OPEN_REPARSE_POINT), and
+// with FILE_FLAG_BACKUP_SEMANTICS so a directory can be opened. It returns the
+// handle and whether the target is a directory. A reparse-point target is
+// rejected outright: a sandbox setup target that resolves to a symlink/junction
+// during elevated setup is the signature of a path-swap attack, and following it
+// is exactly the redirection this guard exists to prevent. A missing target is
+// surfaced as os.ErrNotExist so the caller's materialize path still fires.
+func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
+	utf16Path, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("encode windows ACL target %s: %w", path, err)
+	}
+	handle, err := windows.CreateFile(
+		utf16Path,
+		windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		// syscall.Errno.Is maps ERROR_FILE_NOT_FOUND/ERROR_PATH_NOT_FOUND to
+		// os.ErrNotExist, so the %w keeps the caller's errors.Is check working.
+		return 0, false, fmt.Errorf("open windows ACL target %s: %w", path, err)
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, false, fmt.Errorf("inspect windows ACL target %s: %w", path, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = windows.CloseHandle(handle)
+		return 0, false, fmt.Errorf("refusing to apply ACL to reparse-point target %s: possible path swap during elevated setup", path)
+	}
+	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	return handle, isDir, nil
 }
 
 func windowsACLGroupRequiresExistingTarget(group windowsACLPathGroup) bool {
@@ -201,9 +248,20 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 			errs = append(errs, fmt.Errorf("read rollback windows DACL for %s: %w", snapshot.Path, err))
 			continue
 		}
-		if err := windows.SetNamedSecurityInfo(snapshot.Path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		// Re-open no-follow rather than restoring by pathname: the restore must
+		// land on the real object, not a reparse point swapped in since apply. The
+		// residual window is small because the target is ACL-restricted by now, but
+		// a handle keeps the restore honest. On a materialized-target rollback we
+		// remove it above, so only the restore-existing path opens here.
+		handle, _, err := openWindowsACLTarget(snapshot.Path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
+			continue
+		}
+		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 			errs = append(errs, fmt.Errorf("rollback windows ACL for %s: %w", snapshot.Path, err))
 		}
+		_ = windows.CloseHandle(handle)
 	}
 	return errors.Join(errs...)
 }

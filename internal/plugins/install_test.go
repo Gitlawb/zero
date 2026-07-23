@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -184,6 +185,38 @@ func TestInstallReinstallShowsHashChange(t *testing.T) {
 	}
 	if second.PreviousHash != first.Hash || second.Hash == first.Hash {
 		t.Fatalf("expected a hash change: prev=%q first=%q new=%q", second.PreviousHash, first.Hash, second.Hash)
+	}
+}
+
+func TestConcurrentInstallsPreserveEveryLockEntry(t *testing.T) {
+	destDir := t.TempDir()
+	const count = 12
+	sources := make([]string, count)
+	for index := range count {
+		manifest := validManifest()
+		manifest["id"] = fmt.Sprintf("zero.concurrent.%02d", index)
+		sources[index] = writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), manifest)
+	}
+
+	errs := make(chan error, count)
+	for _, source := range sources {
+		go func() {
+			_, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+			errs <- err
+		}()
+	}
+	for range count {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Install: %v", err)
+		}
+	}
+
+	entries, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if len(entries) != count {
+		t.Fatalf("lockfile has %d entries, want %d: %#v", len(entries), count, entries)
 	}
 }
 

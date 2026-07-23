@@ -216,10 +216,10 @@ func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
 func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 	kind := sessions.SessionKind(strings.ToLower(strings.TrimSpace(value)))
 	switch kind {
-	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl:
+	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSide, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl:
 		return kind, nil
 	default:
-		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, or spec-impl.", value)}
+		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, side, spec-draft, or spec-impl.", value)}
 	}
 }
 
@@ -535,7 +535,7 @@ Commands:
 
 Flags:
       --json            Print JSON output
-      --kind <kind>     Filter list by fork, child, spec-draft, or spec-impl
+      --kind <kind>     Filter list by fork, child, side, spec-draft, or spec-impl
       --sequence <n>    Rewind target sequence (rewind-plan, rewind)
       --event <id>      Rewind target event id (rewind-plan, rewind)
       --exclude-target  Drop the target event (rewind-plan, rewind)

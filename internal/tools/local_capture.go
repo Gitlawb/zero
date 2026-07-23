@@ -58,6 +58,8 @@ func newCaptureArtifactTool(options LocalControlArtifactOptions) Tool {
 				AdditionalProperties: false,
 			},
 			safety: localControlSafety(enabled, SideEffectLocalControl, "Captures local browser, desktop, or terminal state into the configured artifact directory."),
+			// Captures write artifacts under the configured directory.
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false},
 		},
 		browser:      localcontrol.NewBrowser(options.Browser),
 		desktop:      localcontrol.NewDesktop(options.Desktop),

@@ -177,6 +177,33 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
+// ProviderPersisted reports whether a provider profile named name actually has
+// a row in the config file at path. A provider can appear in the resolved/
+// in-memory provider list without ever being written to config.json — e.g.
+// applyProviderEnv synthesizes an "openai" profile purely from an ambient
+// OPENAI_API_KEY environment variable on every Resolve() call, without ever
+// persisting it. RemoveProvider/SetActiveProvider/SetProviderModel only ever
+// look at what's on disk, so a caller offering to mutate a provider by name
+// should check this first: "not on disk" needs different handling (nothing to
+// persist/remove there) than a name that doesn't exist anywhere at all.
+func ProviderPersisted(path string, name string) (bool, error) {
+	path = strings.TrimSpace(path)
+	name = strings.TrimSpace(name)
+	if path == "" || name == "" {
+		return false, nil
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		return false, err
+	}
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // RemoveProvider deletes the named provider profile from the config at path.
 // When the removed profile was active, activeProvider hands off to the first
 // remaining provider (or clears when none remain) so the config never points at

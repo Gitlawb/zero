@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -371,9 +372,15 @@ func ScanSSEDataWithContext(
 				// The provider asked to stop (e.g. it already emitted an error
 				// for this payload). Abort the read and end like ScanSSEData:
 				// return nil so callers fall through to their post-scan checks.
+				// Do not stamp FirstToken — this payload was not accepted model
+				// output, so counting it as first-token time would be misleading.
 				cancel()
 				return nil
 			}
+			// First accepted non-keepalive payload = first real model output. Stamp
+			// once; later real payloads are no-ops. nil recorder (untraced run) is a
+			// no-op.
+			trace.FromContext(ctx).StampFirstToken()
 		}
 	}
 }

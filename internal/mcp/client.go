@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 type RemoteTool struct {
@@ -46,6 +48,7 @@ type Client struct {
 	mu      sync.Mutex
 	closeMu sync.Mutex
 	nextID  int
+	cleanup func()
 
 	// dispatchMu guards the response-dispatch state shared with the single
 	// reader goroutine. It is never held across a blocking read.
@@ -72,9 +75,18 @@ const (
 )
 
 func Connect(ctx context.Context, server Server) (ToolClient, error) {
+	return ConnectWithOptions(ctx, server, ConnectOptions{})
+}
+
+type ConnectOptions struct {
+	Execution     *execution.Runner
+	WorkspaceRoot string
+}
+
+func ConnectWithOptions(ctx context.Context, server Server, options ConnectOptions) (ToolClient, error) {
 	switch server.Type {
 	case ServerTypeStdio:
-		return connectStdio(ctx, server)
+		return connectStdio(ctx, server, options)
 	case ServerTypeHTTP:
 		return connectNetwork(ctx, server)
 	case ServerTypeSSE:
@@ -120,9 +132,37 @@ func (b *boundedBuffer) String() string {
 	return b.buf.String()
 }
 
-func connectStdio(ctx context.Context, server Server) (*Client, error) {
-	cmd := exec.CommandContext(ctx, server.Command, server.Args...)
-	cmd.Env = mergeProcessEnv(server.Env)
+func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*Client, error) {
+	var cmd *exec.Cmd
+	var cleanup func()
+	cleanupTransferred := false
+	defer func() {
+		if cleanup != nil && !cleanupTransferred {
+			cleanup()
+		}
+	}()
+	if options.Execution != nil {
+		workspaceRoot := strings.TrimSpace(options.WorkspaceRoot)
+		if workspaceRoot == "" {
+			return nil, fmt.Errorf("start MCP server %s: execution workspace root is required", server.Name)
+		}
+		prepared, err := options.Execution.Prepare(ctx, execution.Request{
+			Origin:           execution.OriginMCPServer,
+			Mode:             execution.ModeDurable,
+			Command:          execution.Command{Name: server.Command, Args: append([]string(nil), server.Args...), Env: mergeProcessEnv(server.Env)},
+			WorkingDirectory: workspaceRoot,
+			WorkspaceRoots:   []string{workspaceRoot},
+			Approval:         execution.ApprovalContext{PolicyVersion: execution.PolicyVersion},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
+		}
+		cmd = prepared.Command
+		cleanup = prepared.Cleanup
+	} else {
+		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
+		cmd.Env = mergeProcessEnv(server.Env)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open MCP stdin for %s: %w", server.Name, err)
@@ -138,13 +178,15 @@ func connectStdio(ctx context.Context, server Server) (*Client, error) {
 	}
 
 	client := &Client{
-		server: server,
-		cmd:    cmd,
-		stdin:  stdin,
-		reader: newMessageReader(stdout),
-		writer: newMessageWriter(stdin),
-		nextID: 1,
+		server:  server,
+		cmd:     cmd,
+		stdin:   stdin,
+		reader:  newMessageReader(stdout),
+		writer:  newMessageWriter(stdin),
+		nextID:  1,
+		cleanup: cleanup,
 	}
+	cleanupTransferred = true
 	if err := client.initialize(ctx); err != nil {
 		_ = client.Close()
 		message := strings.TrimSpace(stderr.String())
@@ -241,6 +283,10 @@ func (client *Client) Close() error {
 				err = waitErr
 			}
 		}
+	}
+	if client.cleanup != nil {
+		client.cleanup()
+		client.cleanup = nil
 	}
 	return err
 }

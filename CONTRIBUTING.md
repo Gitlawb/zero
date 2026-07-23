@@ -8,6 +8,13 @@ stabilizes. Community participation is still welcome, especially through bug
 reports, feature requests, reproduction details, logs, and discussion on existing
 issues.
 
+Questions and setup help belong in
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions) (see
+[SUPPORT.md](SUPPORT.md)), not in the issue tracker. Feature ideas start in the
+[Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) category;
+an idea that gains traction there is the path to an approved issue and,
+eventually, an accepted PR.
+
 Please read this policy before opening a pull request. Pull requests that do not
 follow it may be closed without review.
 
@@ -33,7 +40,11 @@ unless the issue has been explicitly approved for outside contribution.
 There are three primary ways to contribute:
 
 1. Open a bug report with clear reproduction steps.
-2. Open a feature request describing the problem, use case, and expected behavior.
+2. Propose a feature in
+   [Discussions Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas),
+   describing the problem, use case, and expected behavior. A feature-request
+   issue is filed only after the idea gains traction there or a maintainer asks
+   for one.
 3. Add useful context to an existing issue, such as logs, screenshots, examples,
    affected versions, or reproduction cases.
 
@@ -46,7 +57,8 @@ All community pull requests require an approved parent issue.
 
 Before starting implementation work:
 
-1. Open an issue using the appropriate issue template.
+1. For a bug, open an issue using the bug-report template. For a feature, start
+   in Discussions Ideas; the feature-request issue comes after the discussion.
 2. Describe the bug, feature request, or functional change clearly.
 3. Wait for the core team to review the issue.
 4. Do not open a pull request unless the issue has the `issue-approved` label.
@@ -54,6 +66,28 @@ Before starting implementation work:
 An approved issue means only that the specific issue has been accepted for work.
 It does not approve unrelated future work, future pull requests, or future issues
 from the same author. Each issue is reviewed case by case.
+
+## Contribution Volume and Batching
+
+To keep triage and review sustainable while the project stabilizes, please keep
+your contribution flow to a size the core team can realistically work through:
+
+- One issue per bug. File each defect as its own issue with its own
+  reproduction. Please do not bundle several unrelated findings into a single
+  "audit" issue; separate issues are far easier to triage, approve, and close
+  individually.
+- Keep only a few items open at a time. If you already have several issues or
+  pull requests awaiting review, let those move through the queue before opening
+  more. A large simultaneous burst from one contributor slows review for
+  everyone, even when each item is valid.
+- AI-assisted contributions are welcome, held to the same bar. Automated audits
+  and generated patches are fine, but each issue and pull request must be
+  individually verified, scoped, and reproducible before you open it. Please do
+  not post bulk machine-generated findings unfiltered.
+
+These apply to all contributors and are about review bandwidth, not the value of
+any single report. Maintainers may ask you to consolidate, split, or hold
+submissions to keep the queue manageable.
 
 ## Pull Request Requirements
 
@@ -133,7 +167,12 @@ Clear bug reports are the most useful way to help the project during this phase.
 
 ## Submitting a Feature Request
 
-When filing a feature request, please include:
+Feature requests start as a thread in
+[Discussions Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas),
+not as an issue. The feature-request issue form exists for the step AFTER that:
+when an idea has gained traction in Discussions or a maintainer has asked for an
+issue to track it. Whether in the discussion or the eventual issue, please
+include:
 
 - The problem you are trying to solve.
 - The behavior or functionality you are requesting.
@@ -156,5 +195,9 @@ contribution phase.
 
 ## Getting Help
 
-If you are unsure whether a change is appropriate, open an issue first and ask.
-Please keep discussion focused, specific, and respectful of maintainer time.
+General questions, setup help, and "is this a bug or my config" uncertainty all
+go to
+[Discussions Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a).
+If you are unsure whether a proposed code change is appropriate, raise it in
+Discussions Ideas or on the relevant issue first and ask. Please keep discussion
+focused, specific, and respectful of maintainer time.

@@ -99,35 +99,60 @@ func (s *Store) Add(job Job) (Job, error) {
 		job.Status = StatusActive
 	}
 	job.CreatedAt = s.now().UTC()
-	id, err := s.allocID()
+	id, unlock, err := s.reserveID()
 	if err != nil {
 		return Job{}, err
 	}
+	// Held from reservation through initial persistence: without this, Remove
+	// (which takes the same per-ID lock before deleting) could delete the
+	// bare reservation directory the instant after Mkdir and report success,
+	// then writeJob's MkdirAll would silently resurrect it and persist the
+	// job anyway — or a second Add could re-reserve the freed id while this
+	// writer is still running, putting two writers on the same metadata path.
+	defer unlock()
 	job.ID = id
-	if err := s.writeJob(job); err != nil {
+	if err := s.writeReservedJob(job); err != nil {
 		return Job{}, err
 	}
 	return job, nil
 }
 
-func (s *Store) allocID() (string, error) {
+// reserveID atomically reserves an unused job id (by os.Mkdir-ing its
+// directory) and returns the per-ID lock held for that id, still acquired.
+// The caller must release it (via the returned unlock) only once the
+// reservation has been committed (metadata.json written) or torn down —
+// see Add.
+func (s *Store) reserveID() (string, func(), error) {
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create cron store root: %w", err)
+	}
 	base := s.now().UTC().Format("20060102-150405")
 	for n := 0; n < 100; n++ {
 		id := base
 		if n > 0 {
 			id = fmt.Sprintf("%s-%d", base, n)
 		}
-		if _, err := os.Stat(filepath.Join(s.root, id)); errors.Is(err, os.ErrNotExist) {
-			return id, nil
+		unlock, err := s.lockJob(id)
+		if err != nil {
+			return "", nil, err
 		}
+		mkErr := os.Mkdir(s.jobDir(id), 0o700)
+		if mkErr == nil {
+			return id, unlock, nil
+		}
+		unlock()
+		if errors.Is(mkErr, os.ErrExist) {
+			continue
+		}
+		return "", nil, fmt.Errorf("reserve cron job id %q: %w", id, mkErr)
 	}
-	return "", errors.New("could not allocate a unique cron job id")
+	return "", nil, errors.New("could not allocate a unique cron job id")
 }
 
 func (s *Store) jobDir(id string) string { return filepath.Join(s.root, id) }
 
 // validID rejects ids that could escape the store root (path separators or
-// traversal). allocID-generated timestamp ids always pass; this guards
+// traversal). reserveID-generated timestamp ids always pass; this guards
 // externally-supplied ids (get/update/remove/append).
 func validID(id string) bool {
 	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\`) && filepath.Base(id) == id
@@ -148,6 +173,16 @@ func (s *Store) writeJob(job Job) error {
 	}
 	if err := fsutil.RenameWithRetry(tmp, filepath.Join(dir, "metadata.json"), nil); err != nil {
 		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) writeReservedJob(job Job) error {
+	if err := s.writeJob(job); err != nil {
+		if cleanupErr := os.RemoveAll(s.jobDir(job.ID)); cleanupErr != nil {
+			return errors.Join(err, fmt.Errorf("remove failed cron job reservation: %w", cleanupErr))
+		}
 		return err
 	}
 	return nil

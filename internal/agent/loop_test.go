@@ -6,21 +6,78 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type mockProvider struct {
 	turns    [][]zeroruntime.StreamEvent
 	requests []zeroruntime.CompletionRequest
+}
+
+func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})
+	call := ToolCall{Name: tools.ExecCommandToolName}
+	options := Options{Sandbox: engine}
+	legacyMeta := map[string]string{
+		tools.SandboxLikelyDeniedMeta: "true",
+		tools.SandboxDenialKindMeta:   tools.SandboxDenialKindNetwork,
+	}
+
+	applicationFailure := tools.Result{
+		Status: tools.StatusError,
+		Meta:   legacyMeta,
+		ExecutionOutcome: &execution.Outcome{
+			State: execution.StateFailed,
+			Kind:  execution.OutcomeApplicationFailure,
+			Exit:  &execution.Exit{Code: 1},
+		},
+	}
+	if sandboxDeniedNetworkRetryCandidate(call, nil, applicationFailure, options) || sandboxRestrictedShellRetryCandidate(call, nil, applicationFailure, options) {
+		t.Fatal("typed application failure must not be retried from legacy sandbox-like text")
+	}
+
+	protectedDenial := applicationFailure
+	protectedDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability: execution.Capability{Kind: execution.CapabilityProtectedMetadata, Scope: "/workspace/.zero"},
+			Source:     execution.DenialSourceConfiguredPolicy,
+			Reason:     "protected metadata",
+			NextAction: execution.DenialNextActionRequestApproval,
+		},
+	}
+	if sandboxRestrictedShellRetryCandidate(call, nil, protectedDenial, options) {
+		t.Fatal("narrow protected-metadata denial must not become an unrestricted retry")
+	}
+
+	networkDenial := protectedDenial
+	networkDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability: execution.Capability{Kind: execution.CapabilityExternalNetwork},
+			Source:     execution.DenialSourcePlatformSandbox,
+			Reason:     "external network denied",
+			NextAction: execution.DenialNextActionRequestApproval,
+		},
+	}
+	if !sandboxDeniedNetworkRetryCandidate(call, nil, networkDenial, options) {
+		t.Fatal("typed external-network denial should use the narrow network approval path")
+	}
 }
 
 func (provider *mockProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
@@ -89,6 +146,87 @@ func TestRunDispatchesSessionLifecycleHooks(t *testing.T) {
 	}
 	if started[hooks.EventSessionEnd] != 1 || completed[hooks.EventSessionEnd] != 1 {
 		t.Fatalf("sessionEnd audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionEnd], completed[hooks.EventSessionEnd], events)
+	}
+}
+
+// cancelingProvider simulates an Esc/Ctrl+C abort: it cancels the run's own
+// context mid-stream (as the TUI's interrupt handler would) and returns no
+// events, so Run observes ctx.Err() and returns early with an already-canceled
+// context in scope for the deferred sessionEnd dispatch.
+type cancelingProvider struct {
+	cancel context.CancelFunc
+}
+
+func (provider *cancelingProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	provider.cancel()
+	ch := make(chan zeroruntime.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+// TestRunDispatchesSessionEndHookAfterContextCancellation is a regression test
+// for a bug where an interrupted run (Esc/Ctrl+C) canceled ctx before the
+// deferred sessionEnd dispatch ran, so Hooks.Dispatch's context.WithTimeout(ctx, ...)
+// derived an already-canceled context and the hook command never actually launched.
+func TestRunDispatchesSessionEndHookAfterContextCancellation(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		// The test binary runs on the build machine, so its build-time GOROOT
+		// still identifies the toolchain that produced it.
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &cancelingProvider{cancel: cancel}
+
+	_, err = Run(ctx, "hi", provider, Options{
+		SessionID:    "session-cancel",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Hooks:        dispatcher,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var completedStatus hooks.AuditStatus
+	found := false
+	for _, event := range events {
+		if event.Type == "hook_execution_completed" && event.Event == hooks.EventSessionEnd {
+			completedStatus = event.Status
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no sessionEnd hook_execution_completed audit event, events=%#v", events)
+	}
+	if completedStatus != hooks.AuditCompleted {
+		t.Fatalf("sessionEnd hook status = %q, want %q (hook must actually run despite ctx cancellation)", completedStatus, hooks.AuditCompleted)
 	}
 }
 
@@ -1172,6 +1310,46 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	}
 	if len(toolResults) != 1 || toolResults[0].Status != tools.StatusOK {
 		t.Fatalf("expected one ok tool result, got %#v", toolResults)
+	}
+}
+
+func TestRunPreservesRequestPrefixAcrossTurns(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\n")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "read notes", provider, Options{
+		Cwd:       root,
+		Registry:  registry,
+		SessionID: "session-stable-prefix",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(provider.requests))
+	}
+	first, second := provider.requests[0], provider.requests[1]
+	if len(second.Messages) < len(first.Messages) || !reflect.DeepEqual(second.Messages[:len(first.Messages)], first.Messages) {
+		t.Fatalf("first request messages must be an exact prefix of the second:\nfirst=%#v\nsecond=%#v", first.Messages, second.Messages)
+	}
+	if !reflect.DeepEqual(first.Tools, second.Tools) {
+		t.Fatalf("tool definitions drifted between turns:\nfirst=%#v\nsecond=%#v", first.Tools, second.Tools)
+	}
+	if first.PromptCacheKey != "session-stable-prefix" || second.PromptCacheKey != first.PromptCacheKey {
+		t.Fatalf("prompt cache key must remain stable: first=%q second=%q", first.PromptCacheKey, second.PromptCacheKey)
 	}
 }
 
@@ -3459,5 +3637,75 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(captured.Output), "redacted") {
 		t.Errorf("clean output should not get a reminder, got %q", captured.Output)
+	}
+}
+
+// TestRunTracingWrapperStampsUsage verifies the per-turn tracing setup in Run:
+// a wired recorder is Started, OnUsage is wrapped so it still forwards to the
+// caller's callback AND stamps token counters, and the run completes.
+func TestRunTracingWrapperStampsUsage(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	onUsageCalls := 0
+	rec := trace.NewRecorder("tracing-session", "run-1", "test")
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "tracing-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Trace:        rec,
+		OnUsage:      func(Usage) { onUsageCalls++ },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tr := rec.Finish()
+	if tr.StartedAt.IsZero() {
+		t.Fatal("tracing wrapper did not Start the recorder")
+	}
+	// FirstTokenAt must stamp even though no OnText/OnReasoning user callback is
+	// set: a headless traced run (e.g. `zero exec --trace`) sets Trace but no UI
+	// callbacks, so the loop installs trace-only forwarding handlers to capture
+	// TTFT. Without them FirstTokenAt stays zero and the trace loses its signal.
+	if tr.FirstTokenAt.IsZero() {
+		t.Fatal("FirstTokenAt not stamped for a traced run with no OnText/OnReasoning callbacks")
+	}
+	if got := tr.Counter(trace.CounterInputTokens); got != 100 {
+		t.Fatalf("input token counter = %d, want 100", got)
+	}
+	if got := tr.Counter(trace.CounterCachedInputTokens); got != 20 {
+		t.Fatalf("cached input token counter = %d, want 20", got)
+	}
+	if got := tr.Counter(trace.CounterOutputTokens); got != 40 {
+		t.Fatalf("output token counter = %d, want 40", got)
+	}
+	if onUsageCalls == 0 {
+		t.Fatal("wrapped OnUsage did not forward to the caller's callback")
+	}
+}
+
+// TestRunNilTraceForwardsUsage verifies a nil recorder leaves the loop
+// byte-identical: OnUsage is not wrapped, so the caller's callback still fires
+// and nothing panics.
+func TestRunNilTraceForwardsUsage(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 7}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	onUsageCalls := 0
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "nil-trace-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		OnUsage:      func(Usage) { onUsageCalls++ },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if onUsageCalls == 0 {
+		t.Fatal("OnUsage not forwarded when Trace is nil")
 	}
 }

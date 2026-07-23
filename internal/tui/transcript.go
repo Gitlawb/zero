@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -45,7 +46,8 @@ type transcriptRow struct {
 	// changedFiles lists the workspace-relative paths a mutating tool result
 	// wrote (from tools.Result.ChangedFiles; restored from the session payload on
 	// resume). The sidebar FILES section derives its roster from these.
-	changedFiles []string
+	changedFiles    []string
+	changeSummaries []execution.Change
 
 	// specialistInfo holds the specialist card data for rowSpecialist rows.
 	// Nil for all other row kinds.

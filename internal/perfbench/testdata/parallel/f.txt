@@ -1,0 +1,4 @@
+first line of f.txt
+second line of f.txt
+third line of f.txt
+zeta zeta zeta

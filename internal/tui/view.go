@@ -195,17 +195,21 @@ func (m model) statusLine(width int) string {
 	// in its mode colour. This was previously only on the easy-to-miss composer
 	// rule; the persistent footer is where users look for "will it run commands?".
 	modeText, modeStyle := m.modeLabel()
-	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
+	btwChip := ""
+	if m.btw.active {
+		btwChip = zeroTheme.amber.Render("BTW") + zeroTheme.muted.Render(" · ")
+	}
+	left := prefix + btwChip + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
 
 	if tier == tierTiny {
 		if m.exitConfirmActive {
-			return fitStyledLine(prefix+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(ctrlCExitConfirmText), width)
+			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(ctrlCExitConfirmText), width)
 		}
 		if m.cancelConfirmActive {
-			return fitStyledLine(prefix+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
+			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
 		}
 		if dictation := m.dictationStatusChip(); dictation != "" {
-			return fitStyledLine(prefix+dictation, width)
+			return fitStyledLine(prefix+btwChip+dictation, width)
 		}
 		return fitStyledLine(left, width)
 	}
@@ -215,16 +219,16 @@ func (m model) statusLine(width int) string {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
 	}
 	if m.exitConfirmActive {
-		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
+		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {
-		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
+		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
 	} else if m.dictation.downloading && m.dictation.downloadStatus != "" {
 		// A model download in progress takes over the left chip with a live percentage.
-		left = prefix + zeroTheme.accent.Render("⬇ ") + zeroTheme.muted.Render(m.dictation.downloadStatus)
+		left = prefix + btwChip + zeroTheme.accent.Render("⬇ ") + zeroTheme.muted.Render(m.dictation.downloadStatus)
 	} else if dictation := m.dictationStatusChip(); dictation != "" && m.dictation.active() {
 		// An active recording/transcription takes over the left chip — it is the
 		// most time-sensitive thing on screen (the mic is live).
-		left = prefix + dictation
+		left = prefix + btwChip + dictation
 	} else {
 		if voice := m.voiceModeIndicator(); voice != "" {
 			left += zeroTheme.muted.Render(" · ") + voice

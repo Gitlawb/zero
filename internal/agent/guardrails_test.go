@@ -169,6 +169,37 @@ func TestRunResetsEmptyTurnCounterOnToolCall(t *testing.T) {
 	}
 }
 
+// The whole point of #702's fix: the unknown-session error's normalized
+// signature must not vary with the session id, so a model probing ids 1, 2,
+// 3, … produces one repeated signature the failure guard can count. If the id
+// leaked into the first 80 normalized chars, each probe would reset the streak
+// and the halt would never fire.
+func TestUnknownExecSessionErrorSignatureIsIDInvariant(t *testing.T) {
+	a := errorSignature(tools.UnknownExecSessionError(1))
+	b := errorSignature(tools.UnknownExecSessionError(999999))
+	if a != b {
+		t.Fatalf("unknown-session signature varies with id:\n  %q\n  %q", a, b)
+	}
+}
+
+// End to end: with an id-invariant signature, probing a different unknown id
+// each turn now trips the repeated-failure halt at toolFailureStopAt, where
+// before the fix it never would.
+func TestUnknownExecSessionProbingTripsFailureHalt(t *testing.T) {
+	var state guardState
+	var stoppedAt int
+	for i := 1; i <= toolFailureStopAt; i++ {
+		out := state.observeToolResult(tools.WriteStdinToolName, true, tools.UnknownExecSessionError(i))
+		if out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureStopAt {
+		t.Fatalf("probing distinct unknown ids stopped at %d, want %d", stoppedAt, toolFailureStopAt)
+	}
+}
+
 func TestGuardStateResetsToolOnlyStreakOnEmptyNonToolTurn(t *testing.T) {
 	var state guardState
 	toolOnly := zeroruntime.CollectedStream{

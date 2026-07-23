@@ -73,6 +73,22 @@ func TestResolveEndpointsFallsBackToConfig(t *testing.T) {
 	}
 }
 
+// Discovered MCP metadata that serves an insecure endpoint must be rejected
+// before use, so discovery cannot downgrade the MCP login to an
+// attacker-controlled origin (issue #511).
+func TestResolveAuthorizationServerRejectsInsecureDiscovered(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"` + server.URL + `","token_endpoint":"` + server.URL + `/token","authorization_endpoint":"http://evil.example/authorize"}`))
+	})
+	_, err := resolveAuthorizationServer(context.Background(), server.Client(), server.URL, OAuthConfig{})
+	if err == nil || !strings.Contains(err.Error(), "authorization endpoint") {
+		t.Fatalf("err = %v, want insecure authorization endpoint rejection", err)
+	}
+}
+
 // roundTripperFunc adapts a function to http.RoundTripper so a test can
 // observe every outbound request.
 type roundTripperFunc func(*http.Request) (*http.Response, error)

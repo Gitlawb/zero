@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 )
 
 type providerModelsOptions struct {
@@ -137,7 +138,12 @@ func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderP
 // the provider's model-listing endpoint with no curated-catalog merge or
 // coding-model filtering, so a custom provider's full model list is returned.
 func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{})
+	resolver, loginKey := oauthLoginForProfile(profile)
+	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{
+		OAuthResolver:        resolver,
+		CodexAccountResolver: providers.CodexAccountResolverForLogin(loginKey),
+		UserAgent:            userAgent(),
+	})
 }
 
 func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error) {

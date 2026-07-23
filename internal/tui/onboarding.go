@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -11,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
@@ -29,6 +31,9 @@ const (
 	setupStageEndpoint
 	setupStageName
 	setupStageCredentials
+	// aimlapi.com onboarding sub-flow, reached when the selected
+	// provider is aimlapi. Delegated to the shared aimlapiOnboardState.
+	setupStageAimlapi
 	setupStageModel
 	setupStageSafety
 	setupStageReady
@@ -62,6 +67,25 @@ type setupState struct {
 	modelErr              string
 	modelSrc              string
 	modelGen              uint64
+	// aimlapi holds the shared aimlapi.com onboarding sub-flow while
+	// setup is on setupStageAimlapi.
+	aimlapi *aimlapiOnboardState
+}
+
+// aimlapiTopupEvent is one live update from a running partner checkout, streamed
+// over a channel so the TUI can show progress (and the direct checkout link) as
+// it happens instead of blocking on a single result. Mirrors openclaude's
+// onStatus-driven progress screen.
+type aimlapiTopupEvent struct {
+	detail string // for opening-checkout this is the direct checkout URL
+	done   bool
+	result aimlapi.ProvisionedKey
+	err    error
+
+	// session carries the live partner-checkout session token (empty string means
+	// "drop the retained token"); hasSession distinguishes it from a status update.
+	session    string
+	hasSession bool
 }
 
 // setupOAuthMsg carries the result of a first-run browser OAuth login.
@@ -137,6 +161,16 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The aimlapi.com sub-flow owns all of its keys; Ctrl+C still quits.
+	if m.setup.stage == setupStageAimlapi {
+		if keyCtrl(msg, 'c') {
+			if m.setup.aimlapi != nil {
+				m.setup.aimlapi.cancelStream()
+			}
+			return m, tea.Quit
+		}
+		return m.handleSetupAimlapiKey(msg)
+	}
 	if m.setupEndpointInputActive() {
 		return m.handleSetupEndpointKey(msg)
 	}
@@ -183,7 +217,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.advanceSetup()
 		}
 		return m, nil
-	case keyIs(msg, tea.KeyUp):
+	case keyIs(msg, tea.KeyUp) || keyCtrl(msg, 'p'):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(-1)
 		} else if m.setup.stage == setupStageProvider {
@@ -192,7 +226,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSetupModel(-1)
 		}
 		return m, nil
-	case keyIs(msg, tea.KeyDown):
+	case keyIs(msg, tea.KeyDown) || keyCtrl(msg, 'n'):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(1)
 		} else if m.setup.stage == setupStageProvider {
@@ -269,6 +303,10 @@ func (m model) handleSetupPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 		m.appendSetupBaseURL([]rune(msg.Content))
 	case m.setupNameInputActive():
 		m.appendSetupName([]rune(msg.Content))
+	case m.setup.stage == setupStageAimlapi:
+		if m.setup.aimlapi != nil {
+			m.setup.aimlapi.appendInput(msg.Content)
+		}
 	case m.setupCredentialInputActive():
 		previousAPIKey := m.setup.apiKey.Value()
 		var cmd tea.Cmd
@@ -421,15 +459,34 @@ func setupContentTop(height int, contentLines int, hasError bool) int {
 func (m model) setupStages() []setupStage {
 	stages := []setupStage{setupStageWelcome, setupStageMethod}
 	if m.setup.oauthMode {
-		// OAuth path skips endpoint/name/credentials (the login provides the credential).
+		// OAuth path skips endpoint/name/credentials because login provides the credential.
 		return append(stages, setupStageProvider, setupStageModel, setupStageSafety, setupStageReady)
 	}
 	stages = append(stages, setupStageProvider)
+	if setupProviderIsAimlapi(m.setupProvider()) {
+		// Preserve the catalog's normal env-credential path in first-run setup.
+		// A ready AIMLAPI_API_KEY needs no guided identity flow: model discovery
+		// resolves it at runtime and saveSetupProvider persists APIKeyEnv, not the
+		// materialized secret. /provider owns the richer balance/top-up preflight.
+		if setupAimlapiEnvKey() != "" {
+			return append(stages, setupStageModel, setupStageSafety, setupStageReady)
+		}
+		stages = append(stages, setupStageAimlapi, setupStageModel, setupStageSafety, setupStageReady)
+		return stages
+	}
 	if setupProviderNeedsEndpoint(m.setupProvider()) {
 		stages = append(stages, setupStageEndpoint, setupStageName)
 	}
 	stages = append(stages, setupStageCredentials, setupStageModel, setupStageSafety, setupStageReady)
 	return stages
+}
+
+func setupAimlapiEnvKey() string {
+	return strings.TrimSpace(os.Getenv("AIMLAPI_API_KEY"))
+}
+
+func setupProviderIsAimlapi(option SetupProviderOption) bool {
+	return strings.EqualFold(strings.TrimSpace(option.ID), "aimlapi")
 }
 
 // setupReturnToMethod resets the OAuth selection when navigating back to the
@@ -607,6 +664,54 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleSetupAimlapiKey delegates a key press to first-run setup's aimlapi.com
+// sub-flow and reacts to its outcome.
+func (m model) handleSetupAimlapiKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.setup.aimlapi == nil {
+		return m, nil
+	}
+	cmd, outcome := m.setup.aimlapi.handleKey(msg)
+	return m.resolveSetupAimlapi(cmd, outcome)
+}
+
+// applySetupAimlapiOnboard routes an async aimlapi.com onboarding result into
+// first-run setup's sub-flow and reacts to its outcome.
+func (m model) applySetupAimlapiOnboard(msg aimlapiOnboardMsg) (tea.Model, tea.Cmd) {
+	if m.setup.aimlapi == nil || m.setup.aimlapi != msg.state {
+		return m, nil
+	}
+	cmd, outcome := m.setup.aimlapi.apply(msg)
+	return m.resolveSetupAimlapi(cmd, outcome)
+}
+
+// resolveSetupAimlapi lands the sub-flow outcome on first-run setup: a terminal
+// key moves the issued key into the setup and jumps to model selection; a cancel
+// backs out to the provider list.
+func (m model) resolveSetupAimlapi(cmd tea.Cmd, outcome aimlapiOutcome) (tea.Model, tea.Cmd) {
+	switch outcome {
+	case aimlapiDone:
+		m.setup.apiKey.SetValue(m.setup.aimlapi.apiKey)
+		m.setup.baseURL = m.setup.aimlapi.baseURL
+		m.setup.aimlapi = nil
+		m.setup.err = ""
+		m.setup.stage = setupStageModel
+		m.resetSetupModels()
+		m.setup.modelErr = ""
+		m.setup.modelGen++
+		discoverCmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
+		m.setup.modelLoad = discoverCmd != nil
+		return m, discoverCmd
+	case aimlapiCancel:
+		m.setup.aimlapi = nil
+		m.setup.err = ""
+		m.setup.stage = setupStageProvider
+		return m, nil
+	}
+	// Keep the shared spinner tick alive whenever the sub-flow just entered a busy
+	// or progress state, so its animated spinner advances during onboarding.
+	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+}
+
 func (m model) nextSetupStage() setupStage {
 	stages := m.setupStages()
 	for index, stage := range stages {
@@ -621,6 +726,14 @@ func (m model) nextSetupStage() setupStage {
 }
 
 func (m model) previousSetupStage() setupStage {
+	// The aimlapi.com connect flow is terminal: once it has issued a key, its
+	// transient state is cleared. Going back from model selection or Safety can
+	// otherwise strand the user on an empty intermediate screen. Return to the
+	// provider list so choosing aimlapi.com again starts a fresh connect flow.
+	if (m.setup.stage == setupStageModel || m.setup.stage == setupStageSafety) &&
+		setupProviderIsAimlapi(m.setupProvider()) {
+		return setupStageProvider
+	}
 	stages := m.setupStages()
 	for index, stage := range stages {
 		if stage == m.setup.stage {
@@ -699,6 +812,9 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		}
 		m.setup.stage = m.nextSetupStage()
 		m.setup.err = ""
+		if m.setup.stage == setupStageAimlapi && m.setup.aimlapi == nil {
+			m.setup.aimlapi = newAimlapiOnboard(browser.OpenURL)
+		}
 		if m.setup.stage == setupStageModel {
 			m.resetSetupModels()
 			m.setup.modelErr = ""
@@ -835,7 +951,7 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 				apiKey = resolved
 			}
 		}
-		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		profile := providerWizardDiscoveryProfile(provider, apiKey, m.setupBaseURL(option))
 		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)
 		models, err := discover(ctx, profile)
 		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: secrets, models: models, err: err}
@@ -1099,6 +1215,16 @@ func (m model) setupCredentialAPIKey(option SetupProviderOption) string {
 }
 
 func (m model) setupBaseURL(option SetupProviderOption) string {
+	// aimlapi.com never shows the endpoint field, but its onboarding resolves the
+	// inference endpoint (honoring an AIMLAPI_INFERENCE_URL override) onto
+	// m.setup.baseURL. Persist that so an override reaches the saved profile instead
+	// of being replaced by the catalog default at save time.
+	if providerWizardIsAimlapi(setupProviderDescriptor(option)) {
+		if baseURL := strings.TrimSpace(m.setup.baseURL); baseURL != "" {
+			return baseURL
+		}
+		return strings.TrimSpace(aimlapi.ResolveEndpoints().InferenceBaseURL)
+	}
 	if !setupProviderNeedsEndpoint(option) {
 		return ""
 	}
@@ -1226,6 +1352,11 @@ func (m model) setupStageLines(width int, height int) []string {
 		return m.setupNameLines(width)
 	case setupStageCredentials:
 		return m.setupCredentialLines(width)
+	case setupStageAimlapi:
+		if m.setup.aimlapi != nil {
+			return m.setup.aimlapi.view(width, m.spinnerGlyph())
+		}
+		return nil
 	case setupStageModel:
 		return m.setupModelLines(width, height)
 	case setupStageSafety:
@@ -1606,7 +1737,11 @@ func setupProviderBlockWidth(terminalWidth int, providers []SetupProviderOption)
 	available := maxInt(24, minInt(terminalWidth-8, 44))
 	target := maxInt(lipgloss.Width("  2/6"), lipgloss.Width("  Choose a provider"))
 	for _, provider := range providers {
-		target = maxInt(target, 2+lipgloss.Width(displayValue(provider.Name, provider.ID)))
+		label := displayValue(provider.Name, provider.ID)
+		if provider.Recommended {
+			label = "★ " + label + "  (recommended)"
+		}
+		target = maxInt(target, 2+lipgloss.Width(label))
 	}
 	target = maxInt(target, 32)
 	return minInt(target, available)
@@ -1694,6 +1829,8 @@ func (m model) setupFooter() string {
 			return zeroTheme.faint.Render("paste key optional   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   left back")
 		}
 		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to continue")
+	case setupStageAimlapi:
+		return zeroTheme.faint.Render("type/↑↓ choose   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   left back   Esc cancel")
 	case setupStageProvider:
 		if m.setup.oauthMode && m.setupProviderDescriptor().OAuthDeviceFlow {
 			return zeroTheme.faint.Render("↑/↓ choose   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" sign in   ") + zeroTheme.accent.Render("d") + zeroTheme.faint.Render(" device code   q quit")

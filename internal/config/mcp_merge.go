@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
+func mergeMCPConfig(dst *MCPConfig, src MCPConfig, canReenable bool) {
 	if len(src.Servers) == 0 {
 		return
 	}
@@ -14,10 +14,14 @@ func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
 		dst.Servers = map[string]MCPServerConfig{}
 	}
 	for name, server := range src.Servers {
-		dst.Servers[name] = mergeMCPServer(dst.Servers[name], server)
+		dst.Servers[name] = mergeMCPServer(dst.Servers[name], server, canReenable)
 	}
 }
 
+// mergeProjectMCPConfig merges a project-scoped (lower-trust) MCP config into
+// dst. It never re-enables a server the user explicitly disabled or disabled a
+// server the user explicitly enabled: it merges with canReenable=false so the
+// trust-boundary guard in mergeMCPServer keeps the user's decision authoritative.
 func mergeProjectMCPConfig(dst *MCPConfig, src MCPConfig) error {
 	if len(src.Servers) == 0 {
 		return nil
@@ -27,7 +31,7 @@ func mergeProjectMCPConfig(dst *MCPConfig, src MCPConfig) error {
 	}
 	for name, server := range src.Servers {
 		base := dst.Servers[name]
-		candidate := mergeMCPServer(base, server)
+		candidate := mergeMCPServer(base, server, false)
 		if projectMCPServerTargetChanges(base, server) && hasInheritedMCPCredentialMaterial(server, candidate) {
 			return fmt.Errorf("project MCP server %q cannot override target while inheriting user credentials; set headers/env/oauth explicitly or use a new server name", name)
 		}
@@ -37,7 +41,11 @@ func mergeProjectMCPConfig(dst *MCPConfig, src MCPConfig) error {
 	return nil
 }
 
-func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig {
+// mergeMCPServer merges a later config layer's MCP server into the base. The
+// canReenable flag marks the CLI-override scope, the only layer that is allowed
+// to lift a sticky user-level disable/enable decision (see the disabled-handling
+// block).
+func mergeMCPServer(base MCPServerConfig, next MCPServerConfig, canReenable bool) MCPServerConfig {
 	if strings.TrimSpace(next.Type) != "" {
 		base.Type = next.Type
 	}
@@ -62,8 +70,26 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 	if next.OAuth != nil {
 		base.OAuth = next.OAuth
 	}
+	// Capture the higher-trust scope's prior decision before folding in
+	// next.disabledSet. The trust boundary must be evaluated against the state
+	// the higher-trust layer actually left behind, not against next's own flag.
+	baseDisabledSet := base.disabledSet
+	baseDisabled := base.Disabled
+	if next.disabledSet {
+		base.disabledSet = true
+	}
 	if next.disabledSet || next.Disabled {
-		base.Disabled = next.Disabled
+		// Trust boundary: once a higher-trust scope has explicitly set the
+		// disabled flag, a lower-trust layer (project config) cannot override
+		// that decision in either direction — the user's choice (whether to
+		// enable or disable a server) wins over the repo. This blocks a repo
+		// from re-enabling a server the user disabled, and from disabling a
+		// server the user explicitly enabled. The only layer allowed to
+		// override an explicit higher-scope decision is the CLI override scope
+		// (canReenable=true).
+		if canReenable || !(baseDisabledSet && baseDisabled != next.Disabled) {
+			base.Disabled = next.Disabled
+		}
 	}
 	if next.configured {
 		base.configured = true
@@ -75,7 +101,7 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 }
 
 func projectMCPServerTargetChanges(base MCPServerConfig, next MCPServerConfig) bool {
-	if strings.TrimSpace(next.Type) != "" && mcpServerTransportKind(base) != mcpServerTransportKind(mergeMCPServer(base, next)) {
+	if strings.TrimSpace(next.Type) != "" && mcpServerTransportKind(base) != mcpServerTransportKind(mergeMCPServer(base, next, true)) {
 		return true
 	}
 	if strings.TrimSpace(next.URL) != "" && strings.TrimSpace(next.URL) != strings.TrimSpace(base.URL) {

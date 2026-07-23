@@ -55,10 +55,10 @@ func TestOutputCeilingCapsUnbudgetedTool(t *testing.T) {
 	if result.Meta["raw_bytes"] != strconv.Itoa(len(big)) {
 		t.Fatalf("raw_bytes = %s, want %d", result.Meta["raw_bytes"], len(big))
 	}
-	if !strings.Contains(result.Output, "full output saved to ") {
+	if !strings.Contains(result.Output, "full output received by budgeting layer saved to ") {
 		t.Fatalf("ceiling truncation must include a spill hint: %q", result.Output[:200])
 	}
-	start := strings.Index(result.Output, "full output saved to ") + len("full output saved to ")
+	start := strings.Index(result.Output, "full output received by budgeting layer saved to ") + len("full output received by budgeting layer saved to ")
 	end := strings.Index(result.Output[start:], " (grep")
 	content, err := os.ReadFile(result.Output[start : start+end])
 	if err != nil {
@@ -123,11 +123,6 @@ func TestSelfBudgetingExemptionList(t *testing.T) {
 	exempt := []Tool{
 		NewBashTool(dir),
 		NewExecCommandTool(dir, newExecSessionManager()),
-		NewReadFileTool(dir),
-		NewReadMinifiedFileTool(dir),
-		NewGrepTool(dir),
-		NewGlobTool(dir),
-		NewListDirectoryTool(dir),
 	}
 	for _, tool := range exempt {
 		if _, ok := tool.(selfBudgeting); !ok {
@@ -136,5 +131,10 @@ func TestSelfBudgetingExemptionList(t *testing.T) {
 	}
 	if _, ok := NewWebFetchTool().(selfBudgeting); ok {
 		t.Error("web_fetch must NOT be exempt — the ceiling is its only budget")
+	}
+	for _, tool := range []Tool{NewReadFileTool(dir), NewReadMinifiedFileTool(dir), NewGrepTool(dir), NewGlobTool(dir), NewListDirectoryTool(dir)} {
+		if _, ok := tool.(selfBudgeting); ok {
+			t.Errorf("%s must use the shared post-redaction budget boundary", tool.Name())
+		}
 	}
 }

@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // manifestFileName is the plugin manifest filename, matching the loader.
@@ -128,6 +130,32 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, fmt.Errorf("hash plugin: %w", err)
 	}
 
+	staged, cleanupStage, err := installtxn.StageDir(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer cleanupStage()
+	// Copy the whole plugin tree (entry scripts, prompts, skills) into a sibling
+	// staging area. Copy DATA only — never execute it.
+	if err := copyTree(pluginDir, staged); err != nil {
+		return InstallResult{}, fmt.Errorf("stage plugin: %w", err)
+	}
+	stagedHash, err := hashTree(staged)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("validate staged plugin: %w", err)
+	}
+	if stagedHash != hash {
+		return InstallResult{}, errors.New("validate staged plugin: copied content hash differs from source")
+	}
+
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer unlock()
+
+	// Re-read under the cross-process lock. Another install may have updated the
+	// lockfile while this plugin was fetched and staged.
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return InstallResult{}, err
@@ -138,20 +166,10 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	target := filepath.Join(dir, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create plugins dir: %w", err)
-	}
-	if err := os.RemoveAll(target); err != nil {
-		return InstallResult{}, fmt.Errorf("clear previous plugin: %w", err)
-	}
-	// Copy the whole plugin tree (entry scripts, prompts, skills) so the installed
-	// plugin is runnable through activation. Copy DATA only — never execute it.
-	if err := copyTree(pluginDir, target); err != nil {
-		return InstallResult{}, fmt.Errorf("copy plugin: %w", err)
-	}
-
 	lock[id] = LockEntry{Source: source, Hash: hash}
-	if err := writeLock(dir, lock); err != nil {
+	if err := installtxn.CommitDir(target, staged, func() error {
+		return writeLock(dir, lock)
+	}); err != nil {
 		return InstallResult{}, err
 	}
 
@@ -182,6 +200,12 @@ func Remove(dir string, id string) error {
 		return fmt.Errorf("invalid plugin id %q", id)
 	}
 
+	unlock, err := installtxn.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	lock, err := ReadLock(dir)
 	if err != nil {
 		return err
@@ -194,11 +218,16 @@ func Remove(dir string, id string) error {
 		return fmt.Errorf("plugin %q is not installed", id)
 	}
 	if present {
-		if err := os.RemoveAll(target); err != nil {
+		if err := installtxn.RemoveDir(target, func() error {
+			if !locked {
+				return nil
+			}
+			delete(lock, id)
+			return writeLock(dir, lock)
+		}); err != nil {
 			return fmt.Errorf("remove plugin dir: %w", err)
 		}
-	}
-	if locked {
+	} else if locked {
 		delete(lock, id)
 		if err := writeLock(dir, lock); err != nil {
 			return err
@@ -239,7 +268,7 @@ func writeLock(dir string, entries map[string]LockEntry) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", LockFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+	if err := installtxn.WriteFileAtomically(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", LockFileName, err)
 	}
 	return nil

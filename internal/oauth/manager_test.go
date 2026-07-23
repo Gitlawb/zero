@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -197,6 +198,24 @@ func TestManagerGetFreshDiscoversIssuerEndpoints(t *testing.T) {
 	}
 	if atomic.LoadInt32(&tokenHits) == 0 {
 		t.Fatal("token endpoint never hit — discovery/refresh did not run")
+	}
+}
+
+// A discovery document that serves an insecure (non-https, non-loopback)
+// endpoint must be rejected before it is merged, so discovery metadata cannot
+// silently downgrade the login to an attacker-controlled origin (issue #511).
+func TestResolveEndpointsRejectsInsecureDiscoveredEndpoint(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		// Loopback issuer, but an attacker-controlled http authorization endpoint.
+		_, _ = io.WriteString(w, `{"issuer":"`+server.URL+`","token_endpoint":"`+server.URL+`/token","authorization_endpoint":"http://evil.example/authorize"}`)
+	})
+	m := managerFor(t, map[string]string{}, nil)
+	_, err := m.resolveEndpoints(context.Background(), Config{IssuerURL: server.URL})
+	if !errors.Is(err, ErrInsecureTokenEndpoint) {
+		t.Fatalf("resolveEndpoints err = %v, want ErrInsecureTokenEndpoint", err)
 	}
 }
 
