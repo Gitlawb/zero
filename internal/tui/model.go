@@ -4502,6 +4502,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 	case commandAddDir:
 		m = m.handleAddDirCommand(command.text)
 		return m, nil
+	case commandSecurityReview:
+		return m.handleSecurityReviewCommand(command.text)
 	case commandUnknown:
 		// A "/name" not in the builtin registry may be a user-defined command
 		// from .zero/commands/<name>.md — expand its template and run it as a

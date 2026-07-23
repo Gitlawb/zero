@@ -52,6 +52,7 @@ const (
 	commandLoop
 	commandVoice
 	commandSTTModel
+	commandSecurityReview
 	commandUnknown
 )
 
@@ -115,6 +116,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show planning mode status.",
 		kind:        commandPlan,
+	},
+	{
+		name:        "/review",
+		usage:       "/review",
+		group:       commandGroupTools,
+		description: "Security review of pending changes on the current branch.",
+		kind:        commandSecurityReview,
 	},
 	{
 		name:        "/permissions",
