@@ -224,9 +224,7 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	// QueueDepth flips as soon as a slot is leased, before the worker is tracked
-	// in p.active; wait for the latter so Drain is guaranteed to see it.
-	waitFor(t, func() bool { return len(pool.WorkerStats()) == 1 })
+	waitFor(t, func() bool { return pool.QueueDepth() == 1 })
 
 	pool.Drain() // KillTimeout elapses, straggler is force-killed
 	if atomic.LoadInt32(&straggler.killed) != 1 {
