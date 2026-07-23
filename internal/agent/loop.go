@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -1170,6 +1171,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			decisionCommandPrefix = grant.Prefix
 		}
 	}
+	// An explicit additional-permissions request is an elevation only when it
+	// expands the current effective policy. If the same capability was already
+	// approved for this session, reuse that grant across equivalent commands
+	// instead of prompting again merely because their command prefixes differ.
+	if toolFound && !permissionGranted && isShellCommandTool(call.Name) && options.Sandbox != nil {
+		if profile, requested, profileErr := inlineAdditionalPermissionsProfile(args, options.Cwd); profileErr == nil && requested && options.Sandbox.CoversRequestPermissions(profile) {
+			permissionGranted = true
+			decisionAction = PermissionDecisionAllowForSession
+			decisionReason = "requested sandbox capabilities already granted for this session"
+		}
+	}
 
 	var preflightDecision *sandbox.Decision
 	if toolFound && options.Sandbox != nil {
@@ -1416,17 +1428,18 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
 	return ToolResult{
-		Risk:         executedRisk,
-		ToolCallID:   call.ID,
-		Name:         call.Name,
-		Status:       result.Status,
-		Output:       result.Output,
-		Truncated:    result.Truncated,
-		Meta:         result.Meta,
-		Redacted:     result.Redacted,
-		ChangedFiles: result.ChangedFiles,
-		Display:      result.Display,
-		LoadedTools:  loadedToolsFromResult(result.Meta),
+		Risk:            executedRisk,
+		ToolCallID:      call.ID,
+		Name:            call.Name,
+		Status:          result.Status,
+		Output:          result.Output,
+		Truncated:       result.Truncated,
+		Meta:            result.Meta,
+		Redacted:        result.Redacted,
+		ChangedFiles:    result.ChangedFiles,
+		ChangeSummaries: result.ChangeSummaries,
+		Display:         result.Display,
+		LoadedTools:     loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
 		// the Run turn loop performs the actual provider switch. Empty for every
@@ -1546,8 +1559,15 @@ func sandboxDeniedNetworkRetryCandidate(call ToolCall, args map[string]any, resu
 	if options.Sandbox == nil || !isShellCommandTool(call.Name) {
 		return false
 	}
-	if result.Meta[tools.SandboxLikelyDeniedMeta] != "true" || result.Meta[tools.SandboxDenialKindMeta] != tools.SandboxDenialKindNetwork {
-		return false
+	if result.ExecutionOutcome != nil {
+		denial := result.ExecutionOutcome.Denial
+		if denial == nil || denial.Capability.Kind != execution.CapabilityExternalNetwork {
+			return false
+		}
+	} else {
+		if result.Meta[tools.SandboxLikelyDeniedMeta] != "true" || result.Meta[tools.SandboxDenialKindMeta] != tools.SandboxDenialKindNetwork {
+			return false
+		}
 	}
 	if value, _ := args["sandbox_permissions"].(string); strings.TrimSpace(value) == string(tools.SandboxPermissionsRequireEscalated) {
 		return false
@@ -1600,6 +1620,11 @@ func sandboxRestrictedShellRetryCandidate(call ToolCall, args map[string]any, re
 }
 
 func sandboxDeniedShellResult(result tools.Result) bool {
+	if result.ExecutionOutcome != nil {
+		// Typed denials must be handled by their exact capability path. Never
+		// turn a structured narrow denial into the legacy unrestricted retry.
+		return false
+	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
 }
 
@@ -1728,17 +1753,18 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 
 	return ToolResult{
-		ToolCallID:     call.ID,
-		Name:           call.Name,
-		Status:         result.Status,
-		Output:         output,
-		Truncated:      result.Truncated,
-		Meta:           meta,
-		Redacted:       result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
-		ChangedFiles:   result.ChangedFiles,
-		Display:        display,
-		LoadedTools:    loadedToolsFromResult(meta),
-		RequestedModel: meta["escalate_to_model"],
+		ToolCallID:      call.ID,
+		Name:            call.Name,
+		Status:          result.Status,
+		Output:          output,
+		Truncated:       result.Truncated,
+		Meta:            meta,
+		Redacted:        result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
+		ChangedFiles:    result.ChangedFiles,
+		ChangeSummaries: result.ChangeSummaries,
+		Display:         display,
+		LoadedTools:     loadedToolsFromResult(meta),
+		RequestedModel:  meta["escalate_to_model"],
 	}
 }
 
@@ -1998,15 +2024,16 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Cwd:               options.Cwd,
 		})
 		return ToolResult{
-			ToolCallID:   call.ID,
-			Name:         call.Name,
-			Status:       result.Status,
-			Output:       result.Output,
-			Truncated:    result.Truncated,
-			Meta:         result.Meta,
-			Redacted:     result.Redacted,
-			ChangedFiles: result.ChangedFiles,
-			Display:      result.Display,
+			ToolCallID:      call.ID,
+			Name:            call.Name,
+			Status:          result.Status,
+			Output:          result.Output,
+			Truncated:       result.Truncated,
+			Meta:            result.Meta,
+			Redacted:        result.Redacted,
+			ChangedFiles:    result.ChangedFiles,
+			ChangeSummaries: result.ChangeSummaries,
+			Display:         result.Display,
 		}
 	}
 	return ToolResult{
@@ -2570,7 +2597,8 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 	if profile, ok, err := inlineAdditionalPermissionsProfile(args, options.Cwd); ok && err == nil {
 		scopeText = requestPermissionsScope(profile)
 	}
-	reason = userFacingPermissionReason(call.Name, args, reason)
+	decisionReason := strings.TrimSpace(reason)
+	reason = userFacingPermissionReason(call.Name, args, reason, safety.Reason)
 
 	return PermissionEvent{
 		ToolCallID:        call.ID,
@@ -2583,6 +2611,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Autonomy:          options.Autonomy,
 		SideEffect:        string(safety.SideEffect),
 		Reason:            reason,
+		DecisionReason:    decisionReason,
 		Scope:             scopeText,
 		Risk:              risk,
 		Block:             block,
@@ -2592,18 +2621,31 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 	}, true
 }
 
-func userFacingPermissionReason(toolName string, args map[string]any, reason string) string {
+func userFacingPermissionReason(toolName string, args map[string]any, reason string, fallback string) string {
 	reason = strings.TrimSpace(reason)
-	if !isShellCommandTool(toolName) || !shellCommandRequiresEscalated(args) {
+	if !isShellCommandTool(toolName) {
 		return reason
 	}
-	if justification, ok := firstStringArg(args, "justification"); ok {
-		return justification
+
+	// Policy and sandbox explanations are authoritative. The tool's static
+	// safety copy is only an internal fallback; presenting it as the reason for
+	// every ordinary shell approval makes prompts generic and obscures the cases
+	// where policy has an actionable explanation.
+	fallback = strings.TrimSpace(fallback)
+	if reason != "" && reason != fallback && reason != "tool requires approval before execution" && reason != sandbox.ReasonEscalatedSandboxRequired {
+		return reason
 	}
-	if reason == "" || reason == sandbox.ReasonEscalatedSandboxRequired {
+
+	if shellCommandRequiresEscalated(args) {
+		if justification, ok := firstStringArg(args, "justification"); ok {
+			return justification
+		}
 		return "This command needs to run outside the sandbox."
 	}
-	return reason
+
+	// Ordinary shell approvals need no invented explanation. The raw fallback is
+	// retained separately as DecisionReason for traces and policy auditing.
+	return ""
 }
 
 func grantDecisionAction(grant *sandbox.Grant) PermissionDecisionAction {

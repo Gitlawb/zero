@@ -289,6 +289,7 @@ Install and manage:
 ```bash
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins list
+zero plugins info github-pr-review       # show manifest path, enabled state, lock metadata
 zero plugins remove github-pr-review    # alias: rm
 ```
 

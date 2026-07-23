@@ -62,6 +62,12 @@ func HasProviderProfile(profile ProviderProfile) bool {
 }
 
 type SandboxConfig struct {
+	// Enabled turns the sandbox off when set to false (`"sandbox": {"enabled":
+	// false}`). A pointer distinguishes an explicit false (disable) from an
+	// omitted key (keep the default: enabled). Honored from the GLOBAL user
+	// config and CLI only — deliberately NOT project config, so a cloned repo
+	// cannot disable the sandbox that constrains it. nil / true keep enforcement.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Network controls whether shell commands classified as network-touching
 	// (curl, git push, package installs, …) are allowed: "allow" or "deny".
 	// Empty keeps the built-in default (deny). Without this knob the engine's

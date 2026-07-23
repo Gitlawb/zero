@@ -1107,12 +1107,19 @@ func wrapDetailBlock(detail string, width int) string {
 // renderFocusedPermissionPrompt draws the modal permission card and reports the
 // card-relative Y offset of each option line (in permissionOptions order) so the
 // caller can register those lines as clickable.
-func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, width int) (string, []int) {
+func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, typing bool, feedback string, width int) (string, []int) {
 	name := strings.TrimSpace(request.ToolName)
 	if name == "" {
 		name = "tool"
 	}
-	fill := zeroTheme.onPerm
+	// The card body carries no background fill, matching every other prompt card
+	// (ask_user, spec review, plan) — see the lipgloss.NewStyle() fills below. The
+	// permission card used to tint its whole body with permBg, an amber-family
+	// wash that reads as a warm slab on cool themes (e.g. a brown-yellow box over
+	// dracula's purples) and made it the one outlier. The amber PERMISSION badge
+	// and the amber-mixed border still carry the "this is a permission gate"
+	// signal; the body no longer clashes with the surrounding theme.
+	fill := func(style lipgloss.Style) lipgloss.Style { return style }
 
 	top := zeroTheme.permBadge.Render(" PERMISSION ")
 
@@ -1134,6 +1141,17 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 
 	lines = append(lines, "")
 
+	// Feedback mode: the option list is replaced by a free-text field, like the
+	// ask_user "type your own answer" surface. What is typed is sent to the model
+	// as the denial reason, so it reads the instruction and adjusts.
+	if typing {
+		lines = append(lines, fill(zeroTheme.muted).Render("Tell Zero what to do differently:"))
+		lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(feedback)+fill(zeroTheme.accent).Render("▌"))
+		lines = append(lines, "")
+		lines = append(lines, fill(zeroTheme.faint).Render("enter · send to Zero    esc · back to options"))
+		return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), nil
+	}
+
 	// Each option is its own line so a click anywhere on that row selects it (no
 	// per-column hit-testing). The highlighted row gets a ▸ marker and a reverse
 	// label; the rest stay quiet. styledBlockFill prepends exactly one top-border
@@ -1147,8 +1165,16 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 		hotkey := fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
 		optionLabel := permissionOptionLabel(option, request)
 		if index == cursor {
+			// onSel, not badge. zeroTheme.badge is the brand chip (" 0 ", " ASK ",
+			// " SPEC REVIEW ") — a full-brightness accent fill meant for short
+			// labels. Using it for a selected ROW painted a bright accent slab
+			// across the permission card, fighting the card's amber warning palette
+			// and ignoring the card tint every other line composes onto. selBg is
+			// the tint tuned for exactly this job ("separates from the panel while
+			// ink label contrast stays ~9.4:1"), and onSel is what every other
+			// selectable list in the TUI uses for its highlighted row.
 			marker := fill(zeroTheme.accent).Render("▸ ")
-			label := zeroTheme.badge.Render(" " + optionLabel + " ")
+			label := zeroTheme.onSel(zeroTheme.ink).Bold(true).Render(" " + optionLabel + " ")
 			lines = append(lines, marker+label+hotkey)
 		} else {
 			label := fill(zeroTheme.ink).Render(optionLabel)
@@ -1163,7 +1189,7 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 
-	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), offsets
+	return styledBlockFill(width, lines, zeroTheme.permBorder, lipgloss.NewStyle()), offsets
 }
 
 func permissionScopeLine(request agent.PermissionRequest, scope string) string {

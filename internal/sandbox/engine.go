@@ -80,6 +80,13 @@ func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
 }
 
+func (engine *Engine) ConsumeGrantMigrationNotice() (string, error) {
+	if engine == nil || engine.store == nil {
+		return "", nil
+	}
+	return engine.store.ConsumeMigrationNotice()
+}
+
 func (engine *Engine) GrantCommandPrefixForSession(toolName string, prefix []string) {
 	if engine == nil || len(prefix) == 0 {
 		return

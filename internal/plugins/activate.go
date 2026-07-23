@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/secrets"
@@ -113,6 +114,10 @@ type ActivateOptions struct {
 	// Env supplies the base environment for plugin tool commands. nil uses the
 	// current process environment (os.Environ()).
 	Env []string
+	// Execution routes plugin tool subprocesses through the shared sandbox and
+	// process execution seam. Production callers provide it before any tool can
+	// be invoked; tests may continue to inject runTool directly.
+	Execution *execution.Runner
 
 	runTool toolRunner
 }
@@ -141,8 +146,14 @@ func Activate(registry *tools.Registry, loaded []LoadedPlugin, options ActivateO
 		if timeout <= 0 {
 			timeout = defaultPluginToolTimeout
 		}
-		runTool = func(ctx context.Context, command pluginCommand) commandOutput {
-			return execPluginCommand(ctx, command, timeout)
+		if options.Execution != nil {
+			runTool = func(ctx context.Context, command pluginCommand) commandOutput {
+				return execPluginCommandWithExecution(ctx, options.Execution, command, timeout)
+			}
+		} else {
+			runTool = func(ctx context.Context, command pluginCommand) commandOutput {
+				return execPluginCommand(ctx, command, timeout)
+			}
 		}
 	}
 
@@ -687,5 +698,34 @@ func execPluginCommand(ctx context.Context, command pluginCommand, timeout time.
 	}
 	output.ExitCode = -1
 	output.Err = err
+	return output
+}
+
+func execPluginCommandWithExecution(ctx context.Context, runner *execution.Runner, command pluginCommand, timeout time.Duration) commandOutput {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result := runner.ExecuteCaptured(runCtx, execution.CapturedRequest{
+		Request: execution.Request{
+			Origin:           execution.OriginPlugin,
+			Mode:             execution.ModeCaptured,
+			Command:          execution.Command{Name: command.Command, Args: append([]string(nil), command.Args...), Env: append([]string(nil), command.Env...)},
+			WorkingDirectory: command.Cwd,
+			WorkspaceRoots:   []string{command.Cwd},
+			Approval:         execution.ApprovalContext{PolicyVersion: execution.PolicyVersion},
+		},
+		Stdin: command.Stdin,
+	})
+	exitCode := -1
+	if result.Outcome.Exit != nil {
+		exitCode = result.Outcome.Exit.Code
+	}
+	output := commandOutput{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: exitCode}
+	switch result.Outcome.Kind {
+	case execution.OutcomeSandboxSetupFailure, execution.OutcomeExecutableNotFound, execution.OutcomeTimedOut, execution.OutcomeCancelled:
+		output.Err = result.Err
+	}
+	if output.Stderr == "" && result.Outcome.Denial != nil {
+		output.Stderr = result.Outcome.Denial.Reason
+	}
 	return output
 }

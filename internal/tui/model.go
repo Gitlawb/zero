@@ -689,6 +689,17 @@ type pendingPermissionPrompt struct {
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
+	// typing is true once the user chose "tell Zero what to do differently": the
+	// card replaces its option list with a free-text field (sharing the composer
+	// input, like the ask_user questionnaire). Submitting sends a Deny decision
+	// whose Reason is the typed text, so the model reads it as the tool result and
+	// adjusts course in the same turn instead of the run being cancelled.
+	typing bool
+	// savedDraft holds whatever was in the shared composer input when feedback
+	// mode was entered. The field is cleared for typing and restored on both
+	// submit and cancel, so a half-typed or queued next-turn message survives the
+	// detour (permissionRequestMsg, unlike ask_user, does not clear the composer).
+	savedDraft string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -1439,6 +1450,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.escapeAskUser()
 			}
+			// Esc in the permission feedback field steps back to the option list
+			// rather than resolving, so a stray keystroke is recoverable.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				return m.cancelPermissionTyping()
+			}
 			if m.pendingSpecReview != nil {
 				m.burstCount = 0
 				return m.cancelSpecReview()
@@ -1659,6 +1675,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyBackspace(msg):
+			// In permission feedback mode Backspace is a plain edit of the feedback
+			// text. This case runs before the typing branch below and, on an empty
+			// field (feedback mode clears the composer), would otherwise fall to the
+			// removeLastAttachment path and silently drop a staged image/doc that
+			// savedDraft does not restore. Route it to the shared input instead.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -1854,6 +1880,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSpecReviewKey(msg)
 		}
 		if m.pendingPermission != nil {
+			// Feedback mode: a printable keystroke (and editing keys like
+			// backspace) types into the shared composer input, mirroring the
+			// ask_user free-text path above. Enter/Esc/↑/↓ were already handled
+			// earlier in this switch; the remaining keys reach the input here.
+			if m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			m.burstCount = 0
 			return m.handlePermissionKey(msg)
 		}
@@ -2781,6 +2816,16 @@ func (m model) footerView(width int) string {
 	if m.pendingAskUser != nil {
 		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
 		footer.WriteString("\n")
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
+	// A focused permission prompt owns the keyboard: its options (and the feedback
+	// field) consume every key, so the composer is inert. Suppress it and the idle
+	// hints/plan panel like the ask_user modal above, keeping only the status line.
+	// The card itself renders in the transcript body. This also keeps the shared
+	// input from echoing in two places once "tell Zero what to do differently"
+	// opens the on-card feedback field.
+	if m.pendingPermission != nil {
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
@@ -3942,13 +3987,22 @@ func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := strings.ToLower(msg.String())
 	for _, option := range permissionOptions(m.pendingPermission.request) {
 		if option.hotkey == key {
-			return m.resolvePermission(option.choice)
+			return m.choosePermissionOption(option.choice)
 		}
 	}
 	return m, nil
 }
 
 func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
+	return m.resolvePermissionWithReason(decision, permissionDecisionReason(decision))
+}
+
+// resolvePermissionWithReason resolves the pending prompt with an explicit reason
+// string. It backs both the fixed-label choices (reason = permissionDecisionReason)
+// and the free-text "tell Zero what to do differently" path, where the reason is
+// the user's typed instruction and the action is Deny so the agent surfaces it as
+// the tool result and keeps going.
+func (m model) resolvePermissionWithReason(decision permissionDecision, reason string) (tea.Model, tea.Cmd) {
 	pending := m.pendingPermission
 	if pending == nil {
 		return m, nil
@@ -3957,7 +4011,7 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 	if pending.decide != nil {
 		pending.decide(agent.PermissionDecision{
 			Action: decision,
-			Reason: permissionDecisionReason(decision),
+			Reason: reason,
 		})
 	}
 	m.pendingPermission = nil
@@ -5148,14 +5202,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:         toolResultRowText(result),
-				tool:         result.Name,
-				status:       result.Status,
-				detail:       toolResultDetail(result),
-				runID:        runID,
-				changedFiles: result.ChangedFiles,
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:            toolResultRowText(result),
+				tool:            result.Name,
+				status:          result.Status,
+				detail:          toolResultDetail(result),
+				runID:           runID,
+				changedFiles:    result.ChangedFiles,
+				changeSummaries: result.ChangeSummaries,
 			}
 			// A Task result is shown by the specialist card, and update_plan by the
 			// plan panel/sidebar, so skip both redundant transcript rows.
@@ -5187,6 +5242,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			if len(result.ChangedFiles) > 0 {
 				toolPayload["changedFiles"] = result.ChangedFiles
+			}
+			if len(result.ChangeSummaries) > 0 {
+				toolPayload["changeSummaries"] = result.ChangeSummaries
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,

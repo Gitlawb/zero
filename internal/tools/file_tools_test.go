@@ -829,3 +829,61 @@ func TestGlobSkipsWorkspaceExcludedDirectoriesAndBinaryFiles(t *testing.T) {
 		t.Fatalf("expected only keep.txt, got:\n%s", res.Output)
 	}
 }
+
+// A backwards range (end_line < start_line) is a caller-arithmetic slip, not a
+// fatal error: read_file recovers by reading just start_line and surfaces a note
+// explaining the adjustment, matching how an end_line past EOF is auto-clamped.
+// It must never hard-error the way it used to.
+func TestReadFileToolRecoversBackwardsRange(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta\nepsilon")
+
+	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+		"path":       "notes.txt",
+		"start_line": 3,
+		"end_line":   2, // backwards
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("backwards range must recover, not error; got %s: %s", result.Status, result.Output)
+	}
+	if strings.Contains(result.Output, "must be greater than or equal to start_line") {
+		t.Fatalf("backwards range still hard-errors: %q", result.Output)
+	}
+	for _, want := range []string{
+		"end_line 2 was before start_line 3", // the note
+		"only line 3 was read",
+		"3 | gamma",
+	} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("expected %q in output, got %q", want, result.Output)
+		}
+	}
+	// It read exactly start_line, nothing adjacent.
+	if strings.Contains(result.Output, "beta") || strings.Contains(result.Output, "delta") {
+		t.Fatalf("recovery read the wrong lines: %q", result.Output)
+	}
+}
+
+// A valid range with end_line >= start_line is byte-for-byte unchanged: the
+// recovery path must not touch normal reads (no stray note, exact same window).
+func TestReadFileToolValidRangeUnchangedByRecovery(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta\nepsilon")
+
+	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+		"path":       "notes.txt",
+		"start_line": 2,
+		"end_line":   4,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("valid range failed: %s: %s", result.Status, result.Output)
+	}
+	// Byte-for-byte: header, blank separator, the exact selected lines, and no
+	// recovery note or trailing content. An altered header/separator or a stray
+	// out-of-range line would fail this where a substring check would not.
+	const want = "File: notes.txt (lines 2-4 of 5)\n\n2 | beta\n3 | gamma\n4 | delta"
+	if result.Output != want {
+		t.Fatalf("valid-range output changed by the recovery path:\n got: %q\nwant: %q", result.Output, want)
+	}
+}

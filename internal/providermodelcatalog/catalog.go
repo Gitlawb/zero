@@ -123,10 +123,12 @@ var curatedModels = map[string][]Model{
 		{ID: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", Description: "multimodal model"},
 	},
 	"fireworks": {
-		{ID: "accounts/fireworks/models/deepseek-v3-0324", Description: "catalog default"},
-		{ID: "accounts/fireworks/models/llama-v3p3-70b-instruct", Description: "general model"},
-		{ID: "accounts/fireworks/models/qwen2p5-coder-32b-instruct", Description: "coding model"},
-		{ID: "accounts/fireworks/models/deepseek-r1", Description: "reasoning model"},
+		// Serverless-only curated set: ordinary API-key setups hit /inference/v1
+		// and cannot use on-demand deployment IDs.
+		{ID: "accounts/fireworks/models/kimi-k2p7-code", Description: "catalog default"},
+		{ID: "accounts/fireworks/models/deepseek-v4-flash", Description: "fast coding model"},
+		{ID: "accounts/fireworks/models/gpt-oss-120b", Description: "general model"},
+		{ID: "accounts/fireworks/models/deepseek-v4-pro", Description: "reasoning model"},
 	},
 	"dashscope": {
 		{ID: "qwen-plus", Description: "catalog default"},
@@ -138,6 +140,10 @@ var curatedModels = map[string][]Model{
 		{ID: "kimi-k2-0905-preview", Description: "catalog default"},
 		{ID: "kimi-k2-turbo-preview", Description: "fast coding model"},
 		{ID: "moonshot-v1-128k", Description: "long-context model"},
+	},
+	"atlascloud": {
+		{ID: "qwen/qwen3.5-flash", Description: "catalog default"},
+		{ID: "deepseek-ai/deepseek-v4-pro", Description: "reasoning model"},
 	},
 	"nvidia-nim": {
 		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "catalog default"},

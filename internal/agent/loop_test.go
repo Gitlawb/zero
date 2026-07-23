@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/specmode"
@@ -24,6 +25,59 @@ import (
 type mockProvider struct {
 	turns    [][]zeroruntime.StreamEvent
 	requests []zeroruntime.CompletionRequest
+}
+
+func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})
+	call := ToolCall{Name: tools.ExecCommandToolName}
+	options := Options{Sandbox: engine}
+	legacyMeta := map[string]string{
+		tools.SandboxLikelyDeniedMeta: "true",
+		tools.SandboxDenialKindMeta:   tools.SandboxDenialKindNetwork,
+	}
+
+	applicationFailure := tools.Result{
+		Status: tools.StatusError,
+		Meta:   legacyMeta,
+		ExecutionOutcome: &execution.Outcome{
+			State: execution.StateFailed,
+			Kind:  execution.OutcomeApplicationFailure,
+			Exit:  &execution.Exit{Code: 1},
+		},
+	}
+	if sandboxDeniedNetworkRetryCandidate(call, nil, applicationFailure, options) || sandboxRestrictedShellRetryCandidate(call, nil, applicationFailure, options) {
+		t.Fatal("typed application failure must not be retried from legacy sandbox-like text")
+	}
+
+	protectedDenial := applicationFailure
+	protectedDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability: execution.Capability{Kind: execution.CapabilityProtectedMetadata, Scope: "/workspace/.zero"},
+			Source:     execution.DenialSourceConfiguredPolicy,
+			Reason:     "protected metadata",
+			NextAction: execution.DenialNextActionRequestApproval,
+		},
+	}
+	if sandboxRestrictedShellRetryCandidate(call, nil, protectedDenial, options) {
+		t.Fatal("narrow protected-metadata denial must not become an unrestricted retry")
+	}
+
+	networkDenial := protectedDenial
+	networkDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability: execution.Capability{Kind: execution.CapabilityExternalNetwork},
+			Source:     execution.DenialSourcePlatformSandbox,
+			Reason:     "external network denied",
+			NextAction: execution.DenialNextActionRequestApproval,
+		},
+	}
+	if !sandboxDeniedNetworkRetryCandidate(call, nil, networkDenial, options) {
+		t.Fatal("typed external-network denial should use the narrow network approval path")
+	}
 }
 
 func (provider *mockProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {

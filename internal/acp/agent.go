@@ -11,6 +11,9 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -23,9 +26,10 @@ import (
 // means the editor only hosts the thread — ZERO owns BYOK and telemetry-free
 // operation.
 type Deps struct {
-	ResolveConfig func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	NewProvider   func(profile config.ProviderProfile) (zeroruntime.Provider, error)
-	RunAgent      func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error)
+	ResolveConfig  func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	DiscoverModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	NewProvider    func(profile config.ProviderProfile) (zeroruntime.Provider, error)
+	RunAgent       func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error)
 	// BuildWorkspace builds the SCOPED tool registry and the sandbox engine for a
 	// validated workspace root, so ACP shell tools (bash/exec_command) are confined
 	// exactly like the exec surface — never run unconfined on the host.
@@ -60,13 +64,16 @@ type acpSession struct {
 	// turnMu serializes prompt turns for one session: concurrent session/prompt
 	// calls run one at a time so they can't interleave history or clobber the
 	// single cancel slot.
-	turnMu sync.Mutex
+	turnMu  sync.Mutex
+	modelMu sync.Mutex
 
-	mu      sync.Mutex
-	mode    agent.PermissionMode
-	model   string // override; "" => config default
-	cancel  context.CancelFunc
-	history []turnRecord
+	mu             sync.Mutex
+	mode           agent.PermissionMode
+	model          string
+	models         []SessionConfigOptionValue
+	restrictModels bool
+	cancel         context.CancelFunc
+	history        []turnRecord
 }
 
 // NewAgent builds the ACP server and registers its method handlers on conn.
@@ -120,7 +127,7 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 
 // ---- session lifecycle ----
 
-func (a *Agent) handleSessionNew(_ context.Context, params json.RawMessage) (any, error) {
+func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (any, error) {
 	var p NewSessionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/new params")
@@ -129,18 +136,23 @@ func (a *Agent) handleSessionNew(_ context.Context, params json.RawMessage) (any
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
 	}
-	meta, err := a.deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: root})
+	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
+	if err != nil {
+		return nil, RPCError(codeInternalError, "config: "+err.Error())
+	}
+	meta, err := a.deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: root, ModelID: model})
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess := a.registerSession(meta.SessionID, root, nil)
+	sess := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
 	return NewSessionResult{
-		SessionID: sess.id,
-		Modes:     a.modeState(sess),
+		SessionID:     sess.id,
+		ConfigOptions: a.configOptions(sess),
+		Modes:         a.modeState(sess),
 	}, nil
 }
 
-func (a *Agent) handleSessionLoad(_ context.Context, params json.RawMessage) (any, error) {
+func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (any, error) {
 	var p LoadSessionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/load params")
@@ -161,7 +173,17 @@ func (a *Agent) handleSessionLoad(_ context.Context, params json.RawMessage) (an
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
 	history, historyErr := a.loadHistory(meta.SessionID)
-	sess := a.registerSession(meta.SessionID, root, history)
+	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
+	if err != nil {
+		return nil, RPCError(codeInternalError, "config: "+err.Error())
+	}
+	if persistedModel := strings.TrimSpace(meta.ModelID); persistedModel != "" && (!restrictModels || modelChoiceExists(models, persistedModel)) {
+		model = persistedModel
+		if !modelChoiceExists(models, persistedModel) {
+			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
+		}
+	}
+	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
 	a.warnPersistence(
 		&notifier{conn: a.conn, sessionID: sess.id},
 		"load session history",
@@ -169,7 +191,8 @@ func (a *Agent) handleSessionLoad(_ context.Context, params json.RawMessage) (an
 		historyErr,
 	)
 	return LoadSessionResult{
-		Modes: a.modeState(sess),
+		ConfigOptions: a.configOptions(sess),
+		Modes:         a.modeState(sess),
 	}, nil
 }
 
@@ -354,11 +377,27 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
-	if p.ConfigID != configIDModel {
+	switch p.ConfigID {
+	case configIDModel:
+		model := strings.TrimSpace(p.Value)
+		if err := a.updateModel(sess, model, sess.restrictModels); err != nil {
+			return nil, err
+		}
+	case configIDMode:
+		mode := agent.PermissionMode(p.Value)
+		switch mode {
+		case agent.PermissionModeAuto, agent.PermissionModeAsk:
+			sess.setMode(mode)
+			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
+		case agent.PermissionModeUnsafe:
+			return nil, RPCError(codeInvalidParams, "mode not permitted over ACP: "+p.Value)
+		default:
+			return nil, RPCError(codeInvalidParams, "unknown mode: "+p.Value)
+		}
+	default:
 		return nil, RPCError(codeInvalidParams, "unknown config option: "+p.ConfigID)
 	}
-	sess.setModel(p.Value)
-	return SetSessionConfigOptionResult{}, nil
+	return SetSessionConfigOptionResult{ConfigOptions: a.configOptions(sess)}, nil
 }
 
 func (a *Agent) handleZeroSetModel(_ context.Context, params json.RawMessage) (any, error) {
@@ -370,8 +409,24 @@ func (a *Agent) handleZeroSetModel(_ context.Context, params json.RawMessage) (a
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
-	sess.setModel(p.Model)
-	return ZeroSetModelResult{Model: p.Model}, nil
+	model := strings.TrimSpace(p.Model)
+	if err := a.updateModel(sess, model, false); err != nil {
+		return nil, err
+	}
+	return ZeroSetModelResult{Model: model}, nil
+}
+
+func (a *Agent) updateModel(sess *acpSession, model string, restrictModels bool) error {
+	sess.modelMu.Lock()
+	defer sess.modelMu.Unlock()
+	if restrictModels && !sess.hasModel(model) {
+		return RPCError(codeInvalidParams, "unknown model: "+model)
+	}
+	if _, err := a.deps.Store.UpdateModel(sess.id, model); err != nil {
+		return RPCError(codeInternalError, "save model selection: "+err.Error())
+	}
+	sess.setModel(model)
+	return nil
 }
 
 func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
@@ -396,6 +451,76 @@ func (a *Agent) modeState(s *acpSession) *SessionModeState {
 			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
 		},
 	}
+}
+
+// resolveModelChoices advertises authenticated live models when discovery is
+// available. The configured model is always retained as the sole fallback.
+func (a *Agent) resolveModelChoices(ctx context.Context, cwd string) (string, []SessionConfigOptionValue, bool, error) {
+	resolved, err := a.deps.ResolveConfig(cwd, config.Overrides{})
+	if err != nil {
+		return "", nil, false, err
+	}
+	selected := strings.TrimSpace(resolved.Provider.Model)
+	options := make([]SessionConfigOptionValue, 0, 8)
+	seen := make(map[string]bool)
+	add := func(id, description string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		options = append(options, SessionConfigOptionValue{Value: id, Name: id, Description: description})
+	}
+	add(selected, "")
+	descriptor, knownProvider := providercatalog.Get(resolved.Provider.CatalogID)
+	restrictModels := knownProvider && !descriptor.Custom
+	if a.deps.DiscoverModels != nil {
+		discovered, discoverErr := a.deps.DiscoverModels(ctx, resolved.Provider)
+		if ctx.Err() != nil {
+			return "", nil, false, ctx.Err()
+		}
+		if discoverErr == nil && len(discovered) > 0 {
+			for _, model := range discovered {
+				if providermodelcatalog.ModelIDAllowedForProvider(resolved.Provider.CatalogID, model.ID) {
+					add(model.ID, model.Description)
+				}
+			}
+		}
+	}
+	return selected, options, restrictModels, nil
+}
+
+func modelChoiceExists(models []SessionConfigOptionValue, model string) bool {
+	for _, option := range models {
+		if option.Value == model {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
+	model, models, mode := s.configState()
+	return []SessionConfigOption{{
+		ID:           configIDModel,
+		Name:         "Model",
+		Description:  "Model used for this session.",
+		Category:     configCategoryModel,
+		Type:         configOptionTypeSelect,
+		CurrentValue: model,
+		Options:      models,
+	}, {
+		ID:           configIDMode,
+		Name:         "Mode",
+		Description:  "Permission mode used for this session.",
+		Category:     configCategoryMode,
+		Type:         configOptionTypeSelect,
+		CurrentValue: string(mode),
+		Options: []SessionConfigOptionValue{
+			{Value: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
+			{Value: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+		},
+	}}
 }
 
 // ---- persistence + continuity ----
@@ -525,13 +650,13 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 // session is returned unchanged rather than orphaning its turn or resetting its
 // mode/model. history is set BEFORE publishing so no concurrent prompt can read a
 // half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord) *acpSession {
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) *acpSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
 		return existing
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, history: history}
+	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history}
 	a.sessions[id] = sess
 	return sess
 }
@@ -570,7 +695,18 @@ func (s *acpSession) currentMode() agent.PermissionMode {
 }
 
 func (s *acpSession) setModel(model string) {
+	model = strings.TrimSpace(model)
 	s.mu.Lock()
+	found := false
+	for _, option := range s.models {
+		if option.Value == model {
+			found = true
+			break
+		}
+	}
+	if !found && model != "" {
+		s.models = append(s.models, SessionConfigOptionValue{Value: model, Name: model})
+	}
 	s.model = model
 	s.mu.Unlock()
 }
@@ -579,6 +715,24 @@ func (s *acpSession) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.model
+}
+
+func (s *acpSession) hasModel(model string) bool {
+	model = strings.TrimSpace(model)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, option := range s.models {
+		if option.Value == model {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *acpSession) configState() (string, []SessionConfigOptionValue, agent.PermissionMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model, append([]SessionConfigOptionValue(nil), s.models...), s.mode
 }
 
 func (s *acpSession) appendHistory(rec turnRecord) {

@@ -1787,3 +1787,37 @@ func providerWizardIDs(descriptors []providercatalog.Descriptor) []string {
 	}
 	return ids
 }
+
+// A provider that returns prose blurbs instead of display names must not
+// collapse distinct models into identical rows. Reproduces the reported picker
+// where two "Open-weight GPT model..." and two "Kimi multimodal agent model..."
+// rows were indistinguishable, with the ID visible only for the highlighted one.
+func TestProviderWizardModelRowsStayDistinctWithProseDescriptions(t *testing.T) {
+	wizard := &providerWizardState{
+		step:        providerWizardStepModel,
+		modelSource: "models.dev",
+		models: []providerWizardModel{
+			{ID: "gpt-oss-120b", Description: "Open-weight GPT model for self-hosted reasoning and instruction-following workloads"},
+			{ID: "gpt-oss-20b", Description: "Open-weight GPT model for self-hosted reasoning and instruction-following workloads"},
+			{ID: "kimi-k2-thinking", Description: "Kimi multimodal agent model for visual understanding, coding, and planning"},
+			{ID: "kimi-k2-instruct", Description: "Kimi multimodal agent model for visual understanding, coding, and planning"},
+			{ID: "x-ai/grok-4.3", Description: "Grok 4.3"},
+		},
+	}
+	view := plainRender(t, strings.Join(wizard.renderModelStep(96), "\n"))
+
+	// every prose-described model is identified by its unique ID
+	for _, id := range []string{"gpt-oss-120b", "gpt-oss-20b", "kimi-k2-thinking", "kimi-k2-instruct"} {
+		if !strings.Contains(view, id) {
+			t.Errorf("model %q is not identifiable in the list:\n%s", id, view)
+		}
+	}
+	// a genuine display name is still preferred over the raw id
+	if !strings.Contains(view, "Grok 4.3") {
+		t.Errorf("friendly display name was lost:\n%s", view)
+	}
+	// the prose blurb must not be a row label
+	if strings.Contains(view, "❯ Open-weight GPT model") {
+		t.Errorf("prose blurb still used as a row label:\n%s", view)
+	}
+}

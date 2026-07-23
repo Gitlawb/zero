@@ -454,7 +454,7 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				rowIndex:          -1,
 				heightCacheStable: false, // the highlight changes with the cursor
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, perm.typing, m.input.Value(), width)
 					options := permissionOptions(perm.request)
 					selectable := make([]transcriptSelectableLine, 0, len(offsets))
 					for index, offset := range offsets {
@@ -1401,8 +1401,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
-		if line.permOption {
-			// A left-click on a permission-popup option resolves it directly.
+		if line.permOption && !(m.pendingPermission != nil && m.pendingPermission.typing) {
+			// A left-click on a permission-popup option resolves it directly. The
+			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
+			// returns nil offsets in feedback mode, so no option row is registered as
+			// clickable then — but that single early-return is the only thing keeping
+			// a stray click (Allow included) off the decision path, and it lives in a
+			// function other PRs also edit. Guarding here makes the safety explicit
+			// rather than emergent.
 			next, cmd := m.resolvePermission(line.permChoice)
 			return next.(model), cmd, true
 		}

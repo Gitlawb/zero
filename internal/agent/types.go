@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -71,7 +72,10 @@ type ToolResult struct {
 	Meta         map[string]string
 	Redacted     bool
 	ChangedFiles []string
-	Display      tools.Display
+	// ChangeSummaries are non-selectable generated-tree summaries emitted by
+	// command execution; callers must not schedule per-file work from them.
+	ChangeSummaries []execution.Change
+	Display         tools.Display
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory

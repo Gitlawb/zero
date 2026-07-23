@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Gitlawb/zero/internal/providers/openai"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
@@ -35,9 +36,12 @@ type Model struct {
 }
 
 type Options struct {
-	HTTPClient     *http.Client
-	ModelsDevURL   string
-	OpenGatewayURL string
+	HTTPClient           *http.Client
+	ModelsDevURL         string
+	OpenGatewayURL       string
+	OAuthResolver        providerio.TokenResolver
+	CodexAccountResolver openai.CodexAccountResolver
+	UserAgent            string
 }
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
@@ -188,6 +192,18 @@ func discoverOpenAIModels(ctx context.Context, profile config.ProviderProfile, o
 	if err != nil {
 		return nil, err
 	}
+	var configure func(*http.Request)
+	if providercatalog.NormalizeID(profile.CatalogID) == "chatgpt" {
+		configure = func(request *http.Request) {
+			account := ""
+			if options.CodexAccountResolver != nil {
+				if resolved, ok, resolveErr := options.CodexAccountResolver(request.Context()); resolveErr == nil && ok {
+					account = resolved
+				}
+			}
+			openai.ApplyCodexHeaders(request, account, options.UserAgent)
+		}
+	}
 	return fetchProviderModels(ctx, endpoint, profile, options, providerio.AuthHeaders{
 		APIKey:            profile.APIKey,
 		DefaultAuthHeader: "Authorization",
@@ -196,7 +212,7 @@ func discoverOpenAIModels(ctx context.Context, profile config.ProviderProfile, o
 		AuthScheme:        profile.AuthScheme,
 		AuthHeaderValue:   profile.AuthHeaderValue,
 		CustomHeaders:     providerio.CopyHeaders(profile.CustomHeaders),
-	}, nil)
+	}, configure)
 }
 
 func discoverAnthropicModels(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
@@ -217,25 +233,16 @@ func discoverAnthropicModels(ctx context.Context, profile config.ProviderProfile
 }
 
 func fetchProviderModels(ctx context.Context, endpoint string, profile config.ProviderProfile, options Options, auth providerio.AuthHeaders, configure func(*http.Request)) ([]Model, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	// Authenticate via either an APIKey or a raw auth-header value / custom
-	// headers, matching how the live providers build their requests
-	// (internal/providers/providerio). Honoring AuthHeaderValue keeps discovery
-	// consistent with the credential-present logic elsewhere.
-	providerio.ApplyAuthHeaders(request, auth)
-	request.Header.Set("Accept", "application/json")
-	if configure != nil {
-		configure(request)
-	}
-
 	client := options.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	response, err := client.Do(request)
+	response, err := providerio.SendWithAuthRetry(ctx, client, http.MethodGet, endpoint, nil, auth, options.OAuthResolver, func(request *http.Request) {
+		request.Header.Set("Accept", "application/json")
+		if configure != nil {
+			configure(request)
+		}
+	}, 1)
 	if err != nil {
 		return nil, redactDiscoveryError(err, profile)
 	}

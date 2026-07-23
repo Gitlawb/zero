@@ -30,7 +30,7 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "fireworks",
-			want:     []string{"accounts/fireworks/models/deepseek-v3-0324", "accounts/fireworks/models/qwen2p5-coder-32b-instruct"},
+			want:     []string{"accounts/fireworks/models/kimi-k2p7-code", "accounts/fireworks/models/deepseek-v4-flash"},
 			notWant:  []string{"gpt-4.1", "llama-3.3-70b-versatile"},
 		},
 		{
@@ -42,6 +42,11 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			provider: "aimlapi",
 			want:     []string{"anthropic/claude-sonnet-5", "google/gemini-3.5-flash", "openai/gpt-5.5-2026-04-23", "qwen/qwen-3.7-max", "deepseek/deepseek-v4-pro"},
 			notWant:  []string{"gpt-4o", "openai/gpt-4o", "anthropic/claude-opus-4.8", "x-ai/grok-4-5"},
+		},
+		{
+			provider: "atlascloud",
+			want:     []string{"qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5", "openai/gpt-4.1"},
 		},
 		{
 			provider: "mistral",
