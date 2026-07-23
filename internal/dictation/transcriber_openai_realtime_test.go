@@ -150,8 +150,7 @@ func TestOpenAIRealtimeStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) 
 func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 	deltaSent := make(chan struct{})
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
-		// Session update, then a delta. Leave the socket open so the client
-		// stays in the event loop rather than failing on Read first.
+		// Session update, then a delta.
 		if _, _, err := c.Read(ctx); err != nil {
 			return
 		}
@@ -159,11 +158,8 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 			`{"type":"conversation.item.input_audio_transcription.delta","delta":"hi"}`,
 		))
 		close(deltaSent)
-		for {
-			if _, _, err := c.Read(ctx); err != nil {
-				return
-			}
-		}
+		// Close socket so the next client Write fails and sends to writeErrCh
+		_ = c.Close(websocket.StatusAbnormalClosure, "closed")
 	})
 
 	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: "sk-test-key", BaseURL: url})
@@ -173,9 +169,7 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// One frame so the writer can progress past session setup; channel stays
-	// open so a later Write is still pending when we cancel.
-	chunks := make(chan []byte, 1)
+	chunks := make(chan []byte, 2)
 	defer close(chunks)
 	chunks <- make([]byte, 480)
 	errCh := make(chan error, 1)
@@ -186,8 +180,9 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 
 	select {
 	case <-deltaSent:
-		// Give the client a moment to process the delta and re-enter Read or
-		// select writeErrCh, then cancel so the blocked writer fails.
+		// Push another chunk so writer tries to write to the closed socket
+		chunks <- make([]byte, 480)
+		// Cancel context so writeErrCh observes ctx.Err() != nil
 		cancel()
 		ferr := <-errCh
 		if !errors.Is(ferr, context.Canceled) {
