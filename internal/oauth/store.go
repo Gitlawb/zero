@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -307,7 +308,7 @@ func legacyKeyringLockPath(env map[string]string) string {
 // guards, so distinct (service, account) pairs never share a lock and the
 // same pair always resolves to the same lock regardless of caller config.
 func keyringLockFileName(service, account string) string {
-	return fmt.Sprintf("oauth-keyring-%s-%s.lockfile", sanitizeLockComponent(service), sanitizeLockComponent(account))
+	return fmt.Sprintf("oauth-keyring-%s-%s.lockfile", sanitizeLockComponent(url.QueryEscape(service)), sanitizeLockComponent(url.QueryEscape(account)))
 }
 
 // lockComponentSafe keeps a service/account string safe as one path segment:
