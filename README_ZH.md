@@ -22,7 +22,7 @@ zero exec --output-format stream-json < turns.jsonl
 
 ## 为什么选择 Zero
 
-- **使用你想要的模型。** 支持 OpenAI、Anthropic、Gemini、Groq、OpenRouter、DeepSeek、Mistral、xAI、Qwen、Kimi、GitHub Models、Ollama、LM Studio，或任何 OpenAI/Anthropic 兼容端点。
+- **使用你想要的模型。** 支持 OpenAI、Anthropic、Gemini、Groq、OpenRouter、DeepSeek、Mistral、xAI、Qwen、Kimi、GitHub Models、Ollama、LM Studio、Atomic Chat，或任何 OpenAI/Anthropic 兼容端点。
 - **保持控制权。** 文件写入、Shell 命令、网络访问和工作区外写入都经过 Zero 的权限和沙箱策略。
 - **在终端中工作。** TUI 具有模型/提供商选择器、图片输入、斜杠命令、实时计划/工具渲染、回滚滚动、主题以及恢复/分叉支持。
 - **无 TUI 也能工作。** `zero exec` 可脚本化，支持文本/JSON/stream-JSON I/O、隔离的工作树、规范优先运行，以及用于 CI 的有意义的退出码。
@@ -113,7 +113,9 @@ export LONGCAT_API_KEY=...
 zero providers setup longcat --set-active
 ```
 
-对于本地模型，运行 Ollama 或 LM Studio，然后使用 `zero setup` 或 `zero providers detect`。
+对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，并确保其本地
+OpenAI 兼容 API 可在 `http://127.0.0.1:1337/v1`（默认）访问，然后使用 `zero setup` 或
+`zero providers detect`。
 
 ## 日常使用
 
