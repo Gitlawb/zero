@@ -429,16 +429,17 @@ func looksLikeToken(w string) bool {
 // Redact removes known API-key and bearer-token forms from provider messages.
 func Redact(message string, secrets ...string) string {
 	for _, secret := range secrets {
-		if secret != "" {
+		if secret != "" && !strings.HasPrefix(secret, "[REDACTED") {
 			message = strings.ReplaceAll(message, secret, "[REDACTED]")
 		}
 	}
 	words := strings.Fields(message)
 	for index := 0; index < len(words)-1; index++ {
-		// Only redact the word after "Bearer" when it is actually token-shaped, so the
-		// provider's own help text ("use Bearer authentication", "Bearer token") is no
-		// longer corrupted into "authorization [REDACTED]". (AUDIT-H7)
-		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") && looksLikeToken(words[index+1]) {
+		hdr := strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") ||
+			strings.EqualFold(strings.TrimRight(words[index], ":"), "Token") ||
+			strings.EqualFold(strings.TrimRight(words[index], ":"), "X-Api-Key") ||
+			strings.EqualFold(strings.TrimRight(words[index], ":"), "api-key")
+		if hdr && !strings.HasPrefix(words[index+1], "[REDACTED") && looksLikeToken(words[index+1]) {
 			words[index+1] = "[REDACTED]"
 		}
 	}
