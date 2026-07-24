@@ -437,6 +437,14 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	for key, value := range input.sandboxMeta {
 		meta[key] = value
 	}
+	if input.exited && !input.interrupted && input.report.Denial == nil && input.reportErr == nil {
+		input.report.Denial = markLikelySandboxDenial(
+			meta,
+			input.enforcement.Level == string(zeroSandbox.EnforcementNative),
+			input.exitCode,
+			input.output,
+		)
+	}
 	outcome := execExecutionOutcome(input)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)

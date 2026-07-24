@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,10 +24,16 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 	if pathWithinRoot(workspace, runtimeState.Root) {
 		t.Fatalf("runtime root %q must stay outside workspace %q", runtimeState.Root, workspace)
 	}
-	for _, path := range []string{runtimeState.Home, runtimeState.Cache, runtimeState.Config, runtimeState.Data, runtimeState.State, runtimeState.Temp} {
+	for _, path := range []string{runtimeState.Cache, runtimeState.Data, runtimeState.Temp} {
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {
 			t.Fatalf("managed runtime directory %q was not prepared: %v", path, err)
+		}
+	}
+	for _, name := range []string{"home", "config", "state"} {
+		path := filepath.Join(runtimeState.Root, name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("obsolete synthetic runtime directory %q exists: %v", path, err)
 		}
 	}
 }
@@ -116,34 +124,64 @@ func TestCleanupSandboxRuntimeSkipsActiveLease(t *testing.T) {
 	}
 }
 
-func TestSandboxRuntimeEnvironmentUsesManagedState(t *testing.T) {
+func TestSandboxRuntimeEnvironmentPreservesUserConfiguration(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runtime")
 	runtimeState := SandboxRuntime{
-		Root:   root,
-		Home:   filepath.Join(root, "home"),
-		Cache:  filepath.Join(root, "cache"),
-		Config: filepath.Join(root, "config"),
-		Data:   filepath.Join(root, "data"),
-		State:  filepath.Join(root, "state"),
-		Temp:   filepath.Join(root, "tmp"),
+		Root:  root,
+		Cache: filepath.Join(root, "cache"),
+		Data:  filepath.Join(root, "data"),
+		Temp:  filepath.Join(root, "tmp"),
 	}
 	env := sandboxRuntimeEnvironment([]string{
-		"HOME=/workspace",
+		"HOME=/home/user",
 		"XDG_CACHE_HOME=/host/cache",
+		"XDG_CONFIG_HOME=/home/user/.config",
+		"XDG_DATA_HOME=/home/user/.local/share",
+		"XDG_STATE_HOME=/home/user/.local/state",
+		"NPM_CONFIG_USERCONFIG=/home/user/.npmrc",
+		"CARGO_HOME=/home/user/.cargo",
 		"PATH=/usr/bin",
 	}, &runtimeState)
 
 	for key, want := range map[string]string{
-		"HOME":                  runtimeState.Home,
-		"XDG_CACHE_HOME":        runtimeState.Cache,
-		"XDG_CONFIG_HOME":       runtimeState.Config,
-		"XDG_DATA_HOME":         runtimeState.Data,
-		"XDG_STATE_HOME":        runtimeState.State,
-		"TMPDIR":                runtimeState.Temp,
-		"npm_config_cache":      filepath.Join(runtimeState.Cache, "npm"),
-		"NPM_CONFIG_USERCONFIG": filepath.Join(runtimeState.Config, "npmrc"),
-		"YARN_CACHE_FOLDER":     filepath.Join(runtimeState.Cache, "yarn"),
-		"COREPACK_HOME":         filepath.Join(runtimeState.Cache, "corepack"),
+		"HOME":                  "/home/user",
+		"XDG_CONFIG_HOME":       "/home/user/.config",
+		"XDG_DATA_HOME":         "/home/user/.local/share",
+		"XDG_STATE_HOME":        "/home/user/.local/state",
+		"NPM_CONFIG_USERCONFIG": "/home/user/.npmrc",
+		"CARGO_HOME":            "/home/user/.cargo",
+	} {
+		if got := envListValue(env, key, ""); got != want {
+			t.Fatalf("%s = %q, want %q; env=%#v", key, got, want, env)
+		}
+	}
+}
+
+func TestSandboxRuntimeEnvironmentUsesManagedWritableState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runtime")
+	runtimeState := SandboxRuntime{
+		Root:  root,
+		Cache: filepath.Join(root, "cache"),
+		Data:  filepath.Join(root, "data"),
+		Temp:  filepath.Join(root, "tmp"),
+	}
+	env := sandboxRuntimeEnvironment([]string{
+		"XDG_CACHE_HOME=/host/cache",
+		"TMPDIR=/host/tmp",
+		"PATH=/usr/bin",
+	}, &runtimeState)
+
+	for key, want := range map[string]string{
+		"XDG_CACHE_HOME":    runtimeState.Cache,
+		"TMPDIR":            runtimeState.Temp,
+		"TMP":               runtimeState.Temp,
+		"TEMP":              runtimeState.Temp,
+		"npm_config_cache":  filepath.Join(runtimeState.Cache, "npm"),
+		"YARN_CACHE_FOLDER": filepath.Join(runtimeState.Cache, "yarn"),
+		"COREPACK_HOME":     filepath.Join(runtimeState.Cache, "corepack"),
+		"PIP_CACHE_DIR":     filepath.Join(runtimeState.Cache, "pip"),
+		"GOCACHE":           filepath.Join(runtimeState.Cache, "go-build"),
+		"GOMODCACHE":        filepath.Join(runtimeState.Data, "go-mod"),
 	} {
 		if got := envListValue(env, key, ""); got != want {
 			t.Fatalf("%s = %q, want %q; env=%#v", key, got, want, env)
@@ -154,9 +192,93 @@ func TestSandboxRuntimeEnvironmentUsesManagedState(t *testing.T) {
 	}
 }
 
+func TestSandboxRuntimeEnvironmentPreservesGitGlobalIgnore(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	configHome := filepath.Join(home, ".config")
+	repository := filepath.Join(root, "repository")
+	runtimeRoot := filepath.Join(root, "runtime")
+	for _, directory := range []string{
+		filepath.Join(configHome, "git"),
+		repository,
+		filepath.Join(runtimeRoot, "cache"),
+		filepath.Join(runtimeRoot, "data"),
+		filepath.Join(runtimeRoot, "tmp"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "git", "ignore"), []byte("ignored.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "ignored.txt"), []byte("ignored\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "visible.txt"), []byte("visible\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeState := SandboxRuntime{
+		Root:  runtimeRoot,
+		Cache: filepath.Join(runtimeRoot, "cache"),
+		Data:  filepath.Join(runtimeRoot, "data"),
+		Temp:  filepath.Join(runtimeRoot, "tmp"),
+	}
+	inherited := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(root, "missing-global-config"),
+		"GIT_DIR="+filepath.Join(root, "wrong-repository"),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.excludesFile",
+		"GIT_CONFIG_VALUE_0="+filepath.Join(root, "missing-ignore"),
+	)
+	env := sandboxRuntimeEnvironment(upsertEnvList(withoutGitEnvironmentOverrides(inherited),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+configHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	), &runtimeState)
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command(git, args...)
+		command.Dir = repository
+		command.Env = env
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+		return string(output)
+	}
+	runGit("init", "--quiet")
+	status := runGit("status", "--short", "--untracked-files=all")
+	if strings.Contains(status, "ignored.txt") {
+		t.Fatalf("global ignore was not honored:\n%s", status)
+	}
+	if !strings.Contains(status, "visible.txt") {
+		t.Fatalf("non-ignored file is missing from status:\n%s", status)
+	}
+}
+
+func withoutGitEnvironmentOverrides(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, value := range env {
+		key, _, ok := strings.Cut(value, "=")
+		if ok && strings.HasPrefix(strings.ToUpper(key), "GIT_") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
 func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
 	t.Cleanup(func() { sandboxUserCacheDir = original })
@@ -189,8 +311,8 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	} else if !inUse {
 		t.Fatal("command plan runtime must be marked in use")
 	}
-	if got := envListValue(plan.Env, "HOME", ""); got != plan.PermissionProfile.Runtime.Home {
-		t.Fatalf("HOME = %q, want managed home %q", got, plan.PermissionProfile.Runtime.Home)
+	if got := envListValue(plan.Env, "HOME", ""); got != os.Getenv("HOME") {
+		t.Fatalf("HOME = %q, want caller home %q", got, os.Getenv("HOME"))
 	}
 	foundWriteRoot := false
 	for _, root := range plan.PermissionProfile.FileSystem.WriteRoots {
