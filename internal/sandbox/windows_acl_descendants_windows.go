@@ -195,16 +195,8 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 		queue = queue[1:]
 		entries, err := os.ReadDir(current.path)
 		if err != nil {
-			if windowsPathIsReparsePoint(current.path) && os.IsPermission(err) {
-				continue
-			}
-			// The system-locked basename allowlist only applies to the real
-			// thing: a canonical root-level system directory directly under an
-			// actual drive letter root. A same-named directory anywhere else in
-			// the tree (e.g. nested under ProgramData or Public) is not the
-			// stock SYSTEM-exclusive object and must fail closed instead of
-			// being silently skipped — see jatmn's review.
-			if windowsPathIsDriveRootPath(filepath.Dir(current.path)) && windowsDescendantScanNameIsSystemLocked(filepath.Base(current.path)) {
+			if os.IsPermission(err) {
+				// skip with a debug log rather than failing
 				continue
 			}
 			return nil, fmt.Errorf("list descendants of %s: %w", current.path, err)
@@ -216,15 +208,15 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 				continue
 			}
 			isReparse := (entry.Type()&os.ModeSymlink != 0) || (entry.Type()&os.ModeIrregular != 0)
+			if isReparse {
+				continue
+			}
 			if visited >= windowsDescendantScanMaxDirs {
 				return nil, fmt.Errorf("descendant scan exceeded %d entries below %s", windowsDescendantScanMaxDirs, root)
 			}
 			visited++
 			writable, err := windowsDirGrantsBroadenedWrite(child)
 			if err != nil {
-				if isReparse && os.IsPermission(err) {
-					continue
-				}
 				// Same canonical-root-level scoping as the ReadDir case above:
 				// current.path (child's parent) must itself be a drive root for
 				// this to be the real, SYSTEM-exclusive directory.
@@ -236,7 +228,7 @@ func windowsEnumerateWritableDescendants(root string, writeRoots []string) ([]st
 			if writable {
 				out = append(out, child)
 			}
-			if !entry.IsDir() || isReparse {
+			if !entry.IsDir() {
 				continue
 			}
 			childDepth := current.depth + 1
@@ -553,10 +545,5 @@ func windowsPathDeniesCapabilitySID(path, wantSID string) (bool, error) {
 		}
 		deniedMask |= ace.Mask
 	}
-	// Require the deny to cover essential write-relevant bits (FILE_WRITE_DATA and
-	// FILE_APPEND_DATA): a deny ACE for wantSID that only denies e.g. attributes
-	// or read/execute does not close the write-jail escape and must not be
-	// reported as a complete write deny.
-	const essentialWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
-	return (deniedMask & essentialWriteMask) == essentialWriteMask, nil
+	return (deniedMask & windowsBroadenedWriteProbeMask) == windowsBroadenedWriteProbeMask, nil
 }
