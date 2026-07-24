@@ -89,6 +89,16 @@ type appDeps struct {
 	commitChanges          func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
 	pushChanges            func(context.Context, zerogit.PushOptions) (zerogit.PushResult, error)
 	createPR               func(context.Context, zerogit.PROptions) (zerogit.PRResult, error)
+	createBranch           func(context.Context, zerogit.BranchOptions) (zerogit.BranchResult, error)
+	isDefaultBranch        func(context.Context, zerogit.DefaultBranchOptions) (bool, string, string, error)
+	currentGitUser         func(context.Context, string) string
+	headCommitSubject      func(context.Context, string) string
+	commitsAhead           func(context.Context, string, string, string) (int, error)
+	isUnbornRemote         func(context.Context, string, string) (bool, error)
+	refreshTrackingRef     func(context.Context, string, string, string) error
+	branchHasUpstream      func(context.Context, string, string) (bool, error)
+	markGeneratedBranch    func(context.Context, string, string) error
+	isGeneratedBranch      func(context.Context, string, string) bool
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -195,11 +205,37 @@ func defaultAppDeps() appDeps {
 		commitChanges:    zerogit.Commit,
 		pushChanges:      zerogit.Push,
 		createPR:         zerogit.CreatePR,
-		runTUI:           tui.Run,
-		runEditor:        openEditor,
-		checkUpdate:      update.Check,
-		applyUpdate:      update.Apply,
-		now:              time.Now,
+		createBranch:     zerogit.CreateBranch,
+		isDefaultBranch:  zerogit.IsDefaultBranch,
+		currentGitUser: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentGitUser(ctx, cwd, nil)
+		},
+		headCommitSubject: func(ctx context.Context, cwd string) string {
+			return zerogit.HeadCommitSubject(ctx, cwd, nil)
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return zerogit.CommitsAhead(ctx, cwd, remote, branch, nil)
+		},
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			return zerogit.IsUnbornRemote(ctx, cwd, remote, nil)
+		},
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error {
+			return zerogit.RefreshTrackingRef(ctx, cwd, remote, branch, nil)
+		},
+		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
+			return zerogit.HasUpstream(ctx, cwd, branch, nil)
+		},
+		markGeneratedBranch: func(ctx context.Context, cwd, branch string) error {
+			return zerogit.MarkGeneratedBranch(ctx, cwd, branch, nil)
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return zerogit.IsGeneratedBranch(ctx, cwd, branch, nil)
+		},
+		runTUI:      tui.Run,
+		runEditor:   openEditor,
+		checkUpdate: update.Check,
+		applyUpdate: update.Apply,
+		now:         time.Now,
 	}
 }
 
@@ -555,6 +591,36 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.createPR == nil {
 		deps.createPR = defaults.createPR
+	}
+	if deps.createBranch == nil {
+		deps.createBranch = defaults.createBranch
+	}
+	if deps.isDefaultBranch == nil {
+		deps.isDefaultBranch = defaults.isDefaultBranch
+	}
+	if deps.currentGitUser == nil {
+		deps.currentGitUser = defaults.currentGitUser
+	}
+	if deps.headCommitSubject == nil {
+		deps.headCommitSubject = defaults.headCommitSubject
+	}
+	if deps.commitsAhead == nil {
+		deps.commitsAhead = defaults.commitsAhead
+	}
+	if deps.isUnbornRemote == nil {
+		deps.isUnbornRemote = defaults.isUnbornRemote
+	}
+	if deps.refreshTrackingRef == nil {
+		deps.refreshTrackingRef = defaults.refreshTrackingRef
+	}
+	if deps.branchHasUpstream == nil {
+		deps.branchHasUpstream = defaults.branchHasUpstream
+	}
+	if deps.markGeneratedBranch == nil {
+		deps.markGeneratedBranch = defaults.markGeneratedBranch
+	}
+	if deps.isGeneratedBranch == nil {
+		deps.isGeneratedBranch = defaults.isGeneratedBranch
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI

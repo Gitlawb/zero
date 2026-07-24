@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -522,14 +524,19 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	if command != "commit" && options.message != "" {
 		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
 	}
-	if command != "commit" && (options.hasMessage || options.dryRun || options.auto) {
-		return options, false, execUsageError{"--message, --dry-run, and --auto are only valid with `zero changes commit`"}
+	if command != "commit" && options.hasMessage {
+		return options, false, execUsageError{"--message is only valid with `zero changes commit`"}
 	}
 	if command == "commit" && options.hasMessage && options.auto {
 		return options, false, execUsageError{"cannot specify both --message and --auto"}
 	}
 	if command != "commit" && command != "push" && options.dryRun {
 		return options, false, execUsageError{"--dry-run is only valid with commit or push"}
+	}
+	// --auto on push/pr is the explicit opt-in for LLM branch naming (see
+	// ensureFeatureBranch); on commit it opts into the LLM commit message.
+	if command != "commit" && command != "push" && command != "pr" && options.auto {
+		return options, false, execUsageError{"--auto is only valid with commit, push, or pr"}
 	}
 	if command != "inspect" && options.baseRef != "" {
 		return options, false, execUsageError{"--base is only valid with `zero changes inspect`"}
@@ -838,8 +845,7 @@ Flags:
       --fill              Automatically populate PR title and body from commits
       --draft             Create PR as a draft
       --yes               Confirm pushing to a default/protected branch
-  -a, --auto              Auto-generate commit message using LLM (use --dry-run to preview)
-      --dry-run           Preview commit metadata without mutating git state
+  -a, --auto              Use the LLM: commit generates the message, push/pr name the auto-created branch (sends the diff to the provider)
       --json              Print JSON output
   -h, --help              Show this help
 `)
@@ -862,11 +868,18 @@ func runChangesPush(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, options.dryRun, options.auto, options.maxDiffBytes, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
 	result, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
-		Remote:                 options.remote,
+		Remote:                 firstNonEmptyString(options.remote, remote),
+		Branch:                 branch,
 		Force:                  options.force,
 		DryRun:                 options.dryRun,
+		RequireNewRemoteBranch: created,
 		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
@@ -914,6 +927,23 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	targetRemote := firstNonEmptyString(options.remote, remoteForCheck)
+	if deps.isUnbornRemote != nil {
+		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
+			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
+		}
+	}
+
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
 	if !options.json {
 		if _, err := fmt.Fprintln(stdout, "Pushing current branch to set upstream..."); err != nil {
 			return exitCrash
@@ -921,8 +951,10 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	pushResult, err := deps.pushChanges(context.Background(), zerogit.PushOptions{
 		Cwd:                    workspaceRoot,
-		Remote:                 options.remote,
+		Remote:                 firstNonEmptyString(options.remote, remote),
+		Branch:                 branch,
 		Force:                  options.force,
+		RequireNewRemoteBranch: created,
 		AllowPushDefaultBranch: options.yes,
 	})
 	if err != nil {
@@ -1003,4 +1035,247 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 		return "", fmt.Errorf("provider returned empty commit message")
 	}
 	return msg, nil
+}
+
+// ensureFeatureBranch is the branch-naming step `zero changes push`/`pr` run
+// before pushing: pushing straight to the default branch is refused deeper in
+// zerogit.Push, so rather than surface that as a dead end, create and switch
+// to a conventionally named "<user>/<slug>" branch first. It returns the
+// branch push/pr should target, or "" to mean "current HEAD branch, unchanged"
+// (zerogit.Push already treats an empty Branch that way), plus the remote the
+// preflight resolved (requestedRemote, then the original branch's configured
+// upstream, then "origin"), plus whether Push should require that branch not
+// already exist on that remote. Callers must pass the remote to Push: a
+// freshly created branch has no tracking configuration, so Push's own
+// fallback would silently retarget "origin" even when the work came from a
+// branch tracking a different remote. Callers must also pass that third value
+// through as Push's RequireNewRemoteBranch: CreateBranch's own
+// remote-collision probe runs before this returns, and closing that race
+// requires Push's push itself to assert the destination is still new. That
+// requirement also carries across a retry: if the current branch is already
+// non-default (this call didn't create it) but has no configured upstream
+// yet, it's either a fresh manual branch or this exact generated branch after
+// a lost force-with-lease race, and either way the lease still needs to be
+// asserted rather than silently dropped. allowDefaultBranch (the --yes flag)
+// and dryRun both opt out via the "" branch / false return, leaving Push's own
+// guard/preview behavior on the default branch unaffected.
+//
+// autoNaming gates the LLM naming path (--auto): these commands were
+// git-only, and sending the change diff to a configured provider on every
+// default-branch push would silently export source code nobody asked to
+// share. Without the opt-in the name comes from deterministic local
+// information only. maxDiffBytes caps the committed-range diff Inspect
+// returns, so a user who passed --diff-bytes to bound the proprietary source
+// sent for LLM naming has that cap honored here just as the commit path does.
+// The working tree must be clean and HEAD must be ahead of the resolved remote
+// default before a branch is created; otherwise the push would either leave
+// uncommitted edits behind or publish an empty comparison. The one exception
+// is a confirmed-unborn remote (freshly created, zero refs): it has no
+// tracking ref to check ahead-ness or diff against at all, so that check is
+// bypassed rather than failing the very first push a new remote will ever see.
+func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
+	if allowDefaultBranch || dryRun {
+		return "", strings.TrimSpace(requestedRemote), false, nil
+	}
+
+	isDefault, currentBranch, remote, err := deps.isDefaultBranch(ctx, zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: requestedRemote})
+	if err != nil {
+		return "", "", false, err
+	}
+	if !isDefault {
+		requireNewRemoteBranch := false
+		if deps.branchHasUpstream != nil && deps.isGeneratedBranch != nil {
+			hasUpstream, upstreamErr := deps.branchHasUpstream(ctx, workspaceRoot, currentBranch)
+			isGenerated := deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch)
+			requireNewRemoteBranch = isGenerated && (upstreamErr != nil || !hasUpstream)
+		}
+		return currentBranch, remote, requireNewRemoteBranch, nil
+	}
+
+	// CreateBranch and Push publish commits only. A dirty working tree would
+	// leave uncommitted edits behind under a branch/PR that does not include
+	// them, so refuse until the tree is clean (commit or stash first).
+	workingTree, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot})
+	if err != nil {
+		return "", "", false, fmt.Errorf("failed to inspect working tree: %w", err)
+	}
+	if !workingTree.Clean {
+		return "", "", false, fmt.Errorf("working tree has uncommitted changes; commit or stash them before pushing from the default branch")
+	}
+
+	// Refresh the local remote-tracking ref before trusting it: IsDefaultBranch
+	// already contacted the remote for its symref check, but the tracking ref
+	// commitsAhead reads from is only a local cache (written at clone or the
+	// last fetch) and can sit behind the remote's live tip. Left stale, a real
+	// publishable range could look like zero commits ahead, and the diff
+	// derived below (which reuses this same ref as its base) would be stale
+	// too. A failure here (offline, or a genuinely unborn remote with no such
+	// ref to fetch yet) is folded into the same fail-closed path as an
+	// unresolvable ahead count below.
+	var fetchErr error
+	if deps.refreshTrackingRef != nil {
+		fetchErr = deps.refreshTrackingRef(ctx, workspaceRoot, remote, currentBranch)
+	}
+
+	// Branching off the default branch only makes sense when HEAD carries a
+	// commit that is not already on the remote default branch. A clean,
+	// up-to-date default branch would otherwise publish a feature branch at the
+	// exact default tip. If the ahead count cannot be determined (for example
+	// the remote-tracking ref was never fetched), fail rather than guess -
+	// unless the remote is confirmed unborn (freshly created, zero refs): it
+	// then has no <remote>/<currentBranch> tracking ref for commitsAhead to
+	// exist against, which is proof there is nothing published yet rather than
+	// an unknown state, and every commit on HEAD is new relative to it.
+	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
+	unbornRemote := false
+	if fetchErr != nil || aheadErr != nil {
+		var unbornErr error
+		unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
+		if unbornErr != nil || !unbornRemote {
+			cause := aheadErr
+			if cause == nil {
+				cause = fetchErr
+			}
+			return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, cause)
+		}
+	} else if ahead == 0 {
+		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
+	}
+
+	// Name the branch (and, with --auto, send the provider) from what HEAD is
+	// actually ahead of the resolved remote branch by, using the same ref
+	// commitsAhead just checked. A working-tree snapshot can describe edits a
+	// commit-only push will never include. A confirmed-unborn remote has no
+	// such ref to diff against either, so leave BaseRef empty: Inspect falls
+	// back to the (already known clean) working-tree snapshot, summary.Files
+	// comes back empty, and the headCommitSubject fallback below names the
+	// branch instead.
+	baseRef := remote + "/" + currentBranch
+	if unbornRemote {
+		baseRef = ""
+	}
+	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: maxDiffBytes})
+	if err != nil {
+		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
+	}
+
+	slug := fallbackBranchSlug(summary)
+	if len(summary.Files) == 0 {
+		// An empty commit (or one whose only content the diff omits) leaves
+		// nothing to derive a slug from; name the branch from the commit
+		// subject instead.
+		if subject := deps.headCommitSubject(ctx, workspaceRoot); subject != "" {
+			slug = zerogit.SlugifyBranchComponent(subject)
+		}
+	}
+	if autoNaming && strings.TrimSpace(summary.Diff) != "" {
+		if resolved, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil && config.HasProviderProfile(resolved.Provider) {
+			if provider, provErr := deps.newProvider(resolved.Provider); provErr == nil {
+				if !jsonMode {
+					fmt.Fprintln(stdout, "Generating branch name using LLM...")
+				}
+				genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				generated, genErr := generateAutoBranchSlug(genCtx, provider, resolved.Provider.Model, redactChangeSummary(summary))
+				cancel()
+				if genErr == nil && generated != "" {
+					slug = generated
+				}
+			}
+		}
+	}
+
+	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
+	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
+	if err != nil {
+		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
+	}
+	if deps.markGeneratedBranch != nil {
+		if err := deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch); err != nil {
+			return "", "", false, fmt.Errorf("failed to mark generated branch: %w", err)
+		}
+	}
+	if !jsonMode {
+		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
+	}
+	return result.Branch, remote, true, nil
+}
+
+// fallbackBranchSlug derives a deterministic branch-name slug from a change
+// summary without calling an LLM, so ensureFeatureBranch still works when no
+// provider is configured.
+func fallbackBranchSlug(summary zerogit.ChangeSummary) string {
+	switch len(summary.Files) {
+	case 0:
+		return "changes"
+	case 1:
+		return zerogit.SlugifyBranchComponent(filepath.Base(summary.Files[0].Path))
+	default:
+		return fmt.Sprintf("update-%d-files", len(summary.Files))
+	}
+}
+
+// generateAutoBranchSlug asks the model for a short kebab-case slug
+// describing the diff, mirroring generateAutoCommitMessage's prompt shape.
+func generateAutoBranchSlug(ctx context.Context, provider zeroruntime.Provider, model string, summary zerogit.ChangeSummary) (string, error) {
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString("Analyze the following git diff and generate a short git branch name slug for it.\n")
+	promptBuilder.WriteString("The slug must be 2 to 5 lowercase words separated by hyphens (kebab-case), using only letters, digits, and hyphens, with no prefix like \"feature/\" or \"fix/\" and no surrounding quotes.\n")
+	promptBuilder.WriteString("Output ONLY the raw slug text, nothing else.\n\n")
+	promptBuilder.WriteString("Git Diff:\n")
+	promptBuilder.WriteString(summary.Diff)
+
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: promptBuilder.String()},
+		},
+	}
+	stream, err := provider.StreamCompletion(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	collected := zeroruntime.CollectStream(ctx, stream)
+	if collected.Error != "" {
+		return "", fmt.Errorf("%s", collected.Error)
+	}
+
+	slug := zerogit.SlugifyBranchComponent(extractBranchSlug(collected.Text))
+	if slug == "" {
+		return "", fmt.Errorf("provider returned empty branch slug")
+	}
+	return slug, nil
+}
+
+// slugLineRe matches a line that already reads as a kebab-case slug (letters,
+// digits, and internal single hyphens only). extractBranchSlug prefers such a
+// line so a preamble sentence is never mistaken for the slug.
+var slugLineRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+
+// extractBranchSlug pulls the intended slug out of a model response that didn't
+// follow the "output only the raw slug" instruction exactly. It drops Markdown
+// code-fence lines, then prefers a line that already looks like a kebab-case
+// slug: that skips a leading preamble such as "Here is a suggested branch
+// name:" in favor of the "add-login-page" line that follows it, and it unwraps
+// a fenced reply whose only real content is the slug. When no line is already
+// slug-shaped it falls back to the first non-fence, non-empty line (trimmed of
+// surrounding quotes) so a plain multi-word "add login page" reply still
+// slugifies correctly rather than being returned verbatim.
+func extractBranchSlug(text string) string {
+	fallback := ""
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+		line = strings.TrimSpace(strings.Trim(line, `"'`))
+		if line == "" {
+			continue
+		}
+		if slugLineRe.MatchString(line) {
+			return line
+		}
+		if fallback == "" {
+			fallback = line
+		}
+	}
+	return fallback
 }

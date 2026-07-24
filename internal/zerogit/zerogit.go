@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -528,11 +531,18 @@ func firstNonEmpty(values ...string) string {
 }
 
 type PushOptions struct {
-	Cwd                    string
-	Remote                 string
-	Branch                 string
-	Force                  bool
-	DryRun                 bool
+	Cwd    string
+	Remote string
+	Branch string
+	Force  bool
+	DryRun bool
+	// RequireNewRemoteBranch guards this push with a zero-value
+	// --force-with-lease, so it is rejected instead of fast-forwarding if
+	// Branch already exists on Remote. CreateBranch's collision probe reads
+	// the remote's branches before this push runs, leaving a window in which
+	// a concurrent creator can publish the same generated name; this closes
+	// it at the one point that actually talks to the remote atomically.
+	RequireNewRemoteBranch bool
 	AllowPushDefaultBranch bool
 	RunGit                 Runner
 	RunGitEnv              EnvRunner
@@ -578,7 +588,11 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}
 
 	if !options.AllowPushDefaultBranch {
-		if isDefaultBranch(ctx, runGit, root, remote, branch) {
+		isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
+		if err != nil {
+			return PushResult{}, fmt.Errorf("cannot verify %q is not the default/protected branch: %w; use --yes to override", branch, err)
+		}
+		if isDefault {
 			return PushResult{}, fmt.Errorf("refusing to push to %q (default/protected branch); use --yes to override", branch)
 		}
 	}
@@ -587,7 +601,14 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	if options.DryRun {
 		args = append(args, "--dry-run")
 	}
-	if options.Force {
+	switch {
+	case options.RequireNewRemoteBranch:
+		// An empty expected value means the ref must not currently exist on
+		// the remote: Git rejects the push if another client created
+		// <branch> after CreateBranch's own remote probe ran, instead of
+		// silently fast-forwarding it with this work.
+		args = append(args, "--force-with-lease="+branch+":")
+	case options.Force:
 		args = append(args, "--force-with-lease")
 	}
 	args = append(args, "-u", "--", remote, branch)
@@ -604,18 +625,342 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 	}, nil
 }
 
-func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) bool {
-	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", remote, "HEAD"); err == nil {
+func isDefaultBranch(ctx context.Context, runGit Runner, dir, remote, branch string) (bool, error) {
+	// "--" terminates option parsing: remote comes from --remote/branch config,
+	// and a value like "--upload-pack=/bin/echo" must reach Git as a positional
+	// argument, never as an option.
+	if out, err := gitOutput(ctx, runGit, dir, "ls-remote", "--symref", "--", remote, "HEAD"); err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "ref: refs/heads/") && strings.HasSuffix(line, "\tHEAD") {
 				symref := strings.TrimPrefix(line, "ref: refs/heads/")
 				symref = strings.TrimSuffix(symref, "\tHEAD")
-				return branch == symref
+				return branch == symref, nil
+			}
+		}
+		if strings.TrimSpace(out) == "" {
+			// HEAD didn't resolve to anything. A genuinely unborn remote (no
+			// refs at all) answers this way, and it cannot have a protected
+			// default branch yet, so the fail-closed error below would make
+			// the very first feature-branch push a dead end. But a non-empty
+			// remote whose HEAD symref is dangling or missing produces the
+			// same empty output while still possibly having a protected
+			// default under a name this couldn't identify, so confirm the
+			// remote truly has no branches before granting the unborn
+			// exception; a non-default first push is safe.
+			if heads, headsErr := gitOutput(ctx, runGit, dir, "ls-remote", "--heads", "--", remote); headsErr == nil && strings.TrimSpace(heads) == "" {
+				if branch == "main" || branch == "master" {
+					return true, nil
+				}
+				return false, nil
 			}
 		}
 	}
-	return branch == "main" || branch == "master"
+	// The remote lookup failed (unreachable, slow, or gave no symref): the
+	// local refs/remotes/<remote>/HEAD record, written by clone or `git remote
+	// set-head`, is only a cache. Trust it to *block* a push (a positive match
+	// proves branch is the recorded default) but never to *clear* the guard. If
+	// the server renamed its default (main -> trunk) the stale record still
+	// names main, so a mismatch here is not evidence that pushing trunk is safe;
+	// fall through instead of returning false.
+	if out, err := gitOutput(ctx, runGit, dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"); ok && name == branch {
+			return true, nil
+		}
+	}
+	// The conventional default names are only a fallback for when the remote's
+	// actual default genuinely could not be determined above (live or cached).
+	// Applying this before consulting the remote at all would misidentify a
+	// repository whose real default is e.g. "trunk" but that also happens to
+	// have a local/tracked "main": the live symref result must win whenever
+	// it's available. This is still safe-direction only (it can block a push,
+	// never permit one) since it's the last resort before failing closed.
+	if branch == "main" || branch == "master" {
+		return true, nil
+	}
+	// Fail closed: before this, a lookup timeout silently downgraded the
+	// check to the main/master name heuristic, so a repository whose default
+	// is trunk/develop lost the confirmation guard exactly when the remote
+	// was slow.
+	return false, fmt.Errorf("default branch for remote %q is unknown (remote lookup failed and no local refs/remotes/%s/HEAD record exists; run `git remote set-head %s --auto` to record it)", remote, remote, remote)
+}
+
+// DefaultBranchOptions resolves whether a branch is the repository's
+// default/protected branch.
+type DefaultBranchOptions struct {
+	Cwd    string
+	Remote string
+	Branch string // empty resolves the current branch
+	RunGit Runner
+}
+
+// IsDefaultBranch reports whether options.Branch (or, if empty, the current
+// branch) is the repository's default/protected branch, using the same check
+// Push already applies before refusing to push straight to it. It returns the
+// resolved branch name and remote alongside the bool so callers that left
+// them empty don't need a second lookup: the remote is resolved exactly the
+// way Push resolves it (explicit option, then the branch's configured
+// upstream, then "origin"), so a caller can thread the same remote through a
+// later Push instead of letting a freshly created branch with no tracking
+// configuration silently fall back to "origin".
+func IsDefaultBranch(ctx context.Context, options DefaultBranchOptions) (bool, string, string, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return false, "", "", err
+	}
+	runGit, _ := resolveRunners(options.RunGit, nil)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false, "", "", fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	branch := strings.TrimSpace(options.Branch)
+	if branch == "" {
+		branch, err = gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return false, "", "", fmt.Errorf("resolve current branch: %w", err)
+		}
+	}
+	remote := strings.TrimSpace(options.Remote)
+	if remote == "" {
+		if upstream, err := gitOutput(ctx, runGit, root, "config", "branch."+branch+".remote"); err == nil && upstream != "" {
+			remote = upstream
+		} else {
+			remote = "origin"
+		}
+	}
+	// Honor the caller's deadline (or lack of one). A fixed short timeout here
+	// turned slow but reachable remotes (SSH/VPN handshakes) into fail-closed
+	// "use --yes" errors for ordinary feature-branch pushes, because
+	// ensureFeatureBranch always consults this before Push. Callers that need
+	// a bound should pass a context with a deadline.
+	isDefault, err := isDefaultBranch(ctx, runGit, root, remote, branch)
+	if err != nil {
+		return false, branch, remote, err
+	}
+	return isDefault, branch, remote, nil
+}
+
+// BranchOptions configures creating and checking out a new local branch.
+type BranchOptions struct {
+	Cwd    string
+	Name   string // full branch name, e.g. "alice/fix-typo"
+	DryRun bool
+	RunGit Runner
+	// Remote, when non-empty, is the remote the new branch will be pushed
+	// to; its branch names are treated as taken when resolving collisions,
+	// so a remote-only stale branch (e.g. an old merged PR) is never
+	// fast-forwarded with unrelated new work.
+	Remote string
+}
+
+// BranchResult reports the branch that was (or, in dry-run, would be) created.
+type BranchResult struct {
+	Branch string `json:"branch"`
+}
+
+// CreateBranch checks out a new local branch named options.Name off the
+// current HEAD. DryRun previews the resolved name without mutating the
+// repository, matching the DryRun convention used by Commit and Push.
+func CreateBranch(ctx context.Context, options BranchOptions) (BranchResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return BranchResult{}, err
+	}
+	runGit, _ := resolveRunners(options.RunGit, nil)
+
+	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return BranchResult{}, fmt.Errorf("not a git repository: %w", err)
+	}
+	root = filepath.Clean(root)
+
+	name := strings.TrimSpace(options.Name)
+	if name == "" {
+		return BranchResult{}, fmt.Errorf("branch name required")
+	}
+	if options.DryRun {
+		return BranchResult{Branch: name}, nil
+	}
+	// A repeated run (the same diff producing the same slug, or a low-entropy
+	// fallback name) can collide with a branch that already exists locally.
+	// Never check that existing ref out: its history may be entirely
+	// unrelated to the current work (an old push under the same name), and
+	// switching to it would publish the stale branch while leaving the new
+	// commit behind on the default branch. Pick a unique suffixed name off
+	// the current HEAD instead, and fail visibly when the namespace is
+	// exhausted rather than guess.
+	//
+	// Local refs are not enough: a branch that exists only on the target
+	// remote (an old merged-PR branch, or one pruned locally) would be
+	// silently fast-forwarded by the later `push -u`, appending the new work
+	// to an unrelated remote branch. Probe the remote's heads once under the
+	// caller's context (same connectivity the later push needs) and fail
+	// visibly when the remote cannot be consulted.
+	remoteTaken := map[string]bool{}
+	if remote := strings.TrimSpace(options.Remote); remote != "" {
+		out, err := gitOutput(ctx, runGit, root, "ls-remote", "--heads", "--", remote)
+		if err != nil {
+			return BranchResult{}, fmt.Errorf("cannot check branch names against remote %q: %w", remote, err)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if _, ref, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+				remoteTaken[strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")] = true
+			}
+		}
+	}
+	base := name
+	for suffix := 2; ; suffix++ {
+		_, localErr := gitOutput(ctx, runGit, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+		if localErr != nil && !remoteTaken[name] {
+			break
+		}
+		if suffix > 9 {
+			return BranchResult{}, fmt.Errorf("branch %q already exists locally or on the remote (as do %s-2 through %s-9); delete the stale branches or create one explicitly with `git checkout -b`", base, base, base)
+		}
+		name = fmt.Sprintf("%s-%d", base, suffix)
+	}
+	if _, err := gitOutput(ctx, runGit, root, "checkout", "-b", name); err != nil {
+		return BranchResult{}, fmt.Errorf("create branch %q: %w", name, err)
+	}
+	return BranchResult{Branch: name}, nil
+}
+
+// HeadCommitSubject returns the subject line of the HEAD commit, or "" when
+// it cannot be resolved (empty repository, not a git directory). Callers use
+// it to name the branch for a push that follows a commit, where the working
+// tree is already clean and a diff-based name would be empty.
+func HeadCommitSubject(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	if subject, err := gitOutput(ctx, runGit, cwd, "log", "-1", "--format=%s"); err == nil {
+		return strings.TrimSpace(subject)
+	}
+	return ""
+}
+
+// CommitsAhead reports how many commits HEAD is ahead of the remote-tracking
+// ref <remote>/<branch>. Auto-branching runs this before creating and pushing
+// a feature branch off the default branch: a clean, up-to-date default branch
+// has nothing to publish, so the caller can refuse rather than push an empty
+// comparison. It returns an error when the count cannot be determined (for
+// example the remote-tracking ref was never fetched); callers treat that as a
+// hard failure rather than guessing that there is something to publish.
+func CommitsAhead(ctx context.Context, cwd, remote, branch string, runGit Runner) (int, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "rev-list", "--count", remote+"/"+branch+"..HEAD")
+	if err != nil {
+		return 0, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse commit count %q: %w", out, err)
+	}
+	return count, nil
+}
+
+// RefreshTrackingRef updates the local remote-tracking ref for <remote>/<branch>
+// from the remote's current advertised tip. ensureFeatureBranch calls this
+// before CommitsAhead: IsDefaultBranch already contacted the remote for its
+// symref check, but a merely-cached origin/main (last written at clone or a
+// previous fetch) can sit behind the remote's live tip, making a local-only
+// rev-list comparison report nothing to publish when the remote has actually
+// advanced. The explicit refspec updates the tracking ref regardless of the
+// remote's configured fetch refspec.
+func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit Runner) error {
+	runGit, _ = resolveRunners(runGit, nil)
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
+	// "--" terminates option parsing so a remote value shaped like an option
+	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
+	_, err := gitOutput(ctx, runGit, cwd, "fetch", "--", remote, refspec)
+	return err
+}
+
+// HasUpstream reports whether branch has a configured upstream/tracking ref,
+// meaning a push has already succeeded for it at least once. ensureFeatureBranch
+// consults this when it is called again with a non-default current branch: a
+// generated branch that just lost a force-with-lease race against a
+// concurrent creator is left checked out locally with no upstream recorded, so
+// a retry must not treat it the same as an ordinary, already-published feature
+// branch and drop the nonexistence lease. Any failure to resolve the upstream
+// (including "no upstream configured") reports false so the caller keeps
+// requiring the lease, which is the safe direction.
+func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	_, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	return err == nil, nil
+}
+
+// IsUnbornRemote reports whether remote is a freshly created repository with
+// no refs at all (no branches, no HEAD). ensureFeatureBranch consults this
+// when CommitsAhead fails to determine why: a genuinely empty remote has no
+// <remote>/<branch> tracking ref for CommitsAhead to diff against, and that
+// is proof there is nothing published yet, not an unknown state to fail
+// closed on. An error here (unreachable remote, timeout) leaves the state
+// unconfirmed, so callers must treat that the same as a non-empty remote.
+func IsUnbornRemote(ctx context.Context, cwd, remote string, runGit Runner) (bool, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	// "--" terminates option parsing so a remote value shaped like an option
+	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
+	out, err := gitOutput(ctx, runGit, cwd, "ls-remote", "--heads", "--", remote)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "", nil
+}
+
+// CurrentGitUser resolves an identity to prefix generated branch names with:
+// git config user.name, falling back to the OS account username, falling
+// back to the literal "user" so BuildBranchName always gets a non-empty
+// input.
+func CurrentGitUser(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	if name, err := gitOutput(ctx, runGit, cwd, "config", "user.name"); err == nil && name != "" {
+		return name
+	}
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "user"
+}
+
+// slugComponentRe matches runs of characters not allowed in a branch-name
+// component, so SlugifyBranchComponent can collapse them to a single hyphen.
+var slugComponentRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+// maxSlugComponentLen caps a single branch-name component so generated names
+// stay short and readable, matching the "username/feature-name" convention
+// rather than sprawling into a full sentence.
+const maxSlugComponentLen = 40
+
+// SlugifyBranchComponent lowercases s and collapses any run of non
+// alphanumeric characters into a single hyphen, trimming leading/trailing
+// hyphens and capping length so the result is a safe, short branch-name
+// component.
+func SlugifyBranchComponent(s string) string {
+	slug := slugComponentRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "-")
+	slug = strings.Trim(slug, "-")
+	if len(slug) > maxSlugComponentLen {
+		slug = strings.Trim(slug[:maxSlugComponentLen], "-")
+	}
+	return slug
+}
+
+// BuildBranchName composes a "<user>/<slug>" branch name from a git identity
+// and a short feature slug (the convention used across Gitlawb tooling).
+// Empty or unsafe inputs fall back to "user" and "changes" respectively so
+// the result is always a valid, non-empty branch name.
+func BuildBranchName(gitUser, slug string) string {
+	userSlug := SlugifyBranchComponent(gitUser)
+	if userSlug == "" {
+		userSlug = "user"
+	}
+	featureSlug := SlugifyBranchComponent(slug)
+	if featureSlug == "" {
+		featureSlug = "changes"
+	}
+	return userSlug + "/" + featureSlug
 }
 
 type PROptions struct {
@@ -681,4 +1026,19 @@ func CreatePR(ctx context.Context, options PROptions) (PRResult, error) {
 	return PRResult{
 		Output: res.Stdout,
 	}, nil
+}
+
+// MarkGeneratedBranch records local branch configuration marking branch as
+// auto-generated by Zero.
+func MarkGeneratedBranch(ctx context.Context, cwd, branch string, runGit Runner) error {
+	runGit, _ = resolveRunners(runGit, nil)
+	_, err := gitOutput(ctx, runGit, cwd, "config", "branch."+branch+".zeroAutoBranch", "true")
+	return err
+}
+
+// IsGeneratedBranch reports whether branch was marked as auto-generated by Zero.
+func IsGeneratedBranch(ctx context.Context, cwd, branch string, runGit Runner) bool {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "config", "--get", "branch."+branch+".zeroAutoBranch")
+	return err == nil && strings.TrimSpace(out) == "true"
 }
