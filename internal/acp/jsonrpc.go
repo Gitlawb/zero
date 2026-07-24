@@ -80,8 +80,9 @@ type NotifyFunc func(ctx context.Context, params json.RawMessage)
 // requests/notifications — needed because ACP is bidirectional (the agent calls
 // the client for session/request_permission, fs/*, terminal/*).
 type Conn struct {
-	reader *bufio.Reader
-	w      io.Writer
+	reader       *bufio.Reader
+	readerCloser io.Closer
+	w            io.Writer
 
 	writeMu sync.Mutex // serializes all writes to w
 
@@ -96,14 +97,18 @@ type Conn struct {
 	wg sync.WaitGroup // tracks in-flight inbound handlers
 }
 
-// NewConn builds a peer reading ndjson from r and writing ndjson to w.
+// NewConn builds a peer reading ndjson from r and writing ndjson to w. If r is
+// closable, Serve closes it to interrupt an idle read when its context is
+// cancelled.
 func NewConn(r io.Reader, w io.Writer) *Conn {
+	readerCloser, _ := r.(io.Closer)
 	return &Conn{
-		reader:    bufio.NewReader(r),
-		w:         w,
-		handlers:  make(map[string]HandlerFunc),
-		notifiers: make(map[string]NotifyFunc),
-		pending:   make(map[int64]chan rpcMessage),
+		reader:       bufio.NewReader(r),
+		readerCloser: readerCloser,
+		w:            w,
+		handlers:     make(map[string]HandlerFunc),
+		notifiers:    make(map[string]NotifyFunc),
+		pending:      make(map[int64]chan rpcMessage),
 	}
 }
 
@@ -119,12 +124,36 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 // blocks the loop from delivering session/cancel or a permission response.
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	readLoopDone := make(chan struct{})
+	var endReadOnce sync.Once
+	readInterrupted := false
+	endRead := func(interrupt bool) {
+		endReadOnce.Do(func() {
+			readInterrupted = interrupt
+			if interrupt && c.readerCloser != nil {
+				_ = c.readerCloser.Close()
+			}
+			close(readLoopDone)
+		})
+	}
+	var readerWatcher sync.WaitGroup
+	readerWatcher.Add(1)
+	go func() {
+		defer readerWatcher.Done()
+		select {
+		case <-ctx.Done():
+			endRead(true)
+		case <-readLoopDone:
+		}
+	}()
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
 	// would race the dispatch goroutine and drop the response.
 	defer func() {
+		endRead(false)
 		cancel()
+		readerWatcher.Wait()
 		c.wg.Wait()
 	}()
 
@@ -133,12 +162,17 @@ func (c *Conn) Serve(ctx context.Context) error {
 		// decoder) keeps a single malformed line from making the whole connection
 		// unrecoverable — we report -32700 and continue.
 		line, err := c.reader.ReadBytes('\n')
+		if err != nil {
+			// Claim terminal completion before handling a partial final frame so
+			// concurrent cancellation cannot close the reader or mask this error.
+			endRead(false)
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			c.handleLine(ctx, line)
 		}
 		if err != nil {
 			c.failAllPending(err)
-			if errors.Is(err, io.EOF) || ctx.Err() != nil {
+			if errors.Is(err, io.EOF) || readInterrupted {
 				return nil
 			}
 			return err

@@ -3,10 +3,27 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
 )
+
+type testReadCloser struct {
+	read  func([]byte) (int, error)
+	close func() error
+}
+
+func (r testReadCloser) Read(p []byte) (int, error) { return r.read(p) }
+func (r testReadCloser) Close() error               { return r.close() }
+
+type testReader func([]byte) (int, error)
+
+func (r testReader) Read(p []byte) (int, error) { return r(p) }
+
+type testWriter func([]byte) (int, error)
+
+func (w testWriter) Write(p []byte) (int, error) { return w(p) }
 
 // connPair wires two Conns together over in-memory pipes and serves both.
 func connPair(t *testing.T) (a, b *Conn, stop func()) {
@@ -22,6 +39,93 @@ func connPair(t *testing.T) (a, b *Conn, stop func()) {
 		cancel()
 		_ = aw.Close()
 		_ = bw.Close()
+	}
+}
+
+func TestConnServeCancellationInterruptsIdleRead(t *testing.T) {
+	pipeReader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	readStarted := make(chan struct{})
+	closeCalls := make(chan struct{}, 2)
+	reader := testReadCloser{
+		read: func(p []byte) (int, error) {
+			close(readStarted)
+			return pipeReader.Read(p)
+		},
+		close: func() error {
+			closeCalls <- struct{}{}
+			return pipeReader.Close()
+		},
+	}
+	conn := NewConn(reader, io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	<-readStarted
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v after cancellation, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after cancelling an idle connection")
+	}
+	if got := len(closeCalls); got != 1 {
+		t.Fatalf("reader Close calls = %d, want 1", got)
+	}
+}
+
+func TestConnServePreservesTerminalReadErrorDuringCancellation(t *testing.T) {
+	for _, closable := range []bool{false, true} {
+		name := "non-closable"
+		if closable {
+			name = "closable"
+		}
+		t.Run(name, func(t *testing.T) {
+			wantErr := errors.New("read failed")
+			read := testReader(func(p []byte) (int, error) {
+				return copy(p, "not json"), wantErr
+			})
+			closeCalls := make(chan struct{}, 1)
+			var reader io.Reader = read
+			if closable {
+				reader = testReadCloser{
+					read: read,
+					close: func() error {
+						closeCalls <- struct{}{}
+						return nil
+					},
+				}
+			}
+			writeStarted := make(chan struct{})
+			releaseWrite := make(chan struct{})
+			writer := testWriter(func(p []byte) (int, error) {
+				close(writeStarted)
+				<-releaseWrite
+				return len(p), nil
+			})
+			conn := NewConn(reader, writer)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- conn.Serve(ctx) }()
+
+			<-writeStarted
+			cancel()
+			close(releaseWrite)
+			select {
+			case err := <-done:
+				if !errors.Is(err, wantErr) {
+					t.Fatalf("Serve returned %v, want terminal read error %v", err, wantErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Serve did not return after terminal read error")
+			}
+			if got := len(closeCalls); got != 0 {
+				t.Fatalf("reader Close calls = %d, want 0 after terminal read", got)
+			}
+		})
 	}
 }
 
