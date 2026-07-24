@@ -76,11 +76,15 @@ func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
 	description := strings.ToLower(strings.Join(descriptionParts, " "))
 
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe and cwd guidance in exec_command description, got %q", description)
-		}
-		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
-			t.Fatalf("expected the double-quote metacharacter rule in exec_command description, got %q", description)
+		shell := detectShellRuntime(runtime.GOOS)
+		if shell.Kind == shellKindPowerShell {
+			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
+				if !strings.Contains(description, want) {
+					t.Fatalf("expected Windows PowerShell guidance %q in exec_command description, got %q", want, description)
+				}
+			}
+		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe fallback guidance in exec_command description, got %q", description)
 		}
 	}
 }
@@ -130,6 +134,40 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	}
 	if poll.ExecutionOutcome == nil || poll.ExecutionOutcome.State != execution.StateCompleted || poll.ExecutionOutcome.Kind != execution.OutcomeSuccess {
 		t.Fatalf("completed execution outcome = %#v, want completed/success", poll.ExecutionOutcome)
+	}
+}
+
+func TestExecCommandPowerShellSessionAcceptsStdinOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell session behavior is Windows-specific")
+	}
+	if detectShellRuntime(runtime.GOOS).Kind != shellKindPowerShell {
+		t.Skip("PowerShell is unavailable")
+	}
+
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           `$line = [Console]::In.ReadLine(); Write-Output ('received:' + $line)`,
+		"yield_time_ms": 50,
+	})
+	if start.Status != StatusOK || start.Meta["session_id"] == "" {
+		t.Fatalf("expected a live PowerShell session, got status=%s meta=%#v output=%q", start.Status, start.Meta, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("parse PowerShell session id: %v", err)
+	}
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "hello\n",
+		"yield_time_ms": 30000,
+	})
+	if result.Status != StatusOK || result.Meta["exit_code"] != "0" || !strings.Contains(result.Output, "received:hello") {
+		t.Fatalf("PowerShell stdin result = status=%s meta=%#v output=%q", result.Status, result.Meta, result.Output)
 	}
 }
 

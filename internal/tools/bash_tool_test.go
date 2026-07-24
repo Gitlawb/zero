@@ -124,11 +124,15 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 	}
 
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe and cwd guidance in bash description, got %q", description)
-		}
-		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
-			t.Fatalf("expected the double-quote metacharacter rule in bash description, got %q", description)
+		shell := detectShellRuntime(runtime.GOOS)
+		if shell.Kind == shellKindPowerShell {
+			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
+				if !strings.Contains(description, want) {
+					t.Fatalf("expected Windows PowerShell guidance %q in bash description, got %q", want, description)
+				}
+			}
+		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe fallback guidance in bash description, got %q", description)
 		}
 		return
 	}

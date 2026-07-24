@@ -3160,21 +3160,10 @@ func TestBuildSystemPromptInjectsHostShellContext(t *testing.T) {
 		t.Fatalf("expected operating system in environment block, got %q", prompt)
 	}
 	if runtime.GOOS == "windows" {
-		for _, want := range []string{"Windows cmd.exe syntax", "cwd argument", "MSYS binaries", "grep", "require_escalated", "use double quotes around the value"} {
+		for _, want := range []string{"PowerShell", "workdir/cwd", "Get-ChildItem", "Select-String", "$env:NAME", "MSYS binaries", "require_escalated"} {
 			if !strings.Contains(prompt, want) {
-				t.Fatalf("expected Windows shell guidance to mention %q, got %q", want, prompt)
+				t.Fatalf("expected Windows PowerShell guidance to mention %q, got %q", want, prompt)
 			}
-		}
-		// The examples must themselves use the safe (double-quoted) form; a
-		// single-quoted example here would teach the model the exact syntax
-		// that fails under cmd.exe.
-		for _, want := range []string{`--jq ".a | b"`, `-run "A|B"`} {
-			if !strings.Contains(prompt, want) {
-				t.Fatalf("expected double-quoted example %q in Windows shell guidance, got %q", want, prompt)
-			}
-		}
-		if strings.Contains(prompt, `'.a | b'`) || strings.Contains(prompt, `'A|B'`) {
-			t.Fatalf("Windows shell guidance must not show the unsafe single-quoted form, got %q", prompt)
 		}
 	} else if !strings.Contains(prompt, "/bin/sh syntax") {
 		t.Fatalf("expected POSIX shell guidance in prompt, got %q", prompt)
