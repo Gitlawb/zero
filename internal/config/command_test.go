@@ -151,6 +151,20 @@ func TestLoadProviderCommandTerminatesBackgroundChildOnFailure(t *testing.T) {
 	assertProcessTerminated(t, pidFile)
 }
 
+func TestAssertProcessTerminatedWaitsForDelayedPIDFile(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "delayed.pid")
+	writeDone := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		writeDone <- os.WriteFile(pidFile, []byte("2147483647\n"), 0o600)
+	}()
+
+	assertProcessTerminated(t, pidFile)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write delayed pid file: %v", err)
+	}
+}
+
 func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
 	t.Helper()
 
@@ -167,16 +181,28 @@ func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
 func assertProcessTerminated(t *testing.T, pidFile string) {
 	t.Helper()
 
-	data, err := os.ReadFile(pidFile)
+	deadline := time.Now().Add(3 * time.Second)
+	var data []byte
+	var err error
+	for time.Now().Before(deadline) {
+		data, err = os.ReadFile(pidFile)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read sleeper pid file: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("read sleeper pid file: %v", err)
+		t.Fatalf("read sleeper pid file before timeout: %v", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		t.Fatalf("parse sleeper pid %q: %v", data, err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			return
