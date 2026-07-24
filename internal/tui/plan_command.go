@@ -22,6 +22,9 @@ func (m model) handlePlanCommand(args string) (model, string) {
 	case "", "status":
 		return m, m.planText()
 	case "on":
+		if m.isRunning() {
+			return m, "Cannot change plan mode while a turn is active."
+		}
 		if m.permissionMode == agent.PermissionModePlan {
 			return m, "Plan mode\nAlready active. Write and shell tools stay hidden until /plan off."
 		}
@@ -29,6 +32,9 @@ func (m model) handlePlanCommand(args string) (model, string) {
 		m.permissionMode = agent.PermissionModePlan
 		return m, "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off."
 	case "off":
+		if m.isRunning() {
+			return m, "Cannot change plan mode while a turn is active."
+		}
 		if m.permissionMode != agent.PermissionModePlan {
 			return m, "Plan mode\nNot currently active."
 		}
@@ -53,7 +59,7 @@ func (m model) handlePlanCommand(args string) (model, string) {
 // Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup:
+	case commandRewind, commandExport, commandSandboxSetup, commandSpec:
 		return true
 	default:
 		return false
