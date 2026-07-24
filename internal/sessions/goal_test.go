@@ -87,6 +87,73 @@ func TestGoalBudgetPausesAtLimit(t *testing.T) {
 	}
 }
 
+func TestEditGoalUpdatesStateAndRejectsInvalidInputWithoutMutation(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "edit_goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateGoal(session.SessionID, "Original objective", 1_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddGoalUsage(session.SessionID, 250); err != nil {
+		t.Fatal(err)
+	}
+
+	edited, event, err := store.EditGoal(session.SessionID, "Updated objective", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != EventGoalUpdated {
+		t.Fatalf("edit event = %q, want %q", event.Type, EventGoalUpdated)
+	}
+	if edited.Goal == nil ||
+		edited.Goal.Objective != "Updated objective" ||
+		edited.Goal.TokenBudget != 500 ||
+		edited.Goal.TokensUsed != 250 ||
+		edited.Goal.Status != GoalStatusActive ||
+		edited.Goal.StatusReason != "" {
+		t.Fatalf("edited goal = %#v", edited.Goal)
+	}
+
+	limited, _, err := store.EditGoal(session.SessionID, "Stay within budget", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limited.Goal == nil ||
+		limited.Goal.Status != GoalStatusBudgetLimited ||
+		limited.Goal.StatusReason != "token budget reached" ||
+		limited.Goal.TokensUsed != 250 {
+		t.Fatalf("budget-limited goal = %#v", limited.Goal)
+	}
+
+	before := *limited.Goal
+	eventsBefore, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.EditGoal(session.SessionID, "   ", 200); err == nil {
+		t.Fatal("EditGoal should reject an empty objective")
+	}
+	if _, _, err := store.EditGoal(session.SessionID, "Invalid budget", -1); err == nil {
+		t.Fatal("EditGoal should reject a negative token budget")
+	}
+	after, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil || after.Goal == nil || *after.Goal != before {
+		t.Fatalf("invalid edit mutated goal: before=%#v after=%#v", before, after)
+	}
+	eventsAfter, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("invalid edit appended events: before=%d after=%d", len(eventsBefore), len(eventsAfter))
+	}
+}
+
 func TestCreateGoalRefusesImplicitReplacement(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	session, err := store.Create(CreateInput{SessionID: "replace_session"})
