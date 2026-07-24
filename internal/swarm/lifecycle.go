@@ -12,6 +12,11 @@ import (
 // team is at its slot cap the member is queued and launches when a slot frees
 // (it stays pending in the coordinator until then).
 func (s *Swarm) Spawn(pol Policy, teamName, agentType, task, cwd string) (string, error) {
+	if err := s.beginLifecycleAdmission(); err != nil {
+		return "", err
+	}
+	defer s.lifecycleMu.RUnlock()
+
 	def, err := s.registry.Lookup(agentType)
 	if err != nil {
 		return "", err
@@ -23,15 +28,25 @@ func (s *Swarm) Spawn(pol Policy, teamName, agentType, task, cwd string) (string
 	}
 	s.rememberCwd(id, cwd)
 	spec := s.buildSpec(pol, id, id, team, def, task, cwd)
-	s.dispatch(spec)
+	s.dispatchAdmitted(spec)
 	return id, nil
 }
 
+func (s *Swarm) beginLifecycleAdmission() error {
+	s.lifecycleMu.RLock()
+	if s.closed {
+		s.lifecycleMu.RUnlock()
+		return ErrSwarmClosed
+	}
+	return nil
+}
+
 // dispatch admits a spec to its team (launching now or queuing for a slot).
-func (s *Swarm) dispatch(spec MemberSpec) {
+// The caller must hold lifecycleMu for reading.
+func (s *Swarm) dispatchAdmitted(spec MemberSpec) {
 	t := s.team(spec.Team)
 	if t.admit(spec) {
-		s.launch(t, spec)
+		s.launchAdmitted(t, spec)
 	}
 	// Otherwise the spec is queued; the coordinator task stays pending until a
 	// slot frees and afterExit launches it.
@@ -39,17 +54,22 @@ func (s *Swarm) dispatch(spec MemberSpec) {
 
 // launch starts a member for spec and supervises it. A synchronous launch
 // failure fails the task and frees the slot.
-func (s *Swarm) launch(t *Team, spec MemberSpec) {
+// The caller must hold lifecycleMu for reading.
+func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 	handle, err := s.launcher.Launch(s.baseCtx, spec)
 	if err != nil {
 		_ = s.coord.Fail(spec.TaskID, "launch: "+err.Error())
-		s.afterExit(t)
+		s.afterExitAdmitted(t)
 		return
 	}
 	m := &Member{ID: spec.ID, AgentType: spec.AgentType, TaskID: spec.TaskID, handle: handle}
 	t.addMember(m)
 	_ = s.coord.SetStatus(spec.TaskID, StatusRunning)
-	go s.watch(t, m, spec)
+	s.watchers.Add(1)
+	go func() {
+		defer s.watchers.Done()
+		s.watch(t, m, spec)
+	}()
 }
 
 // watch awaits a member, applies bounded relaunch on temporary failures, records
@@ -60,22 +80,28 @@ func (s *Swarm) launch(t *Team, spec MemberSpec) {
 // life (Member.ID == MemberSpec.ID); a retry never reuses the struct for a
 // different spec.
 func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
-	res, err := m.handle.Wait()
-	if err != nil {
-		if isRetryable(err) && m.restarts < maxMemberRestarts {
-			if nh, relErr := s.launcher.Launch(s.baseCtx, spec); relErr == nil {
-				m.restarts++
-				m.handle = nh
-				go s.watch(t, m, spec)
-				return
+	for {
+		res, err := m.handle.Wait()
+		if err != nil {
+			if isRetryable(err) && m.restarts < maxMemberRestarts {
+				if s.beginLifecycleAdmission() == nil {
+					nh, relErr := s.launcher.Launch(s.baseCtx, spec)
+					s.lifecycleMu.RUnlock()
+					if relErr == nil {
+						m.restarts++
+						m.handle = nh
+						continue
+					}
+				}
+				// Fall through if shutdown started or relaunch failed.
 			}
-			// fall through to record the original error if relaunch fails
+			// res.SessionID is preserved by the handle even on error, so a member that
+			// ran then failed stays drillable; a pure launch error carries an empty id.
+			_ = s.coord.FailWithSession(m.TaskID, memberError(err), res.SessionID)
+		} else {
+			_ = s.coord.CompleteWithSession(m.TaskID, res.Result, res.SessionID)
 		}
-		// res.SessionID is preserved by the handle even on error, so a member that
-		// ran then failed stays drillable; a pure launch error carries an empty id.
-		_ = s.coord.FailWithSession(m.TaskID, memberError(err), res.SessionID)
-	} else {
-		_ = s.coord.CompleteWithSession(m.TaskID, res.Result, res.SessionID)
+		break
 	}
 	t.removeMember(m.ID)
 	s.afterExit(t)
@@ -85,17 +111,33 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 // any. Each exit drains at most one queued member; that member's own exit drains
 // the next, so the queue empties one-per-slot without unbounded recursion.
 func (s *Swarm) afterExit(t *Team) {
+	if s.beginLifecycleAdmission() != nil {
+		t.releaseSlot()
+		return
+	}
+	defer s.lifecycleMu.RUnlock()
+	s.afterExitAdmitted(t)
+}
+
+// afterExitAdmitted drains at most one queued spec while lifecycle admission is
+// held open. The caller must hold lifecycleMu for reading.
+func (s *Swarm) afterExitAdmitted(t *Team) {
 	next, ok := t.onExit()
 	if !ok {
 		return
 	}
-	s.launch(t, next)
+	s.launchAdmitted(t, next)
 }
 
 // Handoff transfers a task to a fresh member of toAgentType, delivering a note to
 // the new member's inbox and marking the original task handed-off. It returns the
 // new task id. A handoff of an already-terminal task is rejected (fail closed).
 func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) (string, error) {
+	if err := s.beginLifecycleAdmission(); err != nil {
+		return "", err
+	}
+	defer s.lifecycleMu.RUnlock()
+
 	task, ok := s.coord.Get(taskID)
 	if !ok {
 		return "", fmt.Errorf("%w: %s", ErrUnknownTask, taskID)
@@ -131,7 +173,7 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 	// Retire the original task (it has been re-delegated).
 	_ = s.coord.SetStatus(taskID, StatusHandedOff)
 	spec := s.buildSpec(pol, newID, newID, team, def, handoffTask, cwd)
-	s.dispatch(spec)
+	s.dispatchAdmitted(spec)
 	return newID, nil
 }
 
@@ -139,6 +181,11 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 // (e.g. a crashed worker) onto fresh members of toAgentType, returning the
 // adopted task ids. Terminal tasks and tasks with a live owner are left alone.
 func (s *Swarm) AdoptOrphans(pol Policy, teamName, toAgentType string) ([]string, error) {
+	if err := s.beginLifecycleAdmission(); err != nil {
+		return nil, err
+	}
+	defer s.lifecycleMu.RUnlock()
+
 	def, err := s.registry.Lookup(toAgentType)
 	if err != nil {
 		return nil, err
@@ -161,7 +208,7 @@ func (s *Swarm) AdoptOrphans(pol Policy, teamName, toAgentType string) ([]string
 		cwd := s.cwdFor(task.ID)
 		s.rememberCwd(task.ID, cwd)
 		spec := s.buildSpec(pol, newAgent, task.ID, team, def, task.Description, cwd)
-		s.dispatch(spec)
+		s.dispatchAdmitted(spec)
 		adopted = append(adopted, task.ID)
 	}
 	return adopted, nil

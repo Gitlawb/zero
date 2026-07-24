@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -214,6 +215,141 @@ func TestPermanentErrorNoRetry(t *testing.T) {
 	task, _ := sw.Coordinator().Get(id)
 	if task.Err == "" {
 		t.Fatal("failed task should record an error message")
+	}
+}
+
+func TestLifecycleAdmissionRejectedAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+	sw.Close()
+
+	if _, err := sw.Spawn(Policy{}, "team", "teammate", "task", ""); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("Spawn after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if _, err := sw.Handoff(Policy{}, "team", "task", "teammate", "note"); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("Handoff after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if _, err := sw.AdoptOrphans(Policy{}, "team", "teammate"); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("AdoptOrphans after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if got := len(l.recorded()); got != 0 {
+		t.Fatalf("launches after Close = %d, want 0", got)
+	}
+}
+
+func TestCloseDoesNotLaunchQueuedMembers(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	sw := newSwarmFor(t, l)
+
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		if err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if got := len(l.recorded()); got != 2 {
+		t.Fatalf("initial launches = %d, want 2 with one queued", got)
+	}
+
+	sw.Close()
+	if got := len(l.recorded()); got != 2 {
+		t.Fatalf("launches after Close = %d, want queued member not launched", got)
+	}
+	for _, id := range ids {
+		task, ok := sw.Coordinator().Get(id)
+		if !ok || !task.Status.terminal() {
+			t.Fatalf("task %s after Close = %+v, want terminal", id, task)
+		}
+	}
+}
+
+func TestClosePreventsMemberRetry(t *testing.T) {
+	started := make(chan struct{}, maxMemberRestarts+1)
+	release := make(chan struct{})
+	l := FuncLauncher{Run: func(context.Context, MemberSpec) (MemberResult, error) {
+		started <- struct{}{}
+		<-release
+		return MemberResult{}, ErrMemberTemporary
+	}}
+	sw := newSwarmFor(t, l)
+	_, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial member did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after retryable member exit")
+	}
+	select {
+	case <-started:
+		t.Fatal("member retried after Close")
+	default:
+	}
+}
+
+func TestCloseWaitsForMemberWatchers(t *testing.T) {
+	release := make(chan struct{})
+	l := FuncLauncher{Run: func(context.Context, MemberSpec) (MemberResult, error) {
+		<-release
+		return MemberResult{Result: "done"}, nil
+	}}
+	sw := newSwarmFor(t, l)
+	id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	waitFor(t, "task running", func() bool {
+		task, ok := sw.Coordinator().Get(id)
+		return ok && task.Status == StatusRunning
+	})
+
+	const callers = 3
+	closing := make(chan struct{}, callers)
+	closed := make(chan struct{}, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			closing <- struct{}{}
+			sw.Close()
+			closed <- struct{}{}
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		<-closing
+	}
+	select {
+	case <-closed:
+		t.Fatal("a Close caller returned before the member watcher exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for i := 0; i < callers; i++ {
+		select {
+		case <-closed:
+		case <-time.After(3 * time.Second):
+			t.Fatal("all Close callers did not return after the member watcher exited")
+		}
 	}
 }
 

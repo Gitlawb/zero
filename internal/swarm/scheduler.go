@@ -121,11 +121,12 @@ type Scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	jobs   map[string]*scheduledJob
-	closed bool
-	seq    atomic.Uint64
-	wg     sync.WaitGroup
+	mu        sync.Mutex
+	jobs      map[string]*scheduledJob
+	closed    bool
+	seq       atomic.Uint64
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // newScheduler builds a Scheduler bound to sw. Its context derives from the
@@ -229,15 +230,13 @@ func (s *Scheduler) List() []JobStatus {
 // Close cancels every job and waits for their loops to exit. Safe to call more
 // than once.
 func (s *Scheduler) Close() {
-	s.mu.Lock()
-	if s.closed {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.cancel()
 		s.mu.Unlock()
-		return
-	}
-	s.closed = true
-	s.cancel()
-	s.mu.Unlock()
-	s.wg.Wait()
+		s.wg.Wait()
+	})
 }
 
 // run is one job's timing loop. It requests a fresh one-shot ticker per interval

@@ -64,6 +64,11 @@ type Swarm struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 
+	lifecycleMu sync.RWMutex
+	closed      bool
+	watchers    sync.WaitGroup
+	closeOnce   sync.Once
+
 	mu        sync.Mutex
 	teams     map[string]*Team
 	taskCwd   map[string]string // taskID -> cwd, for handoff/adoption relaunch
@@ -137,30 +142,56 @@ func New(opts Options) (*Swarm, error) {
 }
 
 // Close cancels every running member's context and releases resources. It is
-// safe to call more than once. The scheduler is closed first so no new spawn
-// fires after shutdown begins.
+// safe to call more than once. It closes lifecycle admission before canceling
+// members, fails queued tasks, and waits for every member watcher to exit.
 func (s *Swarm) Close() {
-	s.mu.Lock()
-	sched := s.scheduler
-	s.mu.Unlock()
-	if sched != nil {
-		sched.Close()
-	}
-	if s.cancel != nil {
-		s.cancel()
-	}
+	s.closeOnce.Do(func() {
+		s.lifecycleMu.Lock()
+		s.closed = true
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.mu.Lock()
+		sched := s.scheduler
+		teams := make([]*Team, 0, len(s.teams))
+		for _, team := range s.teams {
+			teams = append(teams, team)
+		}
+		s.mu.Unlock()
+		s.lifecycleMu.Unlock()
+
+		if sched != nil {
+			sched.Close()
+		}
+		for _, team := range teams {
+			for _, spec := range team.clearQueue() {
+				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())
+			}
+		}
+		s.watchers.Wait()
+	})
 }
 
 // Scheduler returns the swarm's recurring-spawn scheduler, creating it on first
 // use. Scheduling is opt-in: until a job is added the scheduler does nothing.
 func (s *Swarm) Scheduler() *Scheduler {
+	s.lifecycleMu.RLock()
+	closed := s.closed
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.scheduler == nil {
 		s.scheduler = newScheduler(s)
 	}
-	return s.scheduler
+	sched := s.scheduler
+	s.mu.Unlock()
+	s.lifecycleMu.RUnlock()
+	if closed {
+		sched.Close()
+	}
+	return sched
 }
+
+// ErrSwarmClosed reports lifecycle work submitted after shutdown begins.
+var ErrSwarmClosed = errors.New("swarm: closed")
 
 // rememberCwd records a task's working dir so a handoff/adoption relaunch keeps it.
 func (s *Swarm) rememberCwd(taskID, cwd string) {
@@ -286,6 +317,22 @@ func (t *Team) onExit() (MemberSpec, bool) {
 		return next, true
 	}
 	return MemberSpec{}, false
+}
+
+func (t *Team) releaseSlot() {
+	t.mu.Lock()
+	if t.running > 0 {
+		t.running--
+	}
+	t.mu.Unlock()
+}
+
+func (t *Team) clearQueue() []MemberSpec {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	queued := t.queue
+	t.queue = nil
+	return queued
 }
 
 func (t *Team) addMember(m *Member) {
