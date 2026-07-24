@@ -94,9 +94,6 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 		core = fallbackSystemPrompt
 	}
 	sections := []string{core}
-	if modeCtx := permissionModeContext(options); modeCtx != "" {
-		sections = append(sections, modeCtx)
-	}
 	if addendum := modelPromptAddendum(options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
@@ -119,6 +116,9 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	project := workspaceContext(options.Cwd)
 	if project != "" {
 		sections = append(sections, project)
+	}
+	if modeCtx := permissionModeContext(options); modeCtx != "" {
+		sections = append(sections, modeCtx)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)

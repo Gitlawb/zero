@@ -20,6 +20,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":
 			return options, true, nil
+		case arg == "--permission-mode":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--permission-mode="):
+			value, err := requiredInlineFlagValue(arg, "--permission-mode")
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = value
 		case arg == "--skip-permissions-unsafe":
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":

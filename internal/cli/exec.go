@@ -111,6 +111,7 @@ type execOptions struct {
 	worktreeName          string
 	worktreeDir           string
 	skipPermissionsUnsafe bool
+	permissionMode        string
 	// allowEscalation opts the run into mid-run model escalation: it registers
 	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
 	// default — a run without the flag is byte-identical to before (no tool, nil
@@ -316,11 +317,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
 	executionRunner.SetPreparer(sandboxEngine)
-	mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+	if permissionMode != agent.PermissionModePlan {
+		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
+		if err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+		}
+		defer closeMCPRuntime(stderr, mcpRuntime)
 	}
-	defer closeMCPRuntime(stderr, mcpRuntime)
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
