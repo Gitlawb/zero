@@ -1,0 +1,60 @@
+package tools
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/sessions"
+)
+
+func TestGoalToolsAreBoundToTheirSession(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	first, err := store.Create(sessions.CreateInput{SessionID: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(sessions.CreateInput{SessionID: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalTools := NewGoalTools(store, first.SessionID)
+
+	result := goalTools[1].Run(context.Background(), map[string]any{"objective": "Finish first"})
+	if result.Status != StatusOK {
+		t.Fatalf("create result = %#v", result)
+	}
+	loadedFirst, _ := store.Get(first.SessionID)
+	loadedSecond, _ := store.Get(second.SessionID)
+	if loadedFirst.Goal == nil || loadedFirst.Goal.Objective != "Finish first" {
+		t.Fatalf("first goal = %#v", loadedFirst.Goal)
+	}
+	if loadedSecond.Goal != nil {
+		t.Fatalf("second goal unexpectedly changed = %#v", loadedSecond.Goal)
+	}
+}
+
+func TestUpdateGoalToolRestrictsAgentTransitions(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateGoal(session.SessionID, "Finish it", 0); err != nil {
+		t.Fatal(err)
+	}
+	update := NewGoalTools(store, session.SessionID)[2]
+
+	result := update.Run(context.Background(), map[string]any{"status": "paused"})
+	if result.Status != StatusError || !strings.Contains(result.Output, "complete") {
+		t.Fatalf("paused result = %#v", result)
+	}
+	result = update.Run(context.Background(), map[string]any{"status": "blocked"})
+	if result.Status != StatusError || !strings.Contains(result.Output, "require a reason") {
+		t.Fatalf("reasonless blocked result = %#v", result)
+	}
+	result = update.Run(context.Background(), map[string]any{"status": "complete"})
+	if result.Status != StatusOK {
+		t.Fatalf("complete result = %#v", result)
+	}
+}

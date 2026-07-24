@@ -317,18 +317,22 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
 		providerLine += "  (recorded: " + recorded + ")"
 	}
+	lines := []string{
+		"id: " + session.SessionID,
+		"title: " + displayValue(session.Title, "untitled"),
+		modelLine,
+		providerLine,
+		fmt.Sprintf("events: %d", eventCount),
+	}
+	if session.Goal != nil {
+		lines = append(lines, "goal: "+string(session.Goal.Status)+" — "+session.Goal.Objective)
+	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Resumed Zero session",
 		Status: commandStatusOK,
 		Sections: []commandSection{{
 			Title: "Session",
-			Lines: []string{
-				"id: " + session.SessionID,
-				"title: " + displayValue(session.Title, "untitled"),
-				modelLine,
-				providerLine,
-				fmt.Sprintf("events: %d", eventCount),
-			},
+			Lines: lines,
 		}},
 	})
 }

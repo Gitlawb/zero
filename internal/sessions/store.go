@@ -45,6 +45,9 @@ const (
 	EventSpecDraft          EventType = "spec_draft"
 	EventSpecApproved       EventType = "spec_approved"
 	EventSpecRejected       EventType = "spec_rejected"
+	EventGoalCreated        EventType = "goal_created"
+	EventGoalUpdated        EventType = "goal_updated"
+	EventGoalCleared        EventType = "goal_cleared"
 )
 
 type SessionKind string
@@ -64,6 +67,27 @@ const (
 	SpecStatusApproved SpecStatus = "approved"
 	SpecStatusRejected SpecStatus = "rejected"
 )
+
+type GoalStatus string
+
+const (
+	GoalStatusActive        GoalStatus = "active"
+	GoalStatusPaused        GoalStatus = "paused"
+	GoalStatusBlocked       GoalStatus = "blocked"
+	GoalStatusBudgetLimited GoalStatus = "budget_limited"
+	GoalStatusUsageLimited  GoalStatus = "usage_limited"
+	GoalStatusComplete      GoalStatus = "complete"
+)
+
+type Goal struct {
+	Objective    string     `json:"objective"`
+	Status       GoalStatus `json:"status"`
+	StatusReason string     `json:"statusReason,omitempty"`
+	TokenBudget  int        `json:"tokenBudget,omitempty"`
+	TokensUsed   int        `json:"tokensUsed,omitempty"`
+	CreatedAt    string     `json:"createdAt"`
+	UpdatedAt    string     `json:"updatedAt"`
+}
 
 type Metadata struct {
 	SessionID           string      `json:"sessionId"`
@@ -91,6 +115,7 @@ type Metadata struct {
 	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
 	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
 	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
+	Goal                *Goal       `json:"goal,omitempty"`
 	CreatedAt           string      `json:"createdAt"`
 	UpdatedAt           string      `json:"updatedAt"`
 	EventCount          int         `json:"eventCount"`
@@ -123,6 +148,7 @@ type CreateInput struct {
 	SpecRejectReason    string
 	SpecSourceSessionID string
 	SpecImplSessionID   string
+	Goal                *Goal
 }
 
 type ForkInput struct {
@@ -279,6 +305,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SpecRejectReason:    strings.TrimSpace(input.SpecRejectReason),
 		SpecSourceSessionID: strings.TrimSpace(input.SpecSourceSessionID),
 		SpecImplSessionID:   strings.TrimSpace(input.SpecImplSessionID),
+		Goal:                cloneGoal(input.Goal),
 		CreatedAt:           timestamp,
 		UpdatedAt:           timestamp,
 		EventCount:          0,
