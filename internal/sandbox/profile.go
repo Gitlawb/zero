@@ -63,10 +63,72 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 // subprocesses. Nonexistent paths are harmless no-ops in every backend's
 // enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
-	return []string{
-		filepath.Join(root, ".git", "hooks"),
-		filepath.Join(root, ".git", "config"),
+	// Worktrees/submodules store .git as a *file* ("gitdir: <path>"), so
+	// .git/hooks has no parent dir — a --tmpfs carveout there makes bwrap fail
+	// ("Can't mkdir parents ... Not a directory") and blocks every sandboxed
+	// tool. Resolve the real (common) git dir in that case; otherwise keep the
+	// plain-checkout paths (harmless no-ops when .git is absent).
+	gitDir := filepath.Join(root, ".git")
+	if info, err := os.Stat(gitDir); err == nil && !info.IsDir() {
+		if real := resolveGitDir(root); real != "" {
+			gitDir = resolveGitCommonDir(real)
+		}
 	}
+	return []string{
+		filepath.Join(gitDir, "hooks"),
+		filepath.Join(gitDir, "config"),
+	}
+}
+
+// resolveGitDir returns the real git directory for a workspace root, handling
+// both regular checkouts (.git is a directory) and worktrees/submodules (.git
+// is a file containing "gitdir: <path>"). Returns "" when .git is absent, so
+// carveouts collapse to no-ops instead of pointing at a bogus path — a bogus
+// path under a .git *file* makes bwrap fail ("Can't mkdir parents ... Not a
+// directory") and blocks every sandboxed tool.
+func resolveGitDir(root string) string {
+	gitPath := filepath.Join(root, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return gitPath
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return ""
+	}
+	dir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	if dir == "" {
+		return ""
+	}
+	// Worktree gitdir pointers are often relative to the worktree root.
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// resolveGitCommonDir returns the shared git dir for a (possibly worktree)
+// gitDir. Worktree gitdirs carry a "commondir" pointer (usually "../.."); plain
+// checkouts have none and are their own common dir.
+func resolveGitCommonDir(gitDir string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	common := strings.TrimSpace(string(data))
+	if common == "" {
+		return gitDir
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitDir, common)
+	}
+	return filepath.Clean(common)
 }
 
 func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
