@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,194 @@ func TestRunWorktreesPrepareRejectsDuplicateNames(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "worktree name was provided more than once") {
 		t.Fatalf("expected duplicate name error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesRelease(t *testing.T) {
+	worktreeDir := t.TempDir()
+	var releasedPath string
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", worktreeDir}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releasedPath = path
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if releasedPath != worktreeDir {
+		t.Fatalf("released path = %q, want %q", releasedPath, worktreeDir)
+	}
+	if !strings.Contains(stdout.String(), worktreeDir) {
+		t.Fatalf("expected confirmation output to mention path, got %q", stdout.String())
+	}
+}
+
+func TestRunWorktreesReleaseNormalizesRelativePath(t *testing.T) {
+	// git worktree unlock matches against the path git recorded when the
+	// worktree was created, so a relative argument (resolved against
+	// whatever directory the caller happens to be running `zero` from) can
+	// fail to match. Chdir into a known directory and pass a relative
+	// argument to confirm it reaches releaseWorktree as an absolute path.
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	worktreeDir := filepath.Join(parent, "task-a")
+	if err := os.Mkdir(worktreeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(parent); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	// filepath.Abs resolves against os.Getwd, whose spelling of the temp dir
+	// can differ from t.TempDir()'s (macOS reports /private/var for /var), so
+	// derive the expected value through the same resolution instead of
+	// joining onto the lexical parent path.
+	expectedPath, err := filepath.Abs("task-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var releasedPath string
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "task-a"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releasedPath = path
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if releasedPath != expectedPath {
+		t.Fatalf("released path = %q, want absolute %q", releasedPath, expectedPath)
+	}
+}
+
+func TestRunWorktreesReleaseRequiresPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(context.Context, worktrees.Options, string) error {
+			t.Fatal("releaseWorktree should not be called without a path")
+			return nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "requires a worktree path") {
+		t.Fatalf("expected missing-path error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesReleaseWiresWorkspaceCwd(t *testing.T) {
+	// Release only consults Options.Cwd when the worktree directory itself is
+	// already gone (deleted by hand instead of released); git then has to run
+	// from the source repository to clear the orphaned lock. The CLI must
+	// wire the resolved workspace root through, or that advertised recovery
+	// path runs git from a possibly non-repository directory and the lock is
+	// never cleared (Clean skips locked entries).
+	root := t.TempDir()
+	var gotCwd string
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", filepath.Join(root, "already-deleted")}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			gotCwd = options.Cwd
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if gotCwd != root {
+		t.Fatalf("release Options.Cwd = %q, want workspace root %q", gotCwd, root)
+	}
+}
+
+func TestRunWorktreesReleaseHonorsExplicitCwd(t *testing.T) {
+	// The deleted-path recovery cannot derive the source repository from the
+	// worktree path (the directory is gone and its name is a one-way hash),
+	// so -C names it explicitly; the resolved root must reach Release as
+	// Options.Cwd regardless of where the command was launched.
+	launchDir := t.TempDir()
+	repoDir := t.TempDir()
+	var gotCwd string
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "-C", repoDir, filepath.Join(repoDir, "already-deleted")}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return launchDir, nil },
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			gotCwd = options.Cwd
+			return nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if gotCwd != repoDir {
+		t.Fatalf("release Options.Cwd = %q, want explicit -C root %q", gotCwd, repoDir)
+	}
+}
+
+func TestRunWorktreesReleaseReportsErrors(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "/no/such/worktree"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(context.Context, worktrees.Options, string) error {
+			return errors.New("unlock git worktree: not a valid worktree")
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "not a valid worktree") {
+		t.Fatalf("expected underlying error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesReleaseRedactsErrorText(t *testing.T) {
+	// Release errors interpolate the caller-supplied path (see
+	// verifyZeroOwnedWorktree's "refusing to release %s" messages); unlike the
+	// success path, which redacts before printing, the error was previously
+	// forwarded to stderr verbatim, so a rejected path containing a key-shaped
+	// segment would reach terminal/model-visible output unredacted.
+	secret := "sk-proj-abcDEF123_ghiJKL456-mnoPQR789stu"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "release", "/tmp/" + secret + "/task"}, &stdout, &stderr, appDeps{
+		releaseWorktree: func(context.Context, worktrees.Options, string) error {
+			return fmt.Errorf("refusing to release /tmp/%s/task: not a registered worktree of this repository", secret)
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("release error leaked unredacted key-shaped path: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[REDACTED]") {
+		t.Fatalf("expected redaction placeholder in error output, got %q", stderr.String())
 	}
 }
 
@@ -618,6 +807,157 @@ func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "hello") {
 		t.Fatalf("expected provider output, got %q", stdout.String())
+	}
+}
+
+func TestRunExecWorktreeReleasesLockAfterRun(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	var releasedPath string
+	releaseCalls := 0
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", LockAcquired: true}, nil
+		},
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releaseCalls++
+			releasedPath = path
+			return nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	// A `zero exec --worktree` run is the only user of the worktree it prepares:
+	// its own process created it and is now exiting, so it must release the
+	// Prepare lock itself rather than leaving it locked forever (unlike `zero
+	// worktrees prepare`, which hands the path to a longer-lived external
+	// caller and has no such end-of-life signal to act on).
+	if releaseCalls != 1 {
+		t.Fatalf("releaseWorktree call count = %d, want 1", releaseCalls)
+	}
+	if releasedPath != worktreeDir {
+		t.Fatalf("released path = %q, want %q", releasedPath, worktreeDir)
+	}
+}
+
+func TestRunExecWorktreeKeepsLockItDidNotAcquire(t *testing.T) {
+	// Defense in depth: Prepare now rejects an in-use lease outright, so a
+	// successful result always reports LockAcquired=true. Should that ever
+	// change, exec must still only release the ownership its own invocation
+	// established; releasing a lock it did not acquire would clear another
+	// caller's lease and let a later Clean force-delete a live workspace.
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	releaseCalls := 0
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Reused: true, LockAcquired: false}, nil
+		},
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			releaseCalls++
+			return nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if releaseCalls != 0 {
+		t.Fatalf("releaseWorktree call count = %d, want 0 for a lock this run did not acquire", releaseCalls)
+	}
+}
+
+func TestRunExecWorktreeSurfacesReleaseFailure(t *testing.T) {
+	// A failed unlock leaves a lock Clean permanently skips, recreating the
+	// disk leak silently; the failure must reach the user with the affected
+	// path so the leaked lock can be cleared by hand.
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", LockAcquired: true}, nil
+		},
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			return errors.New("unlock git worktree: boom")
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), worktreeDir) || !strings.Contains(stderr.String(), "boom") {
+		t.Fatalf("expected release failure with path on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecWorktreeRedactsReleaseFailureText(t *testing.T) {
+	// The release path argument was already redacted before this diagnostic
+	// was added, but the error's own text was forwarded verbatim; Release's
+	// ownership errors interpolate the caller-supplied path (see
+	// verifyZeroOwnedWorktree), so a key-shaped path reaching this message
+	// leaked unredacted onto stderr.
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	secret := "sk-proj-abcDEF123_ghiJKL456-mnoPQR789stu"
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", LockAcquired: true}, nil
+		},
+		releaseWorktree: func(ctx context.Context, options worktrees.Options, path string) error {
+			return fmt.Errorf("refusing to release /tmp/%s/task: not a registered worktree of this repository", secret)
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("deferred release diagnostic leaked unredacted key-shaped path: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[REDACTED]") {
+		t.Fatalf("expected redaction placeholder in deferred release diagnostic, got %q", stderr.String())
 	}
 }
 

@@ -81,6 +81,7 @@ type appDeps struct {
 	runSandboxSetupHelper  func(path string, args []string, stdout io.Writer, stderr io.Writer) error
 	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
 	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
+	releaseWorktree        func(context.Context, worktrees.Options, string) error
 	detectVerifyPlan       func(string) (verify.Plan, error)
 	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
 	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
@@ -187,6 +188,7 @@ func defaultAppDeps() appDeps {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
 		prepareWorktree:  worktrees.Prepare,
+		releaseWorktree:  worktrees.Release,
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
 		runSelfVerify:    selfverify.Run,
@@ -531,6 +533,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.prepareWorktree == nil {
 		deps.prepareWorktree = defaults.prepareWorktree
+	}
+	if deps.releaseWorktree == nil {
+		deps.releaseWorktree = defaults.releaseWorktree
 	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan

@@ -84,7 +84,7 @@ var completionRoot = completionNode{
 		}},
 		{names: []string{"update"}},
 		{names: []string{"upgrade"}},
-		{names: []string{"worktrees", "worktree"}, children: leafNodes("prepare")},
+		{names: []string{"worktrees", "worktree"}, children: leafNodes("prepare", "release")},
 		{names: []string{"verify"}},
 		{names: []string{"trust"}, children: leafNodes("list", "remove")},
 		{names: []string{"eval"}, children: leafNodes("validate", "run", "bench")},

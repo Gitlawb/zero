@@ -61,6 +61,19 @@ func TestRedactString_CompoundKeyForms(t *testing.T) {
 	}
 }
 
+func TestRedactString_OverlappingExtraSecrets(t *testing.T) {
+	opts := Options{
+		ExtraSecretValues: []string{"secret", "secret_token"},
+	}
+	out := RedactString("my secret_token value", opts)
+	if strings.Contains(out, "_token") {
+		t.Fatalf("RedactString left partial fragment '_token': got %q", out)
+	}
+	if !strings.Contains(out, RedactedSecret) {
+		t.Fatalf("expected RedactedSecret in output: got %q", out)
+	}
+}
+
 func TestRedactString_AuthHeaderSchemes(t *testing.T) {
 	o := Options{}
 	// Opaque values (no token-format prefix) so only the header/colon logic can

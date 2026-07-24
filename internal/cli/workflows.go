@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +64,9 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
+	if command == "release" {
+		return runWorktreesRelease(args, stdout, stderr, deps)
+	}
 	if command != "prepare" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees command %q", command))
 	}
@@ -97,6 +101,83 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintln(stdout, formatWorktreeResult(safeResult)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+// runWorktreesRelease unlocks a worktree `zero worktrees prepare` created, so
+// Zero's automatic Clean pass can reclaim it once it goes stale. Prepare locks
+// every worktree it creates and nothing else in that command's own lifetime
+// unlocks it (its process exits right after printing the path, long before
+// whatever external caller actually finishes using the worktree), so that
+// caller is responsible for running this once it is done.
+func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	var path string
+	var cwdFlag string
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			if err := writeWorktreesHelp(stdout); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		case arg == "-C" || arg == "--cwd":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return writeExecUsageError(stderr, err.Error())
+			}
+			cwdFlag = value
+			index = next
+		case strings.HasPrefix(arg, "--cwd="):
+			cwdFlag = strings.TrimPrefix(arg, "--cwd=")
+		case strings.HasPrefix(arg, "-"):
+			return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees release flag %q", arg))
+		default:
+			if path != "" {
+				return writeExecUsageError(stderr, "worktree path was provided more than once")
+			}
+			path = arg
+		}
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return writeExecUsageError(stderr, "worktrees release requires a worktree path")
+	}
+	// git worktree unlock matches against the path git recorded when the
+	// worktree was created, so a relative argument here (resolved against
+	// whatever directory the caller happens to be running in, not
+	// necessarily the worktree's own) can fail to match. Resolve to absolute
+	// up front so the unlock target is unambiguous regardless of cwd.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	// Release falls back to Options.Cwd as git's working directory when the
+	// worktree directory itself was deleted by hand instead of released; with
+	// no Cwd wired in, that recovery path runs `git worktree unlock` from
+	// wherever the caller happens to be, which outside the source repository
+	// leaves the orphaned lock behind forever (Clean skips locked entries).
+	// -C/--cwd names the source repository explicitly for exactly that case,
+	// since the deleted worktree path itself carries no way back to the repo;
+	// without the flag, resolve the launch directory best-effort (the
+	// ordinary existing-path case does not need it, so a resolution failure
+	// is not an error here).
+	releaseOptions := worktrees.Options{}
+	if cwdFlag != "" {
+		workspaceRoot, err := resolveWorkspaceRoot(cwdFlag, deps)
+		if err != nil {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		releaseOptions.Cwd = workspaceRoot
+	} else if workspaceRoot, rootErr := resolveWorkspaceRoot("", deps); rootErr == nil {
+		releaseOptions.Cwd = workspaceRoot
+	}
+	if err := deps.releaseWorktree(context.Background(), releaseOptions, absPath); err != nil {
+		return writeExecUsageError(stderr, redactCLIString(err.Error()))
+	}
+	if _, err := fmt.Fprintf(stdout, "released %s\n", redactCLIString(path)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -786,14 +867,25 @@ func formatCommitResult(result zerogit.CommitResult) string {
 func writeWorktreesHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero worktrees prepare [flags] [name]
+  zero worktrees release [flags] <path>
 
 Prepares an isolated git worktree for a Zero task.
 
-Flags:
+prepare locks the worktree it creates so Zero's automatic cleanup never
+removes it out from under you. release unlocks a worktree prepare created,
+once you are done with it, so cleanup can reclaim it later if it goes stale.
+If the worktree directory was deleted by hand, run release with -C pointing
+at the source repository so the orphaned lock can still be cleared.
+
+prepare flags:
       --name <name>       Worktree name; defaults to a timestamped task name
       --dir <path>        Base directory for Zero worktrees
   -C, --cwd <path>        Source repository directory
       --json              Print JSON output
+
+release flags:
+  -C, --cwd <path>        Source repository directory (required if the
+                           worktree directory was already deleted)
   -h, --help              Show this help
 `)
 	return err

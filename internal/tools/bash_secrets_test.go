@@ -24,3 +24,13 @@ func TestFormatBashOutputLeavesCleanOutputAlone(t *testing.T) {
 		t.Fatalf("clean output should not be altered, got %q", out)
 	}
 }
+
+func TestFormatBashOutputRedactsAnthropicKey(t *testing.T) {
+	out := formatBashOutput("anthropic key: sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz-12345\n", "", 0)
+	if strings.Contains(out, "sk-ant-api03") {
+		t.Fatalf("bash output leaked an Anthropic key: %q", out)
+	}
+	if !strings.Contains(out, "[REDACTED:openai_key]") {
+		t.Fatalf("expected typed redaction placeholder, got %q", out)
+	}
+}

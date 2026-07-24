@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -156,9 +157,15 @@ func keyLooksSensitive(normalized string) bool {
 func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	redacted := value
-	for _, secret := range options.ExtraSecretValues {
-		if strings.TrimSpace(secret) != "" {
-			redacted = strings.ReplaceAll(redacted, secret, replacement)
+	if len(options.ExtraSecretValues) > 0 {
+		secrets := append([]string{}, options.ExtraSecretValues...)
+		sort.SliceStable(secrets, func(i, j int) bool {
+			return len(secrets[i]) > len(secrets[j])
+		})
+		for _, secret := range secrets {
+			if strings.TrimSpace(secret) != "" {
+				redacted = strings.ReplaceAll(redacted, secret, replacement)
+			}
 		}
 	}
 

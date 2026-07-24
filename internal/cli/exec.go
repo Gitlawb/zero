@@ -199,11 +199,33 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			Name:    options.worktreeName,
 			BaseDir: options.worktreeDir,
 			Now:     deps.now,
+			// The worktree's lifetime is bound to this process (the deferred
+			// release below), so record the PID: if this process dies without
+			// releasing, Clean can expire the lease instead of skipping the
+			// locked worktree forever.
+			LeasePID: os.Getpid(),
 		})
 		if err != nil {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
 		workspaceRoot = preparedWorktree.Path
+		// When this run's own Prepare call took the worktree lock, its
+		// lifetime is bound to this function: release the lock once it returns
+		// so Clean can reclaim the worktree later if it goes stale. A reused
+		// worktree whose lock an external `zero worktrees prepare` caller
+		// still holds reports LockAcquired=false; releasing it here would
+		// clear that caller's lease and expose its workspace to Clean, so the
+		// matching release stays that caller's responsibility. A failed unlock
+		// leaves a lock Clean will permanently skip, so it must not pass
+		// silently; the run's primary result has already been emitted by the
+		// time the defer runs, so surface it as a diagnostic.
+		if preparedWorktree.LockAcquired {
+			defer func() {
+				if releaseErr := deps.releaseWorktree(context.Background(), worktrees.Options{Cwd: trustRoot}, preparedWorktree.Path); releaseErr != nil {
+					fmt.Fprintf(stderr, "zero: failed to release worktree lock on %s: %s\n", redactCLIString(preparedWorktree.Path), redactCLIString(releaseErr.Error()))
+				}
+			}()
+		}
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
