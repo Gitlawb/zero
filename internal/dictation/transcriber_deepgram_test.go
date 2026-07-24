@@ -153,6 +153,15 @@ func TestDeepgramStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) {
 
 func TestDeepgramCustomHeaderErrorRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		for {
+			typ, data, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			if typ == websocket.MessageText && strings.Contains(string(data), "CloseStream") {
+				break
+			}
+		}
 		c.Close(websocket.StatusPolicyViolation, "X-Api-Key: sk-custom-secret-key-1234567890 failed")
 	})
 
@@ -175,6 +184,15 @@ func TestDeepgramCustomHeaderErrorRedaction(t *testing.T) {
 
 func TestDeepgramSinglePassRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		for {
+			typ, data, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			if typ == websocket.MessageText && strings.Contains(string(data), "CloseStream") {
+				break
+			}
+		}
 		c.Close(websocket.StatusPolicyViolation, "error with sk-key1234567890abcdef1234")
 	})
 

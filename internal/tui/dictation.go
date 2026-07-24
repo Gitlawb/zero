@@ -61,6 +61,7 @@ type dictationController struct {
 	browseVariants []dictation.ModelVariant
 
 	// in-flight session state
+	sessionID   int64
 	streaming   bool
 	recorder    Recorder
 	transcriber Transcriber
@@ -108,6 +109,7 @@ type dictationStartedMsg struct {
 // dictationTranscribedMsg carries the final transcript of a batch (or a
 // completed streaming) recording.
 type dictationTranscribedMsg struct {
+	sessionID int64
 	text      string
 	err       error
 	submit    bool
@@ -276,7 +278,7 @@ func (m model) stopDictation() (model, tea.Cmd) {
 		}
 		return m, nil // final text arrives via the streaming command already running
 	}
-	return m, transcribeBatchCmd(m.dictation.ctx, m.dictation.recorder, m.dictation.transcriber, m.dictation.cfg.AutoSubmitEnabled())
+	return m, transcribeBatchCmd(m.dictation.sessionID, m.dictation.ctx, m.dictation.recorder, m.dictation.transcriber, m.dictation.cfg.AutoSubmitEnabled())
 }
 
 // cancelDictation aborts an in-flight recording without transcribing. Bound to
@@ -311,6 +313,7 @@ func (d dictationController) maxDuration() time.Duration {
 }
 
 func (d *dictationController) reset() {
+	d.sessionID++
 	d.phase = dictIdle
 	d.recorder = nil
 	d.transcriber = nil
@@ -335,17 +338,17 @@ func startBatchRecordingCmd(rec Recorder) tea.Cmd {
 // transcribeBatchCmd stops the recording, transcribes the audio, and reports the
 // final text. Runs off the UI goroutine — Stop waits on the capture tool and
 // Transcribe does a network round-trip or a local exec.
-func transcribeBatchCmd(ctx context.Context, rec Recorder, transcriber Transcriber, submit bool) tea.Cmd {
+func transcribeBatchCmd(sessionID int64, ctx context.Context, rec Recorder, transcriber Transcriber, submit bool) tea.Cmd {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return func() tea.Msg {
 		audio, err := rec.Stop()
 		if err != nil {
-			return dictationTranscribedMsg{err: err}
+			return dictationTranscribedMsg{sessionID: sessionID, err: err}
 		}
 		text, err := transcriber.Transcribe(ctx, audio)
-		return dictationTranscribedMsg{text: text, err: err, submit: submit}
+		return dictationTranscribedMsg{sessionID: sessionID, text: text, err: err, submit: submit}
 	}
 }
 
@@ -375,6 +378,9 @@ func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) 
 // handleDictationTranscribed inserts the final transcript into the composer (or
 // submits it when stt.autoSubmit is on), then returns to idle.
 func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Model, tea.Cmd) {
+	if msg.sessionID != 0 && msg.sessionID != m.dictation.sessionID {
+		return m, nil
+	}
 	streaming := m.dictation.streaming || msg.streaming
 	m = m.commitDictationRegion()
 	// A streaming session can end via a transcriber error (not just a user stop), so

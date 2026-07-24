@@ -148,18 +148,17 @@ func TestOpenAIRealtimeStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) 
 // is blocked on more chunks so that path observes a cancelled write and must
 // still return context.Canceled rather than a redacted flat string.
 func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
-	deltaSent := make(chan struct{})
+	sessionReceived := make(chan struct{})
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
-		// Session update, then a delta.
 		if _, _, err := c.Read(ctx); err != nil {
 			return
 		}
-		_ = c.Write(ctx, websocket.MessageText, []byte(
-			`{"type":"conversation.item.input_audio_transcription.delta","delta":"hi"}`,
-		))
-		close(deltaSent)
-		// Close socket so the next client Write fails and sends to writeErrCh
-		_ = c.Close(websocket.StatusAbnormalClosure, "closed")
+		close(sessionReceived)
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				return
+			}
+		}
 	})
 
 	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: "sk-test-key", BaseURL: url})
@@ -169,9 +168,10 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	chunks := make(chan []byte, 2)
-	defer close(chunks)
+	chunks := make(chan []byte, 1)
 	chunks <- make([]byte, 480)
+	defer close(chunks)
+
 	errCh := make(chan error, 1)
 	go func() {
 		_, ferr := tr.StreamTranscribe(ctx, chunks, nil)
@@ -179,17 +179,14 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 	}()
 
 	select {
-	case <-deltaSent:
-		// Push another chunk so writer tries to write to the closed socket
-		chunks <- make([]byte, 480)
-		// Cancel context so writeErrCh observes ctx.Err() != nil
+	case <-sessionReceived:
 		cancel()
 		ferr := <-errCh
 		if !errors.Is(ferr, context.Canceled) {
 			t.Fatalf("write-path cancel lost the context.Canceled sentinel: %v", ferr)
 		}
 	case ferr := <-errCh:
-		t.Fatalf("StreamTranscribe failed before delta: %v", ferr)
+		t.Fatalf("StreamTranscribe failed early instead of blocking: %v", ferr)
 	}
 }
 

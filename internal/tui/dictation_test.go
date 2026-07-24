@@ -340,3 +340,32 @@ func TestCurrentModelLabel(t *testing.T) {
 		t.Errorf("no-model label = %q", got)
 	}
 }
+
+func TestStaleDictationCompletionIgnoredAfterCancel(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "original composer text", cursor: 22})
+	m.dictation.sessionID = 1
+	m.dictation.phase = dictRecording
+
+	m, _ = m.cancelDictation()
+
+	if m.composer.text != "original composer text" {
+		t.Fatalf("composer text = %q, want 'original composer text'", m.composer.text)
+	}
+
+	staleMsg := dictationTranscribedMsg{
+		sessionID: 1,
+		text:      "stale text that should be ignored",
+		submit:    true,
+		streaming: true,
+	}
+	afterStale, cmd := m.handleDictationTranscribed(staleMsg)
+	got := afterStale.(model)
+
+	if got.composer.text != "original composer text" {
+		t.Fatalf("composer text changed to %q after stale completion", got.composer.text)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command for stale completion, got %v", cmd)
+	}
+}
