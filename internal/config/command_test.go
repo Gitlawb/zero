@@ -151,6 +151,33 @@ func TestLoadProviderCommandTerminatesBackgroundChildOnFailure(t *testing.T) {
 	assertProcessTerminated(t, pidFile)
 }
 
+func TestAssertProcessTerminatedWaitsForDelayedPIDFile(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "delayed.pid")
+	firstMissing := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		<-firstMissing
+		tempFile := pidFile + ".tmp"
+		if err := os.WriteFile(tempFile, []byte("2147483647\n"), 0o600); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- os.Rename(tempFile, pidFile)
+	}()
+
+	missingObserved := false
+	assertProcessTerminatedAfterMissing(t, pidFile, func() {
+		missingObserved = true
+		close(firstMissing)
+	})
+	if !missingObserved {
+		t.Fatal("PID file existed before the missing-file polling path was exercised")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write delayed pid file: %v", err)
+	}
+}
+
 func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
 	t.Helper()
 
@@ -167,16 +194,41 @@ func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
 func assertProcessTerminated(t *testing.T, pidFile string) {
 	t.Helper()
 
-	data, err := os.ReadFile(pidFile)
+	assertProcessTerminatedAfterMissing(t, pidFile, nil)
+}
+
+func assertProcessTerminatedAfterMissing(t *testing.T, pidFile string, onMissing func()) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var data []byte
+	var err error
+	missingObserved := false
+	for time.Now().Before(deadline) {
+		data, err = os.ReadFile(pidFile)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read sleeper pid file: %v", err)
+		}
+		if !missingObserved {
+			missingObserved = true
+			if onMissing != nil {
+				onMissing()
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("read sleeper pid file: %v", err)
+		t.Fatalf("read sleeper pid file before timeout: %v", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		t.Fatalf("parse sleeper pid %q: %v", data, err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			return
