@@ -2404,7 +2404,11 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	root := t.TempDir()
 	command := "PATH=.:$PATH curl https://example.com"
 	if runtime.GOOS == "windows" {
-		command = "set PATH=.;%PATH% && curl https://example.com"
+		if windowsTestUsesPowerShell() {
+			command = `$env:PATH = '.;' + $env:PATH; curl.cmd https://example.com`
+		} else {
+			command = "set PATH=.;%PATH% && curl https://example.com"
+		}
 		fakeCurl := filepath.Join(root, "curl.cmd")
 		if err := os.WriteFile(fakeCurl, []byte("@echo fake curl %*\r\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -2525,13 +2529,17 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 
 func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	root := t.TempDir()
+	command := "echo rm -rf /"
+	if runtime.GOOS == "windows" && windowsTestUsesPowerShell() {
+		command = `Write-Output 'rm -rf /'`
+	}
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedBashTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo rm -rf /"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":` + quoteJSONString(command) + `}`},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 				{Type: zeroruntime.StreamEventDone},
 			},
@@ -2625,6 +2633,12 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	if len(permissionEvents) != 1 || permissionEvents[0].Action != PermissionActionAllow || !permissionEvents[0].PermissionGranted {
 		t.Fatalf("expected one allow event with permission granted, got %#v", permissionEvents)
 	}
+}
+
+func windowsTestUsesPowerShell() bool {
+	executable, _ := tools.HostShellCommand("")
+	name := strings.ToLower(filepath.Base(executable))
+	return strings.Contains(name, "powershell") || strings.HasPrefix(name, "pwsh")
 }
 
 func containsPermissionDecision(decisions []PermissionDecisionAction, want PermissionDecisionAction) bool {
@@ -3160,9 +3174,15 @@ func TestBuildSystemPromptInjectsHostShellContext(t *testing.T) {
 		t.Fatalf("expected operating system in environment block, got %q", prompt)
 	}
 	if runtime.GOOS == "windows" {
-		for _, want := range []string{"PowerShell", "workdir/cwd", "Get-ChildItem", "Select-String", "$env:NAME", "MSYS binaries", "require_escalated"} {
+		wants := []string{"workdir/cwd", "MSYS binaries"}
+		if windowsTestUsesPowerShell() {
+			wants = append(wants, "PowerShell", "Get-ChildItem", "Select-String", "$env:NAME", "require_escalated")
+		} else {
+			wants = append(wants, "cmd.exe", "double quotes")
+		}
+		for _, want := range wants {
 			if !strings.Contains(prompt, want) {
-				t.Fatalf("expected Windows PowerShell guidance to mention %q, got %q", want, prompt)
+				t.Fatalf("expected selected Windows shell guidance to mention %q, got %q", want, prompt)
 			}
 		}
 	} else if !strings.Contains(prompt, "/bin/sh syntax") {

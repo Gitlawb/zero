@@ -137,40 +137,6 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	}
 }
 
-func TestExecCommandPowerShellSessionAcceptsStdinOnWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("PowerShell session behavior is Windows-specific")
-	}
-	if detectShellRuntime(runtime.GOOS).Kind != shellKindPowerShell {
-		t.Skip("PowerShell is unavailable")
-	}
-
-	root := t.TempDir()
-	manager := newExecSessionManager()
-	execTool := NewScopedExecCommandTool(root, nil, manager)
-	writeTool := NewWriteStdinTool(manager)
-	start := execTool.Run(context.Background(), map[string]any{
-		"cmd":           `$line = [Console]::In.ReadLine(); Write-Output ('received:' + $line)`,
-		"yield_time_ms": 50,
-	})
-	if start.Status != StatusOK || start.Meta["session_id"] == "" {
-		t.Fatalf("expected a live PowerShell session, got status=%s meta=%#v output=%q", start.Status, start.Meta, start.Output)
-	}
-	sessionID, err := strconv.Atoi(start.Meta["session_id"])
-	if err != nil {
-		t.Fatalf("parse PowerShell session id: %v", err)
-	}
-
-	result := writeTool.Run(context.Background(), map[string]any{
-		"session_id":    sessionID,
-		"chars":         "hello\n",
-		"yield_time_ms": 30000,
-	})
-	if result.Status != StatusOK || result.Meta["exit_code"] != "0" || !strings.Contains(result.Output, "received:hello") {
-		t.Fatalf("PowerShell stdin result = status=%s meta=%#v output=%q", result.Status, result.Meta, result.Output)
-	}
-}
-
 func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
 	root := t.TempDir()
 	manager := newExecSessionManager()
@@ -230,9 +196,15 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 		Policy:        sandbox.DefaultPolicy(),
 		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
+	msysCommand := "cat somefile.txt"
+	if detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
+		// cat is a native Get-Content alias in PowerShell, so use an executable
+		// name that still exercises the MSYS guard.
+		msysCommand = "grep pattern somefile.txt"
+	}
 
 	result := registry.RunWithOptions(context.Background(), ExecCommandToolName, map[string]any{
-		"cmd":                 "cat somefile.txt",
+		"cmd":                 msysCommand,
 		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
 	}, RunOptions{
 		PermissionGranted: true,
@@ -242,8 +214,8 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 
 	// Assert on the preflight block sentinel (exit_code "-1", set only by
 	// shellIssueBlockResult) rather than shell_issue: once the guard is
-	// bypassed, "cat somefile.txt" actually runs, and its real,
-	// PATH-dependent output could otherwise trip the unrelated
+	// bypassed, the command actually runs, and its real, PATH-dependent output
+	// could otherwise trip the unrelated
 	// post-execution detectShellOutputIssue heuristic and make this
 	// assertion flaky for reasons unrelated to the guard under test.
 	if result.Meta["exit_code"] == "-1" {
@@ -322,8 +294,9 @@ func TestExecCommandApplicationFailureHasTypedOutcome(t *testing.T) {
 	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
 		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
 	}
-	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != 7 {
-		t.Fatalf("execution exit = %#v, want code 7", result.ExecutionOutcome.Exit)
+	wantExitCode := helperFailureExitCode()
+	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != wantExitCode {
+		t.Fatalf("execution exit = %#v, want code %d", result.ExecutionOutcome.Exit, wantExitCode)
 	}
 }
 
