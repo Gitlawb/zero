@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.5.1](https://github.com/Gitlawb/zero/compare/v0.5.0...v0.5.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **cli:** include plugins info in shell completions ([#794](https://github.com/Gitlawb/zero/issues/794)) ([fa8734f](https://github.com/Gitlawb/zero/commit/fa8734f17927de8832dfe041e043cfb86f93d12a))
+* **config:** kill provider-command process tree via job object on Windows ([#690](https://github.com/Gitlawb/zero/issues/690)) ([5c58256](https://github.com/Gitlawb/zero/commit/5c58256abc29c185b449f8ce79647eb3fae61882))
+* **cron:** reserve job IDs atomically ([#686](https://github.com/Gitlawb/zero/issues/686)) ([d9b882e](https://github.com/Gitlawb/zero/commit/d9b882eb0a94f38de8447cb54b57860ccd8ed053))
+* **sandbox:** clarify scoped permission prompts ([#798](https://github.com/Gitlawb/zero/issues/798)) ([9fe02ae](https://github.com/Gitlawb/zero/commit/9fe02ae52e3234cb9dae76e0c5594a287ccbb52a))
+* **tui:** fix rendering corruption over multipass + Windows Terminal ([#709](https://github.com/Gitlawb/zero/issues/709)) ([5bb1bc1](https://github.com/Gitlawb/zero/commit/5bb1bc11c3188dcea7709ff07c8b25dda3541de8))
+* **tui:** reset quiet clock for new runs ([#799](https://github.com/Gitlawb/zero/issues/799)) ([a4a805a](https://github.com/Gitlawb/zero/commit/a4a805a6c82c51cb255e909bd87ca183c8805cf2))
+
 ## [0.5.0](https://github.com/Gitlawb/zero/compare/v0.4.0...v0.5.0) (2026-07-22)
 
 
