@@ -2415,6 +2415,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingText = nil
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
+		m = m.reconcileGoalAfterRun(msg.usageEvents, msg.err)
 		// Roll the completed run's wall-time into the session's rolling average so
 		// /context can surface typical turn latency, not just token counts.
 		if msg.turnElapsed > 0 {
@@ -2469,8 +2470,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// other loops remain.
 			m, loopTickCmd = m.ensureLoopTick()
 		}
+		hadQueuedMessage := strings.TrimSpace(m.queuedMessage) != ""
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		var goalCmd tea.Cmd
+		if !hadQueuedMessage && msg.specReview == nil && next.activeLoopID == "" {
+			next, goalCmd = next.launchGoalContinuationIfReady()
+		}
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
@@ -4180,6 +4186,8 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		m, text = m.handleResumeCommand(item.Value)
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		} else {
+			m, cmd = m.launchGoalContinuationIfReady()
 		}
 	case pickerSkill:
 		// Fill the composer with "/name " so the user adds their request before
@@ -4346,6 +4354,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
 		return m.handleLoopCommand(command.text)
+	case commandGoal:
+		return m.handleGoalCommand(command.text)
 	case commandExit:
 		// Closing the session stops its foreground loops mid-task; warn once so a
 		// token-spending loop isn't ended by reflex.
@@ -4483,6 +4493,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			})
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
+		if text == "" {
+			return m.launchGoalContinuationIfReady()
 		}
 		return m, nil
 	case commandRetitle:
@@ -4893,6 +4906,8 @@ func (m *model) rememberInput(value string) {
 }
 
 func (m *model) cancelRun() {
+	goalWasActive := m.pending && m.activeSession.Goal != nil &&
+		m.activeSession.Goal.Status == sessions.GoalStatusActive
 	if m.runCancel != nil {
 		m.runCancel()
 	}
@@ -4941,6 +4956,18 @@ func (m *model) cancelRun() {
 			"message": "Run cancelled.",
 		}); err == nil {
 			*m = next
+		}
+	}
+	if goalWasActive && m.sessionStore != nil && m.activeSession.SessionID != "" {
+		updated, event, err := m.sessionStore.PauseGoalIfActive(m.activeSession.SessionID, "run cancelled by user")
+		if err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Goal: pause after cancellation: " + err.Error()})
+		} else {
+			m.activeSession = updated
+			if event != nil {
+				m.sessionEvents = append(m.sessionEvents, *event)
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Goal paused. Use /goal resume to continue."})
+			}
 		}
 	}
 	m.pending = false
@@ -4992,9 +5019,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
 		options := m.agentOptions
-		options.Registry = m.registry
+		options.Registry = cloneToolRegistry(m.registry)
+		goalAwareRun := !runOptions.specDraft && m.activeLoopID == ""
+		if goalAwareRun {
+			options.Registry = m.goalRegistry()
+		}
 		if runOptions.registry != nil {
-			options.Registry = runOptions.registry
+			options.Registry = cloneToolRegistry(runOptions.registry)
+			if goalAwareRun && m.activeSession.SessionID != "" {
+				for _, tool := range tools.NewGoalTools(m.sessionStore, m.activeSession.SessionID) {
+					options.Registry.Register(tool)
+				}
+			}
 		}
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
@@ -5002,6 +5038,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
+		}
+		if goalAwareRun {
+			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)
 		}
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName

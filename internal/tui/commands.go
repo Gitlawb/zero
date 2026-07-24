@@ -50,6 +50,7 @@ const (
 	commandBTW
 	commandSkills
 	commandLoop
+	commandGoal
 	commandVoice
 	commandSTTModel
 	commandUnknown
@@ -337,6 +338,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Repeat a prompt or command on an interval (e.g. /loop 5m /babysit-prs), or self-paced when no interval is given.",
 		kind:        commandLoop,
+	},
+	{
+		name:        "/goal",
+		usage:       "/goal [--tokens N] <objective> | status | pause | resume | edit | clear",
+		group:       commandGroupSession,
+		description: "Create and pursue one persistent objective for this session.",
+		kind:        commandGoal,
 	},
 	{
 		name:        "/help",
