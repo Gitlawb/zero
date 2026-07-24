@@ -47,6 +47,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "curl", script: "curl https://example.com", network: true},
 		{name: "Windows curl cmd", script: "curl.cmd https://example.com", network: true},
 		{name: "Windows curl exe", script: "curl.exe https://example.com", network: true},
+		{name: "Windows drive path curl exe", script: `'C:\tools\curl.exe' https://example.com`, network: true},
+		{name: "Windows UNC path curl exe", script: `'\\server\share\curl.exe' https://example.com`, network: true},
 		{name: "Windows npm cmd", script: "npm.cmd install", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},
 		{name: "python http server", script: "python3 -m http.server 8000", network: true},

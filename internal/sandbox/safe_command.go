@@ -437,17 +437,22 @@ func normalizeProgramToken(field string) string {
 	token := strings.TrimSpace(field)
 	token = strings.TrimLeft(token, "$(")
 	token = strings.TrimRight(token, ")")
-	// Strip shell quoting/escaping characters (", ', `, \) wherever they appear
-	// in the token — surrounding, embedded, or as a mid-word escape — so
-	// "vim", v"i"m, 'v'im, and vi\m all collapse to the program name. This is
-	// done BEFORE the directory-prefix trim so an escape can't masquerade as a
-	// path separator (e.g. vi\m must become vim, not m).
-	token = stripChars(token, "\"'`\\")
-	// Strip a directory prefix so /usr/bin/vim reduces to the basename. (A
-	// Windows-style backslash path separator is already removed above, so only
-	// the POSIX separator remains to split on.)
-	if i := strings.LastIndex(token, "/"); i >= 0 {
-		token = token[i+1:]
+	// PowerShell commonly invokes absolute drive-letter or UNC paths. Extract
+	// their basename while backslashes still carry path-separator meaning;
+	// removing them first would turn C:\tools\curl.exe into c:toolscurl.exe and
+	// bypass the canonical curl risk entry.
+	pathToken := stripChars(token, "\"'`")
+	if windowsPathBasename, ok := windowsAbsolutePathBasename(pathToken); ok {
+		token = windowsPathBasename
+	} else {
+		// Strip shell quoting/escaping characters (", ', `, \) wherever they
+		// appear in the token — surrounding, embedded, or as a mid-word escape
+		// — so "vim", v"i"m, 'v'im, and vi\m all collapse to the program name.
+		token = stripChars(token, "\"'`\\")
+		// Strip a directory prefix so /usr/bin/vim reduces to the basename.
+		if i := strings.LastIndex(token, "/"); i >= 0 {
+			token = token[i+1:]
+		}
 	}
 	token = strings.ToLower(token)
 	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
@@ -456,6 +461,21 @@ func normalizeProgramToken(field string) string {
 		}
 	}
 	return token
+}
+
+func windowsAbsolutePathBasename(token string) (string, bool) {
+	driveAbsolute := len(token) >= 3 &&
+		((token[0] >= 'a' && token[0] <= 'z') || (token[0] >= 'A' && token[0] <= 'Z')) &&
+		token[1] == ':' && (token[2] == '\\' || token[2] == '/')
+	uncAbsolute := strings.HasPrefix(token, `\\`)
+	if !driveAbsolute && !uncAbsolute {
+		return "", false
+	}
+	index := strings.LastIndexAny(token, `\/`)
+	if index < 0 || index+1 >= len(token) {
+		return "", false
+	}
+	return token[index+1:], true
 }
 
 // stripChars returns s with every rune in cutset removed.
