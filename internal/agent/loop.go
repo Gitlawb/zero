@@ -1619,7 +1619,11 @@ func sandboxDeniedShellResult(result tools.Result) bool {
 	if result.ExecutionOutcome != nil {
 		// Typed denials must be handled by their exact capability path. Never
 		// turn a structured narrow denial into the legacy unrestricted retry.
-		return false
+		denial := result.ExecutionOutcome.Denial
+		return denial != nil &&
+			denial.Source == execution.DenialSourcePlatformSandbox &&
+			denial.Capability.Kind == execution.CapabilityUnrestricted &&
+			denial.NextAction == execution.DenialNextActionRequestApproval
 	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
 }

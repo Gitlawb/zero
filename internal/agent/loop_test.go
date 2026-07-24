@@ -288,6 +288,18 @@ func (tool *sandboxDeniedRetryTool) Run(_ context.Context, args map[string]any) 
 	return tools.Result{
 		Status: tools.StatusError,
 		Output: "touch: cannot touch '/home/user/.npm/cache': Read-only file system",
+		ExecutionOutcome: &execution.Outcome{
+			State: execution.StateDenied,
+			Kind:  execution.OutcomeEnforcementDenied,
+			Exit:  &execution.Exit{Code: 1},
+			Denial: &execution.Denial{
+				Capability:  execution.Capability{Kind: execution.CapabilityUnrestricted, Scope: "host"},
+				Source:      execution.DenialSourcePlatformSandbox,
+				Reason:      "sandbox blocked command execution",
+				Recoverable: true,
+				NextAction:  execution.DenialNextActionRequestApproval,
+			},
+		},
 		Meta: map[string]string{
 			"exit_code":                    "1",
 			tools.SandboxLikelyDeniedMeta:  "true",

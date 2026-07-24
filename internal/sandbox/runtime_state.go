@@ -27,13 +27,10 @@ var fallbackSandboxRuntimes = struct {
 }{roots: make(map[string]string)}
 
 type SandboxRuntime struct {
-	Root   string `json:"root,omitempty"`
-	Home   string `json:"home,omitempty"`
-	Cache  string `json:"cache,omitempty"`
-	Config string `json:"config,omitempty"`
-	Data   string `json:"data,omitempty"`
-	State  string `json:"state,omitempty"`
-	Temp   string `json:"temp,omitempty"`
+	Root  string `json:"root,omitempty"`
+	Cache string `json:"cache,omitempty"`
+	Data  string `json:"data,omitempty"`
+	Temp  string `json:"temp,omitempty"`
 }
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
@@ -75,21 +72,15 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		}
 	}()
 	runtimeState := SandboxRuntime{
-		Root:   root,
-		Home:   filepath.Join(root, "home"),
-		Cache:  filepath.Join(root, "cache"),
-		Config: filepath.Join(root, "config"),
-		Data:   filepath.Join(root, "data"),
-		State:  filepath.Join(root, "state"),
-		Temp:   filepath.Join(root, "tmp"),
+		Root:  root,
+		Cache: filepath.Join(root, "cache"),
+		Data:  filepath.Join(root, "data"),
+		Temp:  filepath.Join(root, "tmp"),
 	}
 	directories := []string{
 		runtimeState.Root,
-		runtimeState.Home,
 		runtimeState.Cache,
-		runtimeState.Config,
 		runtimeState.Data,
-		runtimeState.State,
 		runtimeState.Temp,
 		filepath.Join(runtimeState.Cache, "npm"),
 		filepath.Join(runtimeState.Cache, "yarn"),
@@ -97,7 +88,6 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		filepath.Join(runtimeState.Cache, "pip"),
 		filepath.Join(runtimeState.Cache, "go-build"),
 		filepath.Join(runtimeState.Data, "go-mod"),
-		filepath.Join(runtimeState.Data, "cargo"),
 	}
 	for _, directory := range directories {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -207,22 +197,16 @@ func sandboxRuntimeEnvironment(env []string, runtimeState *SandboxRuntime) []str
 		return env
 	}
 	overrides := []string{
-		"HOME=" + runtimeState.Home,
 		"XDG_CACHE_HOME=" + runtimeState.Cache,
-		"XDG_CONFIG_HOME=" + runtimeState.Config,
-		"XDG_DATA_HOME=" + runtimeState.Data,
-		"XDG_STATE_HOME=" + runtimeState.State,
 		"TMPDIR=" + runtimeState.Temp,
 		"TMP=" + runtimeState.Temp,
 		"TEMP=" + runtimeState.Temp,
 		"npm_config_cache=" + filepath.Join(runtimeState.Cache, "npm"),
-		"NPM_CONFIG_USERCONFIG=" + filepath.Join(runtimeState.Config, "npmrc"),
 		"YARN_CACHE_FOLDER=" + filepath.Join(runtimeState.Cache, "yarn"),
 		"COREPACK_HOME=" + filepath.Join(runtimeState.Cache, "corepack"),
 		"PIP_CACHE_DIR=" + filepath.Join(runtimeState.Cache, "pip"),
 		"GOCACHE=" + filepath.Join(runtimeState.Cache, "go-build"),
 		"GOMODCACHE=" + filepath.Join(runtimeState.Data, "go-mod"),
-		"CARGO_HOME=" + filepath.Join(runtimeState.Data, "cargo"),
 	}
 	return upsertEnvList(env, overrides...)
 }
