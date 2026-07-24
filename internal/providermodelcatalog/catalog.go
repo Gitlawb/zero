@@ -158,7 +158,8 @@ var curatedModels = map[string][]Model{
 		{ID: "mistral-ai/codestral-2501", Description: "coding model"},
 	},
 	"xai": {
-		{ID: "grok-4", Description: "catalog default"},
+		{ID: "grok-4.5", Description: "catalog default"},
+		{ID: "grok-4", Description: "previous flagship"},
 		{ID: "grok-3", Description: "general model"},
 		{ID: "grok-3-mini", Description: "fast reasoning model"},
 		{ID: "grok-code-fast-1", Description: "coding model"},

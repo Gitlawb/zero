@@ -149,7 +149,7 @@ var descriptors = []Descriptor{
 	openAICompat("github", "GitHub Models", "https://models.inference.ai.azure.com", "openai/gpt-4.1", []string{"GITHUB_TOKEN"}, "github-models"),
 	transportDescriptor("bedrock", "Amazon Bedrock", TransportBedrock, "https://bedrock-runtime.${AWS_REGION}.amazonaws.com", "anthropic.claude-3-5-sonnet-20241022-v2:0", []string{"AWS_ACCESS_KEY_ID", "AWS_PROFILE"}, []APIFormat{APIFormatBedrockConverse}, true),
 	transportDescriptor("vertex", "Vertex AI", TransportVertex, "https://aiplatform.googleapis.com", "gemini-2.5-pro", []string{"GOOGLE_APPLICATION_CREDENTIALS"}, []APIFormat{APIFormatVertexGenerateContent}, true),
-	oauthProvider(openAICompat("xai", "xAI", "https://api.x.ai/v1", "grok-4", []string{"XAI_API_KEY"}), false, true),
+	oauthProvider(openAICompat("xai", "xAI", "https://api.x.ai/v1", "grok-4.5", []string{"XAI_API_KEY"}), false, true),
 	openAICompat("venice", "Venice AI", "https://api.venice.ai/api/v1", "qwen-2.5-qwq-32b", []string{"VENICE_API_KEY"}),
 	openAICompat("xiaomi-mimo", "Xiaomi MiMo", "https://api.mimo.xiaomi.com/openai/v1", "mimo-vl", []string{"MIMO_API_KEY", "XIAOMI_API_KEY"}, "xiaomi mimo"),
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
