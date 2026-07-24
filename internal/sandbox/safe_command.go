@@ -430,8 +430,9 @@ func shellDashCPayload(program string, fields []string) string {
 // name: it strips shell quoting/escaping characters (", ', `, \) wherever they
 // appear in the token (including embedded ones like `vi\m` or `v"i"m`), strips
 // leading command-substitution markers, removes any directory prefix (so
-// /usr/bin/vim and C:\tools\vim.exe match "vim"), and lowercases. This closes
-// path/quote/substitution evasions of the detector.
+// /usr/bin/vim and C:\tools\vim.exe match "vim"), removes Windows executable
+// suffixes, and lowercases. This closes path/quote/substitution evasions of the
+// detector and keeps curl.exe/npm.cmd equivalent to curl/npm for risk analysis.
 func normalizeProgramToken(field string) string {
 	token := strings.TrimSpace(field)
 	token = strings.TrimLeft(token, "$(")
@@ -448,7 +449,13 @@ func normalizeProgramToken(field string) string {
 	if i := strings.LastIndex(token, "/"); i >= 0 {
 		token = token[i+1:]
 	}
-	return strings.ToLower(token)
+	token = strings.ToLower(token)
+	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+		if strings.HasSuffix(token, suffix) {
+			return strings.TrimSuffix(token, suffix)
+		}
+	}
+	return token
 }
 
 // stripChars returns s with every rune in cutset removed.

