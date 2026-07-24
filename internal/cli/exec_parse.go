@@ -465,6 +465,9 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		// rather than let a mutation slip in ahead of the mode gate.
 		return options, false, execUsageError{"--plan cannot be combined with --worktree."}
 	}
+	if options.plan && options.permissionMode != "" && strings.ToLower(options.permissionMode) != "plan" {
+		return options, false, execUsageError{"--plan cannot be combined with --permission-mode=" + options.permissionMode + "."}
+	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}
 	}

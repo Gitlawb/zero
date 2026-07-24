@@ -22,7 +22,7 @@ func (m model) handlePlanCommand(args string) (model, string) {
 	case "", "status":
 		return m, m.planText()
 	case "on":
-		if m.isRunning() {
+		if m.pending {
 			return m, "Cannot change plan mode while a turn is active."
 		}
 		if m.permissionMode == agent.PermissionModePlan {
@@ -32,7 +32,7 @@ func (m model) handlePlanCommand(args string) (model, string) {
 		m.permissionMode = agent.PermissionModePlan
 		return m, "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off."
 	case "off":
-		if m.isRunning() {
+		if m.pending {
 			return m, "Cannot change plan mode while a turn is active."
 		}
 		if m.permissionMode != agent.PermissionModePlan {

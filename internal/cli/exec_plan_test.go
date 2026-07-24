@@ -45,6 +45,21 @@ func TestParseExecArgsRejectsPlanWithWorktree(t *testing.T) {
 	}
 }
 
+func TestParseExecArgsRejectsPlanWithNonPlanPermissionMode(t *testing.T) {
+	_, _, err := parseExecArgs([]string{"--plan", "--permission-mode=ask", "draft a plan"})
+	if err == nil || !strings.Contains(err.Error(), "--permission-mode") {
+		t.Fatalf("expected --plan/--permission-mode validation, got %v", err)
+	}
+
+	options, _, err := parseExecArgs([]string{"--plan", "--permission-mode=plan", "draft a plan"})
+	if err != nil {
+		t.Fatalf("expected --plan with --permission-mode=plan to succeed, got %v", err)
+	}
+	if !options.plan || options.permissionMode != "plan" {
+		t.Fatalf("expected options.plan=true and permissionMode=plan, got plan=%v mode=%q", options.plan, options.permissionMode)
+	}
+}
+
 // TestRunExecPlanHidesWriteAndShellToolsFromListing drives the real --plan
 // flag through runExec (via --list-tools, so no provider is needed) and
 // confirms write_file and bash — advertised under every other mode covered by
