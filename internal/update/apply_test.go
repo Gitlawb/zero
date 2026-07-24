@@ -168,9 +168,15 @@ func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
 	if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
 		t.Fatalf("WriteFile helper: %v", err)
 	}
-	// Force installBinary's staging copy to fail by occupying its staged
-	// "<helper>.new" path with a directory instead of a file.
-	if err := os.MkdirAll(existingHelperPath+".new", 0o755); err != nil {
+	// Force installBinary's staging copy to fail by pinning the random
+	// staging suffix and occupying the resulting path with a directory
+	// instead of a file.
+	stubRandomStagingSuffix(t, "test-fixed-suffix")
+	stagedHelperPath, err := stagingFilePath(existingHelperPath)
+	if err != nil {
+		t.Fatalf("stagingFilePath: %v", err)
+	}
+	if err := os.MkdirAll(stagedHelperPath, 0o755); err != nil {
 		t.Fatalf("MkdirAll staged path: %v", err)
 	}
 
