@@ -47,6 +47,7 @@ func newGetGoalTool(store *sessions.Store, sessionID string) Tool {
 
 func newCreateGoalTool(store *sessions.Store, sessionID string) Tool {
 	minimum := 0
+	maximum := 1_000_000_000
 	return &goalTool{
 		baseTool: baseTool{
 			name: "create_goal",
@@ -63,6 +64,7 @@ func newCreateGoalTool(store *sessions.Store, sessionID string) Tool {
 						Type:        "integer",
 						Description: "Optional maximum total tokens. Zero means no goal-specific limit.",
 						Minimum:     &minimum,
+						Maximum:     &maximum,
 					},
 				},
 				Required:             []string{"objective"},

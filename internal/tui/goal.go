@@ -86,6 +86,9 @@ func (m model) handleGoalCommand(args string) (model, tea.Cmd) {
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: message})
 		return m.launchGoalContinuationIfReady()
 	case "create":
+		if m.pending {
+			return m.appendGoalError("A run is already in progress."), nil
+		}
 		objective, budget, err := parseGoalObjective(rest)
 		if err != nil {
 			return m.appendGoalError(err.Error()), nil
@@ -275,40 +278,41 @@ func (m model) reconcileGoalAfterRun(usageEvents []zeroruntime.Usage, runErr err
 		}
 		return m
 	}
-	if loaded.Goal != nil {
-		tokens := 0
-		for _, event := range usageEvents {
-			tokens += event.TotalTokens()
+	if loaded.Goal == nil {
+		return m
+	}
+	tokens := 0
+	for _, event := range usageEvents {
+		tokens += event.TotalTokens()
+	}
+	if tokens > 0 {
+		updated, _, addErr := m.sessionStore.AddGoalUsage(loaded.SessionID, tokens)
+		if addErr != nil {
+			return m.appendGoalError("account usage: " + addErr.Error())
 		}
-		if tokens > 0 {
-			updated, _, addErr := m.sessionStore.AddGoalUsage(loaded.SessionID, tokens)
-			if addErr != nil {
-				return m.appendGoalError("account usage: " + addErr.Error())
-			}
-			loaded = &updated
+		loaded = &updated
+	}
+	if runErr != nil && loaded.Goal.Status == sessions.GoalStatusActive {
+		status := sessions.GoalStatusPaused
+		reason := "run stopped after an error"
+		if errhint.Classify(runErr) == errhint.RateLimit {
+			status = sessions.GoalStatusUsageLimited
+			reason = "provider usage limit reached"
 		}
-		if runErr != nil && loaded.Goal.Status == sessions.GoalStatusActive {
-			status := sessions.GoalStatusPaused
-			reason := "run stopped after an error"
-			if errhint.Classify(runErr) == errhint.RateLimit {
-				status = sessions.GoalStatusUsageLimited
-				reason = "provider usage limit reached"
-			}
-			updated, _, updateErr := m.sessionStore.UpdateGoal(
-				loaded.SessionID,
-				status,
-				reason,
-			)
-			if updateErr != nil {
-				return m.appendGoalError("pause after error: " + updateErr.Error())
-			}
-			loaded = &updated
-			message := "Goal paused because the run stopped with an error. Use /goal resume to continue."
-			if status == sessions.GoalStatusUsageLimited {
-				message = "Goal stopped at the provider usage limit. Use /goal resume when capacity is available."
-			}
-			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: message})
+		updated, _, updateErr := m.sessionStore.UpdateGoal(
+			loaded.SessionID,
+			status,
+			reason,
+		)
+		if updateErr != nil {
+			return m.appendGoalError("pause after error: " + updateErr.Error())
 		}
+		loaded = &updated
+		message := "Goal paused because the run stopped with an error. Use /goal resume to continue."
+		if status == sessions.GoalStatusUsageLimited {
+			message = "Goal stopped at the provider usage limit. Use /goal resume when capacity is available."
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: message})
 	}
 	m.activeSession = *loaded
 	if events, readErr := m.sessionStore.ReadEvents(loaded.SessionID); readErr == nil {

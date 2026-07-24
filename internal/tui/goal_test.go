@@ -37,6 +37,39 @@ func TestGoalCommandCreatesPersistentGoalAndStartsRun(t *testing.T) {
 	}
 }
 
+func TestGoalCommandDoesNotCreateGoalDuringActiveRun(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal_pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:     &scriptedProvider{},
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.activeSession = session
+	m.pending = true
+
+	next, cmd := m.handleGoalCommand("Do not replace the active run")
+	if cmd != nil {
+		t.Fatal("goal creation during an active run returned a command")
+	}
+	if next.activeSession.Goal != nil {
+		t.Fatalf("goal was created during an active run: %#v", next.activeSession.Goal)
+	}
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Goal != nil {
+		t.Fatalf("goal was persisted during an active run: %#v", loaded.Goal)
+	}
+	if !transcriptContains(next.transcript, "A run is already in progress.") {
+		t.Fatalf("missing active-run explanation: %#v", next.transcript)
+	}
+}
+
 func TestGoalRunRegistryContainsSessionBoundTools(t *testing.T) {
 	store := testSessionStore(t)
 	session, err := store.Create(sessions.CreateInput{SessionID: "goal_tools"})
@@ -57,6 +90,45 @@ func TestGoalRunRegistryContainsSessionBoundTools(t *testing.T) {
 	}
 	if _, ok := m.registry.Get("get_goal"); ok {
 		t.Fatal("goal tools should not mutate the shared base registry")
+	}
+}
+
+func TestLoopRunExcludesGoalToolsAndInstructions(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal_loop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err = store.CreateGoal(session.SessionID, "Keep this out of loops", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "Loop iteration complete."},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	m := newModel(context.Background(), Options{
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.activeSession = session
+	m.activeLoopID = "loop-1"
+
+	_ = execCmd(m.runAgentWithOptions(1, context.Background(), "run loop", nil, tuiAgentRunOptions{}))
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(provider.requests))
+	}
+	request := provider.requests[0]
+	for _, definition := range request.Tools {
+		switch definition.Name {
+		case "get_goal", "create_goal", "update_goal":
+			t.Fatalf("loop request exposed goal tool %q", definition.Name)
+		}
+	}
+	if len(request.Messages) > 0 &&
+		strings.Contains(request.Messages[0].Content, "Persistent goal for this session:") {
+		t.Fatalf("loop request included goal instructions: %q", request.Messages[0].Content)
 	}
 }
 

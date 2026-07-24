@@ -34,6 +34,14 @@ func TestGoalToolsAreBoundToTheirSession(t *testing.T) {
 	}
 }
 
+func TestCreateGoalToolDeclaresTokenBudgetMaximum(t *testing.T) {
+	create := NewGoalTools(nil, "goal")[1]
+	maximum := create.Parameters().Properties["token_budget"].Maximum
+	if maximum == nil || *maximum != 1_000_000_000 {
+		t.Fatalf("token_budget maximum = %v, want 1000000000", maximum)
+	}
+}
+
 func TestUpdateGoalToolRestrictsAgentTransitions(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	session, err := store.Create(sessions.CreateInput{SessionID: "goal"})

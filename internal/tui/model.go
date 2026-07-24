@@ -5010,12 +5010,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var specReview *pendingSpecReviewPrompt
 		options := m.agentOptions
 		options.Registry = cloneToolRegistry(m.registry)
-		if !runOptions.specDraft {
+		goalAwareRun := !runOptions.specDraft && m.activeLoopID == ""
+		if goalAwareRun {
 			options.Registry = m.goalRegistry()
 		}
 		if runOptions.registry != nil {
 			options.Registry = cloneToolRegistry(runOptions.registry)
-			if !runOptions.specDraft && m.activeSession.SessionID != "" {
+			if goalAwareRun && m.activeSession.SessionID != "" {
 				for _, tool := range tools.NewGoalTools(m.sessionStore, m.activeSession.SessionID) {
 					options.Registry.Register(tool)
 				}
@@ -5028,7 +5029,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
 		}
-		if !runOptions.specDraft {
+		if goalAwareRun {
 			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)
 		}
 		options.SessionID = m.activeSession.SessionID
