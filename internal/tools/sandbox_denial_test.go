@@ -40,6 +40,19 @@ func TestLikelySandboxDenialMetadataFromCommandOutput(t *testing.T) {
 			if got := denial != nil; got != test.want {
 				t.Fatalf("typed sandbox denial = %t, want %t; denial=%#v", got, test.want, denial)
 			}
+			if test.want {
+				if denial.Source != execution.DenialSourcePlatformSandbox ||
+					denial.Capability.Kind != execution.CapabilityUnrestricted ||
+					denial.Capability.Scope != "host" ||
+					!denial.Recoverable ||
+					denial.NextAction != execution.DenialNextActionRequestApproval {
+					t.Fatalf("unexpected denial shape: %#v", denial)
+				}
+				if meta[SandboxDenialReasonMeta] != denial.Reason ||
+					meta[SandboxDenialKeywordMeta] == "" {
+					t.Fatalf("incomplete denial metadata: %#v", meta)
+				}
+			}
 			if got := meta[SandboxLikelyDeniedMeta] == "true"; got != test.want {
 				t.Fatalf("sandbox denial = %t, want %t; meta=%#v", got, test.want, meta)
 			}
