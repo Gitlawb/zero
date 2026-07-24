@@ -78,11 +78,18 @@ type execOptions struct {
 	// fill-only-if-unset rule, so precedence is explicit flag > mode > profile.
 	// Distinct from the mode preset also named "fast" (which picks a model) and
 	// from the legacy inert --profile above. See internal/execprofile.
-	execProfile           string
-	reasoningEffort       string
-	useSpec               bool
-	specModel             string
-	specReasoningEffort   string
+	execProfile         string
+	reasoningEffort     string
+	useSpec             bool
+	specModel           string
+	specReasoningEffort string
+	// plan selects PermissionModePlan for this run: the same read-only,
+	// in-session planning mode the TUI enters with /plan on. Unlike --use-spec
+	// (a separate draft session with its own review flow), this only swaps the
+	// permission mode for the run already being made — ToolAdvertised gates
+	// write/shell tools generically for any mode, so no other exec plumbing
+	// needs to know about it.
+	plan                  bool
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat
@@ -104,6 +111,7 @@ type execOptions struct {
 	worktreeName          string
 	worktreeDir           string
 	skipPermissionsUnsafe bool
+	permissionMode        string
 	// allowEscalation opts the run into mid-run model escalation: it registers
 	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
 	// default — a run without the flag is byte-identical to before (no tool, nil
@@ -240,6 +248,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
 	}
+	if options.plan {
+		permissionMode = agent.PermissionModePlan
+	}
 	var mcpRuntime mcpToolRuntime
 	var mcpSkip trustSkip
 	// Make local plugins live for this run: register their declared tools into the
@@ -306,11 +317,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
 	executionRunner.SetPreparer(sandboxEngine)
-	mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+	if permissionMode != agent.PermissionModePlan {
+		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
+		if err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+		}
+		defer closeMCPRuntime(stderr, mcpRuntime)
 	}
-	defer closeMCPRuntime(stderr, mcpRuntime)
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {

@@ -20,6 +20,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":
 			return options, true, nil
+		case arg == "--permission-mode":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--permission-mode="):
+			value, err := requiredInlineFlagValue(arg, "--permission-mode")
+			if err != nil {
+				return options, false, err
+			}
+			options.permissionMode = value
 		case arg == "--skip-permissions-unsafe":
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":
@@ -171,6 +184,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.reasoningEffort = strings.TrimSpace(strings.TrimPrefix(arg, "--reasoning-effort="))
 		case arg == "--use-spec":
 			options.useSpec = true
+		case arg == "--plan":
+			options.plan = true
 		case arg == "--spec-model":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -436,6 +451,22 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	}
 	if !options.useSpec && options.specReasoningEffort != "" {
 		return options, false, execUsageError{"--spec-reasoning-effort requires --use-spec."}
+	}
+	if options.plan && options.useSpec {
+		return options, false, execUsageError{"Use either --plan or --use-spec, not both."}
+	}
+	if options.plan && options.skipPermissionsUnsafe {
+		return options, false, execUsageError{"Use either --plan or --skip-permissions-unsafe, not both."}
+	}
+	if options.plan && options.worktree {
+		// Worktree prep (copying/branching the workspace) runs before the plan
+		// permission mode is assigned, so it would happen even under --plan's
+		// read-only, no-side-effects promise. Reject the combination outright
+		// rather than let a mutation slip in ahead of the mode gate.
+		return options, false, execUsageError{"--plan cannot be combined with --worktree."}
+	}
+	if options.plan && options.permissionMode != "" && strings.ToLower(options.permissionMode) != "plan" {
+		return options, false, execUsageError{"--plan cannot be combined with --permission-mode=" + options.permissionMode + "."}
 	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}

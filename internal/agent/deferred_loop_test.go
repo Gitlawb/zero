@@ -798,3 +798,98 @@ func TestDisabledToolSearchFallsBackToEager(t *testing.T) {
 		t.Fatalf("deferred tool must be callable under eager fallback, got status=%s output=%q", result.Status, result.Output)
 	}
 }
+
+// fakeDeferredMutatorTool is a deferred-eligible tool with mutating Safety
+// (SideEffectWrite), standing in for a real write/mutator MCP tool that would
+// be hidden behind tool_search once deferral activates.
+type fakeDeferredMutatorTool struct{ name string }
+
+func (t fakeDeferredMutatorTool) Name() string        { return t.name }
+func (t fakeDeferredMutatorTool) Description() string { return "mutates the workspace, deferred" }
+func (t fakeDeferredMutatorTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (t fakeDeferredMutatorTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, Reason: "mutates"}
+}
+func (t fakeDeferredMutatorTool) Run(_ context.Context, _ map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "mutated"}
+}
+func (t fakeDeferredMutatorTool) Deferred() bool { return true }
+
+// TestPlanModeToolSearchNeverLeaksDeferredMutatorSchema guards the concern
+// raised in PR #642 review (jatmn, P2): that tool_search filters deferred
+// candidates only by EnabledTools/DisabledTools, not by plan-mode visibility,
+// so a plan-mode model could call `tool_search select:<deferred write tool>`
+// and receive that tool's full schema even though a direct call to it is
+// correctly denied the following turn.
+//
+// tool_search's own Safety is SideEffectNone, and toolAdvertisedInPlan (the
+// same gate executeToolCall uses to deny a direct call) requires
+// SideEffect==Read to advertise a tool in plan mode. That means tool_search
+// itself is never advertised, never activates deferral (loaderUsable in
+// partitionToolsCached requires ToolAdvertised(loader, permissionMode)), and
+// is denied at dispatch like any other hidden tool if a stale/adversarial
+// call reaches it anyway — so a deferred mutator's schema can never reach the
+// model through tool_search while in plan mode. This test pins that
+// end-to-end: tool_search is absent from the advertised tool list, and a
+// forced call to it is denied before rendering any tool schema.
+func TestPlanModeToolSearchNeverLeaksDeferredMutatorSchema(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(fakeDeferredMutatorTool{name: "mcp__srv__mutate"})
+	registry.Register(fakeDeferredMutatorTool{name: "mcp__srv__mutate2"})
+	registry.Register(tools.NewToolSearchTool(registry))
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{ // turn 1: force a call to tool_search even though it should not be advertised.
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: tools.ToolSearchToolName},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "c1", ArgumentsFragment: `{"query":"select:mcp__srv__mutate"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{ // turn 2: final answer.
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	result, err := Run(context.Background(), "plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModePlan,
+		DeferThreshold: 2, // 2 deferred mutators registered => eligible for deferral.
+		MaxTurns:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// tool_search (and the deferred mutators) must not be advertised in plan
+	// mode's turn 1 tool list at all.
+	for _, def := range provider.requests[0].Tools {
+		if def.Name == tools.ToolSearchToolName {
+			t.Fatalf("plan mode must not advertise tool_search, got %#v", provider.requests[0].Tools)
+		}
+		if def.Name == "mcp__srv__mutate" || def.Name == "mcp__srv__mutate2" {
+			t.Fatalf("plan mode must not advertise a deferred mutator, got %#v", provider.requests[0].Tools)
+		}
+	}
+
+	// The forced call must be denied outright, never a loaded-schema result:
+	// the tool result must not mention the mutator's name or carry a
+	// load_tools signal.
+	var toolMessage string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolMessage = message.Content
+			break
+		}
+	}
+	if !strings.Contains(toolMessage, "not available in plan mode") {
+		t.Fatalf("expected tool_search call denied in plan mode, got %q", toolMessage)
+	}
+	if strings.Contains(toolMessage, "mcp__srv__mutate") {
+		t.Fatalf("denial must not leak the deferred mutator's name/schema, got %q", toolMessage)
+	}
+}

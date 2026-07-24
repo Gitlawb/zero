@@ -1092,12 +1092,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}, nil
 	}
 	tool, toolFound := registry.Get(call.Name)
-	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
+		modeName := string(permissionMode)
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
 			Status:       tools.StatusError,
-			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + modeName + ` mode.`,
 			DenialReason: DenialFiltered,
 		}, nil
 	}
@@ -1764,11 +1765,25 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
+// hooksSuppressed reports whether executable hooks must not run for this
+// run's permission mode. Plan mode promises a read-only turn, but hooks
+// execute configured host commands outside the advertised-tool and sandbox
+// gates, so dispatching them would let merely starting a plan session or
+// calling read_file mutate the workspace or spawn processes.
+//
+// Spec-draft keeps the existing trust-gated hook model: project hooks still
+// fire when the workspace (or its worktree trust root) is trusted. That is
+// intentional; trust inheritance for --use-spec --worktree is covered by
+// TestExecSpecWorktreeInheritsTrustEndToEnd.
+func hooksSuppressed(options Options) bool {
+	return options.PermissionMode == PermissionModePlan
+}
+
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return hooks.DispatchOutcome{}, false
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1791,7 +1806,7 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 // returns any advisory output (e.g. a formatter or vet result) to surface back
 // to the model. afterTool hooks never block. A nil dispatcher is a no-op.
 func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return ""
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1815,7 +1830,7 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 // model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
 // never block the run.
 func dispatchSessionStart(ctx context.Context, options Options) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
@@ -1836,7 +1851,7 @@ func dispatchSessionStart(ctx context.Context, options Options) {
 // dispatchSessionEnd runs configured sessionEnd hooks once when the agent run
 // exits, including early error returns. Lifecycle hooks are advisory.
 func dispatchSessionEnd(ctx context.Context, options Options, result Result, runErr error) {
-	if options.Hooks == nil {
+	if options.Hooks == nil || hooksSuppressed(options) {
 		return
 	}
 	payload := map[string]any{
@@ -2135,6 +2150,20 @@ type requestPermissionsArgs struct {
 }
 
 func executeRequestPermissions(ctx context.Context, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	// request_permissions is dispatched by name above, before the registry-based
+	// ToolAdvertised gate runs, so a read-only mode's registry omitting this tool
+	// (rather than registering it as denied) must not fall through to a real
+	// grant. Deny it here unconditionally for spec-draft/plan, independent of
+	// whether the caller's registry happens to contain the tool.
+	if permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModePlan {
+		return ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + string(permissionMode) + ` mode.`,
+			DenialReason: DenialFiltered,
+		}, nil
+	}
 	parsed, err := parseRequestPermissionsArgs(args)
 	if err != nil {
 		return ToolResult{
@@ -3101,6 +3130,9 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if permissionMode == PermissionModeSpecDraft {
 		return toolAdvertisedInSpecDraft(tool)
 	}
+	if permissionMode == PermissionModePlan {
+		return toolAdvertisedInPlan(tool)
+	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
@@ -3122,11 +3154,45 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	return true
 }
 
+// toolAdvertisedInSpecDraft is the read-only-ish allowlist for --use-spec:
+// inspection tools, ask_user, and submit_spec (which writes the review
+// artifact). Like plan mode, control-tool names are never trusted alone:
+// Registry.Register can replace ask_user/submit_spec with an arbitrary
+// tool, so each special case requires the Safety shape of the real tool.
 func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
+	safety := tool.Safety()
 	switch tool.Name() {
-	case "ask_user", "submit_spec":
-		return true
 	case "update_plan":
+		return false
+	case "ask_user":
+		// Real ask_user is SideEffectRead + PermissionAllow.
+		return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+	case "submit_spec":
+		// Real submit_spec is SideEffectWrite + PermissionAllow (writes
+		// under .zero/specs). Require that shape so a shell/network spoof
+		// registered under the same name is not advertised or executed.
+		return safety.SideEffect == tools.SideEffectWrite && safety.Permission == tools.PermissionAllow
+	}
+	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+}
+
+// toolAdvertisedInPlan mirrors toolAdvertisedInSpecDraft: the agent may only
+// read the workspace, ask the user, and shape the plan with update_plan. No
+// mutating tool is advertised, so plan mode stays strictly read-only.
+//
+// ask_user and update_plan are validated against Safety like every other
+// tool, never whitelisted by name alone: Registry.Register lets a caller
+// replace either name with a mutating tool, and a name-only match would
+// advertise (and then let executeToolCall run) it under a mode that promises
+// read-only behavior. Both names currently carry SideEffectRead+PermissionAllow,
+// so this changes nothing for the real tools.
+//
+// lsp_navigate is excluded even though it is classified SideEffectRead: its
+// manager lazily starts a real language-server process (internal/lsp/server.go)
+// outside the sandbox and permission gates, which contradicts plan mode's
+// promise that nothing runs.
+func toolAdvertisedInPlan(tool tools.Tool) bool {
+	if tool.Name() == "lsp_navigate" {
 		return false
 	}
 	safety := tool.Safety()

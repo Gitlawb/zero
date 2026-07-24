@@ -148,6 +148,10 @@ func specialistAutonomy(permissionMode string) string {
 // read-only "low". An unsafe parent still yields "high" (full unsafe), and a
 // non-member (Task specialist) is unchanged. Authority stays sandbox-confined.
 func memberAwareAutonomy(permissionMode string, member bool) string {
+	pm := strings.TrimSpace(permissionMode)
+	if pm == "plan" || pm == "spec-draft" {
+		return "low"
+	}
 	autonomy := specialistAutonomy(permissionMode)
 	if member && autonomy == "low" {
 		return "member"
@@ -263,6 +267,9 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	args = append(args, "--auto", memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy), "--output-format", "stream-json")
+	if permMode := strings.TrimSpace(input.PermissionMode); permMode != "" {
+		args = append(args, "--permission-mode", permMode)
+	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -315,6 +322,9 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
 	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
+	if permMode := strings.TrimSpace(input.PermissionMode); permMode != "" {
+		args = append(args, "--permission-mode", permMode)
+	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err

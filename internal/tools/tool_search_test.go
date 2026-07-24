@@ -25,6 +25,27 @@ func (t searchFakeTool) Run(context.Context, map[string]any) Result {
 }
 func (t searchFakeTool) Deferred() bool { return true }
 
+// searchFakeMutatorTool is a deferred-eligible tool with mutating Safety
+// (SideEffectWrite), standing in for a real write/mutator MCP tool that a
+// plan/spec-draft run must never surface through tool_search.
+type searchFakeMutatorTool struct {
+	name        string
+	description string
+}
+
+func (t searchFakeMutatorTool) Name() string        { return t.name }
+func (t searchFakeMutatorTool) Description() string { return t.description }
+func (t searchFakeMutatorTool) Parameters() Schema {
+	return Schema{Type: "object", AdditionalProperties: false}
+}
+func (t searchFakeMutatorTool) Safety() Safety {
+	return Safety{SideEffect: SideEffectWrite, Permission: PermissionPrompt, Reason: "mutates"}
+}
+func (t searchFakeMutatorTool) Run(context.Context, map[string]any) Result {
+	return Result{Status: StatusOK}
+}
+func (t searchFakeMutatorTool) Deferred() bool { return true }
+
 func newDeferredFixtureRegistry() *Registry {
 	reg := NewRegistry()
 	reg.Register(searchFakeTool{
@@ -319,4 +340,160 @@ func TestToolSearchHonorsEnabledAllowlist(t *testing.T) {
 	if strings.Contains(keywordResult.Output, "stock_quote") {
 		t.Fatalf("excluded tool leaked into keyword no-match listing: %q", keywordResult.Output)
 	}
+}
+
+// TestToolSearchExcludesDeferredMutatorInPlanMode guards PR #642 review
+// finding (jatmn, P2): tool_search's deferred-candidate filter previously
+// checked only EnabledTools/DisabledTools, never the run's permission-mode
+// visibility, so a plan-mode run could resolve `select:<deferred write tool>`
+// and receive that tool's full schema even though a direct call to it is
+// denied by the agent's plan-mode dispatch gate. A deferred mutator (write
+// SideEffect) must be invisible to tool_search in plan mode: absent from
+// select: resolution, absent from keyword ranking, and absent from the
+// no-match/listing text — mirroring the read-only visibility rule
+// (agent.toolAdvertisedInPlan) applied to direct tool calls.
+func TestToolSearchExcludesDeferredMutatorInPlanMode(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(searchFakeTool{name: "weather_lookup", description: "Look up weather."})
+	reg.Register(searchFakeMutatorTool{name: "file_mutate", description: "Writes files to disk."})
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+	plan := RunOptions{PermissionMode: "plan"}
+
+	// select: an unrelated miss must NOT list the mutator among available tools.
+	// Query "select:does_not_exist" avoids echoing the mutator's name verbatim so
+	// the listing-omission assertion below is not confused by the query echo.
+	selectResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:does_not_exist"}, plan)
+	if _, present := selectResult.Meta["load_tools"]; present {
+		t.Fatalf("plan mode must not resolve a deferred mutator via select:, got load_tools=%q", selectResult.Meta["load_tools"])
+	}
+	listing := selectResult.Output
+	if idx := strings.Index(listing, "Available tools: "); idx >= 0 {
+		listing = listing[idx:]
+	}
+	if strings.Contains(listing, "file_mutate") {
+		t.Fatalf("deferred mutator leaked into plan-mode no-match listing: %q", selectResult.Output)
+	}
+	if !strings.Contains(listing, "weather_lookup") {
+		t.Fatalf("plan-mode no-match listing must still name the visible read-only tool, got %q", selectResult.Output)
+	}
+
+	// keyword: the mutator must NOT rank, and its schema/description must not leak.
+	keywordResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "mutate write"}, plan)
+	if got := keywordResult.Meta["load_tools"]; got != "" {
+		t.Fatalf("deferred mutator must not rank for a keyword query in plan mode, got load_tools=%q", got)
+	}
+	if strings.Contains(keywordResult.Output, "file_mutate") || strings.Contains(keywordResult.Output, "Writes files") {
+		t.Fatalf("deferred mutator leaked into plan-mode keyword output: %q", keywordResult.Output)
+	}
+
+	// A direct select: of file_mutate must load nothing (exact resolution also
+	// filters by mode, not just the no-match listing/keyword paths).
+	exactResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:file_mutate"}, plan)
+	if got := exactResult.Meta["load_tools"]; got != "" {
+		t.Fatalf("select:file_mutate must not load anything in plan mode, got load_tools=%q", got)
+	}
+	if strings.Contains(exactResult.Output, "Writes files") {
+		t.Fatalf("deferred mutator schema/description leaked via exact select: %q", exactResult.Output)
+	}
+
+	// A read-only deferred tool must remain visible in plan mode (this filter
+	// narrows by mode, it does not disable deferral discovery altogether).
+	readResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:weather_lookup"}, plan)
+	if got := readResult.Meta["load_tools"]; got != "weather_lookup" {
+		t.Fatalf("plan mode must still resolve a read-only deferred tool, got load_tools=%q output=%q", got, readResult.Output)
+	}
+}
+
+// TestToolSearchExcludesDeferredMutatorInSpecDraftMode is the spec-draft analog
+// of TestToolSearchExcludesDeferredMutatorInPlanMode: spec-draft is the other
+// read-only mode whose direct-invocation dispatch gate restricts a tool to
+// SideEffectRead+PermissionAllow (agent.toolAdvertisedInSpecDraft), so
+// tool_search must apply the identical narrowing.
+func TestToolSearchExcludesDeferredMutatorInSpecDraftMode(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(searchFakeMutatorTool{name: "file_mutate", description: "Writes files to disk."})
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+	specDraft := RunOptions{PermissionMode: "spec-draft"}
+
+	result := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:file_mutate"}, specDraft)
+	if got := result.Meta["load_tools"]; got != "" {
+		t.Fatalf("spec-draft mode must not resolve a deferred mutator via select:, got load_tools=%q", got)
+	}
+	if strings.Contains(result.Output, "Writes files") {
+		t.Fatalf("deferred mutator schema/description leaked in spec-draft mode: %q", result.Output)
+	}
+}
+
+// TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety guards the
+// name-only allowlist hole CodeRabbit flagged: a tool re-registered as
+// ask_user or submit_spec with the wrong Safety shape must not be
+// advertised or loadable via tool_search in spec-draft mode.
+func TestToolSearchRejectsSpoofedSpecDraftControlToolsBySafety(t *testing.T) {
+	cases := []struct {
+		name   string
+		safety Safety
+	}{
+		// ask_user must be SideEffectRead+Allow; a shell spoof fails.
+		{name: "ask_user", safety: Safety{SideEffect: SideEffectShell, Permission: PermissionAllow, Reason: "spoof"}},
+		// submit_spec must be SideEffectWrite+Allow; a shell spoof fails.
+		{name: "submit_spec", safety: Safety{SideEffect: SideEffectShell, Permission: PermissionAllow, Reason: "spoof"}},
+		// Wrong permission also fails even if the side effect matches.
+		{name: "ask_user", safety: Safety{SideEffect: SideEffectRead, Permission: PermissionDeny, Reason: "spoof"}},
+		{name: "submit_spec", safety: Safety{SideEffect: SideEffectWrite, Permission: PermissionDeny, Reason: "spoof"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+string(tc.safety.SideEffect)+"/"+string(tc.safety.Permission), func(t *testing.T) {
+			reg := NewRegistry()
+			reg.Register(searchSpoofedSafetyTool{name: tc.name, safety: tc.safety, description: "spoofed control tool"})
+			tool := NewToolSearchTool(reg).(optionsAwareTool)
+			result := tool.RunWithOptions(context.Background(),
+				map[string]any{"query": "select:" + tc.name}, RunOptions{PermissionMode: "spec-draft"})
+			if got := result.Meta["load_tools"]; got != "" {
+				t.Fatalf("spec-draft must not load spoofed %s (safety=%+v), got load_tools=%q", tc.name, tc.safety, got)
+			}
+			if strings.Contains(result.Output, "spoofed control tool") {
+				t.Fatalf("spoofed %s description leaked: %q", tc.name, result.Output)
+			}
+			// The description check alone would still pass a regression that leaks
+			// the schema without the description, since Parameters() previously
+			// exposed no distinctive marker. spoofed_secret is a property unique to
+			// this schema, so its absence from Output proves the schema itself
+			// (not just the description string) never serialized into the result.
+			if strings.Contains(result.Output, "spoofed_secret") {
+				t.Fatalf("spoofed %s schema leaked: %q", tc.name, result.Output)
+			}
+		})
+	}
+}
+
+// searchSpoofedSafetyTool is a deferred-eligible tool whose Name and Safety
+// are under test control (used to re-register ask_user/submit_spec shapes).
+type searchSpoofedSafetyTool struct {
+	name, description string
+	safety            Safety
+}
+
+func (t searchSpoofedSafetyTool) Name() string        { return t.name }
+func (t searchSpoofedSafetyTool) Description() string { return t.description }
+func (t searchSpoofedSafetyTool) Parameters() Schema {
+	// spoofed_secret is a distinctive marker property with no other purpose:
+	// its presence or absence in a serialized result.Output is what proves
+	// whether the schema itself (not just the description) leaked.
+	return Schema{
+		Type: "object",
+		Properties: map[string]PropertySchema{
+			"spoofed_secret": {Type: "string", Description: "spoofed control tool marker property"},
+		},
+		AdditionalProperties: false,
+	}
+}
+func (t searchSpoofedSafetyTool) Safety() Safety { return t.safety }
+func (t searchSpoofedSafetyTool) Deferred() bool { return true }
+func (t searchSpoofedSafetyTool) Run(context.Context, map[string]any) Result {
+	return Result{Status: StatusOK, Output: "should not run"}
 }
