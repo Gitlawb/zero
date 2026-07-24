@@ -72,6 +72,30 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("sandboxed write marker = %q, %v; want ok", bytes, err)
 	}
 
+	// This profile has no DenyRead paths, so its WRITE_RESTRICTED token is
+	// never broadened with the Users/Authenticated Users SIDs (see
+	// createWindowsRestrictedTokenFromBase): the write grant those groups
+	// hold on C:\Users\Public must not be reachable through the restricted
+	// SID check at all. Pin that a write there fails: an independent
+	// shared-writable directory outside every carved-out system path
+	// (ProgramData, Windows\Temp), and outside every workspace write root.
+	publicDir := os.Getenv("PUBLIC")
+	if publicDir == "" {
+		t.Log("PUBLIC is not set; skipping C:\\Users\\Public write-jail probe")
+	} else {
+		publicMarker := filepath.Join(publicDir, "zero-elevated-write-denied.txt")
+		_ = os.Remove(publicMarker)
+		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + publicMarker,
+		}, 1)
+		if _, err := os.Stat(publicMarker); err == nil {
+			_ = os.Remove(publicMarker)
+			t.Fatalf("Windows sandbox allowed a write to the shared C:\\Users\\Public directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat public marker: %v", err)
+		}
+	}
+
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen loopback for Windows network smoke: %v", err)
@@ -202,6 +226,24 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("unelevated sandbox allowed a write outside every granted root")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat outside marker: %v", err)
+	}
+
+	// Verify write to C:\ProgramData is blocked
+	programData := os.Getenv("ProgramData")
+	if programData != "" {
+		programDataMarker := filepath.Join(programData, "zero-unelevated-write-denied.txt")
+		_ = os.Remove(programDataMarker)
+
+		runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+			"cmd.exe", "/d", "/s", "/c", "echo leaked>" + programDataMarker,
+		}, 1)
+
+		if _, err := os.Stat(programDataMarker); err == nil {
+			_ = os.Remove(programDataMarker)
+			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat ProgramData marker: %v", err)
+		}
 	}
 }
 

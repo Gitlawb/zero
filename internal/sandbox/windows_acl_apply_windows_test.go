@@ -48,6 +48,67 @@ func TestApplyWindowsACLPathGroupHandleBasedRoundTrip(t *testing.T) {
 	}
 }
 
+// TestApplyWindowsACLPathGroupRevokeCapabilityRemovesStaleDeny is the
+// real-Windows regression for jatmn's P2 finding: promoting a path to an
+// allowed write root must also remove a stale deny ACE an earlier setup
+// round left there for the stable capability SID, not merely omit it from
+// this plan. Without the fix, applyWindowsACLPlan's SetEntriesInAcl-based
+// merge only touches trustees actually named in the new entry list, so an
+// old DenyWrite ACE for a SID the new plan does not mention would survive
+// and keep winning over the new Allow under deny-before-allow evaluation.
+func TestApplyWindowsACLPathGroupRevokeCapabilityRemovesStaleDeny(t *testing.T) {
+	// The stale/allow SIDs must be synthetic identities the test process itself
+	// is not a member of (exactly like the real stable capability SIDs
+	// LoadOrCreateWindowsCapabilitySIDs mints): a WindowsACLDenyWrite mask
+	// includes WRITE_DAC/WRITE_OWNER/DELETE, so denying a well-known group the
+	// test process actually belongs to (e.g. Everyone, BUILTIN\Users) would
+	// lock the test out of managing — and t.TempDir() out of cleaning up —
+	// its own fixture.
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	otherCaps, err := LoadOrCreateWindowsCapabilitySIDs(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs (other): %v", err)
+	}
+	staleSID := caps.ReadOnly
+	allowSID := otherCaps.ReadOnly
+
+	dir := t.TempDir()
+	// Simulate the stale deny an earlier setup round applied while this path
+	// was still covered by the shared-root/descendant DenyWrite mitigation.
+	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+		Path: dir,
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLDenyWrite,
+			Path:       dir,
+			Capability: staleSID,
+			NoInherit:  true,
+		}},
+	}); err != nil {
+		t.Fatalf("apply stale deny: %v", err)
+	}
+	if !dirDeniesSID(t, dir, staleSID) {
+		t.Fatalf("test fixture bug: %q does not carry the stale deny it is supposed to", dir)
+	}
+
+	// Now promote dir to a write root: the plan carries an Allow for a
+	// different SID plus the reconciling revoke for the stale one.
+	if _, _, err := applyWindowsACLPathGroup(windowsACLPathGroup{
+		Path: dir,
+		Entries: []WindowsACLEntry{
+			{Action: WindowsACLAllowWrite, Path: dir, Capability: allowSID},
+			{Action: WindowsACLRevokeCapability, Path: dir, Capability: staleSID, NoInherit: true},
+		},
+	}); err != nil {
+		t.Fatalf("apply promotion to write root: %v", err)
+	}
+	if dirDeniesSID(t, dir, staleSID) {
+		t.Fatalf("%q still carries the stale deny for %q after promotion to a write root", dir, staleSID)
+	}
+}
+
 // A materialized target that does not exist yet is created, ACL'd through the
 // handle, and removed on rollback.
 func TestApplyWindowsACLPathGroupMaterializes(t *testing.T) {
