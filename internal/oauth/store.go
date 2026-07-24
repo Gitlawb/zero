@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -297,11 +298,11 @@ func keyringLockPath(env map[string]string, service, account string) string {
 // when the file-backend location can't be resolved at all, matching the
 // legacy code's own best-effort fallback (no cross-process lock at all).
 func legacyKeyringLockPath(env map[string]string) string {
-	storePath, err := ResolveStorePath(env)
+	home, err := resolveHomeDir(nil)
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
+	return filepath.Join(home, ".config", "zero", "oauth-keyring.lockfile")
 }
 
 // keyringLockFileName names the lock file after the keyring identity it
@@ -687,6 +688,21 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 		}
 		tokens[key] = token
 	}
+
+	if !legacyLoaded {
+		if lt, lerr := b.readLegacyTokens(); lerr == nil {
+			legacyTokens = lt
+		}
+	}
+	for key, legacyToken := range legacyTokens {
+		if ValidateKey(key) != nil {
+			continue
+		}
+		if _, exists := tokens[key]; !exists {
+			tokens[key] = legacyToken
+		}
+	}
+
 	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
 	if err != nil {
 		return nil, false, err
@@ -736,11 +752,16 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // legacyIsFresher reports whether the legacy copy of an already-indexed key
 // should win over the indexed copy. An old binary running alongside the new one
 // refreshes tokens only in the legacy combined entry, and a refresh pushes the
-// expiry later, so a strictly later, non-zero expiry on the legacy side is the
-// signal that it holds a newer credential. A zero (unknown) expiry on either
-// side is not evidence of freshness, so the indexed value is kept.
+// expiry later, so a strictly later expiry on the legacy side is the
+// signal that it holds a newer credential. Zero (unknown) expiries are valid.
 func legacyIsFresher(legacy, current Token) bool {
-	return !legacy.ExpiresAt.IsZero() && !current.ExpiresAt.IsZero() && legacy.ExpiresAt.After(current.ExpiresAt)
+	if legacy.ExpiresAt.After(current.ExpiresAt) {
+		return true
+	}
+	if legacy.ExpiresAt.Equal(current.ExpiresAt) {
+		return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
+	}
+	return false
 }
 
 // write replaces the keyring's token entries with state, ordered so that
@@ -897,11 +918,12 @@ const maxKeyringIndexChunks = 128
 // produces (short namespaced keys cost at least ~18 bytes each, so one
 // maxKeyringIndexChunkBytes chunk holds on the order of a hundred, times
 // maxKeyringIndexChunks) while still rejecting a damaged index promptly.
-const maxKeyringIndexKeys = maxKeyringIndexChunks * 200
+const maxKeyringIndexKeys = 512
 
 // errKeyringIndexTooManyKeys is returned when a decoded index (or one of its
 // chunks) claims more keys than maxKeyringIndexKeys.
 func errKeyringIndexTooManyKeys(count int) error {
+	log.Printf("warning: oauth: keyring token index lists %d keys, over the %d-key cap", count, maxKeyringIndexKeys)
 	return fmt.Errorf("oauth: keyring token index lists %d keys, over the %d-key cap", count, maxKeyringIndexKeys)
 }
 
