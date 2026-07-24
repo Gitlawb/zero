@@ -173,7 +173,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
 	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
@@ -459,7 +459,7 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	if status == StatusError && input.exited && !input.interrupted {
-		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
+		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
 		}

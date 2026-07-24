@@ -124,11 +124,15 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 	}
 
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe and cwd guidance in bash description, got %q", description)
-		}
-		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
-			t.Fatalf("expected the double-quote metacharacter rule in bash description, got %q", description)
+		shell := detectShellRuntime(runtime.GOOS)
+		if shell.Kind == shellKindPowerShell {
+			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
+				if !strings.Contains(description, want) {
+					t.Fatalf("expected Windows PowerShell guidance %q in bash description, got %q", want, description)
+				}
+			}
+		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe fallback guidance in bash description, got %q", description)
 		}
 		return
 	}
@@ -455,13 +459,14 @@ func TestBashToolReturnsNonzeroExitAsError(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("expected error status, got %s", result.Status)
 	}
-	for _, want := range []string{"stdout:\nbefore failure", "stderr:\nfailure details", "exit_code: 7"} {
+	wantExitCode := strconv.Itoa(helperFailureExitCode())
+	for _, want := range []string{"stdout:\nbefore failure", "stderr:\nfailure details", "exit_code: " + wantExitCode} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, result.Output)
 		}
 	}
-	if result.Meta["exit_code"] != "7" {
-		t.Fatalf("expected exit_code metadata 7, got %q", result.Meta["exit_code"])
+	if result.Meta["exit_code"] != wantExitCode {
+		t.Fatalf("expected exit_code metadata %s, got %q", wantExitCode, result.Meta["exit_code"])
 	}
 	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
 		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
@@ -578,10 +583,16 @@ func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
 	}
 	registry := NewRegistry()
 	registry.Register(NewScopedBashTool(root, nil))
+	msysCommand := "cat somefile.txt"
+	if detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
+		// cat is a native Get-Content alias in PowerShell. Use a name that
+		// still resolves to an incompatible Git-for-Windows MSYS executable.
+		msysCommand = "grep pattern somefile.txt"
+	}
 
 	t.Run("default sandboxing still blocks an MSYS-prone command", func(t *testing.T) {
 		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
-			"command": "cat somefile.txt",
+			"command": msysCommand,
 		}, RunOptions{
 			PermissionGranted: true,
 			Sandbox:           newEngine(),
@@ -594,7 +605,7 @@ func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
 
 	t.Run("approved require_escalated bypasses the MSYS guard", func(t *testing.T) {
 		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
-			"command":             "cat somefile.txt",
+			"command":             msysCommand,
 			"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
 		}, RunOptions{
 			PermissionGranted: true,
@@ -648,8 +659,9 @@ func TestBashToolIgnoresMsysMarkersInCommandArgumentsAfterFailure(t *testing.T) 
 		"command": command,
 	})
 
-	if result.Status != StatusError || result.Meta["exit_code"] != "7" {
-		t.Fatalf("expected the helper's real exit 7 failure, got %s: %#v", result.Status, result)
+	wantExitCode := strconv.Itoa(helperFailureExitCode())
+	if result.Status != StatusError || result.Meta["exit_code"] != wantExitCode {
+		t.Fatalf("expected the helper failure exit %s, got %s: %#v", wantExitCode, result.Status, result)
 	}
 	if result.Meta["shell_issue"] == "windows_msys_sandbox" {
 		t.Fatalf("expected the MSYS marker in the command's own argument text to be ignored, got %#v", result)
@@ -860,6 +872,9 @@ func TestBashToolRunsCommandLineForLoopSyntax(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("cmd.exe command-line vs batch-file parsing is Windows-specific")
 	}
+	if detectShellRuntime(runtime.GOOS).Kind != shellKindCmd {
+		t.Skip("cmd.exe fallback is not selected")
+	}
 	root := t.TempDir()
 
 	result := NewScopedBashTool(root, nil).Run(context.Background(), map[string]any{
@@ -879,6 +894,16 @@ func TestBashToolRunsCommandLineForLoopSyntax(t *testing.T) {
 func helperCommand(name string) string {
 	executable := shellQuote(os.Args[0])
 	return executable + " --zero-bash-helper " + name
+}
+
+func helperFailureExitCode() int {
+	if runtime.GOOS == "windows" && detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
+		// A native program failure at the end of a PowerShell -Command script is
+		// represented by PowerShell's process status rather than the child's
+		// exact code.
+		return 1
+	}
+	return 7
 }
 
 func shellQuote(value string) string {

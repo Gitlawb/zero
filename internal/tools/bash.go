@@ -106,7 +106,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssue(commandText, runtime.GOOS); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtime.GOOS)); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
 
@@ -293,23 +293,19 @@ func shellIssueBlockResult(issue shellIssue) Result {
 }
 
 // buildBashCommand returns the exec.Cmd and the sandbox plan for running
-// commandText. On Windows, when the command is not wrapped by the sandbox
-// engine (plan.Wrapped == false), it also overrides the child's raw command
-// line so commandText reaches cmd.exe unescaped; see
-// zeroSandbox.WindowsShellCommandLine for why that matters. The wrapped case
-// gets the same treatment inside the sandboxed runner process itself
-// (internal/sandbox/windows_process_windows.go), since that command line is
-// built there, not here.
+// commandText. PowerShell is preferred on Windows, with cmd.exe retained as
+// the fallback. Only cmd.exe needs the raw command-line override.
 func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
+	hostShell := detectShellRuntime(runtime.GOOS)
 	spec := zeroSandbox.CommandSpec{
-		Name: shellExecutable(),
-		Args: shellArguments(commandText),
+		Name: hostShell.Executable,
+		Args: hostShell.arguments(commandText),
 		Dir:  absoluteCwd,
 	}
 	if engine != nil {
 		command, plan, err := engine.CommandContext(ctx, spec)
 		if err == nil {
-			applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
+			applyWindowsShellCommandLine(command, commandText, plan.Wrapped, hostShell.Kind == shellKindCmd)
 		}
 		return command, plan, err
 	}
@@ -333,7 +329,7 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	}
 	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	command.Dir = spec.Dir
-	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
+	applyWindowsShellCommandLine(command, commandText, plan.Wrapped, hostShell.Kind == shellKindCmd)
 	return command, plan, nil
 }
 
@@ -383,20 +379,6 @@ func interactiveBlockResult(detection zeroSandbox.InteractiveCommandResult) Resu
 			Kind:    "shell",
 		},
 	}
-}
-
-func shellExecutable() string {
-	if runtime.GOOS == "windows" {
-		return "cmd.exe"
-	}
-	return "/bin/sh"
-}
-
-func shellArguments(command string) []string {
-	if runtime.GOOS == "windows" {
-		return zeroSandbox.WindowsShellArgs(command)
-	}
-	return []string{"-c", command}
 }
 
 func commandExitCode(err error) int {
@@ -621,7 +603,7 @@ func truncateHeadTailWithTotal(value string, total, maxBytes int) (string, int, 
 
 func formatBashOutputWithShellHint(stdout string, stderr string, exitCode int, meta map[string]string) string {
 	output := formatBashOutput(stdout, stderr, exitCode)
-	if issue := detectShellOutputIssue(stdout+"\n"+stderr, runtime.GOOS); issue != nil {
+	if issue := detectShellOutputIssueForRuntime(stdout+"\n"+stderr, detectShellRuntime(runtime.GOOS)); issue != nil {
 		meta["shell_issue"] = issue.Kind
 		output = appendShellIssueHint(output, *issue)
 	}

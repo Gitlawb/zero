@@ -76,11 +76,15 @@ func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
 	description := strings.ToLower(strings.Join(descriptionParts, " "))
 
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe and cwd guidance in exec_command description, got %q", description)
-		}
-		if !strings.Contains(description, "double quotes") || !strings.Contains(description, `--jq ".a | b"`) {
-			t.Fatalf("expected the double-quote metacharacter rule in exec_command description, got %q", description)
+		shell := detectShellRuntime(runtime.GOOS)
+		if shell.Kind == shellKindPowerShell {
+			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
+				if !strings.Contains(description, want) {
+					t.Fatalf("expected Windows PowerShell guidance %q in exec_command description, got %q", want, description)
+				}
+			}
+		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe fallback guidance in exec_command description, got %q", description)
 		}
 	}
 }
@@ -192,9 +196,15 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 		Policy:        sandbox.DefaultPolicy(),
 		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
+	msysCommand := "cat somefile.txt"
+	if detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
+		// cat is a native Get-Content alias in PowerShell, so use an executable
+		// name that still exercises the MSYS guard.
+		msysCommand = "grep pattern somefile.txt"
+	}
 
 	result := registry.RunWithOptions(context.Background(), ExecCommandToolName, map[string]any{
-		"cmd":                 "cat somefile.txt",
+		"cmd":                 msysCommand,
 		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
 	}, RunOptions{
 		PermissionGranted: true,
@@ -204,8 +214,8 @@ func TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval(t *testing.T)
 
 	// Assert on the preflight block sentinel (exit_code "-1", set only by
 	// shellIssueBlockResult) rather than shell_issue: once the guard is
-	// bypassed, "cat somefile.txt" actually runs, and its real,
-	// PATH-dependent output could otherwise trip the unrelated
+	// bypassed, the command actually runs, and its real, PATH-dependent output
+	// could otherwise trip the unrelated
 	// post-execution detectShellOutputIssue heuristic and make this
 	// assertion flaky for reasons unrelated to the guard under test.
 	if result.Meta["exit_code"] == "-1" {
@@ -284,8 +294,9 @@ func TestExecCommandApplicationFailureHasTypedOutcome(t *testing.T) {
 	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
 		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
 	}
-	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != 7 {
-		t.Fatalf("execution exit = %#v, want code 7", result.ExecutionOutcome.Exit)
+	wantExitCode := helperFailureExitCode()
+	if result.ExecutionOutcome.Exit == nil || result.ExecutionOutcome.Exit.Code != wantExitCode {
+		t.Fatalf("execution exit = %#v, want code %d", result.ExecutionOutcome.Exit, wantExitCode)
 	}
 }
 

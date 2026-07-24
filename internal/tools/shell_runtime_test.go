@@ -1,9 +1,108 @@
 package tools
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestDetectShellRuntimePrefersPowerShellSevenOnWindows(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		if name == "pwsh.exe" {
+			return `C:\Program Files\PowerShell\7\pwsh.exe`, nil
+		}
+		return "", errors.New("not found")
+	}
+	shell := detectShellRuntimeWithLookup("windows", lookPath, func(string) string { return "" })
+	if shell.Kind != shellKindPowerShell || !strings.HasSuffix(strings.ToLower(shell.Executable), `\pwsh.exe`) {
+		t.Fatalf("shell = %#v, want PowerShell 7", shell)
+	}
+}
+
+func TestDetectShellRuntimeFallsBackThroughWindowsPowerShellToCmd(t *testing.T) {
+	t.Run("windows powershell", func(t *testing.T) {
+		lookPath := func(name string) (string, error) {
+			if name == "powershell.exe" {
+				return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+			}
+			return "", errors.New("not found")
+		}
+		shell := detectShellRuntimeWithLookup("windows", lookPath, func(string) string { return "" })
+		if shell.Kind != shellKindPowerShell || !strings.HasSuffix(strings.ToLower(shell.Executable), `\powershell.exe`) {
+			t.Fatalf("shell = %#v, want Windows PowerShell", shell)
+		}
+	})
+
+	t.Run("cmd", func(t *testing.T) {
+		shell := detectShellRuntimeWithLookup(
+			"windows",
+			func(string) (string, error) { return "", errors.New("not found") },
+			func(string) string { return "" },
+		)
+		if shell.Kind != shellKindCmd || shell.Executable != "cmd.exe" {
+			t.Fatalf("shell = %#v, want cmd.exe fallback", shell)
+		}
+	})
+}
+
+func TestDetectShellRuntimeSkipsUnusablePowerShell(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		switch name {
+		case "pwsh.exe":
+			return `C:\broken\pwsh.exe`, nil
+		case "powershell.exe":
+			return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+		default:
+			return "", errors.New("not found")
+		}
+	}
+	shell := detectShellRuntimeWithProbe(
+		"windows",
+		lookPath,
+		func(string) string { return "" },
+		func(path string) bool { return !strings.Contains(path, `\broken\`) },
+	)
+	if shell.Kind != shellKindPowerShell || strings.Contains(shell.Executable, `\broken\`) {
+		t.Fatalf("shell = %#v, want usable Windows PowerShell fallback", shell)
+	}
+}
+
+func TestPowerShellArgumentsDisableProfilesAndRequestUTF8(t *testing.T) {
+	shell := shellRuntime{GOOS: "windows", Executable: "pwsh.exe", Syntax: "PowerShell", Kind: shellKindPowerShell}
+	args := shell.arguments("Write-Output 'hello'")
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{"-NoLogo", "-NoProfile", "-Command", windowsPowerShellUTF8Prefix, "Write-Output 'hello'"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("PowerShell args missing %q: %#v", want, args)
+		}
+	}
+}
+
+func TestPowerShellCommandIssueAllowsAliasesAndBlocksMsysExecutables(t *testing.T) {
+	shell := shellRuntime{GOOS: "windows", Executable: "pwsh.exe", Syntax: "PowerShell", Kind: shellKindPowerShell}
+	for _, command := range []string{
+		`ls -Force`,
+		`cat README.md`,
+		`Get-ChildItem | Select-Object -First 10`,
+		`Write-Output 'grep README.md; head file.txt'`,
+		`Write-Output 'cd /tmp'`,
+	} {
+		if issue := detectShellCommandIssueForRuntime(command, shell); issue != nil {
+			t.Fatalf("PowerShell-native command %q was blocked: %#v", command, issue)
+		}
+	}
+	for _, command := range []string{
+		`grep README.md`,
+		`Get-Content README.md | head -10`,
+		`cat.exe README.md`,
+		`bash -lc "make test"`,
+		`Write-Output ok; sed -n '1,5p' README.md`,
+	} {
+		if issue := detectShellCommandIssueForRuntime(command, shell); issue == nil || issue.Kind != windowsMsysSandboxKind {
+			t.Fatalf("MSYS-prone command %q was not blocked: %#v", command, issue)
+		}
+	}
+}
 
 func TestDetectShellCommandIssueFlagsMsysBinaryPaths(t *testing.T) {
 	for _, command := range []string{

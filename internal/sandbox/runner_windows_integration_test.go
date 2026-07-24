@@ -266,6 +266,74 @@ func TestWindowsRestrictedTokenNestedPipeCapture(t *testing.T) {
 	}
 }
 
+// TestWindowsRestrictedTokenPowerShell exercises the default Windows shell
+// shape end to end under the write-restricted token. It covers PowerShell
+// initialization, a native pipeline (which creates IPC objects), UTF-8 output,
+// and workspace write enforcement.
+func TestWindowsRestrictedTokenPowerShell(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	}
+	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+	powerShell := realSmokePowerShell(t)
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{root},
+			WriteRoots:           []WritableRoot{{Root: root}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	config := WindowsSandboxCommandArgsOptions{
+		SandboxHome:       sandboxHome,
+		CommandCWD:        root,
+		WorkspaceRoots:    []string{root},
+		PermissionProfile: profile,
+		SandboxLevel:      WindowsSandboxLevelUnelevated,
+	}
+
+	insideMarker := filepath.Join(root, "powershell-ok.txt")
+	script := "$ErrorActionPreference='Stop'; " +
+		"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+		"$values = 1,2,3 | ForEach-Object { $_ * 2 }; " +
+		"[IO.File]::WriteAllText(" + powershellSingleQuote(insideMarker) + ", (($values -join ',') + ' ✓'))"
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		powerShell, "-NoLogo", "-NoProfile", "-Command", script,
+	}, 0)
+	if bytes, err := os.ReadFile(insideMarker); err != nil || strings.TrimSpace(string(bytes)) != "2,4,6 ✓" {
+		t.Fatalf("PowerShell sandbox marker = %q, %v; want pipeline output", bytes, err)
+	}
+
+	outsideMarker := filepath.Join(outside, "powershell-denied.txt")
+	deniedScript := "$ErrorActionPreference='Stop'; " +
+		"[IO.File]::WriteAllText(" + powershellSingleQuote(outsideMarker) + ", 'leaked')"
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		powerShell, "-NoLogo", "-NoProfile", "-Command", deniedScript,
+	}, 1)
+	if _, err := os.Stat(outsideMarker); err == nil {
+		t.Fatal("sandboxed PowerShell wrote outside every granted root")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat outside PowerShell marker: %v", err)
+	}
+}
+
+func realSmokePowerShell(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"pwsh.exe", "pwsh", "powershell.exe", "powershell"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	t.Skip("PowerShell is unavailable")
+	return ""
+}
+
 func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) string {
 	t.Helper()
 	if path := os.Getenv(envKey); path != "" {
