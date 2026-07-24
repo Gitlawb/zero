@@ -177,10 +177,11 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 	if len(cfg.Scopes) > 0 {
 		form.Set("scope", strings.Join(cfg.Scopes, " "))
 	}
-	// Carry the existing token_type forward: a refresh response commonly omits it,
-	// and PostToken only overwrites TokenType when the response supplies one, so
-	// without seeding it here the type would be silently lost across refreshes (L15).
-	base := Token{Scopes: current.Scopes, RefreshToken: refresh, Account: current.Account, IDToken: current.IDToken, TokenType: current.TokenType}
+	scopes := current.Scopes
+	if len(scopes) == 0 {
+		scopes = cfg.Scopes
+	}
+	base := Token{Scopes: scopes, RefreshToken: refresh, Account: current.Account, IDToken: current.IDToken, TokenType: current.TokenType}
 	return PostToken(ctx, client, cfg.TokenEndpoint, form, base, now)
 }
 

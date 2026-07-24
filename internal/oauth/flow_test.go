@@ -299,3 +299,18 @@ func TestRefreshPreservesTokenTypeWhenOmitted(t *testing.T) {
 		t.Fatalf("refresh should carry the existing token_type forward, got %q", tok.TokenType)
 	}
 }
+
+func TestRefreshPreservesScopesWhenOmitted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"new-at","expires_in":3600}`)) // no scope in response
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", TokenEndpoint: server.URL, Scopes: []string{"fallback-scope"}}
+	tok, err := Refresh(context.Background(), server.Client(), cfg, Token{RefreshToken: "keep-me", Scopes: []string{"custom-scope"}}, nil)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if len(tok.Scopes) != 1 || tok.Scopes[0] != "custom-scope" {
+		t.Fatalf("refresh should carry existing scopes forward, got %v", tok.Scopes)
+	}
+}
