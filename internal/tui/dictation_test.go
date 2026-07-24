@@ -136,6 +136,44 @@ func TestDictationStreamingPartialReplacesRegion(t *testing.T) {
 	}
 }
 
+func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
+	// Esc can race an already-buffered realtime event: cancelDictation discards
+	// the live region and resets state synchronously, but the streaming
+	// goroutine's dictationTranscribedMsg (a nonempty compose() alongside
+	// context.Canceled) can still arrive afterward. With stt.autoSubmit on,
+	// that must never fall through to msg.submit and fire the composer's
+	// restored pre-existing text.
+	m := model{}
+	m.setComposerState(composerState{text: "existing prompt", cursor: len("existing prompt")})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+
+	m = m.handleDictationPartial(sttPartialMsg{text: "half-formed transcript"})
+	if m.composer.text != "existing prompt half-formed transcript" {
+		t.Fatalf("partial did not render into composer: %q", m.composer.text)
+	}
+
+	m, _ = m.cancelDictation()
+	if m.composer.text != "existing prompt" {
+		t.Fatalf("cancel should restore the pre-existing composer text, got %q", m.composer.text)
+	}
+
+	// The already-buffered event's message arrives after the cancel above.
+	next, cmd := m.handleDictationTranscribed(dictationTranscribedMsg{
+		text:      "half-formed transcript",
+		err:       context.Canceled,
+		submit:    true,
+		streaming: true,
+	})
+	got := next.(model)
+	if got.composer.text != "existing prompt" {
+		t.Errorf("a raced cancellation must not auto-submit the restored composer text, got %q", got.composer.text)
+	}
+	if cmd != nil {
+		t.Error("a raced cancellation must not return a submit command")
+	}
+}
+
 func TestDictationCommitKeepsStreamedText(t *testing.T) {
 	m := model{}
 	m.setComposerState(composerState{text: "", cursor: 0})
@@ -300,5 +338,34 @@ func TestCurrentModelLabel(t *testing.T) {
 	d = dictationController{cfg: config.STTConfig{Provider: config.STTProviderLocal}}
 	if got := d.currentModelLabel(); got != "Local (no model set)" {
 		t.Errorf("no-model label = %q", got)
+	}
+}
+
+func TestStaleDictationCompletionIgnoredAfterCancel(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "original composer text", cursor: 22})
+	m.dictation.sessionID = 1
+	m.dictation.phase = dictRecording
+
+	m, _ = m.cancelDictation()
+
+	if m.composer.text != "original composer text" {
+		t.Fatalf("composer text = %q, want 'original composer text'", m.composer.text)
+	}
+
+	staleMsg := dictationTranscribedMsg{
+		sessionID: 1,
+		text:      "stale text that should be ignored",
+		submit:    true,
+		streaming: true,
+	}
+	afterStale, cmd := m.handleDictationTranscribed(staleMsg)
+	got := afterStale.(model)
+
+	if got.composer.text != "original composer text" {
+		t.Fatalf("composer text changed to %q after stale completion", got.composer.text)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command for stale completion, got %v", cmd)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
@@ -60,7 +61,15 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 		HTTPHeader: http.Header{"Authorization": {"Token " + d.cfg.APIKey}},
 	})
 	if err != nil {
-		return "", fmt.Errorf("connecting to Deepgram: %w", err)
+		// Preserve the context.Canceled sentinel (it carries no key) so an
+		// Esc-abort during dial still matches the UI's errors.Is check. Key
+		// on ctx.Err() itself rather than unwrapping err: a cancellation can
+		// surface as a plain transport error (e.g. "closed network
+		// connection") rather than context.Canceled directly.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("connecting to Deepgram: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 	}
 	defer conn.CloseNow()
 
@@ -100,7 +109,17 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("Deepgram stream error: %w", err)
+			// A user abort cancels the streaming context; the UI matches it
+			// with errors.Is(err, context.Canceled), so return the sentinel
+			// itself (it carries no key) instead of a flat redacted string.
+			// Key on ctx.Err() rather than unwrapping err: the writeErrCh
+			// swap above can replace err with a plain transport error (e.g.
+			// "closed network connection") that doesn't itself unwrap to
+			// context.Canceled even though the cancellation is what caused it.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
+			return compose(), fmt.Errorf("Deepgram stream error: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {
 			continue
