@@ -11,9 +11,7 @@ var sandboxDenialKeywords = []string{
 	"permission denied",
 	"read-only file system",
 	"seccomp",
-	"sandbox",
 	"landlock",
-	"failed to write file",
 }
 
 // markStructuredSandboxDenial mirrors typed adapter facts into legacy metadata

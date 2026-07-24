@@ -28,12 +28,18 @@ func TestLikelySandboxDenialMetadataFromCommandOutput(t *testing.T) {
 		{name: "sandboxed read-only filesystem", sandboxed: true, exitCode: 1, output: "touch: Read-only file system", want: true},
 		{name: "sandboxed permission denied", sandboxed: true, exitCode: 1, output: "mkdir: Permission denied", want: true},
 		{name: "successful command", sandboxed: true, exitCode: 0, output: "Read-only file system", want: false},
-		{name: "unsandboxed command", sandboxed: false, exitCode: 1, output: "Read-only file system", want: false},
+		{name: "unsandboxed read-only command", sandboxed: false, exitCode: 1, output: "Read-only file system", want: false},
+		{name: "unsandboxed permission failure", sandboxed: false, exitCode: 1, output: "mkdir: Permission denied", want: false},
+		{name: "generic sandbox message", sandboxed: true, exitCode: 1, output: "application sandbox configuration is invalid", want: false},
+		{name: "generic write failure", sandboxed: true, exitCode: 1, output: "failed to write file: invalid destination", want: false},
 		{name: "ordinary application failure", sandboxed: true, exitCode: 1, output: "invalid package name", want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			meta := map[string]string{}
-			markLikelySandboxDenial(meta, test.sandboxed, test.exitCode, test.output)
+			denial := markLikelySandboxDenial(meta, test.sandboxed, test.exitCode, test.output)
+			if got := denial != nil; got != test.want {
+				t.Fatalf("typed sandbox denial = %t, want %t; denial=%#v", got, test.want, denial)
+			}
 			if got := meta[SandboxLikelyDeniedMeta] == "true"; got != test.want {
 				t.Fatalf("sandbox denial = %t, want %t; meta=%#v", got, test.want, meta)
 			}

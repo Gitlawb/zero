@@ -64,6 +64,22 @@ func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
 		t.Fatal("narrow protected-metadata denial must not become an unrestricted retry")
 	}
 
+	nonRecoverableDenial := protectedDenial
+	nonRecoverableDenial.ExecutionOutcome = &execution.Outcome{
+		State: execution.StateDenied,
+		Kind:  execution.OutcomeEnforcementDenied,
+		Denial: &execution.Denial{
+			Capability:  execution.Capability{Kind: execution.CapabilityUnrestricted, Scope: "host"},
+			Source:      execution.DenialSourcePlatformSandbox,
+			Reason:      "sandbox enforcement failed closed",
+			Recoverable: false,
+			NextAction:  execution.DenialNextActionRequestApproval,
+		},
+	}
+	if sandboxRestrictedShellRetryCandidate(call, nil, nonRecoverableDenial, options) {
+		t.Fatal("non-recoverable sandbox denial must not become an unrestricted retry")
+	}
+
 	networkDenial := protectedDenial
 	networkDenial.ExecutionOutcome = &execution.Outcome{
 		State: execution.StateDenied,

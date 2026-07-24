@@ -30,6 +30,12 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 			t.Fatalf("managed runtime directory %q was not prepared: %v", path, err)
 		}
 	}
+	for _, name := range []string{"home", "config", "state"} {
+		path := filepath.Join(runtimeState.Root, name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("obsolete synthetic runtime directory %q exists: %v", path, err)
+		}
+	}
 }
 
 func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
@@ -223,9 +229,18 @@ func TestSandboxRuntimeEnvironmentPreservesGitGlobalIgnore(t *testing.T) {
 		Data:  filepath.Join(runtimeRoot, "data"),
 		Temp:  filepath.Join(runtimeRoot, "tmp"),
 	}
-	env := sandboxRuntimeEnvironment(upsertEnvList(os.Environ(),
+	inherited := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(root, "missing-global-config"),
+		"GIT_DIR="+filepath.Join(root, "wrong-repository"),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.excludesFile",
+		"GIT_CONFIG_VALUE_0="+filepath.Join(root, "missing-ignore"),
+	)
+	env := sandboxRuntimeEnvironment(upsertEnvList(withoutGitEnvironmentOverrides(inherited),
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+configHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
 	), &runtimeState)
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -246,6 +261,18 @@ func TestSandboxRuntimeEnvironmentPreservesGitGlobalIgnore(t *testing.T) {
 	if !strings.Contains(status, "visible.txt") {
 		t.Fatalf("non-ignored file is missing from status:\n%s", status)
 	}
+}
+
+func withoutGitEnvironmentOverrides(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, value := range env {
+		key, _, ok := strings.Cut(value, "=")
+		if ok && strings.HasPrefix(strings.ToUpper(key), "GIT_") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }
 
 func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {

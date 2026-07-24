@@ -1623,6 +1623,7 @@ func sandboxDeniedShellResult(result tools.Result) bool {
 		return denial != nil &&
 			denial.Source == execution.DenialSourcePlatformSandbox &&
 			denial.Capability.Kind == execution.CapabilityUnrestricted &&
+			denial.Recoverable &&
 			denial.NextAction == execution.DenialNextActionRequestApproval
 	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
