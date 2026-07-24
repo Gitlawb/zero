@@ -126,9 +126,10 @@ func TestLoopRunExcludesGoalToolsAndInstructions(t *testing.T) {
 			t.Fatalf("loop request exposed goal tool %q", definition.Name)
 		}
 	}
-	if len(request.Messages) > 0 &&
-		strings.Contains(request.Messages[0].Content, "Persistent goal for this session:") {
-		t.Fatalf("loop request included goal instructions: %q", request.Messages[0].Content)
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, "Persistent goal for this session:") {
+			t.Fatalf("loop request included goal instructions: %q", message.Content)
+		}
 	}
 }
 
