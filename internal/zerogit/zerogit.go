@@ -602,14 +602,14 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 		args = append(args, "--dry-run")
 	}
 	switch {
-	case options.Force:
-		args = append(args, "--force-with-lease")
 	case options.RequireNewRemoteBranch:
 		// An empty expected value means the ref must not currently exist on
 		// the remote: Git rejects the push if another client created
 		// <branch> after CreateBranch's own remote probe ran, instead of
 		// silently fast-forwarding it with this work.
 		args = append(args, "--force-with-lease="+branch+":")
+	case options.Force:
+		args = append(args, "--force-with-lease")
 	}
 	args = append(args, "-u", "--", remote, branch)
 

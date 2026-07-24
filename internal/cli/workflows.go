@@ -1022,16 +1022,21 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	targetRemote := firstNonEmptyString(options.remote, remote)
+	targetRemote := firstNonEmptyString(options.remote, remoteForCheck)
 	if deps.isUnbornRemote != nil {
 		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
 			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
 		}
+	}
+
+	branch, remote, created, err := ensureFeatureBranch(context.Background(), stdout, options.json, workspaceRoot, options.remote, options.yes, false, options.auto, options.maxDiffBytes, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
 	}
 
 	if !options.json {
@@ -1280,7 +1285,9 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
 	}
 	if deps.markGeneratedBranch != nil {
-		_ = deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch)
+		if err := deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch); err != nil {
+			return "", "", false, fmt.Errorf("failed to mark generated branch: %w", err)
+		}
 	}
 	if !jsonMode {
 		fmt.Fprintf(stdout, "Created branch %s (was on %s)\n", result.Branch, currentBranch)
