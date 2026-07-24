@@ -4807,6 +4807,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
+	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
 	return m

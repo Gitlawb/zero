@@ -106,6 +106,20 @@ func TestQuietGenerationHint(t *testing.T) {
 	}
 }
 
+func TestBeginRunResetsQuietGenerationClock(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                func() time.Time { return now },
+		lastStreamActivity: now.Add(-time.Minute),
+	}
+
+	m = m.beginRun(nil)
+
+	if got := m.quietGenerationHint(); got != "" {
+		t.Fatalf("new run inherited a stale quiet-generation warning: %q", got)
+	}
+}
+
 // TestQuietGenerationHintEscalatesPastHalfIdleTimeout: a heartbeating-but-
 // silent stream (chatgpt/gpt-5.x, ollama reasoning models — see
 // providerio.ErrStreamStalled) and a genuinely healthy-but-slow one look
