@@ -2,7 +2,6 @@ package providercatalog
 
 import (
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -494,8 +493,8 @@ func TestKimiAliasStillResolvesToMoonshot(t *testing.T) {
 // while Get does so resolve-time request building still gets the vendor headers.
 func TestKimiRuntimeHeadersOnlyOnGet(t *testing.T) {
 	tempDir := t.TempDir()
-	cleanup := kimiidentity.SetDeviceIDPathForTest(filepath.Join(tempDir, "kimi-device-id"))
-	t.Cleanup(cleanup)
+	kimiidentity.ResetDeviceIDForTest()
+	t.Cleanup(kimiidentity.ResetDeviceIDForTest)
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 	t.Setenv("APPDATA", tempDir)
 	for _, d := range All() {

@@ -202,6 +202,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc):
 		if m.setup.stage > setupStageWelcome {
@@ -214,6 +215,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.setup.required {
+			m.setup.cancelDeviceLogin()
 			return m, tea.Quit
 		}
 		return m.exitSetupToChat()
@@ -264,6 +266,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		switch keyText(msg) {
 		case "q":
+			m.setup.cancelDeviceLogin()
 			return m, tea.Quit
 		case "k":
 			if m.setup.stage == setupStageProvider {
@@ -299,6 +302,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.advanceSetup()
 		}
 	case "q":
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case "k":
 		switch m.setup.stage {
@@ -1194,6 +1198,7 @@ func (m model) setupNameInputActive() bool {
 func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
@@ -1215,6 +1220,7 @@ func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
@@ -1236,6 +1242,7 @@ func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keyCtrl(msg, 'c'):
+		m.setup.cancelDeviceLogin()
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()

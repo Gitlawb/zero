@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,10 +190,10 @@ func TestResolveConfigHuggingFaceWithEnvClientID(t *testing.T) {
 // existing moonshot profiles.
 func TestResolveConfigKimiCodePreset(t *testing.T) {
 	tempDir := t.TempDir()
-	cleanup := kimiidentity.SetDeviceIDPathForTest(filepath.Join(tempDir, "kimi-device-id"))
-	t.Cleanup(cleanup)
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 	t.Setenv("APPDATA", tempDir)
+	kimiidentity.ResetDeviceIDForTest()
+	t.Cleanup(kimiidentity.ResetDeviceIDForTest)
 	r := NewRegistry()
 	cfg, flow, err := r.ResolveConfig("kimi-code", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
 	if err != nil {

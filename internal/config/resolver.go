@@ -1101,6 +1101,9 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 					break
 				}
 			}
+			if strings.HasPrefix(strings.ToLower(profileKey), "x-msh-") {
+				delete(profile.CustomHeaders, profileKey)
+			}
 		}
 	}
 }

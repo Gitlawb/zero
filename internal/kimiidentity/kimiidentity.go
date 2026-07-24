@@ -52,7 +52,6 @@ func Headers() map[string]string {
 
 var (
 	deviceIDMu       sync.Mutex
-	testDeviceIDPath string
 	cachedDeviceID   = sync.OnceValue(func() string { return loadOrCreateDeviceIDAt(deviceIDPath()) })
 )
 
@@ -77,23 +76,7 @@ func ResetDeviceIDForTest() {
 	deviceIDMu.Unlock()
 }
 
-// SetDeviceIDPathForTest configures an explicit storage path for device ID in
-// unit tests, overriding os.UserConfigDir(). It resets the DeviceID cache and
-// returns a cleanup function that restores the original path and resets the
-// cache.
-func SetDeviceIDPathForTest(path string) func() {
-	deviceIDMu.Lock()
-	prevPath := testDeviceIDPath
-	testDeviceIDPath = path
-	cachedDeviceID = sync.OnceValue(func() string { return loadOrCreateDeviceIDAt(deviceIDPath()) })
-	deviceIDMu.Unlock()
-	return func() {
-		deviceIDMu.Lock()
-		testDeviceIDPath = prevPath
-		cachedDeviceID = sync.OnceValue(func() string { return loadOrCreateDeviceIDAt(deviceIDPath()) })
-		deviceIDMu.Unlock()
-	}
-}
+
 
 // loadOrCreateDeviceIDAt is the real load-or-create logic behind DeviceID,
 // parameterized by the storage path so tests can exercise production code
@@ -177,9 +160,14 @@ func repairAbandonedDeviceID(path, id string) string {
 			return existingID
 		}
 		// If lockPath exists but is stale (owner crashed), break lock and retry once.
+		// Use os.Rename to break the lock atomically so multiple racers seeing the
+		// same stale lock don't blindly unlink a fresh lock created by a winner.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 2*time.Second {
-			_ = os.Remove(lockPath)
-			lock, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			stalePath := fmt.Sprintf("%s.stale.%d.%d", lockPath, os.Getpid(), time.Now().UnixNano())
+			if os.Rename(lockPath, stalePath) == nil {
+				_ = os.Remove(stalePath)
+				lock, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			}
 		}
 		if err != nil {
 			if existingID := readValidDeviceIDWithRetry(path); existingID != "" {
@@ -202,7 +190,9 @@ func repairAbandonedDeviceID(path, id string) string {
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	_ = os.Remove(path)
+	// DO NOT os.Remove(path) here. If path is unlinked, a concurrent
+	// createOrAdoptDeviceID can win O_EXCL and write a divergent ID just
+	// before Rename blindly overwrites it. os.Rename replaces atomically.
 	if err := os.Rename(tmpPath, path); err != nil {
 		if errWrite := os.WriteFile(path, []byte(id+"\n"), 0o600); errWrite == nil {
 			return id
@@ -243,12 +233,6 @@ func readValidDeviceIDWithRetry(path string) string {
 }
 
 func deviceIDPath() string {
-	deviceIDMu.Lock()
-	testPath := testDeviceIDPath
-	deviceIDMu.Unlock()
-	if testPath != "" {
-		return testPath
-	}
 	configDir, err := os.UserConfigDir()
 	if err != nil || strings.TrimSpace(configDir) == "" {
 		return ""

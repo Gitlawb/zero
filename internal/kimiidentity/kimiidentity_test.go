@@ -21,8 +21,8 @@ import (
 func setUserConfigRoot(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
-	cleanup := SetDeviceIDPathForTest(filepath.Join(root, "zero", "kimi-device-id"))
-	t.Cleanup(cleanup)
+	ResetDeviceIDForTest()
+	t.Cleanup(ResetDeviceIDForTest)
 	switch runtime.GOOS {
 	case "windows":
 		t.Setenv("APPDATA", root)
