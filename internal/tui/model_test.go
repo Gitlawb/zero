@@ -1606,6 +1606,9 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
 		t.Fatalf("focused permission prompt must not render risk labels, got %q", view)
 	}
+	if count := strings.Count(view, request.Reason); count != 1 {
+		t.Fatalf("focused permission reason rendered %d times, want once:\n%s", count, view)
+	}
 }
 
 func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
@@ -1716,6 +1719,34 @@ func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
 	for _, blocked := range []string{"risk:", "risk=", "block=", "mode=", "permission=", "side_effect=", "autonomy="} {
 		if strings.Contains(rendered, blocked) {
 			t.Fatalf("denied permission row must not render %q, got %q", blocked, rendered)
+		}
+	}
+}
+
+func TestPermissionRowRendersIdenticalEventAndBlockReasonOnce(t *testing.T) {
+	const reason = "Reading /home/dev/.nvm requires access outside the workspace."
+	event := agent.PermissionEvent{
+		ToolCallID:     "call_read",
+		ToolName:       "list_directory",
+		Action:         agent.PermissionActionDeny,
+		DecisionAction: agent.PermissionDecisionDeny,
+		SideEffect:     "read",
+		Reason:         reason,
+		Scope:          "/home/dev/.nvm",
+		Block: &sandbox.Block{
+			Code:   sandbox.BlockOutsideWorkspace,
+			Path:   "/home/dev/.nvm",
+			Reason: reason,
+		},
+	}
+
+	row := permissionTranscriptRow(event)
+	if count := strings.Count(event.Reason+"\n"+row.detail, reason); count != 1 {
+		t.Fatalf("permission reason represented %d times, want once: detail=%q", count, row.detail)
+	}
+	for _, want := range []string{"denied by user", "outside workspace", "path: /home/dev/.nvm"} {
+		if !strings.Contains(row.detail, want) {
+			t.Fatalf("permission detail missing %q: %q", want, row.detail)
 		}
 	}
 }

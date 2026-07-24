@@ -2212,7 +2212,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
+		promptEvent := permissionEventFromRequest(msg.request)
+		promptRow := permissionTranscriptRow(promptEvent)
+		// The focused modal owns the actionable reason while the decision is
+		// pending. Keep only structured block context in the transcript row so
+		// the same explanation is not shown immediately above the card.
+		if promptEvent.Block == nil {
+			promptRow.detail = ""
+		} else {
+			promptRow.detail = permissionBlockDetail(promptEvent)
+		}
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
 		m.pendingPermission = &pendingPermissionPrompt{

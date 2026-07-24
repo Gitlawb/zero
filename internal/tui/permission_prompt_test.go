@@ -126,6 +126,29 @@ func TestPermissionPromptMapsEscalatedSandboxReason(t *testing.T) {
 	}
 }
 
+func TestPermissionPromptWrapsLongReasonWithoutTruncating(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName:   "list_directory",
+		SideEffect: "read",
+		Reason:     "Reading /home/dev/projects/a-very-long-directory-name/with/nested/configuration requires access outside the workspace.",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionDeny,
+		},
+	}
+
+	card, _ := renderFocusedPermissionPrompt(request, 0, false, "", 60)
+	got := plainRender(t, card)
+	for _, want := range []string{"Reading", "/home/dev/projects", "requires access outside the workspace."} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card truncated reason; missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "…") {
+		t.Fatalf("permission card must wrap the decision reason instead of truncating it:\n%s", got)
+	}
+}
+
 func TestPermissionOptionsExposePersistentCommandPrefixApproval(t *testing.T) {
 	request := agent.PermissionRequest{
 		ToolName:      "bash",
