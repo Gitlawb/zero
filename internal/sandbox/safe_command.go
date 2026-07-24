@@ -437,12 +437,12 @@ func normalizeProgramToken(field string) string {
 	token := strings.TrimSpace(field)
 	token = strings.TrimLeft(token, "$(")
 	token = strings.TrimRight(token, ")")
-	// PowerShell commonly invokes absolute drive-letter or UNC paths. Extract
+	// PowerShell commonly invokes drive-letter, UNC, and relative paths. Extract
 	// their basename while backslashes still carry path-separator meaning;
 	// removing them first would turn C:\tools\curl.exe into c:toolscurl.exe and
 	// bypass the canonical curl risk entry.
 	pathToken := stripChars(token, "\"'`")
-	if windowsPathBasename, ok := windowsAbsolutePathBasename(pathToken); ok {
+	if windowsPathBasename, ok := windowsExecutablePathBasename(pathToken); ok {
 		token = windowsPathBasename
 	} else {
 		// Strip shell quoting/escaping characters (", ', `, \) wherever they
@@ -463,19 +463,37 @@ func normalizeProgramToken(field string) string {
 	return token
 }
 
-func windowsAbsolutePathBasename(token string) (string, bool) {
-	driveAbsolute := len(token) >= 3 &&
+func windowsExecutablePathBasename(token string) (string, bool) {
+	drivePath := len(token) >= 3 &&
 		((token[0] >= 'a' && token[0] <= 'z') || (token[0] >= 'A' && token[0] <= 'Z')) &&
-		token[1] == ':' && (token[2] == '\\' || token[2] == '/')
-	uncAbsolute := strings.HasPrefix(token, `\\`)
-	if !driveAbsolute && !uncAbsolute {
+		token[1] == ':'
+	uncPath := strings.HasPrefix(token, `\\`)
+	explicitRelativePath := strings.HasPrefix(token, `.\`) || strings.HasPrefix(token, `..\`)
+	backslashRelativePath := strings.ContainsRune(token, '\\') && hasWindowsExecutableSuffix(token)
+	if !drivePath && !uncPath && !explicitRelativePath && !backslashRelativePath {
 		return "", false
 	}
 	index := strings.LastIndexAny(token, `\/`)
-	if index < 0 || index+1 >= len(token) {
-		return "", false
+	if index >= 0 {
+		if index+1 >= len(token) {
+			return "", false
+		}
+		return token[index+1:], true
 	}
-	return token[index+1:], true
+	if drivePath && len(token) > 2 {
+		return token[2:], true
+	}
+	return "", false
+}
+
+func hasWindowsExecutableSuffix(token string) bool {
+	token = strings.ToLower(token)
+	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+		if strings.HasSuffix(token, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripChars returns s with every rune in cutset removed.
