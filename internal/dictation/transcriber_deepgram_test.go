@@ -150,3 +150,47 @@ func TestDeepgramStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) {
 		t.Fatalf("StreamTranscribe failed before accept: %v", ferr)
 	}
 }
+
+func TestDeepgramCustomHeaderErrorRedaction(t *testing.T) {
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		c.Close(websocket.StatusPolicyViolation, "X-Api-Key: sk-custom-secret-key-1234567890 failed")
+	})
+
+	tr, err := NewDeepgramTranscriber(DeepgramConfig{APIKey: "sk-custom-secret-key-1234567890", BaseURL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte, 1)
+	chunks <- make([]byte, 320)
+	close(chunks)
+	_, ferr := tr.StreamTranscribe(context.Background(), chunks, func(string, bool) {})
+	if ferr == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(ferr.Error(), "sk-custom-secret-key-1234567890") {
+		t.Errorf("Custom header API key leaked: %v", ferr)
+	}
+}
+
+func TestDeepgramSinglePassRedaction(t *testing.T) {
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		c.Close(websocket.StatusPolicyViolation, "error with sk-key1234567890abcdef1234")
+	})
+
+	tr, err := NewDeepgramTranscriber(DeepgramConfig{APIKey: "sk-key1234567890abcdef1234", BaseURL: url})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte, 1)
+	chunks <- make([]byte, 320)
+	close(chunks)
+	_, ferr := tr.StreamTranscribe(context.Background(), chunks, func(string, bool) {})
+	if ferr == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(ferr.Error(), "[REDACTED:[REDACTED") {
+		t.Errorf("nested redaction marker created: %v", ferr)
+	}
+}
