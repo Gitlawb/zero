@@ -1447,7 +1447,7 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target"} {
+	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target", "ZERO_GITHUB_TOKEN", "GITHUB_TOKEN"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected update help to document %s, got %q", want, stdout.String())
 		}

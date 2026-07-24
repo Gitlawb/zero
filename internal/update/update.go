@@ -17,6 +17,9 @@ import (
 const (
 	DefaultRepository = "Gitlawb/zero"
 	DefaultTimeout    = 5 * time.Second
+	// EnvUpdateToken is read by fetchRelease to authenticate GitHub API
+	// requests. ZERO_GITHUB_TOKEN takes precedence over GITHUB_TOKEN.
+	EnvUpdateToken = "ZERO_GITHUB_TOKEN"
 )
 
 type Release struct {
@@ -228,6 +231,11 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "zero/update")
+	if token := os.Getenv(EnvUpdateToken); token != "" && request.URL.Scheme == "https" && strings.EqualFold(request.URL.Hostname(), "api.github.com") {
+		request.Header.Set("Authorization", "Bearer "+token)
+	} else if token := os.Getenv("GITHUB_TOKEN"); token != "" && request.URL.Scheme == "https" && strings.EqualFold(request.URL.Hostname(), "api.github.com") {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return Release{}, err
