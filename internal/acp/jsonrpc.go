@@ -80,7 +80,7 @@ type NotifyFunc func(ctx context.Context, params json.RawMessage)
 // requests/notifications — needed because ACP is bidirectional (the agent calls
 // the client for session/request_permission, fs/*, terminal/*).
 type Conn struct {
-	reader       *bufio.Reader
+	rawReader    io.Reader // wrapped lazily in Serve, once ctx is known — see interruptibleReader
 	readerCloser io.Closer
 	w            io.Writer
 
@@ -103,7 +103,7 @@ type Conn struct {
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	readerCloser, _ := r.(io.Closer)
 	return &Conn{
-		reader:       bufio.NewReader(r),
+		rawReader:    r,
 		readerCloser: readerCloser,
 		w:            w,
 		handlers:     make(map[string]HandlerFunc),
@@ -124,59 +124,117 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 // blocks the loop from delivering session/cancel or a permission response.
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
-	readLoopDone := make(chan struct{})
-	var endReadOnce sync.Once
-	readInterrupted := false
-	endRead := func(interrupt bool) {
-		endReadOnce.Do(func() {
-			readInterrupted = interrupt
-			if interrupt && c.readerCloser != nil {
-				_ = c.readerCloser.Close()
-			}
-			close(readLoopDone)
-		})
-	}
-	var readerWatcher sync.WaitGroup
-	readerWatcher.Add(1)
-	go func() {
-		defer readerWatcher.Done()
-		select {
-		case <-ctx.Done():
-			endRead(true)
-		case <-readLoopDone:
-		}
-	}()
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
 	// would race the dispatch goroutine and drop the response.
 	defer func() {
-		endRead(false)
 		cancel()
-		readerWatcher.Wait()
 		c.wg.Wait()
 	}()
+
+	interruptible := newInterruptibleReader(c.rawReader, c.readerCloser, ctx)
+	reader := bufio.NewReader(interruptible)
 
 	for {
 		// One ndjson value per line. Framing per line (rather than streaming the
 		// decoder) keeps a single malformed line from making the whole connection
 		// unrecoverable — we report -32700 and continue.
-		line, err := c.reader.ReadBytes('\n')
-		if err != nil {
-			// Claim terminal completion before handling a partial final frame so
-			// concurrent cancellation cannot close the reader or mask this error.
-			endRead(false)
-		}
+		//
+		// generation brackets this SPECIFIC ReadBytes call: bufio may invoke
+		// interruptible.Read zero or more times underneath it (zero when the
+		// answer is already sitting in bufio's own buffer — including a
+		// previously-buffered, not-yet-surfaced error: bufio can return a
+		// complete line with a nil error while quietly caching an error it
+		// received ALONGSIDE that line's bytes, which then surfaces on the VERY
+		// NEXT call with no further contact with interruptible.Read at all). The
+		// generation only advances inside interruptible.Read's own cancellation
+		// branch, so "unchanged across this call" is proof this call's outcome
+		// didn't pass through that branch — whether because it was answered from
+		// the buffer or because it raced ctx.Done() and won. Only that proof
+		// makes it safe to call the outcome genuine.
+		before := interruptible.generation()
+		line, err := reader.ReadBytes('\n')
+		interrupted := interruptible.generation() != before
+
 		if len(bytes.TrimSpace(line)) > 0 {
 			c.handleLine(ctx, line)
 		}
 		if err != nil {
 			c.failAllPending(err)
-			if errors.Is(err, io.EOF) || readInterrupted {
+			if errors.Is(err, io.EOF) || interrupted {
 				return nil
 			}
 			return err
 		}
+	}
+}
+
+// interruptibleReader wraps a reader so a context cancellation can unblock a
+// currently in-flight Read without ever discarding — or misattributing — the
+// real outcome of a call that wasn't actually blocked.
+//
+// Each Read runs the underlying call on its own goroutine and races it against
+// ctx.Done(). If the underlying call finishes first, its result is returned
+// exactly as received; ctx being cancelled a moment later has no bearing on a
+// call that already had its answer. If ctx.Done() fires first, closer (when
+// non-nil) is closed to nudge a genuinely blocked read, the generation counter
+// is bumped, and the call STILL waits for and returns the underlying call's own
+// result — never a synthesized one — since closing a reader's outcome is
+// whatever the reader itself reports for it, not ours to invent.
+//
+// The counter is what lets Serve tell a call that was actually raced against
+// cancellation apart from one merely answered while cancellation happened to be
+// pending — the distinction the read loop's own doc comment explains.
+type interruptibleReader struct {
+	inner  io.Reader
+	closer io.Closer
+	ctx    context.Context
+
+	closeOnce sync.Once
+
+	mu  sync.Mutex
+	gen int64
+}
+
+func newInterruptibleReader(inner io.Reader, closer io.Closer, ctx context.Context) *interruptibleReader {
+	return &interruptibleReader{inner: inner, closer: closer, ctx: ctx}
+}
+
+func (r *interruptibleReader) generation() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gen
+}
+
+type interruptibleReadResult struct {
+	n   int
+	err error
+}
+
+func (r *interruptibleReader) Read(p []byte) (int, error) {
+	resultCh := make(chan interruptibleReadResult, 1)
+	go func() {
+		n, err := r.inner.Read(p)
+		resultCh <- interruptibleReadResult{n, err}
+	}()
+	select {
+	case res := <-resultCh:
+		return res.n, res.err
+	case <-r.ctx.Done():
+		r.mu.Lock()
+		r.gen++
+		r.mu.Unlock()
+		if r.closer != nil {
+			r.closeOnce.Do(func() { _ = r.closer.Close() })
+		}
+		// Wait for the real result rather than returning synthetically: p is
+		// still being written by the goroutine above until it does, so returning
+		// early would race that write, and the actual error (whatever closing
+		// the reader produced, or whatever the reader was already about to
+		// report) is what the caller should see.
+		res := <-resultCh
+		return res.n, res.err
 	}
 }
 

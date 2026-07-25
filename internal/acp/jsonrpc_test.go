@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,11 +46,17 @@ func connPair(t *testing.T) (a, b *Conn, stop func()) {
 func TestConnServeCancellationInterruptsIdleRead(t *testing.T) {
 	pipeReader, writer := io.Pipe()
 	t.Cleanup(func() { _ = writer.Close() })
-	readStarted := make(chan struct{})
+	// Buffered + non-blocking send, not close: interruptibleReader retries each
+	// underlying Read on its own goroutine, so if bufio ever calls this more than
+	// once, a close() here would panic on the second call.
+	readStarted := make(chan struct{}, 1)
 	closeCalls := make(chan struct{}, 2)
 	reader := testReadCloser{
 		read: func(p []byte) (int, error) {
-			close(readStarted)
+			select {
+			case readStarted <- struct{}{}:
+			default:
+			}
 			return pipeReader.Read(p)
 		},
 		close: func() error {
@@ -99,10 +106,16 @@ func TestConnServePreservesTerminalReadErrorDuringCancellation(t *testing.T) {
 					},
 				}
 			}
-			writeStarted := make(chan struct{})
+			// Buffered + non-blocking send, not close: a later change adding a
+			// second write (e.g. an additional error frame) must not panic on a
+			// repeated close of an already-closed channel.
+			writeStarted := make(chan struct{}, 1)
 			releaseWrite := make(chan struct{})
 			writer := testWriter(func(p []byte) (int, error) {
-				close(writeStarted)
+				select {
+				case writeStarted <- struct{}{}:
+				default:
+				}
 				<-releaseWrite
 				return len(p), nil
 			})
@@ -126,6 +139,75 @@ func TestConnServePreservesTerminalReadErrorDuringCancellation(t *testing.T) {
 				t.Fatalf("reader Close calls = %d, want 0 after terminal read", got)
 			}
 		})
+	}
+}
+
+// TestConnServePreservesReadErrorBufferedAlongsideAPriorLine is the deterministic
+// regression test for jatmn's #782 finding: a real, non-EOF ReadBytes failure can
+// be DECIDED before cancellation ever happens, yet only SURFACE afterward, and
+// must still be reported rather than swallowed as a clean shutdown.
+//
+// bufio.Reader can obtain data AND a terminal error from ONE underlying Read call
+// (io.Reader explicitly permits returning (n>0, err) together). If a delimiter is
+// found within that data, ReadBytes returns the line with a nil error for THIS
+// call, but bufio caches the error internally and returns it — WITHOUT calling the
+// underlying reader again — on the very next ReadBytes call. This test forces that
+// exact sequence: the underlying reader hands back one complete, validly-framed
+// line together with wantErr in a SINGLE call (asserted below to be its ONLY
+// call), the loop dispatches that line through a synchronous path that blocks the
+// read loop, cancellation is asserted to have happened before the loop attempts
+// its next read, and only then is the block released. By the time the read loop
+// asks for more input, cancellation is already in effect and the underlying
+// reader is never touched again — so if Serve attributed the resulting error to
+// cancellation merely because ctx was already done, it would incorrectly return
+// nil. It must instead recognize that this read was answered entirely from
+// bufio's own cache, never raced against ctx.Done(), and report wantErr.
+func TestConnServePreservesReadErrorBufferedAlongsideAPriorLine(t *testing.T) {
+	wantErr := errors.New("read failed")
+	var readCalls atomic.Int32
+	read := testReader(func(p []byte) (int, error) {
+		if n := readCalls.Add(1); n > 1 {
+			panic("underlying Read called more than once; bufio should have served the cached error")
+		}
+		// An unsupported jsonrpc version with an id takes the SYNCHRONOUS
+		// writeError path in handleLine (not a dispatched goroutine), giving this
+		// test a reliable blocking point between processing this line and the
+		// loop's next ReadBytes call.
+		return copy(p, `{"jsonrpc":"1.0","id":1}`+"\n"), wantErr
+	})
+	writeStarted := make(chan struct{}, 1)
+	releaseWrite := make(chan struct{})
+	writer := testWriter(func(p []byte) (int, error) {
+		select {
+		case writeStarted <- struct{}{}:
+		default:
+		}
+		<-releaseWrite
+		return len(p), nil
+	})
+	conn := NewConn(read, writer)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	// The synchronous write confirms the first (and, per the panic guard above,
+	// only) read has already returned and is being processed — cancelling now
+	// lands squarely in the gap between that read and the loop's next one, never
+	// racing an in-flight interruptibleReader.Read call.
+	<-writeStarted
+	cancel()
+	close(releaseWrite)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Serve returned %v, want the buffered terminal read error %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after the buffered terminal read error")
+	}
+	if got := readCalls.Load(); got != 1 {
+		t.Fatalf("underlying Read calls = %d, want exactly 1 (bufio must have served the second ReadBytes from its cache)", got)
 	}
 }
 
