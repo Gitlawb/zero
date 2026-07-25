@@ -39,7 +39,7 @@ var defaultModes = []Mode{
 		Description: "Hardest tasks: deep reasoning with a larger turn budget.",
 		Model:       "claude-opus-4.1",
 		Effort:      ReasoningEffortHigh,
-		MaxTurns:    50,
+		MaxTurns:    160,
 	},
 	{
 		Name:        "fast",
@@ -60,16 +60,6 @@ var defaultModes = []Mode{
 		Model:       "claude-sonnet-4.5",
 		Effort:      ReasoningEffortHigh,
 	},
-}
-
-// Modes returns a copy of the preset catalog, preserving declaration order so
-// list output and help text stay stable.
-func Modes() []Mode {
-	modes := make([]Mode, len(defaultModes))
-	for index, mode := range defaultModes {
-		modes[index] = cloneMode(mode)
-	}
-	return modes
 }
 
 // LookupMode returns the preset registered under name (case-insensitive,

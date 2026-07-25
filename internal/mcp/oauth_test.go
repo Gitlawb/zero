@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,7 +52,10 @@ func TestDiscoverParsesMetadata(t *testing.T) {
 
 func TestResolveEndpointsFallsBackToConfig(t *testing.T) {
 	// Server with no metadata document: discovery must fail and the resolver must
-	// fall back to the explicitly configured endpoints.
+	// fall back to the explicitly configured authorization endpoint. Only one
+	// endpoint is configured so the skip-discovery fast path does not fire;
+	// the token endpoint comes from discovery (which fails here), so the
+	// resolver must return an error for the missing token endpoint.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
@@ -59,17 +63,63 @@ func TestResolveEndpointsFallsBackToConfig(t *testing.T) {
 
 	cfg := OAuthConfig{
 		AuthorizationEndpoint: "https://issuer.example/authorize",
-		TokenEndpoint:         "https://issuer.example/token",
 	}
-	meta, err := resolveAuthorizationServer(context.Background(), http.DefaultClient, server.URL, cfg)
+	_, err := resolveAuthorizationServer(context.Background(), http.DefaultClient, server.URL, cfg)
+	if err == nil {
+		t.Fatal("expected error for missing token endpoint when discovery fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "token endpoint") {
+		t.Fatalf("error = %q, want it to mention token endpoint", err)
+	}
+}
+
+// Discovered MCP metadata that serves an insecure endpoint must be rejected
+// before use, so discovery cannot downgrade the MCP login to an
+// attacker-controlled origin (issue #511).
+func TestResolveAuthorizationServerRejectsInsecureDiscovered(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"` + server.URL + `","token_endpoint":"` + server.URL + `/token","authorization_endpoint":"http://evil.example/authorize"}`))
+	})
+	_, err := resolveAuthorizationServer(context.Background(), server.Client(), server.URL, OAuthConfig{})
+	if err == nil || !strings.Contains(err.Error(), "authorization endpoint") {
+		t.Fatalf("err = %v, want insecure authorization endpoint rejection", err)
+	}
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper so a test can
+// observe every outbound request.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestResolveEndpointsSkipsDiscoveryWhenBothConfigured(t *testing.T) {
+	// When both endpoints are configured, discovery must be skipped entirely.
+	// The client fails any outbound request, so this test distinguishes the
+	// fast path from a discovery failure rescued by the config fallback.
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected HTTP request to %s: discovery should be skipped", r.URL)
+		return nil, errors.New("discovery must be skipped")
+	})}
+	cfg := OAuthConfig{
+		AuthorizationEndpoint: "  https://issuer.example/authorize  ",
+		TokenEndpoint:         "  https://issuer.example/token  ",
+		RegistrationEndpoint:  "  https://issuer.example/register  ",
+	}
+	meta, err := resolveAuthorizationServer(context.Background(), client, "https://issuer.example", cfg)
 	if err != nil {
 		t.Fatalf("resolveAuthorizationServer() error = %v", err)
 	}
-	if meta.AuthorizationEndpoint != cfg.AuthorizationEndpoint {
-		t.Fatalf("authorization endpoint = %q, want config fallback", meta.AuthorizationEndpoint)
+	if meta.AuthorizationEndpoint != "https://issuer.example/authorize" {
+		t.Fatalf("authorization endpoint = %q, want trimmed config value", meta.AuthorizationEndpoint)
 	}
-	if meta.TokenEndpoint != cfg.TokenEndpoint {
-		t.Fatalf("token endpoint = %q, want config fallback", meta.TokenEndpoint)
+	if meta.TokenEndpoint != "https://issuer.example/token" {
+		t.Fatalf("token endpoint = %q, want trimmed config value", meta.TokenEndpoint)
+	}
+	if meta.RegistrationEndpoint != "https://issuer.example/register" {
+		t.Fatalf("registration endpoint = %q, want trimmed config value", meta.RegistrationEndpoint)
 	}
 }
 

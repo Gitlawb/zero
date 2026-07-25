@@ -483,6 +483,14 @@ func TestTUISandboxSetupCommandGatedToWindowsNativeBackend(t *testing.T) {
 }
 
 func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
+	// Point HOME at an empty directory so the default credential-store
+	// deny-read entries (which depend on what exists in the real home, e.g.
+	// ~/.aws on the macOS CI image) cannot leak host paths into the golden
+	// comparison.
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("USERPROFILE", emptyHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 	store := newSandboxTestStore(t)
 	workspace := t.TempDir()
 	deps := appDeps{
@@ -616,8 +624,12 @@ func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {
 func normalizePortableJSONRootString(value *any) {
 	switch current := (*value).(type) {
 	case string:
-		if current == `\` {
-			*value = "/"
+		// Normalize OS-specific path separators so the shared golden file
+		// matches on both Unix (slash) and Windows (backslash) runners.
+		// readOnlySubpaths carve-outs are built with filepath.Join, which
+		// renders as backslash paths on Windows.
+		if current != "" {
+			*value = strings.ReplaceAll(current, `\`, "/")
 		}
 	case []any:
 		for index := range current {
@@ -988,4 +1000,19 @@ func sandboxPolicyCapabilityStatus(capabilities []sandbox.BackendCapability, key
 		}
 	}
 	return ""
+}
+
+func TestApplyConfiguredSandboxPolicyEnabledFalseDisables(t *testing.T) {
+	disabled := false
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{Enabled: &disabled}); got.Mode != sandbox.ModeDisabled {
+		t.Fatalf("enabled:false must yield ModeDisabled, got %q", got.Mode)
+	}
+	// Omitted (nil) and explicit true keep the default enforcing mode.
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.Mode == sandbox.ModeDisabled {
+		t.Fatal("omitted enabled must not disable the sandbox")
+	}
+	enabled := true
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{Enabled: &enabled}); got.Mode == sandbox.ModeDisabled {
+		t.Fatal("enabled:true must not disable the sandbox")
+	}
 }

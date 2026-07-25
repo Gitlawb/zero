@@ -15,6 +15,9 @@ import (
 // tokenStoreSchemaVersion is the schema of the legacy mcp-oauth-tokens.json file,
 // retained so migration can recognize a file it understands.
 const tokenStoreSchemaVersion = 1
+const mcpServerIdentityLength = 32
+const maxOAuthTokenKeySegmentLength = 128
+const maxMCPServerNameForIdentityToken = maxOAuthTokenKeySegmentLength - 1 - mcpServerIdentityLength
 
 // StoredToken holds the credentials issued by an OAuth 2.0 authorization server
 // for a single MCP server. The token fields are sensitive: they are tagged so
@@ -32,6 +35,7 @@ type StoredToken struct {
 // omits the access and refresh token material so it can be printed by the CLI.
 type TokenStatus struct {
 	ServerName      string    `json:"serverName"`
+	ServerIdentity  string    `json:"serverIdentity,omitempty"`
 	HasToken        bool      `json:"hasToken"`
 	HasRefreshToken bool      `json:"hasRefreshToken"`
 	TokenType       string    `json:"tokenType,omitempty"`
@@ -148,6 +152,17 @@ func (store *TokenStore) Save(serverName string, token StoredToken) error {
 	return store.store.Save(key, storedToOAuth(token))
 }
 
+// SaveForServer persists a token under the server's target identity. Identity
+// binding prevents a project config with the same server name from reusing a
+// token issued for a different MCP endpoint.
+func (store *TokenStore) SaveForServer(server Server, token StoredToken) error {
+	key, err := mcpIdentityKey(server)
+	if err != nil {
+		return err
+	}
+	return store.store.Save(key, storedToOAuth(token))
+}
+
 // Load returns the stored token for a server. The second return value is false
 // when no token has been stored for the server.
 func (store *TokenStore) Load(serverName string) (StoredToken, bool, error) {
@@ -162,6 +177,30 @@ func (store *TokenStore) Load(serverName string) (StoredToken, bool, error) {
 	return tokenToStored(token), true, nil
 }
 
+// LoadForServer returns the token matching the server's target identity. Legacy
+// name-only tokens are migrated only for servers untouched by project config.
+func (store *TokenStore) LoadForServer(server Server) (StoredToken, bool, error) {
+	key, err := mcpIdentityKey(server)
+	if err != nil {
+		return StoredToken{}, false, err
+	}
+	token, ok, err := store.store.Load(key)
+	if err != nil || ok {
+		return tokenToStored(token), ok, err
+	}
+	if server.ProjectConfigured {
+		return StoredToken{}, false, nil
+	}
+	legacy, ok, err := store.Load(server.Name)
+	if err != nil || !ok {
+		return StoredToken{}, ok, err
+	}
+	if err := store.store.Save(key, storedToOAuth(legacy)); err != nil {
+		return StoredToken{}, false, err
+	}
+	return legacy, true, nil
+}
+
 // Delete removes the stored token for a server. It reports whether an entry was
 // present before deletion.
 func (store *TokenStore) Delete(serverName string) (bool, error) {
@@ -170,6 +209,36 @@ func (store *TokenStore) Delete(serverName string) (bool, error) {
 		return false, err
 	}
 	return store.store.Delete(key)
+}
+
+// DeleteForServerName removes both legacy name-only and identity-bound tokens
+// for a server name.
+func (store *TokenStore) DeleteForServerName(serverName string) (bool, error) {
+	name := strings.TrimSpace(serverName)
+	if err := ValidateServerName(name); err != nil {
+		return false, err
+	}
+	removed, err := store.Delete(name)
+	if err != nil {
+		return false, err
+	}
+	statuses, err := store.store.Status(oauth.KeyPrefixMCP)
+	if err != nil {
+		return removed, err
+	}
+	for _, status := range statuses {
+		segment := strings.TrimPrefix(status.Key, oauth.KeyPrefixMCP)
+		parsedName, _, ok := splitMCPIdentityKeySegment(segment)
+		if !ok || parsedName != name {
+			continue
+		}
+		deleted, err := store.store.Delete(status.Key)
+		if err != nil {
+			return removed, err
+		}
+		removed = removed || deleted
+	}
+	return removed, nil
 }
 
 // Status returns a redaction-safe summary of every stored MCP token, sorted by
@@ -181,8 +250,10 @@ func (store *TokenStore) Status() ([]TokenStatus, error) {
 	}
 	out := make([]TokenStatus, 0, len(statuses))
 	for _, s := range statuses {
+		serverName, serverIdentity, _ := splitMCPIdentityKeySegment(strings.TrimPrefix(s.Key, oauth.KeyPrefixMCP))
 		out = append(out, TokenStatus{
-			ServerName:      strings.TrimPrefix(s.Key, oauth.KeyPrefixMCP),
+			ServerName:      serverName,
+			ServerIdentity:  serverIdentity,
 			HasToken:        s.HasToken,
 			HasRefreshToken: s.HasRefreshToken,
 			TokenType:       s.TokenType,
@@ -250,14 +321,67 @@ func (store *TokenStore) migrateLegacy(legacyPath string) error {
 
 // mcpKey builds and validates the unified store key for an MCP server token.
 func mcpKey(serverName string) (string, error) {
-	if err := ValidateServerName(serverName); err != nil {
+	name := strings.TrimSpace(serverName)
+	if err := ValidateServerName(name); err != nil {
 		return "", err
 	}
-	key := oauth.KeyPrefixMCP + strings.TrimSpace(serverName)
+	if hasMCPIdentitySuffix(name) {
+		return "", fmt.Errorf("MCP OAuth server name %q cannot end with .<32 hex chars> because it collides with identity-bound token storage", name)
+	}
+	key := oauth.KeyPrefixMCP + name
 	if err := oauth.ValidateKey(key); err != nil {
 		return "", err
 	}
 	return key, nil
+}
+
+func mcpIdentityKey(server Server) (string, error) {
+	name := strings.TrimSpace(server.Name)
+	if err := ValidateServerName(name); err != nil {
+		return "", err
+	}
+	if hasMCPIdentitySuffix(name) {
+		return "", fmt.Errorf("MCP OAuth server name %q cannot end with .<32 hex chars> because it collides with identity-bound token storage", name)
+	}
+	identity := strings.TrimSpace(server.Identity)
+	if len(name) > maxMCPServerNameForIdentityToken {
+		return "", fmt.Errorf("MCP OAuth server name %q is too long for identity-bound token storage", name)
+	}
+	if len(identity) != mcpServerIdentityLength || !isMCPServerIdentity(identity) {
+		return "", fmt.Errorf("MCP OAuth server %s has invalid identity %q", name, identity)
+	}
+	key := oauth.KeyPrefixMCP + name + "." + identity
+	if err := oauth.ValidateKey(key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func splitMCPIdentityKeySegment(segment string) (string, string, bool) {
+	index := strings.LastIndex(segment, ".")
+	if index <= 0 || index == len(segment)-1 {
+		return segment, "", false
+	}
+	identity := segment[index+1:]
+	if len(identity) != mcpServerIdentityLength || !isMCPServerIdentity(identity) {
+		return segment, "", false
+	}
+	return segment[:index], identity, true
+}
+
+func hasMCPIdentitySuffix(value string) bool {
+	_, _, ok := splitMCPIdentityKeySegment(value)
+	return ok
+}
+
+func isMCPServerIdentity(value string) bool {
+	for _, ch := range value {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+			continue
+		}
+		return false
+	}
+	return value != ""
 }
 
 // storedToOAuth converts an MCP StoredToken to the shared oauth.Token (the
@@ -284,6 +408,11 @@ func FormatTokenStatuses(statuses []TokenStatus) string {
 			builder.WriteByte('\n')
 		}
 		builder.WriteString(status.ServerName)
+		if status.ServerIdentity != "" {
+			builder.WriteString(" [")
+			builder.WriteString(status.ServerIdentity)
+			builder.WriteString("]")
+		}
 		builder.WriteString(": ")
 		if !status.HasToken {
 			builder.WriteString("no token")

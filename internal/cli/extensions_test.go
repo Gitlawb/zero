@@ -204,7 +204,7 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 	closeCalls := 0
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -264,7 +264,7 @@ func TestRunMCPLegacyListAliases(t *testing.T) {
 	closeCalls := 0
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}

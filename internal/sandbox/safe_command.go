@@ -24,6 +24,10 @@ type InteractiveCommandResult struct {
 type interactiveProgram struct {
 	reason     string
 	suggestion string
+	// windowsSuggestion overrides suggestion when goos == "windows", for cases
+	// where the POSIX suggestion (cat/head/tail/ps, etc.) has no cmd.exe
+	// equivalent and would just trade one broken command for another.
+	windowsSuggestion string
 	// windowsOnly limits the match to GOOS == "windows" (e.g. notepad).
 	windowsOnly bool
 }
@@ -39,14 +43,26 @@ var interactivePrograms = map[string]interactiveProgram{
 	"emacs": {reason: "emacs opens an interactive session", suggestion: "Use `emacs --batch` for scripting, or the edit_file/write_file tools."},
 	"pico":  {reason: "pico is a full-screen editor that waits for keystrokes", suggestion: "Use the edit_file/write_file tools or `sed -i`."},
 	// Pagers.
-	"less": {reason: "less is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
-	"more": {reason: "more is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
-	"most": {reason: "most is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively."},
+	"less": {
+		reason:            "less is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"more": {
+		reason:            "more is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"most": {
+		reason:            "most is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
 	// Process/system monitors.
-	"top":   {reason: "top runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot."},
-	"htop":  {reason: "htop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot."},
-	"btop":  {reason: "btop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot."},
-	"btm":   {reason: "btm runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` for a one-shot snapshot."},
+	"top":   {reason: "top runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},
+	"htop":  {reason: "htop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},
+	"btop":  {reason: "btop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},
+	"btm":   {reason: "btm runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},
 	"watch": {reason: "watch re-runs a command on a loop until interrupted", suggestion: "Run the underlying command once instead of wrapping it in `watch`."},
 	// Language REPLs (only interactive when invoked with no script/expression).
 	"python":  {reason: "python with no script drops into an interactive REPL", suggestion: "Run `python script.py` or `python -c '<code>'`."},
@@ -108,18 +124,19 @@ var infoExitFlags = map[string]bool{
 // matches them as substrings (after normalizing whitespace) so flags like
 // `git rebase -i` or `tail -f` are caught even mid-pipeline.
 var interactiveSegments = []struct {
-	match      string
-	command    string
-	reason     string
-	suggestion string
+	match             string
+	command           string
+	reason            string
+	suggestion        string
+	windowsSuggestion string
 }{
 	{match: "git rebase -i", command: "git rebase -i", reason: "interactive rebase opens an editor for the todo list", suggestion: "Use a non-interactive rebase (`git rebase <base>`) or scripted `git rebase --onto`, and resolve via `git rebase --continue`."},
 	{match: "git rebase --interactive", command: "git rebase -i", reason: "interactive rebase opens an editor for the todo list", suggestion: "Use a non-interactive rebase (`git rebase <base>`)."},
 	{match: "git add -i", command: "git add -i", reason: "interactive add opens a selection prompt", suggestion: "Stage paths explicitly: `git add <path>`."},
 	{match: "git add -p", command: "git add -p", reason: "interactive patch staging opens a prompt", suggestion: "Stage paths explicitly: `git add <path>`."},
 	{match: "git commit -p", command: "git commit -p", reason: "interactive patch commit opens a prompt", suggestion: "Stage with `git add <path>` then `git commit -m`."},
-	{match: "tail -f", command: "tail -f", reason: "tail -f follows a file forever", suggestion: "Use `tail -n N <file>` for a bounded read."},
-	{match: "tail --follow", command: "tail -f", reason: "tail --follow follows a file forever", suggestion: "Use `tail -n N <file>` for a bounded read."},
+	{match: "tail -f", command: "tail -f", reason: "tail -f follows a file forever", suggestion: "Use `tail -n N <file>` for a bounded read.", windowsSuggestion: "Read the file with the read_file tool (offset/limit), or `type <file>` for the whole file."},
+	{match: "tail --follow", command: "tail -f", reason: "tail --follow follows a file forever", suggestion: "Use `tail -n N <file>` for a bounded read.", windowsSuggestion: "Read the file with the read_file tool (offset/limit), or `type <file>` for the whole file."},
 	{match: "journalctl -f", command: "journalctl -f", reason: "journalctl -f streams logs forever", suggestion: "Use `journalctl -n N` for a bounded read."},
 	{match: "kubectl logs -f", command: "kubectl logs -f", reason: "kubectl logs -f streams logs forever", suggestion: "Drop -f and use `kubectl logs --tail=N`."},
 	{match: "docker logs -f", command: "docker logs -f", reason: "docker logs -f streams logs forever", suggestion: "Drop -f and use `docker logs --tail N`."},
@@ -149,11 +166,15 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 		body := strings.ToLower(commandBody(strings.Fields(segment)))
 		for _, seg := range interactiveSegments {
 			if body == seg.match || strings.HasPrefix(body, seg.match+" ") {
+				suggestion := seg.suggestion
+				if goos == "windows" && seg.windowsSuggestion != "" {
+					suggestion = seg.windowsSuggestion
+				}
 				return InteractiveCommandResult{
 					Interactive: true,
 					Command:     seg.command,
 					Reason:      seg.reason,
-					Suggestion:  seg.suggestion,
+					Suggestion:  suggestion,
 				}
 			}
 		}
@@ -186,15 +207,75 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 		if hasNonInteractiveFlag(first, fields) {
 			continue
 		}
+		suggestion := program.suggestion
+		if goos == "windows" && program.windowsSuggestion != "" {
+			suggestion = program.windowsSuggestion
+		}
 		return InteractiveCommandResult{
 			Interactive: true,
 			Command:     first,
 			Reason:      program.reason,
-			Suggestion:  program.suggestion,
+			Suggestion:  suggestion,
+		}
+	}
+
+	// AST second opinion (issue #473): the hand-written segment split above
+	// mis-handles interactive programs hidden by unusual quoting, command
+	// substitution, subshells, or newline separators. Re-extract the real simple
+	// commands from the parsed shell tree and apply the SAME full pipeline
+	// (interactive segments, sh -c payload recursion, per-program lookup), so a
+	// bypass is caught while every program stays classified exactly as before
+	// (ssh with a trailing command, python -c, etc. remain allowed). A command
+	// the parser cannot handle (Windows cmd.exe, obfuscation) yields no commands
+	// and falls through unchanged — the guard never hard-blocks on a parse error.
+	for _, fields := range astCommandFields(command) {
+		if result, ok := inspectCommandFields(fields, goos); ok {
+			return result
 		}
 	}
 
 	return InteractiveCommandResult{}
+}
+
+// inspectCommandFields applies the full interactive-detection pipeline to one
+// already-split command's fields: the multi-word interactive segments, then the
+// `sh -c <payload>` recursion, then the per-program lookup with its
+// non-interactive suppressions (hasNonInteractiveFlag covers REPL flags and
+// trailing-command clients like ssh). It mirrors the hand-written passes above
+// so an AST-extracted command is classified identically to a plainly-split one.
+func inspectCommandFields(fields []string, goos string) (InteractiveCommandResult, bool) {
+	body := strings.ToLower(commandBody(fields))
+	for _, seg := range interactiveSegments {
+		if body == seg.match || strings.HasPrefix(body, seg.match+" ") {
+			suggestion := seg.suggestion
+			if goos == "windows" && seg.windowsSuggestion != "" {
+				suggestion = seg.windowsSuggestion
+			}
+			return InteractiveCommandResult{Interactive: true, Command: seg.command, Reason: seg.reason, Suggestion: suggestion}, true
+		}
+	}
+	first := firstProgram(fields)
+	if first == "" {
+		return InteractiveCommandResult{}, false
+	}
+	if payload := shellDashCPayload(first, fields); payload != "" {
+		if inner := DetectInteractiveCommand(payload, goos); inner.Interactive {
+			return inner, true
+		}
+		return InteractiveCommandResult{}, false
+	}
+	program, ok := interactivePrograms[first]
+	if !ok || (program.windowsOnly && goos != "windows") {
+		return InteractiveCommandResult{}, false
+	}
+	if hasNonInteractiveFlag(first, fields) {
+		return InteractiveCommandResult{}, false
+	}
+	suggestion := program.suggestion
+	if goos == "windows" && program.windowsSuggestion != "" {
+		suggestion = program.windowsSuggestion
+	}
+	return InteractiveCommandResult{Interactive: true, Command: first, Reason: program.reason, Suggestion: suggestion}, true
 }
 
 // wrapperPrograms are launcher prefixes that precede the real program. After

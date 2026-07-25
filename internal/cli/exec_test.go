@@ -345,8 +345,8 @@ func TestRunExecModeSeedsModelAndTurnOverrides(t *testing.T) {
 	if gotModel != "claude-opus-4.1" {
 		t.Fatalf("overrides.Provider.Model = %q, want claude-opus-4.1", gotModel)
 	}
-	if gotMaxTurns != 50 {
-		t.Fatalf("overrides.MaxTurns = %d, want 50", gotMaxTurns)
+	if gotMaxTurns != 160 {
+		t.Fatalf("overrides.MaxTurns = %d, want 160 (deep mode)", gotMaxTurns)
 	}
 }
 
@@ -549,10 +549,14 @@ func TestExecMemberAutoToolListIncludesMutators(t *testing.T) {
 }
 
 func TestRunExecAcceptsLegacyModelProfileFlags(t *testing.T) {
+	// --profile (legacy, inert model profile) and --exec-profile (execution
+	// profile) are distinct flags and must coexist on one invocation.
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{
 		"exec",
 		"--profile",
 		"fast",
+		"--exec-profile",
+		"balanced",
 		"--reasoning-effort",
 		"low",
 		"hello",

@@ -2,12 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -69,6 +71,32 @@ func TestFillAppDepsWrapsNewProviderWithStoredKey(t *testing.T) {
 	}
 	if captured.APIKey != "sk-stored-wrap" {
 		t.Fatalf("wrapped newProvider built with APIKey = %q, want the stored key (unauthenticated regression)", captured.APIKey)
+	}
+}
+
+// fillAppDeps also wraps probeProviderHealth, the code path zero providers
+// check --connectivity, zero doctor --connectivity, and the TUI doctor panel
+// all go through. Passing the raw resolved profile previously sent an
+// unauthenticated (keyless) health probe for apiKeyStored profiles, same
+// regression class as TestFillAppDepsWrapsNewProviderWithStoredKey but for
+// health checks instead of the runtime provider build.
+func TestFillAppDepsWrapsProbeProviderHealthWithStoredKey(t *testing.T) {
+	configPath := seedStoredProviderKey(t, "echo", "sk-stored-health")
+
+	var captured config.ProviderProfile
+	deps := fillAppDeps(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		probeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			captured = options.Profile
+			return providerhealth.Result{Status: providerhealth.StatusPass}
+		},
+	})
+
+	deps.probeProviderHealth(context.Background(), providerhealth.Options{
+		Profile: config.ProviderProfile{Name: "echo", APIKeyStored: true},
+	})
+	if captured.APIKey != "sk-stored-health" {
+		t.Fatalf("wrapped probeProviderHealth ran with APIKey = %q, want the stored key (keyless health-check regression)", captured.APIKey)
 	}
 }
 

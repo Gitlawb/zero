@@ -90,6 +90,8 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 				Reason:          "Sends model-provided search query text to the configured web search backend.",
 				AdvertiseInAuto: true,
 			},
+			// Search backends may share non-thread-safe clients.
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: false},
 		},
 		backend: backend,
 	}

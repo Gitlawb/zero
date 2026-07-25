@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,6 +42,191 @@ func TestTokenStoreRoundTrip(t *testing.T) {
 	}
 	if !loaded.ExpiresAt.Equal(expiry) {
 		t.Fatalf("expiry = %v, want %v", loaded.ExpiresAt, expiry)
+	}
+}
+
+func TestTokenStoreIdentityBoundRoundTrip(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+	otherTarget := testOAuthServer("demo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)
+	if err := store.SaveForServer(server, StoredToken{AccessToken: "identity-token"}); err != nil {
+		t.Fatalf("SaveForServer() error = %v", err)
+	}
+
+	loaded, ok, err := store.LoadForServer(server)
+	if err != nil || !ok {
+		t.Fatalf("LoadForServer() ok=%v err=%v", ok, err)
+	}
+	if loaded.AccessToken != "identity-token" {
+		t.Fatalf("access token = %q", loaded.AccessToken)
+	}
+	if _, ok, err := store.LoadForServer(otherTarget); err != nil || ok {
+		t.Fatalf("LoadForServer(other target) ok=%v err=%v, want no token", ok, err)
+	}
+}
+
+func TestStoreTokenSourceRequiresMatchingIdentity(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+	otherTarget := testOAuthServer("demo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)
+	if err := store.SaveForServer(server, StoredToken{AccessToken: "access-a"}); err != nil {
+		t.Fatalf("SaveForServer() error = %v", err)
+	}
+
+	source := &storeTokenSource{server: server, store: store}
+	token, err := source.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken() error = %v", err)
+	}
+	if token != "access-a" {
+		t.Fatalf("token = %q, want access-a", token)
+	}
+
+	source.server = otherTarget
+	if _, err := source.AccessToken(context.Background()); err == nil {
+		t.Fatal("AccessToken() error = nil for mismatched identity")
+	}
+}
+
+func TestTokenStoreProjectConfiguredDoesNotLoadLegacyToken(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	if err := store.Save("demo", StoredToken{AccessToken: "legacy-token"}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true)
+
+	_, ok, err := store.LoadForServer(server)
+	if err != nil {
+		t.Fatalf("LoadForServer() error = %v", err)
+	}
+	if ok {
+		t.Fatal("LoadForServer() ok = true for project-configured legacy token")
+	}
+}
+
+func TestTokenStoreMigratesLegacyForUserOnlyServer(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	if err := store.Save("demo", StoredToken{AccessToken: "legacy-token"}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	server := testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false)
+
+	loaded, ok, err := store.LoadForServer(server)
+	if err != nil || !ok {
+		t.Fatalf("LoadForServer() ok=%v err=%v", ok, err)
+	}
+	if loaded.AccessToken != "legacy-token" {
+		t.Fatalf("access token = %q", loaded.AccessToken)
+	}
+	if _, err := store.Delete("demo"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	loaded, ok, err = store.LoadForServer(server)
+	if err != nil || !ok || loaded.AccessToken != "legacy-token" {
+		t.Fatalf("identity-bound migrated token missing: loaded=%#v ok=%v err=%v", loaded, ok, err)
+	}
+}
+
+func TestTokenStoreRejectsLongIdentityBoundServerName(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	name := strings.Repeat("a", maxMCPServerNameForIdentityToken+1)
+	err = store.SaveForServer(testOAuthServer(name, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false), StoredToken{AccessToken: "x"})
+	if err == nil {
+		t.Fatal("SaveForServer() error = nil for long server name")
+	}
+	if !strings.Contains(err.Error(), `MCP OAuth server name "`+name+`" is too long for identity-bound token storage`) {
+		t.Fatalf("error = %q, want long-name message", err.Error())
+	}
+}
+
+func TestTokenStoreRejectsAmbiguousIdentitySuffixServerName(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	name := "demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	if err := store.SaveForServer(testOAuthServer(name, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false), StoredToken{AccessToken: "x"}); err == nil {
+		t.Fatal("SaveForServer() error = nil for ambiguous server name")
+	} else if !strings.Contains(err.Error(), `MCP OAuth server name "`+name+`" cannot end with .<32 hex chars>`) {
+		t.Fatalf("SaveForServer() error = %q, want ambiguous-name rejection", err.Error())
+	}
+	if err := store.Save(name, StoredToken{AccessToken: "legacy"}); err == nil {
+		t.Fatal("Save() error = nil for ambiguous legacy server name")
+	}
+}
+
+func TestTokenStoreDeleteForServerNameRemovesLegacyAndIdentityTokens(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	if err := store.Save("demo", StoredToken{AccessToken: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForServer(testOAuthServer("demo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false), StoredToken{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForServer(testOAuthServer("demo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false), StoredToken{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForServer(testOAuthServer("other", "cccccccccccccccccccccccccccccccc", false), StoredToken{AccessToken: "c"}); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := store.DeleteForServerName("demo")
+	if err != nil {
+		t.Fatalf("DeleteForServerName() error = %v", err)
+	}
+	if !removed {
+		t.Fatal("DeleteForServerName() removed = false")
+	}
+	statuses, err := store.Status()
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].ServerName != "other" {
+		t.Fatalf("statuses after delete = %#v, want only other", statuses)
+	}
+}
+
+func TestTokenStoreStatusParsesIdentityAndRedacts(t *testing.T) {
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth-tokens.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	identity := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := store.SaveForServer(testOAuthServer("demo", identity, false), StoredToken{AccessToken: "secret-access", RefreshToken: "secret-refresh"}); err != nil {
+		t.Fatalf("SaveForServer() error = %v", err)
+	}
+	statuses, err := store.Status()
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].ServerName != "demo" || statuses[0].ServerIdentity != identity {
+		t.Fatalf("statuses = %#v, want parsed identity", statuses)
+	}
+	output := FormatTokenStatuses(statuses)
+	if !strings.Contains(output, "demo ["+identity+"]") {
+		t.Fatalf("status output = %q, want identity label", output)
+	}
+	if contains(output, "secret-access") || contains(output, "secret-refresh") {
+		t.Fatalf("status output leaked token: %s", output)
 	}
 }
 
@@ -265,6 +452,17 @@ func TestResolveTokenStorePathUsesXDG(t *testing.T) {
 	want := filepath.Join(configHome, "zero", "mcp-oauth-tokens.json")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func testOAuthServer(name string, identity string, projectConfigured bool) Server {
+	return Server{
+		Name:              name,
+		Type:              ServerTypeHTTP,
+		URL:               "https://example.com/mcp",
+		Auth:              ServerAuthOAuth,
+		Identity:          identity,
+		ProjectConfigured: projectConfigured,
 	}
 }
 

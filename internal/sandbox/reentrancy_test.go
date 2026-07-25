@@ -61,6 +61,7 @@ func TestSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 		},
 		DefaultPolicy(),
 		BackendMacOSSeatbelt,
+		"",
 	)
 
 	for _, want := range []string{

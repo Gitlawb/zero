@@ -45,7 +45,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 
 	for _, want := range []string{
 		"model:",
-		"  /provider [status] - Open provider setup.",
+		"  /provider [add|status] - Manage providers: activate, add, edit, delete.",
 		"  /model [list|id] - Show or switch the active model.",
 		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
 		"session:",
@@ -982,6 +982,31 @@ func TestParseBackgroundTerminalCommands(t *testing.T) {
 		if got.kind != tc.kind || got.text != tc.text {
 			t.Fatalf("%q: got kind=%v text=%q, want kind=%v text=%q", tc.input, got.kind, got.text, tc.kind, tc.text)
 		}
+	}
+}
+
+// /undo is an alias for /rewind (issue #698): previously it fell through to
+// commandUnknown.
+func TestUndoAliasesRewind(t *testing.T) {
+	rewind, ok := resolveCommand("/rewind")
+	if !ok {
+		t.Fatal("expected /rewind to resolve")
+	}
+	alias, ok := resolveCommand("/undo")
+	if !ok || alias.kind != rewind.kind {
+		t.Fatalf("expected /undo to alias /rewind, got ok=%v command=%#v", ok, alias)
+	}
+	// End-to-end: a typed /undo dispatches to the rewind handler with args intact,
+	// for both the "latest" and numeric-<sequence> forms of the /rewind contract.
+	if parsed := parseCommand("/undo latest"); parsed.kind != commandRewind || parsed.text != "latest" {
+		t.Fatalf("parseCommand(%q) = %#v, want commandRewind with text=latest", "/undo latest", parsed)
+	}
+	if parsed := parseCommand("/undo 123"); parsed.kind != commandRewind || parsed.text != "123" {
+		t.Fatalf("parseCommand(%q) = %#v, want commandRewind with text=123", "/undo 123", parsed)
+	}
+	// Guard: without the alias it would be commandUnknown.
+	if parsed := parseCommand("/undo"); parsed.kind == commandUnknown {
+		t.Fatal("/undo resolved to commandUnknown — the alias is not wired")
 	}
 }
 

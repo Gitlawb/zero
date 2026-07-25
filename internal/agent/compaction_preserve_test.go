@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -56,6 +57,103 @@ func TestCompactPreservesActivePlan(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("plan item %q not preserved in %q", want, summary)
 		}
+	}
+}
+
+func TestCompactPreservesBoundedTaskContext(t *testing.T) {
+	objective := strings.Repeat("世", maxTaskObjectiveBytes)
+	task := newTaskState(objective, nil)
+	task.observe(taskStateEvent{kind: taskStateEventPlan, arguments: `{"plan":[{"content":"write code","status":"in_progress"},{"content":"add tests","status":"pending"}]}`})
+	messages := stateConversation()
+	compacted, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+		taskState:    task.snapshotForCompaction(messages),
+	})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(compacted[1].Content)
+	if state.Task == nil || state.Task.Status != taskStatusActive || state.Task.InProgress != 1 || state.Task.Pending != 1 {
+		t.Fatalf("unexpected compact task state: %#v", state.Task)
+	}
+	if len(state.Task.Objective) > maxTaskObjectiveBytes || !utf8.ValidString(state.Task.Objective) {
+		t.Fatalf("objective was not safely bounded: %d bytes %q", len(state.Task.Objective), state.Task.Objective)
+	}
+}
+
+func TestCompactPreservesObjectiveAfterPlanParityMismatch(t *testing.T) {
+	prior := preservedState{Task: &preservedTaskState{Objective: "stale objective", Status: taskStatusActive, Pending: 1}}
+	encoded, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: summaryLabel + "\nold\n\n" + preservedStateLabel + "\n" + string(encoded)},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+		{Role: zeroruntime.MessageRoleUser, Content: "more"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "working"},
+		{Role: zeroruntime.MessageRoleUser, Content: "again"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "done"},
+	}
+	compacted, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+		taskState: &taskStateSnapshot{
+			Objective:  "current objective",
+			PlanParity: taskPlanParityMismatch,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(compacted[1].Content)
+	if state.Task == nil || state.Task.Objective != "current objective" {
+		t.Fatalf("immutable objective was lost on plan mismatch: %#v", state.Task)
+	}
+	if state.Task.Status != "" || state.Task.Pending != 0 {
+		t.Fatalf("uncorroborated mutable task fields survived plan mismatch: %#v", state.Task)
+	}
+}
+
+func TestTaskObjectiveSurvivesRepeatedCompactionWithoutPlanRefresh(t *testing.T) {
+	task := newTaskState("keep this objective", nil)
+	task.observe(taskStateEvent{kind: taskStateEventPlan, arguments: `{"plan":[{"content":"write code","status":"in_progress"},{"content":"add tests","status":"pending"}]}`})
+	messages := stateConversation()
+
+	first, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "FIRST", nil },
+		taskState:    task.snapshotForCompaction(messages),
+	})
+	if err != nil {
+		t.Fatalf("first Compact: %v", err)
+	}
+	secondInput := append(append([]zeroruntime.Message{}, first...),
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "more"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "working"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "again"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "done"},
+	)
+	snapshot := task.snapshotForCompaction(secondInput)
+	if snapshot.PlanParity != taskPlanParityMismatch {
+		t.Fatalf("plan call should be absent after first compaction, parity=%q", snapshot.PlanParity)
+	}
+	second, err := Compact(secondInput, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SECOND", nil },
+		taskState:    snapshot,
+	})
+	if err != nil {
+		t.Fatalf("second Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(second[1].Content)
+	if state.Task == nil || state.Task.Objective != "keep this objective" {
+		t.Fatalf("objective lost after second compaction: %#v", state.Task)
+	}
+	if state.Task.Status != "" || state.Task.InProgress != 0 {
+		t.Fatalf("uncorroborated mutable fields survived second compaction: %#v", state.Task)
 	}
 }
 
@@ -283,12 +381,10 @@ func TestExtractLatestPlanReturnsMostRecent(t *testing.T) {
 	}
 }
 
-func TestFormatPlanArgumentsAcceptsStepAlias(t *testing.T) {
+func TestFormatPlanArgumentsRejectsUnsupportedStepAlias(t *testing.T) {
 	got := formatPlanArguments(`{"plan":[{"step":"write failing test","status":"in_progress"},{"content":"keep existing shape","status":"pending"}]}`)
-	for _, want := range []string{"- [in_progress] write failing test", "- [pending] keep existing shape"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected %q in formatted plan, got %q", want, got)
-		}
+	if got != "" {
+		t.Fatalf("unsupported alias should reject the whole plan like update_plan, got %q", got)
 	}
 }
 

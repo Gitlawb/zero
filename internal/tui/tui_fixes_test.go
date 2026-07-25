@@ -160,3 +160,21 @@ func suggestionNames2(s []commandSuggestion) []string {
 	}
 	return out
 }
+
+func TestGitBranchInSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	gitdir := filepath.Join(root, ".git")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/feature-tui-branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "nested", "sub", "dir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitBranch(subdir); got != "feature-tui-branch" {
+		t.Fatalf("gitBranch in subdirectory = %q, want feature-tui-branch", got)
+	}
+}

@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
@@ -39,25 +39,7 @@ npm install -g @gitlawb/zero
 zero
 ```
 
-npm 包安装一个小型包装器以及与你平台匹配的 Zero 二进制文件（从 GitHub Releases 获取）。支持 Linux、macOS 和 Windows 的 x64 和 arm64。
-
-### Bun
-
-Bun 默认不运行依赖的生命周期脚本，因此获取 Zero 二进制文件的 `postinstall` 会被跳过，首次运行会失败并显示 `No native binary found next to the npm wrapper`。
-
-最简单的解决方法是安装后信任该包，这会运行被阻止的 postinstall。项目安装和全局安装均适用：
-
-```bash
-# 项目安装
-bun add @gitlawb/zero
-bun pm trust @gitlawb/zero
-
-# 全局安装
-bun add -g @gitlawb/zero
-bun pm -g trust @gitlawb/zero
-```
-
-其他方式：在 `bun add` 之前将 `"trustedDependencies": ["@gitlawb/zero"]` 添加到项目的 package.json 以提前允许 postinstall；或在不支持 `bun pm trust` 的旧版 Bun 上手动运行安装程序（`node node_modules/@gitlawb/zero/scripts/postinstall.mjs`）。
+npm 包是一个小型包装器，其平台构建（Linux 和 macOS 的 x64/arm64、Windows 的 x64，包含浏览器/终端控制辅助工具）作为可选依赖直接从 npm registry 安装——没有安装脚本，也不会从 npm 之外下载任何内容。Bun、pnpm 和 yarn 的行为完全一致，无需任何信任或批准步骤。跳过可选依赖的安装（`--omit=optional`）也能工作：只要二进制文件缺失，包装器就会从对应的 GitHub Release 下载。Windows on ARM 通过模拟运行 x64 构建。详见 [docs/NPM_PACKAGING.md](docs/NPM_PACKAGING.md)。
 
 ### 安装脚本
 
@@ -75,7 +57,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### 从源码构建
 
-源码构建需要 Go 1.25+。
+源码构建需要 Go 1.26.5+。
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -255,7 +237,7 @@ zero upgrade          下载、验证并安装最新版本
 | 控制 | 效果 |
 |---|---|
 | `NO_COLOR=<任意值>` | 禁用颜色输出 |
-| `ZERO_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`solarized-light`） |
+| `ZERO_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`neon`、`solarized-light`、`dune`） |
 | `--theme <名称>` | 从 CLI 选择 TUI 主题（相同名称） |
 | `/theme` | 在 TUI 中打开主题选择器（实时预览；`/theme <名称>` 直接切换） |
 | `ZERO_NO_FADE=1` | 禁用流式淡入动画 |
@@ -282,6 +264,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 - [安装](docs/INSTALL.md)
 - [更新流程](docs/UPDATE.md)
+- [主题](docs/THEMES.md)
 - [Stream-JSON 协议](docs/STREAM_JSON_PROTOCOL.md)
 - [专家](docs/SPECIALISTS.md)
 - [GitHub Action](docs/GITHUB_ACTION.md)

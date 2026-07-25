@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -153,6 +152,47 @@ func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 	}
 }
 
+func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
+	// firecrawl is seeded by config.DefaultMCPServers with no credentials; when a
+	// user never configures it, a connect failure (e.g. the real HTTP 401 from
+	// issue #552) must be recorded as UnconfiguredDefault so callers can avoid
+	// warning about a server the user never asked for. "custom" is configured by
+	// the user and must NOT be flagged even though it also fails to connect.
+	registry := tools.NewRegistry()
+
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"firecrawl": config.DefaultMCPServers()["firecrawl"],
+		"custom":    {Type: "stdio", Command: "custom-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
+			return nil, errors.New(server.Name + " connect failed")
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools returned error, want a skip: %v", err)
+	}
+	defer runtime.Close()
+
+	byName := make(map[string]SkippedServer)
+	for _, skipped := range runtime.Skipped() {
+		byName[skipped.Name] = skipped
+	}
+	firecrawl, ok := byName["firecrawl"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
+	}
+	if !firecrawl.UnconfiguredDefault {
+		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	}
+	custom, ok := byName["custom"]
+	if !ok {
+		t.Fatalf("Skipped() = %#v, want an entry for custom", runtime.Skipped())
+	}
+	if custom.UnconfiguredDefault {
+		t.Fatalf("Skipped()[custom] = %#v, want a user-configured server not flagged", custom)
+	}
+}
+
 func TestRegisterToolsKeepsPriorStateAndReachableServersWhenOneIsSkipped(t *testing.T) {
 	// A tool that predates registration must survive, the reachable server's tools
 	// must register, and the unreachable server is skipped (recorded), not fatal.
@@ -248,7 +288,7 @@ func TestRegistryToolIsDeferredEligible(t *testing.T) {
 
 // TestRegistryToolReportsMCPServerName verifies the registryTool reports its true
 // configured server name (not the sanitized tool-name token) so the deferred-tools
-// reminder labels a multi-token server correctly via tools.DeferredLine.
+// discovery label names a multi-token server correctly via tools.DeferredSource.
 func TestRegistryToolReportsMCPServerName(t *testing.T) {
 	client := &fakeToolClient{}
 	// A server name that sanitizes to a token containing an underscore ("git_hub"):
@@ -264,14 +304,9 @@ func TestRegistryToolReportsMCPServerName(t *testing.T) {
 		t.Fatalf("MCPServerName() = %q, want %q", tool.MCPServerName(), "git hub")
 	}
 
-	// DeferredLine must prefer the reported server name over the name-derived token.
-	line := tools.DeferredLine(tool)
-	if !strings.Contains(line, "server: git hub") {
-		t.Fatalf("DeferredLine = %q, want it to label server as %q via MCPServerName()", line, "git hub")
-	}
-	// The truncated token-only label ("git") must NOT be the server segment.
-	if strings.Contains(line, "server: git |") {
-		t.Fatalf("DeferredLine = %q, mislabeled multi-token server with the truncated token", line)
+	// DeferredSource must prefer the reported server name over the name-derived token.
+	if source := tools.DeferredSource(tool); source != "git hub" {
+		t.Fatalf("DeferredSource = %q, want %q via MCPServerName()", source, "git hub")
 	}
 }
 

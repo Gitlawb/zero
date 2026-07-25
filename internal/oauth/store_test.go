@@ -126,3 +126,20 @@ func TestResolveStorePathHonorsOverride(t *testing.T) {
 		t.Fatalf("path = %q, want %q", path, override)
 	}
 }
+
+// TestProviderKeyNormalizesCase: every provider-login write and lookup funnels
+// through ProviderKey, so `zero auth login xAI` and the scaffolded profile's
+// candidate "xai" must resolve to the SAME store entry — the raw-typed casing
+// previously produced an invisible login.
+func TestProviderKeyNormalizesCase(t *testing.T) {
+	if got := ProviderKey(" xAI "); got != "provider:xai" {
+		t.Fatalf("ProviderKey must trim and lower-case, got %q", got)
+	}
+	store, _ := newTestStore(t)
+	if err := store.Save(ProviderKey("xAI"), Token{AccessToken: "tok"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, key, ok := FirstStored(store, []string{"xai"}); !ok || key != "provider:xai" {
+		t.Fatalf("candidate \"xai\" must find the mixed-case login, ok=%v key=%q", ok, key)
+	}
+}

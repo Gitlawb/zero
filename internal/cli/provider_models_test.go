@@ -132,6 +132,62 @@ func TestRunProvidersModelsUnknownProviderFails(t *testing.T) {
 	}
 }
 
+func TestRunProvidersModelsFiltersForCatalogProfile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	// Override the resolved config to include a catalog-backed profile.
+	deps.resolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "opencode-go",
+			ProviderKind: config.ProviderKindAnthropicCompat,
+			CatalogID:    "opencode-go-anthropic-compatible",
+			BaseURL:      "https://api.example.com/zen/go/v1",
+			APIKey:       "sk-test",
+			Model:        "minimax-max",
+		}
+		return config.ResolvedConfig{
+			ActiveProvider: "opencode-go",
+			Providers:      []config.ProviderProfile{profile},
+			Provider:       profile,
+		}, nil
+	}
+	deps.discoverProviderModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "deepseek-chat", Description: "DeepSeek Chat"},
+			{ID: "qwen-max", Description: "Qwen Max"},
+			{ID: "minimax-max-01", Description: "MiniMax Max"},
+			{ID: "kimi-k2", Description: "Kimi K2"},
+			{ID: "glm-4", Description: "GLM-4"},
+		}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "models"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	out := stdout.String()
+	// Only Qwen and MiniMax model IDs should survive the filter.
+	if strings.Contains(out, "deepseek-chat") {
+		t.Error("output should not contain deepseek-chat (blocked by opencode-go-anthropic filter)")
+	}
+	if strings.Contains(out, "kimi-k2") {
+		t.Error("output should not contain kimi-k2 (blocked by opencode-go-anthropic filter)")
+	}
+	if strings.Contains(out, "glm-4") {
+		t.Error("output should not contain glm-4 (blocked by opencode-go-anthropic filter)")
+	}
+	for _, want := range []string{"qwen-max", "minimax-max-01"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing allowed model %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "2 models discovered") {
+		t.Fatalf("output should show 2 models:\n%s", out)
+	}
+}
+
 func TestRunProvidersModelsSurfacesDiscoveryError(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -75,6 +75,12 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if command == "use" {
 		return runProvidersUse(args, stdout, stderr, deps)
 	}
+	if command == "remove" || command == "rm" {
+		return runProvidersRemove(args, stdout, stderr, deps)
+	}
+	if command == "rename" {
+		return runProvidersRename(args, stdout, stderr, deps)
+	}
 	if command == "setup" {
 		return runProvidersSetup(args, stdout, stderr, deps)
 	}
@@ -246,6 +252,20 @@ func parseCommandCenterArgs(args []string, allowModelFilters bool, allowProvider
 
 func summarizeConfig(resolved config.ResolvedConfig) configSummary {
 	summary := zerocommands.ConfigSnapshotFromResolved(resolved)
+	// Mark keyless profiles that authenticate via a stored OAuth login (e.g.
+	// ChatGPT) so the list shows "oauth login" instead of "api key: not set" —
+	// the same candidate matching the runtime resolver uses.
+	logins := oauthLoggedInProviders()
+	if len(logins) > 0 {
+		for index := range summary.Providers {
+			for _, profile := range resolved.Providers {
+				if profile.Name == summary.Providers[index].Name {
+					summary.Providers[index].OAuthLogin = providerHasOAuthLogin(profile, logins)
+					break
+				}
+			}
+		}
+	}
 	sort.SliceStable(summary.Providers, func(i int, j int) bool {
 		if summary.Providers[i].Active != summary.Providers[j].Active {
 			return summary.Providers[i].Active
@@ -323,7 +343,7 @@ func formatProviderSummaries(command string, providers []providerSummary) string
 				"model: "+displayCLIValue(provider.Model, "none"),
 				"api model: "+displayCLIValue(provider.APIModel, "unknown"),
 				"base url: "+displayCLIValue(provider.BaseURL, "default"),
-				"api key: "+apiKeyState(provider.APIKeySet),
+				"api key: "+providerCredentialState(provider),
 			)
 			if provider.Message != "" {
 				lines = append(lines, "status: "+provider.Status+" - "+provider.Message)
@@ -340,7 +360,7 @@ func formatProviderLine(provider providerSummary) string {
 	if provider.Active {
 		marker = "*"
 	}
-	line := fmt.Sprintf("%s %s [%s] model=%s apiModel=%s api key: %s", marker, displayCLIValue(provider.Name, "none"), displayCLIValue(provider.ProviderKind, "unknown"), displayCLIValue(provider.Model, "none"), displayCLIValue(provider.APIModel, "unknown"), apiKeyState(provider.APIKeySet))
+	line := fmt.Sprintf("%s %s [%s] model=%s apiModel=%s api key: %s", marker, displayCLIValue(provider.Name, "none"), displayCLIValue(provider.ProviderKind, "unknown"), displayCLIValue(provider.Model, "none"), displayCLIValue(provider.APIModel, "unknown"), providerCredentialState(provider))
 	if provider.Message != "" {
 		line += " (" + provider.Status + ": " + provider.Message + ")"
 	}
@@ -413,6 +433,15 @@ func apiKeyState(set bool) string {
 	return "not set"
 }
 
+// providerCredentialState renders the credential column: a configured key wins,
+// then a stored OAuth login, then "not set".
+func providerCredentialState(provider providerSummary) string {
+	if !provider.APIKeySet && provider.OAuthLogin {
+		return "oauth login"
+	}
+	return apiKeyState(provider.APIKeySet)
+}
+
 func displayCLIValue(value string, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
@@ -466,6 +495,8 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers add <catalog-id> [flags]
   zero providers check [name] [flags]
   zero providers use <name> [flags]
+  zero providers remove <name> [flags]
+  zero providers rename <old> <new> [flags]
   zero providers setup <catalog-id> [flags]
   zero providers detect [flags]
   zero providers models [name] [flags]

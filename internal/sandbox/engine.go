@@ -14,18 +14,22 @@ type EngineOptions struct {
 	Store         *GrantStore
 	Backend       Backend
 	Scope         *Scope
+	// SensitiveEnvKeys adds config-derived credential variable names to the
+	// catalog and namespace secrets scrubbed from sandboxed commands.
+	SensitiveEnvKeys []string
 }
 
 type Engine struct {
-	workspaceRoot   string
-	policy          Policy
-	store           *GrantStore
-	backend         Backend
-	scope           *Scope
-	sessionGrants   *memoryGrantSet
-	sessionProfiles *permissionProfileGrantSet
-	turnProfiles    *permissionProfileGrantSet
-	commandPrefixes *commandPrefixGrantSet
+	workspaceRoot    string
+	policy           Policy
+	store            *GrantStore
+	backend          Backend
+	scope            *Scope
+	sensitiveEnvKeys []string
+	sessionGrants    *memoryGrantSet
+	sessionProfiles  *permissionProfileGrantSet
+	turnProfiles     *permissionProfileGrantSet
+	commandPrefixes  *commandPrefixGrantSet
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -49,15 +53,16 @@ func NewEngine(options EngineOptions) *Engine {
 		scope = newScopeBestEffort(workspaceRoot)
 	}
 	return &Engine{
-		workspaceRoot:   workspaceRoot,
-		policy:          policy,
-		store:           options.Store,
-		backend:         options.Backend,
-		scope:           scope,
-		sessionGrants:   newMemoryGrantSet(),
-		sessionProfiles: newPermissionProfileGrantSet(),
-		turnProfiles:    newPermissionProfileGrantSet(),
-		commandPrefixes: newCommandPrefixGrantSet(),
+		workspaceRoot:    workspaceRoot,
+		policy:           policy,
+		store:            options.Store,
+		backend:          options.Backend,
+		scope:            scope,
+		sensitiveEnvKeys: normalizeSensitiveEnvKeys(options.SensitiveEnvKeys),
+		sessionGrants:    newMemoryGrantSet(),
+		sessionProfiles:  newPermissionProfileGrantSet(),
+		turnProfiles:     newPermissionProfileGrantSet(),
+		commandPrefixes:  newCommandPrefixGrantSet(),
 	}
 }
 
@@ -73,6 +78,13 @@ func (engine *Engine) Scope() *Scope {
 
 func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
+}
+
+func (engine *Engine) ConsumeGrantMigrationNotice() (string, error) {
+	if engine == nil || engine.store == nil {
+		return "", nil
+	}
+	return engine.store.ConsumeMigrationNotice()
 }
 
 func (engine *Engine) GrantCommandPrefixForSession(toolName string, prefix []string) {
@@ -225,6 +237,15 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 		return false
 	}
 	if policy.Mode == ModeDisabled {
+		return false
+	}
+	// Re-entrancy skips wrapping: when the process carries the sandbox markers,
+	// the runner returns a pass-through (unwrapped) plan, so the native sandbox
+	// is NOT the boundary for THIS command. Because the markers are ambient and
+	// forgeable at an unsandboxed process boundary (issue #727), auto-allowing a
+	// shell command on that basis would run it unwrapped with no prompt. Mirror
+	// the runner: report inactive so the command takes the normal approval path.
+	if IsAlreadySandboxed() {
 		return false
 	}
 	backend := engine.backend

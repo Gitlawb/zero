@@ -30,6 +30,36 @@ func TestDetectShellCommandIssueFlagsStandaloneCat(t *testing.T) {
 	}
 }
 
+// TestDetectShellCommandIssueFlagsShells covers bash/sh invocations: every
+// executable a bare `bash` resolves to on Windows fails under the restricted
+// token (Git-for-Windows MSYS bash dies during runtime init; the System32 WSL
+// launcher is denied its WSL service connection), so both names are blocked
+// upfront like the MSYS coreutils.
+func TestDetectShellCommandIssueFlagsShells(t *testing.T) {
+	for _, command := range []string{
+		`bash -c "make test"`,
+		`bash.exe -lc ls`,
+		`sh -c "echo hi"`,
+		`sh.exe -c "echo hi"`,
+		`git status && bash -c "echo hi"`,
+	} {
+		issue := detectShellCommandIssue(command, "windows")
+		if issue == nil || issue.Kind != "windows_msys_sandbox" {
+			t.Fatalf("expected windows_msys_sandbox for %q, got %#v", command, issue)
+		}
+	}
+
+	// Shell names inside quoted argument text are not invocations.
+	for _, command := range []string{
+		`git commit -m "bash fails under the sandbox"`,
+		`gh pr comment --body "run sh -c manually"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected quoted shell mention to pass for %q, got %#v", command, issue)
+		}
+	}
+}
+
 func TestDetectShellOutputIssueFlagsMsysCreateFileMappingError(t *testing.T) {
 	output := `0 [main] head (3568) C:\Program Files\Git\usr\bin\head.exe: *** fatal error - CreateFileMapping S-1-5-21-3149109338-1484423945-518236903-1001.1, Win32 error 5.  Terminating.`
 	issue := detectShellOutputIssue(output, "windows")
@@ -58,6 +88,25 @@ func TestDetectShellOutputIssueFlagsMsysTerminatingWithMsysMarker(t *testing.T) 
 	}
 }
 
+// TestDetectShellOutputIssueFlagsWslServiceDenied pins detection of the WSL
+// bash launcher's failure under the restricted token. The launcher writes
+// UTF-16LE to a piped stderr, so the captured text carries a NUL byte after
+// every ASCII character; the fixture reproduces that shape.
+func TestDetectShellOutputIssueFlagsWslServiceDenied(t *testing.T) {
+	var utf16ish strings.Builder
+	for _, r := range "Access is denied.\r\nError code: Bash/Service/CreateInstance/E_ACCESSDENIED\r\n" {
+		utf16ish.WriteRune(r)
+		utf16ish.WriteByte(0)
+	}
+	issue := detectShellOutputIssue(utf16ish.String(), "windows")
+	if issue == nil || issue.Kind != "windows_msys_sandbox" {
+		t.Fatalf("expected WSL service-denied output issue, got %#v", issue)
+	}
+	if !strings.Contains(issue.Message, "WSL") {
+		t.Fatalf("expected WSL-specific message, got %#v", issue)
+	}
+}
+
 func TestDetectShellOutputIssueIgnoresNonMsysWin32Error5(t *testing.T) {
 	output := `myapp.exe: unable to open service handle, Win32 error 5 (access denied). Terminating worker.`
 	issue := detectShellOutputIssue(output, "windows")
@@ -82,7 +131,7 @@ func TestShellIssueBlockResultMsysCommand(t *testing.T) {
 }
 
 func TestMsysProneCommandName(t *testing.T) {
-	if !MsysProneCommandName("HEAD") || MsysProneCommandName("echo") {
+	if !MsysProneCommandName("HEAD") || !MsysProneCommandName("bash") || MsysProneCommandName("echo") {
 		t.Fatalf("unexpected MsysProneCommandName results")
 	}
 }

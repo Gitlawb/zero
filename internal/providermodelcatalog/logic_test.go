@@ -11,7 +11,7 @@ import (
 )
 
 func TestLooksLikeCodingModelID(t *testing.T) {
-	coding := []string{"gpt-4o", "claude-sonnet-4.5", "o1", "o3-mini", "o4-mini", "qwen2.5-coder", "deepseek-chat", "kimi-k2", "codestral-latest", "grok-code"}
+	coding := []string{"gpt-4o", "claude-sonnet-4.5", "o1", "o3-mini", "o4-mini", "qwen2.5-coder", "deepseek-chat", "kimi-k2", "codestral-latest", "grok-code", "tencent/hy3"}
 	for _, id := range coding {
 		if !LooksLikeCodingModelID(id) {
 			t.Errorf("LooksLikeCodingModelID(%q) = false, want true", id)

@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers/anthropic"
 	"github.com/Gitlawb/zero/internal/providers/gemini"
 	"github.com/Gitlawb/zero/internal/providers/openai"
@@ -54,19 +55,25 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 
 	switch resolved.providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
+		// prompt_cache_key is an OpenAI-only chat-completions field. Strict
+		// openai-compatible gateways (NVIDIA NIM, etc.) reject it with a 400
+		// instead of ignoring unknown parameters — so omit it for every
+		// openai-compatible profile. Official OpenAI keeps the field so
+		// multi-turn sessions still route to a cached-prefix replica.
 		return openai.New(openai.Options{
-			APIKey:          profile.APIKey,
-			BaseURL:         resolved.baseURL,
-			Model:           resolved.apiModel,
-			AuthHeader:      profile.AuthHeader,
-			AuthScheme:      profile.AuthScheme,
-			AuthHeaderValue: profile.AuthHeaderValue,
-			CustomHeaders:   profile.CustomHeaders,
-			OAuthResolver:   options.OAuthResolver,
-			MaxTokens:       resolved.maxOutputTokens,
-			HTTPClient:      options.HTTPClient,
-			UserAgent:       options.UserAgent,
-			ParseThinkTags:  parseThinkTagsForProfile(profile, resolved),
+			APIKey:                profile.APIKey,
+			BaseURL:               resolved.baseURL,
+			Model:                 resolved.apiModel,
+			AuthHeader:            profile.AuthHeader,
+			AuthScheme:            profile.AuthScheme,
+			AuthHeaderValue:       profile.AuthHeaderValue,
+			CustomHeaders:         providerio.CopyHeaders(profile.CustomHeaders),
+			OAuthResolver:         options.OAuthResolver,
+			MaxTokens:             resolved.maxOutputTokens,
+			HTTPClient:            options.HTTPClient,
+			UserAgent:             options.UserAgent,
+			ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
+			DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
@@ -76,7 +83,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			AuthHeader:      profile.AuthHeader,
 			AuthScheme:      profile.AuthScheme,
 			AuthHeaderValue: profile.AuthHeaderValue,
-			CustomHeaders:   profile.CustomHeaders,
+			CustomHeaders:   providerio.CopyHeaders(profile.CustomHeaders),
 			OAuthResolver:   options.OAuthResolver,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
@@ -90,7 +97,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			AuthHeader:      profile.AuthHeader,
 			AuthScheme:      profile.AuthScheme,
 			AuthHeaderValue: profile.AuthHeaderValue,
-			CustomHeaders:   profile.CustomHeaders,
+			CustomHeaders:   providerio.CopyHeaders(profile.CustomHeaders),
 			OAuthResolver:   options.OAuthResolver,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
@@ -99,6 +106,57 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", resolved.providerKind)
 	}
+}
+
+// NewTurnSessionProvider builds the default TurnSessionProvider for a resolved
+// profile: it constructs the provider exactly as New does, then wraps it with a
+// ProviderCapabilities projection computed from the same model-registry entry
+// New already resolves. The default session's Stream is the provider's
+// StreamCompletion, so runtime behavior is identical to using New directly.
+func NewTurnSessionProvider(profile config.ProviderProfile, options Options) (zeroruntime.TurnSessionProvider, error) {
+	provider, err := New(profile, options)
+	if err != nil {
+		return nil, err
+	}
+	caps, err := resolveCapabilities(profile, options)
+	if err != nil {
+		return nil, err
+	}
+	return zeroruntime.NewProviderTurnSessionProvider(provider, caps), nil
+}
+
+// resolveCapabilities projects the resolved profile's model-registry entry into
+// the flat zeroruntime.ProviderCapabilities (zeroruntime cannot reference
+// modelregistry types — modelregistry imports zeroruntime, so a typed field
+// would form an import cycle). A model absent from the registry yields only the
+// resolved API model id and max-output tokens; the rest stays zero (unknown).
+func resolveCapabilities(profile config.ProviderProfile, options Options) (zeroruntime.ProviderCapabilities, error) {
+	resolved, err := resolveProfile(profile, options)
+	if err != nil {
+		return zeroruntime.ProviderCapabilities{}, err
+	}
+	caps := zeroruntime.ProviderCapabilities{
+		Model:           resolved.apiModel,
+		MaxOutputTokens: resolved.maxOutputTokens,
+	}
+	registry, err := defaultRegistry(options.ModelRegistry)
+	if err != nil {
+		return zeroruntime.ProviderCapabilities{}, err
+	}
+	if entry, ok := registry.Get(strings.TrimSpace(profile.Model)); ok {
+		caps.ContextWindow = entry.ContextLimits.ContextWindow
+		caps.SupportsVision = entry.Supports(modelregistry.ModelCapabilityVision)
+		caps.SupportsReasoning = entry.Supports(modelregistry.ModelCapabilityReasoning)
+		caps.SupportsPromptCache = entry.Supports(modelregistry.ModelCapabilityPromptCache)
+		// Read efforts through Registry.ReasoningEfforts (not the raw entry) so
+		// the projection matches what the /effort picker and the run-time
+		// resolver advertise — including the name-based fallback for catalog
+		// entries that enumerate no efforts of their own.
+		for _, effort := range registry.ReasoningEfforts(entry.ID) {
+			caps.ReasoningEfforts = append(caps.ReasoningEfforts, string(effort))
+		}
+	}
+	return caps, nil
 }
 
 func parseThinkTagsForProfile(profile config.ProviderProfile, resolved resolvedProfile) bool {
@@ -120,6 +178,7 @@ func modelMayEmitThinkTags(model string) bool {
 		"glm-z1",
 		"kimi-k2-thinking",
 		"magistral",
+		"minimax-m2",
 		"minimax-m3",
 		"nemotron",
 		"qwen3",
@@ -205,6 +264,9 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 		}
+		if err := validateModelAllowedForProvider(profile, entry.ID); err != nil {
+			return resolvedProfile{}, err
+		}
 		return resolvedProfile{
 			providerKind:    providerKind,
 			apiModel:        entry.APIModel,
@@ -216,11 +278,37 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 	if providerKind == "" {
 		providerKind = config.ProviderKindOpenAI
 	}
+	if err := validateModelAllowedForProvider(profile, model); err != nil {
+		return resolvedProfile{}, err
+	}
 	return resolvedProfile{
 		providerKind: providerKind,
 		apiModel:     model,
 		baseURL:      baseURL,
 	}, nil
+}
+
+// validateModelAllowedForProvider enforces provider-scoped model allowlists at
+// runtime resolution time. It delegates to
+// providermodelcatalog.ModelIDAllowedForProvider, which encodes the per-provider
+// rules in one place; restricted providers (such as
+// opencode-go-anthropic-compatible) only accept a curated subset of model
+// families, while the default branch makes unrestricted providers a no-op. This
+// guards both New() (TUI /model, headless --model overrides) and
+// ResolveRuntimeMetadata (the read-only metadata path) so a catalog-backed
+// profile cannot persist or send a model outside its scoped allowlist.
+func validateModelAllowedForProvider(profile config.ProviderProfile, model string) error {
+	providerID := strings.TrimSpace(profile.CatalogID)
+	if providermodelcatalog.ModelIDAllowedForProvider(providerID, model) {
+		return nil
+	}
+	if providerID == "" {
+		providerID = strings.TrimSpace(profile.Name)
+	}
+	if providerID == "" {
+		providerID = "provider"
+	}
+	return fmt.Errorf("provider %s does not allow model %s", providerID, strings.TrimSpace(model))
 }
 
 func explicitProviderKind(profile config.ProviderProfile) (config.ProviderKind, bool) {
@@ -273,13 +361,6 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 // login than the bearer — a mismatch the backend rejects.
 func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, options Options) (zeroruntime.Provider, error) {
 	accountKey := options.OAuthLoginKey
-	resolver := openai.CodexAccountResolver(func(ctx context.Context) (string, bool, error) {
-		account := codexAccountForKey(accountKey)
-		if account == "" {
-			return "", false, nil
-		}
-		return account, true, nil
-	})
 	return openai.NewCodexProvider(openai.CodexOptions{
 		Options: openai.Options{
 			BaseURL:         resolved.baseURL,
@@ -300,7 +381,7 @@ func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, 
 		// override. The codex provider's constructor derives the
 		// `/responses` endpoint from BaseURL, so the factory stays out of
 		// the path.
-		AccountResolver: resolver,
+		AccountResolver: CodexAccountResolverForLogin(accountKey),
 	})
 }
 
@@ -322,4 +403,15 @@ func codexAccountForKey(key string) string {
 		return ""
 	}
 	return strings.TrimSpace(token.Account)
+}
+
+// CodexAccountResolverForLogin returns the same per-request account resolver
+// used by the runtime provider. Auxiliary Codex requests use this rather than
+// independently selecting or parsing an OAuth login, which could mismatch the
+// bearer selected by oauthLoginForProfile.
+func CodexAccountResolverForLogin(key string) openai.CodexAccountResolver {
+	return func(context.Context) (string, bool, error) {
+		account := codexAccountForKey(key)
+		return account, account != "", nil
+	}
 }

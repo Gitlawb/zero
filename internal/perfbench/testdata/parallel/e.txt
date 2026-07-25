@@ -1,0 +1,4 @@
+first line of e.txt
+second line of e.txt
+third line of e.txt
+epsilon epsilon epsilon

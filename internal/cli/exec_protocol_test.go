@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -149,7 +150,7 @@ func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 			providerBuilt = true
 			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -192,7 +193,7 @@ func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -712,6 +713,48 @@ func TestRunExecJSONInterruptedEmitsTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestRunExecWarnsAboutScratchFileWhenProviderErrors(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+	runGitForScratchTest(t, cwd, "init")
+	if err := os.WriteFile(filepath.Join(cwd, "README.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForScratchTest(t, cwd, "add", "README.md")
+	runGitForScratchTest(t, cwd, "commit", "-m", "init")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write scratch then fail"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return toolThenErrorExecProvider{
+				toolCallID: "call_scratch",
+				toolName:   "write_file",
+				arguments:  `{"path":"_debug.py","content":"print('debug')"}`,
+				err:        errors.New("provider failed after tool"),
+			}, nil
+		},
+		newSandboxStore: func() (*sandbox.GrantStore, error) {
+			return sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d: stdout=%q stderr=%q", exitProvider, exitCode, stdout.String(), stderr.String())
+	}
+	events := decodeJSONLines(t, stdout.String())
+	warning := findJSONEvent(t, events, "warning")
+	message, _ := warning["message"].(string)
+	if !strings.Contains(message, "_debug.py") {
+		t.Fatalf("expected scratch warning to mention _debug.py, got %#v", warning)
+	}
+}
+
 func TestRunExecReadsStreamJSONPromptFromStdin(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	cwd := t.TempDir()
@@ -790,6 +833,13 @@ type toolCallingExecProvider struct {
 	answer     string
 }
 
+type toolThenErrorExecProvider struct {
+	toolCallID string
+	toolName   string
+	arguments  string
+	err        error
+}
+
 type reasoningExecProvider struct{}
 
 func (reasoningExecProvider) StreamCompletion(context.Context, zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
@@ -809,6 +859,26 @@ func (provider toolCallingExecProvider) StreamCompletion(ctx context.Context, re
 			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
 			close(ch)
 			return ch, nil
+		}
+	}
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	select {
+	case <-ctx.Done():
+		close(ch)
+		return ch, ctx.Err()
+	case ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: provider.toolCallID, ToolName: provider.toolName}:
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: provider.toolCallID, ArgumentsFragment: provider.arguments}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: provider.toolCallID}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func (provider toolThenErrorExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	for _, message := range request.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			return nil, provider.err
 		}
 	}
 	ch := make(chan zeroruntime.StreamEvent, 4)

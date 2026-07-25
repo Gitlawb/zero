@@ -211,11 +211,12 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 			fmt.Fprintf(stderr, "warning: could not re-read job %s before persist: %v\n", job.ID, readErr)
 			return job, nil
 		}
-		if current.Status == cron.StatusPaused {
-			// Honor an external pause that landed while the job ran.
-			job.Status = cron.StatusPaused
+		current.FireCount = job.FireCount
+		current.NextRunAt = job.NextRunAt
+		if current.Status != cron.StatusPaused {
+			current.Status = job.Status
 		}
-		return job, nil
+		return current, nil
 	})
 	if errors.Is(err, cron.ErrJobNotFound) {
 		// Genuinely removed mid-run: don't recreate it (no run record, no persist).

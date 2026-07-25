@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -258,6 +259,225 @@ func TestHandleThemeCommand(t *testing.T) {
 	}
 	if _, bad := m.handleThemeCommand("solarized"); !strings.Contains(bad, "Unknown theme") {
 		t.Errorf("invalid theme should error: %q", bad)
+	}
+}
+
+func TestNewThemePresetsWired(t *testing.T) {
+	neon, ok := lookupTheme("neon")
+	if !ok {
+		t.Fatal("theme 'neon' is not registered")
+	}
+	if !neon.IsDark {
+		t.Error("theme 'neon' should be marked as dark")
+	}
+
+	dune, ok := lookupTheme("dune")
+	if !ok {
+		t.Fatal("theme 'dune' is not registered")
+	}
+	if dune.IsDark {
+		t.Error("theme 'dune' should be marked as light")
+	}
+
+	for _, name := range []string{"neon", "dune"} {
+		if !validThemeMode(name) {
+			t.Errorf("%q should be a valid --theme/ZERO_THEME value", name)
+		}
+	}
+
+	if !contains(themeModes, "neon") || !contains(themeModes, "dune") {
+		t.Errorf("themeModes = %v, want it to include neon and dune (the /theme picker list)", themeModes)
+	}
+}
+
+// The --theme flag and ZERO_THEME both resolve through resolveThemeMode, and
+// applyTheme must actually swap zeroTheme to the resolved preset's own palette,
+// not silently fall back to a built-in.
+func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
+	defer applyTheme(themeDark, true)
+
+	if got := resolveThemeMode("dune", ""); got != themeMode("dune") {
+		t.Fatalf(`resolveThemeMode("dune", "") = %q, want "dune"`, got)
+	}
+	if got := resolveThemeMode("", "neon"); got != themeMode("neon") {
+		t.Fatalf(`resolveThemeMode("", "neon") = %q, want "neon"`, got)
+	}
+
+	applyTheme(themeMode("dune"), true)
+	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, dunePalette.ink) {
+		t.Error("applying \"dune\" did not swap zeroTheme to the dune palette")
+	}
+
+	applyTheme(themeMode("neon"), true)
+	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, neonPalette.ink) {
+		t.Error("applying \"neon\" did not swap zeroTheme to the neon palette")
+	}
+}
+
+func TestExtendedThemeContrastInvariants(t *testing.T) {
+	// Skip validation for old built-in themes if they have established, non-compliant palettes,
+	// but enforce strict compliance on the newly introduced 'neon' and 'dune' themes.
+	for _, entry := range themeRegistry {
+		if entry.Name != "neon" && entry.Name != "dune" {
+			continue
+		}
+		name, pal := entry.Name, entry.Palette
+
+		// Finding 1: Permission and status/success surfaces
+		if r := wcagRatio(t, pal.amber, pal.permBg); r < 4.5 {
+			t.Errorf("%s: amber on permBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.onAccent, pal.amber); r < 4.5 {
+			t.Errorf("%s: onAccent on amber contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.panel); r < 4.5 {
+			t.Errorf("%s: green on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.amber, pal.panel); r < 4.5 {
+			t.Errorf("%s: amber on panel contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.panel); r < 4.5 {
+			t.Errorf("%s: red on panel contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 2: Selected row secondary text
+		if r := wcagRatio(t, pal.faint, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faint on selBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.selBg); r < 4.5 {
+			t.Errorf("%s: faintest on selBg contrast %.2f < 4.5", name, r)
+		}
+
+		// Finding 3: Diff gutter pairings
+		if r := wcagRatio(t, pal.faintest, pal.addBg); r < 4.5 {
+			t.Errorf("%s: faintest on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.faintest, pal.delBg); r < 4.5 {
+			t.Errorf("%s: faintest on delBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.green, pal.addBg); r < 4.5 {
+			t.Errorf("%s: green on addBg contrast %.2f < 4.5", name, r)
+		}
+		if r := wcagRatio(t, pal.red, pal.delBg); r < 4.5 {
+			t.Errorf("%s: red on delBg contrast %.2f < 4.5", name, r)
+		}
+	}
+}
+
+// hexChannels splits a #rrggbb token into its 8-bit channels.
+func hexChannels(t *testing.T, hexColor string) (int, int, int) {
+	t.Helper()
+	h := strings.TrimPrefix(hexColor, "#")
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil || len(h) != 6 {
+		t.Fatalf("bad hex %q", hexColor)
+	}
+	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff)
+}
+
+// xterm256Hex returns the nearest xterm-256 color (the 6x6x6 cube plus the
+// 24-step grayscale ramp, by squared RGB distance): how a terminal without
+// truecolor support downsamples the palette's hex tokens before rendering.
+func xterm256Hex(t *testing.T, hexColor string) string {
+	t.Helper()
+	r, g, b := hexChannels(t, hexColor)
+	levels := []int{0, 95, 135, 175, 215, 255}
+	bestR, bestG, bestB := 0, 0, 0
+	bestDistance := math.MaxFloat64
+	try := func(cr, cg, cb int) {
+		d := float64((r-cr)*(r-cr) + (g-cg)*(g-cg) + (b-cb)*(b-cb))
+		if d < bestDistance {
+			bestDistance, bestR, bestG, bestB = d, cr, cg, cb
+		}
+	}
+	for _, cr := range levels {
+		for _, cg := range levels {
+			for _, cb := range levels {
+				try(cr, cg, cb)
+			}
+		}
+	}
+	for i := 0; i < 24; i++ {
+		gray := 8 + 10*i
+		try(gray, gray, gray)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", bestR, bestG, bestB)
+}
+
+// Hex-level AA does not guarantee the rendered pairs hold on a 256-color
+// terminal, which quantizes every token to its nearest xterm entry first.
+// Guard the pairs that regressed: Dune's selected-row affordances (accent
+// caret/favorite star and blue local-model dot over selBg via onSel) and
+// Neon's diff bands, whose previous values all quantized to the same grays.
+func TestExtendedThemeANSI256Contrast(t *testing.T) {
+	palettes := map[string]palette{}
+	for _, entry := range themeRegistry {
+		palettes[entry.Name] = entry.Palette
+	}
+	q := func(hexColor string) string { return xterm256Hex(t, hexColor) }
+
+	dune := palettes["dune"]
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"accent on selBg", dune.accent, dune.selBg},
+		{"blue on selBg", dune.blue, dune.selBg},
+		{"faintest on selBg", dune.faintest, dune.selBg},
+		{"ink on selBg", dune.ink, dune.selBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("dune: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+
+	neon := palettes["neon"]
+	greenish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return g > r && g > b
+	}
+	reddish := func(hexColor string) bool {
+		r, g, b := hexChannels(t, hexColor)
+		return r > g && r > b
+	}
+	if q(neon.addBg) == q(neon.delBg) || !greenish(q(neon.addBg)) || !reddish(q(neon.delBg)) {
+		t.Errorf("neon: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
+			neon.addBg, q(neon.addBg), neon.delBg, q(neon.delBg))
+	}
+	if q(neon.addBgWord) == q(neon.delBgWord) || !greenish(q(neon.addBgWord)) || !reddish(q(neon.delBgWord)) {
+		t.Errorf("neon: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
+			neon.addBgWord, q(neon.addBgWord), neon.delBgWord, q(neon.delBgWord))
+	}
+	if q(neon.addBgWord) == q(neon.addBg) {
+		t.Errorf("neon: changed span is indistinguishable from its add row after quantization (both %s)", q(neon.addBg))
+	}
+	if q(neon.delBgWord) == q(neon.delBg) {
+		t.Errorf("neon: changed span is indistinguishable from its del row after quantization (both %s)", q(neon.delBg))
+	}
+	if r := wcagRatio(t, q(neon.green), q(neon.addBg)); r < 4.5 {
+		t.Errorf("neon: green on addBg = %.2f < 4.5 after quantization", r)
+	}
+	if r := wcagRatio(t, q(neon.red), q(neon.delBg)); r < 4.5 {
+		t.Errorf("neon: red on delBg = %.2f < 4.5 after quantization", r)
+	}
+	// The two rendered diff-content pairs a 256-color terminal actually
+	// shows: line numbers (faintest on addBg/delBg) and highlighted changed
+	// spans (addInk/delInk on their word bands).
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"faintest on addBg", neon.faintest, neon.addBg},
+		{"faintest on delBg", neon.faintest, neon.delBg},
+		{"addInk on addBgWord", neon.addInk, neon.addBgWord},
+		{"delInk on delBgWord", neon.delInk, neon.delBgWord},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("neon: %s = %.2f < 4.5 after quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	// Error-card borders are non-text UI components: they need 3:1 against
+	// the panel (WCAG 1.4.11) to be distinguishable at all, in both truecolor
+	// and 256-color renderings.
+	if r := wcagRatio(t, neon.cardErr, neon.panel); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0", r)
+	}
+	if r := wcagRatio(t, q(neon.cardErr), q(neon.panel)); r < 3.0 {
+		t.Errorf("neon: cardErr border on panel = %.2f < 3.0 after quantization", r)
 	}
 }
 

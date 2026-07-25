@@ -29,6 +29,27 @@ type mcpWritableConfig struct {
 	serverRaw map[string]json.RawMessage
 }
 
+// projectMCPConfigExists reports whether the workspace's project ./.zero/config.json
+// declares any MCP servers, so the trust notice fires only when project MCP config was
+// actually skipped (mirroring projectHooksFileExists / projectPluginsDirExists). A
+// missing or unparseable file, or one that declares no servers, returns false: there
+// is nothing to notice about. This only reads the file; it never spawns a server, so
+// it is safe to call on an untrusted workspace.
+func projectMCPConfigExists(workspaceRoot string) bool {
+	if workspaceRoot == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(workspaceRoot, ".zero", "config.json"))
+	if err != nil {
+		return false
+	}
+	var fc config.FileConfig
+	if err := json.Unmarshal(data, &fc); err != nil {
+		return false
+	}
+	return len(fc.MCP.Servers) > 0
+}
+
 func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseMCPAddArgs(args)
 	if err != nil {
@@ -243,12 +264,25 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	// `mcp check` connects to (spawns) the named server below to enumerate its tools,
+	// so it is a spawn site: gate the project layer behind the trust check (fail-closed)
+	// so a cloned repo cannot have `zero mcp check <its-server>` run its command. No
+	// --worktree reassignment on this command path, so trustRoot == cwd.
+	mcpExcludeProject, trustCheckErrored := resolveTrust(cwd)
+	cfg, err := deps.resolveMCPConfig(cwd, mcpExcludeProject)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	raw, ok := cfg.Servers[serverName]
 	if !ok {
+		// The server may be missing because the project layer was gated out in an
+		// untrusted workspace; emit the same one-line notice the other spawn sites use so
+		// a dropped project server reads as "run zero trust", not a bare miss. The notice
+		// self-gates: it stays silent unless a project MCP config was actually excluded.
+		emitTrustNotice(stderr, trustSkip{
+			excludedProjectConfig: mcpExcludeProject && projectMCPConfigExists(cwd),
+			trustCheckErrored:     trustCheckErrored,
+		})
 		return writeAppError(stderr, fmt.Sprintf("MCP server %q is not configured", serverName), exitCrash)
 	}
 	if raw.Disabled {

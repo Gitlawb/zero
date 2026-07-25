@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -452,6 +453,43 @@ func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 	}
 	if strings.Contains(events[0].Error, "sk-secret") {
 		t.Fatalf("error leaked token: %q", events[0].Error)
+	}
+}
+
+func TestStreamCompletionClassifiesStreamErrorCode(t *testing.T) {
+	// The error arrives inside a 200 OK SSE payload's "code" field, not the
+	// HTTP status, so this exercises openAIStreamErrorStatusByCode directly:
+	// both the numeric-string codes some providers send and the semantic
+	// string codes OpenAI-compatible providers commonly send instead must
+	// classify identically.
+	cases := []struct {
+		name       string
+		code       string
+		wantPrefix string
+	}{
+		{"numeric 429", `"429"`, "rate limit error:"},
+		{"numeric 401", `"401"`, "auth error:"},
+		{"numeric 403", `"403"`, "auth error:"},
+		{"json number 429", `429`, "rate limit error:"},
+		{"semantic rate_limit_exceeded", `"rate_limit_exceeded"`, "rate limit error:"},
+		{"semantic insufficient_quota", `"insufficient_quota"`, "rate limit error:"},
+		{"semantic invalid_api_key", `"invalid_api_key"`, "auth error:"},
+		{"unknown code", `"server_error"`, "provider error:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(w, `{"error":{"message":"failed","code":`+tc.code+`}}`)
+			})
+
+			events := collectProviderEvents(t, provider)
+			if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+				t.Fatalf("events = %#v, want one error", events)
+			}
+			if !strings.HasPrefix(events[0].Error, tc.wantPrefix) {
+				t.Fatalf("error = %q, want prefix %q", events[0].Error, tc.wantPrefix)
+			}
+		})
 	}
 }
 
@@ -907,9 +945,9 @@ func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
 		t.Fatalf("done FinishReason = %q, want %q", doneReason, zeroruntime.FinishReasonLength)
 	}
 
-	// And it round-trips through the runtime collector as Truncated.
+	// And it round-trips through the runtime collector's FinishReason.
 	collected := zeroruntime.CollectStream(context.Background(), replay(events))
-	if !collected.Truncated() || collected.FinishReason != zeroruntime.FinishReasonLength {
+	if collected.FinishReason != zeroruntime.FinishReasonLength {
 		t.Fatalf("collected = %+v, want truncated length", collected)
 	}
 }
@@ -1263,8 +1301,9 @@ func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
 // TestOpenAIRequestPromptCacheKey locks in prompt_cache_key forwarding: a
 // session-carrying request serializes the key so the backend can route to a
 // replica holding the cached prefix, a keyless request omits the field
-// entirely (strict servers see byte-identical requests to before), and
-// ZERO_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
+// entirely (strict servers see byte-identical requests to before),
+// DisablePromptCacheKey (used for openai-compatible gateways) suppresses it,
+// and ZERO_DISABLE_PROMPT_CACHE_KEY is the env kill switch for any endpoint.
 func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 	provider, err := New(Options{Model: "gpt-test"})
 	if err != nil {
@@ -1295,6 +1334,26 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
 	}
 
+	// openai-compatible providers are constructed with DisablePromptCacheKey so
+	// strict gateways (NVIDIA NIM, …) never see the OpenAI-only field.
+	compat, err := New(Options{Model: "gpt-test", DisablePromptCacheKey: true})
+	if err != nil {
+		t.Fatalf("New(DisablePromptCacheKey) returned error: %v", err)
+	}
+	req = compat.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "" {
+		t.Fatalf("DisablePromptCacheKey ignored; PromptCacheKey = %q", req.PromptCacheKey)
+	}
+	if data, err = json.Marshal(req); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "prompt_cache_key") {
+		t.Fatalf("compatible provider must omit prompt_cache_key: %s", data)
+	}
+
 	t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", "1")
 	req = provider.openAIRequest(zeroruntime.CompletionRequest{
 		Messages:       messages,
@@ -1315,5 +1374,63 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		if req.PromptCacheKey != "sess_123" {
 			t.Fatalf("ZERO_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
 		}
+	}
+}
+
+func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	tools := []zeroruntime.ToolDefinition{{
+		Name:        "read_file",
+		Description: "Read a file.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+			},
+		},
+	}}
+	firstMessages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "stable system prompt"},
+		{Role: zeroruntime.MessageRoleUser, Content: "first turn"},
+	}
+	secondMessages := append([]zeroruntime.Message(nil), firstMessages...)
+	secondMessages = append(secondMessages,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "first response"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "second turn"},
+	)
+
+	marshalBody := func(messages []zeroruntime.Message) map[string]any {
+		t.Helper()
+		mapped := provider.openAIRequest(zeroruntime.CompletionRequest{
+			Messages:       messages,
+			Tools:          tools,
+			PromptCacheKey: "session-stable-prefix",
+		})
+		data, marshalErr := json.Marshal(mapped)
+		if marshalErr != nil {
+			t.Fatalf("marshal request: %v", marshalErr)
+		}
+		var body map[string]any
+		if unmarshalErr := json.Unmarshal(data, &body); unmarshalErr != nil {
+			t.Fatalf("unmarshal request: %v", unmarshalErr)
+		}
+		return body
+	}
+
+	first := marshalBody(firstMessages)
+	second := marshalBody(secondMessages)
+	firstWireMessages := first["messages"].([]any)
+	secondWireMessages := second["messages"].([]any)
+	if !reflect.DeepEqual(secondWireMessages[:len(firstWireMessages)], firstWireMessages) {
+		t.Fatalf("first wire messages must be an exact prefix of the second:\nfirst=%#v\nsecond=%#v", firstWireMessages, secondWireMessages)
+	}
+	if !reflect.DeepEqual(first["tools"], second["tools"]) {
+		t.Fatalf("wire tool definitions drifted:\nfirst=%#v\nsecond=%#v", first["tools"], second["tools"])
+	}
+	if first["prompt_cache_key"] != second["prompt_cache_key"] || first["prompt_cache_key"] != "session-stable-prefix" {
+		t.Fatalf("wire prompt cache key must remain stable: first=%#v second=%#v", first["prompt_cache_key"], second["prompt_cache_key"])
 	}
 }

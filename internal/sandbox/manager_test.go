@@ -41,11 +41,21 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if !stringSliceContains(profile.FileSystem.ReadRoots, profileRootPath()) {
 		t.Fatalf("read roots = %#v, want full read root %q", profile.FileSystem.ReadRoots, profileRootPath())
 	}
-	if !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".git") || !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".zero") {
+	if !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".zero") || !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".agents") {
 		t.Fatalf("protected metadata names = %#v, want workspace metadata protected", profile.FileSystem.WriteRoots[0].ProtectedMetadataNames)
 	}
-	if len(profile.FileSystem.DenyRead) != 1 || len(profile.FileSystem.DenyWrite) != 1 {
-		t.Fatalf("deny paths = %#v / %#v, want one each", profile.FileSystem.DenyRead, profile.FileSystem.DenyWrite)
+	resolvedRoot := profile.FileSystem.WriteRoots[0].Root
+	wantGitCarveouts := []string{filepath.Join(resolvedRoot, ".git", "hooks"), filepath.Join(resolvedRoot, ".git", "config")}
+	for _, want := range wantGitCarveouts {
+		if !stringSliceContains(profile.FileSystem.WriteRoots[0].ReadOnlySubpaths, want) {
+			t.Fatalf("read-only subpaths = %#v, want git metadata carveout %q", profile.FileSystem.WriteRoots[0].ReadOnlySubpaths, want)
+		}
+	}
+	// DenyRead may also carry default credential-store entries when the host
+	// has them, so assert containment rather than an exact count. Compare the
+	// normalized (symlink-resolved) form the profile stores.
+	if !stringSliceContains(profile.FileSystem.DenyRead, normalizeProfilePaths([]string{denyRead})[0]) || len(profile.FileSystem.DenyWrite) != 1 {
+		t.Fatalf("deny paths = %#v / %#v, want configured entries present", profile.FileSystem.DenyRead, profile.FileSystem.DenyWrite)
 	}
 	if profile.Network.Mode != NetworkDeny {
 		t.Fatalf("network profile = %#v, want deny", profile.Network)
@@ -362,4 +372,49 @@ func mkdirAll(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+func TestCredentialDenyReadPathsIn(t *testing.T) {
+	home := t.TempDir()
+	awsDir := filepath.Join(home, ".aws")
+	gcloudDir := filepath.Join(home, ".config", "gcloud")
+	if err := mkdirAll(awsDir, gcloudDir); err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(home, "sa-key.json")
+	if err := os.WriteFile(keyFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := credentialDenyReadPathsIn(home, keyFile, nil)
+	for _, want := range normalizeProfilePaths([]string{awsDir, gcloudDir, keyFile}) {
+		if !stringSliceContains(paths, want) {
+			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
+		}
+	}
+
+	// A path the host does not have is dropped, not emitted blind.
+	if stringSliceContains(paths, filepath.Join(home, ".azure")) {
+		t.Errorf("credential deny paths = %#v, must not include the absent ~/.azure", paths)
+	}
+
+	// An explicit AllowRead entry covering a store is an opt-out.
+	optedOut := credentialDenyReadPathsIn(home, keyFile, []string{awsDir})
+	if stringSliceContains(optedOut, normalizeProfilePaths([]string{awsDir})[0]) {
+		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut)
+	}
+	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
+		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
+	}
+
+	if got := credentialDenyReadPathsIn("  ", "", nil); len(got) != 0 {
+		t.Errorf("credential deny paths for blank home = %#v, want none", got)
+	}
+
+	// The GOOGLE_APPLICATION_CREDENTIALS target stays protected even when no
+	// home directory is resolvable.
+	homeless := credentialDenyReadPathsIn("", keyFile, nil)
+	if !stringSliceContains(homeless, normalizeProfilePaths([]string{keyFile})[0]) {
+		t.Errorf("credential deny paths without home = %#v, want key file included", homeless)
+	}
 }

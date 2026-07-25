@@ -4,10 +4,10 @@ package tools
 
 import (
 	"os/exec"
-	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -27,8 +27,7 @@ func hardenProcessLifetime(command *exec.Cmd) {
 		if command.Process == nil {
 			return nil
 		}
-		_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(command.Process.Pid)).Run()
-		return nil
+		return execution.KillProcessTree(command.Process.Pid)
 	}
 }
 

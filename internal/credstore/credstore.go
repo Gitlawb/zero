@@ -251,6 +251,10 @@ func (s *Store) write(data map[string]string) error {
 		_ = tmp.Close()
 		return fmt.Errorf("credstore: write: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("credstore: sync: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("credstore: write: %w", err)
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -24,6 +25,35 @@ type parsedBinding struct {
 // isZero returns true when p is the nil sentinel (no binding configured).
 func (p parsedBinding) isZero() bool {
 	return p.code == 0 && p.text == ""
+}
+
+// defaultToggleMouseChord and defaultToggleSidebarChord are the built-in
+// Ctrl+E/Ctrl+B chords that conflict with readline cursor navigation
+// (move-to-end-of-line / move-to-beginning-of-line) while typing in the
+// composer.
+var (
+	defaultToggleMouseChord   = parseBinding("ctrl+e")
+	defaultToggleSidebarChord = parseBinding("ctrl+b")
+)
+
+// requiresEmptyComposer reports whether binding b resolves to conflicting, the
+// hardcoded default chord it can fall back to. That happens either because b
+// is unset (isZero, so keyMatch uses the default matcher) or because the user
+// explicitly configured the identical chord (e.g. toggleMouse: "ctrl+e"),
+// which parseBinding does not treat as zero. Only a binding that resolves to
+// a genuinely different chord may fire while the composer has text; one that
+// resolves to the conflicting default must still wait for it to be empty so
+// readline navigation gets the keystroke instead.
+func requiresEmptyComposer(b parsedBinding, conflicting parsedBinding) bool {
+	return b.isZero() || b == conflicting
+}
+
+// canFireComposerGatedToggle reports whether a toggle bound to b (whose
+// conflicting hardcoded default is conflicting) may fire given the current
+// composer-empty state. Factored out of the toggleMouse/toggleSidebar dispatch
+// cases in model.go, which both repeated this same condition inline.
+func canFireComposerGatedToggle(b parsedBinding, conflicting parsedBinding, composerEmpty bool) bool {
+	return !requiresEmptyComposer(b, conflicting) || composerEmpty
 }
 
 // Label returns a human-readable representation of the binding, e.g. "Ctrl+O"
@@ -78,6 +108,9 @@ func (p parsedBinding) Label() string {
 			b.WriteString("PgUp")
 		case tea.KeyPgDown:
 			b.WriteString("PgDn")
+		case tea.KeyF1, tea.KeyF2, tea.KeyF3, tea.KeyF4, tea.KeyF5, tea.KeyF6,
+			tea.KeyF7, tea.KeyF8, tea.KeyF9, tea.KeyF10, tea.KeyF11, tea.KeyF12:
+			b.WriteString(fKeyLabel(p.code))
 		default:
 			// Printable character — uppercase for display
 			if p.code >= 'a' && p.code <= 'z' {
@@ -207,6 +240,30 @@ func parseBinding(s string) parsedBinding {
 		p.code = tea.KeyPgUp
 	case "pgdown", "pagedown":
 		p.code = tea.KeyPgDown
+	case "f1":
+		p.code = tea.KeyF1
+	case "f2":
+		p.code = tea.KeyF2
+	case "f3":
+		p.code = tea.KeyF3
+	case "f4":
+		p.code = tea.KeyF4
+	case "f5":
+		p.code = tea.KeyF5
+	case "f6":
+		p.code = tea.KeyF6
+	case "f7":
+		p.code = tea.KeyF7
+	case "f8":
+		p.code = tea.KeyF8
+	case "f9":
+		p.code = tea.KeyF9
+	case "f10":
+		p.code = tea.KeyF10
+	case "f11":
+		p.code = tea.KeyF11
+	case "f12":
+		p.code = tea.KeyF12
 	case "?":
 		p.text = "?"
 		p.code = 0
@@ -241,6 +298,13 @@ type keyBindings struct {
 	cycleReasoning parsedBinding
 	togglePlan     parsedBinding
 	toggleSidebar  parsedBinding
+}
+
+// fKeyLabel renders a function-key code as "F9" etc. tea.KeyF1..KeyF12 are
+// sequential, so the offset from KeyF1 gives the number.
+func fKeyLabel(code rune) string {
+	n := int(code-tea.KeyF1) + 1
+	return "F" + strconv.Itoa(n)
 }
 
 // resolveKeyBindings converts a user-facing KeyBindingsConfig into the

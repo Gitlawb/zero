@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 const (
@@ -50,6 +52,7 @@ type SessionKind string
 const (
 	SessionKindFork      SessionKind = "fork"
 	SessionKindChild     SessionKind = "child"
+	SessionKindSide      SessionKind = "side"
 	SessionKindSpecDraft SessionKind = "spec-draft"
 	SessionKindSpecImpl  SessionKind = "spec-impl"
 )
@@ -123,11 +126,13 @@ type CreateInput struct {
 }
 
 type ForkInput struct {
-	SessionID string
-	Title     string
-	Cwd       string
-	ModelID   string
-	Provider  string
+	SessionID   string
+	SessionKind SessionKind
+	Title       string
+	Cwd         string
+	ModelID     string
+	Provider    string
+	Tag         string
 }
 
 type ChildInput struct {
@@ -352,10 +357,9 @@ func (store *Store) Latest() (*Metadata, error) {
 }
 
 // IsResumableKind reports whether a session kind represents a standalone,
-// user-resumable conversation rather than an agent sub-run. Regular ("") and
-// user fork sessions are resumable; child (specialist/sub-agent) and spec
-// draft/impl sessions are not — each agent task and /spec run creates one, so
-// listing them in the resume picker floods it with non-conversation entries.
+// user-resumable conversation rather than a transient or agent-owned sub-run.
+// Regular ("") and user fork sessions are resumable; side, child, and spec
+// sessions are not, so they do not flood the resume picker.
 func IsResumableKind(kind SessionKind) bool {
 	switch kind {
 	case "", SessionKindFork:
@@ -416,13 +420,21 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if title == "" && parent.Title != "" {
 		title = parent.Title + " (fork)"
 	}
+	kind := input.SessionKind
+	if kind == "" {
+		kind = SessionKindFork
+	}
+	if kind != SessionKindFork && kind != SessionKindSide {
+		return Metadata{}, fmt.Errorf("invalid zero fork session kind %q", kind)
+	}
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
-		SessionKind:        SessionKindFork,
+		SessionKind:        kind,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
 		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
+		Tag:                input.Tag,
 		ParentSessionID:    parent.SessionID,
 		RootSessionID:      firstNonEmpty(parent.RootSessionID, parent.SessionID),
 		ForkedFromEventID:  last.ID,
@@ -710,6 +722,33 @@ func (store *Store) UpdateTitle(sessionID string, title string) (Metadata, error
 	return session, nil
 }
 
+// UpdateModel replaces a session's selected model without changing its activity
+// timestamp or event counters. An empty model clears the session override.
+func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	modelID = strings.TrimSpace(modelID)
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.ModelID == modelID {
+		return session, nil
+	}
+	session.ModelID = modelID
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
 func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 	if !ValidSessionID(sessionID) {
 		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
@@ -841,7 +880,7 @@ func (store *Store) writeMetadata(session Metadata) error {
 	if err := writeFileSync(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
@@ -904,7 +943,7 @@ func (store *Store) writeFileAtomicSync(path string, content []byte, perm os.Fil
 	if err := writeFileSync(tmp, content, perm); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.RenameWithRetry(tmp, path, nil); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

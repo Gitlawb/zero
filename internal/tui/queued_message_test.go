@@ -203,6 +203,94 @@ func TestAgentResponseLaunchesQueuedPromptAfterError(t *testing.T) {
 	}
 }
 
+func TestUpArrowPopsQueuedMessageIntoComposer(t *testing.T) {
+	m := newQueuedMessageTestModel(t)
+	m.pending = true
+	m.activeRunID = 1
+	m.runID = 1
+	m.width = 96
+	m.input.SetValue("queued followup")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	updated, _ = next.Update(testKey(tea.KeyUp))
+	next = updated.(model)
+
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected ↑ to pop the queued message, still queued: %q", next.queuedMessage)
+	}
+	if got := next.composerValue(); got != "queued followup" {
+		t.Fatalf("expected queued message back in the composer, got %q", got)
+	}
+}
+
+func TestUpArrowPutsQueuedMessageAboveDraft(t *testing.T) {
+	m := newQueuedMessageTestModel(t)
+	m.pending = true
+	m.activeRunID = 1
+	m.runID = 1
+	m.width = 96
+	m.input.SetValue("first queued")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	next.input.SetValue("in-progress draft")
+
+	updated, _ = next.Update(testKey(tea.KeyUp))
+	next = updated.(model)
+
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected ↑ to pop the queued message, still queued: %q", next.queuedMessage)
+	}
+	if got := next.composerValue(); got != "first queued\nin-progress draft" {
+		t.Fatalf("expected queued text above the draft, got %q", got)
+	}
+}
+
+func TestQueuedMessageShowsUpEditHint(t *testing.T) {
+	m := newQueuedMessageTestModel(t)
+	m.pending = true
+	m.activeRunID = 1
+	m.runID = 1
+	m.width = 96
+	m.input.SetValue("queued followup")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	view := viewString(next.View())
+	if !strings.Contains(view, queuedEditHint) {
+		t.Fatalf("expected composer placeholder %q while a message is queued, got:\n%s", queuedEditHint, view)
+	}
+
+	updated, _ = next.Update(testKey(tea.KeyUp))
+	next = updated.(model)
+	view = viewString(next.View())
+	if strings.Contains(view, queuedEditHint) {
+		t.Fatalf("expected hint to clear once the queued message is popped, got:\n%s", view)
+	}
+}
+
+func TestSecondQueuedMessageStacksUnderFirst(t *testing.T) {
+	m := newQueuedMessageTestModel(t)
+	m.pending = true
+	m.activeRunID = 1
+	m.runID = 1
+	m.input.SetValue("first queued")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	next.input.SetValue("second queued")
+
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+
+	if got := next.queuedMessage; got != "first queued\nsecond queued" {
+		t.Fatalf("expected second prompt to stack under the first, got %q", got)
+	}
+}
+
 func newQueuedMessageTestModel(t *testing.T) model {
 	t.Helper()
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -19,22 +20,44 @@ type mcpToolListItem struct {
 	Permission  string `json:"permission"`
 }
 
-func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, autonomy mcp.PermissionAutonomy) (mcpToolRuntime, error) {
-	cfg, err := deps.resolveMCPConfig(workspaceRoot)
+// registerMCPToolsForWorkspace resolves and registers the workspace's MCP servers.
+// This spawns stdio servers, so it gates the project config layer behind the
+// workspace-trust check: trustRoot is the ORIGINAL launch directory (resolved before
+// any --worktree reassignment) so a worktree of a trusted repo inherits that trust.
+// resolveTrust fails closed, so an empty trustRoot or a store-read error excludes the
+// project layer and a cloned repo cannot spawn its ./.zero/config.json MCP servers.
+//
+// It returns a trustSkip alongside the runtime so the caller can fold the MCP gate
+// into the one-line trust notice (mirroring the hooks and plugins chokepoints);
+// otherwise a workspace whose only project config is MCP would be gated silently.
+func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, autonomy mcp.PermissionAutonomy, trustRoot string, runners ...*execution.Runner) (mcpToolRuntime, trustSkip, error) {
+	excludeProject, trustCheckErrored := resolveTrust(trustRoot)
+	skip := trustSkip{
+		excludedProjectConfig: excludeProject && projectMCPConfigExists(workspaceRoot),
+		trustCheckErrored:     trustCheckErrored,
+	}
+	cfg, err := deps.resolveMCPConfig(workspaceRoot, excludeProject)
 	if err != nil {
-		return nil, err
+		return nil, skip, err
 	}
 	if len(cfg.Servers) == 0 {
-		return noopMCPRuntime{}, nil
+		return noopMCPRuntime{}, skip, nil
 	}
 	store, err := deps.newMCPStore()
 	if err != nil {
-		return nil, err
+		return nil, skip, err
 	}
-	return deps.registerMCPTools(ctx, registry, cfg, mcp.RegisterOptions{
+	var runner *execution.Runner
+	if len(runners) > 0 {
+		runner = runners[0]
+	}
+	runtime, err := deps.registerMCPTools(ctx, registry, cfg, mcp.RegisterOptions{
 		PermissionStore: store,
 		Autonomy:        autonomy,
+		Execution:       runner,
+		WorkspaceRoot:   workspaceRoot,
 	})
+	return runtime, skip, err
 }
 
 func execMCPAutonomy(options execOptions) mcp.PermissionAutonomy {

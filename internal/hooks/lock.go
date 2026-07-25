@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Cross-process lock tuning for the audit log. The lock is held only across a
@@ -28,8 +30,7 @@ var auditLockSeq atomic.Uint64
 // than auditLockStaleAfter) is reclaimed. Wall-clock time is used deliberately so
 // lock timing never depends on the store's injectable clock and the stale check
 // compares against real file mtimes. This mirrors internal/cron/lock.go and
-// internal/oauth/lock.go (a shared filelock helper would DRY all three — left as a
-// follow-up to avoid churning those already-green packages here).
+// internal/oauth/lock.go. Uses internal/lockutil for lock restore and reclaim.
 func (store *AuditStore) lockAudit() (func(), error) {
 	lockPath := store.auditPath + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
@@ -44,11 +45,11 @@ func (store *AuditStore) lockAudit() (func(), error) {
 			// releaser could never delete it — stranding the lock. Fail closed.
 			if _, werr := f.WriteString(token); werr != nil {
 				_ = f.Close()
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("hooks: write audit lock: %w", werr)
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("hooks: close audit lock: %w", cerr)
 			}
 			var released bool
@@ -57,10 +58,8 @@ func (store *AuditStore) lockAudit() (func(), error) {
 					return
 				}
 				released = true
-				// Only remove if the file still carries OUR token, so a lock
-				// reclaimed as stale by another process is not deleted under it.
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					_ = os.Remove(lockPath)
+					_ = lockutil.RemoveLockFile(lockPath)
 				}
 			}, nil
 		}
@@ -76,7 +75,18 @@ func (store *AuditStore) lockAudit() (func(), error) {
 		// reclaimStaleLock renames the file aside (only one rename wins) and restores
 		// it if it turns out fresh, so a live lock is never deleted out from under it.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > auditLockStaleAfter {
-			if reclaimStaleLock(lockPath, token, auditLockStaleAfter) {
+			cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+				info, err := os.Stat(reclaimedPath)
+				return err == nil && time.Since(info.ModTime()) <= auditLockStaleAfter
+			})
+			if rerr != nil {
+				// Reclaim hit a hard failure: the rename aside failed outright, or a
+				// live holder's lock could not be put back (the lock path may be
+				// missing, so re-acquiring would break mutual exclusion). Fail closed
+				// instead of spinning to the deadline.
+				return nil, fmt.Errorf("hooks: reclaim stale audit lock: %w", rerr)
+			}
+			if cleared {
 				continue
 			}
 			// Lost the reclaim race (or it was actually fresh) — fall through to the
@@ -87,22 +97,4 @@ func (store *AuditStore) lockAudit() (func(), error) {
 		}
 		time.Sleep(auditLockRetryDelay)
 	}
-}
-
-// reclaimStaleLock atomically reclaims a stale lock file: it renames the lock to a
-// per-acquirer unique name (only one racer can rename a given file), then verifies
-// the moved file is still stale; if a holder reacquired it in the gap it is
-// restored rather than stolen. Returns true only when a genuinely stale lock was
-// removed. Mirrors internal/cron/lock.go and internal/oauth/lock.go.
-func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
-	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
-	if err := os.Rename(lockPath, reclaimed); err != nil {
-		return false
-	}
-	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
-		_ = os.Rename(reclaimed, lockPath)
-		return false
-	}
-	_ = os.Remove(reclaimed)
-	return true
 }

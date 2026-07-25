@@ -64,6 +64,54 @@ func TestSetupMissingCredentialEnv(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// Regression for issue #555: a custom OpenAI-compatible profile saved
+			// with no credential (e.g. a local llama.cpp server with no auth) must
+			// not be reported as missing one, or it gets filtered out of /model on
+			// the next run even though it was configured exactly as intended.
+			name: "custom openai compatible with no credential configured",
+			profile: config.ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				BaseURL:   "http://192.168.1.50:8080/v1",
+			},
+			want: false,
+		},
+		{
+			name: "custom openai compatible with explicit api key env",
+			profile: config.ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				BaseURL:   "http://192.168.1.50:8080/v1",
+				APIKeyEnv: "LLAMA_CPP_API_KEY",
+			},
+			wantEnv: "LLAMA_CPP_API_KEY",
+			want:    true,
+		},
+		{
+			// Self-heal regression: profiles saved by the pre-fix wizard were
+			// stamped with the catalog's own guessed default (OPENAI_API_KEY)
+			// even when the endpoint needed no auth. That stale value must be
+			// treated the same as unset so already-broken saved profiles start
+			// working again without a config.json rewrite.
+			name: "custom openai compatible with stale legacy default env",
+			profile: config.ProviderProfile{
+				Name:      "local-llama",
+				CatalogID: "custom-openai-compatible",
+				BaseURL:   "http://192.168.1.50:8080/v1",
+				APIKeyEnv: "OPENAI_API_KEY",
+			},
+			want: false,
+		},
+		{
+			name: "custom anthropic compatible with no credential configured",
+			profile: config.ProviderProfile{
+				Name:      "local-proxy",
+				CatalogID: "custom-anthropic-compatible",
+				BaseURL:   "http://localhost:9000/anthropic",
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -149,6 +197,54 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	}
 	if key, ok, _ := store.Get("ollama-cloud"); !ok || key != "sk-pasted-secret" {
 		t.Fatalf("stored key = %q,%v; want sk-pasted-secret in the credential store", key, ok)
+	}
+}
+
+func TestSaveSetupProviderAimlapiEnvReferenceAndOverrideHeaders(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "aimlapi",
+		BaseURL:   "https://staging.example/v1",
+		Model:     "anthropic/claude-sonnet-5",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+	if result.Provider.APIKey != "" || result.Provider.APIKeyEnv != "AIMLAPI_API_KEY" {
+		t.Fatalf("runtime profile did not retain AIMLAPI_API_KEY reference: %+v", result.Provider)
+	}
+	if len(result.Provider.CustomHeaders) != 0 {
+		t.Fatalf("catalog headers leaked to first-run override: %#v", result.Provider.CustomHeaders)
+	}
+	persisted := readFileConfig(t, configPath).Providers[0]
+	if persisted.APIKey != "" || persisted.APIKeyEnv != "AIMLAPI_API_KEY" || persisted.APIKeyStored {
+		t.Fatalf("persisted credential source changed: %+v", persisted)
+	}
+	if len(persisted.CustomHeaders) != 0 {
+		t.Fatalf("persisted override contains catalog headers: %#v", persisted.CustomHeaders)
+	}
+}
+
+func TestSaveSetupProviderAimlapiUsesResolvedPartnerOverride(t *testing.T) {
+	t.Setenv("AIMLAPI_PARTNER_ID", "part_override")
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "aimlapi",
+		BaseURL:   "https://api.aimlapi.com/v1",
+		Model:     "anthropic/claude-sonnet-5",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+	if got := result.Provider.CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("runtime partner header = %q, want part_override", got)
+	}
+	if got := readFileConfig(t, configPath).Providers[0].CustomHeaders["X-AIMLAPI-Partner-ID"]; got != "part_override" {
+		t.Fatalf("persisted partner header = %q, want part_override", got)
 	}
 }
 

@@ -72,6 +72,26 @@ func TestSelfReportedIncompletionMatching(t *testing.T) {
 		{"I replaced the placeholder value with the computed key.", false},
 		{"The retry uses exponential backoff as a fallback.", false},
 		{"Without proper error handling the function would crash, so I added it.", false},
+		// real false positive (conversational recap): retelling a PAST exchange is
+		// not an admission about the current objective — the sentence carries its
+		// own narrative context ("You asked …", "at the time"):
+		{"You asked if I could work autonomously on zero if you gave me a GitHub account — I was honest that my sandbox had no repo, no build system, and no network/integration wired up yet, so I couldn't actually do it at the time.", false},
+		{"When we last spoke, I couldn't reach the GitHub API from the sandbox.", false},
+		{"Last session I was unable to build the project; that is what we should retry now.", false},
+		// quoted admissions (the model citing its own earlier message or a log
+		// line) must NOT be flagged:
+		{`My earlier reply said "I couldn't do it" but the tooling is now installed.`, false},
+		{"The run log contains `I cannot access the network`, which is expected inside the sandbox.", false},
+		// current-objective admissions must STILL be flagged, including past tense
+		// and multi-sentence finals whose other sentences are narrative:
+		{"I couldn't complete the refactor.", true},
+		{"I hit an error I could not resolve, so the migration is unfinished.", true},
+		{"You asked me to port the parser. I couldn't finish the second half.", true},
+		// unbalanced delimiters must not swallow the tail (only BALANCED quoted
+		// spans are stripped), so an admission after a stray quote still fires:
+		{"The log ends with a stray \" and I couldn't finish the migration.", true},
+		{"There is an unterminated `code span and I cannot proceed with the fix.", true},
+		{"The doc opens with “a curly quote and I was unable to complete the task.", true},
 	}
 	for _, c := range cases {
 		got := selfReportedIncompletion(c.text) != ""

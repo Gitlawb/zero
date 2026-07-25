@@ -9,7 +9,7 @@ import (
 )
 
 func TestCoreToolsExposeWriteAndPlanTools(t *testing.T) {
-	toolset := CoreTools(t.TempDir())
+	toolset := CoreToolsScoped(t.TempDir(), nil)
 	byName := make(map[string]Tool, len(toolset))
 	for _, tool := range toolset {
 		byName[tool.Name()] = tool
@@ -41,7 +41,7 @@ func TestRegistryBlocksPromptToolsWithoutGrant(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "blocked.txt")
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 
 	result := registry.Run(context.Background(), "write_file", map[string]any{
 		"path":    "blocked.txt",
@@ -62,7 +62,7 @@ func TestRegistryBlocksPromptToolsWithoutGrant(t *testing.T) {
 func TestRegistryRunsPromptToolsWithGrant(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 
 	result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
 		"path":    "allowed.txt",
@@ -83,7 +83,7 @@ func TestRegistryRunsPromptToolsWithGrant(t *testing.T) {
 
 func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	root := t.TempDir()
-	tool := NewWriteFileTool(root)
+	tool := NewScopedWriteFileTool(root, nil)
 
 	created := tool.Run(context.Background(), map[string]any{
 		"path":    "nested/file.txt",
@@ -128,9 +128,90 @@ func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolRecordsCreatedFileButNotOverwrite(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewScopedWriteFileTool(root, nil))
+	tracker := NewFileTracker()
+
+	created := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":    "scratch.txt",
+		"content": "first",
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if created.Status != StatusOK {
+		t.Fatalf("expected create ok, got %s: %s", created.Status, created.Output)
+	}
+	absPath := filepath.Join(root, "scratch.txt")
+	absPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", absPath, err)
+	}
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() = %v, want [%s]", got, absPath)
+	}
+
+	overwrote := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":      "scratch.txt",
+		"content":   "second",
+		"overwrite": true,
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if overwrote.Status != StatusOK {
+		t.Fatalf("expected overwrite ok, got %s: %s", overwrote.Status, overwrote.Output)
+	}
+	// Overwriting an existing file is not a "new" creation, so CreatedFiles
+	// must not gain a second (duplicate) entry for it.
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() after overwrite = %v, want unchanged [%s]", got, absPath)
+	}
+}
+
+func TestApplyPatchRecordsCreatedFileButNotExistingEdits(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewScopedApplyPatchTool(root, nil))
+	tracker := NewFileTracker()
+	patch := strings.Join([]string{
+		"diff --git a/scratch.txt b/scratch.txt",
+		"new file mode 100644",
+		"index 0000000..e965047",
+		"--- /dev/null",
+		"+++ b/scratch.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"diff --git a/existing.txt b/existing.txt",
+		"--- a/existing.txt",
+		"+++ b/existing.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+		"",
+	}, "\n")
+
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+		"patch": patch,
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if result.Status != StatusOK {
+		if gitApplyUnavailable(result.Output) {
+			t.Skipf("git binary unavailable: %s", result.Output)
+		}
+		t.Fatalf("expected apply_patch ok, got %s: %s", result.Status, result.Output)
+	}
+	absPath := filepath.Join(root, "scratch.txt")
+	absPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", absPath, err)
+	}
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() = %v, want [%s]", got, absPath)
+	}
+}
+
 func TestWriteFileSummaryReportsLineCount(t *testing.T) {
 	root := t.TempDir()
-	tool := NewWriteFileTool(root)
+	tool := NewScopedWriteFileTool(root, nil)
 	// Three lines, no trailing newline -> "3 lines" (not a byte count).
 	result := tool.Run(context.Background(), map[string]any{
 		"path":    "multi.txt",
@@ -150,7 +231,7 @@ func TestWriteFileSummaryReportsLineCount(t *testing.T) {
 func TestWriteFileToolAllowsEmptyContent(t *testing.T) {
 	root := t.TempDir()
 
-	result := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":    "empty.txt",
 		"content": "",
 	})
@@ -168,7 +249,7 @@ func TestWriteFileToolAllowsEmptyContent(t *testing.T) {
 }
 
 func TestWriteFileToolReportsTypeErrorsForEmptyAllowedStrings(t *testing.T) {
-	result := NewWriteFileTool(t.TempDir()).Run(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(t.TempDir(), nil).Run(context.Background(), map[string]any{
 		"path":    "bad.txt",
 		"content": 42,
 	})
@@ -185,7 +266,7 @@ func TestWriteFileToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 
-	result := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":    outside,
 		"content": "secret",
 	})
@@ -211,7 +292,7 @@ func TestWriteFileToolRejectsSymlinkParent(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	result := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":    "link/escape.txt",
 		"content": "secret",
 	})
@@ -232,7 +313,7 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	path := filepath.Join(root, "code.go")
 	writeTestFile(t, path, "const a = 1\nconst b = 2\n")
 
-	result := NewEditFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "code.go",
 		"old_string": "const a = 1",
 		"new_string": "const a = 42",
@@ -255,7 +336,7 @@ func TestEditFileToolReplacesCRLF(t *testing.T) {
 	path := filepath.Join(root, "code.go")
 	writeTestFile(t, path, "const a = 1\r\nconst b = 2\r\n")
 
-	result := NewEditFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "code.go",
 		"old_string": "const a = 1\nconst b = 2",
 		"new_string": "const a = 42\nconst b = 24",
@@ -276,7 +357,7 @@ func TestEditFileToolReplacesCRLF(t *testing.T) {
 func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
-	res := NewEditFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
 	})
 	if res.Status != StatusOK {
@@ -299,7 +380,7 @@ func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 
 func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
 	root := t.TempDir()
-	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "new.txt", "content": "line one\nline two\n",
 	})
 	if res.Status != StatusOK {
@@ -321,7 +402,7 @@ func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
 func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "f.txt"), "old line\nkeep\n")
-	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "f.txt", "content": "new line\nkeep\n", "overwrite": true,
 	})
 	if res.Status != StatusOK {
@@ -342,7 +423,7 @@ func TestEditFileToolAllowsDeletingRegions(t *testing.T) {
 	path := filepath.Join(root, "notes.txt")
 	writeTestFile(t, path, "keep\nremove\nkeep\n")
 
-	result := NewEditFileTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "notes.txt",
 		"old_string": "remove\n",
 		"new_string": "",
@@ -364,7 +445,7 @@ func TestEditFileToolRejectsMissingAndAmbiguousMatches(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "dup.txt")
 	writeTestFile(t, path, "x\nx\n")
-	tool := NewEditFileTool(root)
+	tool := NewScopedEditFileTool(root, nil)
 
 	missing := tool.Run(context.Background(), map[string]any{
 		"path":       "dup.txt",
@@ -416,7 +497,7 @@ func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 		"",
 	}, "\n")
 
-	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{
 		"patch": patch,
 	})
 
@@ -448,7 +529,7 @@ func TestApplyPatchToolHandlesHunkBodyLookingLikeHeader(t *testing.T) {
 		"",
 	}, "\n")
 
-	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
 
 	if result.Status != StatusOK {
 		t.Fatalf("expected patch ok (hunk body must not be parsed as a header), got %s: %s", result.Status, result.Output)
@@ -484,7 +565,7 @@ func TestApplyPatchToolRejectsHunkCountInflationHidingEscapePath(t *testing.T) {
 		"",
 	}, "\n")
 
-	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
 
 	if result.Status != StatusError {
 		t.Fatalf("crafted hunk header must not hide the out-of-workspace path, got %s: %s", result.Status, result.Output)
@@ -514,7 +595,7 @@ func TestApplyPatchToolRejectsSymlinkPath(t *testing.T) {
 		"",
 	}, "\n")
 
-	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{
 		"patch": patch,
 	})
 
@@ -533,7 +614,7 @@ func TestApplyPatchToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 
-	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{
 		"cwd": outside,
 		"patch": strings.Join([]string{
 			"diff --git a/nope.txt b/nope.txt",
@@ -567,7 +648,7 @@ func TestApplyPatchReportsWorkspaceRelativeChangedFilesUnderCwd(t *testing.T) {
 	}
 	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n"
 
-	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch, "cwd": "sub/dir"})
+	res := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch, "cwd": "sub/dir"})
 	if res.Status != StatusOK {
 		if gitApplyUnavailable(res.Output) {
 			t.Skipf("git binary unavailable: %s", res.Output)
@@ -581,7 +662,7 @@ func TestApplyPatchReportsWorkspaceRelativeChangedFilesUnderCwd(t *testing.T) {
 
 func TestWriteFileReportsChangedFileAndDisplay(t *testing.T) {
 	root := t.TempDir()
-	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{"path": "notes.txt", "content": "hello"})
+	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{"path": "notes.txt", "content": "hello"})
 	if res.Status != StatusOK {
 		t.Fatalf("status=%s output=%s", res.Status, res.Output)
 	}
@@ -601,7 +682,7 @@ func TestEditFileReportsChangedFileAndDisplay(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("alpha beta"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res := NewEditFileTool(root).Run(context.Background(), map[string]any{"path": "f.txt", "old_string": "alpha", "new_string": "gamma"})
+	res := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{"path": "f.txt", "old_string": "alpha", "new_string": "gamma"})
 	if res.Status != StatusOK {
 		t.Fatalf("status=%s output=%s", res.Status, res.Output)
 	}
@@ -619,7 +700,7 @@ func TestApplyPatchReportsChangedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n"
-	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
+	res := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
 	if res.Status != StatusOK {
 		if gitApplyUnavailable(res.Output) {
 			t.Skipf("git binary unavailable: %s", res.Output)
@@ -643,7 +724,7 @@ func TestApplyPatchReportsChangedFiles(t *testing.T) {
 func TestWriteFileAcceptsContentAlias(t *testing.T) {
 	root := t.TempDir()
 	// minimax-style: content under an alias key instead of "content".
-	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":     "shop.html",
 		"contents": "<html>hi</html>",
 	})

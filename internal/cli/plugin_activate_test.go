@@ -51,7 +51,8 @@ func TestActivatePluginsRegistersToolAndCollectsHooks(t *testing.T) {
 
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), &stderr)
+	workspace := t.TempDir()
+	activation := activatePlugins(workspace, registry, fakePluginDeps(t, loaded), &stderr, workspace)
 
 	if _, ok := registry.Get("demo_lookup"); !ok {
 		t.Fatalf("plugin tool not registered into the bootstrap registry")
@@ -68,6 +69,11 @@ func TestActivatePluginsRegistersToolAndCollectsHooks(t *testing.T) {
 }
 
 func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
+	// Isolate host ~/.agents/skills so it cannot interfere with this test.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
 	pluginDir := t.TempDir()
 	skillDir := filepath.Join(pluginDir, "skills", "demo-skill")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -90,7 +96,8 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewSkillTool(t.TempDir())) // core skill tool, like the real bootstrap
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), &stderr)
+	workspace := t.TempDir()
+	activation := activatePlugins(workspace, registry, fakePluginDeps(t, loaded), &stderr, workspace)
 
 	if len(activation.skillRoots) != 1 {
 		t.Fatalf("expected one plugin skill root, got %#v", activation.skillRoots)
@@ -103,6 +110,42 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	res := skillTool.Run(context.Background(), map[string]any{"name": "demo-skill"})
 	if res.Status != tools.StatusOK {
 		t.Fatalf("plugin skill not resolvable via the agent skill tool: %q (%s)", res.Status, res.Output)
+	}
+}
+
+func TestActivatePluginsAlwaysRegistersMultiRootSkillTool(t *testing.T) {
+	// Even with zero plugins / zero plugin skill roots, activation must overlay
+	// the multi-root skill tool so ~/.agents/skills is loadable on bare runs.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	agents := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(agents, "agents-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: agents-skill\n---\nagents body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewSkillTool(t.TempDir())) // core single-dir tool
+	var stderr bytes.Buffer
+	workspace := t.TempDir()
+	activation := activatePlugins(workspace, registry, fakePluginDeps(t, nil), &stderr, workspace)
+	if len(activation.skillRoots) != 0 {
+		t.Fatalf("expected no plugin skill roots, got %#v", activation.skillRoots)
+	}
+	skillTool, ok := registry.Get("skill")
+	if !ok {
+		t.Fatal("skill tool missing after activation")
+	}
+	res := skillTool.Run(context.Background(), map[string]any{"name": "agents-skill"})
+	if res.Status != tools.StatusOK || !bytes.Contains([]byte(res.Output), []byte("agents body")) {
+		t.Fatalf("agents skill must load with zero plugin roots: %q (%s)", res.Status, res.Output)
 	}
 }
 
@@ -124,7 +167,8 @@ func TestActivatePluginsSurfacesLoadDiagnostics(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activatePlugins(t.TempDir(), registry, deps, &stderr)
+	workspace := t.TempDir()
+	activatePlugins(workspace, registry, deps, &stderr, workspace)
 
 	if stderr.Len() == 0 {
 		t.Fatal("a load diagnostic must be surfaced on stderr")
@@ -143,7 +187,8 @@ func TestActivatePluginsFailsOpenOnLoadError(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, deps, &stderr)
+	workspace := t.TempDir()
+	activation := activatePlugins(workspace, registry, deps, &stderr, workspace)
 
 	if len(activation.hooks) != 0 || len(activation.skillRoots) != 0 {
 		t.Fatalf("a load error must yield an inert activation, got %#v", activation)
@@ -173,7 +218,8 @@ func TestActivatePluginsWarnsOnMalformedPluginButKeepsGood(t *testing.T) {
 
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activatePlugins(t.TempDir(), registry, fakePluginDeps(t, []plugins.LoadedPlugin{bad, good}), &stderr)
+	workspace := t.TempDir()
+	activatePlugins(workspace, registry, fakePluginDeps(t, []plugins.LoadedPlugin{bad, good}), &stderr, workspace)
 
 	if _, ok := registry.Get("good_tool"); !ok {
 		t.Fatal("the good plugin tool must still register despite a malformed sibling")
@@ -198,7 +244,7 @@ func TestNewHookDispatcherWithExtraFoldsPluginHooks(t *testing.T) {
 		Enabled: true,
 	}}
 
-	dispatcher := newHookDispatcherWithExtra(workspace, extra)
+	dispatcher, _ := newHookDispatcherWithExtra(workspace, extra, workspace)
 	if dispatcher == nil {
 		t.Fatal("dispatcher should never be nil for a clean workspace")
 	}

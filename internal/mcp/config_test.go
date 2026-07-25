@@ -88,6 +88,33 @@ func TestNormalizeConfigValidatesTransportBoundaries(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigFlagsUnconfiguredDefault(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"firecrawl": config.DefaultMCPServers()["firecrawl"],
+		"web": {
+			Type: "http",
+			URL:  "https://example.com/mcp",
+		},
+	}}
+
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+
+	byName := make(map[string]Server, len(servers))
+	for _, server := range servers {
+		byName[server.Name] = server
+	}
+
+	if !byName["firecrawl"].UnconfiguredDefault {
+		t.Fatal("an untouched firecrawl default should be flagged UnconfiguredDefault")
+	}
+	if byName["web"].UnconfiguredDefault {
+		t.Fatal("a server the user configured must not be flagged UnconfiguredDefault")
+	}
+}
+
 func TestServerIdentityChangesWithTransportFields(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

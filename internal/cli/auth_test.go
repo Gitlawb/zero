@@ -2,18 +2,26 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 )
 
-// withAuthStore points the provider OAuth store at a temp file for the test.
+// withAuthStore points the provider OAuth store at a temp file for the test,
+// pinning the file backend so an inherited ZERO_OAUTH_STORAGE=keyring can't
+// ignore the temp path and hit the OS keychain.
 func withAuthStore(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	return path
 }
 
@@ -145,6 +153,44 @@ func TestRunAuthOpenRouterRejectsArgs(t *testing.T) {
 	}
 }
 
+func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	var stdout, stderr bytes.Buffer
+
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			return "sk-openrouter-test", nil
+		},
+	})
+
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "new API key saved") {
+		t.Fatalf("expected saved-key confirmation, got %q", stdout.String())
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.ActiveProvider != "openrouter" || len(cfg.Providers) != 1 {
+		t.Fatalf("config = %#v", cfg)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "openrouter" || profile.CatalogID != "openrouter" || !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
+		t.Fatalf("provider not stored-key sanitized: %#v", profile)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok, err := store.Get("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || key != "sk-openrouter-test" {
+		t.Fatalf("stored key = %q, %v", key, ok)
+	}
+}
+
 func TestRunAuthHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
@@ -196,4 +242,82 @@ func TestRunAuthLoginChatGPTRejectsScope(t *testing.T) {
 	if !strings.Contains(stderr.String(), "ChatGPT login does not support --scope") {
 		t.Fatalf("stderr = %q, want the ChatGPT-specific --scope rejection", stderr.String())
 	}
+}
+
+func TestEnsureLoginProviderProfileAddsProviderWithoutStealingActive(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{"activeProvider":"opengateway","providers":[{"name":"opengateway","provider_kind":"openai-compatible","baseURL":"https://gateway.example.com/v1","apiKeyStored":true,"model":"some-model"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+
+	line := ensureLoginProviderProfile(deps, "chatgpt")
+	if !strings.Contains(line, `Added provider "chatgpt"`) {
+		t.Fatalf("expected added-provider guidance, got %q", line)
+	}
+	if !strings.Contains(line, "zero providers use chatgpt") {
+		t.Fatalf("expected switch hint, got %q", line)
+	}
+
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.ActiveProvider != "opengateway" {
+		t.Fatalf("active provider changed to %q", cfg.ActiveProvider)
+	}
+	names := make([]string, 0, len(cfg.Providers))
+	for _, provider := range cfg.Providers {
+		names = append(names, provider.Name)
+	}
+	if len(cfg.Providers) != 2 || cfg.Providers[1].CatalogID != "chatgpt" {
+		t.Fatalf("expected chatgpt profile appended, got %v", names)
+	}
+
+	// A second login must be a no-op with switch guidance, not a duplicate.
+	line = ensureLoginProviderProfile(deps, "chatgpt")
+	if !strings.Contains(line, "already configured") {
+		t.Fatalf("expected already-configured guidance, got %q", line)
+	}
+	cfg = readCLIConfigFixture(t, configPath)
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("repeat login duplicated the profile: %d providers", len(cfg.Providers))
+	}
+}
+
+func TestEnsureLoginProviderProfileActivatesOnFreshConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+
+	line := ensureLoginProviderProfile(deps, "chatgpt")
+	if !strings.Contains(line, "set it active") {
+		t.Fatalf("fresh config should adopt the login as active, got %q", line)
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.ActiveProvider != "chatgpt" {
+		t.Fatalf("active provider = %q, want chatgpt", cfg.ActiveProvider)
+	}
+}
+
+func TestEnsureLoginProviderProfileSkipsNonCatalogProviders(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+
+	if line := ensureLoginProviderProfile(deps, "my-custom-oauth-server"); line != "" {
+		t.Fatalf("custom OAuth server must not scaffold a profile, got %q", line)
+	}
+	if _, err := os.Stat(configPath); err == nil {
+		t.Fatalf("config must not be created for a non-catalog login")
+	}
+}
+
+func readCLIConfigFixture(t *testing.T, path string) config.FileConfig {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	return cfg
 }

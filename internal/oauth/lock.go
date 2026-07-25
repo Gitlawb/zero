@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 const (
@@ -38,11 +40,11 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 			// other processes. Fail closed: remove the file and surface the error.
 			if _, werr := f.WriteString(token); werr != nil {
 				_ = f.Close()
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("oauth: write token lock: %w", werr)
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = os.Remove(lockPath)
+				_ = lockutil.RemoveLockFile(lockPath)
 				return nil, fmt.Errorf("oauth: close token lock: %w", cerr)
 			}
 			var released bool
@@ -52,7 +54,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 				}
 				released = true
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					_ = os.Remove(lockPath)
+					_ = lockutil.RemoveLockFile(lockPath)
 				}
 			}, nil
 		}
@@ -69,7 +71,18 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		// reclaimStaleLock renames the file aside (only one rename wins) and restores
 		// it if it turns out fresh, so a live lock is never deleted out from under it.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > fileLockStaleAfter {
-			if reclaimStaleLock(lockPath, token, fileLockStaleAfter) {
+			cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+				info, err := os.Stat(reclaimedPath)
+				return err == nil && time.Since(info.ModTime()) <= fileLockStaleAfter
+			})
+			if rerr != nil {
+				// Reclaim hit a hard failure: the rename aside failed outright, or a
+				// live holder's lock could not be put back (the lock path may be
+				// missing, so re-acquiring would break mutual exclusion). Fail closed
+				// instead of spinning to the deadline.
+				return nil, fmt.Errorf("oauth: reclaim stale token lock: %w", rerr)
+			}
+			if cleared {
 				continue
 			}
 			// Lost the reclaim race (or it was actually fresh) — fall through to the
@@ -80,22 +93,4 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-// reclaimStaleLock atomically reclaims a stale lock file: it renames the lock to a
-// per-acquirer unique name (only one racer can rename a given file), then verifies
-// the moved file is still stale; if a holder reacquired it in the gap it is
-// restored rather than stolen. Returns true only when a genuinely stale lock was
-// removed. Mirrors internal/cron/lock.go and internal/hooks/lock.go.
-func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
-	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
-	if err := os.Rename(lockPath, reclaimed); err != nil {
-		return false
-	}
-	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
-		_ = os.Rename(reclaimed, lockPath)
-		return false
-	}
-	_ = os.Remove(reclaimed)
-	return true
 }

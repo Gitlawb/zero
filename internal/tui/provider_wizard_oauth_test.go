@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -382,5 +386,66 @@ func TestProviderWizardDeviceCodeIgnoresStaleAttempt(t *testing.T) {
 	}
 	if out.providerWizard.deviceUserCode != "" || out.providerWizard.deviceVerificationURI != "" {
 		t.Fatalf("stale device-code result applied device details: %+v", out.providerWizard)
+	}
+}
+
+func TestPersistOAuthLoginProviderWritesKeylessProfileWithoutStealingActive(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{"activeProvider":"opengateway","providers":[{"name":"opengateway","provider_kind":"openai-compatible","baseURL":"https://gateway.example.com/v1","apiKeyStored":true,"model":"some-model"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	persistOAuthLoginProvider(configPath, "chatgpt")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg.ActiveProvider != "opengateway" {
+		t.Fatalf("active provider changed to %q", cfg.ActiveProvider)
+	}
+	if len(cfg.Providers) != 2 || cfg.Providers[1].CatalogID != "chatgpt" {
+		t.Fatalf("expected chatgpt profile appended, got %+v", cfg.Providers)
+	}
+	if cfg.Providers[1].APIKey != "" || cfg.Providers[1].APIKeyStored {
+		t.Fatalf("OAuth profile must stay keyless so the token resolver attaches, got %+v", cfg.Providers[1])
+	}
+
+	// Blank path (no user config, e.g. tests/ephemeral runs) must be a no-op.
+	persistOAuthLoginProvider("", "chatgpt")
+}
+
+func TestAppendOAuthLoginProfileAddsOnceAndRespectsRenames(t *testing.T) {
+	saved := []config.ProviderProfile{{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible}}
+
+	saved = appendOAuthLoginProfile(saved, "chatgpt")
+	if len(saved) != 2 || saved[1].Name != "chatgpt" || saved[1].CatalogID != "chatgpt" {
+		t.Fatalf("expected chatgpt appended, got %+v", saved)
+	}
+	if saved[1].Model == "" || saved[1].BaseURL == "" {
+		t.Fatalf("appended profile must carry catalog defaults, got %+v", saved[1])
+	}
+
+	// Idempotent: a second login must not duplicate.
+	saved = appendOAuthLoginProfile(saved, "chatgpt")
+	if len(saved) != 2 {
+		t.Fatalf("duplicate appended: %+v", saved)
+	}
+
+	// A renamed profile serving the same catalog entry blocks the append too.
+	renamed := []config.ProviderProfile{{Name: "codex", CatalogID: "chatgpt"}}
+	renamed = appendOAuthLoginProfile(renamed, "chatgpt")
+	if len(renamed) != 1 {
+		t.Fatalf("renamed profile not respected: %+v", renamed)
+	}
+
+	// Unknown catalog id: no-op.
+	if got := appendOAuthLoginProfile(nil, "no-such-provider"); got != nil {
+		t.Fatalf("unknown provider must not append, got %+v", got)
 	}
 }

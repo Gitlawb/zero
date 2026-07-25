@@ -63,6 +63,8 @@ func NewUpdatePlanTool() *updatePlanTool {
 				AdditionalProperties: false,
 			},
 			safety: readOnlySafety("Updates in-memory planning state only."),
+			// Session plan state — ordering matters across turns.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: sessionResourceKeys},
 		},
 	}
 }

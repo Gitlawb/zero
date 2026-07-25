@@ -105,24 +105,6 @@ func (c *staticRenderCache) evictOverflow() {
 	}
 }
 
-func (c *staticRenderCache) stats() renderCacheStats {
-	if c == nil {
-		return renderCacheStats{}
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.statsData
-}
-
-func (c *staticRenderCache) retainedCharacters() int {
-	if c == nil {
-		return 0
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.retained
-}
-
 func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, opts cardRenderOptions, flush bool) (string, bool) {
 	stable := true
 	switch row.kind {

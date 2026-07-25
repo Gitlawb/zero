@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,12 +21,16 @@ type grepTool struct {
 	scope         PathScope
 }
 
+func (grepTool) outputCategory(map[string]any) outputCategory { return outputCategorySearch }
+
 type grepMatch struct {
 	file string
 	line int
 	text string
 	hits int
 }
+
+var errGrepLimitReached = errors.New("grep head limit reached")
 
 func NewGrepTool(workspaceRoot string) Tool {
 	return NewScopedGrepTool(workspaceRoot, nil)
@@ -48,7 +55,8 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"pattern"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Searches file paths and matching lines without modifying files."),
+			safety:       readOnlySafety("Searches file paths and matching lines without modifying files."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: scopedScanResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -56,7 +64,15 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{})
+	return tool.runWith(ctx, args, readExcluder{}, true)
+}
+
+func (tool grepTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	exclude := readExcluder{}
+	if options.Sandbox != nil {
+		exclude = sandboxReadExcluder(options.Sandbox)
+	}
+	return tool.runWith(ctx, args, exclude, false)
 }
 
 // RunWithSandbox runs the search while skipping subtrees the sandbox policy
@@ -64,10 +80,10 @@ func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
 // path. With no DenyRead configured the excluder is a no-op and behavior is
 // unchanged.
 func (tool grepTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result {
-	return tool.runWith(ctx, args, sandboxReadExcluder(engine))
+	return tool.runWith(ctx, args, sandboxReadExcluder(engine), true)
 }
 
-func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder) Result {
+func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder, directBudget bool) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "query", "regex", "search", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for grep: " + err.Error())
@@ -138,85 +154,43 @@ func (tool grepTool) runWith(ctx context.Context, args map[string]any, exclude r
 		}
 	}
 
-	files, err := grepFiles(ctx, resolvedRoot, target, globMatcher, exclude)
-	if err != nil {
-		if res, ok := searchCancelledResult("grep", err); ok {
-			return res
-		}
-		return errorResult("Error running grep: " + err.Error())
-	}
-
-	// resolveScopedPath returns an absolute displayRoot when the target resolved
-	// to an extra (non-workspace) granted root; emit absolute match paths there so
-	// they survive a round-trip through read_file/edit_file (mirrors glob).
-	matches, err := collectGrepMatches(ctx, resolvedRoot, filepath.IsAbs(displayRoot), files, compiled)
-	if err != nil {
-		if res, ok := searchCancelledResult("grep", err); ok {
-			return res
-		}
-		return errorResult("Error running grep: " + err.Error())
-	}
-	if len(matches) == 0 {
-		if outputMode == "count" {
-			return okResult("0 matches found")
-		}
-		return okResult("No matches found.")
-	}
-
+	absolutePaths := filepath.IsAbs(displayRoot)
 	switch outputMode {
 	case "count":
-		total := 0
-		for _, match := range matches {
-			total += match.hits
+		collector := &grepCountCollector{}
+		if err := scanGrepMatches(ctx, resolvedRoot, target, globMatcher, exclude, absolutePaths, exactGrepLineMatcher(compiled), collector.collect); err != nil {
+			if res, ok := searchCancelledResult("grep", err); ok {
+				return res
+			}
+			return errorResult("Error running grep: " + err.Error())
 		}
-		return okResult(fmt.Sprintf("%d matches found", total))
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern to continue")
 	case "files_with_matches":
-		seen := map[string]bool{}
-		files := []string{}
-		for _, match := range matches {
-			if !seen[match.file] {
-				seen[match.file] = true
-				files = append(files, match.file)
+		collector := &grepFileListCollector{}
+		if err := scanGrepMatches(ctx, resolvedRoot, target, globMatcher, exclude, absolutePaths, presenceGrepLineMatcher(compiled), collector.collect); err != nil {
+			if res, ok := searchCancelledResult("grep", err); ok {
+				return res
 			}
+			return errorResult("Error running grep: " + err.Error())
 		}
-		sort.Strings(files)
-		budgeted := applyOutputBudget(strings.Join(files, "\n"), searchOutputBudgetBytes, "narrow path/glob/pattern to continue")
-		meta := outputBudgetMeta(budgeted)
-		if budgeted.Truncated {
-			meta["truncated"] = "true"
-			meta["truncation_reason"] = "byte_budget"
-		}
-		return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern to continue")
 	default:
-		lines := make([]string, 0, len(matches))
-		for _, match := range matches {
-			if len(lines) >= headLimit {
-				break
+		collector := &grepContentCollector{headLimit: headLimit}
+		if err := scanGrepMatches(ctx, resolvedRoot, target, globMatcher, exclude, absolutePaths, presenceGrepLineMatcher(compiled), collector.collect); err != nil {
+			if res, ok := searchCancelledResult("grep", err); ok {
+				return res
 			}
-			lines = append(lines, fmt.Sprintf("%s:%d: %s", match.file, match.line, match.text))
+			return errorResult("Error running grep: " + err.Error())
 		}
-		truncated := len(matches) > headLimit
-		output := strings.Join(lines, "\n")
-		if truncated {
-			output += fmt.Sprintf("\n\n[truncated: showing first %d of %d matches; narrow path/glob/pattern or increase head_limit]", len(lines), len(matches))
-		}
-		budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "narrow path/glob/pattern or increase head_limit")
-		meta := outputBudgetMeta(budgeted)
-		if truncated || budgeted.Truncated {
-			meta["truncated"] = "true"
-			if budgeted.Truncated {
-				meta["truncation_reason"] = "byte_budget"
-			} else {
-				meta["truncation_reason"] = "head_limit"
-			}
-		}
-		return Result{
-			Status:    StatusOK,
-			Output:    budgeted.Output,
-			Truncated: truncated || budgeted.Truncated,
-			Meta:      meta,
-		}
+		return applyDirectSearchBudget(collector.result(), directBudget, "narrow path/glob/pattern or increase head_limit")
 	}
+}
+
+func applyDirectSearchBudget(result Result, directBudget bool, hint string) Result {
+	if !directBudget {
+		return result
+	}
+	return applyLegacyByteBudgetToResult(result, searchOutputBudgetBytes, hint)
 }
 
 // resolveGrepRoot picks the scope root whose EvalSymlinks-resolved path contains
@@ -270,33 +244,32 @@ func confineGrepFile(resolvedRoot string, path string) (string, string, bool) {
 	return filepath.ToSlash(relative), resolved, true
 }
 
-func grepFiles(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder) ([]string, error) {
+func walkGrepFiles(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, visit func(string) error) error {
 	info, err := os.Stat(target)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if !info.IsDir() {
 		relative, _, ok := confineGrepFile(resolvedRoot, target)
 		if !ok {
-			return []string{}, nil
+			return nil
 		}
 		if shouldSkipWorkspaceFile(relative) {
-			return []string{}, nil
+			return nil
 		}
 		if exclude.fileExcluded(target) {
-			return []string{}, nil
+			return nil
 		}
 		// A single explicit file is matched by its base name so a pattern like
 		// "*.go" applies regardless of how deep the file sits under the workspace.
 		if globMatcher == nil || globMatcher.MatchString(filepath.Base(target)) {
-			return []string{target}, nil
+			return visit(target)
 		}
-		return []string{}, nil
+		return nil
 	}
 
-	files := []string{}
-	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
+	return filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
 		// Checked first, ahead of walkErr: an unscoped search over a large tree
 		// (e.g. a broad parent directory, not just the workspace) can run long
 		// enough that cancelling the run must stop the walk promptly rather than
@@ -347,62 +320,200 @@ func grepFiles(ctx context.Context, resolvedRoot string, target string, globMatc
 			globPath = filepath.ToSlash(rel)
 		}
 		if globMatcher == nil || globMatcher.MatchString(globPath) {
-			files = append(files, path)
+			if err := visit(path); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(files)
-	return files, nil
 }
 
-func collectGrepMatches(ctx context.Context, resolvedRoot string, absolutePaths bool, files []string, compiled *regexp.Regexp) ([]grepMatch, error) {
-	matches := []grepMatch{}
-	for _, file := range files {
-		// Checked per file, matching the walk's per-entry check in grepFiles: a
-		// broad search can already have collected many files before the run is
-		// cancelled, and reading/regex-scanning each one is real work that must
-		// stop promptly rather than running to completion.
-		if err := ctx.Err(); err != nil {
-			return matches, err
+type grepLineMatcher func([]byte) (int, bool)
+
+func presenceGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
+	return func(line []byte) (int, bool) {
+		if !compiled.Match(line) {
+			return 0, false
 		}
-		// Re-confine at read time (defense-in-depth) AND to compute the clean
-		// workspace-relative path used in output.
-		relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
-		if !ok {
-			continue
-		}
-		if shouldSkipWorkspaceFile(relative) {
-			continue
-		}
-		// Read the symlink-RESOLVED path that confineGrepFile validated, not the
-		// raw candidate, so a symlink swapped in after the check can't escape.
-		content, err := os.ReadFile(resolvedPath)
-		if err != nil {
-			continue
-		}
-		for index, line := range strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n") {
-			lineMatches := compiled.FindAllStringIndex(line, -1)
-			if len(lineMatches) == 0 {
-				continue
-			}
-			fileLabel := relative
-			if absolutePaths {
-				// Extra-root search: report the absolute, symlink-resolved path
-				// confineGrepFile already validated, so a bare workspace-relative
-				// name can't resolve under the workspace and hit the wrong file when
-				// the same name exists in both roots.
-				fileLabel = filepath.ToSlash(resolvedPath)
-			}
-			matches = append(matches, grepMatch{
-				file: fileLabel,
-				line: index + 1,
-				text: strings.TrimRight(line, "\r"),
-				hits: len(lineMatches),
-			})
-		}
+		return 1, true
 	}
-	return matches, nil
+}
+
+func exactGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
+	return func(line []byte) (int, bool) {
+		matches := compiled.FindAllIndex(line, -1)
+		if len(matches) == 0 {
+			return 0, false
+		}
+		return len(matches), true
+	}
+}
+
+func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, absolutePaths bool, matcher grepLineMatcher, emit func(grepMatch) bool) error {
+	err := walkGrepFiles(ctx, resolvedRoot, target, globMatcher, exclude, func(file string) error {
+		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, matcher, emit)
+	})
+	if errors.Is(err, errGrepLimitReached) {
+		return nil
+	}
+	return err
+}
+
+func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, matcher grepLineMatcher, emit func(grepMatch) bool) error {
+	// Re-confine at read time (defense-in-depth) AND to compute the clean
+	// workspace-relative path used in output.
+	relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
+	if !ok {
+		return nil
+	}
+	if shouldSkipWorkspaceFile(relative) {
+		return nil
+	}
+	fileLabel := relative
+	if absolutePaths {
+		// Extra-root search: report the absolute, symlink-resolved path
+		// confineGrepFile already validated, so a bare workspace-relative
+		// name can't resolve under the workspace and hit the wrong file when
+		// the same name exists in both roots.
+		fileLabel = filepath.ToSlash(resolvedPath)
+	}
+
+	// Read the symlink-RESOLVED path that confineGrepFile validated, not the
+	// raw candidate, so a symlink swapped in after the check can't escape.
+	handle, err := os.Open(resolvedPath)
+	if err != nil {
+		return nil
+	}
+	defer handle.Close()
+
+	reader := bufio.NewReader(handle)
+	lineNumber := 1
+	sawLine := false
+	lastEnded := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, ended, err := readRawLine(reader)
+		if err == io.EOF {
+			if !sawLine || lastEnded {
+				return emitGrepLine(matcher, fileLabel, lineNumber, nil, emit)
+			}
+			return nil
+		}
+		if err != nil {
+			return nil
+		}
+		sawLine = true
+		lastEnded = ended
+		line := trimTrailingCarriageReturns(trimLineBreak(raw, ended))
+		if err := emitGrepLine(matcher, fileLabel, lineNumber, line, emit); err != nil {
+			return err
+		}
+		lineNumber++
+	}
+}
+
+func trimTrailingCarriageReturns(line []byte) []byte {
+	for len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+func emitGrepLine(matcher grepLineMatcher, fileLabel string, lineNumber int, line []byte, emit func(grepMatch) bool) error {
+	hits, ok := matcher(line)
+	if !ok {
+		return nil
+	}
+	if !emit(grepMatch{
+		file: fileLabel,
+		line: lineNumber,
+		text: string(line),
+		hits: hits,
+	}) {
+		return errGrepLimitReached
+	}
+	return nil
+}
+
+type grepCountCollector struct {
+	hits int
+}
+
+func (collector *grepCountCollector) collect(match grepMatch) bool {
+	collector.hits += match.hits
+	return true
+}
+
+func (collector *grepCountCollector) result() Result {
+	return okResult(fmt.Sprintf("%d matches found", collector.hits))
+}
+
+type grepFileListCollector struct {
+	files []string
+	seen  map[string]bool
+}
+
+func (collector *grepFileListCollector) collect(match grepMatch) bool {
+	if collector.seen == nil {
+		collector.seen = map[string]bool{}
+	}
+	if collector.seen[match.file] {
+		return true
+	}
+	collector.seen[match.file] = true
+	collector.files = append(collector.files, match.file)
+	return true
+}
+
+func (collector *grepFileListCollector) result() Result {
+	if len(collector.files) == 0 {
+		return okResult("No matches found.")
+	}
+	sort.Strings(collector.files)
+	return Result{Status: StatusOK, Output: strings.Join(collector.files, "\n")}
+}
+
+type grepContentCollector struct {
+	headLimit   int
+	matches     []grepMatch
+	matchesSeen int
+	truncated   bool
+}
+
+func (collector *grepContentCollector) collect(match grepMatch) bool {
+	collector.matchesSeen++
+	if len(collector.matches) < collector.headLimit {
+		collector.matches = append(collector.matches, match)
+		return true
+	}
+	collector.truncated = true
+	return false
+}
+
+func (collector *grepContentCollector) result() Result {
+	if collector.matchesSeen == 0 {
+		return okResult("No matches found.")
+	}
+	lines := make([]string, 0, len(collector.matches))
+	for _, match := range collector.matches {
+		lines = append(lines, fmt.Sprintf("%s:%d: %s", match.file, match.line, match.text))
+	}
+	truncated := collector.truncated
+	output := strings.Join(lines, "\n")
+	if truncated {
+		output += fmt.Sprintf("\n\n[truncated: showing first %d matches; narrow path/glob/pattern or increase head_limit]", len(lines))
+	}
+	meta := map[string]string{}
+	if truncated {
+		meta["truncated"] = "true"
+		meta["truncation_reason"] = "head_limit"
+	}
+	return Result{
+		Status:    StatusOK,
+		Output:    output,
+		Truncated: truncated,
+		Meta:      meta,
+	}
 }

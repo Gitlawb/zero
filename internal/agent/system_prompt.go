@@ -70,6 +70,22 @@ const (
 // guidelines), and the safety confirmation policy. It is built once per run so
 // every turn shares one (cacheable) system turn.
 func buildSystemPrompt(options Options) string {
+	return buildSystemPromptParts(options).prompt
+}
+
+// systemPromptParts retains both the exact joined prompt and the diagnostic
+// sections used by prompt-prefix tracing. Building these together prevents the
+// tracing path from re-reading workspace state and guarantees that the hash is
+// computed from the same prompt bytes placed in the request.
+type systemPromptParts struct {
+	prompt             string
+	baseInstructions   string
+	confirmationPolicy string
+	projectContext     string
+	skills             string
+}
+
+func buildSystemPromptParts(options Options) systemPromptParts {
 	core := strings.TrimSpace(options.SystemPrompt)
 	if core == "" {
 		core = strings.TrimSpace(coreSystemPrompt)
@@ -97,22 +113,31 @@ func buildSystemPrompt(options Options) string {
 	if user := userGuidelines(); user != "" {
 		sections = append(sections, user)
 	}
-	if ws := workspaceContext(options.Cwd); ws != "" {
-		sections = append(sections, ws)
+	project := workspaceContext(options.Cwd)
+	if project != "" {
+		sections = append(sections, project)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
 	}
-	if skillsBlock := skillsContext(options); skillsBlock != "" {
+	skillsBlock := skillsContext(options)
+	if skillsBlock != "" {
 		sections = append(sections, skillsBlock)
 	}
 	if style := responseStyleContext(options); style != "" {
 		sections = append(sections, style)
 	}
-	if policy := strings.TrimSpace(confirmationPolicy); policy != "" {
+	policy := strings.TrimSpace(confirmationPolicy)
+	if policy != "" {
 		sections = append(sections, policy)
 	}
-	return strings.Join(sections, "\n\n")
+	return systemPromptParts{
+		prompt:             strings.Join(sections, "\n\n"),
+		baseInstructions:   core,
+		confirmationPolicy: policy,
+		projectContext:     project,
+		skills:             skillsBlock,
+	}
 }
 
 // responseStyleContext renders the operator-selected reply style (TUI /style) as
@@ -286,7 +311,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
 	if runtime.GOOS == "windows" {
-		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories. Do not pipe to or invoke POSIX coreutils from Git for Windows (usr\\bin head/grep/tail/cat/...): they are MSYS binaries and fail under the write-restricted sandbox; use native Zero tools (grep, read_file, list_directory, glob) or cmd.exe findstr/more instead, or sandbox_permissions require_escalated only when host-level execution is truly required.\n")
+		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools. To put | & > < etc inside an arg value, use double quotes around the value, not single quotes (single quotes do not protect metachars in cmd.exe): gh --jq \".a | b\", go test -run \"A|B\". Do not pipe to or invoke POSIX coreutils from Git for Windows (usr\\bin head/grep/tail/cat/...): they are MSYS binaries and fail under the write-restricted sandbox; use native Zero tools (grep, read_file, list_directory, glob) or cmd.exe findstr/more instead, or sandbox_permissions require_escalated only when host-level execution is truly required. Prefer the workdir/cwd argument over cd when changing directories.\n")
 	} else {
 		b.WriteString("Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
 	}
@@ -295,7 +320,7 @@ func workspaceContext(cwd string) string {
 	}
 	b.WriteString("</environment>")
 
-	b.WriteString(projectGuidelines(cwd, findProjectGitRoot(cwd)))
+	b.WriteString(projectGuidelines(cwd, FindProjectGitRoot(cwd)))
 	if repoMap := repoMapContext(cwd); repoMap != "" {
 		b.WriteString("\n\n## Repo map\n\n" + repoMap)
 	}
@@ -542,17 +567,17 @@ func resolveDirCaseInsensitive(target, anchor string) (string, bool) {
 	return cur, true
 }
 
-// findProjectGitRoot returns the nearest ancestor of cwd that contains a
+// FindProjectGitRoot returns the nearest ancestor of cwd that contains a
 // .git entry (file or directory). Returns "" when no git root is found, so
 // the caller can fall back to cwd-only lookup.
-func findProjectGitRoot(cwd string) string {
+func FindProjectGitRoot(cwd string) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
 	}
 	cur := cwd
 	for {
-		if hasGitMetadata(cur) {
+		if HasGitMetadata(cur) {
 			return cur
 		}
 		parent := filepath.Dir(cur)
@@ -563,7 +588,7 @@ func findProjectGitRoot(cwd string) string {
 	}
 }
 
-func hasGitMetadata(dir string) bool {
+func HasGitMetadata(dir string) bool {
 	gitPath := filepath.Join(dir, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
@@ -619,7 +644,11 @@ func repoMapContext(cwd string) string {
 // cwd, handling both a regular checkout (.git dir) and a worktree (.git file).
 // Returns "" on any problem — the prompt simply omits the branch segment.
 func gitBranchForPrompt(cwd string) string {
-	gitPath := filepath.Join(cwd, ".git")
+	gitRoot := FindProjectGitRoot(cwd)
+	if gitRoot == "" {
+		return ""
+	}
+	gitPath := filepath.Join(gitRoot, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
 		return ""
@@ -635,10 +664,10 @@ func gitBranchForPrompt(cwd string) string {
 			return ""
 		}
 		// In worktree mode the gitdir is often RELATIVE (e.g.
-		// "gitdir: ../.git/worktrees/<name>") — resolve it against cwd, not the
+		// "gitdir: ../.git/worktrees/<name>") — resolve it against the worktree root (gitRoot), not the
 		// process working directory, or HEAD lookup fails and we drop the branch.
 		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
+			dir = filepath.Join(gitRoot, dir)
 		}
 		headPath = filepath.Join(dir, "HEAD")
 	}

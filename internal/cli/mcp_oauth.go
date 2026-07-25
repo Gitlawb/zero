@@ -55,8 +55,12 @@ func runMCPOAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	}
 	serverName := positional[0]
 
-	server, err := resolveOAuthServer(deps, serverName)
+	server, skip, err := resolveOAuthServer(deps, serverName)
 	if err != nil {
+		// When the named server was dropped because the workspace is untrusted, explain
+		// that with the same one-line notice the other trust-gated MCP paths emit, so a
+		// gated project OAuth server reads as "run zero trust", not a bare miss.
+		emitTrustNotice(stderr, skip)
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 
@@ -82,7 +86,7 @@ func runMCPOAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := store.Save(serverName, token); err != nil {
+	if err := store.SaveForServer(server, token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 
@@ -112,7 +116,7 @@ func runMCPOAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	removed, err := store.Delete(serverName)
+	removed, err := store.DeleteForServerName(serverName)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -193,33 +197,47 @@ func filterTokenStatuses(statuses []mcp.TokenStatus, serverName string) []mcp.To
 }
 
 // resolveOAuthServer loads the workspace MCP config and returns the named server
-// after verifying it declares OAuth authentication.
-func resolveOAuthServer(deps appDeps, serverName string) (mcp.Server, error) {
+// after verifying it declares OAuth authentication. It also returns a trustSkip so the
+// caller can emit the workspace-trust notice when a project server was dropped.
+//
+// Login is gated behind workspace trust (fail-closed) like the stdio spawn paths: it
+// loads a project-scoped MCP server and drives its OAuth flow (endpoint discovery,
+// dynamic client registration, code exchange, token persist) against the server's
+// configured URL. That is a project-scoped server being activated and contacted, so an
+// untrusted clone's ./.zero/config.json OAuth server must be dropped rather than loaded —
+// leaving it ungated would let a cloned repo initiate outbound OAuth I/O and persist a
+// token. There is no --worktree reassignment on this command path, so trustRoot == cwd.
+func resolveOAuthServer(deps appDeps, serverName string) (mcp.Server, trustSkip, error) {
 	if err := mcp.ValidateServerName(serverName); err != nil {
-		return mcp.Server{}, err
+		return mcp.Server{}, trustSkip{}, err
 	}
 	cwd, err := deps.getwd()
 	if err != nil {
-		return mcp.Server{}, fmt.Errorf("failed to resolve workspace: %w", err)
+		return mcp.Server{}, trustSkip{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	excludeProject, trustCheckErrored := resolveTrust(cwd)
+	skip := trustSkip{
+		excludedProjectConfig: excludeProject && projectMCPConfigExists(cwd),
+		trustCheckErrored:     trustCheckErrored,
+	}
+	cfg, err := deps.resolveMCPConfig(cwd, excludeProject)
 	if err != nil {
-		return mcp.Server{}, err
+		return mcp.Server{}, skip, err
 	}
 	servers, err := mcp.NormalizeConfig(cfg)
 	if err != nil {
-		return mcp.Server{}, err
+		return mcp.Server{}, skip, err
 	}
 	for _, server := range servers {
 		if server.Name != serverName {
 			continue
 		}
 		if !strings.EqualFold(server.Auth, mcp.ServerAuthOAuth) {
-			return mcp.Server{}, fmt.Errorf("MCP server %q does not declare auth: \"oauth\"", serverName)
+			return mcp.Server{}, skip, fmt.Errorf("MCP server %q does not declare auth: \"oauth\"", serverName)
 		}
-		return server, nil
+		return server, skip, nil
 	}
-	return mcp.Server{}, fmt.Errorf("MCP server %q is not configured", serverName)
+	return mcp.Server{}, skip, fmt.Errorf("MCP server %q is not configured", serverName)
 }
 
 func oauthConfigForServer(server mcp.Server) mcp.OAuthConfig {

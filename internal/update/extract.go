@@ -53,6 +53,23 @@ func extractTarGz(archivePath string, destDir string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if filepath.IsAbs(header.Linkname) {
+				return fmt.Errorf("absolute symlink targets are not supported: %s -> %s", header.Name, header.Linkname)
+			}
+			// Verify that the symlink target, when resolved, does not escape destDir.
+			resolvedTarget := filepath.Join(filepath.Dir(target), header.Linkname)
+			destDirClean := filepath.Clean(destDir)
+			if !strings.HasPrefix(resolvedTarget, destDirClean+string(os.PathSeparator)) && resolvedTarget != destDirClean {
+				return fmt.Errorf("archive symlink target escapes destination: %s -> %s", header.Name, header.Linkname)
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(header.Linkname, target); err != nil {
+				return err
+			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
@@ -90,8 +107,13 @@ func extractZip(archivePath string, destDir string) error {
 		// Release archives only ever contain regular files and directories;
 		// reject anything else (symlinks, devices) rather than silently write
 		// the link-target string (or other special content) out as an
-		// ordinary file — mirrors extractTarGz's rejection of non-regular tar
-		// entries.
+		// ordinary file. Unlike extractTarGz, zip symlinks stay rejected: the
+		// .zip path is the Windows release archive format, where
+		// filepath.IsAbs does not reliably reject a slash-rooted target like
+		// "/some/other/path" (Windows absolute paths need a drive letter or
+		// UNC prefix), and there is no current use case for symlinks in a
+		// Windows archive. The npm shim symlinks this feature exists for are
+		// packaged in the Unix/macOS .tar.gz archives, handled above.
 		if !entry.Mode().IsRegular() {
 			return fmt.Errorf("unsupported archive entry type for %s", entry.Name)
 		}

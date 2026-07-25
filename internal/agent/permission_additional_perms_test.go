@@ -68,3 +68,61 @@ func TestBuildPermissionEventKeepsAllowForOrdinaryAllowedCommand(t *testing.T) {
 		t.Fatal("shouldRequestPermission must be false for an ordinary sandbox-allowed command")
 	}
 }
+
+func TestBuildPermissionEventReusesCoveredAdditionalPermissions(t *testing.T) {
+	call := ToolCall{ID: "call_3", Name: "bash", Arguments: `{}`}
+	args := map[string]any{
+		"command":             "npm install",
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
+		"additional_permissions": map[string]any{
+			"network": map[string]any{"enabled": true},
+		},
+	}
+	decision := &sandbox.Decision{Action: sandbox.ActionAllow, AutoAllowed: true}
+
+	if shouldRequestPermission(promptShellTool{}, args, true, decision) {
+		t.Fatal("an already-covered capability must not trigger another prompt")
+	}
+	event, ok := buildPermissionEvent(call, promptShellTool{}, args, true, PermissionModeAsk, Options{}, decision)
+	if !ok {
+		t.Fatal("covered capability should still produce an auditable allow event")
+	}
+	if event.Action != PermissionActionAllow {
+		t.Fatalf("Action = %q, want allow for an already-covered capability", event.Action)
+	}
+}
+
+func TestBuildPermissionEventOmitsGenericShellReasonFromPrompt(t *testing.T) {
+	call := ToolCall{ID: "call_4", Name: "bash", Arguments: `{}`}
+	args := map[string]any{"command": "make test"}
+	decision := &sandbox.Decision{Action: sandbox.ActionPrompt, Reason: "runs a shell command"}
+
+	event, ok := buildPermissionEvent(call, promptShellTool{}, args, false, PermissionModeAsk, Options{}, decision)
+	if !ok {
+		t.Fatal("generic shell approval must produce an event")
+	}
+	if event.Reason != "" {
+		t.Fatalf("user-facing reason = %q, want omitted generic tool text", event.Reason)
+	}
+	if event.DecisionReason != "runs a shell command" {
+		t.Fatalf("decision reason = %q, want raw audit reason retained", event.DecisionReason)
+	}
+}
+
+func TestBuildPermissionEventPrefersPolicyReasonOverModelJustification(t *testing.T) {
+	call := ToolCall{ID: "call_5", Name: "bash", Arguments: `{}`}
+	args := map[string]any{
+		"command":             "curl https://example.test",
+		"sandbox_permissions": string(tools.SandboxPermissionsRequireEscalated),
+		"justification":       "Run without sandboxing.",
+	}
+	decision := &sandbox.Decision{Action: sandbox.ActionPrompt, Reason: sandbox.ReasonNetworkBlocked}
+
+	event, ok := buildPermissionEvent(call, promptShellTool{}, args, false, PermissionModeAsk, Options{}, decision)
+	if !ok {
+		t.Fatal("policy approval must produce an event")
+	}
+	if event.Reason != sandbox.ReasonNetworkBlocked {
+		t.Fatalf("user-facing reason = %q, want policy reason %q", event.Reason, sandbox.ReasonNetworkBlocked)
+	}
+}

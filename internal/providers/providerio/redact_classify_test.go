@@ -32,11 +32,11 @@ func TestRedactDoesNotMangleHelpText(t *testing.T) {
 }
 
 func TestClassifiedErrorCuratesAuthFailure(t *testing.T) {
-	// AUDIT-H7: 401/403 must lead with an actionable instruction (run `zero auth`),
+	// AUDIT-H7: 401/403 must lead with an actionable instruction,
 	// not the raw upstream dashboard blurb.
 	msg := ClassifiedError(http.StatusUnauthorized, "Incorrect API key provided: sk-bad. Visit https://platform.openai.com/account/api-keys", "sk-bad")
-	if !strings.Contains(msg, "zero auth") {
-		t.Errorf("401 message should point at `zero auth`, got %q", msg)
+	if !strings.Contains(msg, "zero setup") || !strings.Contains(msg, "zero auth openrouter") {
+		t.Errorf("401 message should point at setup/provider-specific auth, got %q", msg)
 	}
 	if !strings.HasPrefix(msg, "auth error:") {
 		t.Errorf("401 message should lead with 'auth error:', got %q", msg)
@@ -45,7 +45,7 @@ func TestClassifiedErrorCuratesAuthFailure(t *testing.T) {
 		t.Errorf("401 message leaked the key: %q", msg)
 	}
 	// 403 also curated.
-	if got := ClassifiedError(http.StatusForbidden, "forbidden"); !strings.Contains(got, "zero auth") {
+	if got := ClassifiedError(http.StatusForbidden, "forbidden"); !strings.Contains(got, "zero setup") {
 		t.Errorf("403 should also be curated, got %q", got)
 	}
 }

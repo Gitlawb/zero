@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -42,8 +43,10 @@ func (e *setupFixableError) Unwrap() []error { return []error{e.err, e.sentinel}
 
 // defaultMaxTurns is the per-run tool-turn budget when none is configured. 30 was
 // too low for real multi-step agentic work (agents ran out mid-task before reaching
-// later steps); 50 matches the old "deep" preset. Raise per-session with /turns.
-const defaultMaxTurns = 50
+// later steps); 50 was still too low for larger tasks spanning several files (agents
+// hit the ceiling and stopped with a "remaining work" summary instead of finishing).
+// Raise per-session with /turns.
+const defaultMaxTurns = 80
 
 // MaxTurnsCeiling caps the per-run tool-turn budget so a stray env value or typo
 // can't set an absurd ceiling. Shared between applyEnv (read site) and the /turns
@@ -90,6 +93,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		// Sandbox.Enabled is NOT accepted from a provider command, for the same
+		// reason project config cannot set it (see mergeProjectConfig): only
+		// global config and the CLI may turn the sandbox off. A provider command
+		// is an arbitrary executable named in config, and LoadProviderCommand
+		// parses its stdout into a full FileConfig — so without this, a command
+		// returning a valid provider plus {"sandbox":{"enabled":false}} would
+		// disable the very sandbox meant to constrain what it can do. Cleared
+		// here rather than in mergeConfig because that helper is shared with the
+		// trusted global-config merge, which must keep honouring the setting.
+		commandConfig.Sandbox.Enabled = nil
 		mergeConfig(&cfg, commandConfig)
 	}
 
@@ -127,6 +140,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focusMode)
 		}
 	}
+	if err := validateSTTConfig(cfg.STT); err != nil {
+		return ResolvedConfig{}, err
+	}
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
@@ -150,6 +166,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Preferences:    cfg.Preferences,
 		KeyBindings:    cfg.KeyBindings,
 		LocalControl:   cfg.LocalControl,
+		STT:            cfg.STT,
 	}, nil
 }
 
@@ -159,17 +176,29 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 	// can override any field or disable a default by writing over it.
 	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
 
-	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
-		if path == "" {
-			continue
-		}
-		fileConfig, err := loadConfigFile(path)
+	if options.UserConfigPath != "" {
+		fileConfig, err := loadConfigFile(options.UserConfigPath)
 		if err != nil {
 			return MCPConfig{}, err
 		}
-		mergeMCPConfig(&cfg.MCP, fileConfig.MCP)
+		// User config is higher-trust than project config: it may re-enable a
+		// server the user disabled (a user-level disable is sticky, but the user
+		// scope itself may lift it).
+		mergeMCPConfig(&cfg.MCP, fileConfig.MCP, true)
 	}
-	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP)
+	// Drop the project layer when the workspace is untrusted, so a cloned repo's
+	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:
+	// only a trusted workspace clears ExcludeProject. Defaults and user config still load.
+	if options.ProjectConfigPath != "" && !options.ExcludeProject {
+		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
+		if err != nil {
+			return MCPConfig{}, err
+		}
+		if err := mergeProjectMCPConfig(&cfg.MCP, fileConfig.MCP); err != nil {
+			return MCPConfig{}, err
+		}
+	}
+	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP, true)
 	return cfg.MCP, nil
 }
 
@@ -196,7 +225,10 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	for _, provider := range src.Providers {
 		mergeProvider(dst, provider)
 	}
-	mergeMCPConfig(&dst.MCP, src.MCP)
+	mergeMCPConfig(&dst.MCP, src.MCP, true)
+	if src.Sandbox.Enabled != nil {
+		dst.Sandbox.Enabled = src.Sandbox.Enabled
+	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -223,6 +255,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
+	if src.Preferences.RecentModels != nil {
+		dst.Preferences.RecentModels = NormalizeRecentModels(src.Preferences.RecentModels)
+	}
 	if src.Preferences.Recaps != nil {
 		dst.Preferences.Recaps = src.Preferences.Recaps
 	}
@@ -231,6 +266,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
+	mergeSTTConfig(&dst.STT, src.STT)
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -247,7 +283,13 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		}
 		mergeProvider(dst, provider)
 	}
-	mergeMCPConfig(&dst.MCP, src.MCP)
+	if err := mergeProjectMCPConfig(&dst.MCP, src.MCP); err != nil {
+		return err
+	}
+	// Sandbox.Enabled is intentionally NOT merged from project config: a cloned
+	// repo's .zero/config.json must not be able to disable the sandbox that
+	// constrains it. Only global config and CLI can turn the sandbox off.
+	//
 	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
@@ -663,6 +705,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
 	}
+	if overrides.Sandbox.Enabled != nil {
+		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled
+	}
 	if overrides.Sandbox.BlockUnixSockets {
 		cfg.Sandbox.BlockUnixSockets = true
 	}
@@ -681,13 +726,14 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
 	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
+	mergeSTTConfig(&cfg.STT, overrides.STT)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
 	}
 	if hasProviderFields(overrides.Provider) {
 		mergeProvider(cfg, overrides.Provider)
 	}
-	mergeMCPConfig(&cfg.MCP, overrides.MCP)
+	mergeMCPConfig(&cfg.MCP, overrides.MCP, true)
 }
 
 func mergeLocalControlConfig(dst *LocalControlConfig, src LocalControlConfig) {
@@ -734,58 +780,89 @@ func mergeKeyBindings(dst *KeyBindingsConfig, src KeyBindingsConfig) {
 	}
 }
 
-func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
-	if len(src.Servers) == 0 {
-		return
+// mergeSTTConfig overlays any set field of src onto dst. Each field carries its
+// own "unset" sentinel (empty string, 0, or nil *bool), matching how the other
+// section mergers detect intent.
+func mergeSTTConfig(dst *STTConfig, src STTConfig) {
+	if src.Provider != "" {
+		dst.Provider = src.Provider
 	}
-	if dst.Servers == nil {
-		dst.Servers = map[string]MCPServerConfig{}
+	if src.StreamProvider != "" {
+		dst.StreamProvider = src.StreamProvider
 	}
-	for name, server := range src.Servers {
-		dst.Servers[name] = mergeMCPServer(dst.Servers[name], server)
+	if src.Streaming != nil {
+		dst.Streaming = src.Streaming
+	}
+	if src.Model != "" {
+		dst.Model = src.Model
+	}
+	if src.StreamModel != "" {
+		dst.StreamModel = src.StreamModel
+	}
+	if src.LocalModelPath != "" {
+		dst.LocalModelPath = src.LocalModelPath
+	}
+	if src.LocalBinary != "" {
+		dst.LocalBinary = src.LocalBinary
+	}
+	if src.LocalServerBinary != "" {
+		dst.LocalServerBinary = src.LocalServerBinary
+	}
+	if src.LocalServerPort != 0 {
+		dst.LocalServerPort = src.LocalServerPort
+	}
+	if src.EngineVersion != "" {
+		dst.EngineVersion = src.EngineVersion
+	}
+	if src.NumThreads != 0 {
+		dst.NumThreads = src.NumThreads
+	}
+	if src.Language != "" {
+		dst.Language = src.Language
+	}
+	if src.MaxDurationSeconds != 0 {
+		dst.MaxDurationSeconds = src.MaxDurationSeconds
+	}
+	if src.SilenceAutoStop != nil {
+		dst.SilenceAutoStop = src.SilenceAutoStop
+	}
+	if src.AutoSubmit != nil {
+		dst.AutoSubmit = src.AutoSubmit
+	}
+	if src.WindowsAudioDevice != "" {
+		dst.WindowsAudioDevice = src.WindowsAudioDevice
 	}
 }
 
-func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig {
-	if strings.TrimSpace(next.Type) != "" {
-		base.Type = next.Type
+// validateSTTConfig rejects unknown provider/streamProvider values and a
+// negative maxDurationSeconds at load time — a clear startup error naming the
+// bad value and the valid options, never a silent fallback the user did not ask
+// for (§11a).
+func validateSTTConfig(cfg STTConfig) error {
+	if cfg.Provider != "" {
+		switch cfg.Provider {
+		case STTProviderLocal, STTProviderGroq, STTProviderOpenAI:
+		default:
+			return fmt.Errorf("invalid stt.provider %q: expected local, groq, or openai", cfg.Provider)
+		}
 	}
-	if strings.TrimSpace(next.Command) != "" {
-		base.Command = next.Command
+	if cfg.StreamProvider != "" {
+		switch cfg.StreamProvider {
+		case STTProviderLocal, STTProviderDeepgram, STTProviderOpenAI:
+		default:
+			return fmt.Errorf("invalid stt.streamProvider %q: expected local, deepgram, or openai", cfg.StreamProvider)
+		}
 	}
-	if next.Args != nil {
-		base.Args = append([]string{}, next.Args...)
+	if cfg.MaxDurationSeconds < 0 {
+		return fmt.Errorf("invalid stt.maxDurationSeconds %d: must be >= 0 (0 uses the default)", cfg.MaxDurationSeconds)
 	}
-	if next.Env != nil {
-		base.Env = copyMCPStringMap(next.Env)
+	if cfg.NumThreads < 0 {
+		return fmt.Errorf("invalid stt.numThreads %d: must be >= 0 (0 uses the engine default)", cfg.NumThreads)
 	}
-	if strings.TrimSpace(next.URL) != "" {
-		base.URL = next.URL
+	if cfg.LocalServerPort < 0 || cfg.LocalServerPort > 65535 {
+		return fmt.Errorf("invalid stt.localServerPort %d: must be between 1 and 65535 (0 uses the default)", cfg.LocalServerPort)
 	}
-	if next.Headers != nil {
-		base.Headers = copyMCPStringMap(next.Headers)
-	}
-	if strings.TrimSpace(next.Auth) != "" {
-		base.Auth = next.Auth
-	}
-	if next.OAuth != nil {
-		base.OAuth = next.OAuth
-	}
-	if next.disabledSet || next.Disabled {
-		base.Disabled = next.Disabled
-	}
-	return base
-}
-
-func copyMCPStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-	copied := make(map[string]string, len(values))
-	for key, value := range values {
-		copied[key] = value
-	}
-	return copied
+	return nil
 }
 
 func hasProviderFields(profile ProviderProfile) bool {
@@ -985,6 +1062,45 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	}
 	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
+	}
+	canonicalCatalogEndpoint := !explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+	if len(descriptor.CustomHeaders) > 0 && canonicalCatalogEndpoint {
+		catalogHeaders := descriptor.CustomHeaders
+		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
+			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
+		}
+		merged := copyStringMap(catalogHeaders)
+		for key, value := range profile.CustomHeaders {
+			// Header names are case-insensitive. Preserve the catalog spelling while
+			// replacing its value so request construction cannot see two colliding
+			// map entries whose eventual winner depends on iteration order.
+			existingKey := ""
+			for candidate := range merged {
+				if strings.EqualFold(candidate, key) {
+					existingKey = candidate
+					break
+				}
+			}
+			if existingKey != "" {
+				merged[existingKey] = value
+				continue
+			}
+			merged[key] = value
+		}
+		profile.CustomHeaders = merged
+	} else if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") && !canonicalCatalogEndpoint {
+		// AIMLAPI attribution is owned by the catalog endpoint. A profile can retain
+		// those generated headers after its base URL is edited; strip their names
+		// before sending requests to an arbitrary staging/proxy host while preserving
+		// unrelated headers explicitly supplied by the user.
+		for profileKey := range profile.CustomHeaders {
+			for catalogKey := range descriptor.CustomHeaders {
+				if strings.EqualFold(profileKey, catalogKey) {
+					delete(profile.CustomHeaders, profileKey)
+					break
+				}
+			}
+		}
 	}
 }
 

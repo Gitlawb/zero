@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
@@ -44,6 +46,11 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		Name: "/bin/sh",
 		Args: []string{"-c", strings.Join([]string{
 			"set -eu",
+			"test \"$HOME\" != \"$PWD\"",
+			"test ! -e .zero && test ! -e .agents",
+			"echo cache > \"$npm_config_cache/zero-runtime-probe\"",
+			"test ! -e .npm && test ! -e .cache",
+			"rm -f \"$npm_config_cache/zero-runtime-probe\"",
 			"echo ok > write-ok.txt",
 			"test \"$(cat write-ok.txt)\" = ok",
 			"echo tmp > /tmp/zero-sandbox-smoke",
@@ -164,6 +171,95 @@ func TestLinuxLandlockRealSandboxSmoke(t *testing.T) {
 		}
 	} else {
 		t.Log("python3 not found; skipping Landlock network deny probe")
+	}
+}
+
+func TestLinuxHelperAllowsIsolatedLoopbackWithoutExternalEgress(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real sandbox smoke tests")
+	}
+	backend := SelectBackend(BackendOptions{})
+	if !backend.Available || backend.Name != BackendLinuxBwrap {
+		t.Skipf("Linux sandbox backend unavailable: %s", backend.Message)
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil || python == "" {
+		t.Skip("python3 not found; skipping isolated loopback probe")
+	}
+
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+	loopbackScript := strings.Join([]string{
+		"import socket",
+		"server = socket.socket()",
+		"server.bind(('127.0.0.1', 0))",
+		"server.listen()",
+		"client = socket.socket()",
+		"client.connect(('127.0.0.1', server.getsockname()[1]))",
+		"accepted, _ = server.accept()",
+		"client.send(b'ok')",
+		"assert accepted.recv(2) == b'ok'",
+	}, "; ")
+	output, runErr := runLinuxSandboxSmokeCommand(t, engine, CommandSpec{
+		Name: python,
+		Args: []string{"-c", loopbackScript},
+		Dir:  root,
+	})
+	if runErr != nil {
+		t.Fatalf("isolated loopback failed: %v\n%s", runErr, output)
+	}
+
+	output, runErr = runLinuxSandboxSmokeCommand(t, engine, CommandSpec{
+		Name: python,
+		Args: []string{"-c", "import socket; socket.create_connection(('1.1.1.1', 80), 1).close()"},
+		Dir:  root,
+	})
+	if runErr == nil {
+		t.Fatalf("sandbox allowed external egress while isolated loopback was enabled: %s", output)
+	}
+}
+
+func TestLinuxHelperPreservesAbsentProtectedMetadata(t *testing.T) {
+	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real sandbox smoke tests")
+	}
+	backend := SelectBackend(BackendOptions{})
+	if !backend.Available || backend.Name != BackendLinuxBwrap {
+		t.Skipf("Linux sandbox backend unavailable: %s", backend.Message)
+	}
+
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command, plan, err := engine.CommandContext(ctx, CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "set -eu; test ! -e .zero; mkdir .zero"},
+		Dir:  root,
+	})
+	if err != nil {
+		t.Fatalf("CommandContext: %v", err)
+	}
+	defer plan.Cleanup()
+	output, runErr := command.CombinedOutput()
+	if runErr == nil {
+		t.Fatalf("sandbox reported success after protected metadata creation; output=%s", output)
+	}
+	if !strings.Contains(string(output), "blocked creation of protected workspace metadata path") {
+		t.Fatalf("sandbox did not explain protected metadata denial: %v\n%s", runErr, output)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".zero")); !os.IsNotExist(err) {
+		t.Fatalf("protected metadata path remained after execution: %v", err)
+	}
+	report, err := plan.ExecutionReport()
+	if err != nil {
+		t.Fatalf("ExecutionReport: %v", err)
+	}
+	if report.Denial == nil || report.Denial.Capability.Kind != execution.CapabilityProtectedMetadata {
+		t.Fatalf("execution report denial = %#v, want protected metadata", report.Denial)
+	}
+	if report.Denial.Capability.Scope != filepath.Join(root, ".zero") {
+		t.Fatalf("denial scope = %q, want exact protected path", report.Denial.Capability.Scope)
 	}
 }
 

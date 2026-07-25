@@ -519,7 +519,7 @@ func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 	commandSecret := "sk-proj-" + strings.Repeat("a", 24)
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -566,7 +566,7 @@ func TestRunMCPCheckRegistersOnlyRequestedServer(t *testing.T) {
 
 	exitCode := runWithDeps([]string{"mcp", "check", "docs", "--json"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -618,7 +618,7 @@ func TestRunMCPCheckClosesRuntimeReturnedWithError(t *testing.T) {
 
 	exitCode := runWithDeps([]string{"mcp", "check", "docs"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return cwd, nil },
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"docs": {Type: "stdio", Command: "docs-mcp"},
 			}}, nil

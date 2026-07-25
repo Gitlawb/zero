@@ -142,7 +142,7 @@ func TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch(t *testing.T) {
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
 		},
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"docs": {Type: "stdio", Command: "docs-mcp"},
 			}}, nil
@@ -177,7 +177,7 @@ func TestRunExecListToolsHonorsJSONFormat(t *testing.T) {
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
 		},
-		resolveMCPConfig: func(string) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
 		newMCPStore:      func() (*mcp.PermissionStore, error) { return nil, nil },
 		registerMCPTools: func(_ context.Context, _ *tools.Registry, _ config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return closeFunc(func() error { return nil }), nil
@@ -234,7 +234,7 @@ func TestTUIRunThreadsDeferThresholdAndRegistersToolSearch(t *testing.T) {
 				Tools: config.ToolsConfig{DeferThreshold: 2},
 			}, nil
 		},
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"docs": {Type: "stdio", Command: "docs-mcp"},
 			}}, nil

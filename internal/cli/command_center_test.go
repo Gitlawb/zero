@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -344,6 +345,83 @@ func TestRunProvidersAddWritesCatalogProfile(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Added provider fast") || !strings.Contains(output, configPath) {
 		t.Fatalf("unexpected add output: %q", output)
+	}
+}
+
+func TestRunProvidersAddAimlapiWritesDefaultHeaders(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	exitCode := runWithDeps([]string{"providers", "add", "aimlapi"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %#v, want one provider", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "aimlapi" ||
+		profile.CatalogID != "aimlapi" ||
+		profile.BaseURL != "https://api.aimlapi.com/v1" ||
+		profile.Model != "anthropic/claude-sonnet-5" ||
+		profile.APIKeyEnv != "AIMLAPI_API_KEY" {
+		t.Fatalf("unexpected provider profile: %#v", profile)
+	}
+	if profile.CustomHeaders["X-AIMLAPI-Partner-ID"] != "part_62yQoGYDq4Yqnrj2R1iGrDNJ" ||
+		profile.CustomHeaders["X-AIMLAPI-Integration-Repo"] != "Gitlawb/zero" {
+		t.Fatalf("missing aimlapi.com default headers: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestRunProvidersAddAimlapiMixedCaseHeaderOverride(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	// A differently-cased override must replace the catalog header in place, not
+	// leave both spellings behind to race when request construction canonicalizes.
+	exitCode := runWithDeps([]string{
+		"providers", "add", "aimlapi",
+		"--header", "x-aimlapi-partner-id=part_override",
+	}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	profile := readFileConfig(t, configPath).Providers[0]
+	if _, ok := profile.CustomHeaders["x-aimlapi-partner-id"]; ok {
+		t.Fatalf("lowercase override left a duplicate key: %#v", profile.CustomHeaders)
+	}
+	if profile.CustomHeaders["X-AIMLAPI-Partner-ID"] != "part_override" {
+		t.Fatalf("override did not win on the canonical key: %#v", profile.CustomHeaders)
+	}
+}
+
+func TestRunProvidersAddAimlapiOverrideDropsCatalogHeaders(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	exitCode := runWithDeps([]string{
+		"providers", "add", "aimlapi",
+		"--base-url", "https://staging.example/v1",
+		"--header", "X-Environment=staging",
+	}, &stdout, &stderr, providerSetupDeps(configPath))
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	profile := readFileConfig(t, configPath).Providers[0]
+	if _, ok := profile.CustomHeaders["X-AIMLAPI-Partner-ID"]; ok {
+		t.Fatalf("partner attribution leaked to overridden endpoint: %#v", profile.CustomHeaders)
+	}
+	if _, ok := profile.CustomHeaders["X-AIMLAPI-Integration-Repo"]; ok {
+		t.Fatalf("integration attribution leaked to overridden endpoint: %#v", profile.CustomHeaders)
+	}
+	if profile.CustomHeaders["X-Environment"] != "staging" {
+		t.Fatalf("explicit user header was dropped: %#v", profile.CustomHeaders)
 	}
 }
 
@@ -834,4 +912,58 @@ func (commandCenterProvider) StreamCompletion(context.Context, zeroruntime.Compl
 	ch := make(chan zeroruntime.StreamEvent)
 	close(ch)
 	return ch, nil
+}
+
+func TestProviderCredentialStateShowsOAuthLogin(t *testing.T) {
+	if got := providerCredentialState(providerSummary{APIKeySet: true}); got != "set" {
+		t.Fatalf("keyed provider = %q, want set", got)
+	}
+	if got := providerCredentialState(providerSummary{OAuthLogin: true}); got != "oauth login" {
+		t.Fatalf("token-login provider = %q, want oauth login", got)
+	}
+	if got := providerCredentialState(providerSummary{}); got != "not set" {
+		t.Fatalf("credential-less provider = %q, want not set", got)
+	}
+}
+
+// TestProvidersListMarksOAuthLoginProviders: a keyless profile whose credential
+// is a stored OAuth login (the shape `zero auth chatgpt` now writes) must render
+// as "oauth login", not as a broken "api key: not set" entry.
+func TestProvidersListMarksOAuthLoginProviders(t *testing.T) {
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "bearer-123"}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	resolved := config.ResolvedConfig{
+		ActiveProvider: "opengateway",
+		Providers: []config.ProviderProfile{
+			{Name: "opengateway", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://gateway.example.com/v1", APIKeyStored: true, Model: "some-model"},
+			{Name: "chatgpt", CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://chatgpt.com/backend-api/codex", Model: "gpt-5.5"},
+		},
+	}
+	summary := summarizeConfig(resolved)
+	byName := map[string]providerSummary{}
+	for _, provider := range summary.Providers {
+		byName[provider.Name] = provider
+	}
+	if !byName["opengateway"].APIKeySet {
+		t.Fatalf("stored-key provider must report a credential: %+v", byName["opengateway"])
+	}
+	if byName["opengateway"].OAuthLogin {
+		t.Fatalf("key-authed provider must not claim the OAuth login: %+v", byName["opengateway"])
+	}
+	if !byName["chatgpt"].OAuthLogin || byName["chatgpt"].APIKeySet {
+		t.Fatalf("chatgpt must be marked oauth-login and keyless: %+v", byName["chatgpt"])
+	}
+
+	rendered := formatProviderSummaries("list", summary.Providers)
+	if !strings.Contains(rendered, "oauth login") {
+		t.Fatalf("list should render the oauth login state, got:\n%s", rendered)
+	}
 }

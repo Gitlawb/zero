@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -118,6 +119,47 @@ func TestBuildCommandPlanDegradesUnavailableFallback(t *testing.T) {
 	}
 	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason != "native sandbox unavailable" {
 		t.Fatalf("plan = %#v, want degraded direct plan", plan)
+	}
+}
+
+// TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv covers the
+// EnforcementDegraded fallback path: when the native backend is
+// unavailable, BuildCommandPlan falls back to a direct (unwrapped) plan
+// whose spec.Env is nil, so exec.Cmd would otherwise inherit the caller's
+// environment — including configured and dynamically named credentials —
+// unscrubbed.
+func TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv(t *testing.T) {
+	t.Setenv("COMPANY_LLM_SECRET", "custom-secret")
+	t.Setenv("ZERO_OAUTH_ACME_CLIENT_SECRET", "oauth-secret")
+	t.Setenv("SAFE_VAR", "hello")
+
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot:    root,
+		Policy:           DefaultPolicy(),
+		Backend:          Backend{Name: BackendUnavailable, Message: "native sandbox unavailable"},
+		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
+	})
+
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "pwd"},
+		Dir:  root,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded {
+		t.Fatalf("plan = %#v, want degraded direct plan", plan)
+	}
+	for _, entry := range plan.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_ACME_CLIENT_SECRET") {
+			t.Fatalf("degraded plan.Env retained sensitive key %q: %v", key, plan.Env)
+		}
+	}
+	if got := envListValue(plan.Env, "SAFE_VAR", ""); got != "hello" {
+		t.Fatalf("SAFE_VAR = %q, want hello", got)
 	}
 }
 
@@ -357,6 +399,11 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
 		}
 	}
+	for _, forbidden := range []string{"network-bind", "network-inbound", `remote ip "localhost:*"`} {
+		if strings.Contains(sbpl, forbidden) {
+			t.Fatalf("restricted Seatbelt profile must not contain host-local rule %q:\n%s", forbidden, sbpl)
+		}
+	}
 	if strings.Contains(sbpl, "(allow file-read*)\n(allow file-write*)") {
 		t.Fatalf("restricted permission profile must not become full read/write:\n%s", sbpl)
 	}
@@ -458,6 +505,35 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	denyWriteIdx := strings.Index(sbpl, denySecretWriteRule)
 	if allowIdx < 0 || denyReadIdx < allowIdx || metadataIdx < allowIdx || denyWriteIdx < allowIdx {
 		t.Fatalf("deny rules must follow the broad write allow (allow=%d denyRead=%d metadata=%d denyWrite=%d):\n%s", allowIdx, denyReadIdx, metadataIdx, denyWriteIdx, sbpl)
+	}
+}
+
+// TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
+// git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
+// default profile must stop write-denying the whole .git tree and only carve
+// out .git/hooks and .git/config, which stay dangerous (auto-executing
+// scripts, remote/credential-helper rewrites) regardless of what wrote them.
+func TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig(t *testing.T) {
+	workspace := t.TempDir()
+	profile := DefaultPermissionProfile(workspace)
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+
+	resolvedWorkspace := normalizeProfilePath(workspace)
+	gitRegex := `(deny file-write* (regex #"^` + regexpQuoteMeta(resolvedWorkspace) + `/\.git(/.*)?$"))`
+	if strings.Contains(sbpl, gitRegex) {
+		t.Fatalf("seatbelt profile must not blanket-deny the whole .git tree:\n%s", sbpl)
+	}
+	hooksPath := sandboxProfileString(filepath.Join(resolvedWorkspace, ".git", "hooks"))
+	configPath := sandboxProfileString(filepath.Join(resolvedWorkspace, ".git", "config"))
+	for _, want := range []string{
+		`(deny file-write* (literal "` + hooksPath + `"))`,
+		`(deny file-write* (subpath "` + hooksPath + `"))`,
+		`(deny file-write* (literal "` + configPath + `"))`,
+		`(deny file-write* (subpath "` + configPath + `"))`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("seatbelt profile missing %q:\n%s", want, sbpl)
+		}
 	}
 }
 
@@ -607,4 +683,76 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
 	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
+}
+
+func TestScrubSensitiveEnv(t *testing.T) {
+	inputEnv := []string{
+		"PATH=/usr/bin",
+		"OPENAI_API_KEY=sk-proj-12345",
+		"ANTHROPIC_API_KEY=sk-ant-12345",
+		"GEMINI_API_KEY=AIzaSy12345",
+		"DEEPSEEK_API_KEY=ds-12345",
+		"GITHUB_TOKEN=ghp_12345",
+		"AWS_ACCESS_KEY_ID=AKIA12345",
+		"AWS_SECRET_ACCESS_KEY=secret12345",
+		"GOOGLE_API_KEY=AIzaSy67890",
+		"XAI_API_KEY=xai-12345",
+		"HUGGINGFACE_API_KEY=hf_12345",
+		"GOOGLE_APPLICATION_CREDENTIALS=/home/user/sa-key.json",
+		"COMPANY_LLM_SECRET=custom-secret",
+		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
+		"zero_oauth_second_client_secret=case-insensitive-secret",
+		"ZERO_OAUTH_CLIENT_SECRET=not-a-provider-secret",
+		"AWS_PROFILE=staging",
+		"SAFE_VAR=hello",
+	}
+	scrubbed := scrubSensitiveEnv(inputEnv, " COMPANY_LLM_SECRET ", "company_llm_secret", "GITHUB_TOKEN=ghp_pasted-assignment", "=", "")
+	expected := map[string]string{
+		"PATH":                     "/usr/bin",
+		"SAFE_VAR":                 "hello",
+		"AWS_PROFILE":              "staging",
+		"ZERO_OAUTH_CLIENT_SECRET": "not-a-provider-secret",
+	}
+	actual := make(map[string]string, len(scrubbed))
+	for _, entry := range scrubbed {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, dup := actual[key]; dup {
+			t.Errorf("duplicate key %q in scrubbed env: %v", key, scrubbed)
+		}
+		actual[key] = value
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("scrubSensitiveEnv() = %v, want %v", actual, expected)
+	}
+}
+
+func TestEngineScrubsConfiguredSensitiveEnvKeys(t *testing.T) {
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot:    workspace,
+		Policy:           DefaultPolicy(),
+		Backend:          Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
+		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "true",
+		Env: []string{
+			"PATH=/usr/bin",
+			"COMPANY_LLM_SECRET=custom-secret",
+			"ZERO_OAUTH_CUSTOM_CLIENT_SECRET=oauth-secret",
+			"SAFE_VAR=hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	for _, entry := range plan.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_CUSTOM_CLIENT_SECRET") {
+			t.Fatalf("plan.Env retained sensitive key %q: %v", key, plan.Env)
+		}
+	}
+	if got := envListValue(plan.Env, "SAFE_VAR", ""); got != "hello" {
+		t.Fatalf("SAFE_VAR = %q, want hello", got)
+	}
 }

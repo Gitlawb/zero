@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,25 +58,33 @@ type Options struct {
 	// "originator" value. It is also called on the 401-refresh retry, so any
 	// per-request state must be re-derivable from the live request.
 	SetRequestExtra func(*http.Request)
+	// DisablePromptCacheKey omits OpenAI's prompt_cache_key even when the
+	// caller supplies a session identity. Used for openai-compatible gateways
+	// (NVIDIA NIM, strict local proxies, …) that validate and reject unknown
+	// request fields instead of ignoring them. Official OpenAI keeps the field
+	// enabled; the ZERO_DISABLE_PROMPT_CACHE_KEY env kill switch still applies
+	// on top for any endpoint.
+	DisablePromptCacheKey bool
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
 type Provider struct {
-	apiKey            string
-	baseURL           string
-	endpoint          string
-	model             string
-	authHeader        string
-	authScheme        string
-	authHeaderValue   string
-	customHeaders     map[string]string
-	oauthResolver     providerio.TokenResolver
-	maxTokens         int
-	httpClient        *http.Client
-	userAgent         string
-	streamIdleTimeout time.Duration
-	parseThinkTags    bool
-	setRequestExtra   func(*http.Request)
+	apiKey                string
+	baseURL               string
+	endpoint              string
+	model                 string
+	authHeader            string
+	authScheme            string
+	authHeaderValue       string
+	customHeaders         map[string]string
+	oauthResolver         providerio.TokenResolver
+	maxTokens             int
+	httpClient            *http.Client
+	userAgent             string
+	streamIdleTimeout     time.Duration
+	parseThinkTags        bool
+	setRequestExtra       func(*http.Request)
+	disablePromptCacheKey bool
 }
 
 // New creates an OpenAI-compatible provider.
@@ -115,21 +124,22 @@ func New(options Options) (*Provider, error) {
 	}
 
 	return &Provider{
-		apiKey:            options.APIKey,
-		baseURL:           baseURL,
-		endpoint:          endpoint,
-		model:             model,
-		authHeader:        strings.TrimSpace(options.AuthHeader),
-		authScheme:        strings.TrimSpace(options.AuthScheme),
-		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
-		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
-		oauthResolver:     options.OAuthResolver,
-		maxTokens:         maxTokens,
-		httpClient:        httpClient,
-		userAgent:         options.UserAgent,
-		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
-		parseThinkTags:    options.ParseThinkTags,
-		setRequestExtra:   options.SetRequestExtra,
+		apiKey:                options.APIKey,
+		baseURL:               baseURL,
+		endpoint:              endpoint,
+		model:                 model,
+		authHeader:            strings.TrimSpace(options.AuthHeader),
+		authScheme:            strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:       strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:         providerio.CopyHeaders(options.CustomHeaders),
+		oauthResolver:         options.OAuthResolver,
+		maxTokens:             maxTokens,
+		httpClient:            httpClient,
+		userAgent:             options.UserAgent,
+		streamIdleTimeout:     providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
+		parseThinkTags:        options.ParseThinkTags,
+		setRequestExtra:       options.SetRequestExtra,
+		disablePromptCacheKey: options.DisablePromptCacheKey,
 	}, nil
 }
 
@@ -248,6 +258,24 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 }
 
+// openAIStreamErrorStatusByCode maps a streamed error payload's "code" field
+// to the HTTP status classifiedError expects, covering both the numeric-string
+// codes some providers send ("429") and the semantic string codes OpenAI-
+// compatible providers commonly send instead (rate_limit_exceeded). Both
+// forms of the same condition must classify identically, or retry/backoff
+// logic downstream would only kick in for whichever form a given provider
+// happens to use. insufficient_quota maps to 429 (Too Many Requests) to match
+// OpenAI's own API, which returns that code with a 429 status when a caller
+// has exceeded their billing quota.
+var openAIStreamErrorStatusByCode = map[string]int{
+	"429":                 http.StatusTooManyRequests,
+	"401":                 http.StatusUnauthorized,
+	"403":                 http.StatusForbidden,
+	"rate_limit_exceeded": http.StatusTooManyRequests,
+	"insufficient_quota":  http.StatusTooManyRequests,
+	"invalid_api_key":     http.StatusUnauthorized,
+}
+
 // emitPayload handles one accumulated SSE data payload ([DONE]/blank lines are
 // already filtered by the shared reader). It returns false to abort the stream
 // after emitting a terminal error.
@@ -266,9 +294,26 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 	if chunk.Error != nil {
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
+		statusCode := http.StatusInternalServerError
+		if chunk.Error.Code != nil {
+			switch c := chunk.Error.Code.(type) {
+			case string:
+				if code, ok := openAIStreamErrorStatusByCode[c]; ok {
+					statusCode = code
+				}
+			case float64:
+				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(int(c))]; ok {
+					statusCode = code
+				}
+			case int:
+				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(c)]; ok {
+					statusCode = code
+				}
+			}
+		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
-			Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
+			Error: provider.classifiedError(statusCode, chunk.Error.Message),
 		})
 		state.done = true
 		return false
@@ -422,10 +467,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
 	}
-	// prompt_cache_key is a documented OpenAI parameter; compatible servers
-	// ignore unknown fields, but a strict endpoint that rejects it can be
-	// accommodated with ZERO_DISABLE_PROMPT_CACHE_KEY=1.
-	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !promptCacheKeyDisabled() {
+	// prompt_cache_key is a documented OpenAI parameter for server-side prefix
+	// cache routing. Official OpenAI accepts it; many openai-compatible
+	// gateways (NVIDIA NIM, strict local proxies) reject unknown fields with a
+	// 400. Those providers are constructed with DisablePromptCacheKey, and any
+	// endpoint can still force-omit via ZERO_DISABLE_PROMPT_CACHE_KEY=1.
+	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !provider.disablePromptCacheKey && !promptCacheKeyDisabled() {
 		mapped.PromptCacheKey = key
 	}
 	if len(request.Tools) > 0 {

@@ -20,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
+	"github.com/Gitlawb/zero/internal/workspacetrust"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -40,7 +41,36 @@ func TestRunPrintsVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
+	// Non-terminal stdout keeps the machine-readable contract: exactly one
+	// "zero <version>" record, no wordmark banner, no ANSI.
 	if got := stdout.String(); got != "zero dev\n" {
+		t.Fatalf("expected version output, got %q", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+// TestRunVersionRedirectedFile covers the `zero --version > file` path: stdout
+// is a real *os.File but not a terminal, so the single-line contract must hold.
+func TestRunVersionRedirectedFile(t *testing.T) {
+	stdout, err := os.CreateTemp(t.TempDir(), "version-stdout")
+	if err != nil {
+		t.Fatalf("create temp stdout: %v", err)
+	}
+	defer stdout.Close()
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"--version"}, stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	content, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatalf("read temp stdout: %v", err)
+	}
+	if got := string(content); got != "zero dev\n" {
 		t.Fatalf("expected version output, got %q", got)
 	}
 	if stderr.Len() != 0 {
@@ -156,6 +186,86 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
 	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAsk)
+}
+
+type fakeMCPRuntimeWithSkips struct {
+	skipped []mcp.SkippedServer
+}
+
+func (r fakeMCPRuntimeWithSkips) Close() error { return nil }
+
+func (r fakeMCPRuntimeWithSkips) Skipped() []mcp.SkippedServer { return r.skipped }
+
+func TestTUIStartupSuppressesWarningForUnconfiguredDefaultServer(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"firecrawl": config.DefaultMCPServers()["firecrawl"],
+			}}, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{
+				{Name: "firecrawl", Err: errors.New("returned HTTP 401"), UnconfiguredDefault: true},
+			}}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "firecrawl") {
+		t.Fatalf("stderr = %q, want no warning for an unconfigured default server", stderr.String())
+	}
+}
+
+func TestTUIStartupWarnsForUserConfiguredServerSkip(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string, excludeProject bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"custom": {Type: "stdio", Command: "custom-mcp"},
+			}}, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return fakeMCPRuntimeWithSkips{skipped: []mcp.SkippedServer{
+				{Name: "custom", Err: errors.New("connect failed"), UnconfiguredDefault: false},
+			}}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: MCP server custom unavailable") {
+		t.Fatalf("stderr = %q, want a warning for a user-configured server that failed", stderr.String())
+	}
 }
 
 func TestRunNoArgsEntersSetupWhenResolveReportsNoActiveProvider(t *testing.T) {
@@ -324,7 +434,7 @@ func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -399,7 +509,7 @@ func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			resolveCalls++
 			switch resolveCalls {
 			case 1:
@@ -466,7 +576,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"docs": {Type: "stdio", Command: "docs-mcp"},
 			}}, nil
@@ -521,7 +631,7 @@ func TestRunNoArgsSoftFailsMCPTokenStoreInit(t *testing.T) {
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{MaxTurns: 8}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfig: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			return config.MCPConfig{}, nil
 		},
 		newMCPStore: func() (*mcp.PermissionStore, error) {
@@ -657,6 +767,52 @@ func TestRunNoArgsLaunchesTUIInAskPermissionMode(t *testing.T) {
 	}
 	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeAsk {
 		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeAsk)
+	}
+}
+
+// TestRunInteractiveSurfacesMCPTrustNotice executes the interactive (TUI) path's MCP
+// trust notice (app.go), the third notice site alongside exec and spec-draft. An
+// untrusted repo whose only project config is MCP must print the notice before runTUI;
+// trusting it silences it. runTUI is stubbed so nothing renders; resolveMCPConfig
+// returns no servers so nothing spawns -- the notice depends only on the trust verdict
+// and the real ./.zero/config.json.
+func TestRunInteractiveSurfacesMCPTrustNotice(t *testing.T) {
+	setTrustConfigRoot(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".zero"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-cmd"}}}}`
+	if err := os.WriteFile(filepath.Join(repo, ".zero", "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() string {
+		var stdout, stderr bytes.Buffer
+		code := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return repo, nil },
+			resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+				return config.ResolvedConfig{MaxTurns: 3}, nil
+			},
+			resolveMCPConfig: func(string, bool) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+			runTUI:           func(context.Context, tui.Options) int { return 0 },
+		})
+		if code != 0 {
+			t.Fatalf("interactive launch exit = %d, stderr=%q", code, stderr.String())
+		}
+		return stderr.String()
+	}
+
+	untrusted := run()
+	if !strings.Contains(untrusted, "MCP servers") || !strings.Contains(untrusted, "zero trust") {
+		t.Fatalf("untrusted interactive launch must surface the MCP trust notice, stderr=%q", untrusted)
+	}
+
+	if err := workspacetrust.Trust(repo); err != nil {
+		t.Fatal(err)
+	}
+	if trusted := run(); strings.Contains(trusted, "ignoring project") {
+		t.Fatalf("trusted interactive launch must not emit a trust notice, stderr=%q", trusted)
 	}
 }
 

@@ -417,3 +417,55 @@ func TestAskUserEmptyRequestResolvesImmediately(t *testing.T) {
 		t.Fatalf("an empty request should resolve immediately, got %#v", answers)
 	}
 }
+
+func TestAskUserStaleRequestResolvesEmpty(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7 // current run
+
+	// Message for stale runID = 5
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   5,
+		request: agent.AskUserRequest{ToolCallID: "c", Questions: []agent.AskUserQuestion{{Question: "Proceed?"}}},
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("a stale request must not create a pending prompt")
+	}
+	if len(answers) != 1 || answers[0] != nil {
+		t.Fatalf("expected stale request callback to resolve immediately with nil, got: %v", answers)
+	}
+}
+
+func TestAskUserCompleteClearsAndResolves(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+
+	// Start a prompt
+	updated, _ := m.Update(askUserRequestMsg{
+		runID:   7,
+		request: agent.AskUserRequest{ToolCallID: "c", Questions: []agent.AskUserQuestion{{Question: "Proceed?"}}},
+		answer:  func(values []string) { answers = append(answers, values) },
+	})
+	next := updated.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("expected pendingAskUser to be populated")
+	}
+
+	// Receive run completion event before prompt is manually answered
+	finalized, _ := next.Update(agentResponseMsg{
+		runID: 7,
+		err:   context.Canceled,
+	})
+	finalModel := finalized.(model)
+	if finalModel.pendingAskUser != nil {
+		t.Fatal("pendingAskUser must be cleared on response/cancel")
+	}
+	if len(answers) != 1 || answers[0] != nil {
+		t.Fatalf("expected pendingAskUser answer callback to be resolved with nil, got: %v", answers)
+	}
+}

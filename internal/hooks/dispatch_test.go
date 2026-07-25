@@ -2,12 +2,24 @@ package hooks
 
 import (
 	"context"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
+
+type hookExecutionPreparer struct {
+	request execution.Request
+}
+
+func (preparer *hookExecutionPreparer) PrepareExecution(_ context.Context, request execution.Request) (execution.PreparedCommand, error) {
+	preparer.request = request
+	return execution.PreparedCommand{Command: exec.Command(request.Command.Name, request.Command.Args...)}, nil
+}
 
 func beforeToolConfig(hooks ...Definition) Config {
 	return Config{Enabled: true, Hooks: hooks}
@@ -186,14 +198,37 @@ func TestExecCommandRunnerCapturesExitAndStdin(t *testing.T) {
 	}
 }
 
-func TestExecCommandRunnerReportsLaunchFailureWithoutBlocking(t *testing.T) {
+func TestDispatcherRoutesHookThroughTypedExecutionOrigin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	preparer := &hookExecutionPreparer{}
+	dispatcher := NewDispatcher(DispatcherOptions{
+		Config:    beforeToolConfig(Definition{ID: "typed", Event: EventBeforeTool, Command: "/bin/sh", Args: []string{"-c", "cat"}, Enabled: true}),
+		Cwd:       t.TempDir(),
+		Execution: execution.NewRunner(preparer),
+	})
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash", Payload: map[string]any{"ok": true}})
+	if outcome.Blocked || outcome.Ran != 1 {
+		t.Fatalf("dispatch outcome = %#v", outcome)
+	}
+	if preparer.request.Origin != execution.OriginHook || preparer.request.Mode != execution.ModeCaptured {
+		t.Fatalf("execution request = %#v", preparer.request)
+	}
+}
+
+func TestExecCommandRunnerReportsLaunchFailureFailsClosedForBeforeTool(t *testing.T) {
 	result := execCommandRunner(context.Background(), "definitely-not-a-real-binary-zzz", nil, nil, t.TempDir(), nil)
 	if result.Err == nil {
 		t.Fatal("expected launch error for a missing binary")
 	}
-	// A launch failure is an error, never a block, even for beforeTool.
-	if status, blocked := classifyResult(EventBeforeTool, result); blocked || status != AuditError {
-		t.Fatalf("classify = (%q, %v), want (error, false) for a launch failure", status, blocked)
+	// A launch failure for beforeTool fails closed (vetoes/blocks).
+	if status, blocked := classifyResult(EventBeforeTool, result); !blocked || status != AuditBlocked {
+		t.Fatalf("beforeTool classify = (%q, %v), want (blocked, true) for a launch failure", status, blocked)
+	}
+	// An observational afterTool hook still fails open (does not block).
+	if status, blocked := classifyResult(EventAfterTool, result); blocked || status != AuditError {
+		t.Fatalf("afterTool classify = (%q, %v), want (error, false) for a launch failure", status, blocked)
 	}
 }
 

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ const (
 type PermissionProfile struct {
 	FileSystem FileSystemPolicy `json:"fileSystem"`
 	Network    NetworkPolicy    `json:"network"`
+	Runtime    *SandboxRuntime  `json:"runtime,omitempty"`
 }
 
 type FileSystemPolicy struct {
@@ -39,10 +41,32 @@ type NetworkPolicy struct {
 	Mode NetworkMode `json:"mode"`
 }
 
+// protectedMetadataNames marks control-plane directories where the app-level
+// auto-allow gate (see relativePathTouchesProtectedMetadata in engine.go)
+// always requires a prompt for direct file-tool writes (write_file, edit_file,
+// apply_patch): hand-editing git's objects/refs/index or Zero's own state
+// bypasses git's and Zero's own consistency checks, regardless of subpath.
 var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 
-func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
-	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
+// sandboxFullyProtectedMetadataNames are the metadata directories the OS-level
+// sandbox write-denies in full for shell-executed commands. .git is
+// deliberately excluded here: git subprocesses (fetch, commit, add, merge,
+// pull, stash, ...) need to write objects, refs, the index, and FETCH_HEAD,
+// and those writes go through git's own invariants, unlike a raw file-tool
+// write. Only .git/hooks (auto-executing scripts) and .git/config (remote
+// URLs, credential.helper, core.hooksPath) stay write-denied, via
+// gitMetadataWriteCarveouts below.
+var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
+
+// gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
+// under the OS-level sandbox even though the rest of .git is writable to git
+// subprocesses. Nonexistent paths are harmless no-ops in every backend's
+// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
+func gitMetadataWriteCarveouts(root string) []string {
+	return []string{
+		filepath.Join(root, ".git", "hooks"),
+		filepath.Join(root, ".git", "config"),
+	}
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
@@ -65,7 +89,8 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	for _, root := range roots {
 		writeRoots = append(writeRoots, WritableRoot{
 			Root:                   root,
-			ProtectedMetadataNames: append([]string{}, protectedMetadataNames...),
+			ReadOnlySubpaths:       gitMetadataWriteCarveouts(root),
+			ProtectedMetadataNames: append([]string{}, sandboxFullyProtectedMetadataNames...),
 		})
 	}
 	return PermissionProfile{
@@ -73,7 +98,7 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            readRoots,
 			WriteRoots:           writeRoots,
-			DenyRead:             normalizeProfilePaths(policy.DenyRead),
+			DenyRead:             dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...)),
 			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
@@ -117,6 +142,66 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 		readRoots = dedupeStrings(append(readRoots, extra...))
 	}
 	return dedupeStrings(readRoots)
+}
+
+// credentialDenyReadPaths returns default deny-read entries for well-known
+// credential stores (~/.aws, ~/.config/gcloud, ~/.azure, and the file
+// GOOGLE_APPLICATION_CREDENTIALS points to) so sandboxed commands cannot read
+// cloud secrets under the read-all workspace posture. Two deliberate limits:
+//
+//   - Windows is skipped: a non-empty profile DenyRead switches the Windows
+//     runner onto the capability-SID/ACL deny path and away from the
+//     WRITE_RESTRICTED token, which the unelevated tier depends on. Revisit
+//     once the Windows deny-read model is settled.
+//   - A candidate nested under a user-configured AllowRead entry is dropped,
+//     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
+//
+// These are profile-level rules only; they are intentionally NOT merged into
+// Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
+// must keep reflecting user configuration alone.
+func credentialDenyReadPaths(policy Policy) []string {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	// A failed home lookup only drops the home-based candidates; the
+	// GOOGLE_APPLICATION_CREDENTIALS target must be protected regardless.
+	home, _ := os.UserHomeDir()
+	return credentialDenyReadPathsIn(home, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), policy.AllowRead)
+}
+
+// credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
+// separated so tests can exercise it against a synthetic home directory.
+func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead []string) []string {
+	var candidates []string
+	if home = strings.TrimSpace(home); home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".aws"),
+			filepath.Join(home, ".config", "gcloud"),
+			filepath.Join(home, ".azure"),
+		)
+	}
+	if target := strings.TrimSpace(googleCredentials); target != "" {
+		candidates = append(candidates, target)
+	}
+	allowRoots := normalizeProfilePaths(allowRead)
+	out := make([]string, 0, len(candidates))
+	for _, path := range normalizeProfilePaths(candidates) {
+		// Only stores that actually exist on this host need a deny rule.
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		reincluded := false
+		for _, allow := range allowRoots {
+			if pathWithinRoot(allow, path) {
+				reincluded = true
+				break
+			}
+		}
+		if !reincluded {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 // userGitConfigReadPaths returns the user's global git config FILES so a

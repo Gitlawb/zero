@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Mailbox is a per-agent, per-team message inbox persisted as a JSON array on
@@ -32,6 +35,9 @@ type Mailbox struct {
 	MaxMessages int
 	// LockTimeout bounds how long Send/MarkRead wait for the inbox lock.
 	LockTimeout time.Duration
+
+	// rename is used to override the rename operation in tests.
+	rename func(src, dst string) error
 }
 
 const (
@@ -214,7 +220,7 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 		return fmt.Errorf("%w: %d messages", ErrMailboxFull, len(messages))
 	}
 	messages = append(messages, msg)
-	return atomicWriteJSON(path, messages)
+	return m.atomicWriteJSON(path, messages)
 }
 
 // ReadAndConsume reads the recipient's inbox and marks every previously-unread
@@ -256,7 +262,7 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 		}
 	}
 	if changed {
-		if err := atomicWriteJSON(path, messages); err != nil {
+		if err := m.atomicWriteJSON(path, messages); err != nil {
 			return nil, err
 		}
 	}
@@ -299,7 +305,7 @@ func (m *Mailbox) readLocked(path string) ([]Message, error) {
 
 // atomicWriteJSON writes data as pretty JSON to a sibling temp file (0600) then
 // renames it over path, so a reader never observes a partial write.
-func atomicWriteJSON(path string, data any) error {
+func (m *Mailbox) atomicWriteJSON(path string, data any) error {
 	encoded, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("swarm: encode inbox: %w", err)
@@ -322,7 +328,7 @@ func atomicWriteJSON(path string, data any) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("swarm: close temp inbox: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := m.renameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("swarm: commit inbox: %w", err)
 	}
 	return nil
@@ -358,31 +364,32 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 				}
 				released = true
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
-					os.Remove(lockPath)
+					_ = lockutil.RemoveLockFile(lockPath)
 				}
 			}, nil
 		}
 		if !isLockContended(err) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
-		// Lock held: break it if stale, otherwise wait. Reclaim ATOMICALLY via
-		// rename-with-verify. The previous content==content check read the same file
-		// twice microseconds apart, so it was always "unchanged" and gave no
-		// protection — two waiters could both Remove the lock while a third recreated
-		// it via O_EXCL, leaving two live holders. Renaming the file aside means only
-		// one racer wins the rename of a given inode; the moved file's mtime is then
-		// re-checked stale before deletion, and if a holder rotated a fresh lock in
-		// the gap it is renamed back rather than stolen. (AUDIT-M13)
+		// Lock held: break it if stale via the atomic rename-with-verify in
+		// lockutil.ReclaimStaleLock (AUDIT-M13), otherwise wait.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			reclaimed := lockPath + ".stale." + token
-			if os.Rename(lockPath, reclaimed) == nil {
-				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
-					os.Remove(reclaimed) // genuinely stale — drop it
-				} else {
-					_ = os.Rename(reclaimed, lockPath) // young again — restore, don't steal
-				}
+			cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
+				info, err := os.Stat(reclaimedPath)
+				return err == nil && time.Since(info.ModTime()) <= lockStaleAfter
+			})
+			if rerr != nil {
+				// Reclaim hit a hard failure: the rename aside failed outright, or a
+				// live holder's lock could not be put back (the lock path may be
+				// missing, so re-acquiring would break mutual exclusion). Fail closed
+				// instead of spinning to the deadline.
+				return nil, fmt.Errorf("swarm: reclaim stale lock: %w", rerr)
 			}
-			continue
+			if cleared {
+				continue // cleared a genuinely stale lock; retry the O_EXCL create now
+			}
+			// Lost the reclaim race (or it was actually fresh) — fall through to the
+			// bounded wait instead of hot-spinning on a reclaim that never wins.
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("swarm: timed out acquiring lock %s", filepath.Base(lockPath))
@@ -391,4 +398,8 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		// contention (Windows file ops are slow; a coarse sleep starves waiters).
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+func (m *Mailbox) renameWithRetry(src, dst string) error {
+	return fsutil.RenameWithRetry(src, dst, m.rename)
 }

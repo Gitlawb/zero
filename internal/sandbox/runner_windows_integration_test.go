@@ -145,12 +145,22 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 
 	root := t.TempDir()
 	outside := t.TempDir()
+	privateDir := filepath.Join(root, "private")
+	if err := os.MkdirAll(privateDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll private: %v", err)
+	}
+	secretFile := filepath.Join(privateDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("super-secret"), 0o600); err != nil {
+		t.Fatalf("WriteFile secret: %v", err)
+	}
+
 	sandboxHome := filepath.Join(root, ".zero-sandbox")
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            []string{root},
 			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
+			DenyRead:             []string{privateDir},
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
 		},
@@ -178,6 +188,11 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	if _, err := os.Stat(WindowsUnelevatedSetupMarkerPath(sandboxHome)); err != nil {
 		t.Fatalf("expected the unelevated setup marker to be recorded: %v", err)
 	}
+
+	// DenyRead check: reading from the privateDir must be blocked (exit code 1)
+	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+		"cmd.exe", "/d", "/s", "/c", "type " + secretFile,
+	}, 1)
 
 	outsideMarker := filepath.Join(outside, "unelevated-write-denied.txt")
 	runWindowsRealSmokeCommand(t, runnerExe, config, []string{

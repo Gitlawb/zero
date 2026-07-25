@@ -18,6 +18,8 @@ type globTool struct {
 	scope         PathScope
 }
 
+func (globTool) outputCategory(map[string]any) outputCategory { return outputCategorySearch }
+
 func NewGlobTool(workspaceRoot string) Tool {
 	return NewScopedGlobTool(workspaceRoot, nil)
 }
@@ -38,7 +40,8 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"pattern"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Finds matching paths without reading contents or modifying files."),
+			safety:       readOnlySafety("Finds matching paths without reading contents or modifying files."),
+			capabilities: ToolCapabilities{Effect: EffectReadOnly, ThreadSafe: true, ResourceKeys: scopedScanResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
@@ -46,17 +49,25 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool globTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{})
+	return tool.runWith(ctx, args, readExcluder{}, true)
+}
+
+func (tool globTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	exclude := readExcluder{}
+	if options.Sandbox != nil {
+		exclude = sandboxReadExcluder(options.Sandbox)
+	}
+	return tool.runWith(ctx, args, exclude, false)
 }
 
 // RunWithSandbox runs glob while skipping subtrees the sandbox policy denies
 // reads to (DenyRead). With no DenyRead configured the excluder is a no-op and
 // behavior is unchanged.
 func (tool globTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result {
-	return tool.runWith(ctx, args, sandboxReadExcluder(engine))
+	return tool.runWith(ctx, args, sandboxReadExcluder(engine), true)
 }
 
-func (tool globTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder) Result {
+func (tool globTool) runWith(ctx context.Context, args map[string]any, exclude readExcluder, directBudget bool) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "glob", "match", "query", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
@@ -109,24 +120,23 @@ func (tool globTool) runWith(ctx context.Context, args map[string]any, exclude r
 	if truncated {
 		output += fmt.Sprintf("\n\n[truncated: showing first %d of %d matches; increase limit or narrow cwd/pattern]", len(matches), totalMatches)
 	}
-	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "increase limit or narrow cwd/pattern")
-	meta := outputBudgetMeta(budgeted)
+	meta := map[string]string{}
 	meta["pattern"] = pattern
-	if truncated || budgeted.Truncated {
+	if truncated {
 		meta["truncated"] = "true"
-		if budgeted.Truncated {
-			meta["truncation_reason"] = "byte_budget"
-		} else {
-			meta["truncation_reason"] = "limit"
-		}
+		meta["truncation_reason"] = "limit"
 	}
 
-	return Result{
+	result := Result{
 		Status:    StatusOK,
-		Output:    budgeted.Output,
-		Truncated: truncated || budgeted.Truncated,
+		Output:    output,
+		Truncated: truncated,
 		Meta:      meta,
 	}
+	if directBudget {
+		return applyLegacyByteBudgetToResult(result, searchOutputBudgetBytes, "increase limit or narrow cwd/pattern")
+	}
+	return result
 }
 
 func scanGlob(ctx context.Context, root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool, exclude readExcluder) ([]string, error) {

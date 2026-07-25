@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 )
 
 type providerModelsOptions struct {
@@ -49,6 +51,19 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 	models, err := deps.discoverProviderModels(ctx, discoveryCredentialProfile(profile))
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
+	}
+
+	// Apply provider-specific model filtering for catalog-backed profiles.
+	// For example, opencode-go-anthropic-compatible only permits Qwen and
+	// MiniMax model IDs; the raw /zen/go/v1/models endpoint returns many more.
+	if profile.CatalogID != "" {
+		filtered := make([]providermodeldiscovery.Model, 0, len(models))
+		for _, model := range models {
+			if providermodelcatalog.ModelIDAllowedForProvider(profile.CatalogID, model.ID) {
+				filtered = append(filtered, model)
+			}
+		}
+		models = filtered
 	}
 
 	if options.json {
@@ -123,7 +138,12 @@ func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderP
 // the provider's model-listing endpoint with no curated-catalog merge or
 // coding-model filtering, so a custom provider's full model list is returned.
 func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{})
+	resolver, loginKey := oauthLoginForProfile(profile)
+	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{
+		OAuthResolver:        resolver,
+		CodexAccountResolver: providers.CodexAccountResolverForLogin(loginKey),
+		UserAgent:            userAgent(),
+	})
 }
 
 func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error) {

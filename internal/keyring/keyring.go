@@ -3,11 +3,13 @@
 // macOS and `secret-tool` (libsecret) on Linux. It stores a single secret string
 // per (service, account). Windows and other platforms report unsupported.
 //
-// It shells out to the OS tools rather than taking a third-party dependency. On
-// macOS the secret is passed to `security` as an argument, so it is briefly
-// visible to other processes via the process list; on Linux the secret is passed
-// over stdin and is not exposed in the argument vector. Callers that need to keep
-// a secret out of the process list on macOS should prefer the file backend.
+// It shells out to the OS tools rather than taking a third-party dependency.
+// On both macOS and Linux the secret is passed over stdin, never the argument
+// vector, so it is not exposed via the process list. On macOS the write goes
+// through `security -i` (interactive mode), whose command parser is line-based
+// with a fixed 4096-byte line buffer, so Set rejects secrets containing
+// newlines or exceeding that budget rather than silently corrupting them;
+// Linux's secret-tool has no such restriction.
 package keyring
 
 import (
@@ -63,8 +65,28 @@ func (k *Keyring) Set(service, account, secret string) error {
 	}
 	switch k.goos {
 	case "darwin":
+		// The secret must stay out of the argument vector (visible to every
+		// process via `ps`), but a trailing -w prompt is not a substitute:
+		// security prompts with getpass(3), which reads from /dev/tty whenever
+		// the process has a controlling terminal (ignoring a piped stdin) and
+		// truncates at getpass's small fixed buffer otherwise. Instead drive
+		// `security -i`: interactive mode reads whole commands from stdin, so
+		// argv is just ["-i"] and the secret rides inside the command line.
+		// That parser is line-based with a fixed 4096-byte buffer, so reject
+		// newlines and oversized payloads up front; an overlong line would be
+		// split and executed as two garbage commands, silently corrupting the
+		// stored value.
+		for _, s := range []string{service, account, secret} {
+			if strings.ContainsAny(s, "\r\n") {
+				return wrap("set", errors.New("service, account, and secret must not contain newlines on macOS (security -i is line-based)"))
+			}
+		}
 		// -U updates the item if it already exists rather than failing.
-		_, err := k.exec(nil, "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", secret)
+		line := "add-generic-password -U -s " + securityQuote(service) + " -a " + securityQuote(account) + " -w " + securityQuote(secret) + "\n"
+		if len(line) > securityMaxLine {
+			return wrap("set", fmt.Errorf("secret too large for the macOS security tool's %d-byte command line; use the file backend instead", securityMaxLine))
+		}
+		_, err := k.exec([]byte(line), "security", "-i")
 		return wrap("set", err)
 	case "linux":
 		// secret-tool reads the secret from stdin, keeping it out of the argv.
@@ -138,6 +160,19 @@ func (k *Keyring) Delete(service, account string) (bool, error) {
 	default:
 		return false, ErrUnsupported
 	}
+}
+
+// securityMaxLine is the most `security -i` can read as one command: its line
+// buffer is MAX_LINE_LEN (4096) bytes in Apple's SecurityTool, one of which the
+// terminating NUL consumes.
+const securityMaxLine = 4095
+
+// securityQuote wraps s for one argument of a `security -i` command line. The
+// tool's parser (split_line in Apple's SecurityTool) treats a backslash inside
+// double quotes as escaping the next character and the matching quote as the
+// argument terminator, so those two characters are all that needs escaping.
+func securityQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 func (k *Keyring) exec(stdin []byte, name string, args ...string) ([]byte, error) {

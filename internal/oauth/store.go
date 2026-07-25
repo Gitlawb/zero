@@ -38,8 +38,16 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-// ProviderKey builds the store key for a provider login.
-func ProviderKey(name string) string { return KeyPrefixProvider + name }
+// ProviderKey builds the store key for a provider login, normalizing the name
+// to lower case. Every write (Manager.Login, the ChatGPT flow) and every
+// lookup (FirstStored, GetFresh, logout, status filters) funnels through here,
+// so normalizing at this one choke point keeps them symmetric: without it,
+// `zero auth login xAI` stored "provider:xAI" while the profile scaffolded for
+// it looked up "provider:xai" case-sensitively — a fresh, successful login
+// that was invisible to the runtime.
+func ProviderKey(name string) string {
+	return KeyPrefixProvider + strings.ToLower(strings.TrimSpace(name))
+}
 
 // FirstStored returns the token and its ProviderKey for the FIRST candidate name
 // that has a token in the store, with ok=false when none do. Callers pass

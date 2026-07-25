@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
 // Single-instance lock. Mirrors reference-daemon-code-agent-js/supervisor.js's
@@ -43,16 +45,16 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 			// the single-instance guarantee — so on write failure, remove it and fail.
 			if _, werr := fmt.Fprintf(f, "%d\n", os.Getpid()); werr != nil {
 				_ = f.Close()
-				_ = os.Remove(path)
+				_ = lockutil.RemoveLockFile(path)
 				return nil, werr
 			}
 			if cerr := f.Close(); cerr != nil {
-				_ = os.Remove(path)
+				_ = lockutil.RemoveLockFile(path)
 				return nil, cerr
 			}
 			return &fileLock{path: path}, nil
 		}
-		if !errors.Is(err, fs.ErrExist) {
+		if !errors.Is(err, fs.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, err
 		}
 		pid, perr := readPidFile(path)
@@ -65,7 +67,13 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 		// freshly-created lock — leaving both "holding" the single-instance lock.
 		// reclaimStaleLock renames the file aside so only one racer wins the rename,
 		// and restores it if a live holder reacquired in the gap (D6).
-		reclaimStaleLock(path, isAlive)
+		if _, rerr := reclaimStaleLock(path, isAlive); rerr != nil {
+			// Reclaim hit a hard failure: the rename aside failed outright, or a
+			// live holder's lock could not be put back (the lock path may be
+			// missing, so re-acquiring would break the single-instance guarantee).
+			// Fail closed instead of spinning to the deadline.
+			return nil, fmt.Errorf("daemon: reclaim stale lock: %w", rerr)
+		}
 	}
 	return nil, ErrAlreadyRunning
 }
@@ -73,37 +81,29 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 // daemonLockSeq makes each reclaim attempt's sidelined filename unique per process.
 var daemonLockSeq atomic.Uint64
 
-// reclaimStaleLock atomically reclaims a single-instance lock whose recorded PID is
-// dead. A blind Remove lets two racers both delete-and-recreate the lock and wind up
-// BOTH holding it; instead this renames the lock file aside (only one racer can win
-// the rename of a given inode), re-reads the moved file's PID, and removes it only if
-// that PID is still dead. If a new holder reacquired the lock in the gap between the
-// stale check and the rename, the moved file carries that LIVE pid, so it is renamed
-// back rather than stolen. Returns true only when a genuinely stale lock was removed.
-func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
-	reclaimed := fmt.Sprintf("%s.stale.%d-%d", path, os.Getpid(), daemonLockSeq.Add(1))
-	if err := os.Rename(path, reclaimed); err != nil {
-		return false // another racer already moved/removed it, or it vanished
-	}
-	if pid, err := readPidFile(reclaimed); err == nil && pid > 0 && isAlive(pid) {
-		// A holder reacquired the lock in the gap — its live PID is now in the moved
-		// file. Restore it instead of stealing a live lock; let the caller refuse.
-		_ = os.Rename(reclaimed, path)
-		return false
-	}
-	_ = os.Remove(reclaimed)
-	return true
+// reclaimStaleLock atomically reclaims a single-instance lock whose recorded
+// PID is dead, via lockutil.ReclaimStaleLock: the lock file is renamed aside
+// (only one racer can win the rename) and stolen only if the moved file's PID
+// is still dead; a holder that reacquired the lock in the gap between the
+// stale check and the rename carries a LIVE pid and is restored rather than
+// stolen. Returns true only when a genuinely stale lock was removed. A
+// non-nil error means the caller must fail closed instead of re-acquiring
+// (see lockutil.ReclaimStaleLock).
+func reclaimStaleLock(path string, isAlive func(pid int) bool) (bool, error) {
+	suffix := fmt.Sprintf("%d-%d", os.Getpid(), daemonLockSeq.Add(1))
+	return lockutil.ReclaimStaleLock(path, suffix, func(reclaimedPath string) bool {
+		pid, err := readPidFile(reclaimedPath)
+		return err == nil && pid > 0 && isAlive(pid)
+	})
 }
 
-// release removes the lock file. Safe to call once.
+// release removes the lock file. Safe to call once. An already-missing lock
+// file is not an error (lockutil.RemoveLockFile swallows it on every platform).
 func (l *fileLock) release() error {
 	if l == nil || l.path == "" {
 		return nil
 	}
-	if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return lockutil.RemoveLockFile(l.path)
 }
 
 // readPidFile reads and parses the PID recorded in a lock file.

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -127,9 +126,8 @@ func endsWithContinuationCue(text string) bool {
 // which the update_plan tool coerces to "pending") counts as remaining, matching
 // that tool's own status normalization.
 func planStatusRemaining(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]",
-		"failed", "fail", "error", "errored", "blocked", "cancelled", "canceled", "abandoned", "skipped":
+	switch normalizeTaskPlanStatus(status) {
+	case "completed", "failed":
 		return false
 	default:
 		return true
@@ -183,33 +181,110 @@ var successNegationTails = []string{
 	"reproduce", "spot any", "locate any",
 }
 
-// selfReportedIncompletion returns a short reason when the model's final text
-// admits it guessed or could not meet the objective, else "". Case-insensitive.
-func selfReportedIncompletion(text string) string {
-	lower := strings.ToLower(text)
-	for _, phrase := range selfReportPhrases {
-		if strings.Contains(lower, phrase) {
-			return selfReportReason(phrase)
+// narrativeMarkers flag a sentence as RETELLING a past exchange rather than
+// reporting the outcome of the current objective, so an inability admission in
+// that sentence is about THEN, not NOW. Grounded in a real false positive: a
+// conversational recap ("You asked if I could work autonomously … I was honest
+// that my sandbox had no repo … so I couldn't actually do it at the time") was
+// downgraded to INCOMPLETE on the quoted "i couldn't " stem even though the
+// current turn's objective (summarize where we left off) was fully met. Every
+// marker is second-person or explicitly past-referential, so a first-person
+// admission about the current task ("I couldn't complete the refactor") is
+// never masked.
+var narrativeMarkers = []string{
+	"you asked", "you said", "you wanted", "you mentioned",
+	"we discussed", "we talked", "we covered",
+	"when we last", "last time", "last session", "previous session",
+	"previous conversation", "earlier session", "earlier conversation",
+	"at the time", "back then",
+}
+
+// stripQuoted removes spans enclosed in double quotes (straight or curly) or
+// backticks, so an admission the model merely QUOTES — its own earlier message,
+// a log line, an error string — cannot fire the detector. Only BALANCED spans
+// are removed: an opening delimiter that never closes is kept as literal text,
+// so a stray quote cannot swallow the rest of the message (and with it a
+// genuine admission the detector must see). Single quotes are left alone: they
+// are overwhelmingly apostrophes ("couldn't"), and treating them as quote
+// delimiters would swallow the text between two contractions.
+func stripQuoted(s string) string {
+	var b strings.Builder
+	var span strings.Builder // pending text since the open delimiter, kept if it never closes
+	open := rune(0)
+	for _, r := range s {
+		switch {
+		case open != 0:
+			if (open == '"' && r == '"') || (open == '“' && r == '”') || (open == '`' && r == '`') {
+				open = 0
+				span.Reset()
+				continue
+			}
+			span.WriteRune(r)
+		case r == '"' || r == '“' || r == '`':
+			open = r
+			span.WriteRune(r)
+		default:
+			b.WriteRune(r)
 		}
 	}
-	for _, stem := range inabilityStems {
-		// Scan EVERY occurrence of the stem, not just the first: an earlier
-		// success-negation use ("I could not find any examples, so I could not
-		// implement it") must not mask a later genuine admission with the same stem.
-		for start := 0; ; {
-			rel := strings.Index(lower[start:], stem)
-			if rel < 0 {
-				break
+	b.WriteString(span.String()) // dangling delimiter: restore the span verbatim
+	return b.String()
+}
+
+// admissionSentences splits lowered text into sentence-ish fragments so the
+// detector judges each claim in its own context. Newlines split too (markdown
+// bullets are separate claims); the exact boundaries only need to keep an
+// admission next to its own narrative/negation context, not be grammatical.
+func admissionSentences(lower string) []string {
+	return strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n'
+	})
+}
+
+// selfReportedIncompletion returns a short reason when the model's final text
+// admits it guessed or could not meet the objective, else "". Case-insensitive.
+// Matching is per sentence, after dropping quoted spans, and a sentence that
+// retells a past exchange (narrativeMarkers) is skipped entirely — an admission
+// must be the model's own report about the CURRENT objective, not general
+// language that merely resembles one.
+func selfReportedIncompletion(text string) string {
+	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
+		if containsAny(sentence, narrativeMarkers) {
+			continue
+		}
+		for _, phrase := range selfReportPhrases {
+			if strings.Contains(sentence, phrase) {
+				return selfReportReason(phrase)
 			}
-			abs := start + rel
-			tail := strings.TrimSpace(lower[abs+len(stem):])
-			if !hasAnyPrefix(tail, successNegationTails) {
-				return selfReportReason(strings.TrimSpace(stem) + " …")
+		}
+		for _, stem := range inabilityStems {
+			// Scan EVERY occurrence of the stem, not just the first: an earlier
+			// success-negation use ("I could not find any examples, so I could not
+			// implement it") must not mask a later genuine admission with the same stem.
+			for start := 0; ; {
+				rel := strings.Index(sentence[start:], stem)
+				if rel < 0 {
+					break
+				}
+				abs := start + rel
+				tail := strings.TrimSpace(sentence[abs+len(stem):])
+				if !hasAnyPrefix(tail, successNegationTails) {
+					return selfReportReason(strings.TrimSpace(stem) + " …")
+				}
+				start = abs + len(stem)
 			}
-			start = abs + len(stem)
 		}
 	}
 	return ""
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func selfReportReason(marker string) string {
@@ -230,8 +305,8 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // the bug-hunt surfaced: well-formed output treated as correct; pre-existing tests
 // passing treated as the objective being met; and a result that merely matches a
 // baseline the task asked to beat or improve. General — no task-specific content.
-func acceptanceVerificationNudge() string {
-	return "Before this task can be marked complete, " + acceptanceNudgeMarker + " — " +
+func acceptanceVerificationNudge(objective string) string {
+	nudge := "Before this task can be marked complete, " + acceptanceNudgeMarker + " — " +
 		"NOT the shape or format of your output, NOT that pre-existing tests pass, and NOT that your " +
 		"result merely matches a baseline you were asked to beat or improve. " +
 		"Re-read the original task, then run a concrete check that exercises the actual requirement: " +
@@ -239,6 +314,10 @@ func acceptanceVerificationNudge() string {
 		"thing the task asked you to produce, recover, fix, or optimize. " +
 		"If that check passes, reply PASS and cite the evidence. " +
 		"If it does not pass — or you cannot run such a check — say so plainly and keep working; do not claim success."
+	if objective = capTaskObjective(objective); objective != "" {
+		nudge += "\n\nTask objective: " + objective
+	}
+	return nudge
 }
 
 // toolFailureHintMarker is a stable substring for tests.
@@ -476,16 +555,12 @@ func (state *guardState) pendingPlanItems() bool {
 // many items are still remaining. Malformed arguments leave the prior count
 // unchanged (best-effort — the plan panel itself tolerates the same).
 func (state *guardState) observePlanUpdate(arguments string) {
-	var parsed struct {
-		Plan []struct {
-			Status string `json:"status"`
-		} `json:"plan"`
-	}
-	if json.Unmarshal([]byte(arguments), &parsed) != nil {
+	plan, ok := parseTaskPlan(arguments)
+	if !ok {
 		return
 	}
 	pending := 0
-	for _, item := range parsed.Plan {
+	for _, item := range plan {
 		if planStatusRemaining(item.Status) {
 			pending++
 		}

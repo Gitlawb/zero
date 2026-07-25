@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -123,6 +124,7 @@ func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	})
 	base := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
 	times := []time.Time{
+		base, // burst tracker on Enter keypress (timing-based paste guard)
 		base, // run start: consumed by turnStartedAt (the working-line elapsed clock)
 		base,
 		base.Add(1 * time.Second),
@@ -350,7 +352,7 @@ func TestClearCommandResetsTranscript(t *testing.T) {
 
 func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{Registry: registry})
 	m.input.SetValue("/tools")
 
@@ -461,7 +463,7 @@ func TestPlanCommandHandlesMissingPlanTool(t *testing.T) {
 
 func TestContextCommandShowsSessionState(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{
 		Cwd:            `D:\codings\Opensource\Zero`,
 		ProviderName:   "openai",
@@ -1374,6 +1376,33 @@ func TestAgentResponseCompletesStuckPlan(t *testing.T) {
 	})
 }
 
+func TestAgentResponseSurfacesRunCompletionWarning(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		RunCompletionWarning: func() string { return "scratch warning" },
+	})
+	m.pending = true
+	m.activeRunID = 7
+	updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+	next := updated.(model)
+	if !transcriptContains(next.transcript, "scratch warning") {
+		t.Fatalf("expected run completion warning in transcript, got %#v", next.transcript)
+	}
+}
+
+func TestBeginRunPreparesRunCompletionWarningEachTurn(t *testing.T) {
+	prepares := 0
+	m := newModel(context.Background(), Options{
+		PrepareRunCompletionWarning: func() { prepares++ },
+	})
+
+	m = m.beginRun(nil)
+	m = m.beginRun(nil)
+
+	if prepares != 2 {
+		t.Fatalf("PrepareRunCompletionWarning called %d times, want once per run", prepares)
+	}
+}
+
 // TestToolResultDetailPrefersPreview: the card body uses the rich card-only
 // Display.Preview on a successful result, falls back to Output when there's no
 // preview, and always uses Output (the failure) on an error.
@@ -1577,6 +1606,9 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
 		t.Fatalf("focused permission prompt must not render risk labels, got %q", view)
 	}
+	if count := strings.Count(view, request.Reason); count != 1 {
+		t.Fatalf("focused permission reason rendered %d times, want once:\n%s", count, view)
+	}
 }
 
 func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
@@ -1687,6 +1719,34 @@ func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
 	for _, blocked := range []string{"risk:", "risk=", "block=", "mode=", "permission=", "side_effect=", "autonomy="} {
 		if strings.Contains(rendered, blocked) {
 			t.Fatalf("denied permission row must not render %q, got %q", blocked, rendered)
+		}
+	}
+}
+
+func TestPermissionRowRendersIdenticalEventAndBlockReasonOnce(t *testing.T) {
+	const reason = "Reading /home/dev/.nvm requires access outside the workspace."
+	event := agent.PermissionEvent{
+		ToolCallID:     "call_read",
+		ToolName:       "list_directory",
+		Action:         agent.PermissionActionDeny,
+		DecisionAction: agent.PermissionDecisionDeny,
+		SideEffect:     "read",
+		Reason:         reason,
+		Scope:          "/home/dev/.nvm",
+		Block: &sandbox.Block{
+			Code:   sandbox.BlockOutsideWorkspace,
+			Path:   "/home/dev/.nvm",
+			Reason: reason,
+		},
+	}
+
+	row := permissionTranscriptRow(event)
+	if count := strings.Count(event.Reason+"\n"+row.detail, reason); count != 1 {
+		t.Fatalf("permission reason represented %d times, want once: detail=%q", count, row.detail)
+	}
+	for _, want := range []string{"denied by user", "outside workspace", "path: /home/dev/.nvm"} {
+		if !strings.Contains(row.detail, want) {
+			t.Fatalf("permission detail missing %q: %q", want, row.detail)
 		}
 	}
 }
@@ -1933,6 +1993,35 @@ func TestCtrlCRequiresSecondPressToExit(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("second Ctrl+C should return quit command")
+	}
+}
+
+func TestConfirmedCtrlCCancelsProviderAimlapiOnboarding(t *testing.T) {
+	cancelled := false
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepAimlapi,
+		aimlapi: &aimlapiOnboardState{
+			topupCancel: func() { cancelled = true },
+		},
+	}
+
+	updated, _ := m.Update(testKeyCtrl('c'))
+	next := updated.(model)
+	if cancelled {
+		t.Fatal("first Ctrl+C should only arm exit confirmation")
+	}
+
+	updated, cmd := next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if !cancelled {
+		t.Fatal("confirmed Ctrl+C did not cancel AIMLAPI onboarding")
+	}
+	if next.providerWizard.aimlapi != nil {
+		t.Fatal("confirmed Ctrl+C retained AIMLAPI onboarding state")
+	}
+	if cmd == nil {
+		t.Fatal("confirmed Ctrl+C should return quit command")
 	}
 }
 
@@ -2619,6 +2708,172 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 	}
 }
 
+func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	now := base
+	m := model{
+		now:                   func() time.Time { return now },
+		terminalFocused:       true,
+		lastCharTime:          base,
+		composerCursorVisible: true,
+	}
+
+	// Each iteration simulates a keystroke (refreshing lastCharTime) followed by
+	// a blink tick within the typing-idle threshold: cursor must stay solid
+	// rather than toggling off, however many ticks land.
+	for i := 0; i < 3; i++ {
+		now = now.Add(200 * time.Millisecond)
+		m.lastCharTime = now
+		updated, _ := m.Update(composerBlinkMsg{})
+		m = updated.(model)
+		if !m.composerCursorVisible {
+			t.Fatalf("tick %d: expected cursor to stay visible while typing, got hidden", i)
+		}
+	}
+}
+
+func TestComposerBlinkHiddenWhileUnfocused(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		lastCharTime:          base.Add(-time.Hour), // long idle, irrelevant while unfocused
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+
+	for i := 0; i < 3; i++ {
+		updated, _ = m.Update(composerBlinkMsg{})
+		m = updated.(model)
+		if m.composerCursorVisible {
+			t.Fatalf("tick %d: expected cursor to stay hidden while unfocused, got visible", i)
+		}
+	}
+}
+
+func TestComposerBlinkResumesAfterRefocusAndIdle(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		lastCharTime:          base.Add(-time.Hour), // stale: well past the idle threshold
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if !m.terminalFocused {
+		t.Fatal("expected terminalFocused to be true after FocusMsg")
+	}
+
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	first := m.composerCursorVisible
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	second := m.composerCursorVisible
+	if first == second {
+		t.Fatalf("expected blink to toggle once idle+focused, got %v then %v", first, second)
+	}
+}
+
+func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		terminalFocused:       true,
+		lastCharTime:          base.Add(-time.Hour),
+		composerCursorVisible: true,
+	}
+
+	updated, _ := m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	if m.composerCursorVisible {
+		t.Fatal("expected cursor to toggle off on first idle+focused tick")
+	}
+	updated, _ = m.Update(composerBlinkMsg{})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected cursor to toggle back on on second idle+focused tick")
+	}
+}
+
+func TestComposerCursorShowsImmediatelyOnKeypress(t *testing.T) {
+	// The blink phase may have just hidden the caret when the user starts
+	// typing; the typed character must render with a caret immediately, not
+	// after the next composerBlinkMsg tick evaluates the typing threshold.
+	m := newModel(context.Background(), Options{})
+	m.terminalFocused = true
+	m.composerCursorVisible = false
+
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after a keypress, before any blink tick")
+	}
+}
+
+func TestComposerCursorSyncsImmediatelyOnFocusChange(t *testing.T) {
+	// Focus transitions must apply the caret contract synchronously: a blur
+	// with no blink tick yet must not leave a visible caret in an unfocused
+	// terminal, and a refocus must not leave the caret hidden for a tick.
+	m := model{composerCursorVisible: true, terminalFocused: true}
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	if m.composerCursorVisible {
+		t.Fatal("expected caret hidden immediately after BlurMsg, before any blink tick")
+	}
+
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after FocusMsg, before any blink tick")
+	}
+}
+
+func TestComposerCursorShowsImmediatelyOnPaste(t *testing.T) {
+	// A paste is the same immediate-input transition as a keypress: if the
+	// blink phase had just hidden the caret, the freshly pasted composer must
+	// render with a solid caret right away, and the typing timestamp must be
+	// refreshed so the next blink tick holds solid instead of toggling off a
+	// stale idle state.
+	m := newModel(context.Background(), Options{})
+	m.terminalFocused = true
+	m.composerCursorVisible = false
+	m.lastCharTime = time.Now().Add(-time.Hour) // stale: well past the idle threshold
+
+	updated, _ := m.Update(tea.PasteMsg{Content: "pasted text"})
+	m = updated.(model)
+	if !m.composerCursorVisible {
+		t.Fatal("expected caret visible immediately after a paste, before any blink tick")
+	}
+	if time.Since(m.lastCharTime) > time.Minute {
+		t.Fatalf("expected the paste to refresh lastCharTime, still %v old", time.Since(m.lastCharTime))
+	}
+}
+
+func TestCommandArgumentHintFollowsCursorVisibility(t *testing.T) {
+	// The argument-hint composer line is an alternate render path that used to
+	// paint its caret cell unconditionally, ignoring focus and blink state.
+	input := textinput.New()
+	input.SetValue("/rewind ")
+
+	visible := commandArgumentHintComposerLine(input, "hint", true)
+	hidden := commandArgumentHintComposerLine(input, "hint", false)
+	if visible == hidden {
+		t.Fatal("expected the rendered hint line to differ between visible and hidden caret states")
+	}
+	if want := composerCursor(zeroTheme.faint.Render("h")); !strings.Contains(visible, want) {
+		t.Fatalf("expected visible-caret render to contain the styled cursor cell, got %q", visible)
+	}
+	if got := hidden; strings.Contains(got, composerCursor(zeroTheme.faint.Render("h"))) {
+		t.Fatalf("expected hidden-caret render to drop the styled cursor cell, got %q", got)
+	}
+}
+
 func TestScrimViewportLine(t *testing.T) {
 	// Blank lines are left untouched (no scrim).
 	if got := scrimViewportLine("   ", 10); got != "   " {
@@ -2673,5 +2928,141 @@ func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
 	}
 	if !strings.Contains(panelRow, "backdrop") {
 		t.Fatalf("overlaid row should keep backdrop margin text alongside the panel, got %q", panelRow)
+	}
+}
+
+// burstTestModel creates a model with fake provider, advancing clock (60ms/tick),
+// and empty composer for burst/paste testing. termuxVersion controls the env var.
+func burstTestModel(t *testing.T, termuxVersion string) model {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TERMUX_VERSION", termuxVersion)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ok"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          t.TempDir(),
+		ProviderName: "tokenrouter",
+		ModelName:    "MiniMax-M3",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+	})
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	tick := 0
+	m.now = func() time.Time {
+		tick++
+		return base.Add(time.Duration(tick) * 60 * time.Millisecond)
+	}
+	m.input.SetValue("")
+	m.width = 100
+	m.height = 30
+	return m
+}
+
+// typeKeys simulates rapid keypresses into the model, returning the final state.
+func typeKeys(m model, keys string) model {
+	for _, ch := range keys {
+		updated, _ := m.Update(testKeyText(string(ch)))
+		m = updated.(model)
+	}
+	return m
+}
+
+// TestTermuxBurstInsertsNewline: under Termux, 3+ rapid chars + Enter inserts newline.
+func TestTermuxBurstInsertsNewline(t *testing.T) {
+	m := burstTestModel(t, "v0.118.0")
+	m = typeKeys(m, "abc")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.pending {
+		t.Fatal("burst should insert newline, not submit")
+	}
+	if !strings.Contains(m.composerValue(), "\n") {
+		t.Fatalf("burst should insert newline into composer, got %q", m.composerValue())
+	}
+}
+
+// TestTermuxFastTypingSubmits: under Termux, 2 fast chars + Enter still submits.
+func TestTermuxFastTypingSubmits(t *testing.T) {
+	m := burstTestModel(t, "v0.118.0")
+	m = typeKeys(m, "ab")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("fast typing should be pending after submit")
+	}
+	if cmd == nil {
+		t.Fatal("fast typing should submit, got nil cmd")
+	}
+}
+
+// TestDesktopBurstNotAffected: on desktop (no TERMUX_VERSION), 3 fast chars + Enter submits.
+func TestDesktopBurstNotAffected(t *testing.T) {
+	m := burstTestModel(t, "")
+	m = typeKeys(m, "abc")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("desktop burst should be pending after submit")
+	}
+	if cmd == nil {
+		t.Fatal("desktop burst should submit, got nil cmd")
+	}
+}
+
+// TestBurstResetAfterSubmit: after submit, burstCount is reset so normal
+// typing (2 chars + Enter) still submits without false newline insertion.
+func TestBurstResetAfterSubmit(t *testing.T) {
+	m := burstTestModel(t, "v0.118.0")
+	// Type and submit normally
+	m = typeKeys(m, "hi")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("first submit should start a run")
+	}
+	// Process the agent response so the model is no longer pending
+	resp, _ := m.Update(execCmd(cmd))
+	m = resp.(model)
+	if m.pending {
+		t.Fatal("model should not be pending after agent response")
+	}
+
+	// Reset lastKeyTime so the burst tracker sees a clean gap before the
+	// second round of typing — avoids coupling to fake-clock progression.
+	m.lastKeyTime = time.Time{}
+
+	// After reset, 2 fast chars + Enter should still submit (burstCount < 3)
+	m = typeKeys(m, "ok")
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("after burst reset, fast typing should submit")
+	}
+	if cmd == nil {
+		t.Fatal("after burst reset, got nil cmd")
+	}
+}
+
+// TestMultilineBurstSubmits: with a \n already in the composer, a 2-char
+// burst + Enter on desktop should still submit (burstCount < 3), not
+// insert another newline.
+func TestMultilineBurstSubmits(t *testing.T) {
+	m := burstTestModel(t, "")
+	// Seed the composer with multiline text via applyComposerKey
+	m.composerActive = true
+	m.composer.text = "hello\nwor"
+	m.composer.cursor = len([]rune(m.composer.text))
+	m.input.SetValue(m.composer.text)
+
+	// Type "ld" fast (2 chars) then Enter
+	m = typeKeys(m, "ld")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if !m.pending {
+		t.Fatal("multiline burst should submit, not insert newline")
+	}
+	if cmd == nil {
+		t.Fatal("multiline burst got nil cmd")
 	}
 }

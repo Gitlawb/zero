@@ -340,6 +340,9 @@ func TestProviderSnapshotAPIKeySetCountsAuthHeaderValue(t *testing.T) {
 		{"auth header only", config.ProviderProfile{Name: "p", AuthHeaderValue: "Bearer t"}, true},
 		{"both", config.ProviderProfile{Name: "p", APIKey: "sk-x", AuthHeaderValue: "Bearer t"}, true},
 		{"neither", config.ProviderProfile{Name: "p"}, false},
+		// A key in the encrypted credential store is a configured credential even
+		// though the pure resolver leaves APIKey empty.
+		{"stored key marker", config.ProviderProfile{Name: "p", APIKeyStored: true}, true},
 		{"whitespace api key only", config.ProviderProfile{Name: "p", APIKey: "   "}, false},
 		{"whitespace auth header only", config.ProviderProfile{Name: "p", AuthHeaderValue: "   "}, false},
 	}

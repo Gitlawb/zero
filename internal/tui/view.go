@@ -195,14 +195,21 @@ func (m model) statusLine(width int) string {
 	// in its mode colour. This was previously only on the easy-to-miss composer
 	// rule; the persistent footer is where users look for "will it run commands?".
 	modeText, modeStyle := m.modeLabel()
-	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
+	btwChip := ""
+	if m.btw.active {
+		btwChip = zeroTheme.amber.Render("BTW") + zeroTheme.muted.Render(" · ")
+	}
+	left := prefix + btwChip + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
 
 	if tier == tierTiny {
 		if m.exitConfirmActive {
-			return fitStyledLine(prefix+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(ctrlCExitConfirmText), width)
+			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(ctrlCExitConfirmText), width)
 		}
 		if m.cancelConfirmActive {
-			return fitStyledLine(prefix+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
+			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
+		}
+		if dictation := m.dictationStatusChip(); dictation != "" {
+			return fitStyledLine(prefix+btwChip+dictation, width)
 		}
 		return fitStyledLine(left, width)
 	}
@@ -212,11 +219,23 @@ func (m model) statusLine(width int) string {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
 	}
 	if m.exitConfirmActive {
-		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
+		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {
-		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
-	} else if summary := m.backgroundTerminalSummary(); summary != "" {
-		left += separator + zeroTheme.muted.Render(summary)
+		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
+	} else if m.dictation.downloading && m.dictation.downloadStatus != "" {
+		// A model download in progress takes over the left chip with a live percentage.
+		left = prefix + btwChip + zeroTheme.accent.Render("⬇ ") + zeroTheme.muted.Render(m.dictation.downloadStatus)
+	} else if dictation := m.dictationStatusChip(); dictation != "" && m.dictation.active() {
+		// An active recording/transcription takes over the left chip — it is the
+		// most time-sensitive thing on screen (the mic is live).
+		left = prefix + btwChip + dictation
+	} else {
+		if voice := m.voiceModeIndicator(); voice != "" {
+			left += zeroTheme.muted.Render(" · ") + voice
+		}
+		if summary := m.backgroundTerminalSummary(); summary != "" {
+			left += separator + zeroTheme.muted.Render(summary)
+		}
 	}
 	// Active loops surface a persistent "↻ N loops · next 3:05pm" segment so a
 	// running loop is always visible (hidden during an exit/cancel confirm above).
@@ -447,10 +466,15 @@ func shortenPath(path string) string {
 // both regular checkouts (.git dir) and worktrees (.git file). Returns "" on any
 // problem — the header simply omits the segment.
 func gitBranch(cwd string) string {
-	if strings.TrimSpace(cwd) == "" {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
 		return ""
 	}
-	gitPath := filepath.Join(cwd, ".git")
+	gitRoot := agent.FindProjectGitRoot(cwd)
+	if gitRoot == "" {
+		return ""
+	}
+	gitPath := filepath.Join(gitRoot, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
 		return ""
@@ -465,6 +489,12 @@ func gitBranch(cwd string) string {
 		dir := strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir: ")
 		if dir == "" {
 			return ""
+		}
+		// In worktree mode the gitdir is often RELATIVE (e.g.
+		// "gitdir: ../.git/worktrees/<name>") — resolve it against the worktree root (gitRoot), not the
+		// process working directory, or HEAD lookup fails and we drop the branch.
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(gitRoot, dir)
 		}
 		headPath = filepath.Join(dir, "HEAD")
 	}
@@ -727,10 +757,12 @@ func (m model) pickerOverlay(width int) string {
 		visible = m.picker.items[start : start+maxVisible]
 	}
 
-	lines := make([]string, 0, len(visible)+5)
+	lines := make([]string, 0, len(visible)+7)
 	title := strings.TrimSpace(m.picker.title)
-	hint := "↑/↓ · ⏎ · esc"
-	lines = append(lines, zeroTheme.faint.Render(hint))
+	// A visible "search > …" line so typing to filter shows what you've typed,
+	// matching the /model picker. Followed by a separator, then the rows.
+	lines = append(lines, renderPickerSearchLine(m.picker.query, "type to filter…", innerWidth))
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	lastGroup := ""
 	for index, item := range visible {
 		absoluteIndex := start + index
@@ -766,8 +798,16 @@ func (m model) pickerOverlay(width int) string {
 		lines = append(lines, fitStyledLine(line, innerWidth))
 	}
 	if len(visible) == 0 {
-		lines = append(lines, zeroTheme.faint.Render("  no matching items"))
+		if m.picker.loading {
+			lines = append(lines, zeroTheme.faint.Render("Fetching available models…"))
+		} else {
+			lines = append(lines, zeroTheme.faint.Render("  no matching items"))
+		}
 	}
+	// Hints live in the footer (a separator + faint keys), matching the /model
+	// picker and the other bordered boxes.
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	lines = append(lines, zeroTheme.faint.Render("↑/↓ move   Enter select   Esc close"))
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 
@@ -884,11 +924,18 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 }
 
 func renderModelPickerSearchLine(query string, width int) string {
+	return renderPickerSearchLine(query, "model name...", width)
+}
+
+// renderPickerSearchLine renders the "search > <query>▌" input line shared by the
+// popup pickers, so what you type while filtering is always visible. placeholder
+// is the faint hint shown when the query is empty.
+func renderPickerSearchLine(query, placeholder string, width int) string {
 	query = strings.TrimSpace(query)
 	prompt := zeroTheme.userPrompt.Render("search > ")
 	cursor := zeroTheme.accent.Render("▌")
 	if query == "" {
-		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render(placeholder), width)
 	}
 	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
 }

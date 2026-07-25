@@ -3,23 +3,16 @@
 package background
 
 import (
-	"os"
 	"os/exec"
-	"strconv"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
-// ConfigureChildProcessGroup is a no-op on Windows: terminateProcess uses
-// `taskkill /T` to kill the whole process tree, so no launch-time process-group
+// ConfigureChildProcessGroup is a no-op on Windows: process-tree termination is
+// delegated to execution.TerminateProcessTree, so no launch-time process-group
 // setup is required (the POSIX build sets Setpgid here instead).
-func ConfigureChildProcessGroup(cmd *exec.Cmd) {}
+func ConfigureChildProcessGroup(cmd *exec.Cmd) { execution.ConfigureProcessGroup(cmd) }
 
 func terminateProcess(pid int) error {
-	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run(); err == nil {
-		return nil
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return process.Kill()
+	return execution.TerminateProcessTree(pid, 0, 0)
 }
