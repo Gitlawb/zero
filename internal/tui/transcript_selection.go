@@ -130,15 +130,6 @@ type transcriptBodyLayout struct {
 	spans      []transcriptBodyItemSpan
 }
 
-func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
-	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay, false))
-}
-
-func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
-	layout := m.transcriptBodyLayout(width, emptyOverlay)
-	return layout.String(), layout.selectable
-}
-
 func (l transcriptBodyLayout) String() string {
 	return strings.Join(l.lines, "\n")
 }
@@ -149,12 +140,6 @@ func (l transcriptBodyLayout) totalLines() int {
 		return last.startY + last.height
 	}
 	return len(l.lines)
-}
-
-func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []string {
-	start := clampInt(window.start, 0, len(l.lines))
-	end := clampInt(window.end, start, len(l.lines))
-	return append([]string(nil), l.lines[start:end]...)
 }
 
 // padTranscriptBodyLines left-indents transcript body rows when a non-zero
@@ -454,7 +439,7 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				rowIndex:          -1,
 				heightCacheStable: false, // the highlight changes with the cursor
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, perm.typing, m.input.Value(), width)
 					options := permissionOptions(perm.request)
 					selectable := make([]transcriptSelectableLine, 0, len(offsets))
 					for index, offset := range offsets {
@@ -793,10 +778,6 @@ func (m model) renderSelectableToolResultRowFn(rowIndex int, row transcriptRow, 
 	return rendered, selectable
 }
 
-func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
-}
-
 func (m model) renderSelectableRenderedRowFn(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int, renderFn rowRenderFn) (string, []transcriptSelectableLine) {
 	rendered := renderFn(row, width, rc)
 	if rendered == "" {
@@ -953,13 +934,6 @@ func (m model) renderSelectableSpecialistRowFn(rowIndex int, row transcriptRow, 
 		selectable[i] = sl
 	}
 	return rendered, selectable
-}
-
-// renderSelectableSpecialistRow renders a specialist card and marks every line
-// as a clickable specialistCard selectable line carrying the childSessionID.
-// A left-click or Enter on any card line drills into that specialist's subchat.
-func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableSpecialistRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -1332,21 +1306,6 @@ func (m model) stopEdgeScroll() model {
 	return m
 }
 
-func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
-}
-
-func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
-func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForBody(body, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {
 	lineEnd := line.textStart + lipgloss.Width(line.text)
 	return transcriptSelectionPoint{
@@ -1401,8 +1360,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
-		if line.permOption {
-			// A left-click on a permission-popup option resolves it directly.
+		if line.permOption && !(m.pendingPermission != nil && m.pendingPermission.typing) {
+			// A left-click on a permission-popup option resolves it directly. The
+			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
+			// returns nil offsets in feedback mode, so no option row is registered as
+			// clickable then — but that single early-return is the only thing keeping
+			// a stray click (Allow included) off the decision path, and it lives in a
+			// function other PRs also edit. Guarding here makes the safety explicit
+			// rather than emergent.
 			next, cmd := m.resolvePermission(line.permChoice)
 			return next.(model), cmd, true
 		}

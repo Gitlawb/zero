@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -26,6 +27,8 @@ type RegisterOptions struct {
 	// ConnectTimeout bounds the per-server connect+list at startup. Zero uses
 	// defaultConnectTimeout.
 	ConnectTimeout time.Duration
+	Execution      *execution.Runner
+	WorkspaceRoot  string
 }
 
 // SkippedServer records an MCP server that was not registered because it could
@@ -80,7 +83,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	factory := options.ClientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, server Server) (ToolClient, error) {
-			return Connect(ctx, server)
+			return ConnectWithOptions(ctx, server, ConnectOptions{Execution: options.Execution, WorkspaceRoot: options.WorkspaceRoot})
 		}
 	}
 

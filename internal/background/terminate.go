@@ -22,13 +22,36 @@ func TerminateProcess(pid int) error {
 	return terminateProcess(pid)
 }
 
-// TerminateCommand stops a started command's process tree/group and reaps the
-// leader. Keeping both operations together lets platform implementations signal
-// the tree before Wait can discard the leader identity needed to find it.
+// TerminateCommand stops a started command's process tree/group AND reaps the
+// leader, which TerminateProcess alone cannot do: a caller that still owns the
+// exec.Cmd must Wait for it, or the exited leader lingers as a zombie for the
+// lifetime of the parent. `zero daemon start` needs exactly this when readiness
+// times out — it launched the child, so it must both stop the tree and collect
+// the leader.
+//
+// The order matters: the tree is signalled first, because Wait releases the
+// leader's PID and a later group lookup could then resolve to nothing (or, worse,
+// to a recycled PID). Termination itself goes through terminateProcess, so this
+// package keeps ONE cross-platform kill path (execution.TerminateProcessTree)
+// rather than a second platform-specific killer beside it.
 func TerminateCommand(cmd *exec.Cmd) error {
-	return terminateCommand(cmd)
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("terminate command: process was never started")
+	}
+	terminateErr := terminateProcess(cmd.Process.Pid)
+	reapErr := waitForTerminatedCommandWithin(cmd, commandReapTimeout)
+	if terminateErr != nil {
+		if reapErr != nil {
+			return fmt.Errorf("%v (reap failed: %w)", terminateErr, reapErr)
+		}
+		return terminateErr
+	}
+	return reapErr
 }
 
+// classifyWaitError treats a non-zero exit status as success: a process being
+// terminated is expected to report one (or a signal), so the only interesting
+// failure is Wait itself not working.
 func classifyWaitError(waitErr error) error {
 	var exitErr *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitErr) {
@@ -37,6 +60,9 @@ func classifyWaitError(waitErr error) error {
 	return nil
 }
 
+// waitForTerminatedCommandWithin bounds the reap so a child that somehow survives
+// termination cannot hang the caller — the daemon-start cleanup path runs while a
+// user waits at the CLI.
 func waitForTerminatedCommandWithin(cmd *exec.Cmd, timeout time.Duration) error {
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()

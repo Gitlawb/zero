@@ -23,8 +23,6 @@ type Schedule struct {
 	expr    string
 }
 
-func (s Schedule) String() string { return s.expr }
-
 // full returns a bitset with every value in [min,max] set.
 func full(min, max int) uint64 {
 	var m uint64

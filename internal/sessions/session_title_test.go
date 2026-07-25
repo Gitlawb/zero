@@ -75,3 +75,33 @@ func TestUpdateTitle(t *testing.T) {
 		t.Fatal("expected an invalid session id to be rejected")
 	}
 }
+
+func TestUpdateModel(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{ModelID: "model-a"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "user"}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	before, err := store.Get(session.SessionID)
+	if err != nil || before == nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	updated, err := store.UpdateModel(session.SessionID, "  model-b  ")
+	if err != nil {
+		t.Fatalf("update model: %v", err)
+	}
+	if updated.ModelID != "model-b" {
+		t.Fatalf("model = %q, want model-b", updated.ModelID)
+	}
+	if updated.UpdatedAt != before.UpdatedAt || updated.EventCount != before.EventCount {
+		t.Fatalf("model update changed activity metadata: before=%+v after=%+v", before, updated)
+	}
+	persisted, err := store.Get(session.SessionID)
+	if err != nil || persisted == nil || persisted.ModelID != "model-b" {
+		t.Fatalf("persisted model: metadata=%+v err=%v", persisted, err)
+	}
+}

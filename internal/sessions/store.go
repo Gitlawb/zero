@@ -722,6 +722,33 @@ func (store *Store) UpdateTitle(sessionID string, title string) (Metadata, error
 	return session, nil
 }
 
+// UpdateModel replaces a session's selected model without changing its activity
+// timestamp or event counters. An empty model clears the session override.
+func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	modelID = strings.TrimSpace(modelID)
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.ModelID == modelID {
+		return session, nil
+	}
+	session.ModelID = modelID
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
 func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 	if !ValidSessionID(sessionID) {
 		return nil, fmt.Errorf("invalid zero session id %q", sessionID)

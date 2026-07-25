@@ -18,10 +18,6 @@ type stopParameters struct {
 	TaskID string
 }
 
-func NewStopTool(manager *background.Manager) *StopTool {
-	return &StopTool{manager: manager}
-}
-
 func newStopToolWithManagerFunc(managerFunc BackgroundManagerFunc) *StopTool {
 	return &StopTool{managerFunc: managerFunc}
 }

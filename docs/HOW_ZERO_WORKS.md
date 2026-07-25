@@ -749,7 +749,7 @@ flowchart TD
 - **Plugins** can add tools, hooks, and skill roots. Bootstrap always registers a
   multi-root skill tool: primary Zero skills dir, optional `~/.agents/skills`,
   then plugin skill roots (earlier wins). `internal/skills` owns that merge via
-  `LoadFromRoots` / `DiscoveryRoots`; single-root `Load` remains for install/write.
+  `LoadFromRoots`; single-root `Load` remains for install/write.
 - **Hooks** can observe or block tool lifecycle events.
 
 ## End-to-End Data Flow

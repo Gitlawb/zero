@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.5.0](https://github.com/Gitlawb/zero/compare/v0.4.0...v0.5.0) (2026-07-22)
+
+
+### Features
+
+* **plugins:** add zero plugins info command ([#773](https://github.com/Gitlawb/zero/issues/773)) ([2479884](https://github.com/Gitlawb/zero/commit/2479884dea49580c853a53536c3bbab22ce8a2bf))
+* **sandbox:** disable the sandbox via config ([#687](https://github.com/Gitlawb/zero/issues/687)) ([#746](https://github.com/Gitlawb/zero/issues/746)) ([a21a052](https://github.com/Gitlawb/zero/commit/a21a052a4a32ce9cb3c93c94350cd24e138532cd))
+* **sandbox:** unify command execution and enforcement ([#781](https://github.com/Gitlawb/zero/issues/781)) ([96859c9](https://github.com/Gitlawb/zero/commit/96859c9bd16f6dad4e332efc7e68178b9116118a))
+* **tui:** add /undo as an alias for /rewind ([#698](https://github.com/Gitlawb/zero/issues/698)) ([#747](https://github.com/Gitlawb/zero/issues/747)) ([8c6d302](https://github.com/Gitlawb/zero/commit/8c6d3022bd7801eaad6a0440bb21a27221887297))
+* **tui:** add isolated /btw conversations ([#748](https://github.com/Gitlawb/zero/issues/748)) ([2e267bd](https://github.com/Gitlawb/zero/commit/2e267bdbee4a77813e93a7ab51f0c575b66cee8c))
+* **tui:** permission prompt takes free-text feedback inline ([#780](https://github.com/Gitlawb/zero/issues/780)) ([3967d49](https://github.com/Gitlawb/zero/commit/3967d49d64998341af8ef6d7523fc63aeb2a5a7a))
+
+
+### Bug Fixes
+
+* **agent:** stop write_stdin session_id probing thrash ([#702](https://github.com/Gitlawb/zero/issues/702)) ([#749](https://github.com/Gitlawb/zero/issues/749)) ([fbf8598](https://github.com/Gitlawb/zero/commit/fbf85984f679058125951fe2d5e4f200e09a3e2f))
+* **cli:** warn when ZERO_PROVIDER overrides a providers-use selection ([#767](https://github.com/Gitlawb/zero/issues/767)) ([3524f79](https://github.com/Gitlawb/zero/commit/3524f795e5fdbb827166a84f03351cedfc9eba30))
+* **doctor:** detect missing native binary during runtime checks ([#450](https://github.com/Gitlawb/zero/issues/450)) ([7796022](https://github.com/Gitlawb/zero/commit/77960229b839dca856616f846839aa773f2923f7))
+* **lsp:** make the real-gopls check opt-in so a broken gopls can't fail the suite ([#684](https://github.com/Gitlawb/zero/issues/684)) ([#766](https://github.com/Gitlawb/zero/issues/766)) ([b1f4173](https://github.com/Gitlawb/zero/commit/b1f41735a7f6b7928a1875e986a4dca39d106cb9))
+* make extension installs transactional ([#762](https://github.com/Gitlawb/zero/issues/762)) ([baa4be1](https://github.com/Gitlawb/zero/commit/baa4be13ac5321da4e9f53e864dd1cd395481200))
+* **oauth:** refuse redirects on credential POSTs ([#729](https://github.com/Gitlawb/zero/issues/729)) ([#741](https://github.com/Gitlawb/zero/issues/741)) ([974fc03](https://github.com/Gitlawb/zero/commit/974fc036c2f9a194722f2e8fddbb4fdbf797effe))
+* **oauth:** validate discovered endpoints before merge/use ([#511](https://github.com/Gitlawb/zero/issues/511)) ([#739](https://github.com/Gitlawb/zero/issues/739)) ([ce4a996](https://github.com/Gitlawb/zero/commit/ce4a996ffac4482e704f0fd61b3e442398fb2401))
+* **perfbench:** absolutize the bench binary and make errored tasks first-class ([#730](https://github.com/Gitlawb/zero/issues/730)) ([dbd9443](https://github.com/Gitlawb/zero/commit/dbd94430143df6754d68551d1028ad8f15b82f1b))
+* **perfbench:** grant write tools so mutating tasks measure real edits ([#763](https://github.com/Gitlawb/zero/issues/763)) ([e1975c1](https://github.com/Gitlawb/zero/commit/e1975c1b396b3236ed648870230b4f85863b1d03))
+* **perfbench:** keep the stamped answer file out of negative oracle greps ([#737](https://github.com/Gitlawb/zero/issues/737)) ([015452c](https://github.com/Gitlawb/zero/commit/015452c1c98a39eabb021324182094e188a8bd47))
+* **providers:** stop "provider not found" for env-derived profiles ([#716](https://github.com/Gitlawb/zero/issues/716)) ([4cbd144](https://github.com/Gitlawb/zero/commit/4cbd144d11e5cb67bc5fea46f5b294562dac7a1a))
+* **sandbox:** AST second opinion for interactive-command bypasses ([#473](https://github.com/Gitlawb/zero/issues/473)) ([#745](https://github.com/Gitlawb/zero/issues/745)) ([f079b90](https://github.com/Gitlawb/zero/commit/f079b90f82dac7b7ae0864b279dc9094e31a6627))
+* **sandbox:** bind Windows elevated ACL setup to one no-follow handle ([#765](https://github.com/Gitlawb/zero/issues/765)) ([4945684](https://github.com/Gitlawb/zero/commit/4945684fa26aa5994eda59dcabedc817423c535d))
+* **sandbox:** don't auto-allow shell when re-entrancy skips wrapping ([#727](https://github.com/Gitlawb/zero/issues/727)) ([#744](https://github.com/Gitlawb/zero/issues/744)) ([6849011](https://github.com/Gitlawb/zero/commit/684901165d1b7f50a8bb4af31b1c1951e6926a79))
+* **tools:** give write_stdin's invalid-session errors the same recovery guidance ([#749](https://github.com/Gitlawb/zero/issues/749) follow-up) ([#768](https://github.com/Gitlawb/zero/issues/768)) ([da9fb50](https://github.com/Gitlawb/zero/commit/da9fb50f549f6701eb136fc99f6178d0772d9334))
+* **tools:** read_file recovers a backwards line range instead of erroring ([#779](https://github.com/Gitlawb/zero/issues/779)) ([89bdc67](https://github.com/Gitlawb/zero/commit/89bdc6719a1e1b3a3ef0e36b91a7839b3efdfba9))
+* **tui:** cache settled alt-screen transcript ([#647](https://github.com/Gitlawb/zero/issues/647)) ([d74ceb1](https://github.com/Gitlawb/zero/commit/d74ceb11271ed68a21c19248210e098f411805fb))
+* **tui:** model rows labelled by id when the description is prose; keep the sidebar under the / palette ([#775](https://github.com/Gitlawb/zero/issues/775)) ([b30c397](https://github.com/Gitlawb/zero/commit/b30c3971b40b06ba52ad649ba9dc0ad560d4be4c))
+* **tui:** stop the permission card clashing on cool themes ([#778](https://github.com/Gitlawb/zero/issues/778)) ([722bb31](https://github.com/Gitlawb/zero/commit/722bb3121682d9cd9cd4bc6c127e9014d719262a))
+
+
+### Performance Improvements
+
+* **agent:** concurrent read-only tool batches via capability gate ([#715](https://github.com/Gitlawb/zero/issues/715)) ([31d45d5](https://github.com/Gitlawb/zero/commit/31d45d5f14e915acb9946e8b8eb81632c48f126a))
+* **agent:** execution profiles with one-shot posture escalation (PR10b+PR10c) ([#740](https://github.com/Gitlawb/zero/issues/740)) ([378d538](https://github.com/Gitlawb/zero/commit/378d538e240c289e57821e9f9628f76034419d01))
+* **agent:** posture-escalation signals and controller (PR10a) ([#736](https://github.com/Gitlawb/zero/issues/736)) ([af875df](https://github.com/Gitlawb/zero/commit/af875df58775484304fc65586bd6c74552ad01a2))
+* **agent:** preserve prompt cache prefixes ([#760](https://github.com/Gitlawb/zero/issues/760)) ([739a47e](https://github.com/Gitlawb/zero/commit/739a47e3eac92c3decc8734f52a4d99c7480c3ca))
+* **openai:** optimized turn session — background prewarm and prefix telemetry (PR8) ([#723](https://github.com/Gitlawb/zero/issues/723)) ([60dc84e](https://github.com/Gitlawb/zero/commit/60dc84e7a38c5544ebc047f3cfaf4625dd1e83b5))
+* **output:** add token-aware semantic output budgeting (PR11) ([#717](https://github.com/Gitlawb/zero/issues/717)) ([e5670c4](https://github.com/Gitlawb/zero/commit/e5670c427ff39c628fb0822fd5c9317ee2174583))
+* **providers:** provider capabilities and default turn-session adapter (PR7) ([#720](https://github.com/Gitlawb/zero/issues/720)) ([30e2c3f](https://github.com/Gitlawb/zero/commit/30e2c3f7ffa1d5e487bd10b59d4e823cda191d48))
+* **turn-bench:** Phase 0 — strengthen oracles so pass rate can't be misread as correctness ([#712](https://github.com/Gitlawb/zero/issues/712)) ([727ad4d](https://github.com/Gitlawb/zero/commit/727ad4d321fab45d0cf40f8535522e3d94e55c4a))
+
 ## [0.4.0](https://github.com/Gitlawb/zero/compare/v0.3.0...v0.4.0) (2026-07-17)
 
 

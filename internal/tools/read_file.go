@@ -106,8 +106,18 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 	if endLine == 0 || endLine > total {
 		endLine = total
 	}
+	// A backwards range (end_line < start_line) is a caller slip, not a fatal
+	// error. Recover the way an end_line past EOF is already recovered a few lines
+	// up (clamped down to the last line): clamp end_line UP to start_line and read
+	// just that one line. Erroring here instead cost the caller a whole retry for
+	// an off-by-arithmetic mistake, and it was inconsistent — start_line past EOF
+	// and end_line past EOF both recover gracefully; only this case hard-failed.
+	// The recovery is surfaced in the output (rangeNote) so it is never silent: the
+	// caller sees it read a different range than it asked for and why.
+	rangeNote := ""
 	if endLine < startLine {
-		return errorResult("Error: Invalid arguments for read_file: end_line must be greater than or equal to start_line")
+		rangeNote = fmt.Sprintf("(note: end_line %d was before start_line %d, so only line %d was read — pass end_line >= start_line to read a wider range)", endLine, startLine, startLine)
+		endLine = startLine
 	}
 
 	truncated := false
@@ -135,7 +145,12 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 		budgetedOutput = newHeadTailOutputBudgetBuilder(readOutputBudgetBytes, "use start_line/end_line or max_lines to continue with a smaller range")
 	}
 	budgetedOutput.WriteString(header)
-	budgetedOutput.WriteString("\n\n")
+	budgetedOutput.WriteString("\n")
+	if rangeNote != "" {
+		budgetedOutput.WriteString(rangeNote)
+		budgetedOutput.WriteString("\n")
+	}
+	budgetedOutput.WriteString("\n")
 	if err := appendReadFileRange(budgetedOutput, absolutePath, startLine, selectedLines, width); err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}

@@ -2,6 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -62,6 +66,10 @@ type CommandPlan struct {
 	// cleanup releases resources tied to the plan's lifetime. It is never
 	// serialized; callers invoke it via Cleanup() once the command has finished.
 	cleanup func()
+	// executionReportPath is an adapter-owned side channel outside the
+	// workspace. It carries structured policy facts; command output is never
+	// parsed as the control protocol.
+	executionReportPath string
 }
 
 // Cleanup releases any resources the plan holds. It is safe to call on a zero
@@ -70,6 +78,26 @@ func (plan CommandPlan) Cleanup() {
 	if plan.cleanup != nil {
 		plan.cleanup()
 	}
+}
+
+// ExecutionReport reads the structured platform-adapter report for a finished
+// command. A command with no adapter report returns an empty report.
+func (plan CommandPlan) ExecutionReport() (execution.AdapterReport, error) {
+	if strings.TrimSpace(plan.executionReportPath) == "" {
+		return execution.AdapterReport{}, nil
+	}
+	data, err := os.ReadFile(plan.executionReportPath)
+	if os.IsNotExist(err) {
+		return execution.AdapterReport{}, nil
+	}
+	if err != nil {
+		return execution.AdapterReport{}, fmt.Errorf("read sandbox execution report: %w", err)
+	}
+	var report execution.AdapterReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return execution.AdapterReport{}, fmt.Errorf("decode sandbox execution report: %w", err)
+	}
+	return report, nil
 }
 
 func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*exec.Cmd, CommandPlan, error) {
@@ -86,26 +114,33 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	return command, plan, nil
 }
 
-// writeRoots returns the full ordered write-root list for command plans:
-// the workspace root plus any granted extra roots. The single-root fallback
-// only applies to engines built without a workspace root (NewEngine always
-// builds a scope otherwise); it is kept as defense in depth.
-func (engine *Engine) writeRoots(workspaceRoot string) []string {
-	var roots []string
-	if engine.scope != nil {
-		roots = engine.scope.Roots()
-	} else {
-		roots = []string{workspaceRoot}
+// PrepareExecution adapts the platform-neutral execution interface to the
+// sandbox engine. Callers never need to construct native sandbox commands or
+// interpret adapter reports themselves.
+func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Request) (execution.PreparedCommand, error) {
+	if err := request.Validate(); err != nil {
+		return execution.PreparedCommand{}, err
 	}
-	// Reflect the policy's AllowWrite roots in the OS backend write binds so a
-	// sandboxed shell command may write where the policy grants writes. DenyWrite
-	// is enforced at the policy gate, and on sandbox-exec additionally as an
-	// explicit deny rule (see sandboxExecProfile).
-	policy := engine.effectivePolicy(engine.policy)
-	if extra := resolveWriteRootPaths(policy.AllowWrite); len(extra) > 0 {
-		roots = dedupeStrings(append(roots, extra...))
+	command, plan, err := engine.CommandContext(ctx, CommandSpec{
+		Name: request.Command.Name,
+		Args: append([]string(nil), request.Command.Args...),
+		Dir:  request.WorkingDirectory,
+		Env:  append([]string(nil), request.Command.Env...),
+	})
+	if err != nil {
+		return execution.PreparedCommand{}, err
 	}
-	return roots
+	return execution.PreparedCommand{
+		Command: command,
+		Enforcement: execution.Enforcement{
+			Backend:         string(plan.TargetBackend),
+			Level:           string(plan.EnforcementLevel),
+			Degraded:        plan.EnforcementLevel == EnforcementDegraded,
+			DowngradeReason: plan.DowngradeReason,
+		},
+		Report:  plan.ExecutionReport,
+		Cleanup: plan.Cleanup,
+	}, nil
 }
 
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
@@ -144,11 +179,20 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		preference = SandboxPreferenceForbid
 	}
 	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	var runtimeCleanup func()
+	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
+		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
+		if runtimeErr != nil {
+			return CommandPlan{}, runtimeErr
+		}
+		runtimeCleanup = cleanup
+		profile = permissionProfileWithRuntime(profile, runtimeState)
+	}
 	manager := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    backend.Platform,
 		Backend: backend,
 	})
-	return manager.BuildCommandPlan(SandboxManagerRequest{
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     workspaceRoot,
 		Command:           spec,
 		Policy:            policy,
@@ -157,6 +201,14 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		Preference:        preference,
 		ValidateExecution: true,
 	})
+	if err != nil {
+		if runtimeCleanup != nil {
+			runtimeCleanup()
+		}
+		return CommandPlan{}, err
+	}
+	plan.cleanup = combineSandboxCleanups(plan.cleanup, runtimeCleanup)
+	return plan, nil
 }
 
 func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {
@@ -201,36 +253,54 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 		helper = resolved
 	}
 	command := append([]string{spec.Name}, spec.Args...)
+	reportPath, err := newLinuxExecutionReportPath()
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  execRequest.WorkspaceRoot,
 		CommandCWD:        spec.Dir,
 		PermissionProfile: execRequest.PermissionProfile,
 		BlockUnixSockets:  policy.BlockUnixSockets,
+		PolicyReportPath:  reportPath,
 		Command:           command,
 	})
 	if err != nil {
 		return CommandPlan{}, err
 	}
 	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, BackendLinuxBwrap, "", spec.sensitiveEnvKeys)
+	env = sandboxRuntimeEnvironment(env, execRequest.PermissionProfile.Runtime)
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
 	}
 	plan := CommandPlan{
-		Backend:           execRequest.Backend,
-		TargetBackend:     execRequest.TargetBackend,
-		WorkspaceRoot:     execRequest.WorkspaceRoot,
-		Policy:            policy,
-		Wrapped:           true,
-		SandboxEnvMarkers: execRequest.SandboxEnvMarkers,
-		EnforcementLevel:  execRequest.EnforcementLevel,
-		Name:              helper.Name,
-		Args:              append(append([]string{}, helper.ArgsPrefix...), args...),
-		Dir:               planDir,
-		Env:               env,
-		SandboxDir:        spec.Dir,
+		Backend:             execRequest.Backend,
+		TargetBackend:       execRequest.TargetBackend,
+		WorkspaceRoot:       execRequest.WorkspaceRoot,
+		Policy:              policy,
+		Wrapped:             true,
+		SandboxEnvMarkers:   execRequest.SandboxEnvMarkers,
+		EnforcementLevel:    execRequest.EnforcementLevel,
+		Name:                helper.Name,
+		Args:                append(append([]string{}, helper.ArgsPrefix...), args...),
+		Dir:                 planDir,
+		Env:                 env,
+		SandboxDir:          spec.Dir,
+		executionReportPath: reportPath,
+		cleanup: func() {
+			_ = os.Remove(reportPath)
+		},
 	}
 	return withSandboxExecutionMetadata(plan, execRequest), nil
+}
+
+func newLinuxExecutionReportPath() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate sandbox execution report path: %w", err)
+	}
+	return filepath.Join("/tmp", "zero-sandbox-report-"+hex.EncodeToString(token[:])+".json"), nil
 }
 
 func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequest) CommandPlan {
@@ -340,6 +410,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 		envBackend = BackendMacOSSeatbelt
 	}
 	env := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, envBackend, "", spec.sensitiveEnvKeys)
+	env = sandboxRuntimeEnvironment(env, profile.Runtime)
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -358,43 +429,6 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	// monitor matches exactly this run's denials.
 	plan.MonitorTag = denialTag
 	return plan
-}
-
-func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
-	fs := FileSystemPolicy{
-		Kind:                 FileSystemUnrestricted,
-		ReadRoots:            []string{string(filepath.Separator)},
-		IncludePlatformRoots: true,
-		AllowTemp:            true,
-	}
-	if policy.EnforceWorkspace {
-		fs.Kind = FileSystemRestricted
-		fs.WriteRoots = make([]WritableRoot, 0, len(writeRoots))
-		for _, root := range writeRoots {
-			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
-		}
-	}
-	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...))
-	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
-	return PermissionProfile{
-		FileSystem: fs,
-		Network:    NetworkPolicy{Mode: policy.Network},
-	}
-}
-
-func existingBubblewrapMounts() []string {
-	candidates := []string{"/bin", "/usr", "/lib", "/lib64", "/sbin", "/etc"}
-	mounts := []string{}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			mounts = append(mounts, candidate)
-		}
-	}
-	return mounts
-}
-
-func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend, workspaceRoot)
 }
 
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
@@ -580,10 +614,6 @@ func sandboxMachLookupRule() string {
 		filters = append(filters, `(global-name "`+sandboxProfileString(service)+`")`)
 	}
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
-}
-
-func sandboxExecProfile(writeRoots []string, policy Policy, denialTag string) string {
-	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, denialTag)
 }
 
 func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, denialTag string) string {
@@ -789,13 +819,6 @@ func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
 	return out
 }
 
-// denyWriteRules returns seatbelt deny clauses for the policy's resolved
-// DenyWrite paths: a (subpath ...) clause for a directory, a (literal ...) clause
-// for a single file. Empty when DenyWrite is unset.
-func denyWriteRules(policy Policy) []string {
-	return denyWriteRulesFromPaths(resolvePolicyPaths(policy.DenyWrite))
-}
-
 func denyWriteRulesFromPaths(paths []string) []string {
 	return denySeatbeltPathRules("file-write*", paths)
 }
@@ -823,16 +846,14 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 	return out
 }
 
-// networkRuleFor returns the seatbelt network clause for a policy.
-func networkRuleFor(policy Policy) string {
-	return networkRuleForProfile(NetworkPolicy{Mode: policy.Network})
-}
-
 func networkRuleForProfile(network NetworkPolicy) string {
 	switch network.Mode {
 	case NetworkAllow:
 		return "(allow network*)"
 	default:
+		// Seatbelt has no private network namespace. Its localhost filters can
+		// reach services on the host and host interfaces, so the restricted
+		// profile must deny the entire network surface.
 		return "(deny network*)"
 	}
 }

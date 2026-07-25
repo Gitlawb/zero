@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -95,6 +96,11 @@ type Result struct {
 	Truncated       bool
 	Meta            map[string]string
 	SandboxDecision *sandbox.Decision `json:"-"`
+	// ExecutionRequest and ExecutionOutcome are the typed command protocol used
+	// by command-oriented tools. Legacy Output and Meta fields remain populated
+	// while callers migrate away from parsing text and string metadata.
+	ExecutionRequest *execution.Request `json:"-"`
+	ExecutionOutcome *execution.Outcome `json:"-"`
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
@@ -102,6 +108,10 @@ type Result struct {
 	// entries under a granted extra write root are absolute, since
 	// workspace-relative would be ambiguous there.
 	ChangedFiles []string
+	// ChangeSummaries contains bounded generated-tree changes. These are shown
+	// in session evidence and the Files panel but are never treated as files to
+	// open or diagnose individually.
+	ChangeSummaries []execution.Change
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
 }

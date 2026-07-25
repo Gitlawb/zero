@@ -250,13 +250,6 @@ func (m model) handleSTTModelSelection(value string) (model, string) {
 	return m.openSTTKeyPrompt(provider, value, hasKey), ""
 }
 
-// newSTTDownloadPicker builds the model-download chooser, seeded with the
-// curated shortlist. The full model list from the release is fetched
-// asynchronously and merged in (see fetchSTTModelsCmd / handleSTTModelsFetched).
-func (m model) newSTTDownloadPicker() *commandPicker {
-	return newSTTDownloadPickerFrom(dictation.ModelVariants(), true, m.dictation.downloadRoot, m.engineDownloaded(), m.dictation.cfg.LocalModelPath)
-}
-
 // engineDownloaded reports whether the shared engine is already on disk.
 func (m model) engineDownloaded() bool {
 	return dictation.EngineDownloaded(m.dictation.downloadRoot, m.dictation.cfg.EngineVersion)

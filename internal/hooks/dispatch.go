@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // defaultHookTimeout bounds a single hook command so a hung or slow hook cannot
@@ -51,13 +53,14 @@ type commandRunner func(ctx context.Context, command string, args []string, stdi
 
 // DispatcherOptions configures a Dispatcher.
 type DispatcherOptions struct {
-	Config  Config
-	Audit   *AuditStore   // optional; when set, every run is recorded
-	Cwd     string        // working directory for hook commands
-	Env     []string      // extra environment entries appended to the process env
-	Timeout time.Duration // per-command timeout (defaults to defaultHookTimeout)
-	now     func() time.Time
-	run     commandRunner
+	Config    Config
+	Audit     *AuditStore       // optional; when set, every run is recorded
+	Cwd       string            // working directory for hook commands
+	Env       []string          // extra environment entries appended to the process env
+	Timeout   time.Duration     // per-command timeout (defaults to defaultHookTimeout)
+	Execution *execution.Runner // routes hook subprocesses through sandbox policy
+	now       func() time.Time
+	run       commandRunner
 }
 
 // Dispatcher selects and runs the hooks configured for a lifecycle event,
@@ -87,7 +90,11 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 	}
 	run := options.run
 	if run == nil {
-		run = execCommandRunner
+		if options.Execution != nil {
+			run = executionCommandRunner(options.Execution)
+		} else {
+			run = execCommandRunner
+		}
 	}
 	return &Dispatcher{
 		config:  options.Config,
@@ -97,6 +104,42 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 		timeout: timeout,
 		now:     now,
 		run:     run,
+	}
+}
+
+func executionCommandRunner(runner *execution.Runner) commandRunner {
+	return func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+		result := runner.ExecuteCaptured(ctx, execution.CapturedRequest{
+			Request: execution.Request{
+				Origin:           execution.OriginHook,
+				Mode:             execution.ModeCaptured,
+				Command:          execution.Command{Name: command, Args: append([]string(nil), args...), Env: append([]string(nil), env...)},
+				WorkingDirectory: cwd,
+				WorkspaceRoots:   []string{cwd},
+				Approval:         execution.ApprovalContext{PolicyVersion: execution.PolicyVersion},
+			},
+			Stdin: stdin,
+		})
+		exitCode := -1
+		if result.Outcome.Exit != nil {
+			exitCode = result.Outcome.Exit.Code
+		}
+		stderr := result.Stderr
+		if stderr == "" && result.Outcome.Denial != nil {
+			stderr = result.Outcome.Denial.Reason
+		}
+		commandErr := error(nil)
+		switch result.Outcome.Kind {
+		case execution.OutcomeSandboxSetupFailure, execution.OutcomeExecutableNotFound:
+			commandErr = result.Err
+		}
+		return commandResult{
+			ExitCode: exitCode,
+			Stdout:   result.Stdout,
+			Stderr:   stderr,
+			Err:      commandErr,
+			TimedOut: result.Outcome.Kind == execution.OutcomeTimedOut,
+		}
 	}
 }
 
