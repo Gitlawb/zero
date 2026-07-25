@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,10 +113,130 @@ func TestGrantStoreSerializesWritesAcrossStores(t *testing.T) {
 	}
 }
 
-func TestGrantStoreReadsV1GrantFile(t *testing.T) {
+// TestGrantStoreSerializesMigrationNoticeAcrossStores covers the other
+// read-modify-write on the state file: clearing the pending flag. Two frontends
+// starting at once must not both read it as pending and clobber each other.
+func TestGrantStoreSerializesMigrationNoticeAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	if err := writeText(path, `{"schemaVersion":1,"grants":{"write_file":{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}}}`); err != nil {
+		t.Fatalf("write v1 grants: %v", err)
+	}
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+	// Migrate first, so the notice is pending and the lock contention below is
+	// about consuming it rather than about the migration write.
+	if _, err := storeA.List(); err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		notice, err := storeB.ConsumeMigrationNotice()
+		if err == nil && notice == "" {
+			err = errors.New("expected the pending migration notice")
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("ConsumeMigrationNotice completed while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: storeB is waiting for storeA to release the lock.
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ConsumeMigrationNotice after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConsumeMigrationNotice did not complete after file lock release")
+	}
+	// The flag write landed, so the notice is not reported twice.
+	if again, err := storeA.ConsumeMigrationNotice(); err != nil || again != "" {
+		t.Fatalf("second ConsumeMigrationNotice = %q err=%v, want empty", again, err)
+	}
+}
+
+// TestGrantStoreMigrationTakesTheFileLock covers the migrations that write
+// through readState: a legacy file must not be rewritten (nor its backup written)
+// while another process holds the lock, or two processes could both migrate and
+// one would clobber the other's result.
+func TestGrantStoreMigrationTakesTheFileLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":1,"grants":{"write_file":{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatalf("write v1 grants: %v", err)
+	}
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := storeB.List()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("the migration ran while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		if raw, err := os.ReadFile(path); err != nil {
+			unlock()
+			t.Fatalf("ReadFile grants: %v", err)
+		} else if string(raw) != original {
+			unlock()
+			t.Fatalf("the grant file was rewritten while the lock was held:\n%s", raw)
+		}
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("List after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the migration did not complete after file lock release")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile migrated grants: %v", err)
+	}
+	if !strings.Contains(string(raw), `"schemaVersion": 3`) {
+		t.Fatalf("grant file was not migrated after the lock was released:\n%s", raw)
+	}
+}
+
+func TestGrantStoreMigratesExactV1GrantAndReportsOnce(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "sandbox-grants.json")
-	if err := writeText(path, `{"schemaVersion":1,"grants":{"bash":{"toolName":"bash","decision":"allow","approvedAt":"2026-06-05T14:30:00Z","reason":"legacy"}}}`); err != nil {
+	original := `{"schemaVersion":1,"grants":{"write_file":{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z","reason":"legacy"}}}`
+	if err := writeText(path, original); err != nil {
 		t.Fatalf("write v1 grants: %v", err)
 	}
 	store, err := NewGrantStore(StoreOptions{FilePath: path, Now: fixedSandboxTime("2026-06-05T15:00:00Z")})
@@ -127,19 +248,80 @@ func TestGrantStoreReadsV1GrantFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List v1 grants returned error: %v", err)
 	}
-	if len(grants) != 1 || grants[0].ToolName != "bash" || grants[0].Decision != GrantAllow || grants[0].Reason != "legacy" {
+	if len(grants) != 1 || grants[0].ToolName != "write_file" || grants[0].Decision != GrantAllow || grants[0].Reason != "legacy" {
 		t.Fatalf("unexpected v1 grants: %#v", grants)
 	}
-
-	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow}); err != nil {
-		t.Fatalf("Grant after v1 read returned error: %v", err)
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil || !strings.Contains(notice, "migrated 1, invalidated 0") {
+		t.Fatalf("migration notice = %q err=%v", notice, err)
+	}
+	if again, err := store.ConsumeMigrationNotice(); err != nil || again != "" {
+		t.Fatalf("second migration notice = %q err=%v, want empty", again, err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read rewritten grant file: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schemaVersion": 2`) || !strings.Contains(string(raw), `"bash": [`) {
-		t.Fatalf("grant file was not rewritten as v2 buckets:\n%s", raw)
+	if !strings.Contains(string(raw), `"schemaVersion": 3`) || !strings.Contains(string(raw), `"policyVersion": 1`) || !strings.Contains(string(raw), `"write_file": [`) {
+		t.Fatalf("grant file was not rewritten as a versioned grant store:\n%s", raw)
+	}
+	backup, err := os.ReadFile(path + ".v1.backup")
+	if err != nil || string(backup) != original {
+		t.Fatalf("migration backup = %q err=%v, want original", backup, err)
+	}
+}
+
+func TestGrantStoreInvalidatesLegacyShellAllowButKeepsSafePrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":2,"grants":{"exec_command":[{"toolName":"exec_command","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}]},"commandPrefixes":{"exec_command":[{"toolName":"exec_command","prefix":["git","status"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := store.List()
+	if err != nil || len(grants) != 0 {
+		t.Fatalf("legacy shell allows = %#v err=%v, want invalidated", grants, err)
+	}
+	prefixes, err := store.ListCommandPrefixes()
+	if err != nil || len(prefixes) != 1 || !sameStringSlice(prefixes[0].Prefix, []string{"git", "status"}) {
+		t.Fatalf("migrated prefixes = %#v err=%v", prefixes, err)
+	}
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil || !strings.Contains(notice, "migrated 1, invalidated 1") {
+		t.Fatalf("notice = %q err=%v", notice, err)
+	}
+	backup, err := os.ReadFile(path + ".v2.backup")
+	if err != nil || string(backup) != original {
+		t.Fatalf("backup = %q err=%v", backup, err)
+	}
+}
+
+func TestGrantStorePolicyChangePreservesDeniesAndInvalidatesApprovals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":3,"policyVersion":0,"grants":{"write_file":[{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}],"bash":[{"toolName":"bash","decision":"deny","approvedAt":"2026-06-05T14:30:00Z"}]},"commandPrefixes":{"exec_command":[{"toolName":"exec_command","prefix":["git","status"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := store.List()
+	if err != nil || len(grants) != 1 || grants[0].Decision != GrantDeny {
+		t.Fatalf("migrated policy grants = %#v err=%v, want deny only", grants, err)
+	}
+	if prefixes, err := store.ListCommandPrefixes(); err != nil || len(prefixes) != 0 {
+		t.Fatalf("changed-policy prefixes = %#v err=%v, want invalidated", prefixes, err)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "migrated 1, invalidated 2") {
+		t.Fatalf("notice = %q err=%v", notice, err)
+	}
+	backup, err := os.ReadFile(path + ".policy-v0.backup")
+	if err != nil || string(backup) != original {
+		t.Fatalf("policy backup = %q err=%v", backup, err)
 	}
 }
 
@@ -249,7 +431,7 @@ func TestGrantStoreRejectsUnsafeInputsAndMalformedFiles(t *testing.T) {
 	}
 }
 
-func TestGrantStoreRejectsUnsafeStoredCommandPrefix(t *testing.T) {
+func TestGrantStoreInvalidatesUnsafeLegacyCommandPrefix(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "sandbox-grants.json")
 	if err := writeText(path, `{"schemaVersion":2,"grants":{},"commandPrefixes":{"bash":[{"toolName":"bash","prefix":["find"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`); err != nil {
@@ -259,8 +441,37 @@ func TestGrantStoreRejectsUnsafeStoredCommandPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
-	if _, err := store.ListCommandPrefixes(); err == nil || !strings.Contains(err.Error(), "invalid command prefix") {
-		t.Fatalf("expected invalid command prefix error, got %v", err)
+	if prefixes, err := store.ListCommandPrefixes(); err != nil || len(prefixes) != 0 {
+		t.Fatalf("unsafe legacy prefixes = %#v err=%v, want invalidated", prefixes, err)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "invalidated 1") {
+		t.Fatalf("migration notice = %q err=%v", notice, err)
+	}
+}
+
+func TestGrantStoreInvalidatesMalformedLegacyToolKeys(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sandbox-grants.json")
+	original := `{"schemaVersion":2,"grants":{"../escape":[{"toolName":"../escape","decision":"deny","approvedAt":"2026-06-05T14:30:00Z"}]},"commandPrefixes":{"bad name":[{"toolName":"bad name","prefix":["git","status"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grants, err := store.List(); err != nil || len(grants) != 0 {
+		t.Fatalf("malformed legacy grants = %#v err=%v, want invalidated", grants, err)
+	}
+	if prefixes, err := store.ListCommandPrefixes(); err != nil || len(prefixes) != 0 {
+		t.Fatalf("malformed legacy prefixes = %#v err=%v, want invalidated", prefixes, err)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "invalidated 2") {
+		t.Fatalf("migration notice = %q err=%v", notice, err)
+	}
+	backup, err := os.ReadFile(path + ".v2.backup")
+	if err != nil || string(backup) != original {
+		t.Fatalf("backup = %q err=%v, want original", backup, err)
 	}
 }
 

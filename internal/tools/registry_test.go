@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func tempDirOutsideDefaultTemp(t *testing.T) string {
 }
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
-	toolset := CoreReadOnlyTools(t.TempDir())
+	toolset := CoreReadOnlyToolsScoped(t.TempDir(), nil)
 	if len(toolset) != 9 {
 		t.Fatalf("expected 9 core read-only tools, got %d", len(toolset))
 	}
@@ -69,6 +70,23 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 	if !seen[RequestPermissionsToolName] {
 		t.Fatalf("expected %s in core read-only tools", RequestPermissionsToolName)
+	}
+}
+
+func TestRegistryAllReturnsToolsSortedByName(t *testing.T) {
+	registry := NewRegistry()
+	for _, name := range []string{"write_file", "bash", "read_file"} {
+		registry.Register(fakePlainTool{baseTool: baseTool{name: name, description: name}})
+	}
+
+	all := registry.All()
+	got := make([]string, 0, len(all))
+	for _, tool := range all {
+		got = append(got, tool.Name())
+	}
+	want := []string{"bash", "read_file", "write_file"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Registry.All() order = %v, want %v", got, want)
 	}
 }
 
@@ -126,7 +144,7 @@ func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
 }
 
 func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
-	readOnly := CoreReadOnlyTools(t.TempDir())
+	readOnly := CoreReadOnlyToolsScoped(t.TempDir(), nil)
 	for _, tool := range readOnly {
 		if tool.Name() == "web_fetch" {
 			t.Fatal("web_fetch should not be exposed by read-only core tools")
@@ -134,7 +152,7 @@ func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
 	}
 
 	found := false
-	for _, tool := range CoreTools(t.TempDir()) {
+	for _, tool := range CoreToolsScoped(t.TempDir(), nil) {
 		if tool.Name() == "web_fetch" {
 			found = true
 			break
@@ -147,7 +165,7 @@ func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
 
 func TestRegistryRunsToolsThroughSafePath(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(NewReadFileTool(t.TempDir()))
+	registry.Register(NewScopedReadFileTool(t.TempDir(), nil))
 
 	result := registry.Run(context.Background(), "read_file", map[string]any{
 		"path": "missing.txt",
@@ -211,7 +229,7 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
@@ -244,7 +262,7 @@ func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
 		root := t.TempDir()
 		outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 		registry := NewRegistry()
-		registry.Register(NewWriteFileTool(root))
+		registry.Register(NewScopedWriteFileTool(root, nil))
 		engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy()})
 
 		result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
@@ -284,7 +302,7 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),

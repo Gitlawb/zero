@@ -69,13 +69,6 @@ func (m model) settledRow(row transcriptRow, rc rowContext) bool {
 // of the unflushed tail is rendered once and queued for scrollback. It returns
 // the (possibly nil) print command for the queued batch.
 func (m model) settleTranscript() (model, tea.Cmd) {
-	// In alt-screen mode there is no native scrollback surface for tea.Println:
-	// Bubble Tea drops that output by design. Keep rows in the managed view so
-	// the chat behaves like a fullscreen app and cannot reveal prior shell
-	// history by scrolling.
-	if m.altScreen {
-		return m, nil
-	}
 	// Never freeze history at the pre-WindowSizeMsg default width: the first
 	// real WindowSizeMsg arrives before any user-visible content settles, and
 	// flushing earlier would hard-wrap startup rows at 96 cols forever.
@@ -87,10 +80,14 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 		// frontier themselves; this is a safety net).
 		m.flushed = len(m.transcript)
 	}
-	rc := buildRowContext(m.transcript)
+	oldFlushed := m.flushed
+	// An unsettled row blocks the frontier, so every cross-row dependency needed
+	// to decide or render the tail (call/result and prompt/decision pairs) also
+	// lives in the tail. Avoid rescanning the settled prefix on every tick.
+	rc := buildRowContext(m.transcript[m.flushed:])
 	width := chatWidth(m.width)
 	batch := []string{}
-	previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
+	previousKind, havePreviousKind := m.flushedPreviousKind, m.flushedHavePreviousKind
 	for m.flushed < len(m.transcript) {
 		row := m.transcript[m.flushed]
 		if !m.settledRow(row, rc) {
@@ -98,6 +95,15 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 		}
 		m.flushed++
 		if row.kind == rowWelcome || rc.skip(row) {
+			continue
+		}
+		// Bubble Tea intentionally discards tea.Println in alt-screen mode. The
+		// bookkeeping still advances; the settled prefix is retained in the body
+		// item cache rebuilt below.
+		if m.altScreen {
+			m.flushedAny = true
+			previousKind = row.kind
+			havePreviousKind = true
 			continue
 		}
 		rendered := m.renderRowMode(row, width, rc, true)
@@ -114,6 +120,15 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 		batch = append(batch, rendered)
 		previousKind = row.kind
 		havePreviousKind = true
+	}
+	m.flushedPreviousKind = previousKind
+	m.flushedHavePreviousKind = havePreviousKind
+	if m.altScreen {
+		bodyWidth := m.chatColumnWidth()
+		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed {
+			m.rebuildAltScreenSettledItems(bodyWidth)
+		}
+		return m, nil
 	}
 	if len(batch) > 0 {
 		m.flushQueue = append(m.flushQueue, strings.Join(batch, "\n"))
@@ -139,6 +154,11 @@ func (m model) drainFlushQueue() (model, tea.Cmd) {
 // surface ended.
 func (m *model) resetFlushFrontier(divider string) {
 	m.flushed = 0
+	m.flushedPreviousKind = rowWelcome
+	m.flushedHavePreviousKind = false
+	m.altScreenSettledItems = nil
+	m.altScreenSettledWidth = 0
+	m.altScreenSettledFrontier = 0
 	// Renumbers every row's bodyY from the top (used by /clear, /resume, /rewind,
 	// /compact); a transcript-hover target's bodyY would otherwise risk
 	// coincidentally matching an unrelated row in the rebuilt transcript.
@@ -146,4 +166,36 @@ func (m *model) resetFlushFrontier(divider string) {
 	if divider != "" && m.flushedAny {
 		m.flushQueue = append(m.flushQueue, zeroTheme.faint.Render(divider))
 	}
+}
+
+// rebuildAltScreenSettledItems snapshots the stable prefix once when the
+// frontier (or width) changes. View then reuses these item descriptors and only
+// constructs descriptors/context for the live tail.
+func (m *model) rebuildAltScreenSettledItems(width int) {
+	if !m.altScreen || m.flushed == 0 {
+		m.altScreenSettledItems = nil
+		m.altScreenSettledWidth = width
+		m.altScreenSettledFrontier = m.flushed
+		return
+	}
+	snapshot := *m
+	snapshot.transcript = m.transcript[:m.flushed]
+	snapshot.flushed = 0
+	snapshot.flushedAny = false
+	snapshot.flushedHavePreviousKind = false
+	snapshot.altScreenSettledItems = nil
+	snapshot.altScreenSettledWidth = 0
+	snapshot.altScreenSettledFrontier = 0
+	snapshot.pending = false
+	snapshot.pendingSpecReview = nil
+	snapshot.fileView = fileViewState{}
+	built := snapshot.transcriptBodyItems(width, "", false)
+	// Keep scratch capacity for the live tail. transcriptBodyItems can then
+	// append transient rows without copying the entire settled prefix. The cache
+	// length never includes those scratch entries, and the next frame overwrites
+	// them on the single Bubble Tea render goroutine.
+	m.altScreenSettledItems = make([]transcriptBodyItem, len(built), len(built)+256)
+	copy(m.altScreenSettledItems, built)
+	m.altScreenSettledWidth = width
+	m.altScreenSettledFrontier = m.flushed
 }

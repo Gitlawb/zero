@@ -70,6 +70,22 @@ const (
 // guidelines), and the safety confirmation policy. It is built once per run so
 // every turn shares one (cacheable) system turn.
 func buildSystemPrompt(options Options) string {
+	return buildSystemPromptParts(options).prompt
+}
+
+// systemPromptParts retains both the exact joined prompt and the diagnostic
+// sections used by prompt-prefix tracing. Building these together prevents the
+// tracing path from re-reading workspace state and guarantees that the hash is
+// computed from the same prompt bytes placed in the request.
+type systemPromptParts struct {
+	prompt             string
+	baseInstructions   string
+	confirmationPolicy string
+	projectContext     string
+	skills             string
+}
+
+func buildSystemPromptParts(options Options) systemPromptParts {
 	core := strings.TrimSpace(options.SystemPrompt)
 	if core == "" {
 		core = strings.TrimSpace(coreSystemPrompt)
@@ -97,22 +113,31 @@ func buildSystemPrompt(options Options) string {
 	if user := userGuidelines(); user != "" {
 		sections = append(sections, user)
 	}
-	if ws := workspaceContext(options.Cwd); ws != "" {
-		sections = append(sections, ws)
+	project := workspaceContext(options.Cwd)
+	if project != "" {
+		sections = append(sections, project)
 	}
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
 	}
-	if skillsBlock := skillsContext(options); skillsBlock != "" {
+	skillsBlock := skillsContext(options)
+	if skillsBlock != "" {
 		sections = append(sections, skillsBlock)
 	}
 	if style := responseStyleContext(options); style != "" {
 		sections = append(sections, style)
 	}
-	if policy := strings.TrimSpace(confirmationPolicy); policy != "" {
+	policy := strings.TrimSpace(confirmationPolicy)
+	if policy != "" {
 		sections = append(sections, policy)
 	}
-	return strings.Join(sections, "\n\n")
+	return systemPromptParts{
+		prompt:             strings.Join(sections, "\n\n"),
+		baseInstructions:   core,
+		confirmationPolicy: policy,
+		projectContext:     project,
+		skills:             skillsBlock,
+	}
 }
 
 // responseStyleContext renders the operator-selected reply style (TUI /style) as

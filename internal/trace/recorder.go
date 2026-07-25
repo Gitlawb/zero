@@ -29,6 +29,10 @@ type Recorder struct {
 	firstActionStamped  bool
 }
 
+// maxTaskStateEvents bounds trace growth in pathological long runs. Once full,
+// the latest aggregate replaces the tail so final state is never lost.
+const maxTaskStateEvents = 128
+
 // NewRecorder returns a ready recorder. sessionID correlates with the agent
 // session (Options.SessionID); runID is a per-Run sequence; profile is an
 // optional label (e.g. "cold", "warm") for benchmark runs.
@@ -203,6 +207,24 @@ func (r *Recorder) EmitOutputBudget(event OutputBudgetEvent) {
 	r.tr.OutputBudgets = append(r.tr.OutputBudgets, event)
 }
 
+// EmitTaskState records one content-free structured task snapshot. Calls retain
+// event order so revisions can be replayed alongside the tool and turn stream.
+func (r *Recorder) EmitTaskState(event TaskStateEvent) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finished {
+		return
+	}
+	if len(r.tr.TaskStates) < maxTaskStateEvents {
+		r.tr.TaskStates = append(r.tr.TaskStates, event)
+		return
+	}
+	r.tr.TaskStates[len(r.tr.TaskStates)-1] = event
+}
+
 // Finish stamps CompletedAt, derives each span's parent (by interval
 // containment) and exclusive time, and returns a snapshot of the trace. Calling
 // Finish more than once returns the same snapshot.
@@ -223,6 +245,7 @@ func (r *Recorder) Finish() *TurnTrace {
 	snap.Counters = append([]Counter(nil), r.tr.Counters...)
 	snap.PrefixHashes = append([]PrefixHash(nil), r.tr.PrefixHashes...)
 	snap.OutputBudgets = append([]OutputBudgetEvent(nil), r.tr.OutputBudgets...)
+	snap.TaskStates = append([]TaskStateEvent(nil), r.tr.TaskStates...)
 	return &snap
 }
 

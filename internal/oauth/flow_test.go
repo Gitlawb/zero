@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -123,6 +125,64 @@ func TestBuildAuthorizationURLRejectsInsecureEndpoint(t *testing.T) {
 	)
 	if !errors.Is(err, ErrInsecureTokenEndpoint) {
 		t.Fatalf("err = %v, want ErrInsecureTokenEndpoint", err)
+	}
+}
+
+// redirectTrap starts an "attacker" server that counts any hit, and a credential
+// endpoint that redirects to it with the given status. It returns the endpoint
+// URL and a func reporting how many times the attacker was contacted — a
+// non-zero count means the credential-bearing POST body was replayed (#729).
+func redirectTrap(t *testing.T, status int) (endpoint string, attackerHits func() int32) {
+	t.Helper()
+	var hits int32
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = io.WriteString(w, `{"access_token":"leaked","refresh_token":"leaked"}`)
+	}))
+	t.Cleanup(attacker.Close)
+	endp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL, status)
+	}))
+	t.Cleanup(endp.Close)
+	return endp.URL, func() int32 { return atomic.LoadInt32(&hits) }
+}
+
+func TestPostTokenRefusesRedirect(t *testing.T) {
+	endpoint, hits := redirectTrap(t, http.StatusTemporaryRedirect) // 307
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", "the-code")
+	form.Set("client_secret", "shh")
+	_, err := PostToken(context.Background(), http.DefaultClient, endpoint, form, Token{}, nil)
+	if !errors.Is(err, ErrUnsafeRedirect) {
+		t.Fatalf("PostToken err = %v, want ErrUnsafeRedirect", err)
+	}
+	if n := hits(); n != 0 {
+		t.Fatalf("attacker received %d request(s) — credential body was replayed", n)
+	}
+}
+
+func TestExchangeCodeRefusesRedirect(t *testing.T) {
+	endpoint, hits := redirectTrap(t, http.StatusPermanentRedirect) // 308
+	_, err := ExchangeCode(context.Background(), http.DefaultClient,
+		Config{ClientID: "c", TokenEndpoint: endpoint}, "the-code", "verifier", "http://127.0.0.1/cb", nil)
+	if !errors.Is(err, ErrUnsafeRedirect) {
+		t.Fatalf("ExchangeCode err = %v, want ErrUnsafeRedirect", err)
+	}
+	if n := hits(); n != 0 {
+		t.Fatalf("attacker received %d request(s) — code/verifier replayed", n)
+	}
+}
+
+func TestRefreshRefusesRedirect(t *testing.T) {
+	endpoint, hits := redirectTrap(t, http.StatusTemporaryRedirect) // 307
+	_, err := Refresh(context.Background(), http.DefaultClient,
+		Config{ClientID: "c", TokenEndpoint: endpoint}, Token{RefreshToken: "rt"}, nil)
+	if !errors.Is(err, ErrUnsafeRedirect) {
+		t.Fatalf("Refresh err = %v, want ErrUnsafeRedirect", err)
+	}
+	if n := hits(); n != 0 {
+		t.Fatalf("attacker received %d request(s) — refresh_token replayed", n)
 	}
 }
 

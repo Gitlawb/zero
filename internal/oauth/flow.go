@@ -116,6 +116,23 @@ func validateTokenEndpoint(endpoint string) error {
 	return ValidateEndpointURL(endpoint)
 }
 
+// withoutRedirects returns a shallow copy of client whose redirect policy
+// refuses to follow ANY redirect. A credential-bearing OAuth POST (token
+// exchange/refresh, device authorization, device-token poll) must never let a
+// 307/308 replay its form body — codes, PKCE verifiers, refresh tokens, client
+// secrets — to a target that was never endpoint-validated. The caller's client
+// is left unmodified.
+func withoutRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	copied := *client
+	copied.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return ErrUnsafeRedirect
+	}
+	return &copied
+}
+
 func isLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
@@ -176,9 +193,9 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	if err := validateTokenEndpoint(tokenEndpoint); err != nil {
 		return Token{}, err
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
+	// Refuse redirects so a 307/308 from the token endpoint can't replay this
+	// credential-bearing POST body to another (unvalidated) origin.
+	client = withoutRedirects(client)
 	if now == nil {
 		now = time.Now
 	}

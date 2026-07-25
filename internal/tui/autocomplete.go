@@ -259,14 +259,6 @@ func (m model) matchUserCommandSuggestions(token string) []commandSuggestion {
 	return out
 }
 
-// matchCommandSuggestions returns commands whose canonical name or any alias has
-// the typed prefix (case-insensitive), preserving commandDefinitions order and
-// capped at maxCommandSuggestions. A command matched via an alias is still listed
-// by its canonical name (completing always inserts the canonical form).
-func matchCommandSuggestions(token string) []commandSuggestion {
-	return matchCommandSuggestionsWithFilter(token, func(commandDefinition) bool { return true })
-}
-
 func matchCommandSuggestionsWithFilter(token string, include func(commandDefinition) bool) []commandSuggestion {
 	prefix := strings.ToLower(strings.TrimSpace(token))
 	if prefix == "" {
@@ -494,10 +486,6 @@ func expandSpecialistMention(prompt string, specialists []agent.SpecialistInfo) 
 	}
 	return "Use the Task tool to delegate this to the " + matched +
 		" specialist, then report its result back to me:\n\n" + task, true
-}
-
-func completePathQuery(value string, cursorPos int, selectedPath string) (string, int) {
-	return completePathQueryWithTrailingSpace(value, cursorPos, selectedPath, true)
 }
 
 func completePathQueryWithTrailingSpace(value string, cursorPos int, selectedPath string, trailingSpace bool) (string, int) {

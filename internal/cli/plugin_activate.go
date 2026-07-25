@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -42,7 +43,7 @@ type pluginActivation struct {
 // trustRoot is the original launch directory (resolved before any --worktree
 // reassignment). The returned activation carries the skip report so the caller can
 // emit one combined notice; the notice itself is NOT emitted here.
-func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, stderr io.Writer, trustRoot string) pluginActivation {
+func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, stderr io.Writer, trustRoot string, runners ...*execution.Runner) pluginActivation {
 	excludeProject, trustCheckErrored := resolveTrust(trustRoot)
 	skip := trustSkip{
 		excludedProjectConfig: excludeProject && projectPluginsDirExists(workspaceRoot),
@@ -65,7 +66,11 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 		writePluginActivationWarning(stderr, formatLoadDiagnostic(diagnostic))
 	}
 
-	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot})
+	var runner *execution.Runner
+	if len(runners) > 0 {
+		runner = runners[0]
+	}
+	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot, Execution: runner})
 	for _, warning := range result.Warnings {
 		writePluginActivationWarning(stderr, warning)
 	}

@@ -11,12 +11,11 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-// promptSubstrings are the seven cacheable sub-components of the prompt a run
-// sends to a model. Each is the literal content the sub-component would emit
-// into the system prompt or tool list, hashed so a downstream observer can
-// detect drift turn-over-turn. The substrings are produced by
-// buildPromptSubstrings and consumed by ComputePrefixFingerprint.
+// promptSubstrings are the cacheable components of the prompt a run sends to a
+// model. systemPrompt is the exact joined system-message content. The remaining
+// fields retain useful diagnostic boundaries within that prompt and tool list.
 type promptSubstrings struct {
+	systemPrompt       string
 	baseInstructions   string
 	confirmationPolicy string
 	projectContext     string
@@ -25,90 +24,53 @@ type promptSubstrings struct {
 	schema             string
 }
 
-// buildPromptSubstrings assembles the seven cacheable sub-components of the
-// prompt without joining them. The system prompt sections are produced by the
-// same private builders that buildSystemPrompt uses, so the substrings are
-// byte-identical to what would have appeared in the joined prompt. The tools
-// and schema substrings are derived from the partitioned tool list (caller-
-// provided) so this helper does not need to re-run the partition.
-//
-// This is the seam ComputePrefixFingerprint reads from. It exists as a
-// separate function (rather than returning both prompt and substrings from
-// buildSystemPrompt) so existing callers of buildSystemPrompt are unaffected
-// and the substrings helper is independently testable.
+// buildPromptSubstrings builds the prompt and retains both its exact joined
+// form and narrower diagnostic components. Callers that already built the
+// prompt should use buildPromptSubstringsFromParts to avoid repeating workspace
+// reads.
 func buildPromptSubstrings(options Options, exposed []zeroruntime.ToolDefinition) promptSubstrings {
-	core := strings.TrimSpace(options.SystemPrompt)
-	if core == "" {
-		core = strings.TrimSpace(coreSystemPrompt)
-	}
-	if core == "" {
-		core = fallbackSystemPrompt
-	}
+	return buildPromptSubstringsFromParts(buildSystemPromptParts(options), exposed)
+}
 
-	// The confirmation policy is appended unconditionally in buildSystemPrompt;
-	// the substring here is the same constant.
-	policy := strings.TrimSpace(confirmationPolicy)
-
-	// projectContext is the joined output of workspaceContext, which itself
-	// walks the AGENTS.md / ZERO.md / .zero/AGENTS.md chain. Hashing the
-	// joined string captures every guideline file's contribution and the
-	// ordering between them.
-	project := workspaceContext(options.Cwd)
-
-	// skills is the joined output of skillsContext, with each skill on its own
-	// line. The substring is the literal text the model would see.
-	skills := skillsContext(options)
-
-	// tools and schema are derived from the partitioned tool list. The list
-	// passed in is already in stable order (partitionToolsCached is the
-	// canonical stable partitioner) so concatenating in slice order is
-	// sufficient — we sort names again defensively in case a future caller
-	// hands us a list from a different partitioner.
+func buildPromptSubstringsFromParts(parts systemPromptParts, exposed []zeroruntime.ToolDefinition) promptSubstrings {
 	toolsSubstr, schemaSubstr := toolSubstrings(exposed)
 
 	return promptSubstrings{
-		baseInstructions:   core,
-		confirmationPolicy: policy,
-		projectContext:     project,
-		skills:             skills,
+		systemPrompt:       parts.prompt,
+		baseInstructions:   parts.baseInstructions,
+		confirmationPolicy: parts.confirmationPolicy,
+		projectContext:     parts.projectContext,
+		skills:             parts.skills,
 		tools:              toolsSubstr,
 		schema:             schemaSubstr,
 	}
 }
 
-// toolSubstrings extracts a stable, name-sorted digest of the partitioned tool
-// list. The tools substring is "name1\nname2\n..." (sorted) so a reordering of
-// the partition produces a different hash. The schema substring is the
-// concatenation of each tool's JSON schema in name order, so a schema change
-// is detected independently of the tool ordering.
+// toolSubstrings preserves the emitted tool order. Names and descriptions are
+// fingerprinted separately from schemas so either kind of drift is identifiable.
+// Order is part of request identity: silently sorting here would hide a provider-
+// visible reordering and could report a false cache hit.
 func toolSubstrings(exposed []zeroruntime.ToolDefinition) (toolsSubstr, schemaSubstr string) {
 	if len(exposed) == 0 {
 		return "", ""
 	}
-	names := make([]string, 0, len(exposed))
-	byName := make(map[string]zeroruntime.ToolDefinition, len(exposed))
-	for _, def := range exposed {
-		names = append(names, def.Name)
-		byName[def.Name] = def
-	}
-	sort.Strings(names)
 	var toolsSB, schemaSB strings.Builder
-	for i, name := range names {
-		if i > 0 {
-			toolsSB.WriteByte('\n')
-		}
-		toolsSB.WriteString(name)
-		def := byName[name]
+	for _, def := range exposed {
+		writeLengthPrefixed(&toolsSB, def.Name)
+		writeLengthPrefixed(&toolsSB, def.Description)
 		// Parameters is rendered to a canonical JSON string per tool. The
 		// schema-render cache in internal/agent (used by partitionToolsCached)
 		// guarantees the same render is byte-identical across turns for the
 		// same tool, so this substring is a stable hash input.
-		schemaSB.WriteString(name)
-		schemaSB.WriteByte('\n')
-		schemaSB.WriteString(canonicalSchemaString(def.Parameters))
-		schemaSB.WriteByte('\n')
+		writeLengthPrefixed(&schemaSB, def.Name)
+		writeLengthPrefixed(&schemaSB, canonicalSchemaString(def.Parameters))
 	}
 	return toolsSB.String(), schemaSB.String()
+}
+
+func writeLengthPrefixed(sb *strings.Builder, value string) {
+	fmt.Fprintf(sb, "%d:", len(value))
+	sb.WriteString(value)
 }
 
 // canonicalSchemaString renders a tool's parameter schema to a stable string.
@@ -227,36 +189,16 @@ func writeStable(sb *strings.Builder, v any) {
 	}
 }
 
-// ComputePrefixFingerprint returns a trace.PrefixHash (a 7-field fingerprint
-// of the prompt prefix) for one turn of a run. The seven sub-hashes are
-// independent SHA-256s of the corresponding sub-component; the complete-prefix
-// hash is a SHA-256 of the canonical concatenation of the other six, so any
-// sub-component drift is observable both individually and in aggregate.
-//
-// I/O side effects: buildPromptSubstrings calls workspaceContext, which runs
-// git (gitBranchForPrompt, FindProjectGitRoot) and reads the AGENTS.md /
-// ZERO.md / .zero/AGENTS.md chain plus the repo map. The same workspace-
-// context work is performed separately by buildSystemPrompt a few lines
-// later in the request-build path, so on every traced turn the file and
-// git reads happen twice. The duplication is intentional for this PR (a
-// follow-up will pass substrings through) and is a known perf cost only on
-// the opt-in trace path.
-//
-// A stable CompletePrefixHash across turns means the four captured
-// sub-components (baseInstructions, confirmationPolicy, projectContext,
-// skills) are byte-identical. It does NOT rule out drift in the seven
-// uncaptured sections of buildSystemPrompt (modelPromptAddendum,
-// sessionRuntimeContext, approvedCommandPrefixContext, workspaceSeedContext,
-// userGuidelines, specialistDelegationContext, responseStyleContext). For
-// default Options the four captured substrings are the full prompt; for
-// non-default Options the seven uncaptured sections may contribute, and a
-// consumer correlating CompletePrefix stability with cached_input_tokens
-// must cross-check the model_switches counter (modelPromptAddendum changes
-// on a model switch) to disambiguate "no drift" from "drift in an
-// uncaptured section."
-
+// ComputePrefixFingerprint builds and fingerprints a prompt for callers that do
+// not already have one. The agent loop uses computePrefixFingerprint with the
+// prompt parts it built once at run start, ensuring tracing observes the exact
+// request content without repeating workspace I/O.
 func ComputePrefixFingerprint(options Options, exposed []zeroruntime.ToolDefinition) prefixFingerprint {
-	subs := buildPromptSubstrings(options, exposed)
+	return computePrefixFingerprint(buildPromptSubstrings(options, exposed))
+}
+
+func computePrefixFingerprint(subs promptSubstrings) prefixFingerprint {
+	systemPrompt := sha256hex(subs.systemPrompt)
 	base := sha256hex(subs.baseInstructions)
 	policy := sha256hex(subs.confirmationPolicy)
 	project := sha256hex(subs.projectContext)
@@ -264,9 +206,10 @@ func ComputePrefixFingerprint(options Options, exposed []zeroruntime.ToolDefinit
 	toolsH := sha256hex(subs.tools)
 	schema := sha256hex(subs.schema)
 	complete := sha256hex(strings.Join([]string{
-		base, policy, project, skills, toolsH, schema,
+		systemPrompt, toolsH, schema,
 	}, "|"))
 	return prefixFingerprint{
+		SystemPromptHash:       systemPrompt,
 		BaseInstructionsHash:   base,
 		ConfirmationPolicyHash: policy,
 		ProjectContextHash:     project,
@@ -282,6 +225,7 @@ func ComputePrefixFingerprint(options Options, exposed []zeroruntime.ToolDefinit
 // in loop.go) so the trace package does not need to import this one. The field
 // names match the trace.PrefixHash JSON tags 1:1.
 type prefixFingerprint struct {
+	SystemPromptHash       string
 	BaseInstructionsHash   string
 	ConfirmationPolicyHash string
 	ProjectContextHash     string

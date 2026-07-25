@@ -56,6 +56,10 @@ type CompactionOptions struct {
 	// injected so Compact stays pure and testable; the agent loop wires it to a
 	// real provider call.
 	Summarize func(toSummarize []zeroruntime.Message) (string, error)
+	// taskState is a snapshot supplied by the running agent. Its immutable
+	// objective is always preserved; mutable fields are admitted only when its
+	// plan projection still matches the transcript.
+	taskState *taskStateSnapshot
 }
 
 // CompactionResult is the metadata-bearing result returned by CompactMessages.
@@ -220,7 +224,7 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 
 	// Preserve structured state (active plan + loaded skills) from the elided
 	// middle verbatim, so it is not lost or paraphrased away by the prose summary.
-	content := appendPreservedState(summaryLabel+"\n"+summary, middle)
+	content := appendPreservedState(summaryLabel+"\n"+summary, middle, opts.taskState)
 
 	compacted := make([]zeroruntime.Message, 0, systemEnd+1+(len(messages)-boundary))
 	compacted = append(compacted, messages[:systemEnd]...)
@@ -326,6 +330,7 @@ type compactionState struct {
 	// OnText is deliberately NOT forwarded (compaction stays invisible to the user),
 	// but its token COST must still be counted so usage reports and budgets include it.
 	onUsage func(Usage)
+	task    *taskState
 
 	// calibrationRatio scales the raw byte/4 token estimate toward the provider's
 	// real prompt-token count. ApproxTextTokens over-counts code-heavy content by
@@ -365,13 +370,15 @@ func (state *compactionState) calibratedTokens(raw int) int {
 	return int(float64(raw) * state.calibrationRatio)
 }
 
-func newCompactionState(options Options) *compactionState {
-	return &compactionState{
+func newCompactionState(options Options, task *taskState) *compactionState {
+	state := &compactionState{
 		enabled:      options.ContextWindow > 0,
 		threshold:    compactionThreshold(options.ContextWindow),
 		preserveLast: options.CompactionPreserveLast,
 		onUsage:      options.OnUsage,
+		task:         task,
 	}
+	return state
 }
 
 // maybeCompact runs proactive compaction at the top of a turn. It returns the
@@ -418,6 +425,7 @@ func (state *compactionState) maybeCompact(
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
 		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		taskState:    state.task.snapshotForCompaction(messages),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -468,6 +476,7 @@ func (state *compactionState) recover(
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
 		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		taskState:    state.task.snapshotForCompaction(messages),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent

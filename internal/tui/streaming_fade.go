@@ -276,14 +276,3 @@ func (m model) styleStreamingLine(line string, visualIndex, visualCount int) str
 	bornAt := streamingLineBornAt(visualIndex, visualCount, m.lineAges, m.lastStreamActivity)
 	return ageDimLine(line, bornAt, m.now(), zeroTheme.ink)
 }
-
-// ensureAgeTickReschedule is a small helper used after a fade-state change
-// to start the tick if it's not already running. The age-tick case
-// short-circuits when fadeActive is false, so calling this on a no-op
-// transition (e.g. a 0-byte delta) is safe.
-func (m model) ensureAgeTickReschedule() tea.Cmd {
-	if !m.fadeActive {
-		return nil
-	}
-	return streamingFadeTick()
-}

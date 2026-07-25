@@ -67,6 +67,28 @@ An approved issue means only that the specific issue has been accepted for work.
 It does not approve unrelated future work, future pull requests, or future issues
 from the same author. Each issue is reviewed case by case.
 
+## Contribution Volume and Batching
+
+To keep triage and review sustainable while the project stabilizes, please keep
+your contribution flow to a size the core team can realistically work through:
+
+- One issue per bug. File each defect as its own issue with its own
+  reproduction. Please do not bundle several unrelated findings into a single
+  "audit" issue; separate issues are far easier to triage, approve, and close
+  individually.
+- Keep only a few items open at a time. If you already have several issues or
+  pull requests awaiting review, let those move through the queue before opening
+  more. A large simultaneous burst from one contributor slows review for
+  everyone, even when each item is valid.
+- AI-assisted contributions are welcome, held to the same bar. Automated audits
+  and generated patches are fine, but each issue and pull request must be
+  individually verified, scoped, and reproducible before you open it. Please do
+  not post bulk machine-generated findings unfiltered.
+
+These apply to all contributors and are about review bandwidth, not the value of
+any single report. Maintainers may ask you to consolidate, split, or hold
+submissions to keep the queue manageable.
+
 ## Pull Request Requirements
 
 Before opening a community pull request, make sure all of the following are true:

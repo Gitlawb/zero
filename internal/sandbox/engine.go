@@ -80,6 +80,13 @@ func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
 }
 
+func (engine *Engine) ConsumeGrantMigrationNotice() (string, error) {
+	if engine == nil || engine.store == nil {
+		return "", nil
+	}
+	return engine.store.ConsumeMigrationNotice()
+}
+
 func (engine *Engine) GrantCommandPrefixForSession(toolName string, prefix []string) {
 	if engine == nil || len(prefix) == 0 {
 		return
@@ -230,6 +237,15 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 		return false
 	}
 	if policy.Mode == ModeDisabled {
+		return false
+	}
+	// Re-entrancy skips wrapping: when the process carries the sandbox markers,
+	// the runner returns a pass-through (unwrapped) plan, so the native sandbox
+	// is NOT the boundary for THIS command. Because the markers are ambient and
+	// forgeable at an unsandboxed process boundary (issue #727), auto-allowing a
+	// shell command on that basis would run it unwrapped with no prompt. Mirror
+	// the runner: report inactive so the command takes the normal approval path.
+	if IsAlreadySandboxed() {
 		return false
 	}
 	backend := engine.backend

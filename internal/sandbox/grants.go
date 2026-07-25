@@ -12,11 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 const (
-	grantSchemaVersion = 2
+	grantSchemaVersion = 3
 	grantLockTimeout   = 5 * time.Second
 	grantLockRetry     = 10 * time.Millisecond
 )
@@ -55,8 +56,18 @@ type GrantLookup struct {
 
 type grantFile struct {
 	SchemaVersion   int                             `json:"schemaVersion"`
+	PolicyVersion   int                             `json:"policyVersion"`
 	Grants          map[string][]Grant              `json:"grants"`
 	CommandPrefixes map[string][]CommandPrefixGrant `json:"commandPrefixes,omitempty"`
+	Migration       *grantMigration                 `json:"migration,omitempty"`
+}
+
+type grantMigration struct {
+	FromSchemaVersion int    `json:"fromSchemaVersion"`
+	BackupPath        string `json:"backupPath"`
+	Migrated          int    `json:"migrated"`
+	Invalidated       int    `json:"invalidated"`
+	NoticePending     bool   `json:"noticePending"`
 }
 
 type GrantStore struct {
@@ -122,6 +133,40 @@ func (store *GrantStore) FilePath() string {
 	return store.filePath
 }
 
+// ConsumeMigrationNotice returns the legacy-grant migration summary once and
+// atomically records it as seen. Frontends call this during startup so users are
+// told when approvals were invalidated instead of encountering unexplained
+// re-prompts. The original file remains available at the reported backup path.
+func (store *GrantStore) ConsumeMigrationNotice() (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	// Clearing the pending flag is a read-modify-write like any other mutator, so
+	// it takes the same interprocess lock: two frontends starting at once must not
+	// both read NoticePending, both print the notice, and clobber each other's
+	// write of the rest of the state.
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	state, err := store.readStateLocked()
+	if err != nil {
+		return "", err
+	}
+	if state.Migration == nil || !state.Migration.NoticePending {
+		return "", nil
+	}
+	migration := *state.Migration
+	state.Migration.NoticePending = false
+	if err := store.writeState(state); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sandbox grants updated for policy v%d: migrated %d, invalidated %d; backup: %s", execution.PolicyVersion, migration.Migrated, migration.Invalidated, migration.BackupPath), nil
+}
+
 func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	grant, err := createGrant(input, store.now)
 	if err != nil {
@@ -135,7 +180,7 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	}
 	defer unlock()
 
-	state, err := store.readState()
+	state, err := store.readStateLocked()
 	if err != nil {
 		return Grant{}, err
 	}
@@ -173,7 +218,7 @@ func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPr
 	}
 	defer unlock()
 
-	state, err := store.readState()
+	state, err := store.readStateLocked()
 	if err != nil {
 		return CommandPrefixGrant{}, err
 	}
@@ -323,7 +368,7 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	}
 	defer unlock()
 
-	state, err := store.readState()
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -364,7 +409,7 @@ func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, err
 	}
 	defer unlock()
 
-	state, err := store.readState()
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -405,7 +450,7 @@ func (store *GrantStore) Clear() (int, error) {
 	}
 	defer unlock()
 
-	state, err := store.readState()
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -423,10 +468,6 @@ func (store *GrantStore) Clear() (int, error) {
 		return 0, err
 	}
 	return count, nil
-}
-
-func FormatGrantList(grants []Grant) string {
-	return FormatGrantListWithCommandPrefixes(grants, nil)
 }
 
 func FormatGrantListWithCommandPrefixes(grants []Grant, prefixes []CommandPrefixGrant) string {
@@ -539,7 +580,52 @@ func reconcileScope(scope string, kind ScopeKind) (string, ScopeKind) {
 	return scope, kind
 }
 
+// readState reads the grant file for a caller that does NOT hold the
+// interprocess lock (the lookup/list paths). A schema or policy migration has to
+// write — a backup plus the migrated state — so it is performed under the lock,
+// and the read is retaken there because another process may have migrated the
+// file while this one waited.
 func (store *GrantStore) readState() (grantFile, error) {
+	state, needsMigration, err := store.readStateFile(false)
+	if err != nil || !needsMigration {
+		return state, err
+	}
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return grantFile{}, err
+	}
+	defer unlock()
+	return store.readStateLocked()
+}
+
+// readStateLocked reads the grant file for a caller that already holds the
+// interprocess lock, so a migration writes through directly instead of
+// re-acquiring it (which would deadlock against the caller's own lock).
+func (store *GrantStore) readStateLocked() (grantFile, error) {
+	state, _, err := store.readStateFile(true)
+	return state, err
+}
+
+// readStateFile decodes the grant file. needsMigration reports that the state on
+// disk must be rewritten (legacy schema or a changed policy version) and that the
+// caller has to retake this read while holding the interprocess lock; the
+// returned state is meaningless in that case.
+func (store *GrantStore) readStateFile(locked bool) (grantFile, bool, error) {
+	state, err := store.decodeState(locked)
+	if err != nil {
+		if errors.Is(err, errGrantMigrationNeedsLock) {
+			return grantFile{}, true, nil
+		}
+		return grantFile{}, false, err
+	}
+	return state, false, nil
+}
+
+// errGrantMigrationNeedsLock is the internal signal from decodeState that the
+// file needs a migration write, which only a lock holder may perform.
+var errGrantMigrationNeedsLock = errors.New("sandbox grants file needs a migration write")
+
+func (store *GrantStore) decodeState(locked bool) (grantFile, error) {
 	data, err := os.ReadFile(store.filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -552,25 +638,32 @@ func (store *GrantStore) readState() (grantFile, error) {
 	// current (v2) map[tool][]Grant shape.
 	var head struct {
 		SchemaVersion   int             `json:"schemaVersion"`
+		PolicyVersion   int             `json:"policyVersion"`
 		Grants          json.RawMessage `json:"grants"`
 		CommandPrefixes json.RawMessage `json:"commandPrefixes"`
+		Migration       *grantMigration `json:"migration"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return grantFile{}, store.invalidGrantFile(err)
 	}
+	if head.SchemaVersion == 1 || head.SchemaVersion == 2 {
+		if !locked {
+			return grantFile{}, errGrantMigrationNeedsLock
+		}
+		return store.migrateLegacyState(data, head.SchemaVersion, head.Grants, head.CommandPrefixes)
+	}
+	if head.SchemaVersion != grantSchemaVersion {
+		return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: unsupported schemaVersion", store.filePath)
+	}
+	if head.PolicyVersion != execution.PolicyVersion {
+		if !locked {
+			return grantFile{}, errGrantMigrationNeedsLock
+		}
+		return store.migrateChangedPolicy(data, head.PolicyVersion, head.Grants, head.CommandPrefixes)
+	}
 	buckets := map[string][]Grant{}
 	commandPrefixBuckets := map[string][]CommandPrefixGrant{}
 	switch head.SchemaVersion {
-	case 1:
-		legacy := map[string]Grant{}
-		if len(head.Grants) > 0 {
-			if err := json.Unmarshal(head.Grants, &legacy); err != nil {
-				return grantFile{}, store.invalidGrantFile(err)
-			}
-		}
-		for name, grant := range legacy {
-			buckets[name] = []Grant{grant}
-		}
 	case grantSchemaVersion:
 		if len(head.Grants) > 0 {
 			if err := json.Unmarshal(head.Grants, &buckets); err != nil {
@@ -615,7 +708,167 @@ func (store *GrantStore) readState() (grantFile, error) {
 			normalizedPrefixes[key] = append(normalizedPrefixes[key], ng)
 		}
 	}
-	return grantFile{SchemaVersion: grantSchemaVersion, Grants: normalized, CommandPrefixes: normalizedPrefixes}, nil
+	return grantFile{SchemaVersion: grantSchemaVersion, PolicyVersion: execution.PolicyVersion, Grants: normalized, CommandPrefixes: normalizedPrefixes, Migration: head.Migration}, nil
+}
+
+func (store *GrantStore) migrateLegacyState(data []byte, schemaVersion int, grantsJSON json.RawMessage, prefixesJSON json.RawMessage) (grantFile, error) {
+	buckets := map[string][]Grant{}
+	if schemaVersion == 1 {
+		legacy := map[string]Grant{}
+		if len(grantsJSON) > 0 {
+			if err := json.Unmarshal(grantsJSON, &legacy); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+		for name, grant := range legacy {
+			buckets[name] = []Grant{grant}
+		}
+	} else if len(grantsJSON) > 0 {
+		if err := json.Unmarshal(grantsJSON, &buckets); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	prefixes := map[string][]CommandPrefixGrant{}
+	if len(prefixesJSON) > 0 {
+		if err := json.Unmarshal(prefixesJSON, &prefixes); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+
+	backupPath, err := store.writeLegacyBackup(data, schemaVersion)
+	if err != nil {
+		return grantFile{}, err
+	}
+	state := emptyGrantState()
+	migrated, invalidated := 0, 0
+	for name, bucket := range buckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredGrant(key, grant)
+			if err != nil || legacyShellGrant(normalized) {
+				invalidated++
+				continue
+			}
+			state.Grants[key] = append(state.Grants[key], normalized)
+			migrated++
+		}
+	}
+	for name, bucket := range prefixes {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredCommandPrefixGrant(key, grant)
+			if err != nil {
+				invalidated++
+				continue
+			}
+			state.CommandPrefixes[key] = append(state.CommandPrefixes[key], normalized)
+			migrated++
+		}
+	}
+	state.Migration = &grantMigration{FromSchemaVersion: schemaVersion, BackupPath: backupPath, Migrated: migrated, Invalidated: invalidated, NoticePending: true}
+	if err := store.writeState(state); err != nil {
+		return grantFile{}, err
+	}
+	return state, nil
+}
+
+func (store *GrantStore) migrateChangedPolicy(data []byte, policyVersion int, grantsJSON json.RawMessage, prefixesJSON json.RawMessage) (grantFile, error) {
+	buckets := map[string][]Grant{}
+	prefixes := map[string][]CommandPrefixGrant{}
+	if len(grantsJSON) > 0 {
+		if err := json.Unmarshal(grantsJSON, &buckets); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	if len(prefixesJSON) > 0 {
+		if err := json.Unmarshal(prefixesJSON, &prefixes); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+	}
+	backupPath, err := store.writeBackup(data, fmt.Sprintf("policy-v%d", policyVersion))
+	if err != nil {
+		return grantFile{}, err
+	}
+	state := emptyGrantState()
+	migrated, invalidated := 0, 0
+	for name, bucket := range buckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			invalidated += len(bucket)
+			continue
+		}
+		for _, grant := range bucket {
+			normalized, err := normalizeStoredGrant(key, grant)
+			if err != nil || normalized.Decision != GrantDeny {
+				invalidated++
+				continue
+			}
+			state.Grants[key] = append(state.Grants[key], normalized)
+			migrated++
+		}
+	}
+	for _, bucket := range prefixes {
+		invalidated += len(bucket)
+	}
+	state.Migration = &grantMigration{FromSchemaVersion: grantSchemaVersion, BackupPath: backupPath, Migrated: migrated, Invalidated: invalidated, NoticePending: true}
+	if err := store.writeState(state); err != nil {
+		return grantFile{}, err
+	}
+	return state, nil
+}
+
+func legacyShellGrant(grant Grant) bool {
+	if grant.Decision == GrantDeny {
+		return false
+	}
+	switch grant.ToolName {
+	case "bash", "exec_command", "write_stdin":
+		return true
+	default:
+		return false
+	}
+}
+
+func (store *GrantStore) writeLegacyBackup(data []byte, schemaVersion int) (string, error) {
+	return store.writeBackup(data, fmt.Sprintf("v%d", schemaVersion))
+}
+
+func (store *GrantStore) writeBackup(data []byte, label string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return "", err
+	}
+	base := fmt.Sprintf("%s.%s.backup", store.filePath, label)
+	for attempt := 0; ; attempt++ {
+		path := base
+		if attempt > 0 {
+			path = fmt.Sprintf("%s.%d", base, attempt)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return path, nil
+	}
 }
 
 func (store *GrantStore) invalidGrantFile(err error) error {
@@ -721,6 +974,7 @@ func normalizeStoredCommandPrefixGrant(name string, grant CommandPrefixGrant) (C
 func emptyGrantState() grantFile {
 	return grantFile{
 		SchemaVersion:   grantSchemaVersion,
+		PolicyVersion:   execution.PolicyVersion,
 		Grants:          map[string][]Grant{},
 		CommandPrefixes: map[string][]CommandPrefixGrant{},
 	}

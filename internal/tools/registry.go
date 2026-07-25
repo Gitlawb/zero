@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -113,6 +114,9 @@ func (registry *Registry) All() []Tool {
 	for _, tool := range registry.tools {
 		tools = append(tools, tool)
 	}
+	sort.Slice(tools, func(left, right int) bool {
+		return tools[left].Name() < tools[right].Name()
+	})
 	return tools
 }
 
@@ -253,9 +257,6 @@ func scrubResultSecrets(res Result) Result {
 	return res
 }
 
-func CoreReadOnlyTools(workspaceRoot string) []Tool {
-	return CoreReadOnlyToolsScoped(workspaceRoot, nil)
-}
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedReadFileTool(workspaceRoot, scope),
@@ -276,7 +277,6 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreWriteTools(workspaceRoot string) []Tool { return CoreWriteToolsScoped(workspaceRoot, nil) }
 func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedWriteFileTool(workspaceRoot, scope),
@@ -286,7 +286,6 @@ func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
 func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	execManager := newExecSessionManager()
 	return []Tool{
@@ -308,7 +307,6 @@ func CoreNetworkTools() []Tool {
 	return tools
 }
 
-func CoreTools(workspaceRoot string) []Tool { return CoreToolsScoped(workspaceRoot, nil) }
 func CoreToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	tools := append([]Tool{}, CoreReadOnlyToolsScoped(workspaceRoot, scope)...)
 	tools = append(tools, CoreWriteToolsScoped(workspaceRoot, scope)...)

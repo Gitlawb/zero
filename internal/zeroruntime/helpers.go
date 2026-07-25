@@ -26,13 +26,6 @@ type CollectedStream struct {
 	HasReasoning bool
 }
 
-// Truncated reports whether the response ended for a non-normal reason (the
-// output was cut at the token cap or withheld by a content filter), so callers
-// can warn instead of treating a clipped answer as complete.
-func (collected CollectedStream) Truncated() bool {
-	return collected.FinishReason != ""
-}
-
 // CollectOptions provides callbacks for consumers that need live stream updates.
 type CollectOptions struct {
 	OnText      func(string)

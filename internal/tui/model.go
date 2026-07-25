@@ -103,6 +103,11 @@ type model struct {
 	doctorFrame          int
 	activeSession        sessions.Metadata
 	sessionEvents        []sessions.Event
+	btw                  btwState
+	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
+	// surface. It survives returning to the parent so a late message from an old
+	// side run can never match a run in a later BTW conversation.
+	btwRunIDSeq int
 	// titledSessions records session ids for which a model-generated title has
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
@@ -307,16 +312,23 @@ type model struct {
 	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
-	// is already in native scrollback; in alt-screen mode this frontier stays
-	// idle so history cannot reveal prior shell output.
+	// is already in native scrollback. Alt-screen mode advances the same
+	// frontier, but keeps the settled prefix as cached body items so fullscreen
+	// scrolling still exposes the complete transcript without rebuilding it on
+	// every frame.
 	// flushedAny gates the first turn-separator blank line; flushQueue/
 	// printInFlight serialize ordered scrollback prints; headerPrinted records
 	// the one-time inline title-bar print at startup.
-	flushed       int
-	flushedAny    bool
-	flushQueue    []string
-	printInFlight bool
-	headerPrinted bool
+	flushed                  int
+	flushedAny               bool
+	flushedPreviousKind      rowKind
+	flushedHavePreviousKind  bool
+	flushQueue               []string
+	printInFlight            bool
+	headerPrinted            bool
+	altScreenSettledItems    []transcriptBodyItem
+	altScreenSettledWidth    int
+	altScreenSettledFrontier int
 
 	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
 	// lastPrompt is the verbatim text of the most recent submitted prompt, so
@@ -365,7 +377,20 @@ type model struct {
 	lastStreamActivity time.Time
 	fadeActive         bool
 	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color / reduced motion)
-	reducedMotion      bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
+	// streamClearDisabled turns off the full-redraw-on-streamed-newline
+	// workaround for terminals that render scroll regions correctly
+	// (ZERO_NO_STREAM_CLEAR=1). lastStreamClear rate-limits the redraws the
+	// workaround schedules so heavy streaming output (code, logs, diffs)
+	// coalesces to a bounded number of repaints per second instead of one
+	// per newline. pendingStreamClear tracks a newline that arrived while
+	// throttled: the redraw it would have triggered is deferred (flushed by
+	// a scheduled streamClearFlushMsg, or at stream end) instead of dropped
+	// outright, so a throttled newline that happens to be the last one of
+	// the turn still gets its caret repaired.
+	streamClearDisabled bool
+	lastStreamClear     time.Time
+	pendingStreamClear  bool
+	reducedMotion       bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
@@ -396,8 +421,9 @@ type model struct {
 	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
 	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
 	// (clickable suggestions, right-click paste, transcript select) pause while on.
-	mouseReleased       bool
-	transcriptSelection transcriptSelectionState
+	mouseReleased         bool
+	transcriptSelection   transcriptSelectionState
+	transcriptInteraction *transcriptRenderInteraction
 	// hover identifies the single clickable row (if any) currently under the
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
@@ -482,6 +508,28 @@ type model struct {
 type agentTextMsg struct {
 	runID int
 	delta string
+}
+
+// streamClearThrottle is the minimum gap between full-screen stream-clear
+// redraws. Newlines that arrive inside this window mark a deferred clear
+// (pendingStreamClear) instead of firing immediately, so heavy streaming
+// output coalesces to ~10 repaints/second while still guaranteeing a
+// eventual caret repair.
+const streamClearThrottle = 100 * time.Millisecond
+
+// streamClearFlushMsg fires once, roughly when the stream-clear throttle
+// window (see lastStreamClear) has elapsed, to flush a ClearScreen that a
+// throttled newline deferred rather than fired directly. It's a no-op if
+// nothing is pending by the time it lands (the common case, since most
+// throttled newlines are followed by another one that flushes them first).
+type streamClearFlushMsg struct{}
+
+// scheduleStreamClearFlush returns a one-shot command that delivers a
+// streamClearFlushMsg after d. Used to guarantee a deferred stream-clear
+// redraw is eventually flushed even if no later newline or stream-end event
+// does it first (see the streamClearFlushMsg case in Update).
+func scheduleStreamClearFlush(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return streamClearFlushMsg{} })
 }
 
 type exitConfirmExpiredMsg struct {
@@ -676,6 +724,17 @@ type pendingPermissionPrompt struct {
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
+	// typing is true once the user chose "tell Zero what to do differently": the
+	// card replaces its option list with a free-text field (sharing the composer
+	// input, like the ask_user questionnaire). Submitting sends a Deny decision
+	// whose Reason is the typed text, so the model reads it as the tool result and
+	// adjusts course in the same turn instead of the run being cancelled.
+	typing bool
+	// savedDraft holds whatever was in the shared composer input when feedback
+	// mode was entered. The field is cleared for typing and restored on both
+	// submit and cancel, so a half-typed or queued next-turn message survives the
+	// detour (permissionRequestMsg, unlike ask_user, does not clear the composer).
+	savedDraft string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -836,6 +895,7 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
 		transcriptBodyHeights:       newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
+		transcriptInteraction:       &transcriptRenderInteraction{},
 		prService:                   prService,
 		prState:                     prService.GetState(),
 		input:                       input,
@@ -862,6 +922,12 @@ func newModel(ctx context.Context, options Options) model {
 	// Streaming text always renders statically at base ink (the disabled path in
 	// styleStreamingLine), so no accent glow and no per-line fade ticks.
 	m.fadeDisabled = true
+	// Terminals that handle scroll regions correctly can opt back into the
+	// fast incremental path; the redraw workaround (see the ClearScreen
+	// scheduling in updateModel) is otherwise on, rate-limited.
+	if v := strings.TrimSpace(os.Getenv("ZERO_NO_STREAM_CLEAR")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+		m.streamClearDisabled = true
+	}
 	// One session-long LSP manager (cheap to build — servers start lazily on the
 	// first Check), reused across prompts so gopls stays warm between turns.
 	if cwd != "" {
@@ -1029,6 +1095,14 @@ func (m model) shutdownLSPManager() {
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if m.btw.active {
+		if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
+			m.clearComposer()
+			m.clearSuggestions()
+			return m, nil
+		}
+		return m.leaveBTW()
+	}
 	if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
 		m.clearComposer()
 		m.clearSuggestions()
@@ -1108,6 +1182,12 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m = m.resizeBTWParent(size)
+	}
+	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
+		return next, cmd
+	}
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
 		switch {
@@ -1411,6 +1491,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.escapeAskUser()
 			}
+			// Esc in the permission feedback field steps back to the option list
+			// rather than resolving, so a stray keystroke is recoverable.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				return m.cancelPermissionTyping()
+			}
 			if m.pendingSpecReview != nil {
 				m.burstCount = 0
 				return m.cancelSpecReview()
@@ -1453,7 +1538,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// selection is a passive highlight, so Esc dropping it is cheap and
 			// expected (mirrors how editors clear selection on Esc).
 			if m.selectedFile != "" {
-				m.selectedFile = ""
+				m.setSelectedFile("")
 				return m, nil
 			}
 			if m.hasQueuedMessage() {
@@ -1631,6 +1716,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyBackspace(msg):
+			// In permission feedback mode Backspace is a plain edit of the feedback
+			// text. This case runs before the typing branch below and, on an empty
+			// field (feedback mode clears the composer), would otherwise fall to the
+			// removeLastAttachment path and silently drop a staged image/doc that
+			// savedDraft does not restore. Route it to the shared input instead.
+			if m.pendingPermission != nil && m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -1826,6 +1921,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSpecReviewKey(msg)
 		}
 		if m.pendingPermission != nil {
+			// Feedback mode: a printable keystroke (and editing keys like
+			// backspace) types into the shared composer input, mirroring the
+			// ask_user free-text path above. Enter/Esc/↑/↓ were already handled
+			// earlier in this switch; the remaining keys reach the input here.
+			if m.pendingPermission.typing {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
 			m.burstCount = 0
 			return m.handlePermissionKey(msg)
 		}
@@ -1921,6 +2025,37 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-stamps the in-progress last entry so the line that's still
 		// being filled stays visibly fresh.
 		m.recordStreamingDelta(msg.delta)
+		var cmds []tea.Cmd
+		// The streaming caret (appendStreamingCursor) is appended to whatever
+		// visual line is currently last. Some terminal/renderer combinations
+		// (observed over multipass + Windows Terminal) fail to clear the
+		// caret's old cell when a newline moves it to a new line, leaving
+		// ghost carets behind. A newline is exactly the moment that risk
+		// exists, so force one full-screen redraw right then rather than
+		// leaving it to the incremental diff. Rate-limited: heavy streaming
+		// output (code, logs, diffs) would otherwise turn every coalesced
+		// newline into a full-screen repaint, a real throughput/latency cost
+		// on SSH and slow links. ~10 redraws/second is enough to keep the
+		// caret clean without dominating the write path; terminals that
+		// render scroll regions correctly can opt out entirely with
+		// ZERO_NO_STREAM_CLEAR=1. A newline that arrives inside the throttle
+		// window still owes a repair — it's marked pending and a one-shot
+		// timer is scheduled to flush it (see streamClearFlushMsg), instead
+		// of being dropped outright. That covers a throttled newline that
+		// turns out to be the turn's last one (agentResponseMsg also flushes
+		// any still-pending clear at stream end, belt-and-suspenders) as
+		// well as one buried in the middle of a long, still-streaming turn.
+		if strings.Contains(msg.delta, "\n") && !m.streamClearDisabled {
+			now := m.now()
+			if elapsed := now.Sub(m.lastStreamClear); elapsed >= streamClearThrottle {
+				m.lastStreamClear = now
+				m.pendingStreamClear = false
+				cmds = append(cmds, tea.ClearScreen)
+			} else if !m.pendingStreamClear {
+				m.pendingStreamClear = true
+				cmds = append(cmds, scheduleStreamClearFlush(streamClearThrottle-elapsed))
+			}
+		}
 		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
 		// case schedules the next one). Schedule the FIRST tick only on
 		// the inactive→active transition; subsequent deltas just refresh
@@ -1932,10 +2067,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			startTick := !m.fadeActive
 			m.fadeActive = true
 			if startTick {
-				return m, streamingFadeTick()
+				cmds = append(cmds, streamingFadeTick())
 			}
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2009,6 +2144,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, streamingFadeTick()
+	case streamClearFlushMsg:
+		// Flush a newline-triggered redraw that the stream-clear throttle
+		// deferred (see agentTextMsg) once its window has elapsed. This runs
+		// independent of the streaming fade (which is unconditionally off —
+		// fadeDisabled is hardcoded true in newModel — so its tick can't be
+		// relied on to drive this), and independent of stream end: a turn
+		// that keeps streaming for a while after the throttled newline would
+		// otherwise leave the ghost caret up for the rest of the turn.
+		now := m.now()
+		if m.pendingStreamClear && now.Sub(m.lastStreamClear) >= streamClearThrottle {
+			m.lastStreamClear = now
+			m.pendingStreamClear = false
+			return m, tea.ClearScreen
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -2062,7 +2212,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
+		promptEvent := permissionEventFromRequest(msg.request)
+		promptRow := permissionTranscriptRow(promptEvent)
+		// The focused modal owns the actionable reason while the decision is
+		// pending. Keep only structured block context in the transcript row so
+		// the same explanation is not shown immediately above the card.
+		if promptEvent.Block == nil {
+			promptRow.detail = ""
+		} else {
+			promptRow.detail = permissionBlockDetail(promptEvent)
+		}
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
 		m.pendingPermission = &pendingPermissionPrompt{
@@ -2161,6 +2320,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		m.pending = false
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
+		// A newline-triggered redraw deferred by the stream-clear throttle
+		// (see agentTextMsg) may never get a later newline or fade tick to
+		// flush it if this was the turn's last delta — flush it here so the
+		// ghost caret isn't left behind at stream end.
+		var pendingClearCmd tea.Cmd
+		if m.pendingStreamClear {
+			m.pendingStreamClear = false
+			pendingClearCmd = tea.ClearScreen
+		}
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
 		// the pending streamingFadeTickMsg that lands after this point
@@ -2302,7 +2470,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, loopTickCmd = m.ensureLoopTick()
 		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
@@ -2450,7 +2618,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
+		beforeCollapse := len(m.transcript)
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
+		if removed := beforeCollapse - len(m.transcript); removed > 0 {
+			m.flushed = max(0, m.flushed-removed)
+			m.altScreenSettledWidth = 0
+		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		m = m.captureStepWork(msg.row)
 		// A finished command tool may have mutated files git can see but no
@@ -2751,6 +2924,16 @@ func (m model) footerView(width int) string {
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
+	// A focused permission prompt owns the keyboard: its options (and the feedback
+	// field) consume every key, so the composer is inert. Suppress it and the idle
+	// hints/plan panel like the ask_user modal above, keeping only the status line.
+	// The card itself renders in the transcript body. This also keeps the shared
+	// input from echoing in two places once "tell Zero what to do differently"
+	// opens the on-card feedback field.
+	if m.pendingPermission != nil {
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
 	// Pinned plan panel: sits directly above the composer so it stays visible
 	// while the transcript scrolls underneath (a streaming turn no longer pushes
 	// the plan off-screen). Budgeted to at most a third of the screen height; a
@@ -2963,18 +3146,6 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 	}
 }
 
-func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
-	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
-}
-
-func (m model) scrollableTranscriptLayoutView(header string, body transcriptBodyLayout, footer string, width int, overlay string) string {
-	frame := m.scrollableTranscriptFrame(header, footer)
-	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()
-
-	bodyWindow := body.visibleLines(window)
-	return m.renderScrollableTranscriptWindow(frame, bodyWindow, window, width, overlay)
-}
-
 func (m model) scrollableTranscriptItemsView(header string, items []transcriptBodyItem, footer string, width int, overlay string) string {
 	frame := m.scrollableTranscriptFrame(header, footer)
 	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
@@ -3123,11 +3294,6 @@ func (m model) scrollChat(delta int) model {
 		m.chatBodyLines = 0
 	}
 	return m
-}
-
-func (m model) chatMaxScrollOffset() int {
-	_, maxOffset := m.chatScrollMetrics()
-	return maxOffset
 }
 
 func (m model) chatScrollMetrics() (int, int) {
@@ -3909,13 +4075,22 @@ func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := strings.ToLower(msg.String())
 	for _, option := range permissionOptions(m.pendingPermission.request) {
 		if option.hotkey == key {
-			return m.resolvePermission(option.choice)
+			return m.choosePermissionOption(option.choice)
 		}
 	}
 	return m, nil
 }
 
 func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
+	return m.resolvePermissionWithReason(decision, permissionDecisionReason(decision))
+}
+
+// resolvePermissionWithReason resolves the pending prompt with an explicit reason
+// string. It backs both the fixed-label choices (reason = permissionDecisionReason)
+// and the free-text "tell Zero what to do differently" path, where the reason is
+// the user's typed instruction and the action is Deny so the agent surfaces it as
+// the tool result and keeps going.
+func (m model) resolvePermissionWithReason(decision permissionDecision, reason string) (tea.Model, tea.Cmd) {
 	pending := m.pendingPermission
 	if pending == nil {
 		return m, nil
@@ -3924,7 +4099,7 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 	if pending.decide != nil {
 		pending.decide(agent.PermissionDecision{
 			Action: decision,
-			Reason: permissionDecisionReason(decision),
+			Reason: reason,
 		})
 	}
 	m.pendingPermission = nil
@@ -4114,6 +4289,21 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 // dispatchCommand runs a parsed slash/prompt command after submit/leader
 // preamble (history, composer clear, leave-prompt disarm) has already run.
 func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
+	if m.btw.active && command.kind == commandExit && m.btw.parent != nil &&
+		(m.btw.parent.pending || m.btw.parent.compactInFlight || len(m.btw.parent.flushRunIDs) > 0) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: "The main session is still running. Return to it first with /btw or Ctrl+C before exiting.",
+		})
+		return m, nil
+	}
+	if m.btw.active && btwCommandUnavailable(command) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: command.name + " is unavailable in a BTW conversation. Return to the main session first with /btw or Ctrl+C.",
+		})
+		return m, nil
+	}
 	switch command.kind {
 	case commandEmpty:
 		return m, nil
@@ -4152,6 +4342,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.startNewSession(), nil
+	case commandBTW:
+		return m.handleBTWCommand(command.text)
 	case commandLoop:
 		return m.handleLoopCommand(command.text)
 	case commandExit:
@@ -4624,6 +4816,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
+	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
 	return m
@@ -5098,14 +5291,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:         toolResultRowText(result),
-				tool:         result.Name,
-				status:       result.Status,
-				detail:       toolResultDetail(result),
-				runID:        runID,
-				changedFiles: result.ChangedFiles,
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:            toolResultRowText(result),
+				tool:            result.Name,
+				status:          result.Status,
+				detail:          toolResultDetail(result),
+				runID:           runID,
+				changedFiles:    result.ChangedFiles,
+				changeSummaries: result.ChangeSummaries,
 			}
 			// A Task result is shown by the specialist card, and update_plan by the
 			// plan panel/sidebar, so skip both redundant transcript rows.
@@ -5137,6 +5331,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			if len(result.ChangedFiles) > 0 {
 				toolPayload["changedFiles"] = result.ChangedFiles
+			}
+			if len(result.ChangeSummaries) > 0 {
+				toolPayload["changeSummaries"] = result.ChangeSummaries
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventToolResult,
