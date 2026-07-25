@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/acp"
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -43,6 +45,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 	conn := acp.NewConn(deps.stdin, stdout)
 	acp.NewAgent(conn, acp.Deps{
 		ResolveConfig: deps.resolveConfig,
+		DiscoverModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return defaultDiscoverProviderModels(ctx, discoveryCredentialProfile(profile))
+		},
 		// deps.newProvider is wrapped in fillAppDeps to apply the stored API key,
 		// so ACP is authenticated for apiKeyStored profiles like every other
 		// surface — no ACP-specific credential handling needed.

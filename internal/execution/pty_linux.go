@@ -1,6 +1,6 @@
 //go:build linux
 
-package tools
+package execution
 
 import (
 	"errors"
@@ -14,41 +14,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func startPTYProcess(command *exec.Cmd, output *execOutputBuffer) (io.WriteCloser, func(), error) {
+func startPTYProcess(command *exec.Cmd, output io.Writer) (io.WriteCloser, func(), error) {
 	master, slave, err := openPTY()
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := func() {
-		_ = master.Close()
-		_ = slave.Close()
-	}
-	command.Stdin = slave
-	command.Stdout = slave
-	command.Stderr = slave
-	hardenPTYProcessLifetime(command, slave)
+	cleanup := func() { _ = master.Close(); _ = slave.Close() }
+	command.Stdin, command.Stdout, command.Stderr = slave, slave, slave
+	hardenPTYProcess(command)
 	if err := command.Start(); err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	_ = slave.Close()
 	copied := make(chan struct{})
-	go func() {
-		defer close(copied)
-		_, _ = io.Copy(output, master)
-	}()
+	go func() { defer close(copied); _, _ = io.Copy(output, master) }()
 	return master, func() {
-		// cleanup runs in the Wait goroutine AFTER command.Wait() returns, so the
-		// child has exited and its slave fds are closed — the master then EOFs once
-		// io.Copy drains the remaining PTY output into the buffer. Wait for that copy
-		// to finish BEFORE closing the master and letting the caller mark the session
-		// done + remove it; otherwise a command's final output chunk (e.g. a test
-		// runner's last PASS/FAIL line) can be lost on exit. Closing the master first
-		// would truncate the unread tail, so the join precedes the Close. Bounded so a
-		// stuck copy can't hang teardown. (AUDIT-M14)
 		select {
 		case <-copied:
-		case <-time.After(bashWaitDelay):
+		case <-time.After(processWaitDelay):
 		}
 		_ = master.Close()
 	}, nil
@@ -75,18 +59,17 @@ func openPTY() (*os.File, *os.File, error) {
 		_ = master.Close()
 		return nil, nil, err
 	}
-	slave := os.NewFile(uintptr(slaveFD), slaveName)
-	return master, slave, nil
+	return master, os.NewFile(uintptr(slaveFD), slaveName), nil
 }
 
-func hardenPTYProcessLifetime(command *exec.Cmd, slave *os.File) {
+func hardenPTYProcess(command *exec.Cmd) {
 	if command.SysProcAttr == nil {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	command.SysProcAttr.Setsid = true
 	command.SysProcAttr.Setctty = true
 	command.SysProcAttr.Ctty = 0
-	command.WaitDelay = bashWaitDelay
+	command.WaitDelay = processWaitDelay
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return nil

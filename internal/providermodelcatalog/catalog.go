@@ -133,6 +133,10 @@ var curatedModels = map[string][]Model{
 		{ID: "kimi-k2-turbo-preview", Description: "fast coding model"},
 		{ID: "moonshot-v1-128k", Description: "long-context model"},
 	},
+	"atlascloud": {
+		{ID: "qwen/qwen3.5-flash", Description: "catalog default"},
+		{ID: "deepseek-ai/deepseek-v4-pro", Description: "reasoning model"},
+	},
 	"nvidia-nim": {
 		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "catalog default"},
 		{ID: "meta/llama-3.1-70b-instruct", Description: "general model"},
