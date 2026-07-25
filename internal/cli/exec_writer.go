@@ -153,6 +153,9 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		if len(result.Meta) > 0 {
 			payload["meta"] = result.Meta
 		}
+		if result.Truncated {
+			payload["truncated"] = true
+		}
 		if result.Redacted {
 			payload["redacted"] = true
 		}
@@ -166,7 +169,8 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		return
 	}
 	if writer.format == execOutputStreamJSON {
-		output, truncated := truncateForStreamJSONOutput(result.Output)
+		output, surfaceTruncated := truncateForStreamJSONOutput(result.Output)
+		truncated := result.Truncated || surfaceTruncated
 		event := streamjson.Event{
 			Type:         streamjson.EventToolResult,
 			RunID:        writer.runID,

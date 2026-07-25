@@ -88,6 +88,8 @@ func NewAskUserTool() *askUserTool {
 				AdditionalProperties: false,
 			},
 			safety: readOnlySafety("Asks the user clarifying questions; gathers input only."),
+			// EffectInteractive: blocks on user input; ordering matters.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/aimlapi"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -92,6 +93,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		// Sandbox.Enabled is NOT accepted from a provider command, for the same
+		// reason project config cannot set it (see mergeProjectConfig): only
+		// global config and the CLI may turn the sandbox off. A provider command
+		// is an arbitrary executable named in config, and LoadProviderCommand
+		// parses its stdout into a full FileConfig — so without this, a command
+		// returning a valid provider plus {"sandbox":{"enabled":false}} would
+		// disable the very sandbox meant to constrain what it can do. Cleared
+		// here rather than in mergeConfig because that helper is shared with the
+		// trusted global-config merge, which must keep honouring the setting.
+		commandConfig.Sandbox.Enabled = nil
 		mergeConfig(&cfg, commandConfig)
 	}
 
@@ -170,7 +181,10 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 		if err != nil {
 			return MCPConfig{}, err
 		}
-		mergeMCPConfig(&cfg.MCP, fileConfig.MCP)
+		// User config is higher-trust than project config: it may re-enable a
+		// server the user disabled (a user-level disable is sticky, but the user
+		// scope itself may lift it).
+		mergeMCPConfig(&cfg.MCP, fileConfig.MCP, true)
 	}
 	// Drop the project layer when the workspace is untrusted, so a cloned repo's
 	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:
@@ -184,7 +198,7 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 			return MCPConfig{}, err
 		}
 	}
-	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP)
+	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP, true)
 	return cfg.MCP, nil
 }
 
@@ -211,7 +225,10 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	for _, provider := range src.Providers {
 		mergeProvider(dst, provider)
 	}
-	mergeMCPConfig(&dst.MCP, src.MCP)
+	mergeMCPConfig(&dst.MCP, src.MCP, true)
+	if src.Sandbox.Enabled != nil {
+		dst.Sandbox.Enabled = src.Sandbox.Enabled
+	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -269,6 +286,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if err := mergeProjectMCPConfig(&dst.MCP, src.MCP); err != nil {
 		return err
 	}
+	// Sandbox.Enabled is intentionally NOT merged from project config: a cloned
+	// repo's .zero/config.json must not be able to disable the sandbox that
+	// constrains it. Only global config and CLI can turn the sandbox off.
+	//
 	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
@@ -684,6 +705,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
 	}
+	if overrides.Sandbox.Enabled != nil {
+		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled
+	}
 	if overrides.Sandbox.BlockUnixSockets {
 		cfg.Sandbox.BlockUnixSockets = true
 	}
@@ -709,7 +733,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if hasProviderFields(overrides.Provider) {
 		mergeProvider(cfg, overrides.Provider)
 	}
-	mergeMCPConfig(&cfg.MCP, overrides.MCP)
+	mergeMCPConfig(&cfg.MCP, overrides.MCP, true)
 }
 
 func mergeLocalControlConfig(dst *LocalControlConfig, src LocalControlConfig) {
@@ -1038,6 +1062,45 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	}
 	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
+	}
+	canonicalCatalogEndpoint := !explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+	if len(descriptor.CustomHeaders) > 0 && canonicalCatalogEndpoint {
+		catalogHeaders := descriptor.CustomHeaders
+		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {
+			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
+		}
+		merged := copyStringMap(catalogHeaders)
+		for key, value := range profile.CustomHeaders {
+			// Header names are case-insensitive. Preserve the catalog spelling while
+			// replacing its value so request construction cannot see two colliding
+			// map entries whose eventual winner depends on iteration order.
+			existingKey := ""
+			for candidate := range merged {
+				if strings.EqualFold(candidate, key) {
+					existingKey = candidate
+					break
+				}
+			}
+			if existingKey != "" {
+				merged[existingKey] = value
+				continue
+			}
+			merged[key] = value
+		}
+		profile.CustomHeaders = merged
+	} else if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") && !canonicalCatalogEndpoint {
+		// AIMLAPI attribution is owned by the catalog endpoint. A profile can retain
+		// those generated headers after its base URL is edited; strip their names
+		// before sending requests to an arbitrary staging/proxy host while preserving
+		// unrelated headers explicitly supplied by the user.
+		for profileKey := range profile.CustomHeaders {
+			for catalogKey := range descriptor.CustomHeaders {
+				if strings.EqualFold(profileKey, catalogKey) {
+					delete(profile.CustomHeaders, profileKey)
+					break
+				}
+			}
+		}
 	}
 }
 

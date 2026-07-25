@@ -59,25 +59,21 @@ func runSkills(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 }
 
 func runSkillsList(dir string, options skillListOptions, stdout io.Writer, stderr io.Writer) int {
-	discovered, err := skills.List(dir)
+	// Management CLI lists global roots only (primary + ~/.agents/skills); plugin
+	// skills stay out of `zero skills list` and surface via the agent skill tool.
+	roots := skills.GlobalRoots(dir)
+	discovered, dups, err := skills.ListFromRoots(roots)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	// Surface name collisions that List silently resolved (first directory wins),
-	// so a shadowed same-named skill is reported instead of just disappearing.
-	// Warnings go to stderr, keeping stdout (including --json) clean.
-	if dups, derr := skills.Duplicates(dir); derr == nil {
-		for _, dup := range dups {
-			fmt.Fprintf(stderr, "warning: duplicate skill %q: using %s, ignoring %s\n",
-				redaction.RedactString(dup.Name, redaction.Options{}),
-				redaction.RedactString(dup.Winner, redaction.Options{}),
-				redaction.RedactString(dup.Loser, redaction.Options{}))
-		}
-	} else {
-		// Don't silently swallow a scan failure: "no warnings" would then be
-		// ambiguous (no duplicates vs. detection broke). Surface it on stderr.
-		fmt.Fprintf(stderr, "warning: could not check for duplicate skills: %s\n",
-			redaction.ErrorMessage(derr, redaction.Options{}))
+	// Surface name collisions that ListFromRoots silently resolved (earlier root
+	// wins), so a shadowed same-named skill is reported instead of just
+	// disappearing. Warnings go to stderr, keeping stdout (including --json) clean.
+	for _, dup := range dups {
+		fmt.Fprintf(stderr, "warning: duplicate skill %q: using %s, ignoring %s\n",
+			redaction.RedactString(dup.Name, redaction.Options{}),
+			redaction.RedactString(dup.Winner, redaction.Options{}),
+			redaction.RedactString(dup.Loser, redaction.Options{}))
 	}
 	if options.json {
 		payload := struct {
@@ -88,16 +84,16 @@ func runSkillsList(dir string, options skillListOptions, stdout io.Writer, stder
 		}
 		return exitSuccess
 	}
-	output := redaction.RedactString(formatSkillList(discovered, dir), redaction.Options{})
+	output := redaction.RedactString(formatSkillList(discovered), redaction.Options{})
 	if _, err := fmt.Fprintln(stdout, output); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
 }
 
-func formatSkillList(discovered []skills.Skill, dir string) string {
+func formatSkillList(discovered []skills.Skill) string {
 	if len(discovered) == 0 {
-		return fmt.Sprintf("No Zero skills found in %s.", dir)
+		return "No skills found."
 	}
 	lines := []string{"Zero Skills:"}
 	for _, skill := range discovered {
@@ -131,10 +127,13 @@ func writeSkillsHelp(w io.Writer) error {
   zero skills <command>
 
 Commands:
-  list                 List discovered Zero skills
-  add <git-url|path>   Install a skill (checksum-pinned in skills.lock)
+  list                 List discovered skills (Zero dir + ~/.agents/skills)
+  add <git-url|path>   Install a skill into the Zero skills dir (checksum-pinned in skills.lock)
   info <name>          Show a skill's frontmatter, source, and pinned hash
-  remove <name>        Remove an installed skill and its lockfile entry
+  remove <name>        Remove an installed skill and its lockfile entry from the Zero skills dir
+
+list and info also search ~/.agents/skills when present (read-only).
+add and remove always target the Zero-specific skills directory.
 `)
 	return err
 }

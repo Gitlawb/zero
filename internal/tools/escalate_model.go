@@ -57,6 +57,8 @@ func newEscalateModelTool(registry modelregistry.Registry) escalateModelTool {
 				Reason:          "Requests a mid-run switch to a stronger model; the agent loop performs the switch.",
 				AdvertiseInAuto: true,
 			},
+			// Requests mid-run model switch; session-bound.
+			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false},
 		},
 		registry: registry,
 	}

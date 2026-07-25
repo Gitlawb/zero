@@ -37,6 +37,18 @@ func TestBudgetBashOutputSmallPassesThrough(t *testing.T) {
 	}
 }
 
+func TestPrepareBashOutputDefersRegistrySemanticBudget(t *testing.T) {
+	output := "START\n" + strings.Repeat("progress\n", 8_000) + "ERROR: retained\nEND"
+	registryOutput, _, registryTruncated := prepareBashOutput(output, len(output), "", 0, map[string]string{}, false)
+	if registryTruncated || registryOutput != output {
+		t.Fatalf("registry preparation must preserve capture-bounded output for semantic reduction: truncated=%t bytes=%d", registryTruncated, len(registryOutput))
+	}
+	directOutput, _, directTruncated := prepareBashOutput(output, len(output), "", 0, map[string]string{}, true)
+	if !directTruncated || len(directOutput) > bashOutputBudgetBytes+512 {
+		t.Fatalf("direct path must preserve legacy positional budget: truncated=%t bytes=%d", directTruncated, len(directOutput))
+	}
+}
+
 // Oversized stdout is truncated head+tail: both the first and last lines survive,
 // the middle is dropped behind a marker, meta is flagged, and the captured text
 // is spilled to a re-readable file.

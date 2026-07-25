@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,6 +190,37 @@ func TestInstallReinstallShowsHashChange(t *testing.T) {
 	got, _ := Get(destDir, "demo")
 	if !strings.Contains(got.Content, "second body") {
 		t.Fatalf("reinstall did not overwrite content: %q", got.Content)
+	}
+}
+
+func TestConcurrentInstallsPreserveEveryLockEntry(t *testing.T) {
+	destDir := t.TempDir()
+	const count = 12
+	sources := make([]string, count)
+	for index := range count {
+		content := fmt.Sprintf("---\nname: concurrent-%02d\ndescription: test\n---\nbody\n", index)
+		sources[index] = writeSourceSkill(t, filepath.Join(t.TempDir(), "src"), content)
+	}
+
+	errs := make(chan error, count)
+	for _, source := range sources {
+		go func() {
+			_, err := Install(context.Background(), InstallOptions{Source: source, Dir: destDir})
+			errs <- err
+		}()
+	}
+	for range count {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Install: %v", err)
+		}
+	}
+
+	entries, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if len(entries) != count {
+		t.Fatalf("lockfile has %d entries, want %d: %#v", len(entries), count, entries)
 	}
 }
 

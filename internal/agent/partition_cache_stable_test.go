@@ -14,7 +14,7 @@ func TestPartitionToolsActiveAppendsLoadedToolAfterEagerBlock(t *testing.T) {
 	// "read_file".
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root)) // non-deferred, "read_file"
+	registry.Register(tools.NewScopedReadFileTool(root, nil)) // non-deferred, "read_file"
 	registry.Register(fakeToolSearchTool{})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})

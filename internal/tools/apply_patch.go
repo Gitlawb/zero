@@ -16,10 +16,6 @@ type applyPatchTool struct {
 	scope         PathScope
 }
 
-func NewApplyPatchTool(workspaceRoot string) Tool {
-	return NewScopedApplyPatchTool(workspaceRoot, nil)
-}
-
 func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
@@ -34,7 +30,8 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"patch"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectWrite, "Applies patch hunks that can create, edit, or delete files."),
+			safety:       promptSafety(SideEffectWrite, "Applies patch hunks that can create, edit, or delete files."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false, ResourceKeys: applyPatchResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,

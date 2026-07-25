@@ -32,6 +32,15 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.noNotify = true
 		case arg == "--no-completion-gate":
 			options.noCompletionGate = true
+		case arg == "--trace":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.tracePath = value
+			index = next
+		case strings.HasPrefix(arg, "--trace="):
+			options.tracePath = strings.TrimSpace(strings.TrimPrefix(arg, "--trace="))
 		case arg == "--notify":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -138,6 +147,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--profile="):
 			options.modelProfile = strings.TrimSpace(strings.TrimPrefix(arg, "--profile="))
+		case arg == "--exec-profile":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.execProfile = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--exec-profile="):
+			value, err := requiredInlineFlagValue(arg, "--exec-profile")
+			if err != nil {
+				return options, false, err
+			}
+			options.execProfile = value
 		case arg == "-r" || arg == "--reasoning-effort":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {

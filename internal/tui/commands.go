@@ -41,11 +41,13 @@ const (
 	commandAddDir
 	commandSelfCorrect
 	commandTurns
+	commandProfile
 	commandRetry
 	commandEdit
 	commandCopy
 	commandExport
 	commandNew
+	commandBTW
 	commandSkills
 	commandLoop
 	commandVoice
@@ -192,6 +194,13 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandNew,
 	},
 	{
+		name:        "/btw",
+		usage:       "/btw [question]",
+		group:       commandGroupSession,
+		description: "Open an isolated side conversation; run /btw again to return.",
+		kind:        commandBTW,
+	},
+	{
 		name:        "/search",
 		aliases:     []string{"/find"},
 		usage:       "/search <query>",
@@ -252,6 +261,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/rewind",
+		aliases:     []string{"/undo"},
 		usage:       "/rewind [latest|<sequence>]",
 		group:       commandGroupSession,
 		description: "Restore workspace files to a checkpoint and truncate the session.",
@@ -285,6 +295,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or set the per-run tool-turn budget for this session (raise it for long multi-step tasks).",
 		kind:        commandTurns,
+	},
+	{
+		name:        "/profile",
+		usage:       "/profile [status|balanced|fast|thorough]",
+		group:       commandGroupSession,
+		description: "Show or switch the execution profile for the next run (loop posture: turn budget, effort, self-correction, escalation; model selection is unchanged).",
+		kind:        commandProfile,
 	},
 	{
 		name:        "/retry",
@@ -415,32 +432,6 @@ func resolveCommand(name string) (commandDefinition, bool) {
 		}
 	}
 	return commandDefinition{}, false
-}
-
-func listCommandNames() []string {
-	names := make([]string, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		names = append(names, command.name)
-		names = append(names, command.aliases...)
-	}
-	return names
-}
-
-func formatCommandHelpLines() []string {
-	return formatGroupedCommandHelpLines()
-}
-
-func formatGroupedCommandHelpLines() []string {
-	lines := make([]string, 0, len(commandDefinitions)+len(commandGroupOrder()))
-	for _, group := range commandGroupOrder() {
-		groupLines := commandHelpLinesForGroup(group)
-		if len(groupLines) == 0 {
-			continue
-		}
-		lines = append(lines, string(group)+":")
-		lines = append(lines, groupLines...)
-	}
-	return lines
 }
 
 func formatGroupedCommandHelp() string {

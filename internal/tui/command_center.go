@@ -214,6 +214,12 @@ func (m model) setDoctorStatusRow(text string) model {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		if m.transcript[i].id == doctorStatusRowID {
 			m.transcript[i] = row
+			// Settled alt-screen rows are cached across frames; force a rebuild
+			// so an in-place update (e.g. the spinner tick) is reflected
+			// immediately instead of serving the stale cached snapshot.
+			if i < m.flushed {
+				m.altScreenSettledWidth = 0
+			}
 			return m
 		}
 	}
@@ -464,13 +470,15 @@ func (m model) handleModelCommand(args string) (model, string) {
 		// dedupe against the entry just persisted here, showing the same switch twice.
 		config.RecentModelEntry{Provider: m.providerName, Model: target.modelID},
 	)
-	resetEffort := false
-	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
-		// Drop an unsupported carry-over preference and fall back to the
-		// model's effective default for the new model.
-		m.reasoningEffort = ""
-		resetEffort = true
-	}
+	// Drop a known-unsupported preference, void any profile bookkeeping the
+	// drop erased, and re-derive an active profile's per-model effort fill.
+	// The ring is authoritative only for catalog-resolved targets
+	// (target.entry non-nil); live-discovered/custom targets carry no support
+	// knowledge, so an explicit preference survives onto them. resetEffort
+	// reports a dropped preference nothing refilled (shown as a reset to
+	// auto).
+	var resetEffort bool
+	m, resetEffort = m.reconcileEffortForModelSwitch(target.reasoningEfforts, target.entry != nil)
 	effortLine := "effort: " + m.effortDisplay()
 	if resetEffort {
 		// Preference was dropped: show "auto" (model default applies), not a
@@ -551,6 +559,13 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
+	// An active profile's effort fill is per-model: re-derive it for the
+	// destination, exactly like handleModelCommand does. No generic
+	// unsupported-drop here: cross-provider targets are often custom models
+	// the catalog cannot vouch for either way, so an explicit preference is
+	// carried (pre-existing behavior) while the profile's own fill stays
+	// conservative — it only ever applies where support is known.
+	m = m.reconcileProfileAfterModelSwitch(m.availableReasoningEfforts())
 	// Record the outgoing pair too — see the matching comment in
 	// handleModelCommand for why (keeps the session's starting model from
 	// silently dropping out of "Recent" on the first switch away from it).
@@ -680,6 +695,14 @@ func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error
 	}
 	model := strings.TrimSpace(profile.Model)
 	if model == "" {
+		return false, nil
+	}
+	persisted, err := config.ProviderPersisted(path, name)
+	if err != nil {
+		return false, err
+	}
+	if !persisted {
+		// Env-derived providers have no config.json row to update.
 		return false, nil
 	}
 	if _, err := config.SetProviderModel(path, name, model); err != nil {

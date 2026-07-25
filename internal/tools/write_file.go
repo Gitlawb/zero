@@ -14,10 +14,6 @@ type writeFileTool struct {
 	scope         PathScope
 }
 
-func NewWriteFileTool(workspaceRoot string) Tool {
-	return NewScopedWriteFileTool(workspaceRoot, nil)
-}
-
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	return writeFileTool{
 		baseTool: baseTool{
@@ -33,7 +29,8 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"path", "content"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectWrite, "Creates or overwrites files."),
+			safety:       promptSafety(SideEffectWrite, "Creates or overwrites files."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,

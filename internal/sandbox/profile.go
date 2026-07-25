@@ -18,6 +18,7 @@ const (
 type PermissionProfile struct {
 	FileSystem FileSystemPolicy `json:"fileSystem"`
 	Network    NetworkPolicy    `json:"network"`
+	Runtime    *SandboxRuntime  `json:"runtime,omitempty"`
 }
 
 type FileSystemPolicy struct {
@@ -63,20 +64,13 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Backends enforce paths that exist when the sandbox starts;
-// mount-based Linux cannot protect an absent child beneath a writable bind
-// without either creating it on the host or making its parent read-only, so an
-// absent baseline remains an acknowledged backend limitation rather than
-// preventing ordinary non-Git workspaces from launching.
+// subprocesses. Nonexistent paths are harmless no-ops in every backend's
+// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
 	return []string{
 		filepath.Join(root, ".git", "hooks"),
 		filepath.Join(root, ".git", "config"),
 	}
-}
-
-func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
-	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
@@ -101,14 +95,12 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	}
 	readRoots := permissionProfileReadRoots(workspaceRoot, policy, scope, roots)
 	writeRoots := make([]WritableRoot, 0, len(roots))
-	tempRoots := defaultTempWriteRoots()
 	for _, root := range roots {
-		writable := WritableRoot{Root: root}
-		if !profilePathInList(tempRoots, root) {
-			writable.ReadOnlySubpaths = gitMetadataWriteCarveouts(root)
-			writable.ProtectedMetadataNames = append([]string{}, sandboxFullyProtectedMetadataNames...)
-		}
-		writeRoots = append(writeRoots, writable)
+		writeRoots = append(writeRoots, WritableRoot{
+			Root:                   root,
+			ReadOnlySubpaths:       gitMetadataWriteCarveouts(root),
+			ProtectedMetadataNames: append([]string{}, sandboxFullyProtectedMetadataNames...),
+		})
 	}
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -188,16 +180,6 @@ func credentialDenyReadPaths(policy Policy, baseDir string, commandEnv []string)
 	}
 	options := credentialPathOptionsFromEnvironment(baseDir, commandEnv)
 	return credentialDenyReadPathsIn(options, policy.AllowRead)
-}
-
-func profilePathInList(paths []string, want string) bool {
-	want = filepath.Clean(want)
-	for _, path := range paths {
-		if filepath.Clean(path) == want {
-			return true
-		}
-	}
-	return false
 }
 
 func credentialPathOptionsFromEnvironment(baseDir string, commandEnv []string) credentialPathOptions {
@@ -312,10 +294,10 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 }
 
 // resolveCredentialOverridePath mirrors the token stores' own override
-// resolution (oauth.ResolveStorePath, mcp.ResolveTokenStorePath — duplicated
-// here rather than imported, the same tradeoff zeroUserConfigDir makes,
-// because internal/mcp depends on this package): a relative override is
-// resolved literally against the process working directory, NOT tilde-
+// resolution (oauth.ResolveStorePath, mcp.ResolveTokenStorePath — reimplemented
+// here rather than imported because internal/mcp depends on this package): a
+// relative override is resolved literally against the command directory that
+// the child inherits, NOT tilde-
 // expanded the way normalizeProfilePath expands other candidates. Using
 // normalizeProfilePath here would derive a deny path that doesn't match
 // where the store actually writes — e.g. ZERO_OAUTH_TOKENS_PATH=~/x resolves

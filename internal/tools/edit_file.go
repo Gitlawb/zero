@@ -14,10 +14,6 @@ type editFileTool struct {
 	scope         PathScope
 }
 
-func NewEditFileTool(workspaceRoot string) Tool {
-	return NewScopedEditFileTool(workspaceRoot, nil)
-}
-
 func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 	return editFileTool{
 		baseTool: baseTool{
@@ -34,7 +30,8 @@ func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"path", "old_string", "new_string"},
 				AdditionalProperties: false,
 			},
-			safety: promptSafety(SideEffectWrite, "Edits files in place."),
+			safety:       promptSafety(SideEffectWrite, "Edits files in place."),
+			capabilities: ToolCapabilities{Effect: EffectWorkspaceWrite, ThreadSafe: false, ResourceKeys: fileResourceKeys},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/trace"
 )
 
 // Transient-failure retry, shared by every provider.
@@ -67,7 +69,9 @@ func SendWithRetry(
 			setHeader(request)
 		}
 
+		connectSpan := trace.FromContext(ctx).Span(trace.SpanProviderConnect)
 		response, err := client.Do(request)
+		connectSpan.End()
 		if err != nil {
 			// A transport failure on a POST does NOT mean the server didn't receive
 			// it — the request may have arrived and be generating a (billable,
@@ -82,6 +86,9 @@ func SendWithRetry(
 		}
 
 		if ShouldRetryStatus(response.StatusCode) && attempt < maxAttempts {
+			if r := trace.FromContext(ctx); r != nil {
+				r.Counter(trace.CounterRetryCount, 1)
+			}
 			wait := RetryAfter(response)
 			_ = response.Body.Close()
 			if Backoff(ctx, attempt, wait) {

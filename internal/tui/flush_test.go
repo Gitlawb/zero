@@ -36,7 +36,7 @@ func TestSettledRowsAdvanceFrontierAndLeaveLiveView(t *testing.T) {
 	}
 }
 
-func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
+func TestAltScreenAdvancesFrontierAndCachesSettledRows(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	m = updated.(model)
@@ -47,12 +47,155 @@ func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("alt-screen mode should not print rows into native scrollback")
 	}
-	if next.flushed != 0 {
-		t.Fatalf("alt-screen mode should keep the flush frontier unchanged, got %d", next.flushed)
+	if next.flushed != len(next.transcript) {
+		t.Fatalf("alt-screen mode should advance the frontier to %d, got %d", len(next.transcript), next.flushed)
 	}
 	view := viewString(next.View())
 	if !strings.Contains(view, "hello there") || !strings.Contains(view, "noted") {
-		t.Fatalf("settled rows should remain in the managed alt-screen view, got %q", view)
+		t.Fatalf("cached settled rows should remain in the managed alt-screen view, got %q", view)
+	}
+}
+
+func TestAltScreenSettledCacheRebuildsAfterRowToggle(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowReasoning, text: "private thought"})
+	m, _ = m.settleTranscript()
+
+	m = m.toggleTranscriptRow(len(m.transcript) - 1)
+	m, _ = m.settleTranscript()
+	if !m.transcript[len(m.transcript)-1].expanded {
+		t.Fatal("expected reasoning row to be expanded")
+	}
+	if m.altScreenSettledWidth == 0 || len(m.altScreenSettledItems) == 0 {
+		t.Fatal("expected invalidated settled cache to be rebuilt")
+	}
+}
+
+func TestAltScreenSettledCacheRebuildsAfterDoctorStatusUpdate(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m = m.setDoctorStatusRow("frame 0")
+	m, _ = m.settleTranscript()
+	if m.altScreenSettledWidth == 0 {
+		t.Fatal("precondition: settled cache should be populated")
+	}
+
+	// An in-place update to an already-settled doctor row (e.g. a spinner tick)
+	// must invalidate the settled cache, just like toggleTranscriptRow does for
+	// expand/collapse, otherwise the alt-screen view keeps serving the stale
+	// snapshot forever.
+	m = m.setDoctorStatusRow("frame 1")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("expected in-place doctor status update to invalidate the settled cache")
+	}
+	m, _ = m.settleTranscript()
+	view := viewString(m.View())
+	if !strings.Contains(view, "frame 1") {
+		t.Fatalf("expected updated doctor status text in view, got %q", view)
+	}
+	if strings.Contains(view, "frame 0") {
+		t.Fatalf("stale doctor status text must not remain in view, got %q", view)
+	}
+}
+
+func TestAltScreenSettledCacheInvalidatesWithFileSelection(t *testing.T) {
+	m := filesPanelTestModel()
+	m.altScreen = true
+	m.width = 80
+	m.height = 30
+	m, _ = m.settleTranscript()
+	if m.altScreenSettledWidth == 0 {
+		t.Fatal("precondition: settled cache should be populated")
+	}
+
+	m = m.selectFile("internal/tui/sidebar.go")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("selecting a file touched by a settled row must invalidate the cache")
+	}
+	m, _ = m.settleTranscript()
+	selectedView := viewString(m.View())
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = updated.(model)
+	if m.selectedFile != "" {
+		t.Fatalf("Esc should clear the selected file, got %q", m.selectedFile)
+	}
+	if m.altScreenSettledWidth == 0 || m.altScreenSettledFrontier != m.flushed {
+		t.Fatal("clearing a selected file should rebuild the invalidated cache")
+	}
+	if clearedView := viewString(m.View()); clearedView == selectedView {
+		t.Fatal("clearing a selected file should remove the settled row's selection tint")
+	}
+}
+
+func TestAltScreenSettledCacheInvalidatesForOlderFileCard(t *testing.T) {
+	const path = "internal/tui/sidebar.go"
+	m := model{
+		transcript: []transcriptRow{
+			{kind: rowToolResult, changedFiles: []string{path}},
+			{kind: rowToolResult, changedFiles: []string{path}},
+		},
+		flushed:               1,
+		altScreenSettledWidth: 80,
+	}
+
+	m.setSelectedFile(path)
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("selecting a file with an older settled card must invalidate the cache")
+	}
+
+	m.altScreenSettledWidth = 80
+	m.setSelectedFile("")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("clearing a file with an older settled card must invalidate the cache")
+	}
+}
+
+func TestAltScreenRepeatedStatusCollapseRewindsSettledFrontier(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m.pending = true
+	m.activeRunID = 7
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolCall, id: "old", tool: "swarm_status", runID: 7},
+	)
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolResult, id: "old", tool: "swarm_status", status: tools.StatusOK, detail: "1 running", runID: 7},
+	)
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolCall, id: "new", tool: "swarm_status", runID: 7},
+	)
+	m, _ = m.settleTranscript()
+	if m.flushed != len(m.transcript)-1 {
+		t.Fatalf("precondition: frontier=%d, want %d", m.flushed, len(m.transcript)-1)
+	}
+
+	updated, _ = m.Update(agentRowMsg{
+		runID: 7,
+		row: transcriptRow{
+			kind: rowToolResult, id: "new", tool: "swarm_status", status: tools.StatusError, detail: "1 running", runID: 7,
+		},
+	})
+	m = updated.(model)
+	if len(m.transcript) != 3 {
+		t.Fatalf("repeated status should collapse to welcome plus the new call/result pair, got %d rows", len(m.transcript))
+	}
+	if m.flushed != len(m.transcript) {
+		t.Fatalf("collapsed replacement should settle through %d rows, got frontier %d", len(m.transcript), m.flushed)
+	}
+	if m.altScreenSettledWidth == 0 || m.altScreenSettledFrontier != m.flushed {
+		t.Fatal("collapsed replacement should rebuild the invalidated settled cache")
+	}
+	cachedView := viewString(m.View())
+	rebuilt := m
+	rebuilt.altScreenSettledWidth = 0
+	rebuilt, _ = rebuilt.settleTranscript()
+	if rebuiltView := viewString(rebuilt.View()); rebuiltView != cachedView {
+		t.Fatal("collapsed replacement cache is stale compared with a forced rebuild")
 	}
 }
 

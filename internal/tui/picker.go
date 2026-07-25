@@ -420,7 +420,7 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 				k = resolved
 			}
 		}
-		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
+		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k, authed.BaseURL))
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
 	}
 }

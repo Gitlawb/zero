@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/trace"
 )
 
 // TokenResolver yields a fresh OAuth credential for one request, or ok=false to
@@ -42,7 +44,12 @@ func SendWithAuthRetry(
 		// request (leaking the path/body) before we return the error.
 		headers := base
 		if resolver != nil {
+			// ProviderQueue captures pre-send auth-wait (OAuth token resolve). No
+			// send-side semaphore exists today; a future request queue would also
+			// accumulate here. nil recorder (untraced) is a no-op.
+			queueSpan := trace.FromContext(ctx).Span(trace.SpanProviderQueue)
 			header, value, ok, rerr := resolver(ctx, forceRefresh)
+			queueSpan.End()
 			if rerr != nil {
 				return nil, rerr
 			}

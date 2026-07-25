@@ -39,6 +39,9 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	if len(args) > 0 && args[0] == "tasks" {
 		return runTasksCommand(args[1:], getenv, stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "turn" {
+		return runTurnCommand(args[1:], getenv, stdout, stderr)
+	}
 	options, err := parseArgs(args, getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err.Error())
@@ -206,6 +209,7 @@ func helpText() string {
 	return strings.Join([]string{
 		"Usage: zero-perf-bench [options]",
 		"       zero-perf-bench tasks [options]   (Terminal-Bench-style task harness; see `tasks --help`)",
+		"       zero-perf-bench turn  [options]   (per-turn tracing benchmark; see `turn --help`)",
 		"",
 		"Options:",
 		"  --iterations <n>             Measured samples to collect (default: 5)",

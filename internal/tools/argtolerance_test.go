@@ -154,7 +154,7 @@ func TestReadFileToolAcceptsPathAliases(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta")
 	for _, key := range []string{"file", "file_path", "filepath", "filename"} {
-		res := NewReadFileTool(root).Run(context.Background(), map[string]any{key: "notes.txt"})
+		res := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{key: "notes.txt"})
 		if res.Status != StatusOK {
 			t.Fatalf("alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -168,7 +168,7 @@ func TestListDirectoryToolAcceptsDirAliases(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "sub", "x.txt"), "data")
 	for _, key := range []string{"directory", "dir"} {
-		res := NewListDirectoryTool(root).Run(context.Background(), map[string]any{key: "sub"})
+		res := NewScopedListDirectoryTool(root, nil).Run(context.Background(), map[string]any{key: "sub"})
 		if res.Status != StatusOK {
 			t.Fatalf("alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -183,7 +183,7 @@ func TestGlobToolAcceptsPatternAndCwdAliases(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "sub", "a.go"), "package sub")
 	// pattern aliases
 	for _, key := range []string{"glob", "match", "query", "expression"} {
-		res := NewGlobTool(root).Run(context.Background(), map[string]any{key: "**/*.go"})
+		res := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{key: "**/*.go"})
 		if res.Status != StatusOK {
 			t.Fatalf("pattern alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -193,7 +193,7 @@ func TestGlobToolAcceptsPatternAndCwdAliases(t *testing.T) {
 	}
 	// cwd aliases (scope the scan to sub/)
 	for _, key := range []string{"dir", "directory", "path"} {
-		res := NewGlobTool(root).Run(context.Background(), map[string]any{"pattern": "*.go", key: "sub"})
+		res := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{"pattern": "*.go", key: "sub"})
 		if res.Status != StatusOK {
 			t.Fatalf("cwd alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -207,7 +207,7 @@ func TestGrepToolAcceptsPatternAndPathAliases(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "sub", "main.go"), "func main() {}\n")
 	for _, key := range []string{"query", "regex", "search", "expression"} {
-		res := NewGrepTool(root).Run(context.Background(), map[string]any{key: "func main"})
+		res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{key: "func main"})
 		if res.Status != StatusOK {
 			t.Fatalf("pattern alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -216,7 +216,7 @@ func TestGrepToolAcceptsPatternAndPathAliases(t *testing.T) {
 		}
 	}
 	for _, key := range []string{"dir", "directory"} {
-		res := NewGrepTool(root).Run(context.Background(), map[string]any{"pattern": "func main", key: "sub"})
+		res := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{"pattern": "func main", key: "sub"})
 		if res.Status != StatusOK {
 			t.Fatalf("path alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -233,7 +233,7 @@ func TestOptionalPathArgsTreatEmptyAsDefault(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "main.go"), "func main() {}\n")
 
-	grepRes := NewGrepTool(root).Run(context.Background(), map[string]any{"pattern": "func main", "path": ""})
+	grepRes := NewScopedGrepTool(root, nil).Run(context.Background(), map[string]any{"pattern": "func main", "path": ""})
 	if grepRes.Status != StatusOK {
 		t.Fatalf("grep path:\"\" expected ok, got %s: %s", grepRes.Status, grepRes.Output)
 	}
@@ -241,7 +241,7 @@ func TestOptionalPathArgsTreatEmptyAsDefault(t *testing.T) {
 		t.Fatalf("grep path:\"\" expected hit, got %q", grepRes.Output)
 	}
 
-	globRes := NewGlobTool(root).Run(context.Background(), map[string]any{"pattern": "**/*.go", "cwd": ""})
+	globRes := NewScopedGlobTool(root, nil).Run(context.Background(), map[string]any{"pattern": "**/*.go", "cwd": ""})
 	if globRes.Status != StatusOK {
 		t.Fatalf("glob cwd:\"\" expected ok, got %s: %s", globRes.Status, globRes.Output)
 	}
@@ -249,7 +249,7 @@ func TestOptionalPathArgsTreatEmptyAsDefault(t *testing.T) {
 		t.Fatalf("glob cwd:\"\" expected match, got %q", globRes.Output)
 	}
 
-	listRes := NewListDirectoryTool(root).Run(context.Background(), map[string]any{"path": ""})
+	listRes := NewScopedListDirectoryTool(root, nil).Run(context.Background(), map[string]any{"path": ""})
 	if listRes.Status != StatusOK {
 		t.Fatalf("list_directory path:\"\" expected ok, got %s: %s", listRes.Status, listRes.Output)
 	}
@@ -261,7 +261,7 @@ func TestOptionalPathArgsTreatEmptyAsDefault(t *testing.T) {
 func TestWriteFileToolAcceptsPathAliases(t *testing.T) {
 	root := t.TempDir()
 	for _, key := range []string{"file", "file_path", "filename"} {
-		res := NewWriteFileTool(root).Run(context.Background(), map[string]any{key: key + ".txt", "content": "x"})
+		res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{key: key + ".txt", "content": "x"})
 		if res.Status != StatusOK {
 			t.Fatalf("path alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -276,7 +276,7 @@ func TestEditFileToolAcceptsAliases(t *testing.T) {
 	path := filepath.Join(root, "code.go")
 	writeTestFile(t, path, "const a = 1\n")
 	// path/old/new aliases all at once.
-	res := NewEditFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"file": "code.go",
 		"old":  "const a = 1",
 		"new":  "const a = 2",
@@ -291,7 +291,7 @@ func TestEditFileToolAcceptsAliases(t *testing.T) {
 
 	// other alias spellings for old_string/new_string.
 	writeTestFile(t, path, "const a = 1\n")
-	res = NewEditFileTool(root).Run(context.Background(), map[string]any{
+	res = NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"file_path": "code.go",
 		"search":    "const a = 1",
 		"replace":   "const a = 3",
@@ -318,7 +318,7 @@ func TestApplyPatchToolAcceptsDiffAlias(t *testing.T) {
 		"+new",
 		"",
 	}, "\n")
-	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"diff": patch})
+	res := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"diff": patch})
 	if res.Status != StatusOK {
 		if gitApplyUnavailable(res.Output) {
 			t.Skipf("git binary unavailable: %s", res.Output)
@@ -334,7 +334,7 @@ func TestApplyPatchToolAcceptsDiffAlias(t *testing.T) {
 func TestBashToolAcceptsCommandAliases(t *testing.T) {
 	root := t.TempDir()
 	for _, key := range []string{"cmd", "script", "shell"} {
-		res := NewBashTool(root).Run(context.Background(), map[string]any{key: "echo hi"})
+		res := NewScopedBashTool(root, nil).Run(context.Background(), map[string]any{key: "echo hi"})
 		if res.Status != StatusOK {
 			t.Fatalf("command alias %q: expected ok, got %s: %s", key, res.Status, res.Output)
 		}
@@ -403,7 +403,7 @@ func TestWriteFileAcceptsStringOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	// minimax-style: overwrite as the string "true".
-	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "shop.html", "content": "new", "overwrite": "true",
 	})
 	if res.Status != StatusOK {

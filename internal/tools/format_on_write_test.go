@@ -24,7 +24,7 @@ func TestFormatOnWriteDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
 	ugly := "package a\n\nfunc  A( ) {   }\n"
 
-	result := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	result := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "a.go",
 		"content": ugly,
 	}, RunOptions{})
@@ -46,7 +46,7 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 	dir := t.TempDir()
 	tracker := NewFileTracker()
 
-	write := NewWriteFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	write := NewScopedWriteFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":    "a.go",
 		"content": "package a\n\nfunc  A( ) {   }\n",
 	}, RunOptions{FileTracker: tracker})
@@ -63,7 +63,7 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 
 	// The tracker must have been re-baselined to the POST-format content: a
 	// follow-up edit must not trip the external-modification conflict guard.
-	edit := NewEditFileTool(dir).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+	edit := NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":       "a.go",
 		"old_string": "func A() {",
 		"new_string": "func B() {",

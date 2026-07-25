@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/verify"
 )
 
@@ -133,7 +134,9 @@ func (sc *SelfCorrector) inspect(ctx context.Context, changedFiles []string) Cor
 	}
 
 	if sc.cfg.IncludeTests && sc.verifier != nil {
+		verifySpan := trace.FromContext(ctx).Span(trace.SpanVerification)
 		vr, err := sc.verifier.Verify(ctx)
+		verifySpan.End()
 		if err != nil {
 			// "No plan / no tests" is not an error (DetectPlan returns an empty
 			// plan), so a non-nil error means verification could not run at all —

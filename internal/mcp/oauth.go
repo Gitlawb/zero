@@ -133,6 +133,26 @@ func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseU
 	}, nil
 }
 
+// validateResolvedEndpoints applies the shared https/loopback endpoint rule to
+// every non-empty endpoint in the resolved metadata — configured or discovered
+// alike — so discovery metadata can never downgrade an MCP login to an insecure
+// or attacker-controlled authorization, token, or registration endpoint.
+func validateResolvedEndpoints(metadata authServerMetadata) error {
+	for _, ep := range []struct{ kind, url string }{
+		{"authorization", metadata.AuthorizationEndpoint},
+		{"token", metadata.TokenEndpoint},
+		{"registration", metadata.RegistrationEndpoint},
+	} {
+		if strings.TrimSpace(ep.url) == "" {
+			continue
+		}
+		if err := oauth.ValidateEndpointURL(ep.url); err != nil {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", ep.kind, err)
+		}
+	}
+	return nil
+}
+
 // resolveAuthorizationServer discovers metadata and applies explicit config
 // overrides. Configured endpoints take precedence over discovered ones, and act
 // as a fallback when discovery fails or omits a value.
@@ -147,6 +167,9 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 			AuthorizationEndpoint: strings.TrimSpace(cfg.AuthorizationEndpoint),
 			TokenEndpoint:         strings.TrimSpace(cfg.TokenEndpoint),
 			RegistrationEndpoint:  strings.TrimSpace(cfg.RegistrationEndpoint),
+		}
+		if err := validateResolvedEndpoints(metadata); err != nil {
+			return authServerMetadata{}, err
 		}
 		return metadata, nil
 	}
@@ -178,6 +201,9 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 	}
 	if strings.TrimSpace(metadata.TokenEndpoint) == "" {
 		return authServerMetadata{}, errors.New("no token endpoint discovered or configured")
+	}
+	if err := validateResolvedEndpoints(metadata); err != nil {
+		return authServerMetadata{}, err
 	}
 	return metadata, nil
 }

@@ -72,7 +72,7 @@ func TestOpenProviderManagerListsSavedProviders(t *testing.T) {
 	if len(m.providerWizard.manageRows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(m.providerWizard.manageRows))
 	}
-	rendered := m.providerWizard.render(m.width)
+	rendered := m.providerWizard.render(m.width, m.spinnerGlyph())
 	for _, want := range []string{"opengateway", "backup", "active", "Enter activate"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("manager render missing %q:\n%s", want, rendered)

@@ -55,3 +55,6 @@ docs/superpowers/
 zero-termux-arm64
 zero-linux-sandbox
 zero-seccomp
+
+# Generated benchmark reports are evidence for one configuration, never tree state
+internal/perfbench/reports/*.json

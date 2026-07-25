@@ -333,6 +333,38 @@ var everforestPalette = palette{
 	cardPerm:  "#96896b",
 }
 
+// neonPalette is a neon-on-black color scheme: pitch-black surface with
+// neon green ink and a cyan accent.
+var neonPalette = palette{
+	panel:     "#050b06",
+	promptBg:  "#0c180d",
+	line:      "#1c3820",
+	line2:     "#2c5230",
+	ink:       "#c9ffd2",
+	muted:     "#80db8f",
+	faint:     "#6eca7d",
+	faintest:  "#74c468", // brightened from #58af69 so line numbers quantize to #87d75f and stay AA on the xterm-green addBg (#005f00); still dimmer than faint, keeping the ramp monotonic
+	accent:    "#00e5c8",
+	green:     "#39ff6a",
+	red:       "#ff4d6d",
+	amber:     "#f4ff3a",
+	blue:      "#22e0ff",
+	gitAdd:    "#4fdc6a",
+	gitDel:    "#ff6f80",
+	addBg:     "#083c10", // quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals
+	delBg:     "#3c0810", // quantizes to xterm red #5f0000 (see addBg)
+	addBgWord: "#147828", // quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
+	delBgWord: "#74202e", // quantizes to xterm red #870000 (see addBgWord)
+	permBg:    "#2a2a0c",
+	selBg:     "#123a1e",
+	addInk:    "#ecffdc", // quantizes to #ffffd7, which keeps AA on addBgWord's xterm #008700 (the old #c8ffcf quantized to #d7ffd7 at 4.29:1)
+	delInk:    "#ffd0d6",
+	onAccent:  "#001410",
+	cardRun:   "#1f8a6e",
+	cardErr:   "#9a4042", // raised from #8a2f42 for the 3:1 non-text border threshold against the panel (2.43:1 before), holding after xterm-256 quantization too
+	cardPerm:  "#8a8a1f",
+}
+
 // lightPalette is dark-on-light: a warm cream surface (so cards lift off the
 // terminal page, which Zero never paints) with near-black ink and an olive-lime
 // accent that keeps the brand identity while clearing AA on the light panel. The
@@ -401,6 +433,38 @@ var solarizedLightPalette = palette{
 	cardPerm:  "#c4ae63",
 }
 
+// dunePalette is a warm sand-and-cream color scheme: sand/cream surface,
+// charcoal ink, and a soft amber accent.
+var dunePalette = palette{
+	panel:     "#f2e9d8",
+	promptBg:  "#e9dcbf",
+	line:      "#d9c7a3",
+	line2:     "#c2a97c",
+	ink:       "#2b241a",
+	muted:     "#473e32",
+	faint:     "#554a3a",
+	faintest:  "#655648",
+	accent:    "#724028", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg; the previous #7c4712 quantized to #875f00 at 3.81:1)
+	green:     "#38572a",
+	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling (true 6.57:1, 256 7.86:1)
+	amber:     "#6d4600",
+	blue:      "#2f5680", // darkened from #3d6a9e for AA on selBg (was 3.61:1, now 4.90:1)
+	gitAdd:    "#38572a",
+	gitDel:    "#963328",
+	addBg:     "#dcecd0",
+	delBg:     "#f5dbd5",
+	addBgWord: "#b9dc9e",
+	delBgWord: "#eebba9",
+	permBg:    "#f0dfae",
+	selBg:     "#e0cf98",
+	addInk:    "#264018",
+	delInk:    "#5c1810",
+	onAccent:  "#fdf6ea",
+	cardRun:   "#b08a4a",
+	cardErr:   "#b57560",
+	cardPerm:  "#c2a04a",
+}
+
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme
 // token (lowercase, kebab), Label is the picker display text, and IsDark groups the
 // picker (Dark/Light sections) and drives which built-in `auto` resolves to.
@@ -426,8 +490,10 @@ var themeRegistry = []themeEntry{
 	{Name: "solarized-dark", Label: "Solarized Dark", Palette: solarizedDarkPalette, IsDark: true},
 	{Name: "rose-pine", Label: "Rosé Pine", Palette: rosePinePalette, IsDark: true},
 	{Name: "everforest", Label: "Everforest", Palette: everforestPalette, IsDark: true},
+	{Name: "neon", Label: "Neon", Palette: neonPalette, IsDark: true},
 	{Name: "light", Label: "light", Palette: lightPalette, IsDark: false},
 	{Name: "solarized-light", Label: "Solarized Light", Palette: solarizedLightPalette, IsDark: false},
+	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: false},
 }
 
 // themeByName indexes the registry by lowercased name for O(1) lookup. Built as a

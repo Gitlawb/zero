@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/trace"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -194,13 +195,6 @@ func SendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event
 	}
 }
 
-// ScanSSEData parses Server-Sent Event data fields from a streaming response.
-func ScanSSEData(reader io.Reader, handle func(data string) bool) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
-	return scanSSEPayloads(scanner, handle, nil)
-}
-
 // scanSSEPayloads accumulates SSE "data:" lines into payloads (joined across
 // continuation lines, flushed on a blank line or EOF) and forwards each to
 // handle. It is the shared core of ScanSSEData and the idle-aware variant.
@@ -371,9 +365,15 @@ func ScanSSEDataWithContext(
 				// The provider asked to stop (e.g. it already emitted an error
 				// for this payload). Abort the read and end like ScanSSEData:
 				// return nil so callers fall through to their post-scan checks.
+				// Do not stamp FirstToken — this payload was not accepted model
+				// output, so counting it as first-token time would be misleading.
 				cancel()
 				return nil
 			}
+			// First accepted non-keepalive payload = first real model output. Stamp
+			// once; later real payloads are no-ops. nil recorder (untraced run) is a
+			// no-op.
+			trace.FromContext(ctx).StampFirstToken()
 		}
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -93,13 +92,9 @@ func TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage(t *testing.T) {
 	if err := os.WriteFile(helperPath, []byte("helper"), 0o755); err != nil {
 		t.Fatalf("WriteFile helper: %v", err)
 	}
-	profile := PermissionProfile{
-		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, ReadRoots: []string{string(filepath.Separator)}, IncludePlatformRoots: true},
-		Network:    NetworkPolicy{Mode: NetworkDeny},
-	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  "/workspace",
-		PermissionProfile: profile,
+		PermissionProfile: DefaultPermissionProfile("/workspace"),
 		BlockUnixSockets:  true,
 		Command:           []string{"true"},
 	})
@@ -155,10 +150,8 @@ func TestBuildLinuxSandboxBwrapArgsKeepsHostNetworkWhenAllowed(t *testing.T) {
 	if err := os.WriteFile(helperPath, []byte("helper"), 0o755); err != nil {
 		t.Fatalf("WriteFile helper: %v", err)
 	}
-	profile := PermissionProfile{
-		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, ReadRoots: []string{string(filepath.Separator)}, IncludePlatformRoots: true},
-		Network:    NetworkPolicy{Mode: NetworkAllow},
-	}
+	profile := DefaultPermissionProfile("/workspace")
+	profile.Network = NetworkPolicy{Mode: NetworkAllow}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  "/workspace",
 		PermissionProfile: profile,
@@ -197,80 +190,11 @@ func TestLinuxBwrapRootReadUsesReadOnlyHostRoot(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkAllow},
 	}
 
-	args, err := linuxBwrapFilesystemArgs(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	args := linuxBwrapFilesystemArgs(profile)
 	assertArgsContainSequence(t, args, "--ro-bind", "/", "/")
 	if argsContainSequence(args, "--tmpfs", "/") {
 		t.Fatalf("root-read profile must not start from an empty root: %#v", args)
 	}
-}
-
-func TestLinuxBwrapPathCarveoutsFailClosedForMissingMountTargets(t *testing.T) {
-	root := t.TempDir()
-	missing := filepath.Join(root, "missing", "nested")
-	if _, err := appendReadOnlyLinuxPathArgs(nil, missing); err == nil || !strings.Contains(err.Error(), missing) {
-		t.Fatalf("missing read-only target error = %v, want path-specific failure", err)
-	}
-	if _, err := appendUnreadableLinuxPathArgs(nil, missing); err == nil || !strings.Contains(err.Error(), missing) {
-		t.Fatalf("missing deny-read target error = %v, want path-specific failure", err)
-	}
-	if _, err := os.Stat(filepath.Dir(missing)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("building carveouts materialized a host path: %v", err)
-	}
-
-	deniedDir := filepath.Join(root, "denied")
-	if err := os.Mkdir(deniedDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	args, err := appendUnreadableLinuxPathArgs(nil, deniedDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertArgsContainSequence(t, args, "--perms", "000", "--tmpfs", deniedDir, "--remount-ro", deniedDir)
-
-	deniedFile := filepath.Join(root, "secret.json")
-	if err := os.WriteFile(deniedFile, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	args, err = appendUnreadableLinuxPathArgs(nil, deniedFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertArgsContainSequence(t, args, "--ro-bind", "/dev/null", deniedFile)
-	args, err = appendReadOnlyLinuxPathArgs(nil, deniedFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertArgsContainSequence(t, args, "--ro-bind", deniedFile, deniedFile)
-}
-
-func TestLinuxBwrapSkipsMissingAutomaticBaselines(t *testing.T) {
-	root := t.TempDir()
-	missingCredential := filepath.Join(root, "home", ".config", "zero")
-	profile := PermissionProfile{FileSystem: FileSystemPolicy{
-		Kind:             FileSystemRestricted,
-		ReadRoots:        []string{string(filepath.Separator)},
-		WriteRoots:       []WritableRoot{{Root: root, ReadOnlySubpaths: []string{filepath.Join(root, ".git", "hooks")}, ProtectedMetadataNames: []string{".zero"}}},
-		DenyReadIfExists: []string{missingCredential},
-	}}
-
-	args, err := linuxBwrapFilesystemArgs(profile)
-	if err != nil {
-		t.Fatalf("missing automatic baselines must not abort launch: %v", err)
-	}
-	if stringSliceContains(args, missingCredential) {
-		t.Fatalf("missing automatic baseline unexpectedly emitted: %#v", args)
-	}
-	if err := os.MkdirAll(missingCredential, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	args, err = linuxBwrapFilesystemArgs(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertArgsContainSequence(t, args, "--perms", "000", "--tmpfs", missingCredential, "--remount-ro", missingCredential)
 }
 
 func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
@@ -293,10 +217,7 @@ func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkAllow},
 	}
 
-	args, err := linuxBwrapFilesystemArgs(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	args := linuxBwrapFilesystemArgs(profile)
 	if argsContainSequence(args, "--tmpfs", "/tmp") {
 		t.Fatalf("workspace-write temp access must bind host /tmp, not create private tmpfs: %#v", args)
 	}
@@ -316,6 +237,66 @@ func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 	}
 }
 
+func TestLinuxBwrapFilesystemPlanPreservesMissingProtectedMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	existing := filepath.Join(workspace, ".git")
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatalf("Mkdir existing metadata: %v", err)
+	}
+	missing := filepath.Join(workspace, ".zero")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:      FileSystemRestricted,
+			ReadRoots: []string{string(filepath.Separator)},
+			WriteRoots: []WritableRoot{{
+				Root:                   workspace,
+				ProtectedMetadataNames: []string{".git", ".zero"},
+			}},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", existing, existing)
+	if argsContainSequence(plan.Args, "--tmpfs", missing) || argsContainSequence(plan.Args, "--ro-bind", missing, missing) {
+		t.Fatalf("missing protected metadata must remain absent inside the sandbox: %#v", plan.Args)
+	}
+	if !reflect.DeepEqual(plan.ProtectedCreateTargets, []string{missing}) {
+		t.Fatalf("protected create targets = %#v, want %#v", plan.ProtectedCreateTargets, []string{missing})
+	}
+}
+
+func TestLinuxBwrapSkipsMissingCredentialBaselines(t *testing.T) {
+	root := t.TempDir()
+	missingCredential := filepath.Join(root, "home", ".config", "zero")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:             FileSystemRestricted,
+			ReadRoots:        []string{string(filepath.Separator)},
+			WriteRoots:       []WritableRoot{{Root: root}},
+			DenyReadIfExists: []string{missingCredential},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	if stringSliceContains(plan.Args, missingCredential) {
+		t.Fatalf("absent credential baseline must not become a mount target: %#v", plan.Args)
+	}
+	if stringSliceContains(plan.ProtectedCreateTargets, missingCredential) {
+		t.Fatalf("credential baselines are not workspace metadata create targets: %#v", plan.ProtectedCreateTargets)
+	}
+	if _, err := os.Stat(filepath.Dir(missingCredential)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("building the plan materialized a host path: %v", err)
+	}
+
+	if err := os.MkdirAll(missingCredential, 0o700); err != nil {
+		t.Fatalf("MkdirAll credential dir: %v", err)
+	}
+	plan = buildLinuxBwrapFilesystemPlan(profile)
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", missingCredential, "--remount-ro", missingCredential)
+}
+
 func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -325,10 +306,7 @@ func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 
-	args, err := linuxBwrapFilesystemArgs(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	args := linuxBwrapFilesystemArgs(profile)
 	assertArgsContainSequence(t, args, "--bind", "/", "/")
 	if argsContainSequence(args, "--ro-bind", "/", "/") {
 		t.Fatalf("unrestricted filesystem profile must not make host root read-only: %#v", args)
