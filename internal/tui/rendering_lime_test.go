@@ -1659,7 +1659,7 @@ func TestFocusedPermissionCardShowsBadgeAndKeys(t *testing.T) {
 		Risk:               sandbox.Risk{Level: sandbox.RiskMedium},
 		AvailableDecisions: testAllPermissionDecisions(),
 	}
-	card, offsets := renderFocusedPermissionPrompt(request, 0, 80)
+	card, offsets := renderFocusedPermissionPrompt(request, 0, false, "", 80)
 	got := plainRender(t, card)
 	for _, want := range []string{"PERMISSION", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[y]", "continue without running it", "[d]", "[esc]"} {
 		if !strings.Contains(got, want) {

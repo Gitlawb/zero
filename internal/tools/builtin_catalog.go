@@ -19,9 +19,9 @@ func BuiltinCatalog(workspaceRoot string) []Tool {
 		workspaceRoot = "."
 	}
 	var all []Tool
-	all = append(all, CoreReadOnlyTools(workspaceRoot)...)
-	all = append(all, CoreWriteTools(workspaceRoot)...)
-	all = append(all, CoreShellTools(workspaceRoot)...)
+	all = append(all, CoreReadOnlyToolsScoped(workspaceRoot, nil)...)
+	all = append(all, CoreWriteToolsScoped(workspaceRoot, nil)...)
+	all = append(all, CoreShellToolsScoped(workspaceRoot, nil)...)
 	// Network tools: always include web_fetch; always include web_search for
 	// classification even when no backend is configured at runtime (registration
 	// remains conditional in CoreNetworkTools).

@@ -3,13 +3,11 @@
 package tools
 
 import (
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -29,21 +27,8 @@ func hardenProcessLifetime(command *exec.Cmd) {
 		if command.Process == nil {
 			return nil
 		}
-		taskkill := taskkillPath()
-		_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(command.Process.Pid)).Run()
-		return nil
+		return execution.KillProcessTree(command.Process.Pid)
 	}
-}
-
-func taskkillPath() string {
-	systemRoot := os.Getenv("SystemRoot")
-	if systemRoot == "" {
-		systemRoot = os.Getenv("windir")
-	}
-	if systemRoot == "" {
-		systemRoot = `C:\Windows`
-	}
-	return filepath.Join(systemRoot, "System32", "taskkill.exe")
 }
 
 // applyWindowsShellCommandLine overrides command's raw child command line so

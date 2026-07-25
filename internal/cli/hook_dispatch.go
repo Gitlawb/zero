@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/workspacetrust"
 )
@@ -56,8 +57,8 @@ func resolveTrust(trustRoot string) (excludeProject bool, trustCheckErrored bool
 //
 // trustRoot is the original launch directory (resolved before any --worktree
 // reassignment); the project layer loads only when that root is trusted.
-func newHookDispatcher(workspaceRoot string, trustRoot string) (*hooks.Dispatcher, trustSkip) {
-	return newHookDispatcherWithExtra(workspaceRoot, nil, trustRoot)
+func newHookDispatcher(workspaceRoot string, trustRoot string, runners ...*execution.Runner) (*hooks.Dispatcher, trustSkip) {
+	return newHookDispatcherWithExtra(workspaceRoot, nil, trustRoot, runners...)
 }
 
 // newHookDispatcherWithExtra builds the dispatcher like newHookDispatcher but also
@@ -72,7 +73,7 @@ func newHookDispatcher(workspaceRoot string, trustRoot string) (*hooks.Dispatche
 // trust store cannot be read, or the workspace is not trusted (fail-closed). The
 // returned trustSkip lets the caller emit one combined notice; the notice itself
 // is NOT emitted here.
-func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition, trustRoot string) (*hooks.Dispatcher, trustSkip) {
+func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition, trustRoot string, runners ...*execution.Runner) (*hooks.Dispatcher, trustSkip) {
 	excludeProject, trustCheckErrored := resolveTrust(trustRoot)
 	skip := trustSkip{
 		excludedProjectConfig: excludeProject && projectHooksFileExists(workspaceRoot),
@@ -106,10 +107,15 @@ func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition, 
 		}
 		config.Hooks = merged
 	}
+	var runner *execution.Runner
+	if len(runners) > 0 {
+		runner = runners[0]
+	}
 	return hooks.NewDispatcher(hooks.DispatcherOptions{
-		Config: config,
-		Audit:  audit,
-		Cwd:    workspaceRoot,
+		Config:    config,
+		Audit:     audit,
+		Cwd:       workspaceRoot,
+		Execution: runner,
 	}), skip
 }
 

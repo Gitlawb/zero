@@ -236,6 +236,35 @@ func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 	}
 }
 
+func TestLinuxBwrapFilesystemPlanPreservesMissingProtectedMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	existing := filepath.Join(workspace, ".git")
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatalf("Mkdir existing metadata: %v", err)
+	}
+	missing := filepath.Join(workspace, ".zero")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:      FileSystemRestricted,
+			ReadRoots: []string{string(filepath.Separator)},
+			WriteRoots: []WritableRoot{{
+				Root:                   workspace,
+				ProtectedMetadataNames: []string{".git", ".zero"},
+			}},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", existing, existing)
+	if argsContainSequence(plan.Args, "--tmpfs", missing) || argsContainSequence(plan.Args, "--ro-bind", missing, missing) {
+		t.Fatalf("missing protected metadata must remain absent inside the sandbox: %#v", plan.Args)
+	}
+	if !reflect.DeepEqual(plan.ProtectedCreateTargets, []string{missing}) {
+		t.Fatalf("protected create targets = %#v, want %#v", plan.ProtectedCreateTargets, []string{missing})
+	}
+}
+
 func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

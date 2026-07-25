@@ -17,7 +17,7 @@ func runEdit(t *testing.T, dir, initial string, args map[string]any) (Result, st
 	if args["path"] == nil {
 		args["path"] = "target.txt"
 	}
-	result := NewEditFileTool(dir).Run(context.Background(), args)
+	result := NewScopedEditFileTool(dir, nil).Run(context.Background(), args)
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

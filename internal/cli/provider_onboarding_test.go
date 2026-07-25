@@ -75,6 +75,102 @@ func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	}
 }
 
+func providersUseOverrideConfig(t *testing.T) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, Model: "gpt-4.1"},
+			{Name: "fast", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
+		},
+	})
+	return configPath
+}
+
+// The write to config.json still succeeds, but when ZERO_PROVIDER names a
+// different provider the saved selection is NOT effective, so the command must
+// warn instead of reporting a silent success (issue #721).
+func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "work" // ZERO_PROVIDER=work overrides the switch to fast
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "fast" {
+		t.Fatalf("ActiveProvider = %q, want fast (the write still lands)", cfg.ActiveProvider)
+	}
+	if !strings.Contains(stdout.String(), "Active provider set to fast") {
+		t.Fatalf("stdout missing the success line: %q", stdout.String())
+	}
+	note := stderr.String()
+	for _, want := range []string{config.ActiveProviderEnv, "overrides config.json", "work"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("override note missing %q, got %q", want, note)
+		}
+	}
+}
+
+func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(providersUseOverrideConfig(t))
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "work"
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		ActiveProvider    string `json:"activeProvider"`
+		EffectiveProvider string `json:"effectiveProvider"`
+		OverriddenByEnv   string `json:"overriddenByEnv"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv {
+		t.Fatalf("JSON must flag the env override, got %#v", payload)
+	}
+}
+
+// No override note when ZERO_PROVIDER is unset or already names the selection.
+func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
+	cases := map[string]func(string) string{
+		"env unset": func(string) string { return "" },
+		"env matches fast": func(key string) string {
+			if key == config.ActiveProviderEnv {
+				return "fast"
+			}
+			return ""
+		},
+	}
+	for name, getenv := range cases {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			deps := providerSetupDeps(providersUseOverrideConfig(t))
+			deps.getenv = getenv
+			if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+				t.Fatalf("exit = %d: %s", code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected no override note, got %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")

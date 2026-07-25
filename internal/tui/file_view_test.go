@@ -202,7 +202,7 @@ func TestSubchatEntryClosesFileView(t *testing.T) {
 func TestChangedFilesRehydration(t *testing.T) {
 	events := []sessions.Event{{
 		Type:    sessions.EventToolResult,
-		Payload: json.RawMessage(`{"toolCallId":"t1","name":"edit_file","status":"ok","output":"+x","changedFiles":["pkg/a.go","pkg/b.go"]}`),
+		Payload: json.RawMessage(`{"toolCallId":"t1","name":"edit_file","status":"ok","output":"+x","changedFiles":["pkg/a.go","pkg/b.go"],"changeSummaries":[{"path":"node_modules/","kind":"created","aggregated":true}]}`),
 	}}
 	rows := transcriptRowsFromSessionEvents(events)
 	if len(rows) != 1 {
@@ -211,6 +211,9 @@ func TestChangedFilesRehydration(t *testing.T) {
 	got := rows[0].changedFiles
 	if len(got) != 2 || got[0] != "pkg/a.go" || got[1] != "pkg/b.go" {
 		t.Fatalf("changedFiles not rehydrated: %v", got)
+	}
+	if summaries := rows[0].changeSummaries; len(summaries) != 1 || summaries[0].Path != "node_modules/" || !summaries[0].Aggregated {
+		t.Fatalf("changeSummaries not rehydrated: %#v", summaries)
 	}
 }
 

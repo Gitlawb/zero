@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -114,7 +115,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	// may be a --worktree path; this keeps a --use-spec --worktree run of a trusted
 	// repo trusted. Emit at most one notice when project hooks or the project MCP
 	// layer (registered earlier in runExec, carried in run.mcpSkip) were dropped.
-	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.trustRoot)
+	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.trustRoot, execution.NewRunner(run.sandboxEngine))
 	emitTrustNotice(run.stderr, hookSkip, run.mcpSkip)
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:        run.resolved.MaxTurns,
