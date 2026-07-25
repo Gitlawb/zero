@@ -12,10 +12,11 @@ import (
 // team is at its slot cap the member is queued and launches when a slot frees
 // (it stays pending in the coordinator until then).
 func (s *Swarm) Spawn(pol Policy, teamName, agentType, task, cwd string) (string, error) {
-	if err := s.beginLifecycleAdmission(); err != nil {
+	release, err := s.beginLifecycleAdmission()
+	if err != nil {
 		return "", err
 	}
-	defer s.lifecycleMu.RUnlock()
+	defer release()
 
 	def, err := s.registry.Lookup(agentType)
 	if err != nil {
@@ -32,17 +33,36 @@ func (s *Swarm) Spawn(pol Policy, teamName, agentType, task, cwd string) (string
 	return id, nil
 }
 
-func (s *Swarm) beginLifecycleAdmission() error {
+// beginLifecycleAdmission admits one unit of lifecycle work if shutdown has not
+// begun. On success it returns a release func the caller MUST call exactly once
+// (a deferred call is the norm) — Close blocks until every admitted unit has
+// released. On shutdown it returns a nil func and ErrSwarmClosed, and there is
+// nothing to release.
+//
+// It deliberately does NOT keep lifecycleMu held for the caller's duration, which
+// an earlier revision did. Close needs the write lock before it can cancel, so a
+// launcher that blocks in Launch until its context is cancelled would deadlock
+// against every Close caller: the launch holds the read lock while Close waits
+// for the write lock to issue the cancellation neither side can reach. Holding the
+// lock only across the flag check and the counter increment keeps the ordering
+// guarantee (no admission once closed is set) without letting external launcher
+// code sit inside the critical section.
+//
+// The read lock is enough to make the WaitGroup safe: Close flips closed under
+// the write lock, so an Add here either completes before Close acquires it (and is
+// therefore visible to the later Wait) or observes closed and is refused.
+func (s *Swarm) beginLifecycleAdmission() (func(), error) {
 	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
 	if s.closed {
-		s.lifecycleMu.RUnlock()
-		return ErrSwarmClosed
+		return nil, ErrSwarmClosed
 	}
-	return nil
+	s.lifecycleWork.Add(1)
+	return s.lifecycleWork.Done, nil
 }
 
 // dispatch admits a spec to its team (launching now or queuing for a slot).
-// The caller must hold lifecycleMu for reading.
+// The caller must hold an admission ticket from beginLifecycleAdmission.
 func (s *Swarm) dispatchAdmitted(spec MemberSpec) {
 	t := s.team(spec.Team)
 	if t.admit(spec) {
@@ -54,7 +74,7 @@ func (s *Swarm) dispatchAdmitted(spec MemberSpec) {
 
 // launch starts a member for spec and supervises it. A synchronous launch
 // failure fails the task and frees the slot.
-// The caller must hold lifecycleMu for reading.
+// The caller must hold an admission ticket from beginLifecycleAdmission.
 func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 	handle, err := s.launcher.Launch(s.baseCtx, spec)
 	if err != nil {
@@ -84,9 +104,9 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 		res, err := m.handle.Wait()
 		if err != nil {
 			if isRetryable(err) && m.restarts < maxMemberRestarts {
-				if s.beginLifecycleAdmission() == nil {
+				if release, admitErr := s.beginLifecycleAdmission(); admitErr == nil {
 					nh, relErr := s.launcher.Launch(s.baseCtx, spec)
-					s.lifecycleMu.RUnlock()
+					release()
 					if relErr == nil {
 						m.restarts++
 						m.handle = nh
@@ -111,16 +131,17 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 // any. Each exit drains at most one queued member; that member's own exit drains
 // the next, so the queue empties one-per-slot without unbounded recursion.
 func (s *Swarm) afterExit(t *Team) {
-	if s.beginLifecycleAdmission() != nil {
+	release, err := s.beginLifecycleAdmission()
+	if err != nil {
 		t.releaseSlot()
 		return
 	}
-	defer s.lifecycleMu.RUnlock()
+	defer release()
 	s.afterExitAdmitted(t)
 }
 
 // afterExitAdmitted drains at most one queued spec while lifecycle admission is
-// held open. The caller must hold lifecycleMu for reading.
+// held open. The caller must hold an admission ticket from beginLifecycleAdmission.
 func (s *Swarm) afterExitAdmitted(t *Team) {
 	next, ok := t.onExit()
 	if !ok {
@@ -133,10 +154,11 @@ func (s *Swarm) afterExitAdmitted(t *Team) {
 // the new member's inbox and marking the original task handed-off. It returns the
 // new task id. A handoff of an already-terminal task is rejected (fail closed).
 func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) (string, error) {
-	if err := s.beginLifecycleAdmission(); err != nil {
+	release, err := s.beginLifecycleAdmission()
+	if err != nil {
 		return "", err
 	}
-	defer s.lifecycleMu.RUnlock()
+	defer release()
 
 	task, ok := s.coord.Get(taskID)
 	if !ok {
@@ -181,10 +203,11 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 // (e.g. a crashed worker) onto fresh members of toAgentType, returning the
 // adopted task ids. Terminal tasks and tasks with a live owner are left alone.
 func (s *Swarm) AdoptOrphans(pol Policy, teamName, toAgentType string) ([]string, error) {
-	if err := s.beginLifecycleAdmission(); err != nil {
+	release, err := s.beginLifecycleAdmission()
+	if err != nil {
 		return nil, err
 	}
-	defer s.lifecycleMu.RUnlock()
+	defer release()
 
 	def, err := s.registry.Lookup(toAgentType)
 	if err != nil {

@@ -500,3 +500,114 @@ func TestSpawnUnknownAgentType(t *testing.T) {
 		t.Fatal("Spawn with unknown agent type must error")
 	}
 }
+
+// blockingLauncher blocks inside Launch until its context is cancelled — the
+// shape of a real launcher that waits on a slot, a daemon connection, or a
+// sandbox handshake before it can return a handle.
+type blockingLauncher struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (l *blockingLauncher) Launch(ctx context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestCloseCancelsLauncherBlockedInLaunch is the regression test for holding
+// lifecycle admission across MemberLauncher.Launch. When admission was a read lock
+// held for the caller's whole duration, this deadlocked: the spawn sat inside
+// Launch waiting for its context, while Close waited for the write lock it needed
+// before it could cancel that very context. Neither side could progress, so both
+// the spawn and every Close caller hung.
+//
+// Admission is now a counted ticket, so Close can flip the flag, cancel, and then
+// wait the ticket out.
+func TestCloseCancelsLauncherBlockedInLaunch(t *testing.T) {
+	launcher := &blockingLauncher{entered: make(chan struct{})}
+	sw := newSwarmFor(t, launcher)
+
+	spawned := make(chan error, 1)
+	go func() {
+		_, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		spawned <- err
+	}()
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked against a launcher blocked in Launch")
+	}
+	select {
+	case <-spawned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Spawn never returned after Close cancelled the launch context")
+	}
+}
+
+// TestCloseWaitsForAdmittedSpawn pins the other half of the contract: Close is a
+// barrier, so it must not return while an admitted spawn is still running. Without
+// the lifecycleWork wait, Close could finish while this launch was mid-flight.
+func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
+	entered := make(chan struct{})
+	finish := make(chan struct{})
+	launcher := &gatedLaunchLauncher{entered: entered, finish: finish}
+	sw := newSwarmFor(t, launcher)
+
+	go func() {
+		_, _ = sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an admitted spawn was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(finish)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the admitted spawn finished")
+	}
+}
+
+// gatedLaunchLauncher blocks in Launch until the test releases it, ignoring
+// context cancellation so the test controls exactly when the admitted work ends.
+type gatedLaunchLauncher struct {
+	entered chan struct{}
+	finish  chan struct{}
+	once    sync.Once
+}
+
+func (l *gatedLaunchLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return &funcHandle{id: spec.ID, done: closedChan()}, nil
+}
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
