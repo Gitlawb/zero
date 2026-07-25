@@ -43,8 +43,6 @@ type notification struct {
 	params json.RawMessage
 }
 
-const notificationQueueSize = 64
-
 type rpcError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
@@ -211,21 +209,32 @@ func (c *Client) notificationLoop() {
 	}
 }
 
+// enqueueNotification hands a server notification to the worker loop. It never
+// blocks and never discards: the queue grows instead.
+//
+// Both alternatives are worse. Blocking the read loop when a buffer fills is the
+// deadlock this dispatch exists to avoid — a handler that calls Client.Call waits
+// for a response frame the blocked reader can no longer deliver. Dropping the
+// oldest queued item instead loses protocol state permanently: a
+// textDocument/publishDiagnostics for one URI is the server's only report for
+// that URI, so discarding it makes session.waitForDiagnostics time out and
+// Manager.Check return nothing even though the server published findings.
+//
+// Growth is bounded in practice by how much the server emits while a handler
+// runs, and the queue is released as soon as it drains. A handler that never
+// returns would grow it without limit, but that is a handler bug that queue
+// pressure makes visible rather than one this transport can paper over by
+// silently dropping messages.
 func (c *Client) enqueueNotification(item notification) {
 	c.notifyMu.Lock()
-	// Never block protocol reads: at capacity, retain the newest notifications
-	// and preserve their FIFO order by dropping the oldest queued item.
-	if len(c.notifyQueue) == notificationQueueSize {
-		copy(c.notifyQueue, c.notifyQueue[1:])
-		c.notifyQueue[len(c.notifyQueue)-1] = item
-	} else {
-		c.notifyQueue = append(c.notifyQueue, item)
-	}
+	c.notifyQueue = append(c.notifyQueue, item)
 	c.notifyMu.Unlock()
 
 	select {
 	case c.notifyReady <- struct{}{}:
 	default:
+		// A wake-up is already pending; the worker drains the whole queue per wake,
+		// so this item is covered by it.
 	}
 }
 
@@ -238,6 +247,11 @@ func (c *Client) dequeueNotification() (notification, bool) {
 	item := c.notifyQueue[0]
 	c.notifyQueue[0] = notification{}
 	c.notifyQueue = c.notifyQueue[1:]
+	if len(c.notifyQueue) == 0 {
+		// Release the backing array once drained; re-slicing alone would keep a
+		// burst's worth of capacity (and its already-consumed items) alive.
+		c.notifyQueue = nil
+	}
 	return item, true
 }
 

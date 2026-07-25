@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -322,8 +323,18 @@ func TestClientNotificationBurstDoesNotBlockResponse(t *testing.T) {
 
 	handlerStarted := make(chan struct{})
 	handlerDone := make(chan error, 1)
+	var mu sync.Mutex
+	var queued []string
+	allQueued := make(chan struct{})
 	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
 		if method != "blocking" {
+			mu.Lock()
+			queued = append(queued, method)
+			complete := len(queued) == notificationBurstSize
+			mu.Unlock()
+			if complete {
+				close(allQueued)
+			}
 			return
 		}
 		close(handlerStarted)
@@ -346,7 +357,7 @@ func TestClientNotificationBurstDoesNotBlockResponse(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		for i := 0; i < notificationQueueSize+1; i++ {
+		for i := 0; i < notificationBurstSize; i++ {
 			if err := writeMessage(serverWriter, map[string]any{
 				"jsonrpc": "2.0",
 				"method":  fmt.Sprintf("queued-%03d", i),
@@ -384,26 +395,57 @@ func TestClientNotificationBurstDoesNotBlockResponse(t *testing.T) {
 	if err := <-serverDone; err != nil {
 		t.Fatalf("server failed: %v", err)
 	}
+	// Not blocking the reader is only half the requirement: every notification the
+	// server sent during the burst must still reach the handler, in order. A
+	// bounded queue that drops the oldest would silently lose the head of this
+	// sequence — and with it a publishDiagnostics the checker is waiting for.
+	select {
+	case <-allQueued:
+	case <-time.After(5 * time.Second):
+		mu.Lock()
+		received := len(queued)
+		mu.Unlock()
+		t.Fatalf("received %d of %d burst notifications; the queue lost messages", received, notificationBurstSize)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, method := range queued {
+		if want := fmt.Sprintf("queued-%03d", i); method != want {
+			t.Fatalf("burst notification %d = %q, want %q (order must survive the burst)", i, method, want)
+		}
+	}
 }
 
-func TestClientNotificationOverflowDropsOldestInOrder(t *testing.T) {
+// notificationBurstSize is far past any buffer the dispatch used to have, so a
+// bounded queue would be visible as either a blocked read loop or a lost message.
+const notificationBurstSize = 512
+
+// TestClientNotificationQueueIsLossless is the regression test for the overflow
+// policy: a queued notification must never be discarded. A dropped
+// textDocument/publishDiagnostics is the server's only report for that URI, so
+// losing it makes session.waitForDiagnostics time out and Manager.Check return
+// nothing even though the server published findings.
+func TestClientNotificationQueueIsLossless(t *testing.T) {
 	client := &Client{notifyReady: make(chan struct{}, 1)}
-	for i := 0; i < notificationQueueSize+2; i++ {
+	for i := 0; i < notificationBurstSize; i++ {
 		client.enqueueNotification(notification{method: fmt.Sprintf("notification-%03d", i)})
 	}
 
-	for i := 2; i < notificationQueueSize+2; i++ {
-		notification, ok := client.dequeueNotification()
+	for i := 0; i < notificationBurstSize; i++ {
+		item, ok := client.dequeueNotification()
 		if !ok {
-			t.Fatalf("notification %d missing", i)
+			t.Fatalf("notification %d was discarded by the queue", i)
 		}
 		want := fmt.Sprintf("notification-%03d", i)
-		if notification.method != want {
-			t.Fatalf("notification = %q, want %q", notification.method, want)
+		if item.method != want {
+			t.Fatalf("notification = %q, want %q (queue must stay FIFO)", item.method, want)
 		}
 	}
 	if _, ok := client.dequeueNotification(); ok {
-		t.Fatal("notification queue exceeded its bound")
+		t.Fatal("queue returned more notifications than were enqueued")
+	}
+	if client.notifyQueue != nil {
+		t.Fatalf("drained queue retained %d slots of capacity", cap(client.notifyQueue))
 	}
 }
 
