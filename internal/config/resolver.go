@@ -93,6 +93,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		// Sandbox.Enabled is NOT accepted from a provider command, for the same
+		// reason project config cannot set it (see mergeProjectConfig): only
+		// global config and the CLI may turn the sandbox off. A provider command
+		// is an arbitrary executable named in config, and LoadProviderCommand
+		// parses its stdout into a full FileConfig — so without this, a command
+		// returning a valid provider plus {"sandbox":{"enabled":false}} would
+		// disable the very sandbox meant to constrain what it can do. Cleared
+		// here rather than in mergeConfig because that helper is shared with the
+		// trusted global-config merge, which must keep honouring the setting.
+		commandConfig.Sandbox.Enabled = nil
 		mergeConfig(&cfg, commandConfig)
 	}
 
@@ -216,6 +226,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP, true)
+	if src.Sandbox.Enabled != nil {
+		dst.Sandbox.Enabled = src.Sandbox.Enabled
+	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -273,6 +286,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if err := mergeProjectMCPConfig(&dst.MCP, src.MCP); err != nil {
 		return err
 	}
+	// Sandbox.Enabled is intentionally NOT merged from project config: a cloned
+	// repo's .zero/config.json must not be able to disable the sandbox that
+	// constrains it. Only global config and CLI can turn the sandbox off.
+	//
 	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
@@ -687,6 +704,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
+	}
+	if overrides.Sandbox.Enabled != nil {
+		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled
 	}
 	if overrides.Sandbox.BlockUnixSockets {
 		cfg.Sandbox.BlockUnixSockets = true

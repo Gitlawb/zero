@@ -631,3 +631,58 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
 }
+
+// The `/` command palette must NOT collapse the sidebar. It is a centred box
+// capped at suggestionPaletteMaxWidth floating over the chat column, not a
+// full-screen overlay — suppressing the second column for it dropped the plan
+// out of the sidebar and re-rendered it inline at the bottom on every `/`,
+// which is at its most disruptive mid-run with a live plan on screen. The
+// genuinely full-width overlays must still suppress it.
+func TestSidebarSurvivesCommandPalette(t *testing.T) {
+	base := func() model {
+		m := runningPlanModel(t, 3)
+		m.altScreen = true
+		m.height = 40
+		m.headerPrinted = true
+		m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+		return m
+	}
+
+	m := base()
+	if !m.sidebarActive() {
+		t.Fatal("precondition: sidebar should be active for a wide alt-screen model with a plan")
+	}
+
+	// `/` palette open: sidebar stays, so the plan keeps its home and the layout
+	// does not reflow.
+	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}, {Name: "/plan", Desc: "Show planning mode status."}}
+	if !m.suggestionsActive() {
+		t.Fatal("precondition: suggestions should be active")
+	}
+	if !m.sidebarActive() {
+		t.Error("command palette must not collapse the sidebar")
+	}
+	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got != "" {
+		t.Errorf("plan must stay in the sidebar, not fall back to the pinned panel:\n%s", got)
+	}
+	// The palette never contends for the sidebar's cells: the two-column path
+	// renders it at width = chatColumnWidth, so it is centred inside the chat
+	// column and cannot overlap the sidebar.
+	chatW := m.chatColumnWidth()
+	for _, line := range strings.Split(plainRender(t, m.suggestionOverlay(chatW)), "\n") {
+		if w := lipgloss.Width(line); w > chatW {
+			t.Errorf("palette line is %d wide, wider than the chat column %d — it would overlap the sidebar", w, chatW)
+		}
+	}
+	// Clicks still belong to the palette, not the sidebar rows beneath it.
+	if _, ok := m.sidebarLineAtMouse(tea.MouseClickMsg{Button: tea.MouseLeft}); ok {
+		t.Error("sidebar must not take mouse hits while the palette is open")
+	}
+
+	// A genuinely full-width overlay still suppresses the sidebar.
+	full := base()
+	full.picker = &commandPicker{}
+	if full.sidebarActive() {
+		t.Error("a full-screen picker must still collapse the sidebar")
+	}
+}

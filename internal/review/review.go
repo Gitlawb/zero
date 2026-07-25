@@ -76,15 +76,6 @@ func BuildChecksFromEnv(env map[string]string) []Check {
 	return checks
 }
 
-func HasBlockingChecks(checks []Check) bool {
-	for _, check := range checks {
-		if IsBlocking(check.Outcome) {
-			return true
-		}
-	}
-	return false
-}
-
 func IsBlocking(outcome Outcome) bool {
 	switch outcome {
 	case OutcomeFailure, OutcomeCancelled, OutcomeTimedOut, OutcomeActionRequired, OutcomeUnknown:

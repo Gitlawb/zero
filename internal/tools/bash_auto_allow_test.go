@@ -32,7 +32,7 @@ const permissionRequiredFragment = "Permission required for bash"
 func TestBashAutoAllowedWhenSandboxActive(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	registry.Register(NewBashTool(root))
+	registry.Register(NewScopedBashTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandboxedBashPolicy(),
@@ -59,7 +59,7 @@ func TestBashAutoAllowedWhenSandboxActive(t *testing.T) {
 func TestBashRequireEscalatedPromptsWhenSandboxActive(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	registry.Register(NewBashTool(root))
+	registry.Register(NewScopedBashTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandboxedBashPolicy(),
@@ -87,7 +87,7 @@ func TestBashRequireEscalatedPromptsWhenSandboxActive(t *testing.T) {
 func TestBashRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	registry.Register(NewBashTool(root))
+	registry.Register(NewScopedBashTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandboxedBashPolicy(),
@@ -133,7 +133,7 @@ func TestBashRequireEscalatedKeepsSandboxWhenDeniedReadsActive(t *testing.T) {
 func TestBashStillPromptsWithoutActiveSandbox(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
-	registry.Register(NewBashTool(root))
+	registry.Register(NewScopedBashTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandboxedBashPolicy(),

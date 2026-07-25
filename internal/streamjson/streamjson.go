@@ -238,14 +238,6 @@ func ResolveImages(events []InputEvent) ([]zeroruntime.ImageBlock, error) {
 	return images, nil
 }
 
-func ParsePrompt(input string) (string, error) {
-	events, err := ParseInput(input)
-	if err != nil {
-		return "", err
-	}
-	return ResolvePrompt(events)
-}
-
 func validateOutputEvent(event Event) error {
 	if event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schemaVersion must be %d", SchemaVersion)

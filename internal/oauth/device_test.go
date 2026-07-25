@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,30 @@ func TestRequestDeviceCodeSendsClientSecret(t *testing.T) {
 	}
 	if gotSecret != "shh" {
 		t.Fatalf("client_secret = %q, want shh", gotSecret)
+	}
+}
+
+func TestRequestDeviceCodeRefusesRedirect(t *testing.T) {
+	endpoint, hits := redirectTrap(t, http.StatusTemporaryRedirect) // 307
+	_, err := RequestDeviceCode(context.Background(), http.DefaultClient,
+		Config{ClientID: "c", ClientSecret: "shh", DeviceAuthorizationEndpoint: endpoint}, nil)
+	if !errors.Is(err, ErrUnsafeRedirect) {
+		t.Fatalf("RequestDeviceCode err = %v, want ErrUnsafeRedirect", err)
+	}
+	if n := hits(); n != 0 {
+		t.Fatalf("attacker received %d request(s) — client_secret replayed", n)
+	}
+}
+
+func TestPollDeviceOnceRefusesRedirect(t *testing.T) {
+	endpoint, hits := redirectTrap(t, http.StatusPermanentRedirect) // 308
+	_, err := pollDeviceOnce(context.Background(), http.DefaultClient,
+		Config{ClientID: "c", ClientSecret: "shh", TokenEndpoint: endpoint}, "device-code", nil)
+	if !errors.Is(err, ErrUnsafeRedirect) {
+		t.Fatalf("pollDeviceOnce err = %v, want ErrUnsafeRedirect", err)
+	}
+	if n := hits(); n != 0 {
+		t.Fatalf("attacker received %d request(s) — device_code/secret replayed", n)
 	}
 }
 

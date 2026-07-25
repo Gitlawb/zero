@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -289,7 +288,7 @@ func TestRegistryToolIsDeferredEligible(t *testing.T) {
 
 // TestRegistryToolReportsMCPServerName verifies the registryTool reports its true
 // configured server name (not the sanitized tool-name token) so the deferred-tools
-// reminder labels a multi-token server correctly via tools.DeferredLine.
+// discovery label names a multi-token server correctly via tools.DeferredSource.
 func TestRegistryToolReportsMCPServerName(t *testing.T) {
 	client := &fakeToolClient{}
 	// A server name that sanitizes to a token containing an underscore ("git_hub"):
@@ -305,14 +304,9 @@ func TestRegistryToolReportsMCPServerName(t *testing.T) {
 		t.Fatalf("MCPServerName() = %q, want %q", tool.MCPServerName(), "git hub")
 	}
 
-	// DeferredLine must prefer the reported server name over the name-derived token.
-	line := tools.DeferredLine(tool)
-	if !strings.Contains(line, "server: git hub") {
-		t.Fatalf("DeferredLine = %q, want it to label server as %q via MCPServerName()", line, "git hub")
-	}
-	// The truncated token-only label ("git") must NOT be the server segment.
-	if strings.Contains(line, "server: git |") {
-		t.Fatalf("DeferredLine = %q, mislabeled multi-token server with the truncated token", line)
+	// DeferredSource must prefer the reported server name over the name-derived token.
+	if source := tools.DeferredSource(tool); source != "git hub" {
+		t.Fatalf("DeferredSource = %q, want %q via MCPServerName()", source, "git hub")
 	}
 }
 

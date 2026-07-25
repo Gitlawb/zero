@@ -140,6 +140,40 @@ func TestGrantRequestPermissionsSessionPersists(t *testing.T) {
 	}
 }
 
+func TestCoversRequestPermissionsReusesSessionNetworkCapability(t *testing.T) {
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+	enabled := true
+	profile := RequestPermissionProfile{Network: &NetworkPermissions{Enabled: &enabled}}
+	if engine.CoversRequestPermissions(profile) {
+		t.Fatal("default network-deny policy must not cover external network access")
+	}
+	cleanup, err := engine.GrantRequestPermissions(profile, PermissionGrantScopeSession)
+	if err != nil {
+		t.Fatalf("GrantRequestPermissions: %v", err)
+	}
+	cleanup()
+	if !engine.CoversRequestPermissions(profile) {
+		t.Fatal("session network grant should cover an equivalent later request")
+	}
+}
+
+func TestCoversRequestPermissionsDoesNotOutliveTurnGrant(t *testing.T) {
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+	enabled := true
+	profile := RequestPermissionProfile{Network: &NetworkPermissions{Enabled: &enabled}}
+	cleanup, err := engine.GrantRequestPermissions(profile, PermissionGrantScopeTurn)
+	if err != nil {
+		t.Fatalf("GrantRequestPermissions: %v", err)
+	}
+	if !engine.CoversRequestPermissions(profile) {
+		t.Fatal("active turn grant should cover the requested network capability")
+	}
+	cleanup()
+	if engine.CoversRequestPermissions(profile) {
+		t.Fatal("cleaned-up turn grant must not cover later requests")
+	}
+}
+
 func TestPermissionProfileIncludesReadOnlyGrantAsReadRootOnly(t *testing.T) {
 	workspace := t.TempDir()
 	outside := tempDirOutsideDefaultTemp(t)

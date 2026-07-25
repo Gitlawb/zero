@@ -26,6 +26,7 @@ type LinuxSandboxCommandArgsOptions struct {
 	ApplySeccompThenExec bool
 	BlockUnixSockets     bool
 	NoProc               bool
+	PolicyReportPath     string
 	Command              []string
 }
 
@@ -37,6 +38,7 @@ type LinuxSandboxHelperConfig struct {
 	ApplySeccompThenExec bool
 	BlockUnixSockets     bool
 	NoProc               bool
+	PolicyReportPath     string
 	Command              []string
 }
 
@@ -49,6 +51,16 @@ type LinuxSandboxHelperCommand struct {
 type LinuxSandboxBwrapOptions struct {
 	Config     LinuxSandboxHelperConfig
 	HelperPath string
+}
+
+type linuxSandboxBwrapPlan struct {
+	Args                   []string
+	ProtectedCreateTargets []string
+}
+
+type linuxBwrapFilesystemPlan struct {
+	Args                   []string
+	ProtectedCreateTargets []string
 }
 
 var linuxSandboxHelperCommand = findLinuxSandboxHelperCommand
@@ -86,6 +98,9 @@ func BuildLinuxSandboxCommandArgs(options LinuxSandboxCommandArgsOptions) ([]str
 	if options.NoProc {
 		args = append(args, "--no-proc")
 	}
+	if strings.TrimSpace(options.PolicyReportPath) != "" {
+		args = append(args, "--policy-report-path", options.PolicyReportPath)
+	}
 	args = append(args, "--")
 	args = append(args, options.Command...)
 	return args, nil
@@ -103,6 +118,7 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 	flags.BoolVar(&config.ApplySeccompThenExec, "apply-seccomp-then-exec", false, "apply seccomp before exec")
 	flags.BoolVar(&config.BlockUnixSockets, "block-unix-sockets", false, "block AF_UNIX sockets before exec")
 	flags.BoolVar(&config.NoProc, "no-proc", false, "skip proc mount")
+	flags.StringVar(&config.PolicyReportPath, "policy-report-path", "", "structured policy report path")
 	if err := flags.Parse(args); err != nil {
 		return LinuxSandboxHelperConfig{}, err
 	}
@@ -122,6 +138,7 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 		return LinuxSandboxHelperConfig{}, fmt.Errorf("invalid --permission-profile: %w", err)
 	}
 	config.Command = flags.Args()
+	config.PolicyReportPath = strings.TrimSpace(config.PolicyReportPath)
 	if len(config.Command) == 0 {
 		return LinuxSandboxHelperConfig{}, errors.New("missing command after --")
 	}
@@ -129,16 +146,24 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 }
 
 func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, error) {
+	plan, err := buildLinuxSandboxBwrapPlan(options)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Args, nil
+}
+
+func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxBwrapPlan, error) {
 	config := options.Config
 	if config.ApplySeccompThenExec {
-		return nil, errors.New("inner seccomp stage cannot be wrapped by bubblewrap again")
+		return linuxSandboxBwrapPlan{}, errors.New("inner seccomp stage cannot be wrapped by bubblewrap again")
 	}
 	if config.UseLandlock {
-		return nil, errors.New("linux landlock helper mode is not implemented yet")
+		return linuxSandboxBwrapPlan{}, errors.New("linux landlock helper mode is not implemented yet")
 	}
 	helperPath := strings.TrimSpace(options.HelperPath)
 	if helperPath == "" {
-		return nil, errors.New("linux sandbox helper path is required")
+		return linuxSandboxBwrapPlan{}, errors.New("linux sandbox helper path is required")
 	}
 	commandCWD := strings.TrimSpace(config.CommandCWD)
 	if commandCWD == "" {
@@ -154,13 +179,14 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		Command:              config.Command,
 	})
 	if err != nil {
-		return nil, err
+		return linuxSandboxBwrapPlan{}, err
 	}
 	args := []string{
 		"--new-session",
 		"--die-with-parent",
 	}
-	args = append(args, linuxBwrapFilesystemArgs(config.PermissionProfile)...)
+	filesystemPlan := buildLinuxBwrapFilesystemPlan(config.PermissionProfile)
+	args = append(args, filesystemPlan.Args...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
 	}
@@ -185,10 +211,17 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 	}
 	args = append(args, "--", helperPath)
 	args = append(args, innerArgs...)
-	return args, nil
+	return linuxSandboxBwrapPlan{
+		Args:                   args,
+		ProtectedCreateTargets: filesystemPlan.ProtectedCreateTargets,
+	}, nil
 }
 
 func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
+	return buildLinuxBwrapFilesystemPlan(profile).Args
+}
+
+func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesystemPlan {
 	fs := profile.FileSystem
 	if fs.Kind == FileSystemUnrestricted {
 		// Disabled filesystem policy means no write jail: expose the host root
@@ -200,10 +233,11 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 				args = append(args, "--bind", root.Root, root.Root)
 			}
 		}
-		return args
+		return linuxBwrapFilesystemPlan{Args: args}
 	}
 
 	args := []string{}
+	protectedCreateTargets := []string{}
 	if linuxProfileHasFullReadRoot(fs) {
 		args = append(args, "--ro-bind", "/", "/", "--dev", "/dev")
 	} else {
@@ -231,7 +265,12 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 			args = appendReadOnlyLinuxPathArgs(args, subpath)
 		}
 		for _, name := range root.ProtectedMetadataNames {
-			args = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+			path := filepath.Join(root.Root, name)
+			if pathExists(path) {
+				args = appendReadOnlyLinuxPathArgs(args, path)
+			} else {
+				protectedCreateTargets = append(protectedCreateTargets, path)
+			}
 		}
 	}
 	for _, path := range fs.DenyWrite {
@@ -240,7 +279,10 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 	for _, path := range fs.DenyRead {
 		args = appendUnreadableLinuxPathArgs(args, path)
 	}
-	return args
+	return linuxBwrapFilesystemPlan{
+		Args:                   args,
+		ProtectedCreateTargets: dedupeStrings(protectedCreateTargets),
+	}
 }
 
 func linuxWriteRootsWithTemp(fs FileSystemPolicy) []WritableRoot {

@@ -327,6 +327,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 		return CommandPlan{}, err
 	}
 	childEnv := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, BackendWindowsRestrictedToken, execRequest.WorkspaceRoot, spec.sensitiveEnvKeys)
+	childEnv = sandboxRuntimeEnvironment(childEnv, execRequest.PermissionProfile.Runtime)
 	// The unelevated enforcement tier maps to the runner's unelevated level: same
 	// restricted token, but the runner applies the workspace ACLs itself instead
 	// of requiring the elevated setup marker.

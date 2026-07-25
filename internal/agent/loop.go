@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -181,10 +182,20 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	options.runPermissions = runPermissions
 	defer runPermissions.cleanup()
 
-	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
+	promptParts := buildSystemPromptParts(options)
+	messages := zeroruntime.SeedMessagesWithImages(promptParts.prompt, prompt, options.Images)
 
 	guards := newGuardState()
-	compactor := newCompactionState(options)
+	task := newTaskState(prompt, options.Trace)
+	compactor := newCompactionState(options, task)
+	defer func() {
+		// A final transcript comparison is observational. It records drift but
+		// never rewrites the result or changes execution after the fact.
+		task.observePlanParity(result.Messages)
+		// Tool-result observations are intentionally coalesced; this final event
+		// guarantees their aggregate counts are present even on an early return.
+		task.emit()
+	}()
 	// The execution-profile posture controller. nil Options.Profile (every
 	// existing caller) makes every observe/decide call a no-op, keeping the
 	// loop byte-identical for unprofiled runs.
@@ -260,24 +271,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
 		// the messages, so computing it before compaction is safe.
-		// Build the per-turn tool list first so proactive compaction can include
-		// the tool-definition tokens (they ride on every request) in its estimate.
-		// partitionTools depends only on registry/permissions/options/loaded, not on
-		// the messages, so computing it before compaction is safe.
 		toolPartitionSpan := options.Trace.Span(trace.SpanToolPartition)
 		exposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
 		toolPartitionSpan.End()
 
-		// Prompt-prefix fingerprint: hash the seven cacheable sub-components
-		// of this turn's request (system prompt sections, project context,
-		// skills, partitioned tool list, tool schemas) and emit one trace
-		// event. Stable across turns => cacheable. Drift in any sub-hash
-		// names the sub-component that broke the cache for this turn. The
-		// computation is pure and cheap (seven SHA-256s of small strings)
-		// and is a no-op when tracing is off.
+		// Fingerprint the exact system prompt built at run start plus this turn's
+		// provider-visible tool definitions in their emitted order. Reusing the
+		// retained prompt parts avoids rebuilding workspace context while ensuring
+		// the trace describes the same bytes carried by the request.
 		if options.Trace != nil {
-			fp := ComputePrefixFingerprint(options, exposed)
+			fp := computePrefixFingerprint(buildPromptSubstringsFromParts(promptParts, exposed))
 			options.Trace.EmitPrefixHash(trace.PrefixHash{
+				SystemPromptHash:       fp.SystemPromptHash,
 				BaseInstructionsHash:   fp.BaseInstructionsHash,
 				ConfirmationPolicyHash: fp.ConfirmationPolicyHash,
 				ProjectContextHash:     fp.ProjectContextHash,
@@ -571,7 +576,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// model's final answer ONLY when the work is actually done. Default off
 			// (RequireCompletionSignal), so interactive runs stay byte-identical.
 			if options.RequireCompletionSignal {
-				evaluation := completionPolicy.evaluate(collected.Text, guards.pendingPlanItems())
+				completionContext := task.completionContext(messages, guards.pendingPlanItems())
+				evaluation := completionPolicy.evaluate(collected.Text, completionContext)
+				task.observe(taskStateEvent{kind: taskStateEventCompletion, completion: evaluation})
 				switch evaluation.Decision {
 				case CompletionIncomplete:
 					result.Incomplete = true
@@ -596,13 +603,15 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 						options.Trace.Counter(trace.CounterAcceptanceChecks, 1)
 						messages = append(messages, zeroruntime.Message{
 							Role:    zeroruntime.MessageRoleUser,
-							Content: acceptanceVerificationNudge(),
+							Content: acceptanceVerificationNudge(completionContext.Objective),
 						})
 					}
 					continue
 				case CompletionComplete:
 					// Local evidence is sufficient; proceed to final diagnostics.
 				}
+			} else {
+				task.observe(taskStateEvent{kind: taskStateEventCompletion, completion: completionEvaluation{Decision: CompletionComplete}})
 			}
 			// Finalization diagnostics gate: edits from this run may still have
 			// checks in flight — the per-turn drain waits only briefly and defers
@@ -626,6 +635,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// executing so the empty-turn counter resets and plan-tracking signals
 		// stay current.
 		guards.observeTurn(collected)
+		for _, call := range collected.ToolCalls {
+			if call.Name == planToolName {
+				task.observe(taskStateEvent{kind: taskStateEventPlan, arguments: call.Arguments})
+			}
+		}
 
 		failureHint := ""
 		// turnRequestedModel records the FIRST mid-run escalation target requested
@@ -677,6 +691,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
+			task.observe(taskStateEvent{kind: taskStateEventToolResult, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
@@ -758,6 +773,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		if options.SelfCorrect != nil && len(changedFilesThisBatch) > 0 {
 			feedback, selfCorrectOutcome := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch))
 			posture.observeSelfCorrect(selfCorrectOutcome)
+			task.observe(taskStateEvent{kind: taskStateEventVerification, verification: selfCorrectOutcome})
 			if feedback != "" {
 				messages = append(messages, zeroruntime.Message{
 					Role:    zeroruntime.MessageRoleUser,
@@ -1151,6 +1167,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			decisionCommandPrefix = grant.Prefix
 		}
 	}
+	// An explicit additional-permissions request is an elevation only when it
+	// expands the current effective policy. If the same capability was already
+	// approved for this session, reuse that grant across equivalent commands
+	// instead of prompting again merely because their command prefixes differ.
+	if toolFound && !permissionGranted && isShellCommandTool(call.Name) && options.Sandbox != nil {
+		if profile, requested, profileErr := inlineAdditionalPermissionsProfile(args, options.Cwd); profileErr == nil && requested && options.Sandbox.CoversRequestPermissions(profile) {
+			permissionGranted = true
+			decisionAction = PermissionDecisionAllowForSession
+			decisionReason = "requested sandbox capabilities already granted for this session"
+		}
+	}
 
 	var preflightDecision *sandbox.Decision
 	if toolFound && options.Sandbox != nil {
@@ -1397,17 +1424,18 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
 	return ToolResult{
-		Risk:         executedRisk,
-		ToolCallID:   call.ID,
-		Name:         call.Name,
-		Status:       result.Status,
-		Output:       result.Output,
-		Truncated:    result.Truncated,
-		Meta:         result.Meta,
-		Redacted:     result.Redacted,
-		ChangedFiles: result.ChangedFiles,
-		Display:      result.Display,
-		LoadedTools:  loadedToolsFromResult(result.Meta),
+		Risk:            executedRisk,
+		ToolCallID:      call.ID,
+		Name:            call.Name,
+		Status:          result.Status,
+		Output:          result.Output,
+		Truncated:       result.Truncated,
+		Meta:            result.Meta,
+		Redacted:        result.Redacted,
+		ChangedFiles:    result.ChangedFiles,
+		ChangeSummaries: result.ChangeSummaries,
+		Display:         result.Display,
+		LoadedTools:     loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
 		// the Run turn loop performs the actual provider switch. Empty for every
@@ -1527,8 +1555,15 @@ func sandboxDeniedNetworkRetryCandidate(call ToolCall, args map[string]any, resu
 	if options.Sandbox == nil || !isShellCommandTool(call.Name) {
 		return false
 	}
-	if result.Meta[tools.SandboxLikelyDeniedMeta] != "true" || result.Meta[tools.SandboxDenialKindMeta] != tools.SandboxDenialKindNetwork {
-		return false
+	if result.ExecutionOutcome != nil {
+		denial := result.ExecutionOutcome.Denial
+		if denial == nil || denial.Capability.Kind != execution.CapabilityExternalNetwork {
+			return false
+		}
+	} else {
+		if result.Meta[tools.SandboxLikelyDeniedMeta] != "true" || result.Meta[tools.SandboxDenialKindMeta] != tools.SandboxDenialKindNetwork {
+			return false
+		}
 	}
 	if value, _ := args["sandbox_permissions"].(string); strings.TrimSpace(value) == string(tools.SandboxPermissionsRequireEscalated) {
 		return false
@@ -1581,6 +1616,11 @@ func sandboxRestrictedShellRetryCandidate(call ToolCall, args map[string]any, re
 }
 
 func sandboxDeniedShellResult(result tools.Result) bool {
+	if result.ExecutionOutcome != nil {
+		// Typed denials must be handled by their exact capability path. Never
+		// turn a structured narrow denial into the legacy unrestricted retry.
+		return false
+	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
 }
 
@@ -1709,17 +1749,18 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 
 	return ToolResult{
-		ToolCallID:     call.ID,
-		Name:           call.Name,
-		Status:         result.Status,
-		Output:         output,
-		Truncated:      result.Truncated,
-		Meta:           meta,
-		Redacted:       result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
-		ChangedFiles:   result.ChangedFiles,
-		Display:        display,
-		LoadedTools:    loadedToolsFromResult(meta),
-		RequestedModel: meta["escalate_to_model"],
+		ToolCallID:      call.ID,
+		Name:            call.Name,
+		Status:          result.Status,
+		Output:          output,
+		Truncated:       result.Truncated,
+		Meta:            meta,
+		Redacted:        result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
+		ChangedFiles:    result.ChangedFiles,
+		ChangeSummaries: result.ChangeSummaries,
+		Display:         display,
+		LoadedTools:     loadedToolsFromResult(meta),
+		RequestedModel:  meta["escalate_to_model"],
 	}
 }
 
@@ -1979,15 +2020,16 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Cwd:               options.Cwd,
 		})
 		return ToolResult{
-			ToolCallID:   call.ID,
-			Name:         call.Name,
-			Status:       result.Status,
-			Output:       result.Output,
-			Truncated:    result.Truncated,
-			Meta:         result.Meta,
-			Redacted:     result.Redacted,
-			ChangedFiles: result.ChangedFiles,
-			Display:      result.Display,
+			ToolCallID:      call.ID,
+			Name:            call.Name,
+			Status:          result.Status,
+			Output:          result.Output,
+			Truncated:       result.Truncated,
+			Meta:            result.Meta,
+			Redacted:        result.Redacted,
+			ChangedFiles:    result.ChangedFiles,
+			ChangeSummaries: result.ChangeSummaries,
+			Display:         result.Display,
 		}
 	}
 	return ToolResult{
@@ -2551,7 +2593,8 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 	if profile, ok, err := inlineAdditionalPermissionsProfile(args, options.Cwd); ok && err == nil {
 		scopeText = requestPermissionsScope(profile)
 	}
-	reason = userFacingPermissionReason(call.Name, args, reason)
+	decisionReason := strings.TrimSpace(reason)
+	reason = userFacingPermissionReason(call.Name, args, reason, safety.Reason)
 
 	return PermissionEvent{
 		ToolCallID:        call.ID,
@@ -2564,6 +2607,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Autonomy:          options.Autonomy,
 		SideEffect:        string(safety.SideEffect),
 		Reason:            reason,
+		DecisionReason:    decisionReason,
 		Scope:             scopeText,
 		Risk:              risk,
 		Block:             block,
@@ -2573,18 +2617,31 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 	}, true
 }
 
-func userFacingPermissionReason(toolName string, args map[string]any, reason string) string {
+func userFacingPermissionReason(toolName string, args map[string]any, reason string, fallback string) string {
 	reason = strings.TrimSpace(reason)
-	if !isShellCommandTool(toolName) || !shellCommandRequiresEscalated(args) {
+	if !isShellCommandTool(toolName) {
 		return reason
 	}
-	if justification, ok := firstStringArg(args, "justification"); ok {
-		return justification
+
+	// Policy and sandbox explanations are authoritative. The tool's static
+	// safety copy is only an internal fallback; presenting it as the reason for
+	// every ordinary shell approval makes prompts generic and obscures the cases
+	// where policy has an actionable explanation.
+	fallback = strings.TrimSpace(fallback)
+	if reason != "" && reason != fallback && reason != "tool requires approval before execution" && reason != sandbox.ReasonEscalatedSandboxRequired {
+		return reason
 	}
-	if reason == "" || reason == sandbox.ReasonEscalatedSandboxRequired {
+
+	if shellCommandRequiresEscalated(args) {
+		if justification, ok := firstStringArg(args, "justification"); ok {
+			return justification
+		}
 		return "This command needs to run outside the sandbox."
 	}
-	return reason
+
+	// Ordinary shell approvals need no invented explanation. The raw fallback is
+	// retained separately as DecisionReason for traces and policy auditing.
+	return ""
 }
 
 func grantDecisionAction(grant *sandbox.Grant) PermissionDecisionAction {
@@ -2803,19 +2860,6 @@ func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
 	default:
 		return PermissionActionPrompt
 	}
-}
-
-// partitionTools builds the per-turn advertised tool list and optional
-// tool_search discovery text. INACTIVE (DeferThreshold <= 0 or the eligible count is
-// below it): every visible tool is exposed with its full schema EXCEPT tool_search
-// (dropped so it is never advertised when it cannot help), and the discovery text is
-// empty — byte-identical to the pre-deferral output. ACTIVE: a deferred-eligible
-// tool is exposed only when loaded[name]; otherwise it is hidden and searchable
-// through tool_search. Non-deferred tools (including tool_search) are always
-// exposed. The exposed slice is alpha-sorted by name, matching the legacy order
-// so the inactive path is stable.
-func partitionTools(registry *tools.Registry, permissionMode PermissionMode, options Options, loaded map[string]bool) ([]zeroruntime.ToolDefinition, string) {
-	return partitionToolsCached(registry, permissionMode, options, loaded, nil)
 }
 
 // partitionToolsCached is partitionTools with an optional per-tool definition
