@@ -8,33 +8,12 @@ import (
 	"testing"
 )
 
-func TestReplaceBinaryReplacesRunningBinary(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero.exe")
-	newPath := filepath.Join(dir, "zero.exe.new")
-
-	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
-		t.Fatalf("WriteFile target: %v", err)
-	}
-	if err := os.WriteFile(newPath, []byte("new-binary"), 0o755); err != nil {
-		t.Fatalf("WriteFile new: %v", err)
-	}
-
-	if err := replaceBinary(targetPath, newPath); err != nil {
-		t.Fatalf("replaceBinary: %v", err)
-	}
-
-	data, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("ReadFile target: %v", err)
-	}
-	if string(data) != "new-binary" {
-		t.Fatalf("target content = %q, want %q", data, "new-binary")
-	}
-	if _, err := os.Stat(targetPath + ".old"); err != nil {
-		t.Fatalf("expected the original binary to be preserved at %s.old: %v", targetPath, err)
-	}
-}
+// The replacement path itself (rename the running binary aside, then rename the
+// staged object into place through its handle) is covered by
+// TestInstallBinaryInstallsVerifiedBytes and
+// TestPromoteInstallsTheStagedObjectNotTheStagedPath in
+// stage_promote_windows_test.go, which exercise it through the staging handle the
+// production code uses rather than a loose pathname.
 
 func TestRenameWithRetrySucceedsImmediately(t *testing.T) {
 	dir := t.TempDir()

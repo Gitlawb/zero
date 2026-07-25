@@ -2,8 +2,6 @@ package update
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,54 +218,68 @@ func verifyArchiveChecksum(checksumPath string, expectedArchiveName string) erro
 	return nil
 }
 
-// installBinary stages sourcePath next to targetPath (same directory, so the
-// final rename is atomic/same-filesystem) and then swaps it into place.
+// installBinary stages sourcePath next to targetPath (same filesystem, so the
+// final rename is atomic) and then swaps it into place.
 func installBinary(sourcePath string, targetPath string) error {
-	stagedPath, err := stagingFilePath(targetPath)
+	staged, err := stageBinary(sourcePath, targetPath)
 	if err != nil {
 		return fmt.Errorf("stage %s: %w", filepath.Base(targetPath), err)
 	}
-	if err := copyFile(sourcePath, stagedPath); err != nil {
-		return fmt.Errorf("stage %s: %w", filepath.Base(targetPath), err)
-	}
-	defer func() {
-		_ = os.Remove(stagedPath)
-	}()
-	if err := replaceBinary(targetPath, stagedPath); err != nil {
+	// Registered before the promotion attempt and reached on every failure path,
+	// including a mid-write copy error: each attempt now stages under a fresh
+	// random name, so a leaked partial file is never reused by the next attempt
+	// and would otherwise accumulate release-sized garbage in the install
+	// directory. CleanupStaleBinary sweeps leftovers from a hard crash.
+	defer staged.discard()
+	if err := staged.promote(targetPath); err != nil {
 		return fmt.Errorf("install %s: %w", filepath.Base(targetPath), err)
 	}
 	return nil
 }
 
-// randomStagingSuffix returns hex-encoded random bytes for stagingFilePath.
-// Overridden in tests for a deterministic path; production always takes this
-// default, cryptographically random one.
-var randomStagingSuffix = func() (string, error) {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
+// stagedBinary is a freshly created staging object holding the verified release
+// bytes, together with the handle it was created through. Promotion is bound to
+// that object rather than to the staging PATHNAME: under the threat model of
+// #742 a lower-privileged principal that can write in the installation
+// directory may replace a sibling entry, so re-resolving the staging path at
+// swap time would let it substitute its own file into the executable path after
+// the verified bytes were written. Each platform closes that handoff with its
+// own primitive — see the promote implementations.
+type stagedBinary struct {
+	file *os.File
+	path string
+	// dir is a private staging directory that must be removed with the file
+	// (POSIX). Empty on Windows, which binds the swap to the handle instead.
+	dir string
+	// promoted records that path now IS the installed binary, so discard must
+	// not delete it.
+	promoted bool
 }
 
-// stagingFilePath returns an unpredictable path in targetPath's directory
-// (same filesystem, so the later rename into place is atomic). A fixed
-// "<target>.new" name is guessable in advance, and a lower-privileged
-// process that can write in the installation directory could pre-create it
-// as a hard link or reparse point to another file the elevated updater can
-// write, turning the staging copy into an arbitrary-file-overwrite primitive.
-// createStagingFile's exclusive, no-follow creation is the other half of
-// closing that: even a correctly-guessed name can't be opened through.
-func stagingFilePath(targetPath string) (string, error) {
-	suffix, err := randomStagingSuffix()
+// stageBinary creates the staging object for targetPath and writes sourcePath's
+// bytes into it through the handle it was created with, leaving that handle open
+// for promote.
+//
+// It is a package var so a test can force a staging failure on every platform:
+// the staging location is created exclusively under a name that cannot be known
+// in advance, which is exactly what stops a test (like an attacker) from
+// occupying it from outside.
+var stageBinary = func(sourcePath string, targetPath string) (*stagedBinary, error) {
+	staged, err := createStagedBinary(targetPath)
 	if err != nil {
-		return "", fmt.Errorf("generate staging file name: %w", err)
+		return nil, err
 	}
-	name := filepath.Base(targetPath) + "." + suffix + ".new"
-	return filepath.Join(filepath.Dir(targetPath), name), nil
+	if err := staged.copyFrom(sourcePath); err != nil {
+		staged.discard()
+		return nil, err
+	}
+	return staged, nil
 }
 
-func copyFile(sourcePath string, destPath string) (retErr error) {
+// copyFrom writes sourcePath into the staged file through the handle
+// createStagedBinary opened. It never reopens by pathname, so the bytes cannot
+// land anywhere other than the object that was exclusively created.
+func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return err
@@ -275,17 +287,27 @@ func copyFile(sourcePath string, destPath string) (retErr error) {
 	defer func() {
 		_ = source.Close()
 	}()
-	dest, err := createStagingFile(destPath)
-	if err != nil {
+	if _, err := io.Copy(staged.file, source); err != nil {
 		return err
 	}
-	defer func() {
-		if closeErr := dest.Close(); closeErr != nil && retErr == nil {
-			retErr = closeErr
-		}
-	}()
-	_, retErr = io.Copy(dest, source)
-	return retErr
+	return staged.file.Sync()
+}
+
+// discard closes the handle and removes what it created, unless the object was
+// already promoted into the executable path.
+func (staged *stagedBinary) discard() {
+	if staged == nil {
+		return
+	}
+	if staged.file != nil {
+		_ = staged.file.Close()
+	}
+	if !staged.promoted && staged.path != "" {
+		_ = os.Remove(staged.path)
+	}
+	if staged.dir != "" {
+		_ = os.RemoveAll(staged.dir)
+	}
 }
 
 func downloadFile(ctx context.Context, url string, destPath string) error {

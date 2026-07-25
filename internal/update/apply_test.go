@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,17 +170,11 @@ func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
 	if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
 		t.Fatalf("WriteFile helper: %v", err)
 	}
-	// Force installBinary's staging copy to fail by pinning the random
-	// staging suffix and occupying the resulting path with a directory
-	// instead of a file.
-	stubRandomStagingSuffix(t, "test-fixed-suffix")
-	stagedHelperPath, err := stagingFilePath(existingHelperPath)
-	if err != nil {
-		t.Fatalf("stagingFilePath: %v", err)
-	}
-	if err := os.MkdirAll(stagedHelperPath, 0o755); err != nil {
-		t.Fatalf("MkdirAll staged path: %v", err)
-	}
+	// Force the helper's staging to fail. It cannot be provoked from outside any
+	// more: the staging location is created exclusively under a name (POSIX: a
+	// private directory) that nothing else can predict or occupy, which is the
+	// point of the fix. So fail it through the seam instead.
+	stubStageBinaryFailure(t, existingHelperPath, errors.New("staging is unavailable in this test"))
 
 	archiveName := "zero-v0.2.0-linux-x64.tar.gz"
 	archiveDir := t.TempDir()

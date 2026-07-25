@@ -3,8 +3,9 @@
 package update
 
 import (
-	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -13,28 +14,9 @@ const (
 	restoreRenameRetryDelay    = 100 * time.Millisecond
 )
 
-// replaceBinary installs newPath over targetPath. Windows will not let a
-// running executable be overwritten or deleted directly, but NTFS does allow
-// renaming it aside — the same trick already used for locked config files in
-// internal/cli/mcp_config.go's replaceMCPWritableConfigFile.
-func replaceBinary(targetPath string, newPath string) error {
-	oldPath := targetPath + ".old"
-	_ = os.Remove(oldPath) // best-effort cleanup of a leftover from a previous upgrade
-	if err := os.Rename(targetPath, oldPath); err != nil {
-		return fmt.Errorf("rename running binary aside: %w", err)
-	}
-	if err := os.Rename(newPath, targetPath); err != nil {
-		// Retry the restore: a transient Windows file lock (antivirus/indexer
-		// scanning the just-renamed file, a lingering handle) can make a rename
-		// fail momentarily, and here failure means targetPath is left missing
-		// entirely rather than merely stale — worth a short retry to avoid that.
-		if restoreErr := renameWithRetry(oldPath, targetPath); restoreErr != nil {
-			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %v (original preserved at %s)", err, restoreErr, oldPath)
-		}
-		return fmt.Errorf("install new binary: %w", err)
-	}
-	return nil
-}
+// stagingLeftoverMinAge is how long a staging leftover must sit untouched before
+// it is treated as abandoned rather than as another process's work in progress.
+const stagingLeftoverMinAge = time.Hour
 
 func renameWithRetry(oldPath string, newPath string) error {
 	var lastErr error
@@ -49,9 +31,36 @@ func renameWithRetry(oldPath string, newPath string) error {
 	return lastErr
 }
 
-// CleanupStaleBinary best-effort removes a "<path>.old" file left behind by a
-// previous replaceBinary call once the old process holding it has exited.
-// Callers should invoke this once at startup for the current executable.
+// CleanupStaleBinary best-effort removes what a previous update left next to
+// targetPath: the "<path>.old" copy of the running binary (removable once the
+// process holding it has exited) and any staging file abandoned by a crashed or
+// killed update. The staging name is random, so nothing else would ever reclaim
+// it — each crashed attempt would otherwise leave another release-sized file
+// behind. Callers invoke this once at startup for the current executable.
 func CleanupStaleBinary(targetPath string) {
 	_ = os.Remove(targetPath + ".old")
+	removeStaleStagingLeftovers(targetPath, time.Now())
+}
+
+// removeStaleStagingLeftovers deletes "<base>.<random>.new" files older than
+// stagingLeftoverMinAge, so a staging file belonging to a concurrently running
+// update is never pulled out from under it.
+func removeStaleStagingLeftovers(targetPath string, now time.Time) {
+	dir := filepath.Dir(targetPath)
+	prefix := filepath.Base(targetPath) + "."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".new") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < stagingLeftoverMinAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
 }
