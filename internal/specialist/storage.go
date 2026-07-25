@@ -128,7 +128,14 @@ func writeSpecialistAtomicWith(path string, content string, rename func(string, 
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
 	}
-	if err := fsutil.RenameWithRetry(tempPath, path, rename); err != nil {
+	// ReplaceWithRetry, not RenameWithRetry: os.Rename is documented non-atomic
+	// outside Unix, and renaming the freshly created temporary file over the
+	// destination would also publish the directory's inherited DACL in place of
+	// whatever the destination had — silently widening access to a specialist that
+	// had been restricted explicitly. On Windows this replaces through
+	// ReplaceFileW, which is one operation and preserves the destination's
+	// security descriptor; on Unix it is the same atomic rename as before.
+	if err := fsutil.ReplaceWithRetry(tempPath, path, rename); err != nil {
 		return fmt.Errorf("replace specialist file: %w", err)
 	}
 	if err := syncDir(filepath.Dir(path)); err != nil {
