@@ -24,6 +24,7 @@ var expectedCatalogIDs = []string{
 	"together",
 	"dashscope",
 	"moonshot",
+	"atlascloud",
 	"longcat",
 	"nvidia-nim",
 	"minimax",
@@ -154,6 +155,28 @@ func TestLongCatDescriptor(t *testing.T) {
 	}
 }
 
+func TestAtlasCloudDescriptor(t *testing.T) {
+	descriptor, err := Require("atlascloud")
+	if err != nil {
+		t.Fatalf("Require(atlascloud) error = %v", err)
+	}
+	if descriptor.Name != "Atlas Cloud" {
+		t.Fatalf("Name = %q, want Atlas Cloud", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.atlascloud.ai/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Atlas Cloud OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "qwen/qwen3.5-flash" {
+		t.Fatalf("DefaultModel = %q, want qwen/qwen3.5-flash", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"ATLASCLOUD_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want ATLASCLOUD_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
 func TestCatalogDescriptorsExposeRequiredDefaults(t *testing.T) {
 	for _, descriptor := range All() {
 		if descriptor.ID == "" {
@@ -272,6 +295,7 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 		"lm-studio":                    "lmstudio",
 		"mini_max":                     "minimax",
 		"Moonshot":                     "moonshot",
+		"Atlas Cloud":                  "atlascloud",
 		"nvidia nim":                   "nvidia-nim",
 		"xiaomi mimo":                  "xiaomi-mimo",
 		"custom_openai_compatible":     "custom-openai-compatible",
@@ -322,7 +346,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

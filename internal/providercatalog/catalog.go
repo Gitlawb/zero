@@ -140,6 +140,7 @@ var descriptors = []Descriptor{
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
+	openAICompat("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "qwen/qwen3.5-flash", []string{"ATLASCLOUD_API_KEY"}, "atlas cloud", "atlas"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
@@ -186,14 +187,6 @@ func All() []Descriptor {
 	return copied
 }
 
-func IDs() []string {
-	ids := make([]string, 0, len(descriptors))
-	for _, descriptor := range descriptors {
-		ids = append(ids, descriptor.ID)
-	}
-	return ids
-}
-
 func Get(id string) (Descriptor, bool) {
 	normalized := NormalizeID(id)
 	for _, descriptor := range descriptors {
@@ -216,35 +209,6 @@ func Require(id string) (Descriptor, error) {
 		return Descriptor{}, fmt.Errorf("%w %q", ErrUnknownProvider, normalized)
 	}
 	return descriptor, nil
-}
-
-func ListByTransport(transport Transport) []Descriptor {
-	normalized := Transport(NormalizeID(string(transport)))
-	items := make([]Descriptor, 0)
-	for _, descriptor := range descriptors {
-		if descriptor.Transport == normalized {
-			items = append(items, cloneDescriptor(descriptor))
-		}
-	}
-	return items
-}
-
-func ValidTransport(transport Transport) bool {
-	switch Transport(NormalizeID(string(transport))) {
-	case TransportOpenAI, TransportAnthropic, TransportGoogle, TransportBedrock, TransportVertex, TransportOpenAICompatible, TransportAnthropicCompatible:
-		return true
-	default:
-		return false
-	}
-}
-
-func ValidAPIFormat(format APIFormat) bool {
-	switch format {
-	case APIFormatOpenAIResponses, APIFormatOpenAIChatCompletions, APIFormatAnthropicMessages, APIFormatGoogleGenerateContent, APIFormatBedrockConverse, APIFormatVertexGenerateContent:
-		return true
-	default:
-		return false
-	}
 }
 
 func NormalizeID(id string) string {

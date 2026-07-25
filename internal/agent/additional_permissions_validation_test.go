@@ -16,7 +16,7 @@ import (
 func TestExecuteToolCallRejectsMissingAdditionalPermissionsBeforePrompt(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 
 	promptCalls := 0
 	result, err := executeToolCall(
@@ -51,7 +51,7 @@ func TestExecuteToolCallRejectsMissingAdditionalPermissionsBeforePrompt(t *testi
 func TestExecuteToolCallRejectsAdditionalPermissionsWithoutFlagBeforePrompt(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 
 	promptCalls := 0
 	result, err := executeToolCall(
@@ -88,7 +88,7 @@ func TestExecuteToolCallRejectsAdditionalPermissionsWithoutFlagBeforePrompt(t *t
 func TestExecuteToolCallMissingAdditionalPermissionsErrorIsActionable(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 
 	result, err := executeToolCall(
 		context.Background(),
@@ -117,7 +117,7 @@ func TestExecuteToolCallMissingAdditionalPermissionsErrorIsActionable(t *testing
 func TestExecuteToolCallStillPromptsForValidAdditionalPermissions(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewBashTool(root))
+	registry.Register(tools.NewScopedBashTool(root, nil))
 
 	promptCalls := 0
 	_, err := executeToolCall(

@@ -62,6 +62,28 @@ func TestNetworkDenySeccompFilterStructure(t *testing.T) {
 	}
 }
 
+func TestIsolatedNetworkGuardPreservesProcessRestrictionsWithoutBlockingSockets(t *testing.T) {
+	prog := isolatedNetworkGuardFilter()
+	assertValidSockFilterProgram(t, prog)
+
+	for _, denied := range []uint32{101, 117, 310, 311, 270, 271, 425, 426, 427} {
+		if !hasInstruction(prog, bpfJEQK, denied) {
+			t.Fatalf("isolated network guard missing denied syscall %d", denied)
+		}
+	}
+	for _, socketSyscall := range []uint32{nrSocketX86_64, nrSocketAARCH64, 42, 49, 50, 200, 201, 203} {
+		if hasInstruction(prog, bpfJEQK, socketSyscall) {
+			t.Fatalf("isolated network guard blocks socket syscall %d needed by loopback", socketSyscall)
+		}
+	}
+	if !hasInstruction(prog, bpfRETK, seccompRetAllow) {
+		t.Fatal("isolated network guard has no allow return")
+	}
+	if !hasInstruction(prog, bpfRETK, seccompRetErrno|errnoEPERM) {
+		t.Fatal("isolated network guard has no EPERM block return")
+	}
+}
+
 func assertValidSockFilterProgram(t *testing.T, prog []sockFilter) {
 	t.Helper()
 	if len(prog) == 0 {

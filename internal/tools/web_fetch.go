@@ -99,10 +99,6 @@ func NewWebFetchTool() Tool {
 	return newWebFetchToolWithClientAndResolver(nil, defaultWebFetchResolver{})
 }
 
-func newWebFetchToolWithClient(client *http.Client) Tool {
-	return newWebFetchToolWithClientAndResolver(client, nil)
-}
-
 func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetchResolver) Tool {
 	if client == nil {
 		client = &http.Client{Timeout: webFetchTimeout}

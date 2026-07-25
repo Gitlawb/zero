@@ -228,6 +228,9 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative && policyHasExplicitDeny(policy) {
+		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny_read or deny_write rules cannot be enforced")
+	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
 	// Without it, a restricted-filesystem profile can still run in the UNELEVATED
@@ -281,6 +284,10 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		SupportLevel:            backend.SupportLevel(),
 		RequiresPlatformSandbox: requiresPlatformSandbox,
 	}, nil
+}
+
+func policyHasExplicitDeny(policy Policy) bool {
+	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
 }
 
 func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {

@@ -1001,3 +1001,18 @@ func sandboxPolicyCapabilityStatus(capabilities []sandbox.BackendCapability, key
 	}
 	return ""
 }
+
+func TestApplyConfiguredSandboxPolicyEnabledFalseDisables(t *testing.T) {
+	disabled := false
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{Enabled: &disabled}); got.Mode != sandbox.ModeDisabled {
+		t.Fatalf("enabled:false must yield ModeDisabled, got %q", got.Mode)
+	}
+	// Omitted (nil) and explicit true keep the default enforcing mode.
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.Mode == sandbox.ModeDisabled {
+		t.Fatal("omitted enabled must not disable the sandbox")
+	}
+	enabled := true
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{Enabled: &enabled}); got.Mode == sandbox.ModeDisabled {
+		t.Fatal("enabled:true must not disable the sandbox")
+	}
+}

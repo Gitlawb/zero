@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -601,13 +602,14 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			output := payloadString(payload, "output")
 			rows = append(rows, transcriptRow{
-				kind:         rowToolResult,
-				id:           effectiveToolRowID(id, callSeq[id]),
-				text:         fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
-				tool:         name,
-				status:       status,
-				detail:       output,
-				changedFiles: payloadStringSlice(payload, "changedFiles"),
+				kind:            rowToolResult,
+				id:              effectiveToolRowID(id, callSeq[id]),
+				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:            name,
+				status:          status,
+				detail:          output,
+				changedFiles:    payloadStringSlice(payload, "changedFiles"),
+				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
@@ -797,6 +799,22 @@ func payloadStringSlice(payload map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func payloadExecutionChanges(payload map[string]any, key string) []execution.Change {
+	value, ok := payload[key]
+	if !ok {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var changes []execution.Change
+	if err := json.Unmarshal(data, &changes); err != nil {
+		return nil
+	}
+	return changes
 }
 
 func payloadBool(payload map[string]any, key string) bool {

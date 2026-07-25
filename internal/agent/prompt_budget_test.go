@@ -14,13 +14,13 @@ import (
 // deliberately) or trimmed — the per-turn floor should not creep up silently.
 //
 // Measured baselines (2026-07): base system prompt ~3160 tokens; the tools a normal
-// (auto permission-mode) interactive turn sends ~2430 tokens. The tool figure is
-// the auto-mode advertised set, not the full core registry — higher-risk tools that
-// only advertise in other modes are excluded, matching what a real turn actually
-// pays.
+// (auto permission-mode) interactive turn sends ~3230 tokens. The tool figure is
+// the auto-mode advertised set, including exec_command: auto mode must expose both
+// process creation and write_stdin process interaction or the latter is unusable
+// without a session id. Higher-risk tools that do not opt into auto remain excluded.
 const (
 	maxBaseSystemPromptTokens = 3500
-	maxEagerToolSchemaTokens  = 2700
+	maxEagerToolSchemaTokens  = 3550
 )
 
 func TestSystemPromptTokenBudget(t *testing.T) {

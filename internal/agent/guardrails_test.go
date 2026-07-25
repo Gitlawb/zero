@@ -138,7 +138,7 @@ func TestRunResetsEmptyTurnCounterOnToolCall(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -260,7 +260,7 @@ func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -291,7 +291,7 @@ func TestRunDoesNotInjectPlanReminderForTrivialTask(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
@@ -319,7 +319,7 @@ func TestRunDoesNotInjectNotCalledReminderWhenPlanUsed(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	provider := &mockProvider{
@@ -349,7 +349,7 @@ func TestRunInjectsStalePlanReminderAfterManyToolCalls(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	// Turn 1 calls update_plan (so the not-called reminder never triggers), then
@@ -383,7 +383,7 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(tools.NewUpdatePlanTool())
 
 	turns := [][]zeroruntime.StreamEvent{
@@ -418,7 +418,7 @@ func TestRunInjectsToolOnlyProgressReminder(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
 	turns := make([][]zeroruntime.StreamEvent, 0, toolOnlyProgressReminderAt+1)
 	for i := 0; i < toolOnlyProgressReminderAt; i++ {

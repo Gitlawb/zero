@@ -35,7 +35,9 @@ type touchedFile struct {
 	edits        int  // number of mutations
 	created      bool // first touch created the file (write_file "Created …")
 	failed       bool // the latest touch errored
-	lastRowIndex int  // transcript index of the most recent result touching it
+	summarized   bool // generated tree summary; never selectable as a file
+	changeKind   string
+	lastRowIndex int // transcript index of the most recent result touching it
 }
 
 // touchedFiles recovers the session's touched-file roster from the transcript,
@@ -47,7 +49,7 @@ func (m model) touchedFiles() []touchedFile {
 	var files []touchedFile
 	index := map[string]int{}
 	for i, row := range m.transcript {
-		if row.kind != rowToolResult || len(row.changedFiles) == 0 {
+		if row.kind != rowToolResult || (len(row.changedFiles) == 0 && len(row.changeSummaries) == 0) {
 			continue
 		}
 		adds, dels := planDiffStat(row.detail)
@@ -81,6 +83,22 @@ func (m model) touchedFiles() []touchedFile {
 			}
 			files[at].adds += fileAdds
 			files[at].dels += fileDels
+			files[at].edits++
+			files[at].failed = row.status == tools.StatusError
+			files[at].lastRowIndex = i
+		}
+		for _, summary := range row.changeSummaries {
+			if summary.Path == "" {
+				continue
+			}
+			at, seen := index[summary.Path]
+			if !seen {
+				index[summary.Path] = len(files)
+				files = append(files, touchedFile{path: summary.Path, summarized: true, lastRowIndex: i})
+				at = len(files) - 1
+			}
+			files[at].summarized = true
+			files[at].changeKind = string(summary.Kind)
 			files[at].edits++
 			files[at].failed = row.status == tools.StatusError
 			files[at].lastRowIndex = i
@@ -229,7 +247,9 @@ func (m model) sidebarFileLines(width int) ([]string, []fileHit) {
 			break
 		}
 		shown++
-		hits = append(hits, fileHit{lineOffset: len(lines), path: f.path})
+		if !f.summarized {
+			hits = append(hits, fileHit{lineOffset: len(lines), path: f.path})
+		}
 		lines = append(lines, m.renderFileRow(f, room))
 	}
 	return lines, hits
@@ -241,6 +261,8 @@ func (m model) sidebarFileLines(width int) ([]string, []fileHit) {
 func (m model) renderFileRow(f touchedFile, room int) string {
 	badge := zeroTheme.muted.Render("M")
 	switch {
+	case f.summarized:
+		badge = zeroTheme.muted.Render("Σ")
 	case f.failed:
 		badge = zeroTheme.red.Render("✗")
 	case f.created:

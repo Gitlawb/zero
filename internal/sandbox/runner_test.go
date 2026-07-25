@@ -399,6 +399,11 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
 		}
 	}
+	for _, forbidden := range []string{"network-bind", "network-inbound", `remote ip "localhost:*"`} {
+		if strings.Contains(sbpl, forbidden) {
+			t.Fatalf("restricted Seatbelt profile must not contain host-local rule %q:\n%s", forbidden, sbpl)
+		}
+	}
 	if strings.Contains(sbpl, "(allow file-read*)\n(allow file-write*)") {
 		t.Fatalf("restricted permission profile must not become full read/write:\n%s", sbpl)
 	}
