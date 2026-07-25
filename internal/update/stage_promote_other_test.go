@@ -66,6 +66,115 @@ func TestPromoteRefusesASubstitutedStagingEntry(t *testing.T) {
 	}
 }
 
+// TestPromoteSurvivesAncestorDirectoryReplacement is the regression test for a
+// review finding on PR #751: the private staging directory's 0700 mode
+// protects its CONTENTS from a principal who can write in the installation
+// directory, but not its own directory ENTRY — that principal can still
+// rename the staging directory itself out of the way and recreate a
+// look-alike at the same path, with an attacker file at the same basename,
+// in the gap between verifyStagedIdentity returning and the final rename
+// running. A plain pathname rename would re-resolve through the impostor at
+// that point; promote must instead stay bound to the exact directory whose
+// identity was already checked, via the directory descriptor opened when the
+// staging directory was created.
+func TestPromoteSurvivesAncestorDirectoryReplacement(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	staged, err := stageBinary(sourcePath, targetPath)
+	if err != nil {
+		t.Fatalf("stageBinary: %v", err)
+	}
+	defer staged.discard()
+
+	// Rehearse the ancestor swap: move the real staging directory aside (the
+	// test runs as its owner, so it can do what a merely writable-parent
+	// attacker — who only needs rename rights on dir, not on the staging
+	// directory's own contents — can also do), then recreate a look-alike at
+	// the original path with an attacker file at the same basename.
+	base := filepath.Base(staged.path)
+	movedDir := staged.dir + "-moved"
+	if err := os.Rename(staged.dir, movedDir); err != nil {
+		t.Fatalf("Rename staging directory aside: %v", err)
+	}
+	if err := os.Mkdir(staged.dir, 0o700); err != nil {
+		t.Fatalf("Mkdir impostor staging directory: %v", err)
+	}
+	impostorFile := filepath.Join(staged.dir, base)
+	if err := os.WriteFile(impostorFile, []byte("attacker-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile impostor file: %v", err)
+	}
+
+	if err := staged.promote(targetPath); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	installed, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(installed) != "verified-binary" {
+		t.Fatalf("target = %q, want the verified bytes from the original staging directory", installed)
+	}
+	// The impostor must be left untouched: promote should never have looked at
+	// it, let alone consumed or removed it.
+	if impostor, err := os.ReadFile(impostorFile); err != nil {
+		t.Fatalf("ReadFile impostor file: %v", err)
+	} else if string(impostor) != "attacker-binary" {
+		t.Fatalf("impostor file = %q, want it left untouched", impostor)
+	}
+}
+
+// TestCopyFromRefreshesStagingLivenessDuringCopy is the regression test for a
+// review finding on PR #751: removeStaleStagingLeftovers uses the staging
+// directory's mtime as its only liveness signal, but writing INTO an
+// already-created file never touches the PARENT directory's own mtime — only
+// creating/removing/renaming a directory entry does. A large or slow copy
+// could therefore look abandoned to a concurrent CleanupStaleBinary sweep
+// while still in progress. copyFrom must keep the directory's mtime fresh as
+// it goes, not just at the start.
+func TestCopyFromRefreshesStagingLivenessDuringCopy(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero")
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("0123456789abcdef"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	original := copyLivenessChunkSize
+	copyLivenessChunkSize = 4 // force several refreshes for a tiny source file
+	defer func() { copyLivenessChunkSize = original }()
+
+	staged, err := createStagedBinary(targetPath)
+	if err != nil {
+		t.Fatalf("createStagedBinary: %v", err)
+	}
+	defer staged.discard()
+
+	stale := time.Now().Add(-2 * stagingLeftoverMinAge)
+	if err := os.Chtimes(staged.dir, stale, stale); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	if err := staged.copyFrom(sourcePath); err != nil {
+		t.Fatalf("copyFrom: %v", err)
+	}
+
+	info, err := os.Stat(staged.dir)
+	if err != nil {
+		t.Fatalf("Stat staging directory: %v", err)
+	}
+	if !info.ModTime().After(stale) {
+		t.Fatalf("staging directory mtime = %v, want copyFrom to have refreshed it past %v", info.ModTime(), stale)
+	}
+}
+
 // TestInstallBinaryInstallsVerifiedBytes is the success control: the ordinary
 // path must still install the staged bytes, executable, with nothing left over.
 func TestInstallBinaryInstallsVerifiedBytes(t *testing.T) {
@@ -118,21 +227,27 @@ func TestInstallBinaryCleansUpWhenStagingFails(t *testing.T) {
 // TestCleanupStaleBinaryRemovesAbandonedStagingDirectories covers the crash
 // leftover path: a killed update leaves its private staging directory behind and
 // nothing else reclaims it now that the name is random. A directory young enough
-// to belong to a concurrent update must be left alone.
+// to belong to a concurrent update must be left alone, and so must anything that
+// merely starts with the same prefix but is not the exact generated shape
+// (os.MkdirTemp's suffix is always 1-10 ASCII digits) — a user's own similarly
+// named directory must never be swept up just because it is old.
 func TestCleanupStaleBinaryRemovesAbandonedStagingDirectories(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero")
-	abandoned := filepath.Join(dir, stagingDirPrefix+"abandoned")
-	inflight := filepath.Join(dir, stagingDirPrefix+"inflight")
+	abandoned := filepath.Join(dir, stagingDirPrefix+"1234567890")
+	inflight := filepath.Join(dir, stagingDirPrefix+"987654321")
+	lookalike := filepath.Join(dir, stagingDirPrefix+"backup")
 	unrelated := filepath.Join(dir, "keep-me")
-	for _, path := range []string{abandoned, inflight, unrelated} {
+	for _, path := range []string{abandoned, inflight, lookalike, unrelated} {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatalf("Mkdir %s: %v", path, err)
 		}
 	}
 	stale := time.Now().Add(-2 * stagingLeftoverMinAge)
-	if err := os.Chtimes(abandoned, stale, stale); err != nil {
-		t.Fatalf("Chtimes: %v", err)
+	for _, path := range []string{abandoned, lookalike} {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatalf("Chtimes %s: %v", path, err)
+		}
 	}
 
 	removeStaleStagingLeftovers(targetPath, time.Now())
@@ -140,9 +255,26 @@ func TestCleanupStaleBinaryRemovesAbandonedStagingDirectories(t *testing.T) {
 	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
 		t.Fatalf("abandoned staging directory survived: %v", err)
 	}
-	for _, path := range []string{inflight, unrelated} {
+	for _, path := range []string{inflight, lookalike, unrelated} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("%s must be left alone: %v", path, err)
+		}
+	}
+}
+
+func TestIsGeneratedStagingDirName(t *testing.T) {
+	cases := map[string]bool{
+		stagingDirPrefix + "0":           true,
+		stagingDirPrefix + "1234567890":  true,
+		stagingDirPrefix + "12345678901": false, // longer than a uint32 can encode
+		stagingDirPrefix + "":            false,
+		stagingDirPrefix + "backup":      false,
+		stagingDirPrefix + "12a34":       false,
+		"other-1234":                     false,
+	}
+	for name, want := range cases {
+		if got := isGeneratedStagingDirName(name); got != want {
+			t.Errorf("isGeneratedStagingDirName(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

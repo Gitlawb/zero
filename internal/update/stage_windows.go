@@ -103,18 +103,57 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	if err := os.Rename(targetPath, oldPath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
-	if err := renameFileByHandle(staged.file, targetPath); err != nil {
-		// Retry the restore: a transient Windows file lock (antivirus/indexer
-		// scanning the just-renamed file, a lingering handle) can make a rename
-		// fail momentarily, and here failure means targetPath is left missing
-		// entirely rather than merely stale — worth a short retry to avoid that.
-		if restoreErr := renameWithRetry(oldPath, targetPath); restoreErr != nil {
-			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %v (original preserved at %s)", err, restoreErr, oldPath)
+	renameErr := renameFileByHandle(staged.file, targetPath)
+	if renameErr == nil {
+		// SetFileInformationByHandle reporting success is not, on its own, proof
+		// that targetPath now holds the promoted object: a substituted staging
+		// entry can leave the object this handle refers to in a delete-pending
+		// state that some Windows versions accept the rename call against
+		// without actually completing it, which would otherwise let promote
+		// return nil while targetPath is left missing entirely. Confirm the
+		// object is actually reachable there before trusting the rename.
+		if verifyErr := verifyPromotedTarget(targetPath); verifyErr != nil {
+			renameErr = fmt.Errorf("promoted object unreachable at %s: %w", targetPath, verifyErr)
 		}
-		return fmt.Errorf("install new binary: %w", err)
+	}
+	if renameErr != nil {
+		if restoreErr := restoreOriginalBinary(oldPath, targetPath); restoreErr != nil {
+			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %v (original preserved at %s)", renameErr, restoreErr, oldPath)
+		}
+		return fmt.Errorf("install new binary: %w", renameErr)
 	}
 	staged.path = targetPath
 	staged.promoted = true
+	return nil
+}
+
+// refreshLiveness is a no-op on Windows: cleanup here keys off ".old"/staging
+// filename shape rather than a directory mtime (see replace_windows.go), so
+// there is no liveness marker for a slow copy to keep fresh.
+func (staged *stagedBinary) refreshLiveness() {}
+
+// verifyPromotedTarget reports whether targetPath is reachable immediately
+// after a reported-successful rename. SetFileInformationByHandle returning
+// success is not, on its own, proof the object actually ended up there: a
+// handle whose directory entry was removed and replaced out from under it
+// (the substitution createStagingFile's exclusive, no-share open defends
+// against — see its doc comment) can leave some Windows versions accepting
+// the rename call without it taking effect, which would otherwise let
+// promote report success while targetPath is left missing entirely.
+//
+// os.Stat, not a second CreateFile, does the check: staged.file is still
+// open with no sharing, so a second full open of the same object — even
+// read-only, even from this process — would itself fail with a sharing
+// violation and be indistinguishable from a genuine promotion failure. A
+// plain attribute query bypasses share-mode enforcement instead.
+func verifyPromotedTarget(targetPath string) error {
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory, not the promoted binary", targetPath)
+	}
 	return nil
 }
 
@@ -137,7 +176,13 @@ var fileRenameInfoHeaderSize = func() uintptr {
 
 // renameFileByHandle renames the object file refers to, not the object its
 // current pathname resolves to. targetPath must be fully qualified.
-func renameFileByHandle(file *os.File, targetPath string) error {
+//
+// It is a package var, like stageBinary, so a test can simulate
+// SetFileInformationByHandle reporting success without the rename actually
+// taking effect — the exact failure mode verifyPromotedTarget defends
+// against — without needing to reproduce whatever Windows-version-specific
+// condition triggers it for real.
+var renameFileByHandle = func(file *os.File, targetPath string) error {
 	name, err := windows.UTF16FromString(targetPath)
 	if err != nil {
 		return err

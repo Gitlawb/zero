@@ -251,6 +251,14 @@ type stagedBinary struct {
 	// dir is a private staging directory that must be removed with the file
 	// (POSIX). Empty on Windows, which binds the swap to the handle instead.
 	dir string
+	// dirHandle is an open descriptor on dir (POSIX only), bound to that
+	// directory's inode rather than its current pathname. promote renames the
+	// staged file through it (see stage_other.go) so a principal who can write
+	// in the installation directory cannot redirect the final rename by
+	// renaming dir aside and recreating a look-alike directory at the same
+	// path between the identity check and the rename — a pathname lookup at
+	// that point would resolve through the impostor instead. nil on Windows.
+	dirHandle *os.File
 	// promoted records that path now IS the installed binary, so discard must
 	// not delete it.
 	promoted bool
@@ -276,9 +284,19 @@ var stageBinary = func(sourcePath string, targetPath string) (*stagedBinary, err
 	return staged, nil
 }
 
+// copyLivenessChunkSize bounds how much of the source is copied between
+// refreshLiveness calls. A package var so a test can shrink it and exercise
+// multiple refreshes against a small source file. Production always takes
+// this default.
+var copyLivenessChunkSize int64 = 32 << 20 // 32 MiB
+
 // copyFrom writes sourcePath into the staged file through the handle
 // createStagedBinary opened. It never reopens by pathname, so the bytes cannot
 // land anywhere other than the object that was exclusively created.
+//
+// Copying in chunks (rather than one io.Copy) gives refreshLiveness a chance
+// to run partway through a large or slow copy — see its doc comment for why
+// that matters on POSIX.
 func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
@@ -287,14 +305,23 @@ func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	defer func() {
 		_ = source.Close()
 	}()
-	if _, err := io.Copy(staged.file, source); err != nil {
-		return err
+	for {
+		n, err := io.CopyN(staged.file, source, copyLivenessChunkSize)
+		if n > 0 {
+			staged.refreshLiveness()
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
 	}
 	return staged.file.Sync()
 }
 
-// discard closes the handle and removes what it created, unless the object was
-// already promoted into the executable path.
+// discard closes the handle(s) and removes what it created, unless the object
+// was already promoted into the executable path.
 func (staged *stagedBinary) discard() {
 	if staged == nil {
 		return
@@ -304,6 +331,9 @@ func (staged *stagedBinary) discard() {
 	}
 	if !staged.promoted && staged.path != "" {
 		_ = os.Remove(staged.path)
+	}
+	if staged.dirHandle != nil {
+		_ = staged.dirHandle.Close()
 	}
 	if staged.dir != "" {
 		_ = os.RemoveAll(staged.dir)

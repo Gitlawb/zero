@@ -69,6 +69,58 @@ func TestPromoteInstallsTheStagedObjectNotTheStagedPath(t *testing.T) {
 	}
 }
 
+// TestPromoteRejectsALyingRenameByHandle is the regression test for a review
+// finding on PR #751: SetFileInformationByHandle reporting success is not, on
+// its own, proof the object actually ended up at targetPath. Some Windows
+// versions have been observed accepting the rename call against a handle
+// whose directory entry was substituted out from under it without the object
+// actually moving — this simulates that by stubbing the rename to lie, since
+// the real trigger condition is Windows-version-specific and not reliably
+// reproducible on demand. Without verifyPromotedTarget, promote would return
+// nil while targetPath silently ends up missing, reporting a successful
+// update that actually stranded the user without an executable at all.
+func TestPromoteRejectsALyingRenameByHandle(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	staged, err := stageBinary(sourcePath, targetPath)
+	if err != nil {
+		t.Fatalf("stageBinary: %v", err)
+	}
+	defer staged.discard()
+
+	original := renameFileByHandle
+	renameFileByHandle = func(file *os.File, target string) error {
+		return nil // lie: report success without touching anything
+	}
+	defer func() { renameFileByHandle = original }()
+
+	promoteErr := staged.promote(targetPath)
+	if promoteErr == nil {
+		t.Fatal("promote reported success for a rename that never actually happened, want an error")
+	}
+	if !strings.Contains(promoteErr.Error(), "unreachable") {
+		t.Fatalf("error = %q, want it to explain the target is unreachable", promoteErr.Error())
+	}
+	installed, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(installed) != "old-binary" {
+		t.Fatalf("target = %q, want the original binary restored", installed)
+	}
+	if _, err := os.Stat(targetPath + ".old"); !os.IsNotExist(err) {
+		t.Fatalf(".old leftover survived a successful restore: %v", err)
+	}
+}
+
 // TestInstallBinaryInstallsVerifiedBytes is the success control for the ordinary
 // path: the staged bytes land at the target, the running binary is preserved as
 // "<target>.old", and no staging artifact survives.
