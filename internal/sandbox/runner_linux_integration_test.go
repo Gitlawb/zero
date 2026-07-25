@@ -41,6 +41,16 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 			t.Fatalf("Mkdir credential path: %v", err)
 		}
 	}
+	// Secrets inside those stores, so the deny-read table below probes a real read
+	// rather than only the directory's presence.
+	awsCredentials := filepath.Join(credentialHome, ".aws", "credentials")
+	if err := os.WriteFile(awsCredentials, []byte("[default]\naws_secret_access_key = leaked\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile aws credentials: %v", err)
+	}
+	zeroTokens := filepath.Join(configHome, "zero", "oauth-tokens.json")
+	if err := os.WriteFile(zeroTokens, []byte(`{"access_token":"leaked"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile zero tokens: %v", err)
+	}
 	t.Setenv("HOME", credentialHome)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	secretDir := t.TempDir()
@@ -141,6 +151,16 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 			name:   "metadata write",
 			script: "if echo leak > .git/config 2>/dev/null; then echo METADATA_WRITE_SUCCEEDED; exit 42; fi",
 			marker: "METADATA_WRITE_SUCCEEDED",
+		},
+		{
+			name:   "cloud credential store read",
+			script: "if cat " + shellQuote(awsCredentials) + " 2>/dev/null | grep -q leaked; then echo CLOUD_CREDENTIAL_READ_SUCCEEDED; exit 42; fi",
+			marker: "CLOUD_CREDENTIAL_READ_SUCCEEDED",
+		},
+		{
+			name:   "zero credential store read",
+			script: "if cat " + shellQuote(zeroTokens) + " 2>/dev/null | grep -q leaked; then echo ZERO_CREDENTIAL_READ_SUCCEEDED; exit 42; fi",
+			marker: "ZERO_CREDENTIAL_READ_SUCCEEDED",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
