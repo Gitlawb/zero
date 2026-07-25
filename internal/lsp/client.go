@@ -33,9 +33,10 @@ type Client struct {
 	closed    chan struct{}
 	readErr   error
 
-	notifyMu    sync.Mutex
-	notifyQueue []notification
-	notifyReady chan struct{}
+	notifyMu     sync.Mutex
+	notifyQueue  []notification
+	notifyReady  chan struct{}
+	notifyClosed bool
 }
 
 type notification struct {
@@ -227,6 +228,15 @@ func (c *Client) notificationLoop() {
 // silently dropping messages.
 func (c *Client) enqueueNotification(item notification) {
 	c.notifyMu.Lock()
+	if c.notifyClosed {
+		// The worker loop has already stopped, so anything queued now would never
+		// be handled. Retaining it would grow the queue for as long as the
+		// transport stays readable after Close — Server.Shutdown closes the client
+		// before closing stdin, so a server emitting notifications while it handles
+		// shutdown/exit keeps the read loop feeding a queue nobody drains.
+		c.notifyMu.Unlock()
+		return
+	}
 	c.notifyQueue = append(c.notifyQueue, item)
 	c.notifyMu.Unlock()
 
@@ -278,7 +288,24 @@ func (c *Client) failPending(err error) {
 			ch <- rpcResponse{Err: &rpcError{Code: -1, Message: err.Error()}}
 		}
 		close(c.closed)
+		c.closeNotifications()
 	})
+}
+
+// closeNotifications stops accepting notifications and releases anything still
+// queued, so a closed client retains nothing. It runs inside closeOnce, after
+// c.closed is signaled: an enqueue racing with shutdown therefore either sees
+// notifyClosed and drops its item, or appends just before the flag is set and has
+// its item cleared here.
+//
+// Queued-but-unhandled notifications are dropped rather than drained: the worker
+// loop is already gone by definition of close, and callers that need diagnostics
+// (Manager.Check) collect them before shutting the client down.
+func (c *Client) closeNotifications() {
+	c.notifyMu.Lock()
+	c.notifyClosed = true
+	c.notifyQueue = nil
+	c.notifyMu.Unlock()
 }
 
 func (c *Client) readError() error {

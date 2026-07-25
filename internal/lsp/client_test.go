@@ -465,3 +465,79 @@ func TestClientRejectsCallsAfterClose(t *testing.T) {
 		t.Fatal("Notify after Close must return an error")
 	}
 }
+
+// TestClientDropsNotificationsAfterClose covers the shutdown path: Close stops
+// the worker loop, but the read loop keeps reading until the transport ends —
+// Server.Shutdown closes the client BEFORE closing stdin, so a server emitting
+// notifications while it handles shutdown/exit would otherwise pile them into a
+// queue nobody drains. Nothing may be handled or retained after Close.
+func TestClientDropsNotificationsAfterClose(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	client := NewClient(clientReader, clientWriter)
+	defer serverWriter.Close()
+	defer clientWriter.Close()
+	go func() {
+		// Drain anything the client writes so no write can block the test.
+		_, _ = io.Copy(io.Discard, serverReader)
+	}()
+
+	handled := make(chan string, 4)
+	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+		handled <- method
+	})
+
+	// A notification before Close still reaches the handler.
+	if err := writeMessage(serverWriter, map[string]any{"jsonrpc": "2.0", "method": "before-close"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case method := <-handled:
+		if method != "before-close" {
+			t.Fatalf("handled %q, want before-close", method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("notification before Close was not handled")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// The transport stays writable, exactly as it does between Client.Close and
+	// stdin.Close in Server.Shutdown.
+	for i := 0; i < 64; i++ {
+		if err := writeMessage(serverWriter, map[string]any{
+			"jsonrpc": "2.0",
+			"method":  fmt.Sprintf("after-close-%03d", i),
+		}); err != nil {
+			t.Fatalf("write notification after Close: %v", err)
+		}
+	}
+
+	select {
+	case method := <-handled:
+		t.Fatalf("handler ran for %q after Close", method)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Give the read loop time to consume every frame it was handed, then require
+	// the queue to hold nothing: dropping on enqueue is what keeps a closed client
+	// from growing for as long as its reader stays open.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		client.notifyMu.Lock()
+		queued := len(client.notifyQueue)
+		closed := client.notifyClosed
+		client.notifyMu.Unlock()
+		if !closed {
+			t.Fatal("Close did not mark the notification queue closed")
+		}
+		if queued != 0 {
+			t.Fatalf("closed client retained %d queued notifications", queued)
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
