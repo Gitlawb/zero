@@ -445,3 +445,33 @@ func TestSendWithRetryPreSendBudgetSurvivesStatusRetries(t *testing.T) {
 		t.Fatalf("pre-send budget eaten by status retries: transport called %d times, want %d (2 status + %d pre-send)", got, 2+preSendMaxAttempts, preSendMaxAttempts)
 	}
 }
+
+// The inverse sequence: pre-send retries must not consume the 429/503 budget or
+// advance its backoff rung either. Two safely replayed refused dials followed by
+// rate limiting must still leave the status path its full maxAttempts window,
+// otherwise a couple of dial blips silently shorten every later rate-limit wait.
+func TestSendWithRetryStatusBudgetSurvivesPreSendRetries(t *testing.T) {
+	shrinkBackoff(t)
+	const maxAttempts = 3
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			return nil, wrapDialErrno("dial", syscall.ECONNREFUSED)
+		}
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody, Request: r}, nil
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://x.invalid/v1", []byte("{}"), nil, maxAttempts)
+	if err != nil {
+		t.Fatalf("exhausted status retries surface the response, not an error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+	// Calls 1-2 are the retried dial failures; the status path then gets its own
+	// full window (maxAttempts requests) before the 429 is surfaced.
+	if got := atomic.LoadInt32(&calls); got != 2+maxAttempts {
+		t.Fatalf("status budget eaten by pre-send retries: transport called %d times, want %d (2 pre-send + %d status)", got, 2+maxAttempts, maxAttempts)
+	}
+}

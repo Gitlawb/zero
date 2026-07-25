@@ -107,12 +107,17 @@ func SendWithRetry(
 	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	// preSendAttempts bounds the pre-send retries independently of the loop-wide
-	// attempt counter, which also counts 429/503 retries: sharing it let a couple
-	// of status retries exhaust the pre-send budget so the first dial/DNS/TLS blip
-	// after them got no retry at all.
+	// The two retry budgets are fully independent, each with its own counter and
+	// its own backoff ordinal, because they answer different questions: a
+	// dial/DNS/TLS failure is a fast local blip (preSendMaxAttempts, sub-second
+	// schedule) while a 429/503 is a server-side window measured in seconds
+	// (maxAttempts, retryBackoffBase). A single shared loop counter coupled them
+	// in both directions: status retries starved the pre-send budget, and
+	// pre-send retries shortened the status window and started its backoff at a
+	// later rung. Neither kind of failure now consumes or advances the other.
 	preSendAttempts := 0
-	for attempt := 1; ; attempt++ {
+	statusAttempts := 0
+	for {
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -155,17 +160,20 @@ func SendWithRetry(
 			return nil, err
 		}
 
-		if ShouldRetryStatus(response.StatusCode) && attempt < maxAttempts {
-			if r := trace.FromContext(ctx); r != nil {
-				r.Counter(trace.CounterRetryCount, 1)
+		if ShouldRetryStatus(response.StatusCode) {
+			statusAttempts++
+			if statusAttempts < maxAttempts {
+				if r := trace.FromContext(ctx); r != nil {
+					r.Counter(trace.CounterRetryCount, 1)
+				}
+				wait := RetryAfter(response)
+				_ = response.Body.Close()
+				if Backoff(ctx, statusAttempts, wait) {
+					continue
+				}
+				// Backoff aborted: the only reason it returns false is ctx cancellation.
+				return nil, ctx.Err()
 			}
-			wait := RetryAfter(response)
-			_ = response.Body.Close()
-			if Backoff(ctx, attempt, wait) {
-				continue
-			}
-			// Backoff aborted: the only reason it returns false is ctx cancellation.
-			return nil, ctx.Err()
 		}
 
 		// Success, a non-retryable status, or retries exhausted on a retryable
