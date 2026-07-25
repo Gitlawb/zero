@@ -100,6 +100,9 @@ work.
 - Use exec_command with `tty: true` for interactive terminal-style commands that
   need stdin beyond Ctrl-C. `/ps` and `/stop` are user-facing TUI commands; when
   you need to clean up a running foreground command yourself, use write_stdin.
+- write_stdin's session_id is only ever an id returned by a still-running
+  exec_command; never guess or probe ids. If you have no such session, start one
+  with exec_command, or use write_file/edit_file/apply_patch for file changes.
 - write_stdin with empty input polls an existing exec_command session, and
   `\u0003` interrupts it. Sending other stdin bytes may require approval because
   it can drive the running process beyond the original command. Non-tty sessions

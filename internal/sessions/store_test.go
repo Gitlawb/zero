@@ -181,6 +181,32 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestStoreForkSupportsNonResumableSideSession(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "context"}}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	side, err := store.Fork(parent.SessionID, ForkInput{
+		SessionID:   "side",
+		SessionKind: SessionKindSide,
+		Tag:         "btw",
+	})
+	if err != nil {
+		t.Fatalf("Fork side: %v", err)
+	}
+	if side.SessionKind != SessionKindSide || side.Tag != "btw" || side.ParentSessionID != parent.SessionID {
+		t.Fatalf("side metadata = %#v", side)
+	}
+	if IsResumableKind(side.SessionKind) {
+		t.Fatal("side sessions must not appear as resumable conversations")
+	}
+}
+
 func TestStoreForkSkipsUsageEvents(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})
@@ -381,6 +407,7 @@ func TestListAndLatestResumableExcludeSubRuns(t *testing.T) {
 	mk(SessionKindSpecImpl, "spec-impl-1")
 	newestResumable := mk("", "conversation-2") // newest standalone conversation
 	mk(SessionKindChild, "child-2")             // newer overall, but a sub-run
+	mk(SessionKindSide, "side-1")               // newer overall, but non-resumable
 
 	resumable, err := store.ListResumable()
 	if err != nil {
@@ -404,7 +431,7 @@ func TestListAndLatestResumableExcludeSubRuns(t *testing.T) {
 		if latest != nil {
 			got = latest.SessionID
 		}
-		t.Fatalf("LatestResumable = %s, want newest resumable %s (must skip the newer child)", got, newestResumable.SessionID)
+		t.Fatalf("LatestResumable = %s, want newest resumable %s (must skip newer child and side sessions)", got, newestResumable.SessionID)
 	}
 }
 
@@ -535,6 +562,9 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	if _, err := store.AppendEvent("latest", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "previous answer"}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Create(CreateInput{SessionID: "newer-side", SessionKind: SessionKindSide}); err != nil {
+		t.Fatal(err)
+	}
 
 	prepared, err := PrepareExec(PrepareExecOptions{Store: store, ResumeLatest: true})
 	if err != nil {
@@ -545,6 +575,9 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	}
 	if got := FormatExecPrompt("continue", prepared); got == "continue" || !strings.Contains(got, "previous answer") {
 		t.Fatalf("expected session context in prompt, got %q", got)
+	}
+	if _, err := PrepareExec(PrepareExecOptions{Store: store, Resume: "newer-side"}); err == nil || !strings.Contains(err.Error(), "Zero session is not resumable: newer-side") {
+		t.Fatalf("explicit side-session resume error = %v, want non-resumable rejection", err)
 	}
 
 	forked, err := PrepareExec(PrepareExecOptions{Store: store, Fork: "latest", SessionID: "forked"})

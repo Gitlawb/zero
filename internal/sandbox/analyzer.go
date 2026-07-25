@@ -65,6 +65,76 @@ func AnalyzeCommand(script string) AnalysisResult {
 	return result
 }
 
+// astCommandFields parses command with the shell parser and returns each simple
+// command as its literal field slice (program + args as text), resolving the
+// real command positions across quoting, command substitution, subshells, and
+// newline separators — the constructs the hand-written splitter in
+// safe_command.go mis-handles (issue #473). It returns nil when the command
+// cannot be parsed (e.g. a Windows cmd.exe string), so callers fall through to
+// the regex path rather than hard-blocking.
+func astCommandFields(command string) [][]string {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	var commands [][]string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		// EVERY word must be a static literal, not just the program name.
+		// wordText keeps only the literal/quoted parts of a word and silently
+		// drops expansions, so a dynamic word anywhere in the call reconstructs
+		// to something the shell will never run: `$(printf foo)vim` (runs as
+		// `foovim`) collapses to "vim", and `git $(printf foo)rebase -i` (runs
+		// as `git foorebase -i`, non-interactive) collapses to `git rebase -i`
+		// and fabricates an interactive match. Since the runtime value of an
+		// expansion is unknowable here, skip the whole call rather than classify
+		// a lossy reconstruction. Skipping is the safe direction: the
+		// hand-written passes above already ran, and a missed detection falls
+		// through to the normal permission prompt instead of hard-blocking a
+		// command the user never wrote.
+		for _, word := range call.Args {
+			if !isLiteralWord(word) {
+				return true
+			}
+		}
+		fields := make([]string, 0, len(call.Args))
+		for _, word := range call.Args {
+			fields = append(fields, wordText(word))
+		}
+		commands = append(commands, fields)
+		return true
+	})
+	return commands
+}
+
+// isLiteralWord reports whether every part of word is a static literal (bare or
+// quoted). A word containing a command substitution, parameter/arithmetic
+// expansion, process substitution, etc. is dynamic — its runtime value is
+// unknown, so its wordText (a partial literal) must not be trusted as a program
+// name.
+func isLiteralWord(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range typed.Parts {
+				if _, ok := inner.(*syntax.Lit); !ok {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // analyzeInto parses script and folds its interactive/destructive/network usage
 // into result, sharing seen so program names are de-duplicated across recursion.
 func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, depth int) {
@@ -150,7 +220,7 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	case "go":
 		return firstSubcommand(words, nil) == "get"
 	case "git":
-		return firstSubcommand(words, nil) == "clone"
+		return gitUsesNetwork(words)
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
@@ -159,9 +229,15 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 }
 
 func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
+	if packageManagerOffline(words) {
+		return false
+	}
 	first := firstSubcommand(words, aliases)
 	switch first {
-	case "install", "add", "publish", "login":
+	case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
+		"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
+		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
+		"deprecate", "owner", "org", "team", "token", "profile", "access":
 		return true
 	case "start", "serve", "dev", "preview":
 		return true
@@ -169,17 +245,31 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		second := secondSubcommand(words)
 		return second == "start" || second == "serve" || second == "dev" || second == "preview"
 	case "exec":
-		for _, word := range words {
-			if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
-				continue
-			}
-			if word == "exec" || word == "x" || word == "dlx" {
-				continue
-			}
-			return localServerPrograms[word]
+		// Package-manager exec commands may resolve and download a missing
+		// package before launching it. An explicit offline flag keeps this path
+		// inside the isolated namespace; otherwise request egress up front.
+		return true
+	}
+	return false
+}
+
+func packageManagerOffline(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "--offline", "--no-network":
+			return true
 		}
 	}
 	return false
+}
+
+func gitUsesNetwork(words []string) bool {
+	switch firstSubcommand(words, nil) {
+	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+		return true
+	default:
+		return false
+	}
 }
 
 func npxUsesNetwork(_ []string) bool {

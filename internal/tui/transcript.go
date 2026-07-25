@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -45,7 +46,8 @@ type transcriptRow struct {
 	// changedFiles lists the workspace-relative paths a mutating tool result
 	// wrote (from tools.Result.ChangedFiles; restored from the session payload on
 	// resume). The sidebar FILES section derives its roster from these.
-	changedFiles []string
+	changedFiles    []string
+	changeSummaries []execution.Change
 
 	// specialistInfo holds the specialist card data for rowSpecialist rows.
 	// Nil for all other row kinds.
@@ -396,8 +398,10 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.GrantMatched {
 		parts = append(parts, "approved by saved permission")
 	}
-	if event.Reason != "" {
-		parts = append(parts, permissionDisplayReason(event.Reason))
+	if event.Action == agent.PermissionActionPrompt {
+		if reason := permissionDisplayReason(event.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
 	}
 	if event.Block != nil {
 		parts = append(parts, permissionBlockDetail(event))
@@ -436,7 +440,9 @@ func permissionBlockDetail(event agent.PermissionEvent) string {
 	if path := strings.TrimSpace(event.Block.Path); path != "" {
 		parts = append(parts, "path: "+path)
 	}
-	if reason := permissionDisplayReason(event.Block.Reason); reason != "" {
+	reason := permissionDisplayReason(event.Block.Reason)
+	eventReason := permissionDisplayReason(event.Reason)
+	if reason != "" && reason != eventReason {
 		parts = append(parts, reason)
 	}
 	return strings.Join(parts, "  ")

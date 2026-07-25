@@ -49,9 +49,9 @@ func RequestDeviceCode(ctx context.Context, client *http.Client, cfg Config, now
 	if err := validateTokenEndpoint(endpoint); err != nil {
 		return DeviceAuth{}, err
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
+	// Refuse redirects so a device-authorization redirect can't replay the
+	// client_id/client_secret POST body to an unvalidated origin.
+	client = withoutRedirects(client)
 	if now == nil {
 		now = time.Now
 	}
@@ -157,9 +157,9 @@ func pollDeviceOnce(ctx context.Context, client *http.Client, cfg Config, device
 	if err := validateTokenEndpoint(cfg.TokenEndpoint); err != nil {
 		return Token{}, err
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
+	// Refuse redirects so a poll redirect can't replay the device_code/secret
+	// POST body to an unvalidated origin.
+	client = withoutRedirects(client)
 	form := url.Values{}
 	form.Set("grant_type", deviceGrantType)
 	form.Set("device_code", deviceCode)

@@ -406,3 +406,87 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 		}
 	}
 }
+
+// The hand-written segment splitter misses interactive programs hidden by
+// constructs only a real shell parser resolves (a newline separator collapsed
+// to a space; a brace group that shifts the real command position). The AST
+// second opinion must catch them (issue #473).
+func TestDetectInteractiveCommandCatchesParserBypasses(t *testing.T) {
+	for _, cmd := range []string{
+		"echo hi\nvim file.txt", // newline separator collapsed to a space by the regex path
+		"{ vim file.txt; }",     // brace group hides the real program position
+	} {
+		got := DetectInteractiveCommand(cmd, "linux")
+		if !got.Interactive {
+			t.Errorf("DetectInteractiveCommand(%q) = not interactive, want caught (parser bypass)", cmd)
+			continue
+		}
+		if got.Command != "vim" {
+			t.Errorf("DetectInteractiveCommand(%q).Command = %q, want vim", cmd, got.Command)
+		}
+	}
+}
+
+// The AST second opinion must not flag an interactive program NAME that appears
+// only inside a quoted argument (not a real command position) — the parser
+// distinguishes program from argument, so this must stay non-interactive.
+func TestDetectInteractiveCommandNoFalsePositiveOnQuotedArgument(t *testing.T) {
+	got := DetectInteractiveCommand(`echo "please run vim later"`, "linux")
+	if got.Interactive {
+		t.Fatalf("interactive name inside a quoted argument must not be flagged, got %#v", got)
+	}
+}
+
+// The AST second opinion must run the FULL pipeline — multi-word interactive
+// segments and sh -c payload recursion, not just the per-program lookup — so a
+// grouped/nested bypass is caught; and it must not fabricate a program name from
+// a command substitution concatenated with a literal (issue #473, review).
+func TestDetectInteractiveCommandASTPipelineBoundaries(t *testing.T) {
+	interactive := []struct{ cmd, wantCmd string }{
+		{"{ git rebase -i HEAD~1; }", "git rebase -i"}, // multi-word segment in a brace group
+		{"{ sh -c 'vim file.txt'; }", "vim"},           // sh -c payload in a brace group
+	}
+	for _, tc := range interactive {
+		got := DetectInteractiveCommand(tc.cmd, "linux")
+		if !got.Interactive || got.Command != tc.wantCmd {
+			t.Errorf("DetectInteractiveCommand(%q) = %+v, want interactive Command=%q", tc.cmd, got, tc.wantCmd)
+		}
+	}
+}
+
+// The AST pass must not fabricate a program name from a dynamic (non-literal)
+// program word: `$(printf '%s' foo)vim` runs as `foovim`, not vim. Tested at the
+// extractor so the hand-written pass (which pre-empts DetectInteractiveCommand
+// with its own, separate handling of that construct) does not mask the guard.
+func TestAstCommandFieldsSkipsDynamicProgram(t *testing.T) {
+	for _, fields := range astCommandFields("$(printf '%s' foo)vim file.txt") {
+		if firstProgram(fields) == "vim" {
+			t.Fatalf("astCommandFields fabricated a vim command from a substitution: %v", fields)
+		}
+	}
+}
+
+// The literalness guard covers every word, not just the program name. A dynamic
+// ARGUMENT is dropped by wordText the same way a dynamic program word is, so
+// `git $(printf foo)rebase -i HEAD~1` (which runs as `git foorebase -i`, a
+// non-existent and non-interactive subcommand) would otherwise be reconstructed
+// as `git rebase -i` and blocked — a false positive on a command the user never
+// wrote. Asserted through DetectInteractiveCommand as well as the extractor,
+// because the whole point is what the caller ends up blocking.
+func TestAstCommandFieldsSkipsDynamicArgument(t *testing.T) {
+	const dynamic = "{ git $(printf foo)rebase -i HEAD~1 ; }"
+	for _, fields := range astCommandFields(dynamic) {
+		if firstProgram(fields) == "git" {
+			t.Fatalf("astCommandFields reconstructed a git command from a dynamic argument: %v", fields)
+		}
+	}
+	if got := DetectInteractiveCommand(dynamic, "linux"); got.Interactive {
+		t.Errorf("DetectInteractiveCommand(%q) = %+v, want not interactive", dynamic, got)
+	}
+	// The genuine form must still be detected — the guard skips lossy
+	// reconstructions, it does not weaken real detection.
+	const genuine = "{ git rebase -i HEAD~1 ; }"
+	if got := DetectInteractiveCommand(genuine, "linux"); !got.Interactive || got.Command != "git rebase -i" {
+		t.Errorf("DetectInteractiveCommand(%q) = %+v, want interactive Command=%q", genuine, got, "git rebase -i")
+	}
+}

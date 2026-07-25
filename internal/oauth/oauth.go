@@ -90,6 +90,11 @@ var (
 	// ErrInsecureTokenEndpoint is returned when a credential would be sent over a
 	// non-https, non-loopback endpoint.
 	ErrInsecureTokenEndpoint = errors.New("oauth: refusing to send credential to a non-https token endpoint")
+	// ErrUnsafeRedirect is returned when a credential-bearing OAuth POST (token
+	// exchange/refresh, device authorization, or device-token poll) is redirected.
+	// Following it would replay the form body — codes, PKCE verifiers, refresh
+	// tokens, client secrets — to a target that never passed endpoint validation.
+	ErrUnsafeRedirect = errors.New("oauth: refusing to follow a redirect from a credential endpoint")
 	// ErrNoRefreshToken is returned when a refresh is attempted without one.
 	ErrNoRefreshToken = errors.New("oauth: no refresh token available")
 	// ErrAuthorizationPending is the RFC 8628 "keep polling" signal.

@@ -135,7 +135,7 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	assertNotContains(t, emptyText, "registered tools:")
 
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m = newModel(context.Background(), Options{
 		Registry: registry,
 	})
@@ -244,7 +244,7 @@ func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 
 func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
 	if err != nil {

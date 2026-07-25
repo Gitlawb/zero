@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -482,6 +483,28 @@ func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 	}
 	if !strings.Contains(decision.Reason, "outside the workspace") {
 		t.Fatalf("expected outside-workspace reason, got %q", decision.Reason)
+	}
+}
+
+func TestEnginePromptsForOutOfWorkspaceReadWithReadSpecificReason(t *testing.T) {
+	root := t.TempDir()
+	outside := outsideDefaultTempPath(root, "external")
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:      "list_directory",
+		SideEffect:    SideEffectRead,
+		Permission:    PermissionAllow,
+		WorkspaceRoot: root,
+		Args:          map[string]any{"path": outside},
+	})
+
+	want := fmt.Sprintf("Reading %s requires access outside the workspace.", outside)
+	if decision.Action != ActionPrompt || decision.Block == nil || !decision.Block.Recoverable {
+		t.Fatalf("outside read decision = %#v, want recoverable prompt", decision)
+	}
+	if decision.Reason != want || decision.Block.Reason != want {
+		t.Fatalf("outside read reasons = decision %q, block %q; want %q", decision.Reason, decision.Block.Reason, want)
 	}
 }
 

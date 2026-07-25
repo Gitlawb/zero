@@ -93,6 +93,40 @@ func TestSandboxedBashAutoAllowDoesNotAffectNonShell(t *testing.T) {
 	}
 }
 
+// Forged re-entrancy markers (ambient ZERO_SANDBOXED=1 + ZERO_SANDBOX_BACKEND at
+// an unsandboxed process boundary) must NOT let a shell command combine an
+// auto-allow decision with an unwrapped pass-through plan (issue #727). The
+// runner skips wrapping when the markers are present, so the policy must stop
+// auto-allowing on the basis of an "active sandbox" — the command takes the
+// normal prompt instead. Without the markers the identical setup auto-allows
+// (TestSandboxedBashAutoAllowedWhenSandboxActive), so this is the before/after.
+func TestForgedReentrancyMarkersDoNotAutoAllowUnwrappedShell(t *testing.T) {
+	t.Setenv(EnvSandboxed, "1")
+	t.Setenv(EnvSandboxBackend, string(BackendLinuxBwrap))
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        DefaultPolicy(),
+		Backend:       nativeWrappingBackend,
+	})
+
+	// Policy side: the shell command must NOT be auto-allowed.
+	decision := engine.Evaluate(context.Background(), bashRequest())
+	if decision.Action != ActionPrompt || decision.AutoAllowed {
+		t.Fatalf("forged markers must not auto-allow the shell command, got %#v", decision)
+	}
+
+	// Planning side: the same command is an unwrapped pass-through. Together with
+	// the prompt above, this proves auto-allow and unwrapped can no longer combine.
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "echo hi"}, Dir: root})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped {
+		t.Fatalf("re-entrancy plan must be an unwrapped pass-through, got wrapped=%v", plan.Wrapped)
+	}
+}
+
 // TestShellSandboxActive reports correctly across backends and policy modes.
 func TestShellSandboxActive(t *testing.T) {
 	root := t.TempDir()

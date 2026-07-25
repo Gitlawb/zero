@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/localcontrol"
 	"github.com/Gitlawb/zero/internal/mcp"
@@ -58,7 +59,11 @@ type appDeps struct {
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
 	// inject it). nil ⇒ no export.
-	exportActiveProvider   func(providerName string)
+	exportActiveProvider func(providerName string)
+	// getenv reads a process environment variable (production: os.Getenv, set in
+	// defaultAppDeps — deliberately NOT filled by fillAppDeps, so tests are hermetic
+	// against ambient vars like ZERO_PROVIDER unless they inject it). nil ⇒ empty.
+	getenv                 func(string) string
 	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	detectLocalRuntimes    func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
@@ -118,6 +123,7 @@ func defaultAppDeps() appDeps {
 		stdin:                os.Stdin,
 		userConfigPath:       config.DefaultUserConfigPath,
 		exportActiveProvider: config.SetActiveProviderEnv,
+		getenv:               os.Getenv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
@@ -368,6 +374,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
 		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+	case "completions":
+		return runCompletions(args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
@@ -678,6 +686,26 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	executionRunner := execution.NewRunner(nil)
+	sandboxStore, err := deps.newSandboxStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
+	}
+	if notice, err := sandboxStore.ConsumeMigrationNotice(); err != nil {
+		return writeAppError(stderr, "failed to migrate sandbox grants: "+err.Error(), 1)
+	} else if notice != "" {
+		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+	}
+	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
+	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot:    workspaceRoot,
+		Policy:           applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
+		Store:            sandboxStore,
+		Backend:          sandboxBackend,
+		Scope:            scope,
+		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
+	})
+	executionRunner.SetPreparer(sandboxEngine)
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -712,6 +740,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
 			PermissionStore: mcpPermissionStore,
 			Autonomy:        mcp.AutonomyLow,
+			Execution:       executionRunner,
+			WorkspaceRoot:   workspaceRoot,
 		})
 	}
 	if err != nil {
@@ -738,7 +768,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// The interactive TUI is not worktree-reassigned, so the trust root is the
 	// launch directory itself.
 	trustRoot := workspaceRoot
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot)
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
@@ -760,19 +790,6 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// unchanged. The interactive surface applies no operator tool filters, so
 	// enabled/disabled are nil — matching the AgentOptions below.
 	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
-	sandboxStore, err := deps.newSandboxStore()
-	if err != nil {
-		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
-	}
-	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
-	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot:    workspaceRoot,
-		Policy:           applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
-		Store:            sandboxStore,
-		Backend:          sandboxBackend,
-		Scope:            scope,
-		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
-	})
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
 	var scratchBaseline scratchFileBaseline
@@ -789,7 +806,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// Build the hooks dispatcher out of the AgentOptions literal so its trust skip
 	// report can be combined with the plugin activation's, and emit at most one
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
-	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
+	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
@@ -1157,6 +1174,7 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  completions Generate shell completion scripts
   daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets

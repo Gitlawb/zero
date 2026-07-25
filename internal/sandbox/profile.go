@@ -18,6 +18,7 @@ const (
 type PermissionProfile struct {
 	FileSystem FileSystemPolicy `json:"fileSystem"`
 	Network    NetworkPolicy    `json:"network"`
+	Runtime    *SandboxRuntime  `json:"runtime,omitempty"`
 }
 
 type FileSystemPolicy struct {
@@ -66,10 +67,6 @@ func gitMetadataWriteCarveouts(root string) []string {
 		filepath.Join(root, ".git", "hooks"),
 		filepath.Join(root, ".git", "config"),
 	}
-}
-
-func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
-	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {

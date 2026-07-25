@@ -150,10 +150,6 @@ func Wordmark() string {
 	return strings.Join(lines, "\n")
 }
 
-func borderedBlock(width int, lines []string) string {
-	return styledBlock(width, lines, zeroTheme.line)
-}
-
 // styledBlock draws a rounded box around lines with the given border style,
 // padding every row to the full width.
 func styledBlock(width int, lines []string, borderStyle lipgloss.Style) string {

@@ -31,10 +31,6 @@ type AgentRunner interface {
 
 type AgentRunnerFunc func(context.Context, AgentRunInput) AgentRunResult
 
-func (fn AgentRunnerFunc) Run(ctx context.Context, input AgentRunInput) AgentRunResult {
-	return fn(ctx, input)
-}
-
 // defaultAgentOutputLimit caps captured stdout/stderr per stream so a chatty or
 // runaway agent cannot exhaust memory or bloat the benchmark report.
 const defaultAgentOutputLimit = 1 << 20 // 1 MiB per stream

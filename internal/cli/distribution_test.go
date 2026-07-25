@@ -177,6 +177,15 @@ func TestRunPluginAddListRemove(t *testing.T) {
 		t.Fatalf("add output missing id:\n%s", stdout.String())
 	}
 
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithDeps([]string{"plugin", "info", "zero.demo"}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("plugin info exit = %d, stderr = %s", exit, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "zero.demo") || !strings.Contains(stdout.String(), "manifest:") {
+		t.Fatalf("info output missing plugin details:\n%s", stdout.String())
+	}
+
 	// remove
 	stdout.Reset()
 	stderr.Reset()

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -276,6 +277,45 @@ func TestScopeValidateAllowsAnyRootButRelativeOnlyWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(block.Reason, "--add-dir") {
 		t.Fatalf("block.Reason=%q want actionable --add-dir hint", block.Reason)
+	}
+}
+
+func TestScopeValidateReadExplainsReadAccessOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+
+	outside := outsideDefaultTempPath(workspace, "elsewhere.txt")
+	block := scope.validateRead(outside)
+	if block == nil {
+		t.Fatal("validateRead(outside workspace) = nil, want block")
+	}
+	want := fmt.Sprintf("Reading %s requires access outside the workspace.", outside)
+	if block.Reason != want {
+		t.Fatalf("block.Reason = %q, want %q", block.Reason, want)
+	}
+	if strings.Contains(block.Reason, "--add-dir") || strings.Contains(block.Reason, "writes") {
+		t.Fatalf("read block reason must not suggest write access: %q", block.Reason)
+	}
+}
+
+func TestScopeValidateWriteExplainsWriteAccessOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+
+	outside := outsideDefaultTempPath(workspace, "elsewhere.txt")
+	block := scope.validate(outside)
+	if block == nil {
+		t.Fatal("validate(outside workspace) = nil, want block")
+	}
+	want := fmt.Sprintf("Writing to %s requires access outside the workspace. Use /add-dir or --add-dir to allow writes there.", outside)
+	if block.Reason != want {
+		t.Fatalf("block.Reason = %q, want %q", block.Reason, want)
 	}
 }
 
