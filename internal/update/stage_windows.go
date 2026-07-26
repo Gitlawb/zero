@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -129,12 +127,8 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	return nil
 }
 
-// refreshLiveness is a no-op on Windows. Unverifiable random staging files are
-// preserved rather than age-swept.
-func (staged *stagedBinary) refreshLiveness() {}
-
-// verifyPromotedTarget reports whether the staged handle itself resolves to
-// targetPath after a reported-successful rename. SetFileInformationByHandle
+// verifyPromotedTarget reports whether targetPath names the same object as the
+// staged handle after a reported-successful rename. SetFileInformationByHandle
 // returning success is not, on its own, proof the object ended up there: a
 // handle whose directory entry was removed and replaced out from under it
 // (the substitution createStagingFile's exclusive, no-share open defends
@@ -142,36 +136,49 @@ func (staged *stagedBinary) refreshLiveness() {}
 // the rename call without it taking effect, which would otherwise let
 // promote report success while targetPath is left missing entirely.
 //
-// GetFinalPathNameByHandle checks the name of the object already held open.
-// Opening targetPath again would fail because staged.file intentionally has
-// exclusive sharing, and a pathname-only attribute query would not prove
-// object identity.
+// A metadata-only open is not blocked by staged.file's exclusive data/delete
+// sharing. Comparing the volume and file index is independent of path spelling,
+// including 8.3 names, case, UNC prefixes, and reparse points in ancestors.
 func verifyPromotedTarget(file *os.File, targetPath string) error {
-	buffer := make([]uint16, 32768)
-	n, err := windows.GetFinalPathNameByHandle(
-		windows.Handle(file.Fd()),
-		&buffer[0],
-		uint32(len(buffer)),
+	targetPathPtr, err := windows.UTF16PtrFromString(targetPath)
+	if err != nil {
+		return err
+	}
+	targetHandle, err := windows.CreateFile(
+		targetPathPtr,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("open promoted target metadata: %w", err)
 	}
-	if n == 0 || n >= uint32(len(buffer)) {
-		return fmt.Errorf("query promoted object path")
+	defer func() { _ = windows.CloseHandle(targetHandle) }()
+
+	var stagedInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &stagedInfo); err != nil {
+		return fmt.Errorf("query staged object identity: %w", err)
 	}
-	handlePath := windows.UTF16ToString(buffer[:n])
-	if uncPath, ok := strings.CutPrefix(handlePath, `\\?\UNC\`); ok {
-		handlePath = `\\` + uncPath
-	} else {
-		handlePath = strings.TrimPrefix(handlePath, `\\?\`)
+	var targetInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(targetHandle, &targetInfo); err != nil {
+		return fmt.Errorf("query promoted target identity: %w", err)
 	}
-	absoluteTarget, err := filepath.Abs(targetPath)
-	if err != nil {
-		return err
+	if targetInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("promoted target is unexpectedly a reparse point")
 	}
-	if !strings.EqualFold(filepath.Clean(handlePath), filepath.Clean(absoluteTarget)) {
-		return fmt.Errorf("staged handle resolves to %s, not %s", handlePath, absoluteTarget)
+	if targetInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return fmt.Errorf("promoted target is unexpectedly a directory")
+	}
+	if stagedInfo.NumberOfLinks != 1 || targetInfo.NumberOfLinks != 1 {
+		return fmt.Errorf("promoted object unexpectedly has %d hard links", targetInfo.NumberOfLinks)
+	}
+	if stagedInfo.VolumeSerialNumber != targetInfo.VolumeSerialNumber ||
+		stagedInfo.FileIndexHigh != targetInfo.FileIndexHigh ||
+		stagedInfo.FileIndexLow != targetInfo.FileIndexLow {
+		return fmt.Errorf("target path does not name the staged object")
 	}
 	return nil
 }

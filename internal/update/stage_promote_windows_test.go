@@ -142,6 +142,58 @@ func TestVerifyPromotedTargetRejectsDifferentRegularFile(t *testing.T) {
 	}
 }
 
+func TestVerifyPromotedTargetRejectsAHardLinkedName(t *testing.T) {
+	dir := t.TempDir()
+	stagedPath := filepath.Join(dir, "staged.exe")
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(stagedPath, []byte("verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile staged: %v", err)
+	}
+	if err := os.Link(stagedPath, targetPath); err != nil {
+		t.Fatalf("Link target: %v", err)
+	}
+	staged, err := os.Open(stagedPath)
+	if err != nil {
+		t.Fatalf("Open staged: %v", err)
+	}
+	defer func() { _ = staged.Close() }()
+
+	if err := verifyPromotedTarget(staged, targetPath); err == nil {
+		t.Fatal("verifyPromotedTarget accepted a second hard-linked name without a completed rename")
+	}
+}
+
+func TestInstallBinaryThroughReparsePointAncestor(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir real install directory: %v", err)
+	}
+	linkedDir := filepath.Join(root, "linked")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+	targetPath := filepath.Join(linkedDir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	if err := installBinary(sourcePath, targetPath); err != nil {
+		t.Fatalf("installBinary through reparse-point ancestor: %v", err)
+	}
+	installed, err := os.ReadFile(filepath.Join(realDir, "zero.exe"))
+	if err != nil {
+		t.Fatalf("ReadFile installed: %v", err)
+	}
+	if string(installed) != "verified-binary" {
+		t.Fatalf("installed binary = %q, want the verified bytes", installed)
+	}
+}
+
 // TestInstallBinaryInstallsVerifiedBytes is the success control for the ordinary
 // path: the staged bytes land at the target, the running binary is preserved as
 // "<target>.old", and no staging artifact survives.
@@ -188,18 +240,4 @@ func TestInstallBinaryCleansUpWhenStagingFails(t *testing.T) {
 		t.Fatal("installBinary with an unreadable source succeeded, want error")
 	}
 	assertNoStagingLeftovers(t, dir)
-}
-
-// assertNoStagingLeftovers fails when dir still holds a staging artifact.
-func assertNoStagingLeftovers(t *testing.T, dir string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir %s: %v", dir, err)
-	}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".new") {
-			t.Fatalf("staging leftover survived in the install directory: %s", entry.Name())
-		}
-	}
 }

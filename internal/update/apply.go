@@ -229,7 +229,8 @@ func installBinary(sourcePath string, targetPath string) error {
 	// including a mid-write copy error: each attempt now stages under a fresh
 	// random name, so a leaked partial file is never reused by the next attempt
 	// and would otherwise accumulate release-sized garbage in the install
-	// directory. CleanupStaleBinary sweeps leftovers from a hard crash.
+	// directory. Unverifiable leftovers from a hard crash are preserved rather
+	// than removed based only on their public filename shape.
 	defer staged.discard()
 	if err := staged.promote(targetPath); err != nil {
 		return fmt.Errorf("install %s: %w", filepath.Base(targetPath), err)
@@ -286,19 +287,9 @@ var stageBinary = func(sourcePath string, targetPath string) (*stagedBinary, err
 	return staged, nil
 }
 
-// copyLivenessChunkSize bounds how much of the source is copied between
-// refreshLiveness calls. A package var so a test can shrink it and exercise
-// multiple refreshes against a small source file. Production always takes
-// this default.
-var copyLivenessChunkSize int64 = 32 << 20 // 32 MiB
-
 // copyFrom writes sourcePath into the staged file through the handle
 // createStagedBinary opened. It never reopens by pathname, so the bytes cannot
 // land anywhere other than the object that was exclusively created.
-//
-// Copying in chunks (rather than one io.Copy) gives refreshLiveness a chance
-// to run partway through a large or slow copy — see its doc comment for why
-// that matters on POSIX.
 func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
@@ -307,17 +298,8 @@ func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	defer func() {
 		_ = source.Close()
 	}()
-	for {
-		n, err := io.CopyN(staged.file, source, copyLivenessChunkSize)
-		if n > 0 {
-			staged.refreshLiveness()
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
+	if _, err := io.Copy(staged.file, source); err != nil {
+		return err
 	}
 	return staged.file.Sync()
 }

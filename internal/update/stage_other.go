@@ -3,6 +3,9 @@
 package update
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +14,8 @@ import (
 )
 
 const stagingDirPrefix = ".zero-stage-"
+
+const stagingDirectoryCreateAttempts = 100
 
 // openStagingDirectory is a test seam for the creation-to-open race.
 var openStagingDirectory = func(parentFD int, name string) (int, error) {
@@ -27,18 +32,15 @@ func createStagedBinary(targetPath string) (*stagedBinary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open staging parent: %w", err)
 	}
-	dir, err := os.MkdirTemp(parentPath, stagingDirPrefix)
+	dirName, createdStat, err := createStagingDirectory(parentHandle)
 	if err != nil {
 		_ = parentHandle.Close()
 		return nil, fmt.Errorf("create staging directory: %w", err)
 	}
-	createdInfo, err := os.Lstat(dir)
+	dir := filepath.Join(parentPath, dirName)
+	dirHandle, err := openAndVerifyStagingDirectory(parentHandle, dirName, createdStat)
 	if err != nil {
-		_ = parentHandle.Close()
-		return nil, fmt.Errorf("stat new staging directory: %w", err)
-	}
-	dirHandle, err := openAndVerifyStagingDirectory(parentHandle, filepath.Base(dir), createdInfo)
-	if err != nil {
+		removeStagingDirectoryIfSame(parentHandle, dirName, createdStat)
 		_ = parentHandle.Close()
 		return nil, fmt.Errorf("open staging directory: %w", err)
 	}
@@ -62,31 +64,67 @@ func createStagedBinary(targetPath string) (*stagedBinary, error) {
 	}, nil
 }
 
-func openAndVerifyStagingDirectory(parent *os.File, name string, createdInfo os.FileInfo) (*os.File, error) {
+// createStagingDirectory creates and stats the directory relative to the
+// already-open installation directory. POSIX has no mkdir-and-open primitive,
+// so openAndVerifyStagingDirectory additionally verifies that the entry still
+// names this object and is a private directory owned by this effective user.
+func createStagingDirectory(parent *os.File) (string, unix.Stat_t, error) {
+	for attempt := 0; attempt < stagingDirectoryCreateAttempts; attempt++ {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", unix.Stat_t{}, err
+		}
+		name := stagingDirPrefix + hex.EncodeToString(random[:])
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				continue
+			}
+			return "", unix.Stat_t{}, err
+		}
+		var created unix.Stat_t
+		if err := unix.Fstatat(int(parent.Fd()), name, &created, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return "", unix.Stat_t{}, err
+		}
+		return name, created, nil
+	}
+	return "", unix.Stat_t{}, fmt.Errorf("could not allocate a unique staging directory")
+}
+
+func openAndVerifyStagingDirectory(parent *os.File, name string, createdStat unix.Stat_t) (*os.File, error) {
 	fd, err := openStagingDirectory(int(parent.Fd()), name)
 	if err != nil {
 		return nil, err
 	}
 	handle := os.NewFile(uintptr(fd), name)
-	handleInfo, err := handle.Stat()
-	if err != nil {
+	var handleStat unix.Stat_t
+	if err := unix.Fstat(fd, &handleStat); err != nil {
 		_ = handle.Close()
 		return nil, err
 	}
-	stat, ok := handleInfo.Sys().(*unix.Stat_t)
-	if !ok ||
-		!os.SameFile(createdInfo, handleInfo) ||
-		handleInfo.Mode().Perm() != 0o700 ||
-		int(stat.Uid) != os.Geteuid() {
+	if handleStat.Dev != createdStat.Dev ||
+		handleStat.Ino != createdStat.Ino ||
+		handleStat.Mode&unix.S_IFMT != unix.S_IFDIR ||
+		handleStat.Mode&0o777 != 0o700 ||
+		int(handleStat.Uid) != os.Geteuid() {
 		_ = handle.Close()
 		return nil, fmt.Errorf("staging directory entry was replaced before it could be bound")
 	}
 	return handle, nil
 }
 
-// refreshLiveness is intentionally a no-op. Crash leftovers cannot be
-// authenticated as updater-owned, so CleanupStaleBinary preserves them.
-func (staged *stagedBinary) refreshLiveness() {}
+// removeStagingDirectoryIfSame removes only the empty directory entry observed
+// after creation. It never follows the entry or recursively removes contents;
+// a substituted or non-empty directory is preserved.
+func removeStagingDirectoryIfSame(parent *os.File, name string, createdStat unix.Stat_t) {
+	var current unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return
+	}
+	if current.Dev != createdStat.Dev || current.Ino != createdStat.Ino {
+		return
+	}
+	_ = unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+}
 
 // createStagingFile remains the direct-path primitive exercised by the link
 // regression tests.
@@ -117,8 +155,8 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	if err := unix.Renameat(
 		int(staged.dirHandle.Fd()),
 		filepath.Base(staged.path),
-		unix.AT_FDCWD,
-		targetPath,
+		int(staged.parentHandle.Fd()),
+		filepath.Base(targetPath),
 	); err != nil {
 		return fmt.Errorf("rename staged binary onto %s: %w", targetPath, err)
 	}
@@ -172,11 +210,7 @@ func (staged *stagedBinary) discardPaths() {
 			currentErr == nil &&
 			bound.Dev == current.Dev &&
 			bound.Ino == current.Ino {
-			_ = unix.Unlinkat(
-				int(staged.parentHandle.Fd()),
-				filepath.Base(staged.dir),
-				unix.AT_REMOVEDIR,
-			)
+			_ = unix.Unlinkat(int(staged.parentHandle.Fd()), filepath.Base(staged.dir), unix.AT_REMOVEDIR)
 		}
 	}
 	if staged.parentHandle != nil {

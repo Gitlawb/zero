@@ -1,7 +1,9 @@
 package update
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -23,4 +25,20 @@ func stubStageBinaryFailure(t *testing.T, targetPath string, failure error) {
 		return original(sourcePath, target)
 	}
 	t.Cleanup(func() { stageBinary = original })
+}
+
+// assertNoStagingLeftovers fails when dir still holds a platform staging
+// artifact. Checking both patterns is harmless and keeps this test helper
+// consistent across POSIX and Windows.
+func assertNoStagingLeftovers(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", dir, err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".zero-stage-") || strings.HasSuffix(entry.Name(), ".new") {
+			t.Fatalf("staging leftover survived in the install directory: %s", entry.Name())
+		}
+	}
 }

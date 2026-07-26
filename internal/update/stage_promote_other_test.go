@@ -3,9 +3,9 @@
 package update
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -140,6 +140,7 @@ func TestPromoteSurvivesAncestorDirectoryReplacement(t *testing.T) {
 func TestCreateStagedBinaryRejectsDirectoryReplacementBeforeOpen(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero")
+	var impostorMarker string
 	original := openStagingDirectory
 	openStagingDirectory = func(parentFD int, name string) (int, error) {
 		path := filepath.Join(dir, name)
@@ -149,7 +150,8 @@ func TestCreateStagedBinaryRejectsDirectoryReplacementBeforeOpen(t *testing.T) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatalf("Mkdir impostor: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(path, "keep"), []byte("attacker"), 0o600); err != nil {
+		impostorMarker = filepath.Join(path, "keep")
+		if err := os.WriteFile(impostorMarker, []byte("attacker"), 0o600); err != nil {
 			t.Fatalf("WriteFile impostor marker: %v", err)
 		}
 		return original(parentFD, name)
@@ -160,6 +162,27 @@ func TestCreateStagedBinaryRejectsDirectoryReplacementBeforeOpen(t *testing.T) {
 		staged.discard()
 		t.Fatal("createStagedBinary accepted a directory replaced before open")
 	}
+	if marker, err := os.ReadFile(impostorMarker); err != nil {
+		t.Fatalf("substituted directory was removed during failed creation: %v", err)
+	} else if string(marker) != "attacker" {
+		t.Fatalf("substituted directory marker = %q, want it preserved", marker)
+	}
+}
+
+func TestCreateStagedBinaryCleansUpAfterDirectoryOpenFailure(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero")
+	original := openStagingDirectory
+	openStagingDirectory = func(parentFD int, name string) (int, error) {
+		return -1, errors.New("forced open failure")
+	}
+	defer func() { openStagingDirectory = original }()
+
+	if staged, err := createStagedBinary(targetPath); err == nil {
+		staged.discard()
+		t.Fatal("createStagedBinary succeeded despite a forced directory-open failure")
+	}
+	assertNoStagingLeftovers(t, dir)
 }
 
 // TestInstallBinaryInstallsVerifiedBytes is the success control: the ordinary
@@ -223,19 +246,5 @@ func TestCleanupStaleBinaryPreservesUnverifiableStagingDirectories(t *testing.T)
 
 	if _, err := os.Stat(unverifiable); err != nil {
 		t.Fatalf("unverifiable staging directory must be preserved: %v", err)
-	}
-}
-
-// assertNoStagingLeftovers fails when dir still holds a staging artifact.
-func assertNoStagingLeftovers(t *testing.T, dir string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir %s: %v", dir, err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), stagingDirPrefix) || strings.HasSuffix(entry.Name(), ".new") {
-			t.Fatalf("staging leftover survived in the install directory: %s", entry.Name())
-		}
 	}
 }
