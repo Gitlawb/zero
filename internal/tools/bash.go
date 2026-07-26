@@ -453,15 +453,6 @@ const bashOutputBudgetBytes = 32 * 1024
 // the model's recovery path — cover 6× more of the output.
 const bashCaptureBudgetBytes = 96 * 1024
 
-// budgetBashOutput truncates stdout and stderr to bashOutputBudgetBytes each,
-// keeping the head and tail of anything larger, and records raw/emitted byte
-// counts plus a truncated flag in meta (mirroring outputBudgetMeta's shape for
-// the read/search tools). Detection that needs the full output (sandbox-denial
-// scanning) must run on the raw strings before this is applied.
-func budgetBashOutput(stdout string, stderr string, meta map[string]string) (string, string, bool) {
-	return budgetBashCapture(stdout, len(stdout), stderr, len(stderr), meta)
-}
-
 // prepareBashOutput keeps direct callers on the established positional budget.
 // Registry calls retain the existing bounded capture but leave final semantic
 // reduction and spill creation to the post-redaction registry boundary.

@@ -336,7 +336,7 @@ func TestRunProactiveCompactionTriggers(t *testing.T) {
 	}
 
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	result, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:               registry,
@@ -364,7 +364,7 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 		},
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	_, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:       registry,
@@ -427,7 +427,7 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	// the compaction closure. read_file also returns a sizeable result that
 	// bloats the history.
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	// ContextWindow large enough that proactive compaction never triggers, so
 	// only the reactive path can save the run.
@@ -491,7 +491,7 @@ func TestRunReactiveRetryDoesNotDoubleEmitText(t *testing.T) {
 		finalText:   "recovered",
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	var deltas []string
 	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{

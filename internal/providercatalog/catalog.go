@@ -187,14 +187,6 @@ func All() []Descriptor {
 	return copied
 }
 
-func IDs() []string {
-	ids := make([]string, 0, len(descriptors))
-	for _, descriptor := range descriptors {
-		ids = append(ids, descriptor.ID)
-	}
-	return ids
-}
-
 func Get(id string) (Descriptor, bool) {
 	normalized := NormalizeID(id)
 	for _, descriptor := range descriptors {
@@ -217,35 +209,6 @@ func Require(id string) (Descriptor, error) {
 		return Descriptor{}, fmt.Errorf("%w %q", ErrUnknownProvider, normalized)
 	}
 	return descriptor, nil
-}
-
-func ListByTransport(transport Transport) []Descriptor {
-	normalized := Transport(NormalizeID(string(transport)))
-	items := make([]Descriptor, 0)
-	for _, descriptor := range descriptors {
-		if descriptor.Transport == normalized {
-			items = append(items, cloneDescriptor(descriptor))
-		}
-	}
-	return items
-}
-
-func ValidTransport(transport Transport) bool {
-	switch Transport(NormalizeID(string(transport))) {
-	case TransportOpenAI, TransportAnthropic, TransportGoogle, TransportBedrock, TransportVertex, TransportOpenAICompatible, TransportAnthropicCompatible:
-		return true
-	default:
-		return false
-	}
-}
-
-func ValidAPIFormat(format APIFormat) bool {
-	switch format {
-	case APIFormatOpenAIResponses, APIFormatOpenAIChatCompletions, APIFormatAnthropicMessages, APIFormatGoogleGenerateContent, APIFormatBedrockConverse, APIFormatVertexGenerateContent:
-		return true
-	default:
-		return false
-	}
 }
 
 func NormalizeID(id string) string {

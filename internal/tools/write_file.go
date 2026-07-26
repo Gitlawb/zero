@@ -14,10 +14,6 @@ type writeFileTool struct {
 	scope         PathScope
 }
 
-func NewWriteFileTool(workspaceRoot string) Tool {
-	return NewScopedWriteFileTool(workspaceRoot, nil)
-}
-
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	return writeFileTool{
 		baseTool: baseTool{

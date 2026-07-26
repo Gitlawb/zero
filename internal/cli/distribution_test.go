@@ -87,6 +87,19 @@ func TestRunSkillAddInfoRemove(t *testing.T) {
 		t.Fatalf("info missing hash drift status:\n%s", info)
 	}
 
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithDeps([]string{"skill", "info", "confirmation-policy", "--json"}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("skill info --json exit = %d, stderr = %s", exit, stderr.String())
+	}
+	var beforeJSON map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &beforeJSON); err != nil {
+		t.Fatalf("parse skill info json: %v\n%s", err, stdout.String())
+	}
+	if beforeJSON["hashDrift"] != false {
+		t.Fatalf("hashDrift before edit = %#v, want false", beforeJSON["hashDrift"])
+	}
+
 	skillPath := filepath.Join(skillsDir, "confirmation-policy", "SKILL.md")
 	if err := os.WriteFile(skillPath, []byte("---\ndescription: edited\n---\nchanged\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -98,6 +111,19 @@ func TestRunSkillAddInfoRemove(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "hash drift: true") {
 		t.Fatalf("info missing hash drift after edit:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithDeps([]string{"skill", "info", "confirmation-policy", "--json"}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("skill info --json after edit exit = %d, stderr = %s", exit, stderr.String())
+	}
+	var afterJSON map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &afterJSON); err != nil {
+		t.Fatalf("parse skill info json after edit: %v\n%s", err, stdout.String())
+	}
+	if afterJSON["hashDrift"] != true {
+		t.Fatalf("hashDrift after edit = %#v, want true", afterJSON["hashDrift"])
 	}
 
 	// remove deletes it

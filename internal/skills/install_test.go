@@ -422,3 +422,13 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 		t.Fatal("expected hash drift after SKILL.md edit")
 	}
 }
+
+func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing", "SKILL.md")
+	if !skillHashDrift(Skill{Path: missing}, "sha256:deadbeef") {
+		t.Fatal("expected drift when locked SKILL.md cannot be read")
+	}
+	if skillHashDrift(Skill{Path: missing}, "") {
+		t.Fatal("missing lock hash must not count as drift")
+	}
+}

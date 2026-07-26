@@ -427,10 +427,6 @@ func (store *GrantStore) Clear() (int, error) {
 	return count, nil
 }
 
-func FormatGrantList(grants []Grant) string {
-	return FormatGrantListWithCommandPrefixes(grants, nil)
-}
-
 func FormatGrantListWithCommandPrefixes(grants []Grant, prefixes []CommandPrefixGrant) string {
 	if len(grants) == 0 && len(prefixes) == 0 {
 		return "No persistent sandbox grants."
