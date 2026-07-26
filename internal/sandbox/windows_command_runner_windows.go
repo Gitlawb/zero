@@ -75,6 +75,27 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// reads under that flag (#612). Profiles with DenyRead keep the fully
 	// restricted token, trading spawn capability for read-deny enforcement.
 	writeRestricted := len(config.PermissionProfile.FileSystem.DenyRead) == 0
+
+	// A provisioned sandbox principal replaces the restricted token entirely: it
+	// is a separate account, so reads outside its granted roots are denied by the
+	// filesystem rather than left open the way a same-user restricted token has
+	// to leave them (#662). Absent, unprovisioned or opted-out, ok is false and
+	// the restricted-token backend below runs exactly as before.
+	principalToken, ok, err := windowsSandboxPrincipalToken(config)
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
+	if ok {
+		defer principalToken.Close()
+		exitCode, err := runWindowsCommandAsUser(principalToken, config)
+		if err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+			return 1
+		}
+		return exitCode
+	}
+
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs, writeRestricted)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
