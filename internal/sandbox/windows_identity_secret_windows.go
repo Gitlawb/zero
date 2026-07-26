@@ -158,11 +158,26 @@ func writeWindowsSandboxSecret(path string, password string) error {
 		_ = os.Remove(path)
 		return err
 	}
-	if err := os.WriteFile(path, []byte(password), 0o600); err != nil {
+	// Encrypt to the invoking user on top of the ACL, so a copy taken outside the
+	// filesystem's enforcement (backup, disk image) is inert. The principal name is
+	// the entropy, which keeps one principal's blob from authenticating another.
+	sealed, err := protectWindowsSecret(password, windowsSandboxSecretEntropy(path))
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	if err := os.WriteFile(path, sealed, 0o600); err != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("write secret: %w", err)
 	}
 	return nil
+}
+
+// windowsSandboxSecretEntropy derives the DPAPI entropy from the secret's own
+// filename, which is the principal name. Deriving it rather than threading the
+// name through keeps read and write agreeing by construction.
+func windowsSandboxSecretEntropy(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".secret")
 }
 
 // readWindowsSandboxSecret loads a principal's password. A missing file means
@@ -176,8 +191,18 @@ func readWindowsSandboxSecret(path string) (string, error) {
 		}
 		return "", fmt.Errorf("read sandbox secret: %w", err)
 	}
-	secret := strings.TrimSpace(string(data))
-	if secret == "" {
+	if len(data) == 0 {
+		return "", errWindowsSandboxIdentityUnavailable
+	}
+	secret, err := unprotectWindowsSecret(data, windowsSandboxSecretEntropy(path))
+	if err != nil {
+		// A blob written by another user, for another principal, or by an older
+		// build that stored the password in the clear. Report it as unavailable so
+		// the caller falls back to the restricted token; the next elevated setup
+		// rewrites the secret in the current format.
+		return "", errWindowsSandboxIdentityUnavailable
+	}
+	if strings.TrimSpace(secret) == "" {
 		return "", errWindowsSandboxIdentityUnavailable
 	}
 	return secret, nil
