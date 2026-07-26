@@ -56,6 +56,26 @@ func windowsSandboxWorkspaceKey(workspaceRoots []string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// windowsSandboxPrincipalEligible reports whether the principal backend may be
+// used for this command at all, before any account or secret is consulted.
+//
+// Kept separate from the lookup so the decision is observable on its own: on a
+// machine with nothing provisioned the lookup declines anyway, which would let a
+// missing guard here pass unnoticed.
+func windowsSandboxPrincipalEligible(config WindowsSandboxCommandConfig) bool {
+	if !windowsSandboxIdentityEnabled(config.Env) {
+		return false
+	}
+	// Network denial is enforced by WFP filters keyed to the offline-marker SID,
+	// which the restricted token carries and a principal token cannot: LogonUser
+	// mints a token for the account, not for a synthetic capability SID. Using a
+	// principal here would leave those filters matching nothing and silently drop
+	// network enforcement, which is a worse trade than the read confinement it
+	// buys. Fall back to the restricted token, which still enforces the network,
+	// until the filters are also keyed to the principal's own SID.
+	return config.PermissionProfile.Network.Mode != NetworkDeny
+}
+
 // windowsSandboxPrincipalToken returns a token for this workspace's sandbox
 // principal.
 //
@@ -65,7 +85,7 @@ func windowsSandboxWorkspaceKey(workspaceRoots []string) string {
 // means the identity exists but could not be used, which is worth surfacing
 // rather than downgrading around.
 func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.Token, bool, error) {
-	if !windowsSandboxIdentityEnabled(config.Env) {
+	if !windowsSandboxPrincipalEligible(config) {
 		return 0, false, nil
 	}
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
