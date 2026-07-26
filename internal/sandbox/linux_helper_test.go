@@ -353,13 +353,15 @@ func TestLinuxBwrapKeepsCarveoutsReachableInsideMaskedDir(t *testing.T) {
 	}
 
 	plan := buildLinuxBwrapFilesystemPlan(profile)
+	normalizedCredentialDir := normalizeProfilePath(credentialDir)
+	normalizedPluginRoot := normalizeCredentialCarveoutPath(pluginRoot)
 	// 111 rather than 000: a 000 directory cannot be traversed, so the re-bound
 	// subpath below it would be unreachable. Contents stay unlistable either way.
-	assertArgsContainSequence(t, plan.Args, "--perms", "111", "--tmpfs", credentialDir)
-	assertArgsContainSequence(t, plan.Args, "--ro-bind", pluginRoot, pluginRoot)
-	assertArgsContainSequence(t, plan.Args, "--remount-ro", credentialDir)
-	bindIdx := argsSequenceIndex(plan.Args, "--ro-bind", pluginRoot, pluginRoot)
-	remountIdx := argsSequenceIndex(plan.Args, "--remount-ro", credentialDir)
+	assertArgsContainSequence(t, plan.Args, "--perms", "111", "--tmpfs", normalizedCredentialDir)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", normalizedPluginRoot, normalizedPluginRoot)
+	assertArgsContainSequence(t, plan.Args, "--remount-ro", normalizedCredentialDir)
+	bindIdx := argsSequenceIndex(plan.Args, "--ro-bind", normalizedPluginRoot, normalizedPluginRoot)
+	remountIdx := argsSequenceIndex(plan.Args, "--remount-ro", normalizedCredentialDir)
 	if bindIdx < 0 || remountIdx < 0 || bindIdx > remountIdx {
 		t.Fatalf("carveout bind (%d) must precede the tmpfs remount-ro (%d): %#v", bindIdx, remountIdx, plan.Args)
 	}
@@ -394,7 +396,8 @@ func TestLinuxBwrapDoesNotBindSymlinkCarveout(t *testing.T) {
 	}
 
 	plan := buildLinuxBwrapFilesystemPlan(profile)
-	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", credentialDir, "--remount-ro", credentialDir)
+	normalizedCredentialDir := normalizeProfilePath(credentialDir)
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", normalizedCredentialDir, "--remount-ro", normalizedCredentialDir)
 	if argsContainSequence(plan.Args, "--ro-bind", pluginRoot, pluginRoot) || argsContainSequence(plan.Args, "--ro-bind", secret, secret) {
 		t.Fatalf("symlink carveout was rebound into credential mask: %#v", plan.Args)
 	}

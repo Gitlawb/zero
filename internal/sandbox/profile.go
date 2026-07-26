@@ -491,6 +491,7 @@ func credentialCarveoutPaths(denied []string, carveouts []string) []string {
 	if len(carveouts) == 0 {
 		return nil
 	}
+	denied = normalizeProfilePaths(denied)
 	out := make([]string, 0, len(carveouts))
 	for _, entry := range carveouts {
 		carveout := normalizeCredentialCarveoutPath(entry)

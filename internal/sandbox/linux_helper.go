@@ -371,7 +371,7 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
-	path = strings.TrimSpace(path)
+	path = normalizeProfilePath(path)
 	if path == "" {
 		return args
 	}
