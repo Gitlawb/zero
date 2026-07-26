@@ -129,19 +129,62 @@ func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 	}
 }
 
-func TestCtrlVDoesNotPasteIntoComposer(t *testing.T) {
+// Ctrl+V must never insert TEXT: bracketed paste is the only text path, so
+// letting Bubble's own Ctrl+V binding also read the clipboard would double-paste.
+// It may return a command, but that command is the image probe below, never a
+// text paste, so the composer contents are unchanged either way.
+func TestCtrlVDoesNotPasteTextIntoComposer(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("hello")
 	m.input.CursorEnd()
 
-	updated, cmd := m.Update(testKeyCtrl('v'))
+	updated, _ := m.Update(testKeyCtrl('v'))
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("ctrl+v should not run the textinput clipboard paste command")
-	}
 	if got := next.composerValue(); got != "hello" {
 		t.Fatalf("composer value after ctrl+v = %q, want unchanged", got)
+	}
+}
+
+// Ctrl+V probes the clipboard for an image (#534). A clipboard holding a
+// screenshot produces no bracketed paste at all, so without this the empty-paste
+// image probe in routePaste never runs and Ctrl+V does nothing, which is exactly
+// what users reported: right-click paste attached the image, Ctrl+V did not.
+func TestCtrlVProbesClipboardForImage(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+
+	_, cmd := m.Update(testKeyCtrl('v'))
+	if cmd == nil {
+		t.Fatal("ctrl+v should issue the clipboard image probe")
+	}
+
+	// The probe reports an image as a clipboardImageMsg. Substituting a stub
+	// reader keeps the assertion off the developer's real clipboard.
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) {
+		return []byte("png-bytes"), "image/png", nil
+	}
+
+	msg := readClipboardImageCmd()()
+	image, ok := msg.(clipboardImageMsg)
+	if !ok {
+		t.Fatalf("probe returned %T, want clipboardImageMsg", msg)
+	}
+	if string(image.data) != "png-bytes" || image.mediaType != "image/png" {
+		t.Fatalf("unexpected image message: %+v", image)
+	}
+}
+
+// With no image on the clipboard the probe stays silent: Ctrl+V while copying
+// text must not emit a notice or disturb the composer.
+func TestClipboardImageProbeSilentWithoutImage(t *testing.T) {
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) { return nil, "", nil }
+
+	if msg := readClipboardImageCmd()(); msg != nil {
+		t.Fatalf("probe emitted %T with no image on the clipboard, want no message", msg)
 	}
 }
 
