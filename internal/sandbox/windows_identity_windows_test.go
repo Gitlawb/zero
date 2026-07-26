@@ -199,7 +199,10 @@ func TestLSAStructLayouts(t *testing.T) {
 // be exercised without touching the account database.
 func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	if os.Getenv("ZERO_WINDOWS_IDENTITY_PROVISION_TEST") != "1" {
-		t.Skip("set ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1 on an elevated machine to exercise real provisioning")
+		// Spelled out per shell because `set VAR=1` is cmd syntax and silently
+		// sets a shell variable rather than an environment variable in
+		// PowerShell, which makes this skip look like the elevation check failing.
+		t.Skip("provisioning test not enabled: PowerShell `$env:ZERO_WINDOWS_IDENTITY_PROVISION_TEST = \"1\"`, cmd `set ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1`, bash `export ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1` (also needs an elevated terminal)")
 	}
 	if !windowsProcessIsElevated() {
 		t.Skip("provisioning requires an elevated process")
