@@ -24,7 +24,7 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 	if pathWithinRoot(workspace, runtimeState.Root) {
 		t.Fatalf("runtime root %q must stay outside workspace %q", runtimeState.Root, workspace)
 	}
-	for _, path := range []string{runtimeState.Cache, runtimeState.Data, runtimeState.Temp} {
+	for _, path := range []string{runtimeState.Cache, runtimeState.Data, runtimeState.Temp, filepath.Join(runtimeState.Data, "cargo")} {
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {
 			t.Fatalf("managed runtime directory %q was not prepared: %v", path, err)
@@ -139,7 +139,6 @@ func TestSandboxRuntimeEnvironmentPreservesUserConfiguration(t *testing.T) {
 		"XDG_DATA_HOME=/home/user/.local/share",
 		"XDG_STATE_HOME=/home/user/.local/state",
 		"NPM_CONFIG_USERCONFIG=/home/user/.npmrc",
-		"CARGO_HOME=/home/user/.cargo",
 		"PATH=/usr/bin",
 	}, &runtimeState)
 
@@ -149,7 +148,6 @@ func TestSandboxRuntimeEnvironmentPreservesUserConfiguration(t *testing.T) {
 		"XDG_DATA_HOME":         "/home/user/.local/share",
 		"XDG_STATE_HOME":        "/home/user/.local/state",
 		"NPM_CONFIG_USERCONFIG": "/home/user/.npmrc",
-		"CARGO_HOME":            "/home/user/.cargo",
 	} {
 		if got := envListValue(env, key, ""); got != want {
 			t.Fatalf("%s = %q, want %q; env=%#v", key, got, want, env)
@@ -182,6 +180,7 @@ func TestSandboxRuntimeEnvironmentUsesManagedWritableState(t *testing.T) {
 		"PIP_CACHE_DIR":     filepath.Join(runtimeState.Cache, "pip"),
 		"GOCACHE":           filepath.Join(runtimeState.Cache, "go-build"),
 		"GOMODCACHE":        filepath.Join(runtimeState.Data, "go-mod"),
+		"CARGO_HOME":        filepath.Join(runtimeState.Data, "cargo"),
 	} {
 		if got := envListValue(env, key, ""); got != want {
 			t.Fatalf("%s = %q, want %q; env=%#v", key, got, want, env)

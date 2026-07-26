@@ -181,15 +181,6 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		}
 		return withBashExecution(result, executionRequest, plan, exitCode, adapterReport, reportErr, changeObserver.Changes(), true)
 	}
-	if adapterReport.Denial == nil && reportErr == nil {
-		adapterReport.Denial = markLikelySandboxDenial(
-			meta,
-			plan.Wrapped && plan.EnforcementLevel == zeroSandbox.EnforcementNative,
-			exitCode,
-			stdoutText,
-			stderrText,
-		)
-	}
 	if err != nil {
 		if exitCode < 0 {
 			result := Result{

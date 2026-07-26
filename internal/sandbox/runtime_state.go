@@ -88,6 +88,7 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 		filepath.Join(runtimeState.Cache, "pip"),
 		filepath.Join(runtimeState.Cache, "go-build"),
 		filepath.Join(runtimeState.Data, "go-mod"),
+		filepath.Join(runtimeState.Data, "cargo"),
 	}
 	for _, directory := range directories {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -207,6 +208,7 @@ func sandboxRuntimeEnvironment(env []string, runtimeState *SandboxRuntime) []str
 		"PIP_CACHE_DIR=" + filepath.Join(runtimeState.Cache, "pip"),
 		"GOCACHE=" + filepath.Join(runtimeState.Cache, "go-build"),
 		"GOMODCACHE=" + filepath.Join(runtimeState.Data, "go-mod"),
+		"CARGO_HOME=" + filepath.Join(runtimeState.Data, "cargo"),
 	}
 	return upsertEnvList(env, overrides...)
 }

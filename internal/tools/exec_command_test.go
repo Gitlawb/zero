@@ -316,7 +316,7 @@ func TestExecCommandUsesStructuredAdapterDenial(t *testing.T) {
 	}
 }
 
-func TestExecCommandInfersNativeSandboxDenialFromOutput(t *testing.T) {
+func TestExecCommandDoesNotInferNativeSandboxDenialFromOutput(t *testing.T) {
 	result := execToolResult(execToolResultInput{
 		commandText: "touch \"$HOME/probe\"",
 		output:      "touch: cannot touch '/home/user/probe': Read-only file system",
@@ -325,18 +325,14 @@ func TestExecCommandInfersNativeSandboxDenialFromOutput(t *testing.T) {
 		enforcement: execution.Enforcement{Backend: string(sandbox.BackendLinuxBwrap), Level: string(sandbox.EnforcementNative)},
 	})
 
-	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateDenied || result.ExecutionOutcome.Kind != execution.OutcomeEnforcementDenied {
-		t.Fatalf("execution outcome = %#v, want denied/enforcement_denied", result.ExecutionOutcome)
+	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
+		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
 	}
-	denial := result.ExecutionOutcome.Denial
-	if denial == nil ||
-		denial.Source != execution.DenialSourcePlatformSandbox ||
-		denial.Capability.Kind != execution.CapabilityUnrestricted ||
-		denial.NextAction != execution.DenialNextActionRequestApproval {
-		t.Fatalf("inferred denial = %#v, want recoverable platform-sandbox unrestricted denial", denial)
+	if result.ExecutionOutcome.Denial != nil {
+		t.Fatalf("command output created a typed denial: %#v", result.ExecutionOutcome.Denial)
 	}
-	if result.Meta[SandboxDenialKeywordMeta] != "read-only file system" {
-		t.Fatalf("denial metadata = %#v, want read-only filesystem keyword", result.Meta)
+	if result.Meta[SandboxLikelyDeniedMeta] == "true" {
+		t.Fatalf("command output created sandbox-denial metadata: %#v", result.Meta)
 	}
 }
 
