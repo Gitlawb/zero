@@ -70,6 +70,10 @@ type Options struct {
 	Timeout    time.Duration
 	GOOS       string
 	GOARCH     string
+	// JSON indicates the caller will print a machine-readable result to
+	// stdout afterward, so any subprocess output (e.g. `npm install -g`)
+	// must be kept off stdout to avoid corrupting it.
+	JSON bool
 	// Fetch overrides the release fetcher for tests and alternate transports.
 	Fetch func(context.Context, string) (Release, error)
 }

@@ -274,7 +274,17 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 ## 社区
 
-加入 [Discord 服务器](https://discord.gg/CaQDS6wdFn) 提问、反馈和讨论。
+实时交流在 [Discord 服务器](https://discord.gg/CaQDS6wdFn) 进行。
+
+提问、安装帮助、想法和分享都在
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions)：
+
+| 分类 | 用途 |
+|---|---|
+| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | 安装帮助、提供商/模型配置、"如何做"类问题 |
+| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | 功能提议和 PR 之前的设计讨论 |
+| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | 你的技能、插件、MCP 配置、主题和工作流 |
+| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | 维护者发布的版本和项目动态 |
 
 ## 贡献
 
