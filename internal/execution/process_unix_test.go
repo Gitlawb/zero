@@ -72,6 +72,49 @@ func TestTerminateProcessTreeStopsRunningGroup(t *testing.T) {
 	}
 }
 
+// TestSignalTargetRunningTreatsZombieIndividualPIDAsExited is the regression
+// test for jatmn's second #774 finding: signalTargetRunning's zombie check
+// matched the individual-PID fallback target (a process that is NOT its own
+// group leader — processSignalTarget's positive-PID case) against process-table
+// rows by PGID. That target's actual PGID differs from its own PID by
+// definition (that's exactly why processSignalTarget fell back to the
+// individual PID instead of a negative group target), so no row ever matched,
+// "unknown" resulted every time, and signalTargetRunning conservatively (and
+// incorrectly) treated a zombie individual-PID target as still running.
+func TestSignalTargetRunningTreatsZombieIndividualPIDAsExited(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 0")
+	// Deliberately do NOT call ConfigureProcessGroup: the child inherits this
+	// test process's group, so it is not its own leader and processSignalTarget
+	// falls back to the individual (positive) PID.
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Wait() })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if zombie, ok := processIsZombie(pid); ok && zombie {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Skip("child did not reach the zombie state; ps output is unavailable in this environment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	target, err := processSignalTarget(pid)
+	if err != nil {
+		t.Fatalf("processSignalTarget: %v", err)
+	}
+	if target != pid {
+		t.Skip("child unexpectedly became its own group leader; cannot exercise the individual-PID fallback")
+	}
+	if signalTargetRunning(target) {
+		t.Fatal("a zombie individual-PID target must not count as running")
+	}
+}
+
 // processIsZombie reports a process's zombie state via ps. ok is false when the
 // state could not be read.
 func processIsZombie(pid int) (zombie bool, ok bool) {

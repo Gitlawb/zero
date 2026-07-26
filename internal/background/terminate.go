@@ -38,15 +38,20 @@ func TerminateCommand(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return errors.New("terminate command: process was never started")
 	}
-	terminateErr := terminateProcess(cmd.Process.Pid)
+	terminateErr := terminateOwnedProcess(cmd)
 	reapErr := waitForTerminatedCommandWithin(cmd, commandReapTimeout)
-	if terminateErr != nil {
-		if reapErr != nil {
+	if reapErr != nil {
+		if terminateErr != nil {
 			return fmt.Errorf("%v (reap failed: %w)", terminateErr, reapErr)
 		}
-		return terminateErr
+		return reapErr
 	}
-	return reapErr
+	// A successful reap is authoritative: cmd.Wait returned, so the leader is
+	// confirmed gone and collected. A terminateErr alongside that (e.g. a kill
+	// attempt racing a process that had already exited on its own, such as
+	// taskkill /T failing on Windows because the PID is already gone) describes
+	// how the attempt went, not whether the goal — the process is gone — was met.
+	return nil
 }
 
 // classifyWaitError treats a non-zero exit status as success: a process being
