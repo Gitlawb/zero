@@ -453,12 +453,13 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 	configHome := filepath.Join(root, "xdg")
 	npmrc := filepath.Join(root, "npm", "userconfig")
 	ghConfigDir := filepath.Join(root, "gh")
+	cloudSDKConfig := filepath.Join(root, "gcloud")
 	netrc := filepath.Join(root, "netrc")
 	dockerConfigDir := filepath.Join(root, "docker")
 	kubeConfigA := filepath.Join(root, "kube", "a")
 	kubeConfigB := filepath.Join(root, "kube", "b")
 	zeroConfig := filepath.Join(configHome, "zero", "config.json")
-	paths := []string{
+	filePaths := []string{
 		npmrc,
 		filepath.Join(ghConfigDir, "hosts.yml"),
 		netrc,
@@ -467,7 +468,10 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 		kubeConfigB,
 		zeroConfig,
 	}
-	for _, path := range paths {
+	if err := os.MkdirAll(cloudSDKConfig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range filePaths {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -478,13 +482,15 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 
 	got := credentialDenyReadPathsForEnvironment(credentialPathEnvironment{
 		ConfigHome:      configHome,
+		CloudSDKConfig:  cloudSDKConfig,
 		NPMUserConfig:   npmrc,
 		GHConfigDir:     ghConfigDir,
 		Netrc:           netrc,
 		DockerConfigDir: dockerConfigDir,
 		KubeConfig:      strings.Join([]string{kubeConfigA, kubeConfigB}, string(filepath.ListSeparator)),
 	}, nil)
-	for _, want := range normalizeProfilePaths(paths) {
+	wantPaths := append(filePaths, cloudSDKConfig)
+	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(got, want) {
 			t.Errorf("credential deny paths = %#v, want override %q included", got, want)
 		}

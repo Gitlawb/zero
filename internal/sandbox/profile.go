@@ -170,6 +170,7 @@ func credentialDenyReadPaths(policy Policy) []string {
 	return credentialDenyReadPathsForEnvironment(credentialPathEnvironment{
 		Home:              home,
 		ConfigHome:        os.Getenv("XDG_CONFIG_HOME"),
+		CloudSDKConfig:    os.Getenv("CLOUDSDK_CONFIG"),
 		GoogleCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
 		NPMUserConfig:     firstNonEmpty(os.Getenv("NPM_CONFIG_USERCONFIG"), os.Getenv("npm_config_userconfig")),
 		GHConfigDir:       os.Getenv("GH_CONFIG_DIR"),
@@ -191,6 +192,7 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead 
 type credentialPathEnvironment struct {
 	Home              string
 	ConfigHome        string
+	CloudSDKConfig    string
 	GoogleCredentials string
 	NPMUserConfig     string
 	GHConfigDir       string
@@ -230,9 +232,15 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 	}
 	if configHome != "" {
 		candidates = append(candidates,
-			filepath.Join(configHome, "gcloud"),
 			filepath.Join(configHome, "zero", "config.json"),
 		)
+	}
+	cloudSDKConfig := strings.TrimSpace(env.CloudSDKConfig)
+	if cloudSDKConfig == "" && configHome != "" {
+		cloudSDKConfig = filepath.Join(configHome, "gcloud")
+	}
+	if cloudSDKConfig != "" {
+		candidates = append(candidates, cloudSDKConfig)
 	}
 	ghConfigDir := strings.TrimSpace(env.GHConfigDir)
 	if ghConfigDir == "" && configHome != "" {
