@@ -27,6 +27,16 @@ var destructivePrograms = map[string]bool{
 	"mkfs": true, "fdisk": true, "shred": true, "dd": true, "parted": true,
 }
 
+var powerShellRemoveItemPrograms = map[string]bool{
+	"remove-item": true,
+	"ri":          true,
+	"rd":          true,
+	"rmdir":       true,
+	"del":         true,
+	"erase":       true,
+	"rm":          true,
+}
+
 // networkPrograms are commands that perform network egress/ingress.
 var networkPrograms = map[string]bool{
 	"curl": true, "wget": true, "ssh": true, "scp": true, "sftp": true,
@@ -175,7 +185,7 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
-			(prog == "remove-item" && hasPowerShellRecursiveForce(rest)) ||
+			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
 			(prog == "find" && hasFindDelete(rest)) {
 			result.Destructive = true
 		}
@@ -489,7 +499,7 @@ func hasPowerShellRecursiveForce(args []*syntax.Word) bool {
 		switch strings.ToLower(wordText(arg)) {
 		case "-recurse", "-r":
 			recursive = true
-		case "-force", "-f":
+		case "-force":
 			force = true
 		}
 	}
