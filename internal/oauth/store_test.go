@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -92,24 +91,29 @@ func TestStoreFileMode0600(t *testing.T) {
 	}
 }
 
-func TestStoreUsesFixedProtectedPublicationSibling(t *testing.T) {
+// TestStorePublishesThroughProtectedDirectory pins the publication contract the
+// sandbox profile relies on: the plaintext blob is never written to a path a
+// same-user process can predict (a fixed `.tmp` sibling), only to a random name
+// inside the directory the profile denies by name, and nothing is left behind.
+func TestStorePublishesThroughProtectedDirectory(t *testing.T) {
 	s, path := newTestStore(t)
-	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(path+".tmp", []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if _, err := os.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("publication sibling remains after save: %v", err)
+	// A predictable sibling is never used, so a pre-existing one is untouched
+	// rather than becoming the file the plaintext passes through.
+	if data, err := os.ReadFile(path + ".tmp"); err != nil || string(data) != "stale" {
+		t.Fatalf("fixed sibling data = %q, err = %v, want the untouched placeholder", data, err)
 	}
+	assertEmptyPublicationDir(t, path)
 }
 
-func TestEncryptedStoreUsesFixedProtectedSecretSibling(t *testing.T) {
+func TestEncryptedStorePublishesSecretThroughProtectedDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.json")
-	secretTempPath := path + ".secret.tmp"
-	if err := os.WriteFile(secretTempPath, []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(path+".secret.tmp", []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s, err := NewStore(StoreOptions{FilePath: path, Storage: "encrypted-file"})
@@ -119,8 +123,25 @@ func TestEncryptedStoreUsesFixedProtectedSecretSibling(t *testing.T) {
 	if err := s.Save(ProviderKey("x"), Token{AccessToken: "secret"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if _, err := os.Stat(secretTempPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("secret publication sibling remains after save: %v", err)
+	if data, err := os.ReadFile(path + ".secret.tmp"); err != nil || string(data) != "stale" {
+		t.Fatalf("fixed secret sibling data = %q, err = %v, want the untouched placeholder", data, err)
+	}
+	assertEmptyPublicationDir(t, path)
+	assertEmptyPublicationDir(t, path+".secret")
+}
+
+// assertEmptyPublicationDir asserts the store's publication directory exists
+// (so the sandbox has a mount target to mask on Linux) and holds no leftover
+// copy of the secret it published.
+func assertEmptyPublicationDir(t *testing.T, storePath string) {
+	t.Helper()
+	dir := PublicationDir(storePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read publication dir %s: %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("publication dir %s = %v, want empty after publish", dir, entries)
 	}
 }
 

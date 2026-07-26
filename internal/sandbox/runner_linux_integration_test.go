@@ -105,6 +105,93 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		}
 	})
 
+	// The mid-session race the EnsureDenyReadDirs contract exists for: nothing
+	// under $XDG_CONFIG_HOME exists when the plan is built, so bubblewrap would
+	// have had no mount destination to mask. The sandbox creates Zero's own
+	// directory first, and the token written by this test WHILE the sandboxed
+	// command is already running must stay invisible to it.
+	t.Run("credential store created during the session stays hidden", func(t *testing.T) {
+		raceHome := t.TempDir()
+		raceConfig := filepath.Join(raceHome, "config")
+		raceStore := filepath.Join(raceConfig, "zero")
+		tokenPath := filepath.Join(raceStore, "oauth-tokens.json")
+		raceRoot := t.TempDir()
+		started := filepath.Join(raceRoot, "started")
+		ready := filepath.Join(raceRoot, "ready")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			deadline := time.Now().Add(20 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(started); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			// The namespace is assembled by now, so this write is the concurrent
+			// login the sandbox must not be able to read.
+			if err := os.MkdirAll(raceStore, 0o700); err == nil {
+				_ = os.WriteFile(tokenPath, []byte("racyleak\n"), 0o600)
+			}
+			_ = os.WriteFile(ready, []byte("1\n"), 0o600)
+		}()
+		raceEngine := NewEngine(EngineOptions{WorkspaceRoot: raceRoot, Policy: DefaultPolicy(), Backend: backend})
+		output, _ := runLinuxSandboxSmokeCommand(t, raceEngine, CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", strings.Join([]string{
+				"echo 1 > " + shellQuote(started),
+				"i=0",
+				"while [ ! -e " + shellQuote(ready) + " ] && [ \"$i\" -lt 2000 ]; do i=$((i+1)); sleep 0.01; done",
+				"if cat " + shellQuote(tokenPath) + " 2>/dev/null | grep -q racyleak; then echo MIDSESSION_CREDENTIAL_READ_SUCCEEDED; fi",
+			}, "\n")},
+			Dir: raceRoot,
+			Env: []string{"HOME=" + raceHome, "XDG_CONFIG_HOME=" + raceConfig},
+		})
+		<-done
+		if strings.Contains(string(output), "MIDSESSION_CREDENTIAL_READ_SUCCEEDED") {
+			t.Fatalf("token created during the session was readable: %s", output)
+		}
+		if _, err := os.Stat(tokenPath); err != nil {
+			t.Fatalf("test did not create the token it probes for: %v", err)
+		}
+	})
+
+	// The user plugin root shares the denied credential directory, and its
+	// commands are executed through this sandbox, so it must stay readable.
+	t.Run("user plugin root inside the denied config dir stays readable", func(t *testing.T) {
+		pluginHome := t.TempDir()
+		pluginConfig := filepath.Join(pluginHome, "config")
+		pluginRoot := filepath.Join(pluginConfig, "zero", "plugins", "demo")
+		if err := os.MkdirAll(pluginRoot, 0o700); err != nil {
+			t.Fatalf("MkdirAll plugin root: %v", err)
+		}
+		manifest := filepath.Join(pluginRoot, "plugin.json")
+		if err := os.WriteFile(manifest, []byte(`{"name":"demo"}`+"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile plugin manifest: %v", err)
+		}
+		secret := filepath.Join(pluginConfig, "zero", "oauth-tokens.json")
+		if err := os.WriteFile(secret, []byte(`{"access_token":"leaked"}`+"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile zero tokens: %v", err)
+		}
+		pluginEngine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+		output, runErr := runLinuxSandboxSmokeCommand(t, pluginEngine, CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", strings.Join([]string{
+				"set -eu",
+				"grep -q demo " + shellQuote(manifest),
+				"if cat " + shellQuote(secret) + " 2>/dev/null | grep -q leaked; then echo CARVEOUT_LEAKED_SIBLING; exit 42; fi",
+			}, "\n")},
+			Dir: root,
+			Env: []string{"HOME=" + pluginHome, "XDG_CONFIG_HOME=" + pluginConfig},
+		})
+		if runErr != nil {
+			t.Fatalf("plugin root inside the denied config dir was not readable: %v\n%s", runErr, output)
+		}
+		if strings.Contains(string(output), "CARVEOUT_LEAKED_SIBLING") {
+			t.Fatalf("carveout exposed a credential sibling: %s", output)
+		}
+	})
+
 	t.Run("credential store created after launch stays hidden on the next run", func(t *testing.T) {
 		lateHome := t.TempDir()
 		lateConfig := filepath.Join(lateHome, "config")

@@ -508,6 +508,45 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 }
 
+// TestSeatbeltProfileRendersCredentialBaselineAndCarveouts pins the rendering of
+// the credential baseline, which the struct-level tests do not cover: a
+// DenyReadIfExists entry must reach the profile as a real deny rule (dropping
+// the field from denyReadRules would silently make every credential store
+// readable again on macOS), and a DenyReadCarveouts entry must be re-allowed
+// AFTER it, since SBPL is last-match-wins.
+func TestSeatbeltProfileRendersCredentialBaselineAndCarveouts(t *testing.T) {
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.MkdirAll(pluginRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{"/"},
+			WriteRoots:        []WritableRoot{{Root: "/repo"}},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+			AllowTemp:         true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	denyRule := `(deny file-read* (subpath "` + sandboxProfileString(normalizeProfilePath(credentialDir)) + `"))`
+	allowRule := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(normalizeProfilePath(pluginRoot)) + `"))`
+	denyIdx := strings.Index(sbpl, denyRule)
+	allowIdx := strings.Index(sbpl, allowRule)
+	if denyIdx < 0 {
+		t.Fatalf("Seatbelt profile missing credential baseline deny %q:\n%s", denyRule, sbpl)
+	}
+	if allowIdx < 0 {
+		t.Fatalf("Seatbelt profile missing carveout allow %q:\n%s", allowRule, sbpl)
+	}
+	if allowIdx < denyIdx {
+		t.Fatalf("carveout allow (%d) must follow the deny (%d) to win under last-match-wins:\n%s", allowIdx, denyIdx, sbpl)
+	}
+}
+
 // TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
 // git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
 // default profile must stop write-denying the whole .git tree and only carve

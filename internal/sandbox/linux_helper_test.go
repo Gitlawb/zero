@@ -297,6 +297,74 @@ func TestLinuxBwrapSkipsMissingCredentialBaselines(t *testing.T) {
 	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", missingCredential, "--remount-ro", missingCredential)
 }
 
+// TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking covers the long-lived
+// session race: bubblewrap cannot mount over a path that does not exist, so a
+// store written after the namespace was assembled would stay readable through
+// the live read-only host-root bind. Zero's own directories are therefore
+// created up front and masked, unlike third-party stores it must not create.
+func TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking(t *testing.T) {
+	root := t.TempDir()
+	ownedDir := filepath.Join(root, "config", "zero")
+	thirdParty := filepath.Join(root, "home", ".aws")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:               FileSystemRestricted,
+			ReadRoots:          []string{string(filepath.Separator)},
+			WriteRoots:         []WritableRoot{{Root: root}},
+			DenyReadIfExists:   []string{ownedDir, thirdParty},
+			EnsureDenyReadDirs: []string{ownedDir},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	if info, err := os.Stat(ownedDir); err != nil || !info.IsDir() {
+		t.Fatalf("owned credential dir was not created: err=%v", err)
+	}
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", ownedDir, "--remount-ro", ownedDir)
+	if stringSliceContains(plan.Args, thirdParty) {
+		t.Fatalf("absent third-party store must stay unmounted and uncreated: %#v", plan.Args)
+	}
+	if _, err := os.Stat(thirdParty); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("third-party store must not be created by the sandbox: %v", err)
+	}
+}
+
+// TestLinuxBwrapKeepsCarveoutsReachableInsideMaskedDir covers the user plugin
+// root inside the denied Zero config directory: the mask has to keep the
+// traverse bit and re-bind the carveout, otherwise an installed user plugin
+// cannot be executed through the sandbox at all.
+func TestLinuxBwrapKeepsCarveoutsReachableInsideMaskedDir(t *testing.T) {
+	root := t.TempDir()
+	credentialDir := filepath.Join(root, "config", "zero")
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.MkdirAll(pluginRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator)},
+			WriteRoots:        []WritableRoot{{Root: root}},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	// 111 rather than 000: a 000 directory cannot be traversed, so the re-bound
+	// subpath below it would be unreachable. Contents stay unlistable either way.
+	assertArgsContainSequence(t, plan.Args, "--perms", "111", "--tmpfs", credentialDir)
+	assertArgsContainSequence(t, plan.Args, "--ro-bind", pluginRoot, pluginRoot)
+	assertArgsContainSequence(t, plan.Args, "--remount-ro", credentialDir)
+	bindIdx := argsSequenceIndex(plan.Args, "--ro-bind", pluginRoot, pluginRoot)
+	remountIdx := argsSequenceIndex(plan.Args, "--remount-ro", credentialDir)
+	if bindIdx < 0 || remountIdx < 0 || bindIdx > remountIdx {
+		t.Fatalf("carveout bind (%d) must precede the tmpfs remount-ro (%d): %#v", bindIdx, remountIdx, plan.Args)
+	}
+}
+
 func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

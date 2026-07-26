@@ -46,7 +46,6 @@ func sandboxExecProfile(writeRoots []string, policy Policy, denialTag string) st
 }
 
 func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
-	credentialBaseDir, _ := os.Getwd()
 	fs := FileSystemPolicy{
 		Kind:                 FileSystemUnrestricted,
 		ReadRoots:            []string{string(filepath.Separator)},
@@ -61,7 +60,10 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 		}
 	}
 	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
-	fs.DenyReadIfExists = credentialDenyReadPaths(policy, credentialBaseDir, os.Environ())
+	credentials := credentialDenyReadPaths(policy, "", os.Environ())
+	fs.DenyReadIfExists = credentials.Paths
+	fs.DenyReadCarveouts = pathsOutsideRoots(credentials.Carveouts, fs.DenyRead)
+	fs.EnsureDenyReadDirs = credentials.EnsureDirs
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,

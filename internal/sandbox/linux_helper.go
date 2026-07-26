@@ -277,19 +277,26 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 		args = appendReadOnlyLinuxPathArgs(args, path)
 	}
 	for _, path := range fs.DenyRead {
-		args = appendUnreadableLinuxPathArgs(args, path)
+		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
 	}
+	// Zero owns these directories, so create the ones that are missing before the
+	// namespace is assembled: bubblewrap cannot mount over an absent path, and a
+	// directory that appears afterwards (a concurrent login writing a token
+	// store) would otherwise be readable through the live read-only host bind for
+	// the rest of a long-lived sandbox session.
+	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
 	for _, path := range fs.DenyReadIfExists {
 		if !pathExists(path) {
-			// Baseline credential paths are emitted for every run, so an absent
-			// entry is the common case on a fresh machine. The read-all profile
-			// starts from a read-only host-root bind where bubblewrap cannot
-			// create a missing mount destination, and masking the nearest
-			// existing parent could hide HOME, /tmp, or the workspace. Path-based
-			// backends (seatbelt) still deny these paths before they exist.
+			// A baseline credential path is emitted for every run, so an absent
+			// entry is the common case on a fresh machine — a third-party store
+			// such as ~/.aws that Zero must not create. The read-all profile starts
+			// from a read-only host-root bind where bubblewrap cannot create a
+			// missing mount destination, and masking the nearest existing parent
+			// could hide HOME, /tmp, or the workspace. Path-based backends
+			// (seatbelt) still deny these paths before they exist.
 			continue
 		}
-		args = appendUnreadableLinuxPathArgs(args, path)
+		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
 	}
 	return linuxBwrapFilesystemPlan{
 		Args:                   args,
@@ -365,7 +372,7 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
 }
 
-func appendUnreadableLinuxPathArgs(args []string, path string) []string {
+func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []string) []string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return args
@@ -373,7 +380,55 @@ func appendUnreadableLinuxPathArgs(args []string, path string) []string {
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
 		return append(args, "--ro-bind", "/dev/null", path)
 	}
-	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+	nested := nestedCarveoutPaths(path, carveouts)
+	if len(nested) == 0 {
+		return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+	}
+	// A carveout has to stay reachable, and traversing into a directory needs the
+	// execute bit, so the mask is 111 (--x--x--x) instead of 000: the directory's
+	// contents remain unlistable and unreadable, while an explicitly re-bound
+	// subpath below it can still be resolved. The binds must precede the
+	// --remount-ro, which is what freezes the tmpfs.
+	args = append(args, "--perms", "111", "--tmpfs", path)
+	for _, carveout := range nested {
+		if pathExists(carveout) {
+			args = append(args, "--ro-bind", carveout, carveout)
+		}
+	}
+	return append(args, "--remount-ro", path)
+}
+
+// nestedCarveoutPaths returns the carveouts that sit strictly inside root,
+// shallowest first so a parent bind is created before a nested one.
+func nestedCarveoutPaths(root string, carveouts []string) []string {
+	if len(carveouts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(carveouts))
+	for _, carveout := range carveouts {
+		carveout = strings.TrimSpace(carveout)
+		if carveout == "" || carveout == root {
+			continue
+		}
+		if pathWithinRoot(root, carveout) {
+			out = append(out, carveout)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return pathDepth(out[i]) < pathDepth(out[j]) })
+	return dedupeStrings(out)
+}
+
+// ensureLinuxDenyReadDirs creates the Zero-owned directories a deny mask needs
+// to exist for. Best effort: a failure just leaves the path unmasked, exactly as
+// before, and never blocks the command.
+func ensureLinuxDenyReadDirs(dirs []string) {
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || pathExists(dir) {
+			continue
+		}
+		_ = os.MkdirAll(dir, 0o700)
+	}
 }
 
 func shouldUnshareLinuxNetwork(policy NetworkPolicy) bool {

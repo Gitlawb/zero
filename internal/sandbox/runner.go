@@ -661,6 +661,10 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		writeRule,
 	}
 	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	// SBPL is last-match-wins, so the carveouts MUST follow the deny rules above:
+	// they re-include the supported non-secret subtrees of a directory-level
+	// credential deny (Zero's user plugin/specialist/command roots).
+	rules = append(rules, denyReadCarveoutRules(profile.FileSystem)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -789,6 +793,35 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 
 func denyReadRules(fs FileSystemPolicy) []string {
 	return denySeatbeltPathRules("file-read*", dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...)))
+}
+
+// denyReadCarveoutRules re-allows reads for the non-secret subtrees of a denied
+// credential directory. Writes are untouched: the credential directory is not a
+// write root, so the profile's write rule keeps denying them. Only
+// DenyReadCarveouts entries are emitted, and the profile builder derives those
+// exclusively from Zero's own config directory (never from a user-configured
+// DenyRead root), so no user deny is weakened here.
+func denyReadCarveoutRules(fs FileSystemPolicy) []string {
+	resolved := normalizeProfilePaths(fs.DenyReadCarveouts)
+	if len(resolved) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(resolved)+1)
+	for _, path := range resolved {
+		escaped := sandboxProfileString(path)
+		out = append(out,
+			`(allow file-read* file-test-existence (subpath "`+escaped+`"))`,
+			`(allow file-read* file-test-existence (literal "`+escaped+`"))`,
+		)
+	}
+	// Resolving a path into the carveout also needs stat on its ancestors, and the
+	// deny rule above covers the denied directory itself. This grants metadata
+	// only, so the denied directory stays unreadable and unlistable — the same
+	// split seatbeltReadRule already relies on for deeply nested read roots.
+	if ancestors := seatbeltAncestorMetadataRule(resolved); ancestors != "" {
+		out = append(out, ancestors)
+	}
+	return out
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {

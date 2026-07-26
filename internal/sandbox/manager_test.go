@@ -7,7 +7,19 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/oauth"
 )
+
+// TestCredentialPublicationDirSuffixMatchesStore keeps the duplicated suffix in
+// step with the store that creates the directory: if they ever diverge, the
+// profile denies a directory the store does not publish through, and the
+// plaintext token passes through an unprotected path instead.
+func TestCredentialPublicationDirSuffixMatchesStore(t *testing.T) {
+	if credentialPublicationDirSuffix != oauth.PublicationDirSuffix {
+		t.Fatalf("publication dir suffix = %q, want oauth.PublicationDirSuffix %q", credentialPublicationDirSuffix, oauth.PublicationDirSuffix)
+	}
+}
 
 func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	workspace := t.TempDir()
@@ -429,17 +441,44 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	options := credentialPathOptions{
-		Home:              home,
-		GoogleCredentials: keyFile,
-		ZeroConfigDir:     filepath.Join(home, "config"),
-		OAuthTokens:       oauthOverride,
-		MCPOAuthTokens:    mcpOverride,
+		Homes:             []string{home},
+		GoogleCredentials: []string{keyFile},
+		ZeroConfigDirs:    []string{filepath.Join(home, "config")},
+		OAuthTokens:       []string{oauthOverride},
+		MCPOAuthTokens:    []string{mcpOverride},
 	}
-	paths := credentialDenyReadPathsIn(options, nil)
+	credentials := credentialDenyReadPathsIn(options, nil)
+	paths := credentials.Paths
 	wantPaths := append([]string{awsDir, gcloudDir, keyFile, zeroDir}, overrideFiles...)
 	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
+		}
+	}
+	// The store publishes through a per-store directory whose name is derived
+	// from the store path, so it can be denied even though the random file name
+	// inside it cannot be.
+	for _, want := range normalizeProfilePaths([]string{oauthOverride + ".publish", mcpOverride + ".publish"}) {
+		if !stringSliceContains(paths, want) {
+			t.Errorf("credential deny paths = %#v, want publication directory %q included", paths, want)
+		}
+	}
+	// Zero owns its config directory and the publication directories, so the
+	// mount-based backend may create them to guarantee a mask exists.
+	for _, want := range normalizeProfilePaths([]string{zeroDir, oauthOverride + ".publish", mcpOverride + ".publish"}) {
+		if !stringSliceContains(credentials.EnsureDirs, want) {
+			t.Errorf("credential ensure dirs = %#v, want %q", credentials.EnsureDirs, want)
+		}
+	}
+	if stringSliceContains(credentials.EnsureDirs, normalizeProfilePaths([]string{awsDir})[0]) {
+		t.Errorf("credential ensure dirs = %#v, must not create third-party stores", credentials.EnsureDirs)
+	}
+	// The user plugin/specialist/command roots live in the denied config
+	// directory and are executed through the sandbox, so they stay readable.
+	for _, name := range []string{"plugins", "specialists", "commands"} {
+		want := filepath.Join(zeroDir, name)
+		if !stringSliceContains(credentials.Carveouts, normalizeProfilePaths([]string{want})[0]) {
+			t.Errorf("credential carveouts = %#v, want %q", credentials.Carveouts, want)
 		}
 	}
 	// zeroFiles is covered by the zeroDir subpath deny above, not by an
@@ -461,25 +500,32 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 
 	// An explicit AllowRead entry covering a store is an opt-out.
 	optedOut := credentialDenyReadPathsIn(options, []string{awsDir, zeroDir})
-	if stringSliceContains(optedOut, normalizeProfilePaths([]string{awsDir})[0]) {
-		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut)
+	if stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{awsDir})[0]) {
+		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut.Paths)
 	}
-	if stringSliceContains(optedOut, normalizeProfilePaths([]string{zeroDir})[0]) {
-		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop %q", optedOut, zeroDir)
+	if stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{zeroDir})[0]) {
+		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop %q", optedOut.Paths, zeroDir)
 	}
-	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
-		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
+	if !stringSliceContains(optedOut.Paths, normalizeProfilePaths([]string{keyFile})[0]) {
+		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut.Paths)
+	}
+	// Nothing is created or carved out for a directory that is no longer denied.
+	if stringSliceContains(optedOut.EnsureDirs, normalizeProfilePaths([]string{zeroDir})[0]) {
+		t.Errorf("credential ensure dirs = %#v, want the opted-out config dir dropped", optedOut.EnsureDirs)
+	}
+	if stringSliceContains(optedOut.Carveouts, normalizeProfilePaths([]string{filepath.Join(zeroDir, "plugins")})[0]) {
+		t.Errorf("credential carveouts = %#v, want no allow-back inside an opted-out deny", optedOut.Carveouts)
 	}
 
-	if got := credentialDenyReadPathsIn(credentialPathOptions{}, nil); len(got) != 0 {
-		t.Errorf("credential deny paths for blank home = %#v, want none", got)
+	if got := credentialDenyReadPathsIn(credentialPathOptions{}, nil); len(got.Paths) != 0 {
+		t.Errorf("credential deny paths for blank home = %#v, want none", got.Paths)
 	}
 
 	// The GOOGLE_APPLICATION_CREDENTIALS target stays protected even when no
 	// home directory is resolvable.
-	homeless := credentialDenyReadPathsIn(credentialPathOptions{GoogleCredentials: keyFile}, nil)
-	if !stringSliceContains(homeless, normalizeProfilePaths([]string{keyFile})[0]) {
-		t.Errorf("credential deny paths without home = %#v, want key file included", homeless)
+	homeless := credentialDenyReadPathsIn(credentialPathOptions{GoogleCredentials: []string{keyFile}}, nil)
+	if !stringSliceContains(homeless.Paths, normalizeProfilePaths([]string{keyFile})[0]) {
+		t.Errorf("credential deny paths without home = %#v, want key file included", homeless.Paths)
 	}
 }
 
@@ -500,15 +546,15 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 		"ZERO_OAUTH_TOKENS_PATH=" + override,
 		"ZERO_MCP_OAUTH_TOKENS_PATH=mcp/tokens.json",
 	})
-	paths := credentialDenyReadPathsIn(options, nil)
+	paths := credentialDenyReadPathsIn(options, nil).Paths
 
 	wantHome := filepath.Join(commandDir, "profile-home")
-	if options.Home != wantHome {
-		t.Fatalf("home = %q, want USERPROFILE fallback %q", options.Home, wantHome)
+	if !stringSliceContains(options.Homes, wantHome) {
+		t.Fatalf("homes = %#v, want USERPROFILE fallback %q", options.Homes, wantHome)
 	}
 	wantConfig := filepath.Join(commandDir, "~", "literal-xdg")
-	if options.ZeroConfigDir != wantConfig {
-		t.Fatalf("config dir = %q, want command-relative literal XDG path %q", options.ZeroConfigDir, wantConfig)
+	if !stringSliceContains(options.ZeroConfigDirs, wantConfig) {
+		t.Fatalf("config dirs = %#v, want command-relative literal XDG path %q", options.ZeroConfigDirs, wantConfig)
 	}
 	for _, want := range []string{
 		filepath.Join(wantConfig, "zero"),
@@ -533,12 +579,12 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testing.T) {
 	configDir := "~/literal-xdg"
 	commandDir := t.TempDir()
-	resolvedConfigDir := credentialPathOptionsFromEnvironment(commandDir, []string{"XDG_CONFIG_HOME=" + configDir}).ZeroConfigDir
-	paths := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDir: resolvedConfigDir}, nil)
+	resolvedConfigDirs := credentialPathOptionsFromEnvironment(commandDir, []string{"XDG_CONFIG_HOME=" + configDir}).ZeroConfigDirs
+	paths := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDirs: resolvedConfigDirs}, nil).Paths
 
 	want := filepath.Join(commandDir, configDir, "zero")
-	if resolvedConfigDir != filepath.Dir(want) {
-		t.Fatalf("zero credential config dir = %q, want literal XDG resolution %q", resolvedConfigDir, filepath.Dir(want))
+	if !stringSliceContains(resolvedConfigDirs, filepath.Dir(want)) {
+		t.Fatalf("zero credential config dirs = %#v, want literal XDG resolution %q", resolvedConfigDirs, filepath.Dir(want))
 	}
 	if !stringSliceContains(paths, want) {
 		t.Fatalf("credential deny paths = %#v, want literal XDG resolution %q", paths, want)
@@ -579,6 +625,62 @@ func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
 	}
 	if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want)) {
 		t.Fatalf("DenyReadIfExists = %#v, must not mask override parent %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want))
+	}
+}
+
+// TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir covers the
+// bypass a command-directory-only resolution left open: oauth.ResolveStorePath
+// and mcp.ResolveTokenStorePath call filepath.Abs, so a relative override names
+// a file under the ZERO PROCESS working directory, while a sandboxed command
+// runs with its own cwd. Denying only the command-relative path left the real
+// store readable under the read-all posture.
+func TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	workspace := resolvedTempDir(t)
+	processDir := filepath.Join(workspace, "process")
+	commandDir := filepath.Join(workspace, "process", "nested")
+	if err := mkdirAll(commandDir); err != nil {
+		t.Fatal(err)
+	}
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(processDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalDir) })
+
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend:       Backend{Name: BackendUnavailable, Platform: runtime.GOOS},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "true",
+		Dir:  commandDir,
+		Env:  []string{"HOME=" + filepath.Join(workspace, "home"), "ZERO_OAUTH_TOKENS_PATH=tokens.json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store the Zero process actually writes.
+	processStore := filepath.Join(processDir, "tokens.json")
+	// The path a sandboxed child (e.g. a nested Zero) would resolve instead.
+	commandStore := filepath.Join(commandDir, "tokens.json")
+	for _, want := range []string{processStore, commandStore} {
+		if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
+			t.Fatalf("DenyReadIfExists = %#v, want relative override resolved to %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
+		}
+	}
+	// Neither resolution may mask the parent directory itself: that would hide the
+	// workspace or a temp root from every sandboxed command.
+	for _, unwanted := range []string{processDir, commandDir} {
+		if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(unwanted)) {
+			t.Fatalf("DenyReadIfExists = %#v, must not mask override parent %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, unwanted)
+		}
 	}
 }
 

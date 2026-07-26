@@ -47,7 +47,12 @@ func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {
 	}
 }
 
-func TestCredentialDeniesMatchRelativeTokenOverridesAtCommandDir(t *testing.T) {
+// TestCredentialDeniesMatchRelativeTokenOverridesFromStoreResolution runs the
+// sandboxed command from a DIFFERENT directory than the Zero process, which is
+// what makes this meaningful: the stores resolve a relative override with
+// filepath.Abs against the process working directory, so that is the path the
+// profile has to deny.
+func TestCredentialDeniesMatchRelativeTokenOverridesFromStoreResolution(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows credential deny-read is tracked separately")
 	}
@@ -60,7 +65,9 @@ func TestCredentialDeniesMatchRelativeTokenOverridesAtCommandDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(commandDir); err != nil {
+	// The Zero process stays in the workspace root while the command runs in the
+	// nested directory, so the two resolutions differ.
+	if err := os.Chdir(workspace); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chdir(originalDir) }()
