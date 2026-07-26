@@ -163,6 +163,21 @@ func TestBTWHiddenParentDoesNotLaunchGoalContinuation(t *testing.T) {
 	if parent.activeSession.Goal == nil || parent.activeSession.Goal.ContinuationCount != 0 {
 		t.Fatalf("hidden parent consumed a continuation: %#v", parent.activeSession.Goal)
 	}
+
+	returned, cmd := routed.leaveBTW()
+	if cmd == nil || !returned.pending {
+		t.Fatalf("returning from BTW did not resume the deferred goal: pending=%v cmd=%v", returned.pending, cmd)
+	}
+	if returned.goalContinuationsSuspended {
+		t.Fatal("goal continuations remained suspended after leaving BTW")
+	}
+	if returned.activeSession.Goal == nil || returned.activeSession.Goal.ContinuationCount != 1 {
+		t.Fatalf("returning from BTW reserved an unexpected continuation: %#v", returned.activeSession.Goal)
+	}
+	again, duplicateCmd := returned.launchGoalContinuationIfReady()
+	if duplicateCmd != nil || again.activeSession.Goal.ContinuationCount != 1 {
+		t.Fatalf("returning from BTW launched more than one continuation: goal=%#v cmd=%v", again.activeSession.Goal, duplicateCmd)
+	}
 }
 
 func TestBTWInlineQuestionStartsSideRun(t *testing.T) {

@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,130 @@ func TestGoalContinuationLimitStopsWithoutProviderUsage(t *testing.T) {
 	if resumed.Goal.ContinuationCount != 0 {
 		t.Fatalf("explicit resume did not reset consecutive continuations: %#v", resumed.Goal)
 	}
+}
+
+func TestResetGoalContinuationsPersistsOnlyActiveChanges(t *testing.T) {
+	newStore := func(t *testing.T) (*Store, Metadata) {
+		t.Helper()
+		now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+		store := NewStore(StoreOptions{
+			RootDir: t.TempDir(),
+			Now: func() time.Time {
+				now = now.Add(time.Second)
+				return now
+			},
+		})
+		session, err := store.Create(CreateInput{SessionID: "reset_goal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store, session
+	}
+	pinMetadataTime := func(t *testing.T, store *Store, sessionID string) time.Time {
+		t.Helper()
+		path := store.metadataPath(sessionID)
+		sentinel := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+		if err := os.Chtimes(path, sentinel, sentinel); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info.ModTime()
+	}
+	assertMetadataTime := func(t *testing.T, store *Store, sessionID string, want time.Time) {
+		t.Helper()
+		info, err := os.Stat(store.metadataPath(sessionID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(want) {
+			t.Fatalf("metadata was rewritten: modtime=%s want=%s", info.ModTime(), want)
+		}
+	}
+
+	t.Run("no goal is a no-op", func(t *testing.T) {
+		store, session := newStore(t)
+		modTime := pinMetadataTime(t, store, session.SessionID)
+		updated, err := store.ResetGoalContinuations(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Goal != nil {
+			t.Fatalf("no-goal reset created a goal: %#v", updated.Goal)
+		}
+		assertMetadataTime(t, store, session.SessionID, modTime)
+	})
+
+	t.Run("inactive goal is a no-op", func(t *testing.T) {
+		store, session := newStore(t)
+		if _, _, err := store.CreateGoal(session.SessionID, "Pause safely", 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, reserved, err := store.ReserveGoalContinuation(session.SessionID); err != nil || !reserved {
+			t.Fatalf("reserve continuation: reserved=%v err=%v", reserved, err)
+		}
+		paused, _, err := store.UpdateGoal(session.SessionID, GoalStatusPaused, "user paused")
+		if err != nil {
+			t.Fatal(err)
+		}
+		modTime := pinMetadataTime(t, store, session.SessionID)
+		updated, err := store.ResetGoalContinuations(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Goal.ContinuationCount != 1 || updated.Goal.UpdatedAt != paused.Goal.UpdatedAt {
+			t.Fatalf("inactive goal changed during reset: before=%#v after=%#v", paused.Goal, updated.Goal)
+		}
+		assertMetadataTime(t, store, session.SessionID, modTime)
+	})
+
+	t.Run("already reset active goal is a no-op", func(t *testing.T) {
+		store, session := newStore(t)
+		created, _, err := store.CreateGoal(session.SessionID, "Stay reset", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modTime := pinMetadataTime(t, store, session.SessionID)
+		updated, err := store.ResetGoalContinuations(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Goal.ContinuationCount != 0 ||
+			updated.Goal.ContinuationLimit != GoalMaxConsecutiveContinuations ||
+			updated.Goal.UpdatedAt != created.Goal.UpdatedAt {
+			t.Fatalf("already-reset goal changed: before=%#v after=%#v", created.Goal, updated.Goal)
+		}
+		assertMetadataTime(t, store, session.SessionID, modTime)
+	})
+
+	t.Run("active goal reset persists", func(t *testing.T) {
+		store, session := newStore(t)
+		if _, _, err := store.CreateGoal(session.SessionID, "Reset progress", 0); err != nil {
+			t.Fatal(err)
+		}
+		reserved, _, ok, err := store.ReserveGoalContinuation(session.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("reserve continuation: reserved=%v err=%v", ok, err)
+		}
+		updated, err := store.ResetGoalContinuations(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Goal.ContinuationCount != 0 ||
+			updated.Goal.ContinuationLimit != GoalMaxConsecutiveContinuations ||
+			updated.Goal.UpdatedAt == reserved.Goal.UpdatedAt {
+			t.Fatalf("active reset did not persist: before=%#v after=%#v", reserved.Goal, updated.Goal)
+		}
+		reloaded, err := store.Get(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.Goal == nil || *reloaded.Goal != *updated.Goal {
+			t.Fatalf("active reset was not durable: updated=%#v reloaded=%#v", updated.Goal, reloaded.Goal)
+		}
+	})
 }
 
 func TestGoalObjectiveLengthIsBounded(t *testing.T) {

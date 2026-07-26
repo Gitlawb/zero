@@ -198,7 +198,9 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		text: "Returned from the isolated BTW conversation. Its messages were not added to this session.",
 	})
 	parent.resetFlushFrontier("· returned from btw ·")
-	return parent, batchCommands(sweepCmd, spinnerCmd)
+	var goalCmd tea.Cmd
+	parent, goalCmd = parent.launchGoalContinuationIfReady()
+	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd)
 }
 
 func btwCommandUnavailable(command parsedCommand) bool {
