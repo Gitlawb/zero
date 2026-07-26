@@ -236,6 +236,68 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	}
 }
 
+// The other half of the privileged chain: granting logon rights and actually
+// minting a token. Provisioning proves the account exists; this proves it is
+// USABLE, which is the part the runner depends on.
+//
+// The batch logon doubles as the assertion that LsaAddAccountRights worked. A
+// LOGON32_LOGON_BATCH logon fails with ERROR_LOGON_TYPE_NOT_GRANTED (1385)
+// unless SeBatchLogonRight is actually held, so a token coming back is proof the
+// grant landed rather than merely that the call returned success.
+//
+// Creates a real local account and removes it again, so it is gated the same way
+// as the provisioning round-trip.
+func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
+	if os.Getenv("ZERO_WINDOWS_IDENTITY_PROVISION_TEST") != "1" {
+		t.Skip("provisioning test not enabled: PowerShell `$env:ZERO_WINDOWS_IDENTITY_PROVISION_TEST = \"1\"`, cmd `set ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1`, bash `export ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1` (also needs an elevated terminal)")
+	}
+	if !windowsProcessIsElevated() {
+		t.Skip("granting logon rights requires an elevated process")
+	}
+
+	const key = "ziplogon01"
+	// A leftover account from an interrupted run would keep its old password,
+	// which the freshly generated one will not match, so start from a clean slate.
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key))
+
+	identity, password, err := provisionWindowsSandboxIdentity(key)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := removeWindowsSandboxIdentity(identity.Username); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+
+	// Exercises LsaAddAccountRights, including the LSA_UNICODE_STRING byte-length
+	// handling that nothing else has run.
+	if err := grantWindowsSandboxLogonRights(identity.SID); err != nil {
+		t.Fatalf("grant logon rights: %v", err)
+	}
+	// Idempotent: setup re-runs must not fail on rights the account already holds.
+	if err := grantWindowsSandboxLogonRights(identity.SID); err != nil {
+		t.Fatalf("granting logon rights twice must succeed: %v", err)
+	}
+
+	token, err := logonWindowsSandboxPrincipal(identity.Username, password)
+	if err != nil {
+		t.Fatalf("logon as principal: %v", err)
+	}
+	defer token.Close()
+
+	// The token must BE the principal. If this came back as the caller, the whole
+	// identity boundary would be an illusion and reads would still run as the user.
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatalf("token user: %v", err)
+	}
+	if !user.User.Sid.Equals(identity.SID) {
+		t.Fatalf("token belongs to %s, want the principal %s", user.User.Sid, identity.SID)
+	}
+	t.Logf("minted a token for %s", identity)
+}
+
 // A workspace with no provisioned principal must report the actionable
 // "run setup" error rather than a raw lookup failure, so the command path can
 // fall back instead of surfacing a Win32 code.
