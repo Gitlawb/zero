@@ -447,6 +447,9 @@ func TestClientNotificationQueueIsLossless(t *testing.T) {
 	if client.notifyQueue != nil {
 		t.Fatalf("drained queue retained %d slots of capacity", cap(client.notifyQueue))
 	}
+	if client.notifyBytes != 0 {
+		t.Fatalf("drained queue retained byte accounting: %d", client.notifyBytes)
+	}
 }
 
 // TestClientFailsOnNotificationBacklogOverload is the regression test for
@@ -483,9 +486,54 @@ func TestClientFailsOnNotificationBacklogOverload(t *testing.T) {
 	}
 	client.notifyMu.Lock()
 	queuedAfter := len(client.notifyQueue)
+	bytesAfter := client.notifyBytes
 	client.notifyMu.Unlock()
 	if queuedAfter != 0 {
 		t.Fatalf("closed client retained %d queued notifications, want 0", queuedAfter)
+	}
+	if bytesAfter != 0 {
+		t.Fatalf("closed client retained %d bytes of notification accounting, want 0", bytesAfter)
+	}
+}
+
+func TestClientFailsOnNotificationBacklogByteOverload(t *testing.T) {
+	client := &Client{
+		notifyReady: make(chan struct{}, 1),
+		pending:     make(map[int64]chan rpcResponse),
+		closed:      make(chan struct{}),
+	}
+	const messageCount = 16
+	const method = "spam"
+	for i := 0; i < messageCount; i++ {
+		client.enqueueNotification(notification{
+			method: method,
+			params: make(json.RawMessage, notifyQueueByteLimit/messageCount-len(method)),
+		})
+	}
+	if client.IsClosed() {
+		t.Fatal("client closed before the notification byte limit was exceeded")
+	}
+	client.notifyMu.Lock()
+	queued := len(client.notifyQueue)
+	queuedBytes := client.notifyBytes
+	client.notifyMu.Unlock()
+	if queued != messageCount {
+		t.Fatalf("queued = %d, want %d at the byte limit", queued, messageCount)
+	}
+	if queuedBytes != notifyQueueByteLimit {
+		t.Fatalf("queued bytes = %d, want limit %d", queuedBytes, notifyQueueByteLimit)
+	}
+
+	client.enqueueNotification(notification{method: "x"})
+	if !client.IsClosed() {
+		t.Fatal("client must close before retaining notification bytes past the limit")
+	}
+	client.notifyMu.Lock()
+	queuedAfter := len(client.notifyQueue)
+	bytesAfter := client.notifyBytes
+	client.notifyMu.Unlock()
+	if queuedAfter != 0 || bytesAfter != 0 {
+		t.Fatalf("closed client retained %d notifications and %d accounted bytes", queuedAfter, bytesAfter)
 	}
 }
 

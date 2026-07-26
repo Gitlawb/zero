@@ -312,6 +312,55 @@ func TestPublishBaselineRejectsAlreadyQueuedPublish(t *testing.T) {
 	}
 }
 
+func TestWaitForDiagnosticsReturnsWhenClientCloses(t *testing.T) {
+	client := &Client{
+		pending: make(map[int64]chan rpcResponse),
+		closed:  make(chan struct{}),
+	}
+	uri := PathToURI("/repo/main.go")
+	sess := &session{
+		client:      client,
+		diagnostics: map[string][]Diagnostic{},
+		lastPublish: map[string]time.Time{},
+		publishSeq:  map[string]int64{},
+		waiters:     map[string][]chan struct{}{},
+	}
+	waitDone := make(chan bool, 1)
+	go func() {
+		waitDone <- sess.waitForDiagnostics(context.Background(), uri, time.Second, 0)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		sess.mu.Lock()
+		waiting := len(sess.waiters[uri]) == 1
+		sess.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("diagnostic wait was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	client.failPending(errors.New("notification backlog exceeded"))
+	select {
+	case fresh := <-waitDone:
+		if fresh {
+			t.Fatal("client failure without a fresh publish must not report fresh diagnostics")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic wait did not wake when the client failed")
+	}
+	sess.mu.Lock()
+	waiters := len(sess.waiters[uri])
+	sess.mu.Unlock()
+	if waiters != 0 {
+		t.Fatalf("client failure left %d diagnostic waiters registered", waiters)
+	}
+}
+
 func TestManagerCheckDegradesWhenServerBinaryMissing(t *testing.T) {
 	// A configured extension whose binary isn't on PATH (exec.ErrNotFound) must
 	// degrade to no diagnostics, exactly like an unsupported extension.

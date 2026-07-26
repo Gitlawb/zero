@@ -41,6 +41,7 @@ type Client struct {
 
 	notifyMu     sync.Mutex
 	notifyQueue  []notification
+	notifyBytes  int
 	notifyReady  chan struct{}
 	notifyClosed bool
 	notifySeq    int64 // count of notifications received (enqueued) so far
@@ -52,15 +53,19 @@ type notification struct {
 	seq    int64
 }
 
-// notifyQueueLimit bounds the notification backlog. A well-behaved handler
-// drains far faster than any single burst fills it; sustained overload — a
-// language server emitting faster than the single handler can consume, or a
-// handler stuck waiting on a re-entrant Call — is a fatal condition for this
-// client, not something to paper over by growing the queue without bound.
-// Hitting the limit fails the client (see enqueueNotification): IsClosed
-// becomes true, and the manager evicts and restarts the session on next use,
-// exactly as it does for any other dead client.
-const notifyQueueLimit = 4096
+// The notification backlog is bounded by both message count and retained
+// payload bytes. A well-behaved handler drains far faster than any single burst
+// fills either limit; sustained overload — a language server emitting faster
+// than the single handler can consume, or a handler stuck waiting on a
+// re-entrant Call — is a fatal condition for this client, not something to
+// paper over by growing the queue without bound. Hitting either limit fails the
+// client (see enqueueNotification): IsClosed becomes true, and the manager
+// evicts and restarts the session on next use, exactly as it does for any other
+// dead client.
+const (
+	notifyQueueLimit     = 4096
+	notifyQueueByteLimit = 16 << 20 // 16 MiB
+)
 
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -230,7 +235,7 @@ func (c *Client) notificationLoop() {
 
 // enqueueNotification hands a server notification to the worker loop. It never
 // blocks and never silently discards a message the handler could still act on:
-// the queue grows instead, up to notifyQueueLimit.
+// the queue grows instead, up to its message and byte limits.
 //
 // The alternatives to growing are worse. Blocking the read loop when a buffer
 // fills is the deadlock this dispatch exists to avoid — a handler that calls
@@ -246,9 +251,11 @@ func (c *Client) notificationLoop() {
 // not a limit: a handler that never returns, or a server that sustains a
 // higher rate than the single handler can drain, would otherwise grow this
 // queue's full json.RawMessage payloads without bound until the heap gives
-// out. notifyQueueLimit turns that into an explicit, observable failure —
-// the client is failed and closed — rather than an unbounded retention of
-// protocol input this transport has no business trying to buffer forever.
+// out. The count limit alone is insufficient because notification payloads are
+// peer-controlled and can be large; the byte limit prevents a few large
+// diagnostics publishes from exhausting the heap before the count limit is
+// reached. Either limit turns overload into an explicit, observable failure —
+// the client is failed and closed — rather than unbounded protocol retention.
 func (c *Client) enqueueNotification(item notification) {
 	c.notifyMu.Lock()
 	if c.notifyClosed {
@@ -260,14 +267,20 @@ func (c *Client) enqueueNotification(item notification) {
 		c.notifyMu.Unlock()
 		return
 	}
-	if len(c.notifyQueue) >= notifyQueueLimit {
+	itemBytes := len(item.method) + len(item.params)
+	if len(c.notifyQueue) >= notifyQueueLimit || itemBytes > notifyQueueByteLimit-c.notifyBytes {
 		c.notifyMu.Unlock()
-		c.failPending(fmt.Errorf("lsp client: notification backlog exceeded %d messages", notifyQueueLimit))
+		c.failPending(fmt.Errorf(
+			"lsp client: notification backlog exceeded %d messages or %d bytes",
+			notifyQueueLimit,
+			notifyQueueByteLimit,
+		))
 		return
 	}
 	c.notifySeq++
 	item.seq = c.notifySeq
 	c.notifyQueue = append(c.notifyQueue, item)
+	c.notifyBytes += itemBytes
 	c.notifyMu.Unlock()
 
 	select {
@@ -298,6 +311,7 @@ func (c *Client) dequeueNotification() (notification, bool) {
 		return notification{}, false
 	}
 	item := c.notifyQueue[0]
+	c.notifyBytes -= len(item.method) + len(item.params)
 	c.notifyQueue[0] = notification{}
 	c.notifyQueue = c.notifyQueue[1:]
 	if len(c.notifyQueue) == 0 {
@@ -348,6 +362,7 @@ func (c *Client) closeNotifications() {
 	c.notifyMu.Lock()
 	c.notifyClosed = true
 	c.notifyQueue = nil
+	c.notifyBytes = 0
 	c.notifyMu.Unlock()
 }
 

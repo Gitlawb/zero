@@ -152,11 +152,11 @@ func (s *session) publishBaseline() int64 {
 
 // waitForDiagnostics blocks until a publish newer than baseline arrives for the
 // URI and the server then goes quiet for the debounce window, or until ctx is
-// done. It returns true when a fresh publish was observed and false when ctx
-// expired before any did — so a caller can avoid returning a stale prior result
-// for newer text. Servers don't signal "analysis complete", so the debounce
-// approximates it: once a fresh publish lands, wait debounce for a follow-up,
-// resetting on each new publish.
+// done or the client closes. It returns true when a fresh publish was observed
+// and false when the wait ended before any did — so a caller can avoid returning
+// a stale prior result for newer text. Servers don't signal "analysis complete",
+// so the debounce approximates it: once a fresh publish lands, wait debounce for
+// a follow-up, resetting on each new publish.
 func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce time.Duration, baseline int64) bool {
 	for {
 		s.mu.Lock()
@@ -171,6 +171,9 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 			case <-ctx.Done():
 				s.cancelWaiter(uri, ch)
 				return false // no fresh publish for this sync arrived in time
+			case <-s.client.closed:
+				s.cancelWaiter(uri, ch)
+				return false // the failed client cannot publish diagnostics now
 			case <-ch:
 				continue // a fresh publish arrived; loop into the debounce check
 			}
@@ -187,6 +190,10 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 			timer.Stop()
 			s.cancelWaiter(uri, ch)
 			return true // a fresh publish did arrive; ctx merely cut the debounce short
+		case <-s.client.closed:
+			timer.Stop()
+			s.cancelWaiter(uri, ch)
+			return true // preserve the fresh publish already received before failure
 		case <-ch:
 			timer.Stop()
 			continue // a newer publish arrived; re-arm the debounce
