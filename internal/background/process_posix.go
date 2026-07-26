@@ -40,13 +40,13 @@ func terminateProcess(pid int) error {
 	return execution.TerminateProcessTree(pid, terminationGracePeriod, terminationPollInterval)
 }
 
-// terminateOwnedProcess terminates cmd's process for a caller that launched it
-// through this package (ConfigureChildProcessGroup was called before Start), so
-// cmd.Process.Pid is known — from launch time — to be its own process-group
-// leader. It signals the group directly via execution.TerminateProcessGroup
-// rather than terminateProcess's TerminateProcessTree, whose Getpgid
-// rediscovery is fragile once the leader may have already exited (see
-// TerminateProcessGroup's doc comment for why).
+// terminateOwnedProcess terminates cmd's process group directly when its launch
+// configuration proves it was made a group leader. This avoids fragile Getpgid
+// rediscovery after an owned leader exits. Ordinary commands fall back to the
+// safe PID/tree path rather than assuming their PID is also a process-group ID.
 func terminateOwnedProcess(cmd *exec.Cmd) error {
-	return execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		return execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
+	}
+	return terminateProcess(cmd.Process.Pid)
 }

@@ -159,6 +159,25 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 	}
 }
 
+func TestTerminateCommandStopsUnconfiguredCommand(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+
+	if err := TerminateCommand(cmd); err != nil {
+		t.Fatalf("TerminateCommand: %v", err)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("unconfigured command was not reaped")
+	}
+}
+
 func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
 	grace, poll := terminationGracePeriod, terminationPollInterval
 	terminationGracePeriod, terminationPollInterval = 2*time.Second, 20*time.Millisecond

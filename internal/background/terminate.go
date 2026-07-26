@@ -22,8 +22,9 @@ func TerminateProcess(pid int) error {
 	return terminateProcess(pid)
 }
 
-// TerminateCommand stops a started command's process tree/group AND reaps the
-// leader, which TerminateProcess alone cannot do: a caller that still owns the
+// TerminateCommand stops a started command and reaps its leader. On POSIX it
+// stops the whole group when the command was configured as its leader; ordinary
+// commands safely fall back to PID/tree discovery. A caller that still owns the
 // exec.Cmd must Wait for it, or the exited leader lingers as a zombie for the
 // lifetime of the parent. `zero daemon start` needs exactly this when readiness
 // times out — it launched the child, so it must both stop the tree and collect
@@ -31,9 +32,8 @@ func TerminateProcess(pid int) error {
 //
 // The order matters: the tree is signalled first, because Wait releases the
 // leader's PID and a later group lookup could then resolve to nothing (or, worse,
-// to a recycled PID). Termination itself goes through terminateProcess, so this
-// package keeps ONE cross-platform kill path (execution.TerminateProcessTree)
-// rather than a second platform-specific killer beside it.
+// to a recycled PID). Termination stays in the shared execution lifecycle
+// primitives rather than introducing a second platform-specific killer.
 func TerminateCommand(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return errors.New("terminate command: process was never started")

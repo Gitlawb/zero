@@ -68,6 +68,9 @@ func TerminateProcessTree(pid int, grace, poll time.Duration) error {
 // that: the negative PID is used directly, regardless of whether the leader is
 // still alive to be looked up.
 func TerminateProcessGroup(pid int, grace, poll time.Duration) error {
+	if pid <= 1 {
+		return fmt.Errorf("refusing to signal invalid pid %d", pid)
+	}
 	return terminateTarget(pid, -pid, grace, poll)
 }
 
@@ -203,10 +206,14 @@ func processSignalTarget(pid int) (int, error) {
 		if pgid == pid {
 			target = -pid
 		}
-	} else if errors.Is(err, syscall.ESRCH) {
-		// Preserve the individual target; the signal call below treats ESRCH as
-		// already gone, which is a successful lifecycle outcome.
-		return pid, nil
+	} else {
+		if errors.Is(err, syscall.ESRCH) {
+			// Preserve the individual target; the signal call below treats ESRCH as
+			// already gone, which is a successful lifecycle outcome.
+			return pid, nil
+		}
+		// Conservatively retain the individual PID after other lookup failures;
+		// guessing and signalling a process group could affect unrelated processes.
 	}
 	return target, nil
 }
