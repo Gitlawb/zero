@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,118 @@ func TestReplaceWithRetryRetriesTransientLockViolation(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("attempts = %d, want the transient violations retried", attempts)
+	}
+}
+
+// TestReplaceFileFlagsDoNotIgnoreMergeErrors is the regression test for jatmn's
+// #757 P1 finding on flags: the call used to pass REPLACEFILE_IGNORE_MERGE_ERRORS
+// (0x2) while the comment claimed ACL failures were fail-closed. Microsoft
+// documents 0x2 and REPLACEFILE_IGNORE_ACL_ERRORS (0x4) identically — with either
+// one set, a call lacking WRITE_DAC "succeeds but the ACLs are not preserved" —
+// so passing 0x2 let a --force overwrite silently publish the temporary file's
+// inherited directory DACL over a restricted specialist and expose its system
+// prompt.
+//
+// This asserts the flag word directly rather than a live denied merge because a
+// denied merge is not constructible for a file this process owns: Windows grants
+// an object's owner READ_CONTROL and WRITE_DAC implicitly, so no DACL a test can
+// apply to its own temp file can withhold WRITE_DAC from it. Pinning the flags is
+// what actually prevents the regression — re-adding either bit fails here.
+func TestReplaceFileFlagsDoNotIgnoreMergeErrors(t *testing.T) {
+	const (
+		ignoreMergeErrors = 0x00000002
+		ignoreACLErrors   = 0x00000004
+	)
+	if replaceFileFlags&ignoreMergeErrors != 0 {
+		t.Error("REPLACEFILE_IGNORE_MERGE_ERRORS must not be set: it makes ReplaceFileW succeed WITHOUT preserving ACLs when it cannot obtain WRITE_DAC")
+	}
+	if replaceFileFlags&ignoreACLErrors != 0 {
+		t.Error("REPLACEFILE_IGNORE_ACL_ERRORS must not be set: it makes ReplaceFileW succeed WITHOUT preserving ACLs when it cannot obtain WRITE_DAC")
+	}
+}
+
+// TestRecoverPartialReplaceRescuesTheReplacement is the regression test for
+// jatmn's #757 second P1 finding. With no backup file, ReplaceFileW's 1176/1177
+// failures leave the DESTINATION DELETED and the replacement surviving only under
+// its temporary name. Returning those errors unrepaired let the caller's deferred
+// temp-file cleanup remove that sole surviving copy, so one failed
+// `specialist create --force` destroyed the old manifest AND the new one.
+func TestRecoverPartialReplaceRescuesTheReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code syscall.Errno
+	}{
+		{name: "ERROR_UNABLE_TO_MOVE_REPLACEMENT", code: errorUnableToMoveReplacement},
+		{name: "ERROR_UNABLE_TO_MOVE_REPLACEMENT_2", code: errorUnableToMoveReplacement2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, ".manifest.tmp")
+			dst := filepath.Join(dir, "manifest.md")
+			if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+				t.Fatalf("WriteFile src: %v", err)
+			}
+			// dst is deliberately absent: the documented post-failure state is that
+			// Windows has already removed (1176) or renamed away (1177) the
+			// destination while the replacement stayed put.
+
+			err := recoverPartialReplace(tc.code, src, dst)
+			if err == nil {
+				t.Fatal("recoverPartialReplace must still report the failure; the destination's security descriptor was lost with the destination")
+			}
+			if !errors.Is(err, tc.code) {
+				t.Fatalf("error = %v, want it to wrap %v", err, tc.code)
+			}
+			data, readErr := os.ReadFile(dst)
+			if readErr != nil {
+				t.Fatalf("the replacement was not recovered to the destination: %v", readErr)
+			}
+			if string(data) != "new" {
+				t.Fatalf("destination content = %q, want the replacement bytes", data)
+			}
+			// The replacement must no longer sit at its temporary name, so the
+			// caller's cleanup cannot delete the only copy of the new content.
+			if _, err := os.Lstat(src); !os.IsNotExist(err) {
+				t.Fatalf("the replacement should have been moved off its temporary name: %v", err)
+			}
+		})
+	}
+}
+
+// TestRecoverPartialReplaceLeavesIntactStatesAlone covers the other half of the
+// contract: for failures Microsoft documents as leaving "the replaced and
+// replacement files retain their original file names", the destination still
+// holds its original content, so the error must pass through untouched and the
+// temporary file must stay put for the caller's cleanup to remove.
+func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code syscall.Errno
+	}{
+		{name: "ERROR_UNABLE_TO_REMOVE_REPLACED", code: errorUnableToRemoveReplaced},
+		{name: "ERROR_ACCESS_DENIED", code: syscall.Errno(5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, ".manifest.tmp")
+			dst := filepath.Join(dir, "manifest.md")
+			if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+				t.Fatalf("WriteFile src: %v", err)
+			}
+			if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+				t.Fatalf("WriteFile dst: %v", err)
+			}
+
+			if err := recoverPartialReplace(tc.code, src, dst); !errors.Is(err, tc.code) {
+				t.Fatalf("error = %v, want the original %v unchanged", err, tc.code)
+			}
+			if data, err := os.ReadFile(dst); err != nil || string(data) != "old" {
+				t.Fatalf("destination = %q err=%v, want its original content untouched", data, err)
+			}
+			if _, err := os.Lstat(src); err != nil {
+				t.Fatalf("the temporary file must stay put for the caller to clean up: %v", err)
+			}
+		})
 	}
 }
 

@@ -177,6 +177,55 @@ func TestWriteSpecialistAtomicPropagatesDirectorySyncError(t *testing.T) {
 	assertNoTemporarySpecialistFiles(t, dir)
 }
 
+// TestWriteSpecialistAtomicKeepsAReplacementRecoveredByAFailedReplace pins the
+// caller-side contract that makes fsutil's partial-ReplaceFileW recovery work
+// (jatmn's #757 finding). With no backup file, ReplaceFileW's 1176/1177 failures
+// delete the destination and leave the replacement under its temporary name;
+// fsutil.recoverPartialReplace moves it into place and STILL reports the error.
+// That recovery only holds if this function's failure path leaves the recovered
+// destination alone — its deferred cleanup removes the temporary path, so a
+// future change removing `path` on error (or recreating/truncating it) would
+// silently re-destroy the sole surviving copy of the new content.
+//
+// Unlike the fsutil-side tests, this one does NOT fail against the pre-fix code:
+// it asserts a property of this caller, which the fix did not change. It is a
+// guard on the half of the contract that lives here. The replace primitive is
+// injected to stage the post-recovery shape (content published at path, error
+// returned) on every platform, since ReplaceFileW's partial failures cannot be
+// provoked for real.
+func TestWriteSpecialistAtomicKeepsAReplacementRecoveredByAFailedReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "safe.md")
+	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaceErr := errors.New("ReplaceFileW could not rename the replacement")
+	err := writeSpecialistAtomicWith(path, "new content", func(src, dst string) error {
+		// What recoverPartialReplace leaves behind: the destination Windows
+		// already removed, the replacement moved into its place, and the failure
+		// still reported because the destination's descriptor is gone.
+		if err := os.Remove(dst); err != nil {
+			t.Fatalf("simulate the destination Windows deleted: %v", err)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			t.Fatalf("simulate the recovery move: %v", err)
+		}
+		return replaceErr
+	}, func(string) error { return nil })
+
+	if !errors.Is(err, replaceErr) {
+		t.Fatalf("writeSpecialistAtomicWith error = %v, want it to report %v", err, replaceErr)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("the recovered replacement was deleted by the failure cleanup: %v", readErr)
+	}
+	if got := string(data); got != "new content" {
+		t.Fatalf("file content = %q, want the recovered replacement bytes", got)
+	}
+	assertNoTemporarySpecialistFiles(t, dir)
+}
+
 func assertNoTemporarySpecialistFiles(t *testing.T, dir string) {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, ".specialist-*.tmp"))
