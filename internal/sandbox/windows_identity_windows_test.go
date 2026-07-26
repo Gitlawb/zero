@@ -1,0 +1,247 @@
+//go:build windows
+
+package sandbox
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+// A local Windows account name is capped at 20 characters, so the derived name
+// must truncate rather than produce a name NetUserAdd rejects.
+func TestWindowsSandboxUserNameRespectsLengthLimit(t *testing.T) {
+	name := windowsSandboxUserName(strings.Repeat("a", 64))
+	if len(name) > windowsSandboxUserNameMax {
+		t.Fatalf("name %q is %d chars, want at most %d", name, len(name), windowsSandboxUserNameMax)
+	}
+	if !strings.HasPrefix(name, windowsSandboxUserPrefix) {
+		t.Fatalf("name %q lost the managed prefix", name)
+	}
+}
+
+// The same workspace must map to the same principal, otherwise re-running setup
+// would accumulate a new local account every time.
+func TestWindowsSandboxUserNameIsStable(t *testing.T) {
+	first := windowsSandboxUserName("abc123")
+	second := windowsSandboxUserName("abc123")
+	if first != second {
+		t.Fatalf("name is not stable: %q vs %q", first, second)
+	}
+	if other := windowsSandboxUserName("def456"); other == first {
+		t.Fatalf("different workspaces produced the same principal %q", first)
+	}
+}
+
+// The key is sanitised to characters a local account name accepts, so a hash or
+// path fragment cannot smuggle a separator or a space into the name.
+func TestWindowsSandboxUserNameRejectsUnsafeCharacters(t *testing.T) {
+	name := windowsSandboxUserName(`C:\Users\me\proj ect`)
+	for _, r := range strings.TrimPrefix(name, windowsSandboxUserPrefix) {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if !isLower && !isDigit {
+			t.Fatalf("name %q contains unsafe rune %q", name, r)
+		}
+	}
+	if name == windowsSandboxUserPrefix {
+		t.Fatal("sanitising removed every character, leaving a bare prefix")
+	}
+}
+
+// An empty or fully-sanitised-away key must still yield a usable name rather
+// than the bare prefix.
+func TestWindowsSandboxUserNameHandlesEmptyKey(t *testing.T) {
+	for _, key := range []string{"", "///", "   "} {
+		if got := windowsSandboxUserName(key); got == windowsSandboxUserPrefix {
+			t.Fatalf("key %q produced a bare prefix", key)
+		}
+	}
+}
+
+// The password must be fresh per call and carry the character classes a default
+// Windows complexity policy demands, or NetUserAdd fails with ERROR_PASSWORD_RESTRICTION.
+func TestNewWindowsSandboxPasswordIsRandomAndComplex(t *testing.T) {
+	first, err := newWindowsSandboxPassword()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	second, err := newWindowsSandboxPassword()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if first == second {
+		t.Fatal("two generated passwords are identical, so they are not random")
+	}
+	if len(first) < 12 {
+		t.Fatalf("password is only %d chars", len(first))
+	}
+	var hasUpper, hasLower, hasDigit bool
+	for _, r := range first {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasUpper || !hasLower || !hasDigit {
+		t.Fatalf("password %q lacks a required character class", first)
+	}
+}
+
+// "Already exists" is the normal result of re-running setup and must not surface
+// as an error, while a genuine failure must.
+func TestNetAPIStatusTreatsExistingAsSuccess(t *testing.T) {
+	if err := netAPIStatus("NetUserAdd", nerrSuccess); err != nil {
+		t.Fatalf("success status returned %v", err)
+	}
+	if err := netAPIStatus("NetUserAdd", nerrUserExists, nerrUserExists); err != nil {
+		t.Fatalf("existing user must be success, got %v", err)
+	}
+	if err := netAPIStatus("NetLocalGroupAdd", nerrGroupExists, nerrGroupExists, errorAliasExists); err != nil {
+		t.Fatalf("existing group must be success, got %v", err)
+	}
+	if err := netAPIStatus("NetUserAdd", 2245); err == nil {
+		t.Fatal("an unexpected status must surface as an error")
+	}
+}
+
+// Access-denied is the status an unelevated run gets, and it must say so rather
+// than reporting a bare number the user cannot act on.
+func TestNetAPIStatusExplainsAccessDenied(t *testing.T) {
+	err := netAPIStatus("NetUserAdd", errorAccessDenied32)
+	if err == nil {
+		t.Fatal("access denied must be an error")
+	}
+	if !strings.Contains(err.Error(), "elevated") {
+		t.Fatalf("error %q should point at elevation", err)
+	}
+}
+
+// The Win32 structs are passed to netapi32 as raw buffers, so their layout must
+// match what the API expects. A wrong size means silent memory corruption.
+func TestWindowsIdentityStructLayouts(t *testing.T) {
+	ptr := unsafe.Sizeof(uintptr(0))
+	if got, want := unsafe.Sizeof(localGroupMembersInfo3{}), ptr; got != want {
+		t.Fatalf("LOCALGROUP_MEMBERS_INFO_3 size = %d, want %d", got, want)
+	}
+	if got, want := unsafe.Sizeof(localGroupInfo1{}), 2*ptr; got != want {
+		t.Fatalf("LOCALGROUP_INFO_1 size = %d, want %d", got, want)
+	}
+	// USER_INFO_1 is four pointers plus three DWORDs, with the compiler padding
+	// each DWORD pair up to pointer alignment on amd64.
+	if got := unsafe.Sizeof(userInfo1{}); got < 4*ptr {
+		t.Fatalf("USER_INFO_1 size = %d, smaller than its four pointer fields", got)
+	}
+	if unsafe.Offsetof(userInfo1{}.Password) != ptr {
+		t.Fatal("USER_INFO_1.Password must directly follow Name")
+	}
+}
+
+// LSA_UNICODE_STRING counts BYTES, not runes, and excludes the NUL terminator
+// from Length while including it in MaximumLength. Getting either wrong makes
+// LsaAddAccountRights read past the buffer or silently match no right, so pin it.
+func TestNewLSAStringUsesByteLengths(t *testing.T) {
+	buffer, err := windows.UTF16FromString("SeBatchLogonRight")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	entry := newLSAString(buffer)
+	const runes uint16 = uint16(len("SeBatchLogonRight"))
+	if entry.Length != runes*2 {
+		t.Fatalf("Length = %d, want %d (bytes, excluding NUL)", entry.Length, runes*2)
+	}
+	if entry.MaximumLength != (runes+1)*2 {
+		t.Fatalf("MaximumLength = %d, want %d (bytes, including NUL)", entry.MaximumLength, (runes+1)*2)
+	}
+	if entry.Buffer == nil {
+		t.Fatal("Buffer must point at the encoded string")
+	}
+}
+
+// An empty buffer must not produce a struct pointing at nothing with a nonzero
+// length, which would hand LSA a wild pointer.
+func TestNewLSAStringHandlesEmptyBuffer(t *testing.T) {
+	entry := newLSAString(nil)
+	if entry.Buffer != nil || entry.Length != 0 || entry.MaximumLength != 0 {
+		t.Fatalf("empty buffer produced %+v, want a zero value", entry)
+	}
+}
+
+// The LSA structs are passed to advapi32 as raw buffers, so their sizes must
+// match the Win32 definitions.
+func TestLSAStructLayouts(t *testing.T) {
+	ptr := unsafe.Sizeof(uintptr(0))
+	// LSA_UNICODE_STRING: two uint16 then a pointer, padded to pointer alignment.
+	if got, want := unsafe.Sizeof(lsaUnicodeString{}), 2*ptr; got != want {
+		t.Fatalf("LSA_UNICODE_STRING size = %d, want %d", got, want)
+	}
+	if unsafe.Offsetof(lsaUnicodeString{}.Buffer) != ptr {
+		t.Fatal("LSA_UNICODE_STRING.Buffer must sit at the second pointer slot")
+	}
+	var attributes lsaObjectAttributes
+	if unsafe.Sizeof(attributes) < 6*ptr-ptr {
+		t.Fatalf("LSA_OBJECT_ATTRIBUTES size = %d, smaller than its fields", unsafe.Sizeof(attributes))
+	}
+	if unsafe.Offsetof(attributes.ObjectName) == 0 {
+		t.Fatal("LSA_OBJECT_ATTRIBUTES.ObjectName must not alias Length")
+	}
+}
+
+// Provisioning creates real local accounts, so it only runs when explicitly
+// opted into on an elevated machine. Everything above covers the logic that can
+// be exercised without touching the account database.
+func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
+	if os.Getenv("ZERO_WINDOWS_IDENTITY_PROVISION_TEST") != "1" {
+		t.Skip("set ZERO_WINDOWS_IDENTITY_PROVISION_TEST=1 on an elevated machine to exercise real provisioning")
+	}
+	if !windowsProcessIsElevated() {
+		t.Skip("provisioning requires an elevated process")
+	}
+	identity, password, err := provisionWindowsSandboxIdentity("ziptest01")
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if identity.SID == nil {
+		t.Fatal("provisioned identity has no SID")
+	}
+	if password == "" {
+		t.Fatal("provisioning returned an empty password")
+	}
+	// Re-running must converge on the same principal rather than failing or
+	// creating a second account.
+	again, _, err := provisionWindowsSandboxIdentity("ziptest01")
+	if err != nil {
+		t.Fatalf("second provision: %v", err)
+	}
+	if again.Username != identity.Username || !again.SID.Equals(identity.SID) {
+		t.Fatalf("provisioning is not idempotent: %s then %s", identity, again)
+	}
+	// Lookup must find what provisioning created.
+	found, err := lookupWindowsSandboxIdentity("ziptest01")
+	if err != nil {
+		t.Fatalf("lookup after provision: %v", err)
+	}
+	if !found.SID.Equals(identity.SID) {
+		t.Fatalf("lookup returned %s, want %s", found, identity)
+	}
+}
+
+// A workspace with no provisioned principal must report the actionable
+// "run setup" error rather than a raw lookup failure, so the command path can
+// fall back instead of surfacing a Win32 code.
+func TestLookupWindowsSandboxIdentityUnprovisioned(t *testing.T) {
+	_, err := lookupWindowsSandboxIdentity("nosuchworkspacekey9z")
+	if err == nil {
+		t.Skip("a principal for this key unexpectedly exists on this machine")
+	}
+	if err != errWindowsSandboxIdentityUnavailable {
+		t.Fatalf("error = %v, want errWindowsSandboxIdentityUnavailable", err)
+	}
+}
