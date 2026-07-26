@@ -163,10 +163,6 @@ func (s *Swarm) Close() {
 		s.closed = true
 		s.mu.Lock()
 		sched := s.scheduler
-		teams := make([]*Team, 0, len(s.teams))
-		for _, team := range s.teams {
-			teams = append(teams, team)
-		}
 		s.mu.Unlock()
 		s.lifecycleMu.Unlock()
 
@@ -178,12 +174,16 @@ func (s *Swarm) Close() {
 		}
 		// Wait for every already-admitted lifecycle operation (spawn, handoff,
 		// adoption, retry, queue drain) to finish BEFORE sweeping queues below.
-		// dispatchAdmitted appends to a team's queue (t.admit), when it queues at
-		// all, strictly before its caller releases its ticket — so once every
-		// ticket is back, no queue can gain a new entry, and clearing it now can't
-		// race a late append that would otherwise sit stranded forever (never
-		// launched, never failed) because this sweep already ran.
+		// Such work can create teams as well as append to their queues, so snapshot
+		// the teams only after every ticket is back. At that point no team or queue
+		// can gain a new entry, and the sweep cannot miss late-admitted work.
 		s.lifecycleWork.Wait()
+		s.mu.Lock()
+		teams := make([]*Team, 0, len(s.teams))
+		for _, team := range s.teams {
+			teams = append(teams, team)
+		}
+		s.mu.Unlock()
 		for _, team := range teams {
 			for _, spec := range team.clearQueue() {
 				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())

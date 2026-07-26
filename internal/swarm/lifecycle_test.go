@@ -592,46 +592,37 @@ func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
 	}
 }
 
-// TestCloseFailsLateQueuedSpec is the regression test for jatmn's first #776
-// finding on the ticket-based design: Close used to sweep (clearQueue) every
-// team's queue BEFORE waiting for admitted-but-in-flight lifecycle operations to
-// finish. A Spawn/Handoff/AdoptOrphans call that obtained its ticket right
-// before closed flipped could still be paused before it reached
-// dispatchAdmitted (the queue append) — and once it resumed after the sweep had
-// already run, its spec would sit in the queue forever: never launched (shutdown
-// had begun) and never failed (the one-time sweep had already passed).
+// TestCloseFailsQueuedSpecOnLateCreatedTeam is the regression test for queue
+// sweeping after shutdown begins. Spawn/Handoff/AdoptOrphans calls that obtained
+// tickets before closed flipped can still create a team and append to its queue.
+// Close must wait for those calls before both snapshotting teams and sweeping
+// their queues, or a late-created team's queued task remains pending forever.
 //
-// This drives that exact interleaving directly: it holds a ticket open past the
-// point where Close has flipped closed and would (with the bug) already have
-// swept the queue, appends a spec to a full team's queue while still holding
-// that ticket, and only then releases it. Close must not have swept yet — the
-// late append must still get failed with ErrSwarmClosed, not stranded.
-func TestCloseFailsLateQueuedSpec(t *testing.T) {
+// This drives that interleaving directly: two operations obtain tickets before
+// Close, then the first creates and fills a previously unseen one-slot team and
+// the second queues behind it after Close has flipped closed.
+func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
 	l := &ignoresCancelLauncher{hold: make(chan struct{})}
-	sw := newSwarmFor(t, l) // MaxTeamSize 2
+	sw := newSwarmFor(t, l)
+	sw.maxTeamSize = 1
 
-	// Fill both slots so a further admission queues instead of launching. This
-	// launcher ignores ctx cancellation, so Close's cancel() (which fires well
-	// before this test releases hold) can't unblock these two early and free a
-	// slot the late admission below needs to stay queued.
-	for i := 0; i < 2; i++ {
-		if _, err := sw.Spawn(Policy{}, "team", "teammate", "task", ""); err != nil {
-			t.Fatalf("Spawn %d: %v", i, err)
-		}
-	}
-	team := sw.team("team")
-	waitFor(t, "both slots running", func() bool { return team.Running() == 2 })
-
-	// Simulate a Spawn call that got its ticket just before Close began, but
-	// hasn't reached dispatchAdmitted (the queue append) yet.
-	release, err := sw.beginLifecycleAdmission()
-	if err != nil {
-		t.Fatalf("beginLifecycleAdmission: %v", err)
+	if _, err := sw.coord.Register("running-task", "running-agent", "team", "running work"); err != nil {
+		t.Fatalf("Register running task: %v", err)
 	}
 	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("Register late task: %v", err)
 	}
-	spec := MemberSpec{ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team"}
+	firstRelease, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		t.Fatalf("first beginLifecycleAdmission: %v", err)
+	}
+	secondRelease, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		firstRelease()
+		t.Fatalf("second beginLifecycleAdmission: %v", err)
+	}
+	runningSpec := MemberSpec{ID: "running-agent", TaskID: "running-task", AgentType: "teammate", Team: "team"}
+	queuedSpec := MemberSpec{ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team"}
 
 	closed := make(chan struct{})
 	go func() {
@@ -649,11 +640,14 @@ func TestCloseFailsLateQueuedSpec(t *testing.T) {
 	default:
 	}
 
-	// The delayed append this ticket was holding open for. Slots are still full
-	// (hold hasn't been released), so this queues rather than launches.
-	sw.dispatchAdmitted(spec)
-	release()
-	close(l.hold) // let the two filler members (and their watchers) finish
+	// Neither dispatch ran before Close took its old, buggy team snapshot. The
+	// first creates the team and fills its only slot; the second queues.
+	sw.dispatchAdmitted(runningSpec)
+	firstRelease()
+	sw.dispatchAdmitted(queuedSpec)
+	secondRelease()
+	team := sw.team("team")
+	close(l.hold)
 
 	select {
 	case <-closed:
