@@ -42,16 +42,20 @@ var errProviderCommandTimeout = errors.New("provider command timeout")
 
 func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, error) {
 	cmd := shellCommand(command)
-	configureCommandProcess(cmd)
+	// Bound the time Wait spends draining I/O pipes after the process exits,
+	// in case an orphaned descendant still holds the write ends open.
+	cmd.WaitDelay = time.Second
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Start(); err != nil {
+	proc, err := startCommandProcess(cmd)
+	if err != nil {
 		return nil, nil, err
 	}
+	defer proc.Close()
 
 	done := make(chan error, 1)
 	go func() {
@@ -63,9 +67,21 @@ func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, 
 
 	select {
 	case err := <-done:
+		if err != nil {
+			// The shell exited (whether via ErrWaitDelay because a
+			// background descendant kept the inherited stdout/stderr pipes
+			// open, or via a nonzero exit status) but a leftover descendant
+			// may still be running. Terminate is a no-op against an
+			// already-dead tree, so always call it rather than gating on
+			// the specific error to avoid leaking that descendant.
+			proc.Terminate()
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return stdout.Bytes(), stderr.Bytes(), errProviderCommandTimeout
+		}
 		return stdout.Bytes(), stderr.Bytes(), err
 	case <-timer.C:
-		terminateCommandProcess(cmd)
+		proc.Terminate()
 		<-done
 		return stdout.Bytes(), stderr.Bytes(), errProviderCommandTimeout
 	}

@@ -69,10 +69,6 @@ func gitMetadataWriteCarveouts(root string) []string {
 	}
 }
 
-func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
-	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
-}
-
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()

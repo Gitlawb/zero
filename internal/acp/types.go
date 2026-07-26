@@ -103,10 +103,6 @@ type ContentBlock struct {
 
 func TextBlock(text string) ContentBlock { return ContentBlock{Type: "text", Text: text} }
 
-func ImageBlock(base64Data, mimeType string) ContentBlock {
-	return ContentBlock{Type: "image", Data: base64Data, MimeType: mimeType}
-}
-
 // ---- sessions ----
 
 // McpServer mirrors the editor-provided MCP server entry. ZERO owns its own MCP
@@ -231,10 +227,6 @@ type ToolCallContent struct {
 
 func ToolContent(block ContentBlock) ToolCallContent {
 	return ToolCallContent{Type: "content", Content: &block}
-}
-
-func ToolDiff(path, oldText, newText string) ToolCallContent {
-	return ToolCallContent{Type: "diff", Path: path, OldText: oldText, NewText: newText}
 }
 
 type ToolCallLocation struct {

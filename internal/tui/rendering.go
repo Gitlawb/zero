@@ -1131,7 +1131,13 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 	lines := []string{top, body}
 	if reason := permissionDisplayReason(request.Reason); reason != "" {
-		lines = append(lines, fill(zeroTheme.muted).Render(reason))
+		reasonWidth := width
+		if widthTier(width) != tierTiny {
+			reasonWidth = maxInt(1, width-4)
+		}
+		for _, line := range wrapPlainText(reason, reasonWidth) {
+			lines = append(lines, fill(zeroTheme.muted).Render(line))
+		}
 	}
 	// Surface exactly what the grant covers (file/dir/host) so "always" is a
 	// clear, bounded choice rather than a blind tool-wide yes.

@@ -203,11 +203,24 @@ func dedupeScopeRoots(roots []string) []string {
 // only on outside_workspace results. The returned block always carries
 // the caller's original requestedPath.
 func (s *Scope) validate(requestedPath string) *pathBlock {
-	return s.validateAgainstRoots(requestedPath, s.Roots())
+	return withOutsideWorkspaceAccessReason(s.validateAgainstRoots(requestedPath, s.Roots()), requestedPath, SideEffectWrite)
 }
 
 func (s *Scope) validateRead(requestedPath string) *pathBlock {
-	return s.validateAgainstRoots(requestedPath, s.ReadRoots())
+	return withOutsideWorkspaceAccessReason(s.validateAgainstRoots(requestedPath, s.ReadRoots()), requestedPath, SideEffectRead)
+}
+
+func withOutsideWorkspaceAccessReason(block *pathBlock, requestedPath string, sideEffect SideEffect) *pathBlock {
+	if block == nil || block.Code != BlockOutsideWorkspace || !strings.Contains(block.Reason, " is outside the workspace") {
+		return block
+	}
+	switch sideEffect {
+	case SideEffectRead:
+		block.Reason = fmt.Sprintf("Reading %s requires access outside the workspace.", requestedPath)
+	case SideEffectWrite, SideEffectOutOfWorkspace:
+		block.Reason = fmt.Sprintf("Writing to %s requires access outside the workspace. Use /add-dir or --add-dir to allow writes there.", requestedPath)
+	}
+	return block
 }
 
 func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *pathBlock {
