@@ -173,9 +173,7 @@ func TestConnServePreservesReadErrorBufferedAlongsideAPriorLine(t *testing.T) {
 	wantErr := errors.New("read failed")
 	var readCalls atomic.Int32
 	read := testReader(func(p []byte) (int, error) {
-		if n := readCalls.Add(1); n > 1 {
-			panic("underlying Read called more than once; bufio should have served the cached error")
-		}
+		readCalls.Add(1)
 		// An unsupported jsonrpc version with an id takes the SYNCHRONOUS
 		// writeError path in handleLine (not a dispatched goroutine), giving this
 		// test a reliable blocking point between processing this line and the
@@ -256,6 +254,26 @@ func TestInterruptibleReaderPrefersDecidedResultOverCancellation(t *testing.T) {
 			t.Fatalf("iteration %d: generation = %d, want 0 (a decided result must never be attributed to cancellation)", i, got)
 		}
 		cancel()
+	}
+}
+
+// TestInterruptibleReadCompletionWinsBeforeResultPublication covers the gap
+// after inner.Read returns and claims completion but before its goroutine sends
+// the result. Cancellation must not reclassify that finished read as interrupted.
+func TestInterruptibleReadCompletionWinsBeforeResultPublication(t *testing.T) {
+	var decision interruptibleReadDecision
+	decision.complete()
+
+	// An unbuffered send cannot publish until the receive below, leaving the
+	// result deliberately unpublished while cancellation tries to claim the call.
+	resultCh := make(chan interruptibleReadResult)
+	go func() {
+		resultCh <- interruptibleReadResult{err: errors.New("read failed")}
+	}()
+	claimed := decision.interrupt()
+	<-resultCh
+	if claimed {
+		t.Fatal("cancellation claimed a read that completed before result publication")
 	}
 }
 

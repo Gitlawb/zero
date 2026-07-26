@@ -220,30 +220,41 @@ type interruptibleReadResult struct {
 	err error
 }
 
+// interruptibleReadDecision arbitrates whether an underlying Read completed or
+// cancellation claimed it first. Completion is recorded before the result is
+// published so cancellation cannot misclassify a finished read merely because
+// its goroutine has not sent the result yet.
+type interruptibleReadDecision struct {
+	once sync.Once
+}
+
+func (d *interruptibleReadDecision) complete() { d.once.Do(func() {}) }
+
+func (d *interruptibleReadDecision) interrupt() (claimed bool) {
+	d.once.Do(func() { claimed = true })
+	return claimed
+}
+
 func (r *interruptibleReader) Read(p []byte) (int, error) {
 	resultCh := make(chan interruptibleReadResult, 1)
+	var decision interruptibleReadDecision
 	go func() {
 		n, err := r.inner.Read(p)
+		decision.complete()
 		resultCh <- interruptibleReadResult{n, err}
 	}()
 	select {
 	case res := <-resultCh:
 		return res.n, res.err
 	case <-r.ctx.Done():
-		// select chooses pseudo-randomly among ready cases: resultCh may already
-		// hold the real, decided outcome even though ctx.Done() became ready at
-		// essentially the same moment (e.g. a terminal transport error racing
-		// cancellation). Re-check it non-blockingly before claiming this call for
-		// cancellation — only a call whose result truly wasn't ready yet may be
-		// attributed to the ctx.Done() branch below.
-		select {
-		case res := <-resultCh:
-			return res.n, res.err
-		default:
-		}
-		r.gen.Add(1)
-		if r.closer != nil {
-			r.closeOnce.Do(func() { _ = r.closer.Close() })
+		// resultCh may not be readable yet even when inner.Read has returned: its
+		// goroutine can be descheduled between recording completion and publishing
+		// the result. Only interrupt a call that cancellation actually claims.
+		if decision.interrupt() {
+			r.gen.Add(1)
+			if r.closer != nil {
+				r.closeOnce.Do(func() { _ = r.closer.Close() })
+			}
 		}
 		// Wait for the real result rather than returning synthetically: p is
 		// still being written by the goroutine above until it does, so returning
