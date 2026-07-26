@@ -126,6 +126,51 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	return identity, nil
 }
 
+// setupWindowsSandboxPrincipal provisions this workspace's principal and grants
+// it the filesystem access its permission profile describes. It returns a
+// rollback that undoes everything it created, so a later setup step failing does
+// not leave a half-provisioned account behind.
+//
+// Rollback order is the inverse of creation and matters: ACEs are revoked BEFORE
+// the account is deleted, because removing the account first would leave ACEs
+// naming a SID that no longer resolves, which is the orphaned-entry residue this
+// model exists to avoid.
+func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() error, error) {
+	identity, err := provisionWindowsSandboxPrincipalForSetup(config)
+	if err != nil {
+		return nil, err
+	}
+	removePrincipal := func() error { return removeWindowsSandboxPrincipalForSetup(config) }
+
+	filesystem := config.PermissionProfile.FileSystem
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: identity.SID.String(),
+		WriteRoots:   filesystem.WriteRoots,
+		ReadRoots:    filesystem.ReadRoots,
+		DenyRead:     filesystem.DenyRead,
+	})
+	if err != nil {
+		_ = removePrincipal()
+		return nil, err
+	}
+	revertACL, err := applyWindowsACLPlan(plan)
+	if err != nil {
+		_ = removePrincipal()
+		return nil, err
+	}
+	return func() error {
+		aclErr := revertACL()
+		// Remove the principal even when the ACL revert failed, so a broken
+		// rollback does not also strand an account; report the ACL error since it
+		// is the one that leaves state behind.
+		removeErr := removePrincipal()
+		if aclErr != nil {
+			return aclErr
+		}
+		return removeErr
+	}, nil
+}
+
 // removeWindowsSandboxPrincipalForSetup retires a workspace's principal: secret
 // first, then the account. ACE revocation is the caller's job and must happen
 // before this, or ACEs naming a deleted SID are left behind.
