@@ -365,6 +365,41 @@ func TestLinuxBwrapKeepsCarveoutsReachableInsideMaskedDir(t *testing.T) {
 	}
 }
 
+func TestLinuxBwrapDoesNotBindSymlinkCarveout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	root := t.TempDir()
+	credentialDir := filepath.Join(root, "config", "zero")
+	if err := os.MkdirAll(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(credentialDir, "oauth-tokens.json")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.Symlink(secret, pluginRoot); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{string(filepath.Separator)},
+			WriteRoots:        []WritableRoot{{Root: root}},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", credentialDir, "--remount-ro", credentialDir)
+	if argsContainSequence(plan.Args, "--ro-bind", pluginRoot, pluginRoot) || argsContainSequence(plan.Args, "--ro-bind", secret, secret) {
+		t.Fatalf("symlink carveout was rebound into credential mask: %#v", plan.Args)
+	}
+}
+
 func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

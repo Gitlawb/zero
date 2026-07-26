@@ -547,6 +547,41 @@ func TestSeatbeltProfileRendersCredentialBaselineAndCarveouts(t *testing.T) {
 	}
 }
 
+func TestSeatbeltProfileDoesNotRenderSymlinkCarveout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	if err := os.MkdirAll(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(credentialDir, "oauth-tokens.json")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := filepath.Join(credentialDir, "plugins")
+	if err := os.Symlink(secret, pluginRoot); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:              FileSystemRestricted,
+			ReadRoots:         []string{"/"},
+			DenyReadIfExists:  []string{credentialDir},
+			DenyReadCarveouts: []string{pluginRoot},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	for _, path := range []string{pluginRoot, secret, normalizeProfilePath(pluginRoot), normalizeProfilePath(secret)} {
+		allow := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(path) + `"))`
+		if strings.Contains(sbpl, allow) {
+			t.Fatalf("Seatbelt profile re-allowed symlink carveout path %q:\n%s", path, sbpl)
+		}
+	}
+}
+
 // TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
 // git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
 // default profile must stop write-denying the whole .git tree and only carve

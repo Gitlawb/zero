@@ -802,7 +802,8 @@ func denyReadRules(fs FileSystemPolicy) []string {
 // exclusively from Zero's own config directory (never from a user-configured
 // DenyRead root), so no user deny is weakened here.
 func denyReadCarveoutRules(fs FileSystemPolicy) []string {
-	resolved := normalizeProfilePaths(fs.DenyReadCarveouts)
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	resolved := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
 	if len(resolved) == 0 {
 		return nil
 	}

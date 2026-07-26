@@ -279,11 +279,9 @@ func buildLinuxBwrapFilesystemPlan(profile PermissionProfile) linuxBwrapFilesyst
 	for _, path := range fs.DenyRead {
 		args = appendUnreadableLinuxPathArgs(args, path, fs.DenyReadCarveouts)
 	}
-	// Zero owns these directories, so create the ones that are missing before the
-	// namespace is assembled: bubblewrap cannot mount over an absent path, and a
-	// directory that appears afterwards (a concurrent login writing a token
-	// store) would otherwise be readable through the live read-only host bind for
-	// the rest of a long-lived sandbox session.
+	// The profile includes only trusted, process-environment-derived directories
+	// here. Command-controlled credential roots remain deny-if-present and must
+	// never cause host filesystem mutations before sandbox launch.
 	ensureLinuxDenyReadDirs(fs.EnsureDenyReadDirs)
 	for _, path := range fs.DenyReadIfExists {
 		if !pathExists(path) {
@@ -391,7 +389,7 @@ func appendUnreadableLinuxPathArgs(args []string, path string, carveouts []strin
 	// --remount-ro, which is what freezes the tmpfs.
 	args = append(args, "--perms", "111", "--tmpfs", path)
 	for _, carveout := range nested {
-		if pathExists(carveout) {
+		if info, err := os.Lstat(carveout); err == nil && info.IsDir() {
 			args = append(args, "--ro-bind", carveout, carveout)
 		}
 	}
@@ -404,23 +402,14 @@ func nestedCarveoutPaths(root string, carveouts []string) []string {
 	if len(carveouts) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(carveouts))
-	for _, carveout := range carveouts {
-		carveout = strings.TrimSpace(carveout)
-		if carveout == "" || carveout == root {
-			continue
-		}
-		if pathWithinRoot(root, carveout) {
-			out = append(out, carveout)
-		}
-	}
+	out := credentialCarveoutPaths([]string{root}, carveouts)
 	sort.SliceStable(out, func(i, j int) bool { return pathDepth(out[i]) < pathDepth(out[j]) })
 	return dedupeStrings(out)
 }
 
-// ensureLinuxDenyReadDirs creates the Zero-owned directories a deny mask needs
-// to exist for. Best effort: a failure just leaves the path unmasked, exactly as
-// before, and never blocks the command.
+// ensureLinuxDenyReadDirs creates trusted Zero-process directories a deny mask
+// needs to exist for. Best effort: a failure leaves the path unmasked and never
+// blocks the command.
 func ensureLinuxDenyReadDirs(dirs []string) {
 	for _, dir := range dirs {
 		dir = strings.TrimSpace(dir)

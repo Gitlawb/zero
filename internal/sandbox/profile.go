@@ -115,9 +115,7 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	}
 	userDenyRead := normalizeProfilePaths(policy.DenyRead)
 	credentials := credentialDenyReadPaths(policy, credentialCommandDir, credentialEnv)
-	// A carveout re-includes reads, so it must never reach inside a path the USER
-	// denied: their configuration outranks Zero's automatic baseline.
-	credentials.Carveouts = pathsOutsideRoots(credentials.Carveouts, userDenyRead)
+	credentials = finalizeCredentialDenyPaths(credentials, userDenyRead)
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
@@ -173,13 +171,14 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 }
 
 // credentialDenyPaths is the credential baseline a profile derives from the
-// environment: the paths to deny reads on, the non-secret subtrees that stay
-// readable inside them, and the Zero-owned directories a mount-based backend
-// may create so its mask actually exists.
+// environment: the paths to deny reads on, the known directory paths among
+// them, the trusted non-secret subtrees that stay readable, and the trusted
+// Zero-owned directories a mount-based backend may create so its mask exists.
 type credentialDenyPaths struct {
 	Paths      []string
 	Carveouts  []string
 	EnsureDirs []string
+	Dirs       []string
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
@@ -197,9 +196,9 @@ type credentialDenyPaths struct {
 //   - Candidates are emitted whether or not they currently exist on disk.
 //     Pathname-policy backends such as Seatbelt can enforce future paths;
 //     mount-based Linux masks a path only if it exists when the namespace is
-//     assembled, which is why the directories Zero owns are also reported as
-//     EnsureDirs (the backend creates them, so the mask is always present) and
-//     why third-party stores such as ~/.aws stay best-effort there.
+//     assembled, which is why directories derived from Zero's own process
+//     environment are also reported as EnsureDirs (command-controlled roots
+//     never are) and why third-party stores such as ~/.aws stay best-effort.
 //   - Zero's own config directory is denied WHOLE, with the supported
 //     non-secret subtrees carved back out. Only a directory-level rule covers
 //     the temporary names its stores publish through and the files a concurrent
@@ -214,8 +213,37 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 	if runtime.GOOS == "windows" {
 		return credentialDenyPaths{}
 	}
-	options := credentialPathOptionsFromEnvironment(commandDir, commandEnv)
-	return credentialDenyReadPathsIn(options, policy.AllowRead)
+
+	// Only roots derived from Zero's own process environment may produce
+	// carveouts or host directories. CommandSpec.Env can contain project-controlled
+	// MCP environment overrides, so it contributes deny-if-present paths only.
+	processBaseDirs := credentialProcessBaseDirs()
+	trusted := credentialDenyReadPathsIn(
+		credentialPathOptionsFromEnvironment(processBaseDirs, os.Environ()),
+		policy.AllowRead,
+	)
+	appendUntrusted := func(options credentialPathOptions) {
+		paths := credentialDenyReadPathsIn(options, policy.AllowRead)
+		trusted.Paths = append(trusted.Paths, paths.Paths...)
+		trusted.Dirs = append(trusted.Dirs, paths.Dirs...)
+	}
+	commandBaseDirs := credentialCommandBaseDirs(commandDir)
+	if len(commandBaseDirs) > 0 {
+		// A nested Zero inherits the process environment but resolves relative
+		// values from the sandboxed command's cwd.
+		appendUntrusted(credentialPathOptionsFromEnvironment(commandBaseDirs, os.Environ()))
+	}
+	if commandEnv != nil {
+		// A supplied environment may also be consumed by code in the running Zero
+		// process before exec, so conservatively deny both process- and
+		// command-relative resolutions. These remain untrusted: neither resolution
+		// contributes carveouts or host directory creation.
+		baseDirs := dedupeStrings(append(append([]string{}, processBaseDirs...), commandBaseDirs...))
+		appendUntrusted(credentialPathOptionsFromEnvironment(baseDirs, commandEnv))
+	}
+	trusted.Paths = dedupeStrings(trusted.Paths)
+	trusted.Dirs = dedupeStrings(trusted.Dirs)
+	return trusted
 }
 
 // zeroConfigReadCarveoutNames are the supported non-secret subtrees of
@@ -226,32 +254,25 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 // files directly under <configDir>/zero, not in these subtrees.
 var zeroConfigReadCarveoutNames = []string{"plugins", "specialists", "commands"}
 
-// credentialOverrideBaseDirs returns the directories a RELATIVE credential
-// override is resolved against, most authoritative first.
-//
-// The stores themselves call filepath.Abs (oauth.ResolveStorePath,
-// mcp.ResolveTokenStorePath), i.e. they resolve against the Zero PROCESS
-// working directory, so that is the path that must be denied. The command
-// directory is kept as a second candidate because a sandboxed child (including
-// a nested Zero) resolves the inherited value against its own cwd instead.
-// Denying both costs two rules and closes the mismatch in either direction.
-func credentialOverrideBaseDirs(commandDir string) []string {
-	var dirs []string
+// credentialProcessBaseDirs returns the directory the running Zero process uses
+// to resolve relative credential overrides.
+func credentialProcessBaseDirs() []string {
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		dirs = append(dirs, filepath.Clean(cwd))
+		return []string{filepath.Clean(cwd)}
 	}
-	if dir := strings.TrimSpace(commandDir); dir != "" {
-		dirs = append(dirs, filepath.Clean(dir))
-	}
-	return dedupeStrings(dirs)
+	return nil
 }
 
-func credentialPathOptionsFromEnvironment(commandDir string, commandEnv []string) credentialPathOptions {
-	env := commandEnv
-	if env == nil {
-		env = os.Environ()
+// credentialCommandBaseDirs returns the directory a sandboxed child (including
+// a nested Zero) uses to resolve inherited relative credential overrides.
+func credentialCommandBaseDirs(commandDir string) []string {
+	if dir := strings.TrimSpace(commandDir); dir != "" {
+		return []string{filepath.Clean(dir)}
 	}
-	baseDirs := credentialOverrideBaseDirs(commandDir)
+	return nil
+}
+
+func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) credentialPathOptions {
 	homes := resolveCredentialOverridePaths(credentialEnvValue(env, "HOME"), baseDirs)
 	if len(homes) == 0 {
 		homes = resolveCredentialOverridePaths(credentialEnvValue(env, "USERPROFILE"), baseDirs)
@@ -302,15 +323,18 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	var candidates []string
 	var carveouts []string
 	var ensureDirs []string
+	var dirs []string
 	for _, home := range options.Homes {
 		if strings.TrimSpace(home) == "" {
 			continue
 		}
-		candidates = append(candidates,
+		homeDirs := []string{
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".config", "gcloud"),
 			filepath.Join(home, ".azure"),
-		)
+		}
+		candidates = append(candidates, homeDirs...)
+		dirs = append(dirs, homeDirs...)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
 	for _, configDir := range options.ZeroConfigDirs {
@@ -325,8 +349,16 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// directory rule covers all three. Zero owns this directory, so it is also
 		// an EnsureDir: bubblewrap cannot mask a path that is absent when the
 		// namespace is assembled.
-		zeroDir := filepath.Join(configDir, "zero")
+		// Normalize the denied root first, then derive its fixed children
+		// lexically. This keeps nonexistent carveouts under the same canonical
+		// parent (for example macOS /var -> /private/var) without following a
+		// plugins/specialists/commands symlink into a credential file.
+		zeroDir := normalizeProfilePath(filepath.Join(configDir, "zero"))
+		if zeroDir == "" {
+			continue
+		}
 		candidates = append(candidates, zeroDir)
+		dirs = append(dirs, zeroDir)
 		ensureDirs = append(ensureDirs, zeroDir)
 		for _, name := range zeroConfigReadCarveoutNames {
 			carveouts = append(carveouts, filepath.Join(zeroDir, name))
@@ -334,14 +366,18 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	}
 	for _, tokenPath := range options.OAuthTokens {
 		candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
-		ensureDirs = append(ensureDirs, credentialPublicationDirs(tokenPath)...)
+		publicationDirs := credentialPublicationDirs(tokenPath)
+		dirs = append(dirs, publicationDirs...)
+		ensureDirs = append(ensureDirs, publicationDirs...)
 	}
 	for _, tokenPath := range options.MCPOAuthTokens {
 		candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
 		// The legacy store renames itself aside after importing into the unified
 		// store, leaving a readable copy of the same tokens behind.
 		candidates = append(candidates, tokenPath+".migrated")
-		ensureDirs = append(ensureDirs, credentialPublicationDirs(tokenPath)...)
+		publicationDirs := credentialPublicationDirs(tokenPath)
+		dirs = append(dirs, publicationDirs...)
+		ensureDirs = append(ensureDirs, publicationDirs...)
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -354,7 +390,8 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	return credentialDenyPaths{
 		Paths:      out,
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
-		EnsureDirs: credentialEnsureDirs(out, ensureDirs),
+		EnsureDirs: credentialRetainedDirs(out, ensureDirs),
+		Dirs:       credentialRetainedDirs(out, normalizeProfilePaths(dirs)),
 	}
 }
 
@@ -415,6 +452,29 @@ func pathsOutsideRoots(paths []string, roots []string) []string {
 	return out
 }
 
+// pathsOutsideOverlappingRoots drops paths that contain, or are contained by, a
+// root. A credential carveout is an allow-back rule, so either overlap could
+// weaken a user deny after Seatbelt's last-match-wins evaluation.
+func pathsOutsideOverlappingRoots(paths []string, roots []string) []string {
+	if len(paths) == 0 || len(roots) == 0 {
+		return paths
+	}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		overlaps := false
+		for _, root := range roots {
+			if pathWithinRoot(root, path) || pathWithinRoot(path, root) {
+				overlaps = true
+				break
+			}
+		}
+		if !overlaps {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
 func credentialPathReincluded(allowRoots []string, path string) bool {
 	for _, allow := range allowRoots {
 		if pathWithinRoot(allow, path) {
@@ -432,7 +492,21 @@ func credentialCarveoutPaths(denied []string, carveouts []string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(carveouts))
-	for _, carveout := range normalizeProfilePaths(carveouts) {
+	for _, entry := range carveouts {
+		carveout := normalizeProfilePathLexically(entry)
+		if carveout == "" {
+			continue
+		}
+		// A missing fixed subtree may be installed later by trusted host code, but
+		// an existing entry must be a real directory. In particular, never turn a
+		// plugins symlink into an allow rule for its credential-file target.
+		if info, err := os.Lstat(carveout); err == nil {
+			if !info.IsDir() {
+				continue
+			}
+		} else if !os.IsNotExist(err) {
+			continue
+		}
 		for _, deny := range denied {
 			if carveout != deny && pathWithinRoot(deny, carveout) {
 				out = append(out, carveout)
@@ -443,14 +517,13 @@ func credentialCarveoutPaths(denied []string, carveouts []string) []string {
 	return dedupeStrings(out)
 }
 
-// credentialEnsureDirs keeps only the directories that are still denied, so the
-// sandbox never creates a directory it is not going to mask.
-func credentialEnsureDirs(denied []string, ensureDirs []string) []string {
-	if len(ensureDirs) == 0 {
+// credentialRetainedDirs keeps only directories that remain exact deny entries.
+func credentialRetainedDirs(denied []string, dirs []string) []string {
+	if len(dirs) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(ensureDirs))
-	for _, dir := range normalizeProfilePaths(ensureDirs) {
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
 		for _, deny := range denied {
 			if dir == deny {
 				out = append(out, dir)
@@ -459,6 +532,36 @@ func credentialEnsureDirs(denied []string, ensureDirs []string) []string {
 		}
 	}
 	return dedupeStrings(out)
+}
+
+// finalizeCredentialDenyPaths gives user denies precedence and removes nested
+// automatic mounts that an outer automatic directory mask already covers.
+// Children inside a retained carveout stay explicit denies, because the
+// carveout re-allows that subtree.
+func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead []string) credentialDenyPaths {
+	credentials.Paths = pathsOutsideRoots(credentials.Paths, userDenyRead)
+	credentials.Carveouts = pathsOutsideOverlappingRoots(credentials.Carveouts, userDenyRead)
+	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
+	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
+
+	paths := make([]string, 0, len(credentials.Paths))
+	for _, path := range credentials.Paths {
+		covered := false
+		for _, dir := range credentials.Dirs {
+			if path != dir && pathWithinRoot(dir, path) && !credentialPathReincluded(credentials.Carveouts, path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			paths = append(paths, path)
+		}
+	}
+	credentials.Paths = dedupeStrings(paths)
+	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
+	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
+	credentials.EnsureDirs = credentialRetainedDirs(credentials.Paths, credentials.EnsureDirs)
+	return credentials
 }
 
 // resolveCredentialOverridePaths mirrors the token stores' own override
@@ -471,9 +574,8 @@ func credentialEnsureDirs(denied []string, ensureDirs []string) []string {
 // expands "~"), but normalizeProfilePath would deny $HOME/x instead, leaving
 // the real file unprotected.
 //
-// A relative value yields one candidate per base dir (see
-// credentialOverrideBaseDirs) because the process that resolves it is not
-// necessarily the one that writes the store.
+// A relative value yields one candidate per supplied base dir because the
+// process that resolves it is not necessarily the one that writes the store.
 func resolveCredentialOverridePaths(override string, baseDirs []string) []string {
 	override = strings.TrimSpace(override)
 	if override == "" {
@@ -549,6 +651,36 @@ func normalizeProfilePaths(entries []string) []string {
 }
 
 func normalizeProfilePath(entry string) string {
+	absolute := normalizeProfilePathLexically(entry)
+	if absolute == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+
+	// EvalSymlinks requires the whole path to exist. Resolve the deepest existing
+	// ancestor and append the missing tail lexically so future deny paths still
+	// match canonical aliases such as macOS /var -> /private/var.
+	current := absolute
+	var tail []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(absolute)
+		}
+		tail = append([]string{filepath.Base(current)}, tail...)
+		current = parent
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(append([]string{resolved}, tail...)...)
+		}
+	}
+}
+
+// normalizeProfilePathLexically expands and absolutizes a profile path without
+// resolving symlinks. Credential carveouts use it so their fixed lexical name
+// can never become an allow rule for a symlink target.
+func normalizeProfilePathLexically(entry string) string {
 	trimmed := strings.TrimSpace(entry)
 	if trimmed == "" {
 		return ""
@@ -563,9 +695,6 @@ func normalizeProfilePath(entry string) string {
 	absolute, err := filepath.Abs(trimmed)
 	if err != nil {
 		return ""
-	}
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-		return resolved
 	}
 	return filepath.Clean(absolute)
 }

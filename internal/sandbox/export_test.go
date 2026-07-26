@@ -60,9 +60,9 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 		}
 	}
 	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
-	credentials := credentialDenyReadPaths(policy, "", os.Environ())
+	credentials := finalizeCredentialDenyPaths(credentialDenyReadPaths(policy, "", os.Environ()), fs.DenyRead)
 	fs.DenyReadIfExists = credentials.Paths
-	fs.DenyReadCarveouts = pathsOutsideRoots(credentials.Carveouts, fs.DenyRead)
+	fs.DenyReadCarveouts = credentials.Carveouts
 	fs.EnsureDenyReadDirs = credentials.EnsureDirs
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{

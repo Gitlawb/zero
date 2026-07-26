@@ -539,7 +539,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 	commandDir := t.TempDir()
 	override := "~/relative-tilde-tokens.json"
-	options := credentialPathOptionsFromEnvironment(commandDir, []string{
+	options := credentialPathOptionsFromEnvironment(credentialCommandBaseDirs(commandDir), []string{
 		"HOME=",
 		"USERPROFILE=" + filepath.Join(commandDir, "profile-home"),
 		"XDG_CONFIG_HOME=~/literal-xdg",
@@ -579,7 +579,7 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testing.T) {
 	configDir := "~/literal-xdg"
 	commandDir := t.TempDir()
-	resolvedConfigDirs := credentialPathOptionsFromEnvironment(commandDir, []string{"XDG_CONFIG_HOME=" + configDir}).ZeroConfigDirs
+	resolvedConfigDirs := credentialPathOptionsFromEnvironment(credentialCommandBaseDirs(commandDir), []string{"XDG_CONFIG_HOME=" + configDir}).ZeroConfigDirs
 	paths := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDirs: resolvedConfigDirs}, nil).Paths
 
 	want := filepath.Join(commandDir, configDir, "zero")
@@ -652,6 +652,7 @@ func TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(originalDir) })
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "tokens.json")
 
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
@@ -681,6 +682,184 @@ func TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir(t *testing
 		if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(unwanted)) {
 			t.Fatalf("DenyReadIfExists = %#v, must not mask override parent %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, unwanted)
 		}
+	}
+}
+
+func TestCredentialCarveoutsUseNormalizedParentForMissingChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	realConfig := filepath.Join(t.TempDir(), "real-config")
+	if err := os.MkdirAll(realConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "config-link")
+	if err := os.Symlink(realConfig, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	credentials := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDirs: []string{alias}}, nil)
+	wantZeroDir := normalizeProfilePath(filepath.Join(realConfig, "zero"))
+	if !stringSliceContains(credentials.Paths, wantZeroDir) {
+		t.Fatalf("credential deny paths = %#v, want canonical missing Zero dir %q", credentials.Paths, wantZeroDir)
+	}
+	if _, err := os.Stat(wantZeroDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test requires the Zero dir to remain absent, got %v", err)
+	}
+	for _, name := range zeroConfigReadCarveoutNames {
+		want := filepath.Join(wantZeroDir, name)
+		if !stringSliceContains(credentials.Carveouts, want) {
+			t.Errorf("credential carveouts = %#v, want lexical child of canonical root %q", credentials.Carveouts, want)
+		}
+	}
+}
+
+func TestCredentialCarveoutsRejectSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	configDir := t.TempDir()
+	zeroDir := filepath.Join(configDir, "zero")
+	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(zeroDir, "oauth-tokens.json")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := filepath.Join(zeroDir, "plugins")
+	if err := os.Symlink(secret, pluginRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	credentials := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDirs: []string{configDir}}, nil)
+	normalizedZeroDir := normalizeProfilePath(zeroDir)
+	if stringSliceContains(credentials.Carveouts, filepath.Join(normalizedZeroDir, "plugins")) || stringSliceContains(credentials.Carveouts, normalizeProfilePath(secret)) {
+		t.Fatalf("credential carveouts = %#v, must not re-allow a symlink or its credential target", credentials.Carveouts)
+	}
+	if want := filepath.Join(normalizedZeroDir, "specialists"); !stringSliceContains(credentials.Carveouts, want) {
+		t.Fatalf("credential carveouts = %#v, want unrelated fixed subtree %q", credentials.Carveouts, want)
+	}
+}
+
+func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingCommandDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	parentHome := t.TempDir()
+	parentConfig := filepath.Join(parentHome, "config")
+	parentToken := filepath.Join(parentHome, "trusted-store", "tokens.json")
+	t.Setenv("HOME", parentHome)
+	t.Setenv("USERPROFILE", parentHome)
+	t.Setenv("XDG_CONFIG_HOME", parentConfig)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", parentToken)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+	workspace := t.TempDir()
+	childHome := filepath.Join(workspace, "child-home")
+	childConfig := filepath.Join(childHome, "config")
+	childToken := filepath.Join(workspace, "child-store", "tokens.json")
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend:       Backend{Name: BackendUnavailable, Platform: runtime.GOOS},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "true",
+		Dir:  workspace,
+		Env: []string{
+			"HOME=" + childHome,
+			"XDG_CONFIG_HOME=" + childConfig,
+			"ZERO_OAUTH_TOKENS_PATH=" + childToken,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := plan.PermissionProfile.FileSystem
+	parentZero := filepath.Join(parentConfig, "zero")
+	childZero := filepath.Join(childConfig, "zero")
+	for _, want := range []string{parentZero, childZero, parentToken, childToken} {
+		if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(want)) {
+			t.Errorf("DenyReadIfExists = %#v, want process/command root %q", fs.DenyReadIfExists, want)
+		}
+	}
+	for _, want := range []string{parentZero, parentToken + credentialPublicationDirSuffix} {
+		if !stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(want)) {
+			t.Errorf("EnsureDenyReadDirs = %#v, want trusted process dir %q", fs.EnsureDenyReadDirs, want)
+		}
+	}
+	for _, unwanted := range []string{childZero, childToken + credentialPublicationDirSuffix} {
+		if stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(unwanted)) {
+			t.Errorf("EnsureDenyReadDirs = %#v, must not include command-controlled dir %q", fs.EnsureDenyReadDirs, unwanted)
+		}
+	}
+
+	_ = buildLinuxBwrapFilesystemPlan(plan.PermissionProfile)
+	if info, err := os.Stat(parentZero); err != nil || !info.IsDir() {
+		t.Fatalf("trusted process credential dir was not created: info=%v err=%v", info, err)
+	}
+	for _, unwanted := range []string{childZero, childToken + credentialPublicationDirSuffix} {
+		if _, err := os.Stat(unwanted); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("command-controlled credential dir %q was created on the host: %v", unwanted, err)
+		}
+	}
+}
+
+func TestPermissionProfileDropsAutomaticMasksCoveredByUserDeny(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	policy := DefaultPolicy()
+	policy.DenyRead = []string{home}
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), policy, nil)
+	fs := profile.FileSystem
+	if len(fs.DenyReadIfExists) != 0 || len(fs.DenyReadCarveouts) != 0 || len(fs.EnsureDenyReadDirs) != 0 {
+		t.Fatalf("automatic credential fields beneath user deny were retained: paths=%#v carveouts=%#v ensure=%#v", fs.DenyReadIfExists, fs.DenyReadCarveouts, fs.EnsureDenyReadDirs)
+	}
+	zeroDir := filepath.Join(home, ".config", "zero")
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	if stringSliceContains(plan.Args, zeroDir) {
+		t.Fatalf("bwrap args contain a nested automatic mount beneath user deny %q: %#v", home, plan.Args)
+	}
+}
+
+func TestPermissionProfileDropsRedundantAutomaticMasksInsideZeroDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config")
+	zeroDir := filepath.Join(configHome, "zero")
+	tokenPath := filepath.Join(zeroDir, "oauth-tokens.json")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	fs := profile.FileSystem
+	if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(zeroDir)) {
+		t.Fatalf("DenyReadIfExists = %#v, want Zero directory mask", fs.DenyReadIfExists)
+	}
+	for _, path := range credentialTokenStorePaths(tokenPath) {
+		if stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(path)) {
+			t.Fatalf("DenyReadIfExists = %#v, redundant nested mask %q must be covered by Zero directory", fs.DenyReadIfExists, path)
+		}
+	}
+	if stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(tokenPath+credentialPublicationDirSuffix)) {
+		t.Fatalf("EnsureDenyReadDirs = %#v, redundant nested publication dir must not be created", fs.EnsureDenyReadDirs)
 	}
 }
 
