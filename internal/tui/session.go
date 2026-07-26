@@ -325,7 +325,11 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 		fmt.Sprintf("events: %d", eventCount),
 	}
 	if session.Goal != nil {
-		lines = append(lines, "goal: "+string(session.Goal.Status)+" — "+session.Goal.Objective)
+		goalLine := "goal: " + string(session.Goal.Status) + " — " + session.Goal.Objective
+		if session.Goal.Status == sessions.GoalStatusActive {
+			goalLine += " (run /goal resume to continue)"
+		}
+		lines = append(lines, goalLine)
 	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Resumed Zero session",

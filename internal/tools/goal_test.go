@@ -40,6 +40,14 @@ func TestCreateGoalToolDeclaresTokenBudgetMaximum(t *testing.T) {
 	if maximum == nil || *maximum != 1_000_000_000 {
 		t.Fatalf("token_budget maximum = %v, want 1000000000", maximum)
 	}
+	maxLength := create.Parameters().Properties["objective"].MaxLength
+	if maxLength == nil || *maxLength != sessions.GoalObjectiveMaxLength {
+		t.Fatalf("objective maxLength = %v, want %d", maxLength, sessions.GoalObjectiveMaxLength)
+	}
+	safety := create.Safety()
+	if safety.SideEffect != SideEffectWrite || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("create_goal safety = %#v, want prompted persistent write advertised in auto mode", safety)
+	}
 }
 
 func TestUpdateGoalToolRestrictsAgentTransitions(t *testing.T) {

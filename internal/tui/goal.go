@@ -18,6 +18,9 @@ const goalContinuationPrompt = "Continue pursuing the active goal. Review the ex
 
 func (m model) handleGoalCommand(args string) (model, tea.Cmd) {
 	action, rest := splitGoalCommand(args)
+	if rest != "" && (action == "status" || action == "pause" || action == "resume" || action == "clear") {
+		return m.appendGoalError("Usage: /goal " + action), nil
+	}
 	switch action {
 	case "status":
 		return m.appendGoalStatus(), nil
@@ -119,7 +122,7 @@ func splitGoalCommand(args string) (string, string) {
 	}
 	first, rest, _ := strings.Cut(trimmed, " ")
 	switch strings.ToLower(first) {
-	case "pause", "resume", "clear":
+	case "status", "pause", "resume", "clear":
 		return strings.ToLower(first), strings.TrimSpace(rest)
 	case "edit":
 		return "edit", strings.TrimSpace(rest)
@@ -176,12 +179,24 @@ func (m model) appendGoalStatus() model {
 		"status: " + string(goal.Status),
 		"objective: " + goal.Objective,
 		"budget: " + budget,
+		fmt.Sprintf(
+			"automatic continuations: %d / %d",
+			goal.ContinuationCount,
+			goalContinuationLimit(goal),
+		),
 	}
 	if goal.StatusReason != "" {
 		lines = append(lines, "reason: "+goal.StatusReason)
 	}
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: strings.Join(lines, "\n")})
 	return m
+}
+
+func goalContinuationLimit(goal *sessions.Goal) int {
+	if goal != nil && goal.ContinuationLimit > 0 {
+		return goal.ContinuationLimit
+	}
+	return sessions.GoalMaxConsecutiveContinuations
 }
 
 func (m model) goalFooterSummary() string {
@@ -246,15 +261,36 @@ func (m model) goalSystemPrompt(base string) string {
 func (m model) launchGoalContinuationIfReady() (model, tea.Cmd) {
 	goal := m.activeSession.Goal
 	if goal == nil || goal.Status != sessions.GoalStatusActive || m.pending ||
-		m.compactInFlight || m.exiting || m.provider == nil {
+		m.compactInFlight || m.exiting || m.provider == nil ||
+		m.goalContinuationsSuspended {
 		return m, nil
 	}
+	updated, event, reserved, err := m.sessionStore.ReserveGoalContinuation(m.activeSession.SessionID)
+	if err != nil {
+		return m.appendGoalError("reserve automatic continuation: " + err.Error()), nil
+	}
+	m.activeSession = updated
+	if event != nil {
+		m.sessionEvents = append(m.sessionEvents, *event)
+	}
+	if !reserved {
+		if event != nil && updated.Goal != nil && updated.Goal.Status == sessions.GoalStatusPaused {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind: rowSystem,
+				text: fmt.Sprintf(
+					"Goal paused after %d automatic continuations. Review progress, then use /goal resume to continue.",
+					goalContinuationLimit(updated.Goal),
+				),
+			})
+		}
+		return m, nil
+	}
+	goal = updated.Goal
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 		kind: rowSystem,
 		text: "Continuing goal: " + goal.Objective,
 	})
 	prompt := m.sessionPrompt(goalContinuationPrompt)
-	var err error
 	m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
 		"role":    "goal",
 		"content": goalContinuationPrompt,

@@ -80,13 +80,15 @@ const (
 )
 
 type Goal struct {
-	Objective    string     `json:"objective"`
-	Status       GoalStatus `json:"status"`
-	StatusReason string     `json:"statusReason,omitempty"`
-	TokenBudget  int        `json:"tokenBudget,omitempty"`
-	TokensUsed   int        `json:"tokensUsed,omitempty"`
-	CreatedAt    string     `json:"createdAt"`
-	UpdatedAt    string     `json:"updatedAt"`
+	Objective         string     `json:"objective"`
+	Status            GoalStatus `json:"status"`
+	StatusReason      string     `json:"statusReason,omitempty"`
+	TokenBudget       int        `json:"tokenBudget,omitempty"`
+	TokensUsed        int        `json:"tokensUsed,omitempty"`
+	ContinuationCount int        `json:"continuationCount,omitempty"`
+	ContinuationLimit int        `json:"continuationLimit,omitempty"`
+	CreatedAt         string     `json:"createdAt"`
+	UpdatedAt         string     `json:"updatedAt"`
 }
 
 type Metadata struct {

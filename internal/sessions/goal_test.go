@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -84,6 +85,71 @@ func TestGoalBudgetPausesAtLimit(t *testing.T) {
 	}
 	if event == nil || event.Type != EventGoalUpdated {
 		t.Fatalf("budget transition event = %#v", event)
+	}
+}
+
+func TestGoalContinuationLimitStopsWithoutProviderUsage(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "continuation_limit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateGoal(session.SessionID, "Stay bounded without usage events", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	for continuation := 1; continuation <= GoalMaxConsecutiveContinuations; continuation++ {
+		updated, event, reserved, err := store.ReserveGoalContinuation(session.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reserved || event != nil {
+			t.Fatalf("continuation %d: reserved=%v event=%#v", continuation, reserved, event)
+		}
+		if updated.Goal.ContinuationCount != continuation {
+			t.Fatalf("continuation count = %d, want %d", updated.Goal.ContinuationCount, continuation)
+		}
+		if updated.Goal.TokensUsed != 0 {
+			t.Fatalf("provider-independent guard unexpectedly recorded tokens: %#v", updated.Goal)
+		}
+	}
+
+	stopped, event, reserved, err := store.ReserveGoalContinuation(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved || event == nil || stopped.Goal.Status != GoalStatusPaused ||
+		stopped.Goal.StatusReason != goalContinuationLimitStatusReason {
+		t.Fatalf("unbounded continuation was not stopped: goal=%#v event=%#v reserved=%v", stopped.Goal, event, reserved)
+	}
+	reloaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Goal.ContinuationCount != GoalMaxConsecutiveContinuations ||
+		reloaded.Goal.Status != GoalStatusPaused {
+		t.Fatalf("continuation guard did not persist: %#v", reloaded.Goal)
+	}
+
+	resumed, _, err := store.UpdateGoal(session.SessionID, GoalStatusActive, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Goal.ContinuationCount != 0 {
+		t.Fatalf("explicit resume did not reset consecutive continuations: %#v", resumed.Goal)
+	}
+}
+
+func TestGoalObjectiveLengthIsBounded(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "objective_limit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooLong := strings.Repeat("g", GoalObjectiveMaxLength+1)
+	if _, _, err := store.CreateGoal(session.SessionID, tooLong, 0); err == nil ||
+		!strings.Contains(err.Error(), "cannot exceed") {
+		t.Fatalf("oversized objective error = %v", err)
 	}
 }
 

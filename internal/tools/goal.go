@@ -48,6 +48,7 @@ func newGetGoalTool(store *sessions.Store, sessionID string) Tool {
 func newCreateGoalTool(store *sessions.Store, sessionID string) Tool {
 	minimum := 0
 	maximum := 1_000_000_000
+	maxObjectiveLength := sessions.GoalObjectiveMaxLength
 	return &goalTool{
 		baseTool: baseTool{
 			name: "create_goal",
@@ -59,6 +60,7 @@ func newCreateGoalTool(store *sessions.Store, sessionID string) Tool {
 					"objective": {
 						Type:        "string",
 						Description: "The concrete objective to keep pursuing.",
+						MaxLength:   &maxObjectiveLength,
 					},
 					"token_budget": {
 						Type:        "integer",
@@ -71,9 +73,10 @@ func newCreateGoalTool(store *sessions.Store, sessionID string) Tool {
 				AdditionalProperties: false,
 			},
 			safety: Safety{
-				SideEffect: SideEffectNone,
-				Permission: PermissionAllow,
-				Reason:     "Creates persistent goal state for the current session.",
+				SideEffect:      SideEffectWrite,
+				Permission:      PermissionPrompt,
+				Reason:          "Creates persistent goal state and enables automatic follow-up runs for the current session.",
+				AdvertiseInAuto: true,
 			},
 			capabilities: ToolCapabilities{Effect: EffectInteractive, ThreadSafe: false, ResourceKeys: sessionResourceKeys},
 		},

@@ -135,6 +135,36 @@ func TestBTWCanOpenWhileParentRunContinues(t *testing.T) {
 	}
 }
 
+func TestBTWHiddenParentDoesNotLaunchGoalContinuation(t *testing.T) {
+	m := newBTWTestModel(t)
+	goalSession, _, err := m.sessionStore.CreateGoal(m.activeSession.SessionID, "Stay visible to the user", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.activeSession = goalSession
+	m.provider = &fakeProvider{}
+	m.pending = true
+	m.runID = 7
+	m.activeRunID = 7
+
+	side, _ := m.handleBTWCommand("")
+	routed, _, ok := side.routeBTWParentMessage(agentResponseMsg{
+		runID:     7,
+		goalAware: true,
+		rows:      []transcriptRow{{kind: rowAssistant, text: "main turn finished", final: true}},
+	})
+	if !ok || routed.btw.parent == nil {
+		t.Fatal("parent completion was not routed while BTW was active")
+	}
+	parent := routed.btw.parent
+	if parent.pending {
+		t.Fatal("hidden parent launched an automatic goal continuation")
+	}
+	if parent.activeSession.Goal == nil || parent.activeSession.Goal.ContinuationCount != 0 {
+		t.Fatalf("hidden parent consumed a continuation: %#v", parent.activeSession.Goal)
+	}
+}
+
 func TestBTWInlineQuestionStartsSideRun(t *testing.T) {
 	m := newBTWTestModel(t)
 	m.provider = &fakeProvider{}

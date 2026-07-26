@@ -133,6 +133,45 @@ func TestLoopRunExcludesGoalToolsAndInstructions(t *testing.T) {
 	}
 }
 
+func TestLoopRunDoesNotConsumeGoalBudgetOrLaunchContinuation(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal_loop_usage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err = store.CreateGoal(session.SessionID, "Keep loop usage separate", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:     &scriptedProvider{},
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.activeSession = session
+	m.pending = true
+	m.activeRunID = 1
+	m.activeLoopID = "loop-1"
+
+	updated, _ := m.Update(agentResponseMsg{
+		runID:       1,
+		goalAware:   false,
+		usageEvents: []zeroruntime.Usage{{InputTokens: 8, OutputTokens: 4}},
+		rows:        []transcriptRow{{kind: rowAssistant, text: "loop result", final: true}},
+	})
+	next := updated.(model)
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Goal.TokensUsed != 0 || loaded.Goal.ContinuationCount != 0 {
+		t.Fatalf("loop run mutated goal accounting: %#v", loaded.Goal)
+	}
+	if next.pending {
+		t.Fatal("loop completion launched a goal continuation")
+	}
+}
+
 func TestAgentCanCompleteGoalWithoutAnotherContinuation(t *testing.T) {
 	store := testSessionStore(t)
 	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
@@ -221,6 +260,56 @@ func TestActiveGoalLaunchesContinuation(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "Continuing goal: Keep going") {
 		t.Fatalf("continuation was not surfaced: %#v", next.transcript)
+	}
+}
+
+func TestGoalContinuationChainStopsAtPersistedLimit(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal_hard_stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err = store.CreateGoal(session.SessionID, "Never run forever", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:     &scriptedProvider{},
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.activeSession = session
+
+	for continuation := 1; continuation <= sessions.GoalMaxConsecutiveContinuations; continuation++ {
+		next, cmd := m.launchGoalContinuationIfReady()
+		if cmd == nil || !next.pending {
+			t.Fatalf("continuation %d did not launch", continuation)
+		}
+		if next.runCancel != nil {
+			next.runCancel()
+		}
+		next.runCancel = nil
+		next.pending = false
+		next.activeRunID = 0
+		m = next
+	}
+	stopped, cmd := m.launchGoalContinuationIfReady()
+	if cmd != nil || stopped.pending {
+		t.Fatal("goal exceeded its automatic continuation limit")
+	}
+	if stopped.activeSession.Goal.Status != sessions.GoalStatusPaused ||
+		!transcriptContains(stopped.transcript, "Goal paused after") {
+		t.Fatalf("hard stop was not surfaced: goal=%#v transcript=%#v", stopped.activeSession.Goal, stopped.transcript)
+	}
+}
+
+func TestGoalActionsRejectTrailingArguments(t *testing.T) {
+	for _, action := range []string{"status extra", "pause extra", "resume extra", "clear extra"} {
+		m := newModel(context.Background(), Options{})
+		next, cmd := m.handleGoalCommand(action)
+		if cmd != nil || !transcriptContains(next.transcript, "Usage: /goal") {
+			t.Fatalf("%q silently accepted trailing arguments: %#v", action, next.transcript)
+		}
 	}
 }
 
