@@ -13,8 +13,14 @@ import (
 )
 
 // NotificationHandler receives server->client notifications (e.g.
-// textDocument/publishDiagnostics). params is the raw JSON payload.
-type NotificationHandler func(method string, params json.RawMessage)
+// textDocument/publishDiagnostics). params is the raw JSON payload. seq is the
+// notification's receipt sequence (see Client.NotificationSeq): the count of
+// notifications read off the wire, including this one, at the moment it was
+// enqueued — NOT when this handler happens to run, which can lag receipt when
+// the queue is backed up. A caller that needs to know whether something newer
+// than a given point has arrived must compare against seq, not against when
+// its own handling code runs.
+type NotificationHandler func(method string, params json.RawMessage, seq int64)
 
 // Client speaks JSON-RPC 2.0 with LSP framing (Content-Length headers) over a
 // reader/writer pair. It is transport-agnostic: server.go wires it to a process's
@@ -37,12 +43,24 @@ type Client struct {
 	notifyQueue  []notification
 	notifyReady  chan struct{}
 	notifyClosed bool
+	notifySeq    int64 // count of notifications received (enqueued) so far
 }
 
 type notification struct {
 	method string
 	params json.RawMessage
+	seq    int64
 }
+
+// notifyQueueLimit bounds the notification backlog. A well-behaved handler
+// drains far faster than any single burst fills it; sustained overload — a
+// language server emitting faster than the single handler can consume, or a
+// handler stuck waiting on a re-entrant Call — is a fatal condition for this
+// client, not something to paper over by growing the queue without bound.
+// Hitting the limit fails the client (see enqueueNotification): IsClosed
+// becomes true, and the manager evicts and restarts the session on next use,
+// exactly as it does for any other dead client.
+const notifyQueueLimit = 4096
 
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -203,7 +221,7 @@ func (c *Client) notificationLoop() {
 				handler := c.handler
 				c.mu.Unlock()
 				if handler != nil {
-					handler(notification.method, notification.params)
+					handler(notification.method, notification.params, notification.seq)
 				}
 			}
 		}
@@ -211,21 +229,26 @@ func (c *Client) notificationLoop() {
 }
 
 // enqueueNotification hands a server notification to the worker loop. It never
-// blocks and never discards: the queue grows instead.
+// blocks and never silently discards a message the handler could still act on:
+// the queue grows instead, up to notifyQueueLimit.
 //
-// Both alternatives are worse. Blocking the read loop when a buffer fills is the
-// deadlock this dispatch exists to avoid — a handler that calls Client.Call waits
-// for a response frame the blocked reader can no longer deliver. Dropping the
-// oldest queued item instead loses protocol state permanently: a
-// textDocument/publishDiagnostics for one URI is the server's only report for
-// that URI, so discarding it makes session.waitForDiagnostics time out and
-// Manager.Check return nothing even though the server published findings.
+// The alternatives to growing are worse. Blocking the read loop when a buffer
+// fills is the deadlock this dispatch exists to avoid — a handler that calls
+// Client.Call waits for a response frame the blocked reader can no longer
+// deliver. Dropping the oldest queued item instead loses protocol state
+// permanently: a textDocument/publishDiagnostics for one URI is the server's
+// only report for that URI, so discarding it makes session.waitForDiagnostics
+// time out and Manager.Check return nothing even though the server published
+// findings.
 //
 // Growth is bounded in practice by how much the server emits while a handler
-// runs, and the queue is released as soon as it drains. A handler that never
-// returns would grow it without limit, but that is a handler bug that queue
-// pressure makes visible rather than one this transport can paper over by
-// silently dropping messages.
+// runs, and the queue is released as soon as it drains. But "in practice" is
+// not a limit: a handler that never returns, or a server that sustains a
+// higher rate than the single handler can drain, would otherwise grow this
+// queue's full json.RawMessage payloads without bound until the heap gives
+// out. notifyQueueLimit turns that into an explicit, observable failure —
+// the client is failed and closed — rather than an unbounded retention of
+// protocol input this transport has no business trying to buffer forever.
 func (c *Client) enqueueNotification(item notification) {
 	c.notifyMu.Lock()
 	if c.notifyClosed {
@@ -237,6 +260,13 @@ func (c *Client) enqueueNotification(item notification) {
 		c.notifyMu.Unlock()
 		return
 	}
+	if len(c.notifyQueue) >= notifyQueueLimit {
+		c.notifyMu.Unlock()
+		c.failPending(fmt.Errorf("lsp client: notification backlog exceeded %d messages", notifyQueueLimit))
+		return
+	}
+	c.notifySeq++
+	item.seq = c.notifySeq
 	c.notifyQueue = append(c.notifyQueue, item)
 	c.notifyMu.Unlock()
 
@@ -246,6 +276,19 @@ func (c *Client) enqueueNotification(item notification) {
 		// A wake-up is already pending; the worker drains the whole queue per wake,
 		// so this item is covered by it.
 	}
+}
+
+// NotificationSeq returns the number of notifications received (read off the
+// wire and enqueued) so far, including any still waiting to be dispatched to
+// the handler. A caller that wants to know whether a notification newer than
+// "now" has arrived should snapshot this before triggering whatever produces
+// it, then require a subsequently-observed seq to be strictly greater: a
+// notification already sitting in the queue at snapshot time has seq <= the
+// snapshot, even if the handler doesn't run for it until afterward.
+func (c *Client) NotificationSeq() int64 {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.notifySeq
 }
 
 func (c *Client) dequeueNotification() (notification, bool) {

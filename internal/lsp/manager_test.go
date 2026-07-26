@@ -228,15 +228,87 @@ func TestSessionDropsStaleVersionPublish(t *testing.T) {
 	sess.mu.Unlock()
 
 	stale, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Version: 2, Diagnostics: []Diagnostic{{Message: "stale"}}})
-	sess.handleNotification("textDocument/publishDiagnostics", stale)
+	sess.handleNotification("textDocument/publishDiagnostics", stale, 1)
 	if len(sess.diagnosticsFor(uri)) != 0 {
 		t.Fatal("a publish for an older version must be ignored")
 	}
 
 	fresh, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Version: 3, Diagnostics: []Diagnostic{{Message: "fresh"}}})
-	sess.handleNotification("textDocument/publishDiagnostics", fresh)
+	sess.handleNotification("textDocument/publishDiagnostics", fresh, 2)
 	if d := sess.diagnosticsFor(uri); len(d) != 1 || d[0].Message != "fresh" {
 		t.Fatalf("a current-version publish must apply, got %#v", d)
+	}
+}
+
+// TestPublishBaselineRejectsAlreadyQueuedPublish is the regression test for
+// jatmn's #759 P1 finding: publishBaseline used to snapshot how many publishes
+// session.handleNotification had already RUN for a URI. Dispatch happens off a
+// queue, though, so a publish for a version Check is about to supersede can
+// already be sitting RECEIVED but undispatched at the moment a later Check
+// captures its baseline — then run only afterward, incrementing the old
+// count-based baseline and wrongly looking "new". Since many servers omit the
+// version field, handleNotification's own staleness check (which only fires
+// for a positive version) can't catch this either, so the stale result would
+// reach the caller for the new text, and the debounce could finish before the
+// real response even arrives.
+//
+// This drives the exact interleaving through the real production path: the
+// stale publish is enqueued first (fixing its receipt seq), THEN a baseline is
+// captured, THEN the stale item is dispatched — reproducing "received before
+// baseline, handled after" without depending on goroutine scheduling luck. A
+// bare Client (no background loops, like TestClientNotificationQueueIsLossless
+// uses) makes the enqueue/dequeue ordering fully explicit.
+func TestPublishBaselineRejectsAlreadyQueuedPublish(t *testing.T) {
+	client := &Client{notifyReady: make(chan struct{}, 1)}
+	sess := &session{
+		client:      client,
+		versions:    map[string]int{},
+		diagnostics: map[string][]Diagnostic{},
+		lastPublish: map[string]time.Time{},
+		publishSeq:  map[string]int64{},
+		waiters:     map[string][]chan struct{}{},
+	}
+	uri := PathToURI("/repo/main.go")
+
+	// The stale (version-less — the common case) publish is RECEIVED first.
+	stale, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Diagnostics: []Diagnostic{{Message: "stale"}}})
+	client.enqueueNotification(notification{method: "textDocument/publishDiagnostics", params: stale})
+
+	// A later Check captures its baseline only now — after the stale publish's
+	// receipt, exactly as publishBaseline does between two Checks whose
+	// notification queue has backed up.
+	baseline := sess.publishBaseline()
+
+	// Dispatch the stale item exactly as notificationLoop would: dequeue and
+	// call the handler with the receipt seq it was actually stamped with.
+	item, ok := client.dequeueNotification()
+	if !ok {
+		t.Fatal("stale notification was not queued")
+	}
+	sess.handleNotification(item.method, item.params, item.seq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if sess.waitForDiagnostics(ctx, uri, 10*time.Millisecond, baseline) {
+		t.Fatal("a publish received before baseline must not satisfy waitForDiagnostics merely because it was handled afterward")
+	}
+
+	// The real response — received (and handled) after baseline — must satisfy it.
+	fresh, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Diagnostics: []Diagnostic{{Message: "fresh"}}})
+	client.enqueueNotification(notification{method: "textDocument/publishDiagnostics", params: fresh})
+	item2, ok := client.dequeueNotification()
+	if !ok {
+		t.Fatal("fresh notification was not queued")
+	}
+	sess.handleNotification(item2.method, item2.params, item2.seq)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if !sess.waitForDiagnostics(ctx2, uri, 10*time.Millisecond, baseline) {
+		t.Fatal("a publish received after baseline must satisfy waitForDiagnostics")
+	}
+	if d := sess.diagnosticsFor(uri); len(d) != 1 || d[0].Message != "fresh" {
+		t.Fatalf("diagnostics = %#v, want the fresh publish", d)
 	}
 }
 

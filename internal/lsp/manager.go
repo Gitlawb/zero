@@ -73,7 +73,7 @@ func (m *Manager) Check(ctx context.Context, path, text string) ([]Diagnostic, e
 		}
 		return nil, err
 	}
-	baseline := sess.publishBaseline(uri)
+	baseline := sess.publishBaseline()
 	if err := sess.sync(ctx, abs, languageID, text); err != nil {
 		return nil, err
 	}

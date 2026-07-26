@@ -209,7 +209,7 @@ func TestClientNotificationHandler(t *testing.T) {
 	_ = serverReader
 
 	received := make(chan string, 1)
-	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
 		received <- method
 	})
 	_ = writeMessage(serverWriter, map[string]any{
@@ -256,7 +256,7 @@ func TestClientNotificationHandlerCanCallClient(t *testing.T) {
 	}()
 
 	handlerDone := make(chan error, 1)
-	client.SetNotificationHandler(func(_ string, _ json.RawMessage) {
+	client.SetNotificationHandler(func(_ string, _ json.RawMessage, _ int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_, err := client.Call(ctx, "workspace/applyEdit", nil)
@@ -289,7 +289,7 @@ func TestClientNotificationHandlersPreserveOrder(t *testing.T) {
 	defer serverWriter.Close()
 
 	received := make(chan string, 2)
-	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
 		received <- method
 	})
 	for _, method := range []string{"first", "second"} {
@@ -326,7 +326,7 @@ func TestClientNotificationBurstDoesNotBlockResponse(t *testing.T) {
 	var mu sync.Mutex
 	var queued []string
 	allQueued := make(chan struct{})
-	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
 		if method != "blocking" {
 			mu.Lock()
 			queued = append(queued, method)
@@ -449,6 +449,46 @@ func TestClientNotificationQueueIsLossless(t *testing.T) {
 	}
 }
 
+// TestClientFailsOnNotificationBacklogOverload is the regression test for
+// jatmn's #759 P2 finding: the lossless queue above had no failure policy — a
+// language server sustaining a higher notification rate than the single
+// handler can drain (no permanently-stuck handler required, just a sustained
+// producer faster than the consumer) would retain every full json.RawMessage
+// payload on Zero's heap without bound. Hitting notifyQueueLimit must fail
+// (and close) the client observably instead of continuing to grow.
+func TestClientFailsOnNotificationBacklogOverload(t *testing.T) {
+	client := &Client{
+		notifyReady: make(chan struct{}, 1),
+		pending:     make(map[int64]chan rpcResponse),
+		closed:      make(chan struct{}),
+	}
+	for i := 0; i < notifyQueueLimit; i++ {
+		client.enqueueNotification(notification{method: "spam"})
+	}
+	if client.IsClosed() {
+		t.Fatal("client closed before the backlog limit was reached")
+	}
+	client.notifyMu.Lock()
+	queued := len(client.notifyQueue)
+	client.notifyMu.Unlock()
+	if queued != notifyQueueLimit {
+		t.Fatalf("queued = %d, want %d before the limit is exceeded", queued, notifyQueueLimit)
+	}
+
+	// One push past the limit must fail the client rather than growing the
+	// queue further.
+	client.enqueueNotification(notification{method: "spam"})
+	if !client.IsClosed() {
+		t.Fatal("client must be closed once the notification backlog exceeds notifyQueueLimit")
+	}
+	client.notifyMu.Lock()
+	queuedAfter := len(client.notifyQueue)
+	client.notifyMu.Unlock()
+	if queuedAfter != 0 {
+		t.Fatalf("closed client retained %d queued notifications, want 0", queuedAfter)
+	}
+}
+
 func TestClientRejectsCallsAfterClose(t *testing.T) {
 	clientReader, serverWriter := io.Pipe()
 	serverReader, clientWriter := io.Pipe()
@@ -483,7 +523,7 @@ func TestClientDropsNotificationsAfterClose(t *testing.T) {
 	}()
 
 	handled := make(chan string, 4)
-	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
 		handled <- method
 	})
 

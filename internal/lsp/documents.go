@@ -21,33 +21,33 @@ type session struct {
 	server lspServer
 	client *Client
 
-	mu           sync.Mutex
-	open         map[string]bool            // uri -> didOpen sent
-	versions     map[string]int             // uri -> current (committed) version
-	diagnostics  map[string][]Diagnostic    // uri -> latest published diagnostics
-	lastPublish  map[string]time.Time       // uri -> time of last publish
-	publishCount map[string]int             // uri -> monotonic publish count
-	waiters      map[string][]chan struct{} // uri -> goroutines awaiting the next publish
-	fileLocks    map[string]*sync.Mutex     // uri -> per-document sync serializer
+	mu          sync.Mutex
+	open        map[string]bool            // uri -> didOpen sent
+	versions    map[string]int             // uri -> current (committed) version
+	diagnostics map[string][]Diagnostic    // uri -> latest published diagnostics
+	lastPublish map[string]time.Time       // uri -> time of last publish
+	publishSeq  map[string]int64           // uri -> receipt seq of latest publish (see Client.NotificationSeq)
+	waiters     map[string][]chan struct{} // uri -> goroutines awaiting the next publish
+	fileLocks   map[string]*sync.Mutex     // uri -> per-document sync serializer
 }
 
 func newSession(server lspServer) *session {
 	s := &session{
-		server:       server,
-		client:       server.Client(),
-		open:         map[string]bool{},
-		versions:     map[string]int{},
-		diagnostics:  map[string][]Diagnostic{},
-		lastPublish:  map[string]time.Time{},
-		publishCount: map[string]int{},
-		waiters:      map[string][]chan struct{}{},
-		fileLocks:    map[string]*sync.Mutex{},
+		server:      server,
+		client:      server.Client(),
+		open:        map[string]bool{},
+		versions:    map[string]int{},
+		diagnostics: map[string][]Diagnostic{},
+		lastPublish: map[string]time.Time{},
+		publishSeq:  map[string]int64{},
+		waiters:     map[string][]chan struct{}{},
+		fileLocks:   map[string]*sync.Mutex{},
 	}
 	s.client.SetNotificationHandler(s.handleNotification)
 	return s
 }
 
-func (s *session) handleNotification(method string, params json.RawMessage) {
+func (s *session) handleNotification(method string, params json.RawMessage, seq int64) {
 	if method != "textDocument/publishDiagnostics" {
 		return
 	}
@@ -66,7 +66,7 @@ func (s *session) handleNotification(method string, params json.RawMessage) {
 	}
 	s.diagnostics[payload.URI] = payload.Diagnostics
 	s.lastPublish[payload.URI] = time.Now()
-	s.publishCount[payload.URI]++
+	s.publishSeq[payload.URI] = seq
 	waiters := s.waiters[payload.URI]
 	delete(s.waiters, payload.URI)
 	s.mu.Unlock()
@@ -133,13 +133,21 @@ func (s *session) diagnosticsFor(uri string) []Diagnostic {
 	return append([]Diagnostic(nil), s.diagnostics[uri]...)
 }
 
-// publishBaseline snapshots the current publish count for a URI, captured before
-// a sync so waitForDiagnostics can wait specifically for the publish that sync
-// triggers (not be satisfied by a stale earlier publish).
-func (s *session) publishBaseline(uri string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.publishCount[uri]
+// publishBaseline snapshots the client's current notification receipt
+// sequence, captured before a sync so waitForDiagnostics can require a publish
+// that was RECEIVED after this point. This must baseline against receipt, not
+// against session.publishSeq (which only advances once handleNotification
+// actually runs): dispatch happens off a queue, so a publish for a since-
+// superseded version can already be sitting in that queue, still unprocessed,
+// at the moment a later Check captures its baseline. If baseline were instead
+// "how many publishes has this session recorded so far", that stale publish
+// would land afterward, still satisfy "more than baseline", and hand the new
+// check diagnostics for the wrong text — silently, since many servers omit the
+// version field the staleness check in handleNotification relies on.
+// Baselining against receipt sequence closes that: a notification already
+// enqueued before this call has seq <= baseline no matter when it is handled.
+func (s *session) publishBaseline() int64 {
+	return s.client.NotificationSeq()
 }
 
 // waitForDiagnostics blocks until a publish newer than baseline arrives for the
@@ -149,16 +157,16 @@ func (s *session) publishBaseline(uri string) int {
 // for newer text. Servers don't signal "analysis complete", so the debounce
 // approximates it: once a fresh publish lands, wait debounce for a follow-up,
 // resetting on each new publish.
-func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce time.Duration, baseline int) bool {
+func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce time.Duration, baseline int64) bool {
 	for {
 		s.mu.Lock()
 		ch := make(chan struct{})
 		s.waiters[uri] = append(s.waiters[uri], ch)
-		count := s.publishCount[uri]
+		seq := s.publishSeq[uri]
 		last := s.lastPublish[uri]
 		s.mu.Unlock()
 
-		if count <= baseline {
+		if seq <= baseline {
 			select {
 			case <-ctx.Done():
 				s.cancelWaiter(uri, ch)
