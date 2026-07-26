@@ -42,7 +42,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		}
 	}
 
-	conn := acp.NewConn(deps.stdin, stdout)
+	// The process's own stdin belongs exclusively to this Conn for the life of
+	// the command, so cancellation may close it to interrupt an idle read.
+	conn := acp.NewOwnedConn(deps.stdin, stdout)
 	acp.NewAgent(conn, acp.Deps{
 		ResolveConfig: deps.resolveConfig,
 		DiscoverModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {

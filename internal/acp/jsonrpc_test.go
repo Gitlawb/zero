@@ -64,7 +64,7 @@ func TestConnServeCancellationInterruptsIdleRead(t *testing.T) {
 			return pipeReader.Close()
 		},
 	}
-	conn := NewConn(reader, io.Discard)
+	conn := NewOwnedConn(reader, io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- conn.Serve(ctx) }()
@@ -119,7 +119,14 @@ func TestConnServePreservesTerminalReadErrorDuringCancellation(t *testing.T) {
 				<-releaseWrite
 				return len(p), nil
 			})
-			conn := NewConn(reader, writer)
+			newConn := NewConn
+			if closable {
+				// Ownership matters here: this case exists to prove that even a
+				// Conn entitled to close its reader on cancellation still
+				// preserves a terminal error that was already decided.
+				newConn = NewOwnedConn
+			}
+			conn := newConn(reader, writer)
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- conn.Serve(ctx) }()
@@ -208,6 +215,47 @@ func TestConnServePreservesReadErrorBufferedAlongsideAPriorLine(t *testing.T) {
 	}
 	if got := readCalls.Load(); got != 1 {
 		t.Fatalf("underlying Read calls = %d, want exactly 1 (bufio must have served the second ReadBytes from its cache)", got)
+	}
+}
+
+// TestInterruptibleReaderPrefersDecidedResultOverCancellation is the regression
+// test for jatmn's second #782 finding: interruptibleReader.Read's select
+// between resultCh and ctx.Done() chooses pseudo-randomly when both are ready,
+// so a real, already-decided outcome (e.g. a terminal transport error) could be
+// misattributed to cancellation purely because ctx also happened to be done by
+// the time the select ran. Each iteration lets the underlying Read return (so
+// resultCh already holds the real outcome) before cancelling, maximizing the
+// odds of landing exactly in that ambiguous window; the generation counter must
+// never advance when the real, already-decided result is what gets returned.
+func TestInterruptibleReaderPrefersDecidedResultOverCancellation(t *testing.T) {
+	wantErr := errors.New("read failed")
+	for i := 0; i < 100; i++ {
+		resultReady := make(chan struct{})
+		read := testReader(func(p []byte) (int, error) {
+			defer close(resultReady)
+			return copy(p, "x"), wantErr
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		r := newInterruptibleReader(ctx, read, nil)
+
+		readDone := make(chan interruptibleReadResult, 1)
+		go func() {
+			n, err := r.Read(make([]byte, 8))
+			readDone <- interruptibleReadResult{n, err}
+		}()
+
+		<-resultReady
+		time.Sleep(time.Millisecond) // bias resultCh's send ahead of cancel
+		cancel()
+
+		res := <-readDone
+		if !errors.Is(res.err, wantErr) {
+			t.Fatalf("iteration %d: Read returned %v, want %v", i, res.err, wantErr)
+		}
+		if got := r.generation(); got != 0 {
+			t.Fatalf("iteration %d: generation = %d, want 0 (a decided result must never be attributed to cancellation)", i, got)
+		}
+		cancel()
 	}
 }
 

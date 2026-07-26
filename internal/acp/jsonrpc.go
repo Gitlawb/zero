@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // JSON-RPC 2.0 standard error codes.
@@ -97,19 +98,32 @@ type Conn struct {
 	wg sync.WaitGroup // tracks in-flight inbound handlers
 }
 
-// NewConn builds a peer reading ndjson from r and writing ndjson to w. If r is
-// closable, Serve closes it to interrupt an idle read when its context is
-// cancelled.
+// NewConn builds a peer reading ndjson from r and writing ndjson to w. This
+// Conn does not own r: cancelling Serve's context cannot forcibly close it, so
+// a Read on r that's genuinely idle (never returns on its own) leaves Serve
+// blocked until r itself produces something — e.g. a test that closes r's own
+// write side to unblock it. Use NewOwnedConn when this Conn should own r's
+// lifetime.
 func NewConn(r io.Reader, w io.Writer) *Conn {
-	readerCloser, _ := r.(io.Closer)
 	return &Conn{
-		rawReader:    r,
-		readerCloser: readerCloser,
-		w:            w,
-		handlers:     make(map[string]HandlerFunc),
-		notifiers:    make(map[string]NotifyFunc),
-		pending:      make(map[int64]chan rpcMessage),
+		rawReader: r,
+		w:         w,
+		handlers:  make(map[string]HandlerFunc),
+		notifiers: make(map[string]NotifyFunc),
+		pending:   make(map[int64]chan rpcMessage),
 	}
+}
+
+// NewOwnedConn is like NewConn but declares that this Conn exclusively owns r:
+// if r implements io.Closer, Serve closes it on context cancellation to
+// interrupt an otherwise-idle blocking Read. Only pass a reader whose lifetime
+// this Conn should control — e.g. the process's own stdin — never a reader a
+// caller retains or shares elsewhere, since cancellation tears it down
+// permanently for every consumer, not just this Conn.
+func NewOwnedConn(r io.Reader, w io.Writer) *Conn {
+	c := NewConn(r, w)
+	c.readerCloser, _ = r.(io.Closer)
+	return c
 }
 
 // Handle registers a request handler for method.
@@ -133,7 +147,7 @@ func (c *Conn) Serve(ctx context.Context) error {
 		c.wg.Wait()
 	}()
 
-	interruptible := newInterruptibleReader(c.rawReader, c.readerCloser, ctx)
+	interruptible := newInterruptibleReader(ctx, c.rawReader, c.readerCloser)
 	reader := bufio.NewReader(interruptible)
 
 	for {
@@ -192,20 +206,14 @@ type interruptibleReader struct {
 	ctx    context.Context
 
 	closeOnce sync.Once
-
-	mu  sync.Mutex
-	gen int64
+	gen       atomic.Int64
 }
 
-func newInterruptibleReader(inner io.Reader, closer io.Closer, ctx context.Context) *interruptibleReader {
+func newInterruptibleReader(ctx context.Context, inner io.Reader, closer io.Closer) *interruptibleReader {
 	return &interruptibleReader{inner: inner, closer: closer, ctx: ctx}
 }
 
-func (r *interruptibleReader) generation() int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.gen
-}
+func (r *interruptibleReader) generation() int64 { return r.gen.Load() }
 
 type interruptibleReadResult struct {
 	n   int
@@ -222,9 +230,18 @@ func (r *interruptibleReader) Read(p []byte) (int, error) {
 	case res := <-resultCh:
 		return res.n, res.err
 	case <-r.ctx.Done():
-		r.mu.Lock()
-		r.gen++
-		r.mu.Unlock()
+		// select chooses pseudo-randomly among ready cases: resultCh may already
+		// hold the real, decided outcome even though ctx.Done() became ready at
+		// essentially the same moment (e.g. a terminal transport error racing
+		// cancellation). Re-check it non-blockingly before claiming this call for
+		// cancellation — only a call whose result truly wasn't ready yet may be
+		// attributed to the ctx.Done() branch below.
+		select {
+		case res := <-resultCh:
+			return res.n, res.err
+		default:
+		}
+		r.gen.Add(1)
 		if r.closer != nil {
 			r.closeOnce.Do(func() { _ = r.closer.Close() })
 		}
