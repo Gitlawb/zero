@@ -3,6 +3,8 @@
 package sandbox
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,4 +195,78 @@ func windowsSecretACEList(dacl *windows.ACL) ([]*windows.SID, error) {
 		out = append(out, copied)
 	}
 	return out, nil
+}
+
+// DPAPI round-trip through the real store, which needs no privilege and so is
+// genuine coverage rather than a gated stub.
+func TestWindowsSandboxSecretRoundTripsThroughDPAPI(t *testing.T) {
+	path, err := windowsSandboxSecretPath(t.TempDir(), "zero-sbx-roundtrip")
+	if err != nil {
+		t.Fatalf("secret path: %v", err)
+	}
+	const password = "S0me-Sandbox-P@ssw0rd-value"
+	if err := writeWindowsSandboxSecret(path, password); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	got, err := readWindowsSandboxSecret(path)
+	if err != nil {
+		t.Fatalf("read secret: %v", err)
+	}
+	if got != password {
+		t.Fatalf("round-trip returned %q, want %q", got, password)
+	}
+	// The point of the exercise: the password must not be recoverable by reading
+	// the file, or the encryption layer is decorative.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read raw secret file: %v", err)
+	}
+	if bytes.Contains(raw, []byte(password)) {
+		t.Fatal("the password appears verbatim in the stored file; it was not encrypted")
+	}
+}
+
+// Entropy is the principal name, so a blob moved onto another principal's secret
+// path must fail to decrypt rather than authenticate the wrong account.
+func TestWindowsSandboxSecretDoesNotTransferBetweenPrincipals(t *testing.T) {
+	home := t.TempDir()
+	minePath, err := windowsSandboxSecretPath(home, "zero-sbx-mine")
+	if err != nil {
+		t.Fatalf("secret path: %v", err)
+	}
+	theirsPath, err := windowsSandboxSecretPath(home, "zero-sbx-theirs")
+	if err != nil {
+		t.Fatalf("secret path: %v", err)
+	}
+	if err := writeWindowsSandboxSecret(minePath, "a-password-for-mine"); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	blob, err := os.ReadFile(minePath)
+	if err != nil {
+		t.Fatalf("read blob: %v", err)
+	}
+	if err := os.WriteFile(theirsPath, blob, 0o600); err != nil {
+		t.Fatalf("plant blob: %v", err)
+	}
+	if _, err := readWindowsSandboxSecret(theirsPath); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+		t.Fatalf("a blob planted at another principal's path decrypted; got err = %v", err)
+	}
+}
+
+// An older plaintext secret must degrade to a fallback rather than being handed
+// to LogonUser as if it were a password.
+func TestWindowsSandboxSecretRejectsLegacyPlaintext(t *testing.T) {
+	path, err := windowsSandboxSecretPath(t.TempDir(), "zero-sbx-legacy")
+	if err != nil {
+		t.Fatalf("secret path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("plaintext-password"), 0o600); err != nil {
+		t.Fatalf("write legacy secret: %v", err)
+	}
+	if _, err := readWindowsSandboxSecret(path); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+		t.Fatalf("legacy plaintext secret was accepted; got err = %v", err)
+	}
 }
