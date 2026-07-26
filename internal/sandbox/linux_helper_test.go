@@ -294,7 +294,8 @@ func TestLinuxBwrapSkipsMissingCredentialBaselines(t *testing.T) {
 		t.Fatalf("MkdirAll credential dir: %v", err)
 	}
 	plan = buildLinuxBwrapFilesystemPlan(profile)
-	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", missingCredential, "--remount-ro", missingCredential)
+	normalizedCredential := normalizeProfilePath(missingCredential)
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", normalizedCredential, "--remount-ro", normalizedCredential)
 }
 
 // TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking covers the long-lived
@@ -321,7 +322,8 @@ func TestLinuxBwrapCreatesOwnedCredentialDirsBeforeMasking(t *testing.T) {
 	if info, err := os.Stat(ownedDir); err != nil || !info.IsDir() {
 		t.Fatalf("owned credential dir was not created: err=%v", err)
 	}
-	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", ownedDir, "--remount-ro", ownedDir)
+	normalizedOwnedDir := normalizeProfilePath(ownedDir)
+	assertArgsContainSequence(t, plan.Args, "--perms", "000", "--tmpfs", normalizedOwnedDir, "--remount-ro", normalizedOwnedDir)
 	if stringSliceContains(plan.Args, thirdParty) {
 		t.Fatalf("absent third-party store must stay unmounted and uncreated: %#v", plan.Args)
 	}
