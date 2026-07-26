@@ -1,0 +1,194 @@
+//go:build windows
+
+package sandbox
+
+// Storing a sandbox principal's password.
+//
+// The elevated setup path provisions the account, but the per-command path runs
+// UNELEVATED and needs the password to call LogonUser. So the secret has to
+// cross that boundary on disk, and the only thing standing between it and the
+// sandboxed child is the file's ACL.
+//
+// The file is locked to the invoking user: an explicit, INHERITANCE-PROTECTED
+// DACL granting that user and SYSTEM, and nobody else. The sandbox principal is
+// deliberately absent from it, which is the property that matters, because a
+// principal that could read this file could mint its own token and the whole
+// identity boundary would be decorative. Administrators are not added either;
+// an admin can already take ownership, so naming them buys nothing and widens
+// the visible grant.
+//
+// Ordering is load-bearing: the ACL is applied to an EMPTY file before the
+// password is written, so the bytes never exist under the directory's inherited
+// permissions even briefly.
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/windows"
+)
+
+// windowsSandboxSecretDirName holds per-principal secrets under the Zero config
+// directory. Kept in its own directory so the whole set can be removed when the
+// sandbox is torn down.
+const windowsSandboxSecretDirName = "windows-sandbox"
+
+// windowsSandboxSecretPath returns where a principal's password lives. The
+// account name is already sanitised to [a-z0-9-] by windowsSandboxUserName, so
+// it cannot escape the directory.
+func windowsSandboxSecretPath(configDir string, username string) (string, error) {
+	if strings.TrimSpace(configDir) == "" {
+		return "", errors.New("windows sandbox secret: empty config directory")
+	}
+	if strings.TrimSpace(username) == "" {
+		return "", errors.New("windows sandbox secret: empty principal name")
+	}
+	// Defence in depth against a caller passing something windowsSandboxUserName
+	// did not produce: refuse anything with a separator or a parent reference.
+	if strings.ContainsAny(username, `\/:`) || strings.Contains(username, "..") {
+		return "", fmt.Errorf("windows sandbox secret: unsafe principal name %q", username)
+	}
+	return filepath.Join(configDir, windowsSandboxSecretDirName, username+".secret"), nil
+}
+
+// currentTokenUserSID returns the SID of the user this process runs as. Under
+// UAC the elevated token keeps the same user SID as the desktop session, so
+// setup and the later unelevated command path agree on the owner, which is what
+// makes an owner-scoped ACL usable across the elevation boundary.
+func currentTokenUserSID() (*windows.SID, error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return nil, fmt.Errorf("open process token: %w", err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("get token user: %w", err)
+	}
+	// The SID points into a buffer owned by the Tokenuser, so copy it out before
+	// that buffer goes away.
+	copied, err := user.User.Sid.Copy()
+	if err != nil {
+		return nil, fmt.Errorf("copy token user SID: %w", err)
+	}
+	return copied, nil
+}
+
+// lockWindowsSecretToOwner replaces a file's DACL with an explicit,
+// inheritance-protected one granting only owner and SYSTEM. PROTECTED is what
+// drops any ACE inherited from the config directory; without it a permissive
+// parent would still grant access to whoever it names.
+func lockWindowsSecretToOwner(path string, owner *windows.SID) error {
+	if owner == nil {
+		return errors.New("windows sandbox secret: nil owner SID")
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return fmt.Errorf("resolve SYSTEM SID: %w", err)
+	}
+	entries := []windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(owner),
+			},
+		},
+		{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(system),
+			},
+		},
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return fmt.Errorf("build secret ACL: %w", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("lock secret to owner: %w", err)
+	}
+	return nil
+}
+
+// writeWindowsSandboxSecret stores a principal's password readable only by the
+// invoking user.
+//
+// The file is created empty, locked down, and only then written, so the secret
+// is never on disk under the directory's inherited ACL. An existing file is
+// replaced rather than appended, since a stale password would make LogonUser
+// fail in a way that looks like a sandbox bug.
+func writeWindowsSandboxSecret(path string, password string) error {
+	owner, err := currentTokenUserSID()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create secret directory: %w", err)
+	}
+	// Truncate any previous secret first: the ACL below is applied to whatever
+	// inode ends up at this path, so create it before locking it.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create secret file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close secret file: %w", err)
+	}
+	if err := lockWindowsSecretToOwner(path, owner); err != nil {
+		// Do not leave an unprotected empty file behind.
+		_ = os.Remove(path)
+		return err
+	}
+	if err := os.WriteFile(path, []byte(password), 0o600); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("write secret: %w", err)
+	}
+	return nil
+}
+
+// readWindowsSandboxSecret loads a principal's password. A missing file means
+// setup has not run for this workspace, which the caller turns into a fallback
+// rather than a hard failure.
+func readWindowsSandboxSecret(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errWindowsSandboxIdentityUnavailable
+		}
+		return "", fmt.Errorf("read sandbox secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", errWindowsSandboxIdentityUnavailable
+	}
+	return secret, nil
+}
+
+// removeWindowsSandboxSecret deletes a stored password. Called before the
+// account itself is removed so a secret never outlives the principal it
+// authenticates.
+func removeWindowsSandboxSecret(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove sandbox secret: %w", err)
+	}
+	return nil
+}
