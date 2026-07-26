@@ -143,6 +143,26 @@ func (store *GrantStore) ConsumeMigrationNotice() (string, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	// Look for a pending notice WITHOUT taking the interprocess lock. Acquiring
+	// that lock creates the grants directory and opens <grants>.lockfile, so doing
+	// it unconditionally would make this call require a WRITABLE grants directory
+	// even when it has nothing to write. Every startup and every `zero exec` calls
+	// this, so a user with no grants file whose configured grants path (or its
+	// parent) sits on a read-only mount would fail outright with "failed to
+	// migrate sandbox grants", where reading alone reports an empty state and
+	// writes nothing.
+	state, needsMigration, err := store.readStateFile(false)
+	if err != nil {
+		return "", err
+	}
+	if !needsMigration && (state.Migration == nil || !state.Migration.NoticePending) {
+		return "", nil
+	}
+	// Past here a write is genuinely required — either a schema/policy migration,
+	// which only a lock holder may perform, or clearing NoticePending — so the
+	// lock is warranted and a read-only grants path legitimately fails (as it did
+	// before this lock existed, via readState's own migration path).
+	//
 	// Clearing the pending flag is a read-modify-write like any other mutator, so
 	// it takes the same interprocess lock: two frontends starting at once must not
 	// both read NoticePending, both print the notice, and clobber each other's
@@ -152,7 +172,11 @@ func (store *GrantStore) ConsumeMigrationNotice() (string, error) {
 		return "", err
 	}
 	defer unlock()
-	state, err := store.readStateLocked()
+	// Re-read under the lock. The unlocked peek above is only a snapshot: another
+	// process may have consumed the notice or migrated the file while this one
+	// waited, and when needsMigration was set that snapshot's contents are
+	// meaningless by readStateFile's contract.
+	state, err = store.readStateLocked()
 	if err != nil {
 		return "", err
 	}

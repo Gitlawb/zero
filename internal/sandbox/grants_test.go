@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +169,86 @@ func TestGrantStoreSerializesMigrationNoticeAcrossStores(t *testing.T) {
 	// The flag write landed, so the notice is not reported twice.
 	if again, err := storeA.ConsumeMigrationNotice(); err != nil || again != "" {
 		t.Fatalf("second ConsumeMigrationNotice = %q err=%v, want empty", again, err)
+	}
+}
+
+// TestConsumeMigrationNoticeWritesNothingWithoutAPendingNotice is the regression
+// test for jatmn's #755 finding: ConsumeMigrationNotice took the interprocess
+// lock unconditionally, and acquiring that lock MkdirAlls the grants directory
+// and creates <grants>.lockfile. Every startup and every `zero exec` calls this,
+// so it turned "read the grants state" into "require a writable grants
+// directory" — a user with no grants file whose grants path sat on a read-only
+// mount failed outright with "failed to migrate sandbox grants".
+//
+// Asserting that nothing is created is the portable form of that requirement: it
+// holds identically on every OS and as any user, unlike a read-only-directory
+// test (see the sibling test, which cannot run everywhere).
+func TestConsumeMigrationNoticeWritesNothingWithoutAPendingNotice(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "config")
+	path := filepath.Join(dir, "sandbox-grants.json")
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil {
+		t.Fatalf("ConsumeMigrationNotice with no grants file: %v", err)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty when nothing was migrated", notice)
+	}
+	// Nothing at all may be created: not the lock file, not the grants file, not
+	// even the directory that would hold them.
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(dir)
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("the grants directory was created (contents: %v); reading a state with no pending notice must not require a writable directory", names)
+	}
+}
+
+// TestConsumeMigrationNoticeToleratesAReadOnlyGrantsDirectory exercises the
+// actual failure from the same finding, rather than only its portable proxy
+// above: with the grants directory read-only and no grants file, the pre-fix
+// code failed at MkdirAll/OpenFile for the lock file.
+//
+// It cannot run everywhere — Windows ignores the mode bits used here, and root
+// bypasses directory permissions entirely — so it skips instead of pretending to
+// cover those platforms.
+func TestConsumeMigrationNoticeToleratesAReadOnlyGrantsDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory mode bits do not deny writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so a read-only directory cannot be simulated")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sandbox-grants.json")
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("cannot make the grants directory read-only: %v", err)
+	}
+	// Restore write permission so t.TempDir's cleanup can remove the directory.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// Confirm the directory really is read-only here; otherwise this test would
+	// pass without exercising anything.
+	if probe, err := os.OpenFile(filepath.Join(dir, ".probe"), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+		_ = probe.Close()
+		t.Skip("this filesystem still allows writes to a 0500 directory")
+	}
+
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil {
+		t.Fatalf("ConsumeMigrationNotice on a read-only grants directory: %v", err)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty when nothing was migrated", notice)
 	}
 }
 
