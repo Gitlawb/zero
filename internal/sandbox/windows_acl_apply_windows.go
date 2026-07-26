@@ -224,6 +224,17 @@ func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACC
 	switch action {
 	case WindowsACLAllowWrite:
 		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE, nil
+	case WindowsACLAllowRead:
+		// Read and traverse without write. A sandbox principal is a separate
+		// account with no inherent access to the caller's tree, so a read-only
+		// root has to be granted rather than assumed. Deliberately omits
+		// FILE_GENERIC_WRITE, DELETE and WRITE_DAC.
+		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE, nil
+	case windowsACLRevoke:
+		// REVOKE_ACCESS drops every ACE naming the trustee regardless of the mask,
+		// so the mask is ignored here. Used to retire a principal without having
+		// to remember which access each path was granted.
+		return windows.REVOKE_ACCESS, 0, nil
 	case WindowsACLDenyRead:
 		return windows.DENY_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE, nil
 	case WindowsACLDenyWrite:
