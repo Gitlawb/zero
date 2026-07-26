@@ -494,7 +494,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	// emitted so pathname-policy backends can reserve it. Mount-based Linux
 	// retains the same profile baseline but can mask only paths that exist when
 	// Bubblewrap assembles the namespace.
-	if !stringSliceContains(paths, filepath.Join(home, ".azure")) {
+	if !stringSliceContains(paths, normalizeProfilePath(filepath.Join(home, ".azure"))) {
 		t.Errorf("credential deny paths = %#v, want the not-yet-existing ~/.azure included", paths)
 	}
 
@@ -570,7 +570,7 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 		filepath.Join(commandDir, "mcp", "tokens.json.secret.lock"),
 		filepath.Join(commandDir, "mcp", "tokens.json.migrated"),
 	} {
-		if !stringSliceContains(paths, want) {
+		if !stringSliceContains(paths, normalizeProfilePath(want)) {
 			t.Errorf("credential deny paths = %#v, want command-relative root %q", paths, want)
 		}
 	}
@@ -586,7 +586,7 @@ func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testin
 	if !stringSliceContains(resolvedConfigDirs, filepath.Dir(want)) {
 		t.Fatalf("zero credential config dirs = %#v, want literal XDG resolution %q", resolvedConfigDirs, filepath.Dir(want))
 	}
-	if !stringSliceContains(paths, want) {
+	if !stringSliceContains(paths, normalizeProfilePath(want)) {
 		t.Fatalf("credential deny paths = %#v, want literal XDG resolution %q", paths, want)
 	}
 	if expanded := normalizeProfilePaths([]string{filepath.Join(configDir, "zero")})[0]; expanded != want && stringSliceContains(paths, expanded) {

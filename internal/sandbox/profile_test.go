@@ -15,7 +15,10 @@ func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows credential deny-read is tracked separately")
 	}
-	workspace := t.TempDir()
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	profileHome := filepath.Join(workspace, "profile-home")
 	envMap := map[string]string{"HOME": "", "USERPROFILE": profileHome, "XDG_CONFIG_HOME": ""}
 	oauthPath, err := oauth.ResolveStorePath(envMap)

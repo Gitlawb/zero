@@ -390,7 +390,7 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	return credentialDenyPaths{
 		Paths:      out,
 		Carveouts:  credentialCarveoutPaths(out, carveouts),
-		EnsureDirs: credentialRetainedDirs(out, ensureDirs),
+		EnsureDirs: credentialRetainedDirs(out, normalizeProfilePaths(ensureDirs)),
 		Dirs:       credentialRetainedDirs(out, normalizeProfilePaths(dirs)),
 	}
 }
@@ -493,18 +493,8 @@ func credentialCarveoutPaths(denied []string, carveouts []string) []string {
 	}
 	out := make([]string, 0, len(carveouts))
 	for _, entry := range carveouts {
-		carveout := normalizeProfilePathLexically(entry)
+		carveout := normalizeCredentialCarveoutPath(entry)
 		if carveout == "" {
-			continue
-		}
-		// A missing fixed subtree may be installed later by trusted host code, but
-		// an existing entry must be a real directory. In particular, never turn a
-		// plugins symlink into an allow rule for its credential-file target.
-		if info, err := os.Lstat(carveout); err == nil {
-			if !info.IsDir() {
-				continue
-			}
-		} else if !os.IsNotExist(err) {
 			continue
 		}
 		for _, deny := range denied {
@@ -515,6 +505,32 @@ func credentialCarveoutPaths(denied []string, carveouts []string) []string {
 		}
 	}
 	return dedupeStrings(out)
+}
+
+// normalizeCredentialCarveoutPath canonicalizes the parent while preserving
+// the fixed terminal name. That keeps the allow under the same canonical root
+// as its deny (for example macOS /var -> /private/var) without ever following a
+// plugins/specialists/commands symlink to a credential target.
+func normalizeCredentialCarveoutPath(entry string) string {
+	carveout := normalizeProfilePathLexically(entry)
+	if carveout == "" {
+		return ""
+	}
+	// A missing fixed subtree may be installed later by trusted host code, but
+	// an existing entry must be a real directory. In particular, never turn a
+	// plugins symlink into an allow rule for its credential-file target.
+	if info, err := os.Lstat(carveout); err == nil {
+		if !info.IsDir() {
+			return ""
+		}
+	} else if !os.IsNotExist(err) {
+		return ""
+	}
+	parent := normalizeProfilePath(filepath.Dir(carveout))
+	if parent == "" {
+		return ""
+	}
+	return filepath.Join(parent, filepath.Base(carveout))
 }
 
 // credentialRetainedDirs keeps only directories that remain exact deny entries.
@@ -544,7 +560,7 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
 
-	paths := make([]string, 0, len(credentials.Paths))
+	var paths []string
 	for _, path := range credentials.Paths {
 		covered := false
 		for _, dir := range credentials.Dirs {
