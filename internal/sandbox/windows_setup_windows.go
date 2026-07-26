@@ -35,6 +35,33 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
+	// Provision this workspace's sandbox principal, when opted in. A principal is
+	// a separate local account, so it is created only on an explicit opt-in: it
+	// is visible in `net user`, and account creation is exactly the kind of thing
+	// endpoint protection and enterprise policy object to. Without the opt-in the
+	// capability-SID backend above is the whole of setup, unchanged.
+	if windowsSandboxIdentityEnabled(config.commandConfig().Env) {
+		principalRollback, err := setupWindowsSandboxPrincipal(config.commandConfig())
+		if err != nil {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
+				return 1
+			}
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+			return 1
+		}
+		// Fold the principal into the existing rollback so every later failure
+		// path undoes it too, rather than each one having to remember.
+		aclRollback := rollback
+		rollback = func() error {
+			principalErr := principalRollback()
+			aclErr := aclRollback()
+			if principalErr != nil {
+				return principalErr
+			}
+			return aclErr
+		}
+	}
 	if err := applyWindowsNetworkPlan(networkPlan); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
