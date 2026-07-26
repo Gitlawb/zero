@@ -83,7 +83,11 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// the restricted-token backend below runs exactly as before.
 	principalToken, ok, err := windowsSandboxPrincipalToken(config)
 	if err != nil {
-		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		// The one path here that does not fall back, because a provisioned but
+		// unusable principal means the sandbox is broken rather than absent. Say
+		// how to get out of it, since the whole backend is opt-in.
+		fmt.Fprintf(stderr, "%s: sandbox principal is provisioned but unusable: %v. Re-run `zero sandbox setup` from an elevated terminal, or unset %s to fall back to the restricted-token sandbox.\n",
+			WindowsSandboxCommandRunnerName, err, windowsSandboxIdentityEnv)
 		return 1
 	}
 	if ok {
