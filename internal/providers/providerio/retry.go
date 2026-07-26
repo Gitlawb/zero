@@ -95,17 +95,29 @@ func SendWithRetry(
 	if client == nil {
 		client = http.DefaultClient
 	}
-	// Redirects are NOT followed on this path. Otherwise client.Do could transmit
-	// the original POST to the first host, follow a 307/308 to a redirect target,
-	// and if the dial to that target then failed, return an Op=="dial" error that
-	// isPreSendTransportError would wrongly treat as pre-send and replay, re-billing
-	// a completion the first host already received. With redirects off, any
-	// dial/DNS/TLS error from Do can only come from the single initial request, so
-	// "no request bytes left this host" holds. A 3xx is returned as the response
-	// (ErrUseLastResponse) for the caller's existing non-2xx status handling.
-	noRedirectClient := *client
-	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	// Redirects are still FOLLOWED, so a redirecting gateway keeps working, but
+	// entering one makes that attempt non-retryable. The hazard is that client.Do
+	// can transmit the original POST to the first host, follow a 307/308, and then
+	// fail the dial to the redirect target: that error is an Op=="dial" error, so
+	// isPreSendTransportError would read it as "nothing was sent" and replay a
+	// completion the first host already received. Observing the redirect rather
+	// than blocking it keeps both properties, since a request that was redirected
+	// is never replayed while redirecting endpoints stay usable. The caller's own
+	// CheckRedirect still runs and still decides whether to proceed.
+	redirected := false
+	callerCheckRedirect := client.CheckRedirect
+	redirectAwareClient := *client
+	redirectAwareClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		redirected = true
+		if callerCheckRedirect != nil {
+			return callerCheckRedirect(request, via)
+		}
+		// Mirror net/http's default policy, which a nil CheckRedirect would have
+		// applied: stop after 10 hops.
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
 	}
 	// The two retry budgets are fully independent, each with its own counter and
 	// its own backoff ordinal, because they answer different questions: a
@@ -118,6 +130,9 @@ func SendWithRetry(
 	preSendAttempts := 0
 	statusAttempts := 0
 	for {
+		// Per attempt: only a redirect entered by THIS attempt can make its own
+		// transport error unsafe to replay.
+		redirected = false
 		request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -127,7 +142,7 @@ func SendWithRetry(
 		}
 
 		connectSpan := trace.FromContext(ctx).Span(trace.SpanProviderConnect)
-		response, err := noRedirectClient.Do(request)
+		response, err := redirectAwareClient.Do(request)
 		connectSpan.End()
 		if err != nil {
 			// Context cancellation always surfaces as cancellation, never a retry.
@@ -145,7 +160,10 @@ func SendWithRetry(
 			// its own short bound and sub-second schedule (preSendMaxAttempts /
 			// preSendBackoff), not the seconds-long 429 schedule, so a permanent
 			// dial failure fails fast instead of stalling the agent for ~60s.
-			if isPreSendTransportError(err) {
+			// A redirect means the original POST already left this host, so the
+			// dial that failed belongs to a later hop and replaying would duplicate
+			// a completion the first host may already have processed.
+			if isPreSendTransportError(err) && !redirected {
 				preSendAttempts++
 				if preSendAttempts < preSendMaxAttempts {
 					if r := trace.FromContext(ctx); r != nil {

@@ -388,34 +388,100 @@ func TestSendWithRetryReturnsLastResponseAfterMaxAttempts(t *testing.T) {
 	}
 }
 
-// A redirect is NOT followed on the completion path. If it were, client.Do could
-// transmit the original POST to the first host, follow the 307/308, and then a
-// dial failure to the redirect target would arrive as an Op=="dial" error that
-// isPreSendTransportError treats as pre-send, replaying a completion the first
-// host already received. With redirects off, the 3xx surfaces as the response and
-// the POST is sent exactly once.
-func TestSendWithRetryDoesNotFollowRedirects(t *testing.T) {
+// Redirects are still followed, so a gateway that answers the completion endpoint
+// with a 307/308 keeps working: the caller gets the final response, not the 3xx.
+func TestSendWithRetryFollowsRedirects(t *testing.T) {
 	var calls int32
 	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		atomic.AddInt32(&calls, 1)
-		return &http.Response{
-			StatusCode: http.StatusTemporaryRedirect,
-			Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
-			Body:       http.NoBody,
-			Request:    r,
-		}, nil
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
 	})}
 
 	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 3)
 	if err != nil {
-		t.Fatalf("a 307 must surface as a response, not an error: %v", err)
+		t.Fatalf("a redirected completion must succeed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the redirect should have been followed)", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("transport called %d times, want 2 (origin then redirect target)", got)
+	}
+}
+
+// Once an attempt has entered a redirect, the original POST has already left this
+// host, so a dial failure on the redirect hop must NOT be replayed even though it
+// arrives as an Op=="dial" error that isPreSendTransportError would otherwise
+// treat as provably pre-send. Replaying it would re-bill a completion the first
+// host may already have processed.
+func TestSendWithRetryDoesNotReplayAfterRedirect(t *testing.T) {
+	shrinkBackoff(t)
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		}
+		// The dial to the redirect target fails: pre-send in shape, but post-send
+		// in fact, because the origin already received the POST.
+		return nil, wrapDialErrno("dial", syscall.ECONNREFUSED)
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 6)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected the redirect-hop dial failure to surface as an error")
+	}
+	// Exactly two: the origin request and the single redirect hop. A third would
+	// mean the redirected POST was replayed.
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("redirected POST was replayed: transport called %d times, want 2", got)
+	}
+}
+
+// A caller that supplies its own CheckRedirect keeps it: the retry path observes
+// redirects, it does not take the decision away from the caller.
+func TestSendWithRetryPreservesCallerRedirectPolicy(t *testing.T) {
+	var policyCalls int32
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			atomic.AddInt32(&policyCalls, 1)
+			return http.ErrUseLastResponse
+		},
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 3)
+	if err != nil {
+		t.Fatalf("caller policy asked to stop at the 3xx, so it must surface: %v", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("want the 307 surfaced unfollowed, got status %d", resp.StatusCode)
+		t.Fatalf("status = %d, want the 307 surfaced per the caller's policy", resp.StatusCode)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("redirect was followed and/or the POST replayed: transport called %d times, want 1", got)
+	if got := atomic.LoadInt32(&policyCalls); got != 1 {
+		t.Fatalf("caller CheckRedirect called %d times, want 1 (it must not be discarded)", got)
 	}
 }
 
