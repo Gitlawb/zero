@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestPromoteRefusesASubstitutedStagingEntry is the regression test for the live
@@ -92,7 +91,12 @@ func TestPromoteSurvivesAncestorDirectoryReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stageBinary: %v", err)
 	}
-	defer staged.discard()
+	discarded := false
+	defer func() {
+		if !discarded {
+			staged.discard()
+		}
+	}()
 
 	// Rehearse the ancestor swap: move the real staging directory aside (the
 	// test runs as its owner, so it can do what a merely writable-parent
@@ -122,8 +126,10 @@ func TestPromoteSurvivesAncestorDirectoryReplacement(t *testing.T) {
 	if string(installed) != "verified-binary" {
 		t.Fatalf("target = %q, want the verified bytes from the original staging directory", installed)
 	}
+	staged.discard()
+	discarded = true
 	// The impostor must be left untouched: promote should never have looked at
-	// it, let alone consumed or removed it.
+	// it, let alone consumed or removed it during deferred cleanup.
 	if impostor, err := os.ReadFile(impostorFile); err != nil {
 		t.Fatalf("ReadFile impostor file: %v", err)
 	} else if string(impostor) != "attacker-binary" {
@@ -131,47 +137,28 @@ func TestPromoteSurvivesAncestorDirectoryReplacement(t *testing.T) {
 	}
 }
 
-// TestCopyFromRefreshesStagingLivenessDuringCopy is the regression test for a
-// review finding on PR #751: removeStaleStagingLeftovers uses the staging
-// directory's mtime as its only liveness signal, but writing INTO an
-// already-created file never touches the PARENT directory's own mtime — only
-// creating/removing/renaming a directory entry does. A large or slow copy
-// could therefore look abandoned to a concurrent CleanupStaleBinary sweep
-// while still in progress. copyFrom must keep the directory's mtime fresh as
-// it goes, not just at the start.
-func TestCopyFromRefreshesStagingLivenessDuringCopy(t *testing.T) {
+func TestCreateStagedBinaryRejectsDirectoryReplacementBeforeOpen(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero")
-	sourcePath := filepath.Join(t.TempDir(), "new-binary")
-	if err := os.WriteFile(sourcePath, []byte("0123456789abcdef"), 0o755); err != nil {
-		t.Fatalf("WriteFile source: %v", err)
+	original := openStagingDirectory
+	openStagingDirectory = func(parentFD int, name string) (int, error) {
+		path := filepath.Join(dir, name)
+		if err := os.Rename(path, path+"-original"); err != nil {
+			t.Fatalf("Rename original staging directory: %v", err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("Mkdir impostor: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "keep"), []byte("attacker"), 0o600); err != nil {
+			t.Fatalf("WriteFile impostor marker: %v", err)
+		}
+		return original(parentFD, name)
 	}
+	defer func() { openStagingDirectory = original }()
 
-	original := copyLivenessChunkSize
-	copyLivenessChunkSize = 4 // force several refreshes for a tiny source file
-	defer func() { copyLivenessChunkSize = original }()
-
-	staged, err := createStagedBinary(targetPath)
-	if err != nil {
-		t.Fatalf("createStagedBinary: %v", err)
-	}
-	defer staged.discard()
-
-	stale := time.Now().Add(-2 * stagingLeftoverMinAge)
-	if err := os.Chtimes(staged.dir, stale, stale); err != nil {
-		t.Fatalf("Chtimes: %v", err)
-	}
-
-	if err := staged.copyFrom(sourcePath); err != nil {
-		t.Fatalf("copyFrom: %v", err)
-	}
-
-	info, err := os.Stat(staged.dir)
-	if err != nil {
-		t.Fatalf("Stat staging directory: %v", err)
-	}
-	if !info.ModTime().After(stale) {
-		t.Fatalf("staging directory mtime = %v, want copyFrom to have refreshed it past %v", info.ModTime(), stale)
+	if staged, err := createStagedBinary(targetPath); err == nil {
+		staged.discard()
+		t.Fatal("createStagedBinary accepted a directory replaced before open")
 	}
 }
 
@@ -224,58 +211,18 @@ func TestInstallBinaryCleansUpWhenStagingFails(t *testing.T) {
 	assertNoStagingLeftovers(t, dir)
 }
 
-// TestCleanupStaleBinaryRemovesAbandonedStagingDirectories covers the crash
-// leftover path: a killed update leaves its private staging directory behind and
-// nothing else reclaims it now that the name is random. A directory young enough
-// to belong to a concurrent update must be left alone, and so must anything that
-// merely starts with the same prefix but is not the exact generated shape
-// (os.MkdirTemp's suffix is always 1-10 ASCII digits) — a user's own similarly
-// named directory must never be swept up just because it is old.
-func TestCleanupStaleBinaryRemovesAbandonedStagingDirectories(t *testing.T) {
+func TestCleanupStaleBinaryPreservesUnverifiableStagingDirectories(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero")
-	abandoned := filepath.Join(dir, stagingDirPrefix+"1234567890")
-	inflight := filepath.Join(dir, stagingDirPrefix+"987654321")
-	lookalike := filepath.Join(dir, stagingDirPrefix+"backup")
-	unrelated := filepath.Join(dir, "keep-me")
-	for _, path := range []string{abandoned, inflight, lookalike, unrelated} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatalf("Mkdir %s: %v", path, err)
-		}
-	}
-	stale := time.Now().Add(-2 * stagingLeftoverMinAge)
-	for _, path := range []string{abandoned, lookalike} {
-		if err := os.Chtimes(path, stale, stale); err != nil {
-			t.Fatalf("Chtimes %s: %v", path, err)
-		}
+	unverifiable := filepath.Join(dir, stagingDirPrefix+"1234567890")
+	if err := os.Mkdir(unverifiable, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
 	}
 
-	removeStaleStagingLeftovers(targetPath, time.Now())
+	CleanupStaleBinary(targetPath)
 
-	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
-		t.Fatalf("abandoned staging directory survived: %v", err)
-	}
-	for _, path := range []string{inflight, lookalike, unrelated} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s must be left alone: %v", path, err)
-		}
-	}
-}
-
-func TestIsGeneratedStagingDirName(t *testing.T) {
-	cases := map[string]bool{
-		stagingDirPrefix + "0":           true,
-		stagingDirPrefix + "1234567890":  true,
-		stagingDirPrefix + "12345678901": false, // longer than a uint32 can encode
-		stagingDirPrefix + "":            false,
-		stagingDirPrefix + "backup":      false,
-		stagingDirPrefix + "12a34":       false,
-		"other-1234":                     false,
-	}
-	for name, want := range cases {
-		if got := isGeneratedStagingDirName(name); got != want {
-			t.Errorf("isGeneratedStagingDirName(%q) = %v, want %v", name, got, want)
-		}
+	if _, err := os.Stat(unverifiable); err != nil {
+		t.Fatalf("unverifiable staging directory must be preserved: %v", err)
 	}
 }
 

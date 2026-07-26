@@ -121,6 +121,27 @@ func TestPromoteRejectsALyingRenameByHandle(t *testing.T) {
 	}
 }
 
+func TestVerifyPromotedTargetRejectsDifferentRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	stagedPath := filepath.Join(dir, "staged.exe")
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(stagedPath, []byte("verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile staged: %v", err)
+	}
+	if err := os.WriteFile(targetPath, []byte("attacker"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	staged, err := os.Open(stagedPath)
+	if err != nil {
+		t.Fatalf("Open staged: %v", err)
+	}
+	defer func() { _ = staged.Close() }()
+
+	if err := verifyPromotedTarget(staged, targetPath); err == nil {
+		t.Fatal("verifyPromotedTarget accepted a different regular file at targetPath")
+	}
+}
+
 // TestInstallBinaryInstallsVerifiedBytes is the success control for the ordinary
 // path: the staged bytes land at the target, the running binary is preserved as
 // "<target>.old", and no staging artifact survives.

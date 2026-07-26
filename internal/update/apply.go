@@ -259,6 +259,8 @@ type stagedBinary struct {
 	// path between the identity check and the rename — a pathname lookup at
 	// that point would resolve through the impostor instead. nil on Windows.
 	dirHandle *os.File
+	// parentHandle is the descriptor-bound parent of dir (POSIX only).
+	parentHandle *os.File
 	// promoted records that path now IS the installed binary, so discard must
 	// not delete it.
 	promoted bool
@@ -329,15 +331,7 @@ func (staged *stagedBinary) discard() {
 	if staged.file != nil {
 		_ = staged.file.Close()
 	}
-	if !staged.promoted && staged.path != "" {
-		_ = os.Remove(staged.path)
-	}
-	if staged.dirHandle != nil {
-		_ = staged.dirHandle.Close()
-	}
-	if staged.dir != "" {
-		_ = os.RemoveAll(staged.dir)
-	}
+	staged.discardPaths()
 }
 
 func downloadFile(ctx context.Context, url string, destPath string) error {

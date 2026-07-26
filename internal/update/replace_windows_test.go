@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -84,51 +83,17 @@ func TestRestoreOriginalBinaryFlagsPossibleTamperingWhenRestoreFails(t *testing.
 	}
 }
 
-func TestIsGeneratedStagingFileName(t *testing.T) {
-	hex32 := "0123456789abcdef0123456789abcdef"
-	cases := map[string]bool{
-		"zero.exe." + hex32 + ".new":     true,
-		"zero.exe." + hex32[:31] + ".new": false, // one hex char short
-		"zero.exe." + hex32 + "A.new":    false,  // uppercase hex, not what hex.EncodeToString produces
-		"zero.exe.release-notes.new":     false,  // loose look-alike a user could plausibly have
-		"zero.exe.backup":                false,  // no .new suffix
-		"other.exe." + hex32 + ".new":    false,  // wrong binary name
-	}
-	for name, want := range cases {
-		if got := isGeneratedStagingFileName("zero.exe", name); got != want {
-			t.Errorf("isGeneratedStagingFileName(%q) = %v, want %v", name, got, want)
-		}
-	}
-}
-
-// TestRemoveStaleStagingLeftoversIgnoresLookalikeNames covers the cleanup
-// finding from the same PR #751 review: only the exact generated shape
-// ("<binary>.<32 lowercase hex chars>.new") is swept, so a legitimate file
-// that merely starts and ends the same way — e.g. release notes a user saved
-// next to the binary — survives regardless of age.
-func TestRemoveStaleStagingLeftoversIgnoresLookalikeNames(t *testing.T) {
+func TestCleanupStaleBinaryPreservesUnverifiableStagingFiles(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")
-	generated := filepath.Join(dir, "zero.exe.0123456789abcdef0123456789abcdef.new")
-	lookalike := filepath.Join(dir, "zero.exe.release-notes.new")
-	for _, path := range []string{generated, lookalike} {
-		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
-			t.Fatalf("WriteFile %s: %v", path, err)
-		}
-	}
-	stale := time.Now().Add(-2 * stagingLeftoverMinAge)
-	for _, path := range []string{generated, lookalike} {
-		if err := os.Chtimes(path, stale, stale); err != nil {
-			t.Fatalf("Chtimes %s: %v", path, err)
-		}
+	unverifiable := filepath.Join(dir, "zero.exe.0123456789abcdef0123456789abcdef.new")
+	if err := os.WriteFile(unverifiable, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
-	removeStaleStagingLeftovers(targetPath, time.Now())
+	CleanupStaleBinary(targetPath)
 
-	if _, err := os.Stat(generated); !os.IsNotExist(err) {
-		t.Fatalf("generated staging leftover survived: %v", err)
-	}
-	if _, err := os.Stat(lookalike); err != nil {
-		t.Fatalf("look-alike file must be left alone: %v", err)
+	if _, err := os.Stat(unverifiable); err != nil {
+		t.Fatalf("unverifiable staging file must be preserved: %v", err)
 	}
 }

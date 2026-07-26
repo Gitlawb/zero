@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -112,7 +114,7 @@ func (staged *stagedBinary) promote(targetPath string) error {
 		// without actually completing it, which would otherwise let promote
 		// return nil while targetPath is left missing entirely. Confirm the
 		// object is actually reachable there before trusting the rename.
-		if verifyErr := verifyPromotedTarget(targetPath); verifyErr != nil {
+		if verifyErr := verifyPromotedTarget(staged.file, targetPath); verifyErr != nil {
 			renameErr = fmt.Errorf("promoted object unreachable at %s: %w", targetPath, verifyErr)
 		}
 	}
@@ -127,34 +129,61 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	return nil
 }
 
-// refreshLiveness is a no-op on Windows: cleanup here keys off ".old"/staging
-// filename shape rather than a directory mtime (see replace_windows.go), so
-// there is no liveness marker for a slow copy to keep fresh.
+// refreshLiveness is a no-op on Windows. Unverifiable random staging files are
+// preserved rather than age-swept.
 func (staged *stagedBinary) refreshLiveness() {}
 
-// verifyPromotedTarget reports whether targetPath is reachable immediately
-// after a reported-successful rename. SetFileInformationByHandle returning
-// success is not, on its own, proof the object actually ended up there: a
+// verifyPromotedTarget reports whether the staged handle itself resolves to
+// targetPath after a reported-successful rename. SetFileInformationByHandle
+// returning success is not, on its own, proof the object ended up there: a
 // handle whose directory entry was removed and replaced out from under it
 // (the substitution createStagingFile's exclusive, no-share open defends
 // against — see its doc comment) can leave some Windows versions accepting
 // the rename call without it taking effect, which would otherwise let
 // promote report success while targetPath is left missing entirely.
 //
-// os.Stat, not a second CreateFile, does the check: staged.file is still
-// open with no sharing, so a second full open of the same object — even
-// read-only, even from this process — would itself fail with a sharing
-// violation and be indistinguishable from a genuine promotion failure. A
-// plain attribute query bypasses share-mode enforcement instead.
-func verifyPromotedTarget(targetPath string) error {
-	info, err := os.Stat(targetPath)
+// GetFinalPathNameByHandle checks the name of the object already held open.
+// Opening targetPath again would fail because staged.file intentionally has
+// exclusive sharing, and a pathname-only attribute query would not prove
+// object identity.
+func verifyPromotedTarget(file *os.File, targetPath string) error {
+	buffer := make([]uint16, 32768)
+	n, err := windows.GetFinalPathNameByHandle(
+		windows.Handle(file.Fd()),
+		&buffer[0],
+		uint32(len(buffer)),
+		0,
+	)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, not the promoted binary", targetPath)
+	if n == 0 || n >= uint32(len(buffer)) {
+		return fmt.Errorf("query promoted object path")
+	}
+	handlePath := windows.UTF16ToString(buffer[:n])
+	if uncPath, ok := strings.CutPrefix(handlePath, `\\?\UNC\`); ok {
+		handlePath = `\\` + uncPath
+	} else {
+		handlePath = strings.TrimPrefix(handlePath, `\\?\`)
+	}
+	absoluteTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(filepath.Clean(handlePath), filepath.Clean(absoluteTarget)) {
+		return fmt.Errorf("staged handle resolves to %s, not %s", handlePath, absoluteTarget)
 	}
 	return nil
+}
+
+func (staged *stagedBinary) discardPaths() {
+	// POSIX-only state is present in the shared struct and always nil here.
+	_ = staged.dir
+	_ = staged.dirHandle
+	_ = staged.parentHandle
+	if !staged.promoted && staged.path != "" {
+		_ = os.Remove(staged.path)
+	}
 }
 
 // fileRenameInfo mirrors FILE_RENAME_INFO. FileName is a variable-length WCHAR
