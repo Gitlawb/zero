@@ -48,6 +48,7 @@ func TestReplaceWithRetryKeepsTheDestinationIdentity(t *testing.T) {
 	if _, err := os.Lstat(src); !os.IsNotExist(err) {
 		t.Fatalf("the replacement file should be consumed by the replace: %v", err)
 	}
+	assertNoReplaceBackups(t, dir)
 	if got := creationTime(t, dst); got != created {
 		t.Fatalf("creation time = %v, want the replaced file's %v (a rename would not preserve it)", got, created)
 	}
@@ -97,6 +98,7 @@ func TestReplaceWithRetryPreservesDestinationDACL(t *testing.T) {
 	if got := describeDACL(t, dst); got != want {
 		t.Fatalf("DACL after replace = %q, want the destination's own %q", got, want)
 	}
+	assertNoReplaceBackups(t, dir)
 }
 
 // TestReplaceWithRetryPublishesWhenDestinationIsMissing covers the no-destination
@@ -115,6 +117,7 @@ func TestReplaceWithRetryPublishesWhenDestinationIsMissing(t *testing.T) {
 	if data, err := os.ReadFile(dst); err != nil || string(data) != "new" {
 		t.Fatalf("destination = %q err=%v, want the replacement bytes", data, err)
 	}
+	assertNoReplaceBackups(t, dir)
 }
 
 // TestReplaceWithRetryRetriesTransientLockViolation keeps the retry behavior that
@@ -163,66 +166,13 @@ func TestReplaceFileFlagsDoNotIgnoreMergeErrors(t *testing.T) {
 	}
 }
 
-// TestRecoverPartialReplaceRescuesTheReplacement is the regression test for
-// jatmn's #757 second P1 finding. With no backup file, ReplaceFileW's 1176/1177
-// failures leave the DESTINATION DELETED and the replacement surviving only under
-// its temporary name. Returning those errors unrepaired let the caller's deferred
-// temp-file cleanup remove that sole surviving copy, so one failed
-// `specialist create --force` destroyed the old manifest AND the new one.
-func TestRecoverPartialReplaceRescuesTheReplacement(t *testing.T) {
+func TestReplaceExistingRejectsUnsupportedAtomicReplacement(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		code syscall.Errno
 	}{
-		{name: "ERROR_UNABLE_TO_MOVE_REPLACEMENT", code: errorUnableToMoveReplacement},
-		{name: "ERROR_UNABLE_TO_MOVE_REPLACEMENT_2", code: errorUnableToMoveReplacement2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			src := filepath.Join(dir, ".manifest.tmp")
-			dst := filepath.Join(dir, "manifest.md")
-			if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
-				t.Fatalf("WriteFile src: %v", err)
-			}
-			// dst is deliberately absent: the documented post-failure state is that
-			// Windows has already removed (1176) or renamed away (1177) the
-			// destination while the replacement stayed put.
-
-			err := recoverPartialReplace(tc.code, src, dst)
-			if err == nil {
-				t.Fatal("recoverPartialReplace must still report the failure; the destination's security descriptor was lost with the destination")
-			}
-			if !errors.Is(err, tc.code) {
-				t.Fatalf("error = %v, want it to wrap %v", err, tc.code)
-			}
-			data, readErr := os.ReadFile(dst)
-			if readErr != nil {
-				t.Fatalf("the replacement was not recovered to the destination: %v", readErr)
-			}
-			if string(data) != "new" {
-				t.Fatalf("destination content = %q, want the replacement bytes", data)
-			}
-			// The replacement must no longer sit at its temporary name, so the
-			// caller's cleanup cannot delete the only copy of the new content.
-			if _, err := os.Lstat(src); !os.IsNotExist(err) {
-				t.Fatalf("the replacement should have been moved off its temporary name: %v", err)
-			}
-		})
-	}
-}
-
-// TestRecoverPartialReplaceLeavesIntactStatesAlone covers the other half of the
-// contract: for failures Microsoft documents as leaving "the replaced and
-// replacement files retain their original file names", the destination still
-// holds its original content, so the error must pass through untouched and the
-// temporary file must stay put for the caller's cleanup to remove.
-func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		code syscall.Errno
-	}{
-		{name: "ERROR_UNABLE_TO_REMOVE_REPLACED", code: errorUnableToRemoveReplaced},
-		{name: "ERROR_ACCESS_DENIED", code: syscall.Errno(5)},
+		{name: "ERROR_INVALID_FUNCTION", code: errorInvalidFunction},
+		{name: "ERROR_NOT_SUPPORTED", code: errorNotSupported},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -235,16 +185,264 @@ func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
 				t.Fatalf("WriteFile dst: %v", err)
 			}
 
-			if err := recoverPartialReplace(tc.code, src, dst); !errors.Is(err, tc.code) {
+			err := replaceExistingWith(src, dst, func(replaced, replacement, backup string) error {
+				if replaced != dst || replacement != src {
+					t.Fatalf("ReplaceFileW paths = (%q, %q), want (%q, %q)", replaced, replacement, dst, src)
+				}
+				if filepath.Dir(backup) != dir {
+					t.Fatalf("backup directory = %q, want sibling directory %q", filepath.Dir(backup), dir)
+				}
+				return tc.code
+			}, nil)
+			if !errors.Is(err, tc.code) {
+				t.Fatalf("error = %v, want unsupported error %v", err, tc.code)
+			}
+			if !strings.Contains(err.Error(), "atomic replacement is not supported") {
+				t.Fatalf("error = %v, want an atomic-replacement explanation", err)
+			}
+			assertFileContent(t, dst, "old")
+			assertFileContent(t, src, "new")
+			assertNoReplaceBackups(t, dir)
+		})
+	}
+}
+
+func TestReplaceExistingCleansManagedBackup(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".manifest.tmp")
+	dst := filepath.Join(dir, "manifest.md")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile dst: %v", err)
+	}
+
+	var backupPath string
+	err := replaceExistingWith(src, dst, func(replaced, replacement, backup string) error {
+		backupPath = backup
+		if matched, matchErr := filepath.Match(replaceBackupPattern, filepath.Base(backup)); matchErr != nil || !matched {
+			t.Fatalf("backup path = %q, want pattern %q (match error: %v)", backup, replaceBackupPattern, matchErr)
+		}
+		if _, statErr := os.Lstat(backup); !os.IsNotExist(statErr) {
+			t.Fatalf("backup path must be vacant before ReplaceFileW: %v", statErr)
+		}
+		if renameErr := os.Rename(replaced, backup); renameErr != nil {
+			t.Fatalf("stage backup: %v", renameErr)
+		}
+		// Windows refuses to remove a read-only file. The cleanup path must clear
+		// that attribute without changing the backup's DACL, then remove it.
+		if chmodErr := os.Chmod(backup, 0o400); chmodErr != nil {
+			t.Fatalf("make backup read-only: %v", chmodErr)
+		}
+		return os.Rename(replacement, replaced)
+	}, nil)
+	if err != nil {
+		t.Fatalf("replaceExistingWith: %v", err)
+	}
+	assertFileContent(t, dst, "new")
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Fatalf("replacement source should be consumed: %v", err)
+	}
+	if _, err := os.Lstat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("managed backup should be removed: %v", err)
+	}
+	assertNoReplaceBackups(t, dir)
+}
+
+func TestReplaceExistingKeeps1176FilesAtOriginalNames(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".manifest.tmp")
+	dst := filepath.Join(dir, "manifest.md")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile dst: %v", err)
+	}
+
+	err := replaceExistingWith(src, dst, func(_, _, _ string) error {
+		// With a backup name, Microsoft documents that 1176 leaves the replaced
+		// and replacement files under their original names.
+		return errorUnableToMoveReplacement
+	}, nil)
+	if !errors.Is(err, errorUnableToMoveReplacement) {
+		t.Fatalf("error = %v, want %v", err, errorUnableToMoveReplacement)
+	}
+	assertFileContent(t, dst, "old")
+	assertFileContent(t, src, "new")
+	assertNoReplaceBackups(t, dir)
+}
+
+func TestReplaceExistingRollsBack1177AndRetriesTransientRestore(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".manifest.tmp")
+	dst := filepath.Join(dir, "manifest.md")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile dst: %v", err)
+	}
+
+	var backupPath string
+	restoreAttempts := 0
+	err := replaceExistingWith(src, dst, func(replaced, _, backup string) error {
+		backupPath = backup
+		if renameErr := os.Rename(replaced, backup); renameErr != nil {
+			t.Fatalf("stage documented 1177 backup: %v", renameErr)
+		}
+		return errorUnableToMoveReplacement2
+	}, func(backup, destination string) error {
+		restoreAttempts++
+		if restoreAttempts < 3 {
+			return &os.PathError{Op: "rename", Path: backup, Err: syscall.Errno(32)}
+		}
+		return os.Rename(backup, destination)
+	})
+	if !errors.Is(err, errorUnableToMoveReplacement2) {
+		t.Fatalf("error = %v, want %v", err, errorUnableToMoveReplacement2)
+	}
+	if restoreAttempts != 3 {
+		t.Fatalf("restore attempts = %d, want transient lock failures retried", restoreAttempts)
+	}
+	assertFileContent(t, dst, "old")
+	assertFileContent(t, src, "new")
+	if _, err := os.Lstat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("backup should be consumed by rollback: %v", err)
+	}
+	assertNoReplaceBackups(t, dir)
+}
+
+func TestReplaceExistingPreserves1177BackupWhenRollbackFails(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".manifest.tmp")
+	dst := filepath.Join(dir, "manifest.md")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile dst: %v", err)
+	}
+
+	var backupPath string
+	replaceAttempts := 0
+	err := ReplaceWithRetry(src, dst, func(src, dst string) error {
+		replaceAttempts++
+		return replaceExistingWith(src, dst, func(replaced, _, backup string) error {
+			backupPath = backup
+			if renameErr := os.Rename(replaced, backup); renameErr != nil {
+				t.Fatalf("stage documented 1177 backup: %v", renameErr)
+			}
+			return errorUnableToMoveReplacement2
+		}, func(_, _ string) error {
+			return &os.PathError{Op: "rename", Path: backupPath, Err: syscall.Errno(32)}
+		})
+	})
+	if !errors.Is(err, errorUnableToMoveReplacement2) {
+		t.Fatalf("error = %v, want %v", err, errorUnableToMoveReplacement2)
+	}
+	if replaceAttempts != 1 {
+		t.Fatalf("replace attempts = %d, want no retry after a partial failure", replaceAttempts)
+	}
+	if os.IsPermission(err) || isWindowsSharingOrLockViolation(err) {
+		t.Fatalf("partial-failure error exposes the rollback lock error to the outer retry loop: %v", err)
+	}
+	if !strings.Contains(err.Error(), backupPath) {
+		t.Fatalf("error = %v, want retained backup path %q", err, backupPath)
+	}
+	if _, err := os.Lstat(dst); !os.IsNotExist(err) {
+		t.Fatalf("destination should remain absent after failed rollback: %v", err)
+	}
+	assertFileContent(t, backupPath, "old")
+	assertFileContent(t, src, "new")
+}
+
+func TestReplaceExistingRejectsSymlinkDestination(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	dst := filepath.Join(dir, "manifest.md")
+	src := filepath.Join(dir, ".manifest.tmp")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	if err := os.Symlink(target, dst); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	called := false
+	err := replaceExistingWith(src, dst, func(_, _, _ string) error {
+		called = true
+		return nil
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace symlink") {
+		t.Fatalf("symlink replacement error = %v", err)
+	}
+	if called {
+		t.Fatal("ReplaceFileW callback was called for a symlink destination")
+	}
+	assertFileContent(t, target, "old")
+	assertFileContent(t, src, "new")
+	if info, err := os.Lstat(dst); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("destination symlink was changed: info=%v err=%v", info, err)
+	}
+	assertNoReplaceBackups(t, dir)
+}
+
+func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code syscall.Errno
+	}{
+		{name: "ERROR_UNABLE_TO_REMOVE_REPLACED", code: errorUnableToRemoveReplaced},
+		{name: "ERROR_ACCESS_DENIED", code: syscall.Errno(5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, ".manifest.tmp")
+			dst := filepath.Join(dir, "manifest.md")
+			backup := filepath.Join(dir, ".zero-replace-test.backup")
+			if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+				t.Fatalf("WriteFile src: %v", err)
+			}
+			if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+				t.Fatalf("WriteFile dst: %v", err)
+			}
+
+			if err := recoverPartialReplace(tc.code, src, dst, backup, nil); !errors.Is(err, tc.code) {
 				t.Fatalf("error = %v, want the original %v unchanged", err, tc.code)
 			}
-			if data, err := os.ReadFile(dst); err != nil || string(data) != "old" {
-				t.Fatalf("destination = %q err=%v, want its original content untouched", data, err)
-			}
-			if _, err := os.Lstat(src); err != nil {
-				t.Fatalf("the temporary file must stay put for the caller to clean up: %v", err)
+			assertFileContent(t, dst, "old")
+			assertFileContent(t, src, "new")
+			if _, err := os.Lstat(backup); !os.IsNotExist(err) {
+				t.Fatalf("unexpected backup residue: %v", err)
 			}
 		})
+	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("content of %s = %q, want %q", path, data, want)
+	}
+}
+
+func assertNoReplaceBackups(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, replaceBackupPattern))
+	if err != nil {
+		t.Fatalf("Glob replacement backups: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("replacement backups remain: %v", matches)
 	}
 }
 

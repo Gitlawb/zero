@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -27,10 +29,11 @@ import (
 //     operation swap is ReplaceFileW's own documented behavior, not this flag's.
 const replaceFileFlags = 0
 
+const replaceBackupPattern = ".zero-replace-*.backup"
+
 const (
-	// Returned when the volume cannot perform a replace (FAT/exFAT, some network
-	// redirectors). Such volumes carry no ACL to preserve, so a plain rename is
-	// an equivalent publish there.
+	// Returned when the volume or redirector cannot provide ReplaceFileW's atomic,
+	// descriptor-preserving semantics. Existing destinations must fail closed.
 	errorInvalidFunction = syscall.Errno(1)
 	errorNotSupported    = syscall.Errno(50)
 
@@ -68,25 +71,53 @@ var (
 // destination untouched and the caller free to clean up its temporary file,
 // except in the partial-failure states recoverPartialReplace repairs.
 func replaceExisting(src, dst string) error {
-	if _, err := os.Lstat(dst); err != nil {
+	return replaceExistingWith(src, dst, callReplaceFile, nil)
+}
+
+func replaceExistingWith(src, dst string, replace func(string, string, string) error, restore func(string, string) error) error {
+	info, err := os.Lstat(dst)
+	if err != nil {
 		if os.IsNotExist(err) {
 			// Nothing to replace and no descriptor to preserve.
 			return os.Rename(src, dst)
 		}
 		return err
 	}
-	replaced, err := syscall.UTF16PtrFromString(dst)
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to replace symlink destination: %s", dst)
+	}
+
+	backup, err := prepareReplaceBackup(dst)
+	if err != nil {
+		return fmt.Errorf("prepare replacement backup: %w", err)
+	}
+	callErr := replace(dst, src, backup)
+	if callErr == nil {
+		return cleanupReplaceBackup(nil, backup)
+	}
+	if errors.Is(callErr, errorInvalidFunction) || errors.Is(callErr, errorNotSupported) {
+		callErr = fmt.Errorf("atomic replacement is not supported for %s: %w", dst, callErr)
+	}
+	return recoverPartialReplace(callErr, src, dst, backup, restore)
+}
+
+func callReplaceFile(replacedPath, replacementPath, backupPath string) error {
+	replaced, err := syscall.UTF16PtrFromString(replacedPath)
 	if err != nil {
 		return err
 	}
-	replacement, err := syscall.UTF16PtrFromString(src)
+	replacement, err := syscall.UTF16PtrFromString(replacementPath)
+	if err != nil {
+		return err
+	}
+	backup, err := syscall.UTF16PtrFromString(backupPath)
 	if err != nil {
 		return err
 	}
 	result, _, callErr := replaceProcReplaceFil.Call(
 		uintptr(unsafe.Pointer(replaced)),
 		uintptr(unsafe.Pointer(replacement)),
-		0, // no backup copy
+		uintptr(unsafe.Pointer(backup)),
 		uintptr(replaceFileFlags),
 		0,
 		0,
@@ -95,59 +126,96 @@ func replaceExisting(src, dst string) error {
 		return nil
 	}
 	if callErr == nil || errors.Is(callErr, syscall.Errno(0)) {
-		return fmt.Errorf("replace %s: ReplaceFileW failed", dst)
+		return fmt.Errorf("replace %s: ReplaceFileW failed", replacedPath)
 	}
-	if errors.Is(callErr, errorInvalidFunction) || errors.Is(callErr, errorNotSupported) {
-		return os.Rename(src, dst)
-	}
-	return recoverPartialReplace(callErr, src, dst)
+	return callErr
 }
 
-// recoverPartialReplace repairs the on-disk state after a ReplaceFileW failure
-// that had already moved or deleted something, then returns the error to report.
-//
-// We pass no backup file, and Microsoft documents that this makes two failure
-// codes leave the DESTINATION GONE while the replacement survives only under its
-// original (temporary) name:
-//
-//   - ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176): "If lpBackupFileName was
-//     specified, the replaced and replacement files retain their original file
-//     names. Otherwise, the replaced file no longer exists and the replacement
-//     file exists under its original name."
-//   - ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 (1177): the replacement survives under
-//     its original name having already inherited the replaced file's streams and
-//     attributes, while the replaced file "still exists with a different name" —
-//     a name only the backup parameter would have reported, so with no backup it
-//     is unreachable and the destination path is equally empty.
-//
-// Callers write to a temporary file and remove it unconditionally on failure
-// (internal/specialist's writeSpecialistAtomicWith does, via defer), so
-// returning either error unrepaired destroys BOTH copies: the destination
-// Windows already deleted, and the only surviving copy of the new content. A
-// failed `specialist create --force` would leave no manifest at all.
-//
-// Moving the replacement into place is therefore the recovery. The destination
-// path is free — Windows deleted or renamed away whatever was there — so the new
-// content lands where it belongs and nothing is left for the caller's cleanup to
-// delete. The error is still returned rather than swallowed: the destination's
-// original security descriptor died with the destination, so the published file
-// carries the temporary file's inherited DACL, and reporting success would be
-// exactly the silent ACL widening replaceFileFlags refuses to allow.
-func recoverPartialReplace(callErr error, src, dst string) error {
-	if !errors.Is(callErr, errorUnableToMoveReplacement) && !errors.Is(callErr, errorUnableToMoveReplacement2) {
-		// Everything else — including ERROR_UNABLE_TO_REMOVE_REPLACED (1175) and
-		// every unlisted error, for which Microsoft documents that "the replaced and
-		// replacement files retain their original file names" — leaves the
-		// destination holding its original content. The caller's temporary-file
-		// cleanup is then correct and there is nothing to repair.
-		return callErr
+func prepareReplaceBackup(dst string) (string, error) {
+	file, err := os.CreateTemp(filepath.Dir(dst), replaceBackupPattern)
+	if err != nil {
+		return "", err
 	}
-	if _, err := os.Lstat(src); err != nil {
-		// No replacement left to recover with; report the original failure.
-		return callErr
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		cleanupErr := removeReplaceBackup(path)
+		return "", fmt.Errorf("close backup placeholder %s: %w (cleanup error: %v)", path, err, cleanupErr)
 	}
-	if err := os.Rename(src, dst); err != nil {
-		return fmt.Errorf("replace %s: %w (the replacement survives at %s; recovering it failed: %v)", dst, callErr, src, err)
+	if err := removeReplaceBackup(path); err != nil {
+		return "", fmt.Errorf("release backup path %s: %w", path, err)
 	}
-	return fmt.Errorf("replace %s: %w (the replacement was moved into place, but the destination's security descriptor was lost with the destination — re-check its permissions)", dst, callErr)
+	return path, nil
+}
+
+func removeReplaceBackup(path string) error {
+	var err error
+	for i := 0; i < 10; i++ {
+		err = os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		if os.IsPermission(err) {
+			// ReplaceFileW can leave the original's read-only attribute on the
+			// backup. Chmod clears that bit on Windows without changing its DACL.
+			_ = os.Chmod(path, 0o600)
+		}
+		if os.IsPermission(err) || isWindowsSharingOrLockViolation(err) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return err
+}
+
+func cleanupReplaceBackup(callErr error, backup string) error {
+	if err := removeReplaceBackup(backup); err != nil {
+		if callErr == nil {
+			// Do not wrap a transient cleanup error: the replacement already
+			// succeeded, so ReplaceWithRetry must not run the operation again.
+			return fmt.Errorf("replacement succeeded, but backup %s could not be removed: %v", backup, err)
+		}
+		return fmt.Errorf("%w (backup %s could not be removed: %v)", callErr, backup, err)
+	}
+	return callErr
+}
+
+// recoverPartialReplace restores the original after ReplaceFileW reports a
+// partial failure, then returns the original error. Supplying a managed backup
+// changes the dangerous failure states documented by Microsoft:
+//
+//   - ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176) leaves both files under their
+//     original names, so the failed write can discard src normally.
+//   - ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 (1177) leaves src in place and moves the
+//     original destination to backup. Moving backup back to dst rolls the failed
+//     overwrite back without losing the original content or its DACL. The src
+//     file, including any streams it inherited during the failed operation, stays
+//     under the caller's temporary name for the caller's normal cleanup.
+func recoverPartialReplace(callErr error, src, dst, backup string, restore func(string, string) error) error {
+	if !errors.Is(callErr, errorUnableToMoveReplacement2) {
+		// For 1175, 1176, unsupported volumes, and ordinary failures, Windows
+		// documents that dst remains at its original name. Remove any redundant
+		// backup only after confirming that the destination still exists.
+		if _, err := os.Lstat(dst); err == nil {
+			return cleanupReplaceBackup(callErr, backup)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("replace %s: %w (inspect destination during recovery: %v)", dst, callErr, err)
+		}
+	}
+
+	if _, err := os.Lstat(backup); err != nil {
+		return fmt.Errorf("replace %s: %w (original backup expected at %s is unavailable: %v; replacement remains at %s)", dst, callErr, backup, err, src)
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("replace %s: %w (destination unexpectedly exists; original remains at backup %s and replacement at %s)", dst, callErr, backup, src)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("replace %s: %w (inspect destination before restoring backup %s: %v)", dst, callErr, backup, err)
+	}
+	if err := RenameWithRetry(backup, dst, restore); err != nil {
+		// Only callErr is wrapped. Exposing a sharing violation from the exhausted
+		// rollback would make the outer ReplaceWithRetry call retry after the
+		// filesystem was already mutated.
+		return fmt.Errorf("replace %s: %w (original survives at backup %s; restoring it failed: %v; replacement remains at %s)", dst, callErr, backup, err, src)
+	}
+	return fmt.Errorf("replace %s: %w (original was restored; replacement remains at %s for cleanup)", dst, callErr, src)
 }
