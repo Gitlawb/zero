@@ -45,6 +45,12 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "sudo dynamic flag then rm -rf", script: `sudo "$maybe" rm -rf /tmp/x`, destructive: true},
 
 		{name: "curl", script: "curl https://example.com", network: true},
+		{name: "PowerShell iwr alias", script: "iwr https://example.com", network: true},
+		{name: "PowerShell irm alias", script: "irm https://example.com", network: true},
+		{name: "PowerShell Invoke-WebRequest", script: "Invoke-WebRequest https://example.com", network: true},
+		{name: "PowerShell Invoke-RestMethod", script: "Invoke-RestMethod https://example.com", network: true},
+		{name: "PowerShell Remove-Item recursive force", script: `Remove-Item -Recurse -Force 'C:\temp\x'`, destructive: true},
+		{name: "PowerShell Remove-Item without recurse", script: `Remove-Item -Force 'C:\temp\x'`, destructive: false},
 		{name: "Windows curl cmd", script: "curl.cmd https://example.com", network: true},
 		{name: "Windows curl exe", script: "curl.exe https://example.com", network: true},
 		{name: "Windows drive path curl exe", script: `'C:\tools\curl.exe' https://example.com`, network: true},

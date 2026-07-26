@@ -31,7 +31,8 @@ var destructivePrograms = map[string]bool{
 var networkPrograms = map[string]bool{
 	"curl": true, "wget": true, "ssh": true, "scp": true, "sftp": true,
 	"rsync": true, "nc": true, "ncat": true, "netcat": true, "telnet": true,
-	"ftp": true,
+	"ftp": true, "iwr": true, "irm": true, "invoke-webrequest": true,
+	"invoke-restmethod": true,
 }
 
 var localServerPrograms = map[string]bool{
@@ -172,7 +173,10 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
-		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(rest)) || (prog == "find" && hasFindDelete(rest)) {
+		if destructivePrograms[prog] ||
+			(prog == "rm" && hasRecursiveForce(rest)) ||
+			(prog == "remove-item" && hasPowerShellRecursiveForce(rest)) ||
+			(prog == "find" && hasFindDelete(rest)) {
 			result.Destructive = true
 		}
 		return true
@@ -474,6 +478,19 @@ func hasRecursiveForce(args []*syntax.Word) bool {
 					force = true
 				}
 			}
+		}
+	}
+	return recursive && force
+}
+
+func hasPowerShellRecursiveForce(args []*syntax.Word) bool {
+	recursive, force := false, false
+	for _, arg := range args {
+		switch strings.ToLower(wordText(arg)) {
+		case "-recurse", "-r":
+			recursive = true
+		case "-force", "-f":
+			force = true
 		}
 	}
 	return recursive && force

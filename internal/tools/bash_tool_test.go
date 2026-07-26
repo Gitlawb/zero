@@ -897,12 +897,6 @@ func helperCommand(name string) string {
 }
 
 func helperFailureExitCode() int {
-	if runtime.GOOS == "windows" && detectShellRuntime(runtime.GOOS).Kind == shellKindPowerShell {
-		// A native program failure at the end of a PowerShell -Command script is
-		// represented by PowerShell's process status rather than the child's
-		// exact code.
-		return 1
-	}
 	return 7
 }
 

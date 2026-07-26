@@ -42,6 +42,10 @@ const windowsMsysSandboxSuggestion = "MSYS/Cygwin executables and shells (bash, 
 
 const windowsPowerShellUTF8Prefix = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n"
 
+const windowsPowerShellFailurePrefix = "$ErrorActionPreference = 'Stop'\n"
+
+const windowsPowerShellExitSuffix = "\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n"
+
 var (
 	hostShellOnce sync.Once
 	hostShell     shellRuntime
@@ -131,7 +135,8 @@ func windowsPowerShellCandidates(getenv func(string) string) []string {
 func (shell shellRuntime) arguments(command string) []string {
 	switch shell.Kind {
 	case shellKindPowerShell:
-		return []string{"-NoLogo", "-NoProfile", "-Command", windowsPowerShellUTF8Prefix + command}
+		script := windowsPowerShellUTF8Prefix + windowsPowerShellFailurePrefix + command + windowsPowerShellExitSuffix
+		return []string{"-NoLogo", "-NoProfile", "-Command", script}
 	case shellKindCmd:
 		return zeroSandbox.WindowsShellArgs(command)
 	default:
@@ -163,7 +168,8 @@ func shellGuidanceForGOOS(goos string) string {
 
 func shellGuidanceForRuntime(shell shellRuntime) string {
 	if shell.GOOS == "windows" && shell.Kind == shellKindPowerShell {
-		return "Uses PowerShell syntax on Windows; prefer cwd/workdir over Set-Location when changing directories. Examples: Get-ChildItem -Force; Get-ChildItem -Recurse -Filter *.go; Get-ChildItem -Recurse | Select-String -Pattern 'TODO'; Get-Process | Where-Object { $_.ProcessName -like '*node*' }; $env:NAME='value'; @'\nprint('hello')\n'@ | python -. Do not invoke Git-for-Windows MSYS/Cygwin executables (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; prefer PowerShell cmdlets or native Zero tools."
+		guidance := "Uses PowerShell syntax on Windows; prefer cwd/workdir over Set-Location when changing directories. Examples: Get-ChildItem -Force; Get-ChildItem -Recurse -Filter *.go; Get-ChildItem -Recurse | Select-String -Pattern 'TODO'; Get-Process | Where-Object { $_.ProcessName -like '*node*' }; $env:NAME='value'; @'\nprint('hello')\n'@ | python -. Do not invoke Git-for-Windows MSYS/Cygwin executables (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; prefer PowerShell cmdlets or native Zero tools."
+		return guidance + legacyPowerShellChainGuidance(shell)
 	}
 	if shell.GOOS == "windows" {
 		return "Uses " + shell.Syntax + " syntax on Windows because PowerShell was unavailable; prefer cwd/workdir over cd when changing directories. To include | & > < or other metacharacters in an argument value, wrap the value in double quotes (e.g. --jq \".a | b\"); single quotes do not protect metacharacters in cmd.exe. MSYS/Cygwin coreutils on PATH (Git for Windows usr\\bin) are not sandbox-compatible; prefer native Zero file tools."
@@ -178,14 +184,36 @@ func shellGuidanceForRuntime(shell shellRuntime) string {
 // HostShellEnvironmentGuidance returns the concise, model-facing shell rule
 // for the current host.
 func HostShellEnvironmentGuidance() string {
-	shell := detectShellRuntime(runtime.GOOS)
+	return hostShellEnvironmentGuidanceForRuntime(detectShellRuntime(runtime.GOOS))
+}
+
+func hostShellEnvironmentGuidanceForRuntime(shell shellRuntime) string {
 	if shell.GOOS == "windows" && shell.Kind == shellKindPowerShell {
-		return "Shell syntax: PowerShell for exec_command/bash tools. Use PowerShell cmdlets and pipelines (Get-ChildItem, Get-Content, Select-String, Select-Object), use $env:NAME='value' for environment variables, and prefer the workdir/cwd argument over Set-Location. Do not invoke Git-for-Windows MSYS binaries (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; use native PowerShell cmdlets or Zero tools instead, or sandbox_permissions require_escalated only when host-level execution is truly required."
+		guidance := "Shell syntax: PowerShell for exec_command/bash tools. Use PowerShell cmdlets and pipelines (Get-ChildItem, Get-Content, Select-String, Select-Object), use $env:NAME='value' for environment variables, and prefer the workdir/cwd argument over Set-Location. Do not invoke Git-for-Windows MSYS binaries (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; use native PowerShell cmdlets or Zero tools instead, or sandbox_permissions require_escalated only when host-level execution is truly required."
+		return guidance + legacyPowerShellChainGuidance(shell)
 	}
 	if shell.GOOS == "windows" {
 		return "Shell syntax: Windows cmd.exe syntax for exec_command/bash tools because PowerShell is unavailable. To put | & > < etc inside an arg value, use double quotes around the value, not single quotes. Do not invoke Git-for-Windows MSYS binaries inside the restricted sandbox; use native Zero tools instead. Prefer the workdir/cwd argument over cd."
 	}
 	return "Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories."
+}
+
+func legacyPowerShellChainGuidance(shell shellRuntime) string {
+	if !shell.isWindowsPowerShell() {
+		return ""
+	}
+	return " This host uses Windows PowerShell 5.1, which does not support && or ||. Use separate statements when execution is unconditional, or if ($?) { ... } and if (-not $?) { ... } for conditional chaining."
+}
+
+func (shell shellRuntime) isWindowsPowerShell() bool {
+	if shell.Kind != shellKindPowerShell {
+		return false
+	}
+	executable := strings.TrimSpace(shell.Executable)
+	if index := strings.LastIndexAny(executable, `\/`); index >= 0 {
+		executable = executable[index+1:]
+	}
+	return strings.EqualFold(executable, "powershell") || strings.EqualFold(executable, "powershell.exe")
 }
 
 // MsysProneCommandName reports whether a bare command name commonly resolves to
@@ -310,6 +338,13 @@ func detectShellCommandIssueForRuntime(command string, shell shellRuntime) *shel
 	unquoted := stripCmdCaretEscapes(stripDoubleQuotedSpans(trimmed))
 	if shell.Kind == shellKindPowerShell {
 		unquoted = stripPowerShellQuotedSpans(trimmed)
+		if shell.isWindowsPowerShell() && (strings.Contains(unquoted, "&&") || strings.Contains(unquoted, "||")) {
+			return &shellIssue{
+				Kind:       "windows_powershell_version",
+				Message:    "Command uses && or ||, but this host runs Windows PowerShell 5.1, which does not support those operators.",
+				Suggestion: "Use separate statements when execution is unconditional, or if ($?) { ... } and if (-not $?) { ... } for conditional chaining.",
+			}
+		}
 	}
 	if windowsBashStyleCDPattern.MatchString(unquoted) {
 		if shell.Kind == shellKindPowerShell {
