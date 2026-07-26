@@ -147,6 +147,21 @@ func (s *Swarm) afterExitAdmitted(t *Team) {
 	if !ok {
 		return
 	}
+	// This call's own ticket only proves shutdown hadn't begun when it was
+	// granted; Close may have set closed in the meantime, and t.onExit above
+	// already removed next from t.queue, so Close's clearQueue sweep can no
+	// longer see it (nor will it wait for one, since this ticket is what Close's
+	// lifecycleWork.Wait() is blocked on). Re-check before launching so a dequeue
+	// that straddles the shutdown boundary fails the task in place of a launch a
+	// shutting-down swarm never wanted started.
+	s.lifecycleMu.RLock()
+	closed := s.closed
+	s.lifecycleMu.RUnlock()
+	if closed {
+		t.releaseSlot()
+		_ = s.coord.Fail(next.TaskID, ErrSwarmClosed.Error())
+		return
+	}
 	s.launchAdmitted(t, next)
 }
 

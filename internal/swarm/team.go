@@ -176,14 +176,22 @@ func (s *Swarm) Close() {
 		if sched != nil {
 			sched.Close()
 		}
+		// Wait for every already-admitted lifecycle operation (spawn, handoff,
+		// adoption, retry, queue drain) to finish BEFORE sweeping queues below.
+		// dispatchAdmitted appends to a team's queue (t.admit), when it queues at
+		// all, strictly before its caller releases its ticket — so once every
+		// ticket is back, no queue can gain a new entry, and clearing it now can't
+		// race a late append that would otherwise sit stranded forever (never
+		// launched, never failed) because this sweep already ran.
+		s.lifecycleWork.Wait()
 		for _, team := range teams {
 			for _, spec := range team.clearQueue() {
 				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())
 			}
 		}
-		// Admitted work first, then the watchers it may still be starting: a spawn
-		// in flight can add a watcher, so waiting on watchers alone could miss one.
-		s.lifecycleWork.Wait()
+		// The watchers admitted work may still be starting: a spawn in flight adds
+		// one after its own ticket already released, so waiting on lifecycleWork
+		// alone could miss it.
 		s.watchers.Wait()
 	})
 }

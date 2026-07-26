@@ -592,6 +592,183 @@ func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
 	}
 }
 
+// TestCloseFailsLateQueuedSpec is the regression test for jatmn's first #776
+// finding on the ticket-based design: Close used to sweep (clearQueue) every
+// team's queue BEFORE waiting for admitted-but-in-flight lifecycle operations to
+// finish. A Spawn/Handoff/AdoptOrphans call that obtained its ticket right
+// before closed flipped could still be paused before it reached
+// dispatchAdmitted (the queue append) — and once it resumed after the sweep had
+// already run, its spec would sit in the queue forever: never launched (shutdown
+// had begun) and never failed (the one-time sweep had already passed).
+//
+// This drives that exact interleaving directly: it holds a ticket open past the
+// point where Close has flipped closed and would (with the bug) already have
+// swept the queue, appends a spec to a full team's queue while still holding
+// that ticket, and only then releases it. Close must not have swept yet — the
+// late append must still get failed with ErrSwarmClosed, not stranded.
+func TestCloseFailsLateQueuedSpec(t *testing.T) {
+	l := &ignoresCancelLauncher{hold: make(chan struct{})}
+	sw := newSwarmFor(t, l) // MaxTeamSize 2
+
+	// Fill both slots so a further admission queues instead of launching. This
+	// launcher ignores ctx cancellation, so Close's cancel() (which fires well
+	// before this test releases hold) can't unblock these two early and free a
+	// slot the late admission below needs to stay queued.
+	for i := 0; i < 2; i++ {
+		if _, err := sw.Spawn(Policy{}, "team", "teammate", "task", ""); err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+	}
+	team := sw.team("team")
+	waitFor(t, "both slots running", func() bool { return team.Running() == 2 })
+
+	// Simulate a Spawn call that got its ticket just before Close began, but
+	// hasn't reached dispatchAdmitted (the queue append) yet.
+	release, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		t.Fatalf("beginLifecycleAdmission: %v", err)
+	}
+	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	spec := MemberSpec{ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team"}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an admitted ticket was still open")
+	default:
+	}
+
+	// The delayed append this ticket was holding open for. Slots are still full
+	// (hold hasn't been released), so this queues rather than launches.
+	sw.dispatchAdmitted(spec)
+	release()
+	close(l.hold) // let the two filler members (and their watchers) finish
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the admitted ticket released")
+	}
+
+	if got := team.QueueDepth(); got != 0 {
+		t.Fatalf("queue depth after Close = %d, want 0 (late spec swept)", got)
+	}
+	task, ok := sw.Coordinator().Get("late-task")
+	if !ok {
+		t.Fatal("late-queued task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("late-queued task status = %v, want %v (failed, not stranded)", task.Status, StatusFailed)
+	}
+	if !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("late-queued task err = %q, want it to mention %q", task.Err, ErrSwarmClosed.Error())
+	}
+	for _, s := range l.recorded() {
+		if s.ID == "late-agent" {
+			t.Fatal("late-queued spec must never launch once shutdown began")
+		}
+	}
+}
+
+// ignoresCancelLauncher blocks in Launch on an explicit hold channel, ignoring
+// context cancellation entirely — unlike controllableLauncher, which races the
+// same gate against ctx.Done(). Used where a test needs a member to keep
+// occupying its slot no matter when Close's cancel() fires, so a slot-count
+// assumption (e.g. "both slots are still full") can't be invalidated by
+// scheduling.
+type ignoresCancelLauncher struct {
+	mu    sync.Mutex
+	specs []MemberSpec
+	hold  chan struct{}
+}
+
+func (l *ignoresCancelLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.mu.Lock()
+	l.specs = append(l.specs, spec)
+	l.mu.Unlock()
+	h := &funcHandle{id: spec.ID, done: make(chan struct{})}
+	go func() {
+		defer close(h.done)
+		<-l.hold
+		h.res = MemberResult{Result: "ok:" + spec.Task}
+	}()
+	return h, nil
+}
+
+func (l *ignoresCancelLauncher) recorded() []MemberSpec {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]MemberSpec, len(l.specs))
+	copy(out, l.specs)
+	return out
+}
+
+// TestAfterExitAdmittedFailsDequeuedSpecAfterClose is the regression test for
+// jatmn's second #776 finding: afterExitAdmitted used to dequeue a queued spec
+// (t.onExit) and launch it unconditionally once its own ticket was granted,
+// even though Close can flip closed in the gap between that dequeue — which
+// makes the spec invisible to Close's clearQueue sweep — and the launch. A
+// launcher that performs work before honoring its cancelled context could then
+// start a brand new worker after shutdown had already begun.
+func TestAfterExitAdmittedFailsDequeuedSpecAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+
+	if _, err := sw.coord.Register("queued-task", "queued-agent", "team", "queued work"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	spec := MemberSpec{ID: "queued-agent", TaskID: "queued-task", AgentType: "teammate", Team: "team"}
+
+	// Occupy the only slot, then queue spec behind it.
+	team := &Team{Name: "team", members: map[string]*Member{}, maxSize: 1}
+	if !team.admit(MemberSpec{ID: "running-agent", TaskID: "running-task"}) {
+		t.Fatal("first spec should take the only slot")
+	}
+	if team.admit(spec) {
+		t.Fatal("second spec should queue, not launch, over the cap")
+	}
+
+	// Simulate shutdown racing in between this call's ticket admission (already
+	// granted, hence no beginLifecycleAdmission call here) and its dequeue+launch,
+	// exactly like the finding describes: closed is already set by the time
+	// afterExitAdmitted's post-dequeue check runs.
+	sw.lifecycleMu.Lock()
+	sw.closed = true
+	sw.lifecycleMu.Unlock()
+
+	sw.afterExitAdmitted(team) // running-agent "exits" -> dequeues spec
+
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced drain = %d, want 0 (slot released, not held for a launch)", got)
+	}
+	task, ok := sw.Coordinator().Get("queued-task")
+	if !ok {
+		t.Fatal("dequeued task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("dequeued task status = %v, want %v (failed, not launched)", task.Status, StatusFailed)
+	}
+	if !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("dequeued task err = %q, want it to mention %q", task.Err, ErrSwarmClosed.Error())
+	}
+	for _, s := range l.recorded() {
+		if s.ID == "queued-agent" {
+			t.Fatal("a spec dequeued after shutdown began must never launch")
+		}
+	}
+}
+
 // gatedLaunchLauncher blocks in Launch until the test releases it, ignoring
 // context cancellation so the test controls exactly when the admitted work ends.
 type gatedLaunchLauncher struct {
