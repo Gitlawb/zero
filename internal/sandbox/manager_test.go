@@ -458,7 +458,7 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 	dockerConfigDir := filepath.Join(root, "docker")
 	kubeConfigA := filepath.Join(root, "kube", "a")
 	kubeConfigB := filepath.Join(root, "kube", "b")
-	zeroConfig := filepath.Join(configHome, "zero", "config.json")
+	zeroConfig := filepath.Join(configHome, "zero")
 	filePaths := []string{
 		npmrc,
 		filepath.Join(ghConfigDir, "hosts.yml"),
@@ -474,6 +474,9 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 	for _, path := range filePaths {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
+		}
+		if path == zeroConfig {
+			continue
 		}
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)

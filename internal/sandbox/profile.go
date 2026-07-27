@@ -232,7 +232,7 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 	}
 	if configHome != "" {
 		candidates = append(candidates,
-			filepath.Join(configHome, "zero", "config.json"),
+			filepath.Join(configHome, "zero"),
 		)
 	}
 	cloudSDKConfig := strings.TrimSpace(env.CloudSDKConfig)
