@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/Gitlawb/zero/internal/dictation"
 )
@@ -85,10 +84,6 @@ func (m model) scrollableTranscriptLayoutView(header string, body transcriptBody
 
 	bodyWindow := body.visibleLines(window)
 	return m.renderScrollableTranscriptWindow(frame, bodyWindow, window, width, overlay)
-}
-
-func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
-	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
 }
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {
@@ -230,17 +225,6 @@ func (d *streamingDecoder) tailLines() []string {
 	return out
 }
 
-// ensureAgeTickReschedule is a small helper used after a fade-state change
-// to start the tick if it's not already running. The age-tick case
-// short-circuits when fadeActive is false, so calling this on a no-op
-// transition (e.g. a 0-byte delta) is safe.
-func (m model) ensureAgeTickReschedule() tea.Cmd {
-	if !m.fadeActive {
-		return nil
-	}
-	return streamingFadeTick()
-}
-
 // newSTTDownloadPicker builds the model-download chooser, seeded with the
 // curated shortlist. The full model list from the release is fetched
 // asynchronously and merged in (see fetchSTTModelsCmd / handleSTTModelsFetched).
@@ -285,11 +269,6 @@ func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []st
 
 func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
 	window := transcriptViewportForBody(body, frame, scrollOffset).window()
-	return window.start, window.height, frame.bodyRect.y
-}
-
-func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
 	return window.start, window.height, frame.bodyRect.y
 }
 

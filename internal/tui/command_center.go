@@ -548,7 +548,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// and a stored OAuth login (e.g. ChatGPT) is a credential too — the profile stays
 	// keyless on purpose so newProvider attaches the bearer resolver + login key.
 	if strings.TrimSpace(target.APIKey) == "" && strings.TrimSpace(target.AuthHeaderValue) == "" &&
-		!(hasDescriptor && descriptor.Local) && !oauthLoginAvailable(target) {
+		(!hasDescriptor || !descriptor.Local) && !oauthLoginAvailable(target) {
 		return m, "Model\nprovider " + strconv.Quote(providerName) + " has no usable credential — run setup or `zero auth login " + providerName + "`.", false, nil
 	}
 	next, err := m.newProvider(target)

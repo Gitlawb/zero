@@ -188,7 +188,7 @@ func writePromptLine(builder *strings.Builder, format string, args ...any) {
 	if builder.Len() > 0 {
 		builder.WriteByte('\n')
 	}
-	builder.WriteString(fmt.Sprintf(format, args...))
+	fmt.Fprintf(builder, format, args...)
 }
 
 func clampBudget(text string, budget int) string {
