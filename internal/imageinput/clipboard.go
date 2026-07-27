@@ -103,41 +103,71 @@ func readClipboardImageWindows() ([]byte, error) {
 
 // readClipboardImageDarwin uses osascript to check for and read a clipboard
 // image. Returns (nil, nil) when no image is present.
-func readClipboardImageDarwin() ([]byte, error) {
-	// Check clipboard info for image classes.
-	check := `osascript -e 'clipboard info'`
-	out, err := exec.Command("sh", "-c", check).Output()
-	if err != nil {
-		return nil, nil
+// darwinClipboardInfo reports what the pasteboard is currently offering, and
+// darwinClipboardExtract pulls the PNG bytes out of it.
+//
+// Both are vars so the two-step logic below can be driven in a test. The step
+// that matters, "the clipboard holds an image and nothing here can extract it",
+// only happens when the first succeeds and the second fails, which cannot be
+// arranged by stubbing the caller: a test that substitutes ReadClipboardImage
+// asserts the plumbing around this function rather than the decision inside it,
+// and stays green with that decision reverted.
+var (
+	darwinClipboardInfo = func() (string, error) {
+		out, err := exec.Command("sh", "-c", `osascript -e 'clipboard info'`).Output()
+		return string(out), err
 	}
-	info := string(out)
-	if !strings.Contains(info, "PNG") && !strings.Contains(info, "JPEG") && !strings.Contains(info, "TIFF") && !strings.Contains(info, "GIF") {
-		return nil, nil
-	}
-	// Write clipboard image to a temp file via AppleScript, then read it.
-	// Using pngpaste if available, falling back to a Python one-liner.
-	cmd := exec.Command("sh", "-c", `pngpaste - 2>/dev/null || python3 -c "
+	darwinClipboardExtract = func() ([]byte, error) {
+		// pngpaste if available, falling back to a Python one-liner. Neither
+		// ships with macOS: pngpaste is Homebrew-only and Apple dropped the
+		// bundled PyObjC, so a stock Mac fails here every time.
+		cmd := exec.Command("sh", "-c", `pngpaste - 2>/dev/null || python3 -c "
 import AppKit, sys
 pb = AppKit.NSPasteboard.generalPasteboard()
 data = pb.dataForType_(AppKit.NSPasteboardTypePNG)
 if data:
     sys.stdout.buffer.write(data.bytes())
 "`)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	// Past this point the clipboard is KNOWN to hold an image, because the
-	// clipboard-info probe above said so. So a failure here is not "no image", it
-	// is "there is an image and nothing on this host can extract it", and
-	// reporting it as absence is what left users staring at a paste that silently
-	// did nothing. Neither helper ships with macOS: pngpaste is Homebrew-only and
-	// Apple dropped the bundled PyObjC, so a stock Mac reaches this every time.
-	if err := cmd.Run(); err != nil {
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		if err := cmd.Run(); err != nil {
+			return nil, err
+		}
+		return stdout.Bytes(), nil
+	}
+)
+
+// darwinClipboardOffersImage reports whether the pasteboard info line names an
+// image class.
+func darwinClipboardOffersImage(info string) bool {
+	for _, class := range []string{"PNG", "JPEG", "TIFF", "GIF"} {
+		if strings.Contains(info, class) {
+			return true
+		}
+	}
+	return false
+}
+
+func readClipboardImageDarwin() ([]byte, error) {
+	info, err := darwinClipboardInfo()
+	if err != nil {
+		return nil, nil
+	}
+	if !darwinClipboardOffersImage(info) {
+		return nil, nil
+	}
+	// Past this point the clipboard is KNOWN to hold an image, because the probe
+	// above said so. A failure here is therefore not "no image", it is "there is
+	// an image and nothing on this host can extract it". Reporting that as
+	// absence is what left users staring at a paste that silently did nothing.
+	data, err := darwinClipboardExtract()
+	if err != nil {
 		return nil, ErrClipboardImageUnreadable
 	}
-	if stdout.Len() == 0 {
+	if len(data) == 0 {
 		return nil, ErrClipboardImageUnreadable
 	}
-	return stdout.Bytes(), nil
+	return data, nil
 }
 
 // readClipboardImageLinux tries wl-paste (Wayland) then xclip (X11) to read
