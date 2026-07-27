@@ -151,39 +151,51 @@ func TestCtrlVDoesNotPasteTextIntoComposer(t *testing.T) {
 // image probe in routePaste never runs and Ctrl+V does nothing, which is exactly
 // what users reported: right-click paste attached the image, Ctrl+V did not.
 func TestCtrlVProbesClipboardForImage(t *testing.T) {
-	m := newModel(context.Background(), Options{})
-
-	_, cmd := m.Update(testKeyCtrl('v'))
-	if cmd == nil {
-		t.Fatal("ctrl+v should issue the clipboard image probe")
-	}
-
-	// The probe reports an image as a clipboardImageMsg. Substituting a stub
-	// reader keeps the assertion off the developer's real clipboard.
+	// Stubbed BEFORE Update, so the command Update returns is the one that runs.
+	// Asserting only that some command came back, then running a freshly built
+	// probe, would pass even if the key never reached the image route at all.
 	original := readClipboardImage
 	t.Cleanup(func() { readClipboardImage = original })
 	readClipboardImage = func() ([]byte, string, error) {
 		return []byte("png-bytes"), "image/png", nil
 	}
 
-	msg := readClipboardImageCmd()()
-	image, ok := msg.(clipboardImageMsg)
-	if !ok {
-		t.Fatalf("probe returned %T, want clipboardImageMsg", msg)
-	}
-	if string(image.data) != "png-bytes" || image.mediaType != "image/png" {
-		t.Fatalf("unexpected image message: %+v", image)
+	// Both modifiers: macOS reports Command as ModSuper, so a handler matching
+	// only ModCtrl leaves Cmd+V doing nothing on the platform where screenshots
+	// are most often on the clipboard.
+	for name, key := range map[string]tea.KeyPressMsg{
+		"ctrl+v": testKeyCtrl('v'),
+		"cmd+v":  testKeyPressMod('v', tea.ModSuper),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			_, cmd := m.Update(key)
+			if cmd == nil {
+				t.Fatal("no command issued; the clipboard image probe never ran")
+			}
+			image, ok := execCmd(cmd).(clipboardImageMsg)
+			if !ok {
+				t.Fatal("the command issued was not the clipboard image probe")
+			}
+			if string(image.data) != "png-bytes" || image.mediaType != "image/png" {
+				t.Fatalf("unexpected image message: %+v", image)
+			}
+		})
 	}
 }
 
 // With no image on the clipboard the probe stays silent: Ctrl+V while copying
-// text must not emit a notice or disturb the composer.
+// text must not emit a notice or disturb the composer. Driven through Update
+// rather than by calling the probe directly, so this covers the real key route
+// and not just the command in isolation.
 func TestClipboardImageProbeSilentWithoutImage(t *testing.T) {
 	original := readClipboardImage
 	t.Cleanup(func() { readClipboardImage = original })
 	readClipboardImage = func() ([]byte, string, error) { return nil, "", nil }
 
-	if msg := readClipboardImageCmd()(); msg != nil {
+	m := newModel(context.Background(), Options{})
+	_, cmd := m.Update(testKeyCtrl('v'))
+	if msg := execCmd(cmd); msg != nil {
 		t.Fatalf("probe emitted %T with no image on the clipboard, want no message", msg)
 	}
 }

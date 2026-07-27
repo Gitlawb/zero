@@ -1699,7 +1699,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
 			}
-		case keyCtrl(msg, 'v'):
+		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
 			// Ctrl+V probes the clipboard for an IMAGE only. Text pasting stays
 			// exclusively on the terminal's bracketed-paste path (Bubble's own
 			// Ctrl+V binding is disabled in newModel for exactly that reason), so
@@ -1711,6 +1711,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// readClipboardImageCmd yields no message when the clipboard holds no
 			// image, so Ctrl+V with text on the clipboard stays a no-op here and is
 			// handled by the bracketed paste exactly as before.
+			//
+			// Cmd+V is matched too, since macOS reports Command as ModSuper rather
+			// than ModCtrl. That only helps on terminals that deliver the key to the
+			// application: one that handles Cmd+V itself pastes the clipboard TEXT
+			// and sends no key event, so an image-only clipboard still produces
+			// nothing for this to react to.
 			if m.noBlockingModal() {
 				return m, readClipboardImageCmd()
 			}
