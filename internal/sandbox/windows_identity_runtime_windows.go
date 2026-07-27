@@ -144,14 +144,20 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	// deleting it because a later run failed would turn a partial failure into a
 	// total one.
 	rightsGranted := false
-	secretWritten := false
-	secretPath := ""
+	// Resolved from the account name rather than the identity, so it is known
+	// before anything can fail. Deriving it later, after the rights grant, left
+	// the one window this cleanup exists for uncovered: provisioning ALWAYS sets
+	// the password, including resetting a pre-existing account's, so from the
+	// moment it returns the stored secret is already stale. A failure before the
+	// path was computed then had nothing to remove.
+	secretPath, secretPathErr := windowsSandboxSecretPath(config.SandboxHome, windowsSandboxUserName(key))
 	undo := func() {
-		if secretWritten && secretPath != "" {
-			// Dropping the secret is also the repair for a pre-existing account
-			// whose password this run reset: the stored secret no longer matches,
-			// and absent beats stale, since the command path treats a missing
-			// secret as "not provisioned" and falls back rather than failing.
+		// Unconditionally, not only when this run wrote one. Provisioning has
+		// already replaced the account's password by the time any of this can
+		// fail, so whatever is on disk cannot authenticate. Absent beats stale:
+		// the command path treats a missing secret as "not provisioned" and falls
+		// back, while a stale one fails the logon and reports a broken sandbox.
+		if secretPath != "" {
 			_ = removeWindowsSandboxSecret(secretPath)
 		}
 		if identity.SID != nil && rightsGranted {
@@ -173,10 +179,9 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		return windowsSandboxIdentity{}, err
 	}
 	rightsGranted = true
-	secretPath, err = windowsSandboxSecretPath(config.SandboxHome, identity.Username)
-	if err != nil {
+	if secretPathErr != nil {
 		undo()
-		return windowsSandboxIdentity{}, err
+		return windowsSandboxIdentity{}, secretPathErr
 	}
 	// The secret is rewritten every run so it stays in step with the account.
 	// provisionWindowsSandboxIdentity guarantees the password it returns is the
@@ -187,7 +192,6 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		undo()
 		return windowsSandboxIdentity{}, err
 	}
-	secretWritten = true
 	return identity, nil
 }
 
