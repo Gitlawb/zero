@@ -145,9 +145,10 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
-// credential stores (~/.aws, ~/.config/gcloud, ~/.azure, and the file
-// GOOGLE_APPLICATION_CREDENTIALS points to) so sandboxed commands cannot read
-// cloud secrets under the read-all workspace posture. Two deliberate limits:
+// credential stores so sandboxed commands cannot read secrets under the
+// read-all workspace posture. This includes tool configuration files that can
+// carry credentials and are now discoverable through the preserved caller
+// environment. Two deliberate limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
@@ -166,22 +167,99 @@ func credentialDenyReadPaths(policy Policy) []string {
 	// A failed home lookup only drops the home-based candidates; the
 	// GOOGLE_APPLICATION_CREDENTIALS target must be protected regardless.
 	home, _ := os.UserHomeDir()
-	return credentialDenyReadPathsIn(home, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), policy.AllowRead)
+	return credentialDenyReadPathsForEnvironment(credentialPathEnvironment{
+		Home:              home,
+		ConfigHome:        os.Getenv("XDG_CONFIG_HOME"),
+		CloudSDKConfig:    os.Getenv("CLOUDSDK_CONFIG"),
+		GoogleCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+		NPMUserConfig:     firstNonEmpty(os.Getenv("NPM_CONFIG_USERCONFIG"), os.Getenv("npm_config_userconfig")),
+		GHConfigDir:       os.Getenv("GH_CONFIG_DIR"),
+		Netrc:             os.Getenv("NETRC"),
+		DockerConfigDir:   os.Getenv("DOCKER_CONFIG"),
+		KubeConfig:        os.Getenv("KUBECONFIG"),
+	}, policy.AllowRead)
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
 // separated so tests can exercise it against a synthetic home directory.
 func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead []string) []string {
+	return credentialDenyReadPathsForEnvironment(credentialPathEnvironment{
+		Home:              home,
+		GoogleCredentials: googleCredentials,
+	}, allowRead)
+}
+
+type credentialPathEnvironment struct {
+	Home              string
+	ConfigHome        string
+	CloudSDKConfig    string
+	GoogleCredentials string
+	NPMUserConfig     string
+	GHConfigDir       string
+	Netrc             string
+	DockerConfigDir   string
+	KubeConfig        string
+}
+
+func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowRead []string) []string {
 	var candidates []string
-	if home = strings.TrimSpace(home); home != "" {
+	home := strings.TrimSpace(env.Home)
+	configHome := strings.TrimSpace(env.ConfigHome)
+	if configHome == "" && home != "" {
+		configHome = filepath.Join(home, ".config")
+	}
+	if home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, ".aws"),
-			filepath.Join(home, ".config", "gcloud"),
 			filepath.Join(home, ".azure"),
 		)
 	}
-	if target := strings.TrimSpace(googleCredentials); target != "" {
+	npmUserConfig := strings.TrimSpace(env.NPMUserConfig)
+	if npmUserConfig == "" && home != "" {
+		npmUserConfig = filepath.Join(home, ".npmrc")
+	}
+	netrc := strings.TrimSpace(env.Netrc)
+	if netrc == "" && home != "" {
+		netrc = filepath.Join(home, ".netrc")
+	}
+	dockerConfigDir := strings.TrimSpace(env.DockerConfigDir)
+	if dockerConfigDir == "" && home != "" {
+		dockerConfigDir = filepath.Join(home, ".docker")
+	}
+	candidates = append(candidates, npmUserConfig, netrc)
+	if dockerConfigDir != "" {
+		candidates = append(candidates, filepath.Join(dockerConfigDir, "config.json"))
+	}
+	if configHome != "" {
+		candidates = append(candidates,
+			filepath.Join(configHome, "zero"),
+		)
+	}
+	cloudSDKConfig := strings.TrimSpace(env.CloudSDKConfig)
+	if cloudSDKConfig == "" && configHome != "" {
+		cloudSDKConfig = filepath.Join(configHome, "gcloud")
+	}
+	if cloudSDKConfig != "" {
+		candidates = append(candidates, cloudSDKConfig)
+	}
+	ghConfigDir := strings.TrimSpace(env.GHConfigDir)
+	if ghConfigDir == "" && configHome != "" {
+		ghConfigDir = filepath.Join(configHome, "gh")
+	}
+	if ghConfigDir != "" {
+		candidates = append(candidates, filepath.Join(ghConfigDir, "hosts.yml"))
+	}
+	if target := strings.TrimSpace(env.GoogleCredentials); target != "" {
 		candidates = append(candidates, target)
+	}
+	kubeConfig := strings.TrimSpace(env.KubeConfig)
+	if kubeConfig == "" && home != "" {
+		kubeConfig = filepath.Join(home, ".kube", "config")
+	}
+	for _, path := range filepath.SplitList(kubeConfig) {
+		if path = strings.TrimSpace(path); path != "" {
+			candidates = append(candidates, path)
+		}
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -206,11 +284,12 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, allowRead 
 
 // userGitConfigReadPaths returns the user's global git config FILES so a
 // sandboxed git can read identity and config (user.name/email, aliases) instead
-// of failing with "unable to access ~/.gitconfig". It is deliberately the config
-// files only — not the ~/.config/git directory, which can hold an XDG credential
-// store — so credentials and the rest of HOME stay unreadable. Granted at the
-// macOS-seatbelt read rule (not the cross-platform PermissionProfile) so the
-// HOME-dependent paths don't leak into the platform-agnostic policy snapshot.
+// of failing with "unable to access ~/.gitconfig". On macOS, where reads are
+// allow-listed, granting only these files avoids exposing the surrounding
+// configuration directory. Linux uses a read-all profile with explicit
+// credential deny rules. The paths are granted at the macOS seatbelt read rule
+// rather than the cross-platform PermissionProfile so HOME-dependent paths
+// don't leak into the platform-agnostic policy snapshot.
 func userGitConfigReadPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {

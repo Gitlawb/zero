@@ -327,6 +327,26 @@ func TestExecCommandUsesStructuredAdapterDenial(t *testing.T) {
 	}
 }
 
+func TestExecCommandDoesNotInferNativeSandboxDenialFromOutput(t *testing.T) {
+	result := execToolResult(execToolResultInput{
+		commandText: "touch \"$HOME/probe\"",
+		output:      "touch: cannot touch '/home/user/probe': Read-only file system",
+		exited:      true,
+		exitCode:    1,
+		enforcement: execution.Enforcement{Backend: string(sandbox.BackendLinuxBwrap), Level: string(sandbox.EnforcementNative)},
+	})
+
+	if result.ExecutionOutcome == nil || result.ExecutionOutcome.State != execution.StateFailed || result.ExecutionOutcome.Kind != execution.OutcomeApplicationFailure {
+		t.Fatalf("execution outcome = %#v, want failed/application_failure", result.ExecutionOutcome)
+	}
+	if result.ExecutionOutcome.Denial != nil {
+		t.Fatalf("command output created a typed denial: %#v", result.ExecutionOutcome.Denial)
+	}
+	if result.Meta[SandboxLikelyDeniedMeta] == "true" {
+		t.Fatalf("command output created sandbox-denial metadata: %#v", result.Meta)
+	}
+}
+
 func executionRequestHasCapability(request execution.Request, kind execution.CapabilityKind, scope string) bool {
 	for _, capability := range request.Capabilities {
 		if capability.Kind == kind && (scope == "" || capability.Scope == scope) {
