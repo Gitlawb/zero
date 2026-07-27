@@ -16,7 +16,7 @@ import (
 // A local Windows account name is capped at 20 characters, so the derived name
 // must truncate rather than produce a name NetUserAdd rejects.
 func TestWindowsSandboxUserNameRespectsLengthLimit(t *testing.T) {
-	name := windowsSandboxUserName(strings.Repeat("a", 64))
+	name := windowsSandboxUserName(strings.Repeat("a", 64), windowsSandboxRoleOffline)
 	if len(name) > windowsSandboxUserNameMax {
 		t.Fatalf("name %q is %d chars, want at most %d", name, len(name), windowsSandboxUserNameMax)
 	}
@@ -28,12 +28,12 @@ func TestWindowsSandboxUserNameRespectsLengthLimit(t *testing.T) {
 // The same workspace must map to the same principal, otherwise re-running setup
 // would accumulate a new local account every time.
 func TestWindowsSandboxUserNameIsStable(t *testing.T) {
-	first := windowsSandboxUserName("abc123")
-	second := windowsSandboxUserName("abc123")
+	first := windowsSandboxUserName("abc123", windowsSandboxRoleOffline)
+	second := windowsSandboxUserName("abc123", windowsSandboxRoleOffline)
 	if first != second {
 		t.Fatalf("name is not stable: %q vs %q", first, second)
 	}
-	if other := windowsSandboxUserName("def456"); other == first {
+	if other := windowsSandboxUserName("def456", windowsSandboxRoleOffline); other == first {
 		t.Fatalf("different workspaces produced the same principal %q", first)
 	}
 }
@@ -41,7 +41,7 @@ func TestWindowsSandboxUserNameIsStable(t *testing.T) {
 // The key is sanitised to characters a local account name accepts, so a hash or
 // path fragment cannot smuggle a separator or a space into the name.
 func TestWindowsSandboxUserNameRejectsUnsafeCharacters(t *testing.T) {
-	name := windowsSandboxUserName(`C:\Users\me\proj ect`)
+	name := windowsSandboxUserName(`C:\Users\me\proj ect`, windowsSandboxRoleOffline)
 	for _, r := range strings.TrimPrefix(name, windowsSandboxUserPrefix) {
 		isLower := r >= 'a' && r <= 'z'
 		isDigit := r >= '0' && r <= '9'
@@ -58,7 +58,7 @@ func TestWindowsSandboxUserNameRejectsUnsafeCharacters(t *testing.T) {
 // than the bare prefix.
 func TestWindowsSandboxUserNameHandlesEmptyKey(t *testing.T) {
 	for _, key := range []string{"", "///", "   "} {
-		if got := windowsSandboxUserName(key); got == windowsSandboxUserPrefix {
+		if got := windowsSandboxUserName(key, windowsSandboxRoleOffline); got == windowsSandboxUserPrefix {
 			t.Fatalf("key %q produced a bare prefix", key)
 		}
 	}
@@ -213,9 +213,9 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	// previous run. Provisioning no longer resets an adopted account's password,
 	// so a leftover account would otherwise be adopted with a password this test
 	// never learns.
-	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01"))
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01", windowsSandboxRoleOffline))
 
-	identity, password, _, err := provisionWindowsSandboxIdentity("ziptest01")
+	identity, password, _, err := provisionWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	}
 	// Re-running must converge on the same principal rather than failing or
 	// creating a second account.
-	again, secondPassword, _, err := provisionWindowsSandboxIdentity("ziptest01")
+	again, secondPassword, _, err := provisionWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 		SandboxHome:    t.TempDir(),
 		WorkspaceRoots: []string{`C:\ziptest01`},
 	}
-	setupIdentity, _, err := provisionWindowsSandboxPrincipalForSetup(config)
+	setupIdentity, _, err := provisionWindowsSandboxPrincipalForSetup(config, windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("setup provision: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 		_ = removeWindowsSandboxIdentity(setupIdentity.Username)
 	})
 	// Lookup must find what provisioning created.
-	found, err := lookupWindowsSandboxIdentity("ziptest01")
+	found, err := lookupWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("lookup after provision: %v", err)
 	}
@@ -318,9 +318,9 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 	const key = "ziplogon01"
 	// A leftover account from an interrupted run would keep its old password,
 	// which the freshly generated one will not match, so start from a clean slate.
-	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key))
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key, windowsSandboxRoleOffline))
 
-	identity, password, _, err := provisionWindowsSandboxIdentity(key)
+	identity, password, _, err := provisionWindowsSandboxIdentity(key, windowsSandboxRoleOffline)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 // "run setup" error rather than a raw lookup failure, so the command path can
 // fall back instead of surfacing a Win32 code.
 func TestLookupWindowsSandboxIdentityUnprovisioned(t *testing.T) {
-	_, err := lookupWindowsSandboxIdentity("nosuchworkspacekey9z")
+	_, err := lookupWindowsSandboxIdentity("nosuchworkspacekey9z", windowsSandboxRoleOffline)
 	if err == nil {
 		t.Skip("a principal for this key unexpectedly exists on this machine")
 	}
@@ -457,5 +457,42 @@ func TestWindowsSandboxNameCollisionIsTyped(t *testing.T) {
 	}
 	if !strings.Contains(wrapped.Error(), "not created by Zero") {
 		t.Fatalf("collision message = %q, want it to say the account is not ours", wrapped.Error())
+	}
+}
+
+// The two roles must never collide onto one account. If they did, the online
+// principal would be whatever the offline one is, which means either an approved
+// network command silently has no network, or an ordinary command silently has
+// one. The second is the dangerous direction.
+func TestWindowsSandboxUserNameSeparatesRoles(t *testing.T) {
+	const key = "abc123"
+	offline := windowsSandboxUserName(key, windowsSandboxRoleOffline)
+	online := windowsSandboxUserName(key, windowsSandboxRoleOnline)
+	if offline == online {
+		t.Fatalf("both roles produced %q", offline)
+	}
+	// Still stable per role, or setup would create a new account every run.
+	if again := windowsSandboxUserName(key, windowsSandboxRoleOnline); again != online {
+		t.Fatalf("online name is not stable: %q then %q", online, again)
+	}
+
+	// The role tag has to survive truncation. A very long key is exactly when the
+	// name is cut to the 20-character limit, and losing the tag there is what
+	// would collide the roles on precisely the workspaces most likely to hit it.
+	longKey := strings.Repeat("f", 200)
+	longOffline := windowsSandboxUserName(longKey, windowsSandboxRoleOffline)
+	longOnline := windowsSandboxUserName(longKey, windowsSandboxRoleOnline)
+	if longOffline == longOnline {
+		t.Fatalf("truncation collided the roles onto %q", longOffline)
+	}
+	for _, name := range []string{longOffline, longOnline} {
+		if len(name) > windowsSandboxUserNameMax {
+			t.Fatalf("name %q is %d chars, want at most %d", name, len(name), windowsSandboxUserNameMax)
+		}
+	}
+
+	// Different workspaces still get different accounts within a role.
+	if other := windowsSandboxUserName("def456", windowsSandboxRoleOffline); other == offline {
+		t.Fatalf("two workspaces produced the same offline account %q", other)
 	}
 }

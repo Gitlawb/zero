@@ -62,14 +62,45 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 	if err != nil {
 		return WindowsNetworkPlan{}, err
 	}
+	// The offline-marker SID stays first: the setup marker records
+	// IdentitySIDs[0] as the offline filter identity.
+	identitySIDs := []string{offlineSID}
+	// A sandbox principal cannot carry the offline-marker SID, because LogonUser
+	// builds a token from an account's real group memberships and the marker is a
+	// synthetic capability SID. So the same filters additionally match a real
+	// local group that network-denied principals belong to.
+	//
+	// Resolved rather than assumed, and absent until the group exists, so a
+	// machine that has never provisioned principals computes exactly the plan it
+	// computed before this existed. That matters because the plan is hashed into
+	// the setup marker and compared on every command: an identity set that
+	// differed between setup and the command path would fail every command with
+	// "setup is out of date".
+	if resolveWindowsSandboxOfflineGroupSIDHook != nil {
+		groupSID, err := resolveWindowsSandboxOfflineGroupSIDHook()
+		if err != nil {
+			return WindowsNetworkPlan{}, err
+		}
+		if strings.TrimSpace(groupSID) != "" {
+			identitySIDs = append(identitySIDs, groupSID)
+		}
+	}
 	return WindowsNetworkPlan{
 		Mode:         NetworkDeny,
 		ProviderKey:  windowsWFPProviderKey,
 		SubLayerKey:  windowsWFPSubLayerKey,
-		IdentitySIDs: []string{offlineSID},
+		IdentitySIDs: identitySIDs,
 		Filters:      windowsDenyWFPFilterSpecs(),
 	}, nil
 }
+
+// resolveWindowsSandboxOfflineGroupSIDHook resolves the local group that
+// network-denied principals belong to. It is wired up on Windows only, so this
+// file stays free of Win32 calls and the plan on other platforms is unchanged.
+//
+// Returning ("", nil) means the group does not exist yet, which is the state
+// before principals have ever been provisioned.
+var resolveWindowsSandboxOfflineGroupSIDHook func() (string, error)
 
 // WindowsNetworkInfraHash fingerprints the provisioned (mode-independent) network
 // infrastructure so the setup marker validates against the same setup for BOTH

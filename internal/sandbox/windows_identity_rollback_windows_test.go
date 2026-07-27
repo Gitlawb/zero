@@ -13,23 +13,30 @@ import (
 // function can run on an ordinary machine. Every one of them needs an elevated
 // caller and a real local account, so without this the test would stop at the
 // first call and never reach the behaviour it is named for.
-func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, sidErr error) {
+func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, offlineErr error, sidErr error) {
 	t.Helper()
 	prevGroup, prevUser := ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn
+	prevOfflineGroup := ensureWindowsSandboxOfflineGroupFn
 	prevAdd, prevSID := addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn
 	prevManaged := windowsSandboxUserIsManagedFn
+	prevOffline := addWindowsSandboxUserToOfflineGroupFn
 	t.Cleanup(func() {
 		ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn = prevGroup, prevUser
+		ensureWindowsSandboxOfflineGroupFn = prevOfflineGroup
 		addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn = prevAdd, prevSID
 		windowsSandboxUserIsManagedFn = prevManaged
+		addWindowsSandboxUserToOfflineGroupFn = prevOffline
 	})
 
 	ensureWindowsSandboxGroupFn = func() error { return nil }
+	ensureWindowsSandboxOfflineGroupFn = func() error { return nil }
 	// Adopted accounts are ours in these tests; the ownership check is a real
 	// syscall and would otherwise refuse before the code under test runs.
 	windowsSandboxUserIsManagedFn = func(string, string) (bool, error) { return true, nil }
 	ensureWindowsSandboxUserFn = func(string, string, string) (bool, error) { return existed, nil }
+	addWindowsSandboxUserToOfflineGroupFn = func(string) error { return offlineErr }
 	addWindowsSandboxUserToGroupFn = func(string) error { return groupErr }
+	addWindowsSandboxUserToOfflineGroupFn = func(string) error { return offlineErr }
 	resolveWindowsSandboxSIDFn = func(username string) (*windows.SID, error) {
 		if sidErr != nil {
 			return nil, sidErr
@@ -46,19 +53,22 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, sidErr 
 // most: it is the enforcement boundary and it can fail under local policy.
 func TestProvisionWindowsSandboxIdentityReturnsNameForRollback(t *testing.T) {
 	groupFailure := errors.New("group attachment refused by policy")
+	offlineFailure := errors.New("offline group attachment refused by policy")
 	sidFailure := errors.New("sid lookup failed")
 
 	for name, testCase := range map[string]struct {
-		groupErr error
-		sidErr   error
+		groupErr   error
+		offlineErr error
+		sidErr     error
 	}{
-		"group attachment fails": {groupErr: groupFailure},
-		"sid resolution fails":   {sidErr: sidFailure},
+		"group attachment fails":         {groupErr: groupFailure},
+		"offline group attachment fails": {offlineErr: offlineFailure},
+		"sid resolution fails":           {sidErr: sidFailure},
 	} {
 		t.Run(name, func(t *testing.T) {
-			stubWindowsProvisioning(t, false, testCase.groupErr, testCase.sidErr)
+			stubWindowsProvisioning(t, false, testCase.groupErr, testCase.offlineErr, testCase.sidErr)
 
-			identity, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+			identity, _, created, err := provisionWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline)
 			if err == nil {
 				t.Fatal("provisioning reported success despite an injected failure")
 			}
@@ -69,7 +79,7 @@ func TestProvisionWindowsSandboxIdentityReturnsNameForRollback(t *testing.T) {
 			if identity.Username == "" {
 				t.Fatal("identity carries no username, so the rollback deletes \"\" and strands the account")
 			}
-			if want := windowsSandboxUserName("workspacekey"); identity.Username != want {
+			if want := windowsSandboxUserName("workspacekey", windowsSandboxRoleOffline); identity.Username != want {
 				t.Fatalf("username = %q, want %q", identity.Username, want)
 			}
 		})
@@ -80,9 +90,9 @@ func TestProvisionWindowsSandboxIdentityReturnsNameForRollback(t *testing.T) {
 // failed. created=false is what stops the rollback turning a partial failure
 // into the loss of a working principal from an earlier setup.
 func TestProvisionWindowsSandboxIdentityDoesNotClaimPreexistingAccount(t *testing.T) {
-	stubWindowsProvisioning(t, true, errors.New("group attachment refused"), nil)
+	stubWindowsProvisioning(t, true, errors.New("group attachment refused"), nil, nil)
 
-	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline)
 	if err == nil {
 		t.Fatal("provisioning reported success despite an injected failure")
 	}

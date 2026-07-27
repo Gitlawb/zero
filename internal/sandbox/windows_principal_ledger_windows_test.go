@@ -126,45 +126,72 @@ func TestPrincipalACLRecordCoversTheGrantBeforeItIsMade(t *testing.T) {
 // it is the fail-open: revocation would then cover only what the new plan
 // happens to name. Retiring the account instead makes every ACE that cannot be
 // found name a SID Windows never reuses.
+// The record is per role because the principals are: seeding one role's record
+// must retire the other and only the other. Retiring both would destroy an
+// account there is nothing wrong with, and retiring neither is the fail-open.
 func TestSetupRetiresAPrincipalWithNoRecordOfItsGrants(t *testing.T) {
 	for name, testCase := range map[string]struct {
-		seedRecord    bool
+		seedRoles     []windowsSandboxRole
 		identityFound bool
-		wantRetired   int
+		wantRetired   []windowsSandboxRole
 	}{
-		"no record and a principal from an earlier setup": {identityFound: true, wantRetired: 1},
-		"no record and nothing provisioned":               {identityFound: false, wantRetired: 0},
-		"a record to reconcile against":                   {seedRecord: true, identityFound: true, wantRetired: 0},
+		"no record and principals from an earlier setup": {
+			identityFound: true,
+			wantRetired:   []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline},
+		},
+		"no record and nothing provisioned": {identityFound: false},
+		"only the offline role has a record": {
+			seedRoles:     []windowsSandboxRole{windowsSandboxRoleOffline},
+			identityFound: true,
+			wantRetired:   []windowsSandboxRole{windowsSandboxRoleOnline},
+		},
+		"both roles have a record to reconcile against": {
+			seedRoles:     []windowsSandboxRole{windowsSandboxRoleOffline, windowsSandboxRoleOnline},
+			identityFound: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := stubWindowsPrincipalSetup(t)
-			username := windowsSandboxUserName(windowsSandboxPrincipalKey(config))
-			if testCase.seedRecord {
+			key := windowsSandboxPrincipalKey(config)
+			for _, role := range testCase.seedRoles {
+				username := windowsSandboxUserName(key, role)
 				if err := writeWindowsPrincipalACLLedger(config.SandboxHome, username, []string{`C:\ws\recorded`}); err != nil {
-					t.Fatalf("seed the record: %v", err)
+					t.Fatalf("seed the %s record: %v", role, err)
 				}
 			}
 
-			lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+			lookupWindowsSandboxIdentityFn = func(_ string, role windowsSandboxRole) (windowsSandboxIdentity, error) {
 				if testCase.identityFound {
-					return windowsSandboxIdentity{Username: username, SID: guestsSID(t)}, nil
+					return windowsSandboxIdentity{Username: windowsSandboxUserName(key, role), SID: guestsSID(t)}, nil
 				}
 				return windowsSandboxIdentity{}, errWindowsSandboxIdentityUnavailable
 			}
-			retired := 0
-			removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
-				retired++
+			var retired []windowsSandboxRole
+			removeWindowsSandboxPrincipalForSetupFn = func(_ WindowsSandboxCommandConfig, role windowsSandboxRole) error {
+				retired = append(retired, role)
 				return nil
 			}
 
 			if _, err := setupWindowsSandboxPrincipal(config); err != nil {
 				t.Fatalf("setupWindowsSandboxPrincipal: %v", err)
 			}
-			if retired != testCase.wantRetired {
-				t.Errorf("retired the principal %d times, want %d", retired, testCase.wantRetired)
+			if !sameRoles(retired, testCase.wantRetired) {
+				t.Errorf("retired %v, want %v", retired, testCase.wantRetired)
 			}
 		})
 	}
+}
+
+func sameRoles(got []windowsSandboxRole, want []windowsSandboxRole) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // A failure to retire has to fail the setup. Reporting success would leave the
@@ -172,10 +199,10 @@ func TestSetupRetiresAPrincipalWithNoRecordOfItsGrants(t *testing.T) {
 // nobody can enumerate is still holding them.
 func TestSetupFailsWhenAnUnrecordedPrincipalCannotBeRetired(t *testing.T) {
 	config := stubWindowsPrincipalSetup(t)
-	lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+	lookupWindowsSandboxIdentityFn = func(string, windowsSandboxRole) (windowsSandboxIdentity, error) {
 		return windowsSandboxIdentity{Username: "zerosbx", SID: guestsSID(t)}, nil
 	}
-	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
+	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig, windowsSandboxRole) error {
 		return errors.New("account is in use")
 	}
 	if _, err := setupWindowsSandboxPrincipal(config); err == nil {
@@ -202,14 +229,25 @@ func TestTeardownRevokesRecordedPathsTheCurrentPolicyNoLongerNames(t *testing.T)
 			},
 		},
 	}
-	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config))
+	role := windowsSandboxRoleOffline
+	username := windowsSandboxUserName(windowsSandboxPrincipalKey(config), role)
 	if err := writeWindowsPrincipalACLLedger(home, username, []string{dropped}); err != nil {
 		t.Fatalf("seed the record: %v", err)
 	}
 
-	paths, err := windowsPrincipalRevocationPaths(config, "S-1-5-32-546")
+	paths, err := windowsPrincipalRevocationPaths(config, "S-1-5-32-546", role)
 	if err != nil {
 		t.Fatalf("windowsPrincipalRevocationPaths: %v", err)
+	}
+
+	// The other role's revocation must not pick this up: separate accounts,
+	// separate records, and retiring one must leave the other's ACEs alone.
+	other, err := windowsPrincipalRevocationPaths(config, "S-1-5-32-546", windowsSandboxRoleOnline)
+	if err != nil {
+		t.Fatalf("windowsPrincipalRevocationPaths(online): %v", err)
+	}
+	if containsPathFold(other, dropped) {
+		t.Errorf("the online role would revoke %q, which only the offline role's record names", dropped)
 	}
 	if !containsPathFold(paths, dropped) {
 		t.Errorf("teardown would revoke %v, missing the recorded root %q the policy no longer names", paths, dropped)
@@ -246,8 +284,8 @@ func stubWindowsPrincipalSetup(t *testing.T) WindowsSandboxCommandConfig {
 		sandboxUserCacheDir = prevCache
 	})
 
-	provisionWindowsSandboxIdentityFn = func(key string) (windowsSandboxIdentity, string, bool, error) {
-		return windowsSandboxIdentity{Username: windowsSandboxUserName(key), SID: guestsSID(t)}, "pw", true, nil
+	provisionWindowsSandboxIdentityFn = func(key string, role windowsSandboxRole) (windowsSandboxIdentity, string, bool, error) {
+		return windowsSandboxIdentity{Username: windowsSandboxUserName(key, role), SID: guestsSID(t)}, "pw", true, nil
 	}
 	grantWindowsSandboxLogonRightsFn = func(*windows.SID) error { return nil }
 	resetWindowsSandboxUserPasswordFn = func(string, string) error { return nil }

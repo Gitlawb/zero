@@ -118,3 +118,71 @@ func assertWindowsWFPCommonFilter(t *testing.T, specs map[string]WindowsWFPFilte
 
 // Coverage for the network infra plan + hash and the per-mode token-SID
 // composition lives in windows_online_offline_test.go.
+
+// The block filters have to name the offline group as well as the offline-marker
+// SID, or a sandbox principal is not covered by them at all: LogonUser builds a
+// token from real group memberships and cannot carry the synthetic marker. This
+// is the single property that makes network denial work for the principal
+// backend, so assert it on the plan rather than trusting the wiring.
+func TestNetworkInfraPlanIncludesOfflineGroupIdentity(t *testing.T) {
+	previous := resolveWindowsSandboxOfflineGroupSIDHook
+	t.Cleanup(func() { resolveWindowsSandboxOfflineGroupSIDHook = previous })
+
+	config := WindowsSandboxCommandConfig{SandboxHome: t.TempDir()}
+
+	// Before principals have ever been provisioned the group does not exist, and
+	// the plan must be exactly what it was before this feature. The plan is hashed
+	// into the setup marker and re-derived on every command, so an identity set
+	// that appeared out of nowhere would fail every command with "setup is out of
+	// date".
+	resolveWindowsSandboxOfflineGroupSIDHook = func() (string, error) { return "", nil }
+	base, err := BuildWindowsNetworkInfraPlan(config)
+	if err != nil {
+		t.Fatalf("build plan without the group: %v", err)
+	}
+	if len(base.IdentitySIDs) != 1 {
+		t.Fatalf("identity SIDs = %v, want only the offline marker when the group is absent", base.IdentitySIDs)
+	}
+
+	const groupSID = "S-1-5-32-9999"
+	resolveWindowsSandboxOfflineGroupSIDHook = func() (string, error) { return groupSID, nil }
+	withGroup, err := BuildWindowsNetworkInfraPlan(config)
+	if err != nil {
+		t.Fatalf("build plan with the group: %v", err)
+	}
+	if len(withGroup.IdentitySIDs) != 2 || withGroup.IdentitySIDs[1] != groupSID {
+		t.Fatalf("identity SIDs = %v, want the offline marker plus %s", withGroup.IdentitySIDs, groupSID)
+	}
+	// The marker records IdentitySIDs[0] as the offline filter identity, so the
+	// marker SID has to stay first.
+	if withGroup.IdentitySIDs[0] != base.IdentitySIDs[0] {
+		t.Fatalf("offline marker moved from position 0: %v", withGroup.IdentitySIDs)
+	}
+	// Adding the group must change the fingerprint, or setup and the command path
+	// could disagree about the installed filters without anything noticing.
+	baseHash, err := WindowsNetworkInfraHash(base)
+	if err != nil {
+		t.Fatalf("hash base: %v", err)
+	}
+	groupHash, err := WindowsNetworkInfraHash(withGroup)
+	if err != nil {
+		t.Fatalf("hash with group: %v", err)
+	}
+	if baseHash == groupHash {
+		t.Fatal("the infra hash ignored the offline group identity")
+	}
+}
+
+// A lookup failure must not be swallowed into "no group", because that silently
+// produces a plan whose filters do not cover sandbox principals.
+func TestNetworkInfraPlanPropagatesOfflineGroupLookupFailure(t *testing.T) {
+	previous := resolveWindowsSandboxOfflineGroupSIDHook
+	t.Cleanup(func() { resolveWindowsSandboxOfflineGroupSIDHook = previous })
+
+	resolveWindowsSandboxOfflineGroupSIDHook = func() (string, error) {
+		return "", errors.New("boom")
+	}
+	if _, err := BuildWindowsNetworkInfraPlan(WindowsSandboxCommandConfig{SandboxHome: t.TempDir()}); err == nil {
+		t.Fatal("a failed offline-group lookup produced a plan; the filters would not cover any principal")
+	}
+}

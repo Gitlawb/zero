@@ -115,7 +115,7 @@ func findPrincipalACLEntry(plan WindowsACLPlan, action WindowsACLAction, path st
 // read the absent secret as "not provisioned" and quietly fell back to the
 // weaker backend.
 func TestProvisionWindowsSandboxIdentityDefersPasswordRotation(t *testing.T) {
-	stubWindowsProvisioning(t, true, nil, nil)
+	stubWindowsProvisioning(t, true, nil, nil, nil)
 
 	rotated := false
 	previous := resetWindowsSandboxUserPasswordFn
@@ -125,7 +125,7 @@ func TestProvisionWindowsSandboxIdentityDefersPasswordRotation(t *testing.T) {
 		return nil
 	}
 
-	if _, _, _, err := provisionWindowsSandboxIdentity("workspacekey"); err != nil {
+	if _, _, _, err := provisionWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline); err != nil {
 		t.Fatalf("provisioning an adopted account: %v", err)
 	}
 	if rotated {
@@ -147,7 +147,7 @@ func TestWindowsSandboxUserCommentDistinguishesWorkspaces(t *testing.T) {
 	}
 	// The names DO collide, which is the whole reason the comment has to carry
 	// the key. If this stops being true the test is no longer covering anything.
-	if windowsSandboxUserName("aaaaaaaaaaaabbbbbbbb") != windowsSandboxUserName("aaaaaaaaaaaacccccccc") {
+	if windowsSandboxUserName("aaaaaaaaaaaabbbbbbbb", windowsSandboxRoleOffline) != windowsSandboxUserName("aaaaaaaaaaaacccccccc", windowsSandboxRoleOffline) {
 		t.Skip("account names no longer collide for these keys; revisit what this test is for")
 	}
 }
@@ -168,7 +168,7 @@ func TestSetupRollbackRevokesRightsOnlyForCreatedPrincipals(t *testing.T) {
 		"created principal": {existed: false, wantRevoked: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			stubWindowsProvisioning(t, testCase.existed, nil, nil)
+			stubWindowsProvisioning(t, testCase.existed, nil, nil, nil)
 
 			revoked := false
 			prevGrant, prevRevoke := grantWindowsSandboxLogonRightsFn, revokeWindowsSandboxLogonRightsFn
@@ -189,7 +189,7 @@ func TestSetupRollbackRevokesRightsOnlyForCreatedPrincipals(t *testing.T) {
 				SandboxHome:    t.TempDir(),
 				WorkspaceRoots: []string{`C:\ws`},
 			}
-			if _, _, err := provisionWindowsSandboxPrincipalForSetup(config); err == nil {
+			if _, _, err := provisionWindowsSandboxPrincipalForSetup(config, windowsSandboxRoleOffline); err == nil {
 				t.Fatal("provisioning reported success despite an injected grant failure")
 			}
 			if revoked != testCase.wantRevoked {
@@ -246,7 +246,7 @@ func TestLookupWindowsSandboxIdentityRejectsForeignWorkspace(t *testing.T) {
 		askedKey = workspaceKey
 		return false, nil
 	}
-	_, err := lookupWindowsSandboxIdentity("workspacekey")
+	_, err := lookupWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline)
 	if err == nil {
 		t.Fatal("lookup accepted an account belonging to another workspace")
 	}
@@ -267,7 +267,7 @@ func TestLookupWindowsSandboxIdentityAbsentAccountIsUnavailable(t *testing.T) {
 		t.Fatal("ownership must not be consulted for an account that does not resolve")
 		return false, nil
 	}
-	if _, err := lookupWindowsSandboxIdentity("nosuchworkspacekey"); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+	if _, err := lookupWindowsSandboxIdentity("nosuchworkspacekey", windowsSandboxRoleOffline); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 		t.Fatalf("absent account returned %v, want errWindowsSandboxIdentityUnavailable", err)
 	}
 }
@@ -362,13 +362,13 @@ func TestSetupRuntimeRootWithoutWorkspaceIsNotAnError(t *testing.T) {
 // exists to withhold: rewriting the ACLs confining it, reading the secret locked
 // to the invoking user, and stopping Zero.
 func TestProvisionWindowsSandboxIdentityRefusesPrivilegedAccount(t *testing.T) {
-	stubWindowsProvisioning(t, true, nil, nil)
+	stubWindowsProvisioning(t, true, nil, nil, nil)
 
 	previous := windowsSandboxUserIsPrivilegedFn
 	t.Cleanup(func() { windowsSandboxUserIsPrivilegedFn = previous })
 	windowsSandboxUserIsPrivilegedFn = func(string) (bool, error) { return true, nil }
 
-	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline)
 	if !errors.Is(err, errWindowsSandboxPrivilegedAccount) {
 		t.Fatalf("provisioning adopted a privileged account, err = %v", err)
 	}
@@ -379,13 +379,13 @@ func TestProvisionWindowsSandboxIdentityRefusesPrivilegedAccount(t *testing.T) {
 
 // The ordinary adopted account is unaffected.
 func TestProvisionWindowsSandboxIdentityAdoptsUnprivilegedAccount(t *testing.T) {
-	stubWindowsProvisioning(t, true, nil, nil)
+	stubWindowsProvisioning(t, true, nil, nil, nil)
 
 	previous := windowsSandboxUserIsPrivilegedFn
 	t.Cleanup(func() { windowsSandboxUserIsPrivilegedFn = previous })
 	windowsSandboxUserIsPrivilegedFn = func(string) (bool, error) { return false, nil }
 
-	if _, _, _, err := provisionWindowsSandboxIdentity("workspacekey"); err != nil {
+	if _, _, _, err := provisionWindowsSandboxIdentity("workspacekey", windowsSandboxRoleOffline); err != nil {
 		t.Fatalf("an unprivileged managed account must still be adopted: %v", err)
 	}
 }

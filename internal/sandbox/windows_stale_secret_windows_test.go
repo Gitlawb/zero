@@ -52,7 +52,7 @@ func TestProvisionSurfacesFailedStaleSecretCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			// created=false so the run ADOPTS an account and rotation applies.
-			provisionWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, string, bool, error) {
+			provisionWindowsSandboxIdentityFn = func(string, windowsSandboxRole) (windowsSandboxIdentity, string, bool, error) {
 				return windowsSandboxIdentity{Username: "zero-sbx-test", SID: sid}, "pw", false, nil
 			}
 			grantWindowsSandboxLogonRightsFn = func(*windows.SID) error { return nil }
@@ -80,7 +80,7 @@ func TestProvisionSurfacesFailedStaleSecretCleanup(t *testing.T) {
 				CommandCWD:     `C:\ws`,
 				WorkspaceRoots: []string{`C:\ws`},
 			}
-			_, _, err = provisionWindowsSandboxPrincipalForSetup(config)
+			_, _, err = provisionWindowsSandboxPrincipalForSetup(config, windowsSandboxRoleOffline)
 
 			if removed != testCase.wantRemove {
 				t.Fatalf("stale secret removal attempted = %v, want %v", removed, testCase.wantRemove)

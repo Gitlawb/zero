@@ -55,7 +55,47 @@ const (
 	windowsSandboxUserComment    = "Zero sandbox principal (managed)"
 	windowsSandboxUserCommentKey = windowsSandboxUserComment + " key="
 	windowsSandboxUserNameMax    = 20
+
+	// windowsSandboxOfflineGroupName is what the network block filters are keyed
+	// to. Network denial cannot be expressed on a principal's own token the way
+	// it is on a restricted token: the block filters match the offline-marker
+	// SID, which is a synthetic capability SID, and LogonUser mints a token from
+	// an account's real group memberships rather than from arbitrary SIDs. A
+	// principal is therefore denied the network by being a MEMBER of this group,
+	// whose SID the filters also match.
+	//
+	// A group rather than the offline principal's own SID because principals are
+	// per workspace: one filter set covers every offline principal on the machine
+	// instead of needing a filter per workspace.
+	windowsSandboxOfflineGroupName    = "ZeroSandboxOffline"
+	windowsSandboxOfflineGroupComment = "Zero sandbox principals denied network access (managed)"
 )
+
+// windowsSandboxRole distinguishes the two principals a workspace gets. They are
+// separate accounts rather than one account reconfigured per command, because
+// the network decision is baked into group membership at setup time and setup
+// needs elevation; flipping it per command would need an elevated hop on every
+// command.
+type windowsSandboxRole string
+
+const (
+	// windowsSandboxRoleOffline is a member of the offline group, so the block
+	// filters match its token and it has no network.
+	windowsSandboxRoleOffline windowsSandboxRole = "offline"
+	// windowsSandboxRoleOnline is not, so an approved network command reaches the
+	// network while still being read-confined by having its own identity.
+	windowsSandboxRoleOnline windowsSandboxRole = "online"
+)
+
+// roleTag is the single character that distinguishes the two accounts for a
+// workspace. One character because the 20-character account-name limit is
+// already tight and every character spent here is a bit of workspace hash lost.
+func (role windowsSandboxRole) roleTag() string {
+	if role == windowsSandboxRoleOnline {
+		return "n"
+	}
+	return "d"
+}
 
 // Win32 status codes that mean "already there". Treated as success so
 // provisioning converges instead of failing on a second run.
@@ -146,12 +186,17 @@ func (identity windowsSandboxIdentity) String() string {
 	return identity.Username + " (" + identity.SID.String() + ")"
 }
 
-// windowsSandboxUserName derives a stable account name for a workspace key. The
-// key is hashed by the caller (see windowsSandboxWorkspaceKey) so the name reveals no
-// path, and it is truncated to the 20-character local-account limit. The same
-// workspace always maps to the same account, so re-running setup reuses the
-// principal instead of accumulating accounts.
-func windowsSandboxUserName(workspaceKey string) string {
+// windowsSandboxUserName derives a stable account name for a workspace key and
+// role. The key is hashed by the caller (see windowsSandboxWorkspaceKey) so the
+// name reveals no path, and it is truncated to the 20-character local-account
+// limit. The same workspace and role always map to the same account, so
+// re-running setup reuses the principals instead of accumulating accounts.
+//
+// The role tag sits before the hash rather than after it, so truncation eats
+// hash characters and never the tag. A name that lost its tag would collide the
+// two roles onto one account, which would silently put an online principal in
+// the offline group or the reverse.
+func windowsSandboxUserName(workspaceKey string, role windowsSandboxRole) string {
 	cleaned := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
@@ -165,7 +210,7 @@ func windowsSandboxUserName(workspaceKey string) string {
 	if cleaned == "" {
 		cleaned = "default"
 	}
-	name := windowsSandboxUserPrefix + cleaned
+	name := windowsSandboxUserPrefix + role.roleTag() + cleaned
 	if len(name) > windowsSandboxUserNameMax {
 		name = name[:windowsSandboxUserNameMax]
 	}
@@ -287,11 +332,54 @@ func resolveWindowsSandboxGroupAdd(status uintptr, owned func() (bool, error)) e
 // ensureWindowsSandboxGroup creates the managed local group, or adopts it when
 // it already exists AND carries our ownership comment.
 func ensureWindowsSandboxGroup() error {
-	name, err := windows.UTF16PtrFromString(windowsSandboxGroupName)
+	return ensureWindowsLocalGroup(windowsSandboxGroupName, windowsSandboxGroupComment)
+}
+
+// ensureWindowsSandboxOfflineGroup creates the group the network block filters
+// are keyed to. Membership of it is what denies a principal the network, so it
+// has to exist before any offline principal is created.
+func ensureWindowsSandboxOfflineGroup() error {
+	return ensureWindowsLocalGroup(windowsSandboxOfflineGroupName, windowsSandboxOfflineGroupComment)
+}
+
+// Wires the portable network planner to the Windows group lookup. Done here so
+// windows_network.go can stay free of Win32 calls while still folding the group
+// into the filter identity set.
+func init() {
+	resolveWindowsSandboxOfflineGroupSIDHook = resolveWindowsSandboxOfflineGroupSID
+}
+
+// resolveWindowsSandboxOfflineGroupSID returns the SID the block filters key to.
+//
+// Reports ("", nil) when the group does not exist, which is the state before
+// setup has ever run. Callers fold that into "no extra identity", so the plan
+// they compute matches what an un-provisioned machine would produce rather than
+// failing to build at all.
+func resolveWindowsSandboxOfflineGroupSID() (string, error) {
+	sid, _, accountType, err := windows.LookupSID("", windowsSandboxOfflineGroupName)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+			return "", nil
+		}
+		return "", fmt.Errorf("look up %s: %w", windowsSandboxOfflineGroupName, err)
+	}
+	// A local group is an alias. Anything else means the name has been taken by
+	// something that is not ours, and keying network filters to it would be both
+	// wrong and a way to affect unrelated accounts.
+	if accountType != windows.SidTypeAlias && accountType != windows.SidTypeGroup {
+		return "", fmt.Errorf("%s resolves to a non-group account (type %d)", windowsSandboxOfflineGroupName, accountType)
+	}
+	return sid.String(), nil
+}
+
+// ensureWindowsLocalGroup creates a local group, or leaves it alone when it
+// already exists.
+func ensureWindowsLocalGroup(groupName string, groupComment string) error {
+	name, err := windows.UTF16PtrFromString(groupName)
 	if err != nil {
 		return err
 	}
-	comment, err := windows.UTF16PtrFromString(windowsSandboxGroupComment)
+	comment, err := windows.UTF16PtrFromString(groupComment)
 	if err != nil {
 		return err
 	}
@@ -390,7 +478,20 @@ func resetWindowsSandboxUserPassword(username string, password string) error {
 // addWindowsSandboxUserToGroup puts a principal in the managed group, ignoring
 // the status that means it is already a member.
 func addWindowsSandboxUserToGroup(username string) error {
-	group, err := windows.UTF16PtrFromString(windowsSandboxGroupName)
+	return addWindowsUserToLocalGroup(windowsSandboxGroupName, username)
+}
+
+// addWindowsSandboxUserToOfflineGroup is what actually denies a principal the
+// network: the block filters match this group's SID, and LogonUser puts the
+// group into the token it mints for a member.
+func addWindowsSandboxUserToOfflineGroup(username string) error {
+	return addWindowsUserToLocalGroup(windowsSandboxOfflineGroupName, username)
+}
+
+// addWindowsUserToLocalGroup puts an account in a local group, ignoring the
+// status that means it is already a member.
+func addWindowsUserToLocalGroup(groupName string, username string) error {
+	group, err := windows.UTF16PtrFromString(groupName)
 	if err != nil {
 		return err
 	}
@@ -652,21 +753,23 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // post-creation pair would never get past ensureWindowsSandboxGroup on an
 // ordinary machine and would pass without reaching the code it names.
 var (
-	ensureWindowsSandboxGroupFn          = ensureWindowsSandboxGroup
-	windowsSandboxGroupIsOwnedFn         = windowsSandboxGroupIsOwned
-	ensureWindowsSandboxUserFn           = ensureWindowsSandboxUser
-	addWindowsSandboxUserToGroupFn       = addWindowsSandboxUserToGroup
-	resolveWindowsSandboxSIDFn           = resolveWindowsSandboxSID
-	resetWindowsSandboxUserPasswordFn    = resetWindowsSandboxUserPassword
-	windowsSandboxUserIsManagedFn        = windowsSandboxUserIsManaged
-	windowsSandboxUserHasLegacyCommentFn = windowsSandboxUserHasLegacyComment
-	windowsSandboxUserIsPrivilegedFn     = windowsSandboxUserIsPrivileged
-	grantWindowsSandboxLogonRightsFn     = grantWindowsSandboxLogonRights
-	revokeWindowsSandboxLogonRightsFn    = revokeWindowsSandboxLogonRights
+	ensureWindowsSandboxGroupFn           = ensureWindowsSandboxGroup
+	windowsSandboxGroupIsOwnedFn          = windowsSandboxGroupIsOwned
+	ensureWindowsSandboxOfflineGroupFn    = ensureWindowsSandboxOfflineGroup
+	ensureWindowsSandboxUserFn            = ensureWindowsSandboxUser
+	addWindowsSandboxUserToGroupFn        = addWindowsSandboxUserToGroup
+	addWindowsSandboxUserToOfflineGroupFn = addWindowsSandboxUserToOfflineGroup
+	resolveWindowsSandboxSIDFn            = resolveWindowsSandboxSID
+	resetWindowsSandboxUserPasswordFn     = resetWindowsSandboxUserPassword
+	windowsSandboxUserIsManagedFn         = windowsSandboxUserIsManaged
+	windowsSandboxUserHasLegacyCommentFn  = windowsSandboxUserHasLegacyComment
+	windowsSandboxUserIsPrivilegedFn      = windowsSandboxUserIsPrivileged
+	grantWindowsSandboxLogonRightsFn      = grantWindowsSandboxLogonRights
+	revokeWindowsSandboxLogonRightsFn     = revokeWindowsSandboxLogonRights
 	// applyWindowsACLPlanFn is a seam so a test can pin the ORDER of setup's ACL
-	// work. The revocation below only prevents a stale grant if it runs before
-	// the plan that re-adds the current one; a test that exercised the revoke
-	// helper on its own would pass just as happily with the call site deleted.
+	// work. The revocation only prevents a stale grant if it runs before the plan
+	// that re-adds the current one; a test that exercised the revoke helper on its
+	// own would pass just as happily with the call site deleted.
 	applyWindowsACLPlanFn = applyWindowsACLPlan
 )
 
@@ -680,11 +783,17 @@ var (
 // live. The returned value is always the account's actual password, including
 // when the account already existed, because that case is reset explicitly
 // below.
-func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, string, bool, error) {
+func provisionWindowsSandboxIdentity(workspaceKey string, role windowsSandboxRole) (windowsSandboxIdentity, string, bool, error) {
 	if err := ensureWindowsSandboxGroupFn(); err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
-	username := windowsSandboxUserName(workspaceKey)
+	// The offline group has to exist before an offline principal joins it, and it
+	// is created unconditionally so the network filters can be keyed to its SID
+	// whether or not an offline principal has been provisioned yet.
+	if err := ensureWindowsSandboxOfflineGroupFn(); err != nil {
+		return windowsSandboxIdentity{}, "", false, err
+	}
+	username := windowsSandboxUserName(workspaceKey, role)
 	password, err := newWindowsSandboxPassword()
 	if err != nil {
 		return windowsSandboxIdentity{}, "", false, err
@@ -764,6 +873,19 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 	if err := addWindowsSandboxUserToGroupFn(username); err != nil {
 		return windowsSandboxIdentity{Username: username}, "", !existed, err
 	}
+	// Membership of the offline group IS the network denial, so it is applied
+	// here rather than left to a later step: a principal that reached the runner
+	// without it would look correctly provisioned and quietly have the network.
+	//
+	// This is the failure most worth surviving cleanly. It happens after the
+	// account exists, and local policy can refuse a group join, so the name has
+	// to come back with the error or the rollback deletes "" and strands a
+	// principal that has network access and no offline membership.
+	if role == windowsSandboxRoleOffline {
+		if err := addWindowsSandboxUserToOfflineGroupFn(username); err != nil {
+			return windowsSandboxIdentity{Username: username}, "", !existed, err
+		}
+	}
 	sid, err := resolveWindowsSandboxSIDFn(username)
 	if err != nil {
 		return windowsSandboxIdentity{Username: username}, "", !existed, err
@@ -797,21 +919,8 @@ var errWindowsSandboxIdentityUnavailable = errors.New("no Zero sandbox principal
 // creating anything, so the unelevated command path can discover whether an
 // identity exists. It returns errWindowsSandboxIdentityUnavailable when setup
 // has not run.
-func lookupWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, error) {
-	username := windowsSandboxUserName(workspaceKey)
-	// Ownership is checked here as well as at provisioning, because the account
-	// NAME cannot carry the whole workspace key.
-	//
-	// The name keeps 11 characters of the digest; the comment holds all of it.
-	// Provisioning refuses a name whose comment names a different workspace, and
-	// without the same check here the workspace that LOST that race would still
-	// resolve the name to a SID and quietly use the other workspace's principal,
-	// its secret and its ACL identity. Setup would have failed for it, so this is
-	// the path that decides whether the refusal actually holds.
-	//
-	// A collision is very unlikely with real keys, roughly 2^-44 per pair, but the
-	// cost of being wrong is one workspace running as another's identity, and the
-	// check is one syscall on a path that is already doing several.
+func lookupWindowsSandboxIdentity(workspaceKey string, role windowsSandboxRole) (windowsSandboxIdentity, error) {
+	username := windowsSandboxUserName(workspaceKey, role)
 	// SID resolution runs FIRST so "no such account" stays the unavailable
 	// sentinel. windowsSandboxUserIsManaged answers false for both an absent
 	// account and one belonging to someone else, so checking it before this would
@@ -846,8 +955,8 @@ func lookupWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, 
 // stay able to clean up an account that has become privileged rather than
 // refusing to touch it. Refusing there would leave the very account this guards
 // against permanently undeletable by Zero.
-func lookupWindowsSandboxPrincipalForCommand(workspaceKey string) (windowsSandboxIdentity, error) {
-	identity, err := lookupWindowsSandboxIdentity(workspaceKey)
+func lookupWindowsSandboxPrincipalForCommand(workspaceKey string, role windowsSandboxRole) (windowsSandboxIdentity, error) {
+	identity, err := lookupWindowsSandboxIdentity(workspaceKey, role)
 	if err != nil {
 		return windowsSandboxIdentity{}, err
 	}

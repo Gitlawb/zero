@@ -73,10 +73,10 @@ func withWindowsSetupSeams(t *testing.T, seams windowsSetupSeams) {
 		}
 		return func() error { return nil }, nil
 	}
-	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
+	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig, windowsSandboxRole) error {
 		return seams.retireErr
 	}
-	lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+	lookupWindowsSandboxIdentityFn = func(string, windowsSandboxRole) (windowsSandboxIdentity, error) {
 		if seams.principalStillInstalled {
 			return windowsSandboxIdentity{Username: "zero-sbx-stub"}, nil
 		}
