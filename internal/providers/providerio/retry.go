@@ -178,6 +178,19 @@ func SendWithRetry(
 			return nil, err
 		}
 
+		// Deliberately NOT guarded on `redirected`, unlike the transport-error
+		// branch above. The two differ in what is known about the request. A
+		// transport failure after a redirect leaves it unknown whether the
+		// redirect target received and began processing the POST, so replaying
+		// could duplicate billable work. Here every hop answered: a 307/308 is the
+		// origin declining and delegating, and a retryable status is the target
+		// declining as well, so nothing accepted the request and a replay
+		// duplicates nothing.
+		//
+		// The exposure is also identical to a retryable status with no redirect in
+		// play, which this package has always retried. Guarding on redirects here
+		// would not close a gap, it would make a rate-limited completion behind a
+		// redirecting gateway fail outright instead of backing off.
 		if ShouldRetryStatus(response.StatusCode) {
 			statusAttempts++
 			if statusAttempts < maxAttempts {

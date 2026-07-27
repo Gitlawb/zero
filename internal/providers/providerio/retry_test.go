@@ -541,3 +541,57 @@ func TestSendWithRetryStatusBudgetSurvivesPreSendRetries(t *testing.T) {
 		t.Fatalf("status budget eaten by pre-send retries: transport called %d times, want %d (2 pre-send + %d status)", got, 2+maxAttempts, maxAttempts)
 	}
 }
+
+// A redirect followed by a RETRYABLE STATUS is still retried, and deliberately
+// so. This is the case a reviewer flagged as a possible replay of billable work,
+// and the asymmetry with the transport-error guard above is intentional rather
+// than an oversight, so it is pinned here.
+//
+// The two situations differ in what is known about the request:
+//
+//   - Transport error after a redirect: the original POST reached the origin and
+//     the dial to the redirect target then failed, so whether the target received
+//     and began processing it is UNKNOWN. Replaying could duplicate work, which
+//     is why that path refuses to retry.
+//   - Retryable status after a redirect: every hop answered. A 307/308 is the
+//     origin declining to process and delegating, and a 429/503/529 is the target
+//     declining as well. Nothing accepted the request, so replaying duplicates
+//     nothing.
+//
+// The risk here is also exactly the risk of a 429 without any redirect, which
+// this package has always retried; the redirect adds no new ambiguity. Refusing
+// to retry would instead make a rate-limited completion behind a redirecting
+// gateway fail outright rather than back off.
+func TestSendWithRetryRetriesRedirectedRetryableStatus(t *testing.T) {
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1, 3:
+			// The origin declines and delegates, both times.
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {"https://redirect-target.invalid/v1"}},
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		case 2:
+			// The target declines too: rate limited, so nothing was accepted.
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody, Request: r}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 3)
+	if err != nil {
+		t.Fatalf("a rate-limited completion behind a redirect must still retry: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after the retry succeeded", resp.StatusCode)
+	}
+	// origin, target(429), origin, target(200).
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Fatalf("transport called %d times, want 4 (redirect, 429, redirect, 200)", got)
+	}
+}
