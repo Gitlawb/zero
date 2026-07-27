@@ -74,6 +74,25 @@ func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	}
 }
 
+func TestEngineClassifiesPowerShellCurlCommandAsNetwork(t *testing.T) {
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: t.TempDir(),
+		Policy:        DefaultPolicy(),
+	})
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "bash",
+		SideEffect:     SideEffectShell,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args: map[string]any{
+			"command": `$env:PATH = '.;' + $env:PATH; curl.cmd https://example.com`,
+		},
+	})
+	if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked || !HasRiskCategory(decision.Risk, "network") {
+		t.Fatalf("PowerShell curl command decision = %#v, want network prompt", decision)
+	}
+}
+
 func TestUnsandboxedExecutionAllowedPreservesDeniedReads(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()

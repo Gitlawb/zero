@@ -162,10 +162,11 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 
 	binaryName := "zero"
 	optionalBinaries := linuxOptionalBinaries
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		binaryName = "zero.exe"
 		optionalBinaries = windowsOptionalBinaries
-	} else if runtime.GOOS == "darwin" {
+	case "darwin":
 		optionalBinaries = nil
 	}
 

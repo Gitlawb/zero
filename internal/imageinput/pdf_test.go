@@ -48,7 +48,7 @@ func buildMinimalPDF(text string) []byte {
 	buf.WriteString("0 " + strconv.Itoa(len(offsets)+1) + "\n")
 	buf.WriteString("0000000000 65535 f \n")
 	for _, off := range offsets {
-		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", off))
+		fmt.Fprintf(&buf, "%010d 00000 n \n", off)
 	}
 	buf.WriteString("trailer\n<< /Size " + strconv.Itoa(len(offsets)+1) + " /Root 1 0 R >>\n")
 	buf.WriteString("startxref\n" + strconv.Itoa(xrefStart) + "\n%%EOF\n")
@@ -277,7 +277,7 @@ func buildEmptyTextPDF() []byte {
 	buf.WriteString("0 " + strconv.Itoa(len(offsets)+1) + "\n")
 	buf.WriteString("0000000000 65535 f \n")
 	for _, off := range offsets {
-		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", off))
+		fmt.Fprintf(&buf, "%010d 00000 n \n", off)
 	}
 	buf.WriteString("trailer\n<< /Size " + strconv.Itoa(len(offsets)+1) + " /Root 1 0 R >>\n")
 	buf.WriteString("startxref\n" + strconv.Itoa(xrefStart) + "\n%%EOF\n")
