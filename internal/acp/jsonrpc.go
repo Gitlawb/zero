@@ -235,13 +235,25 @@ func (d *interruptibleReadDecision) interrupt() (claimed bool) {
 	return claimed
 }
 
+// readInner records completion in the Read call's deferred epilogue. It also
+// converts a reader panic into a terminal error so the helper goroutine always
+// publishes a result for Read to join.
+func (r *interruptibleReader) readInner(p []byte, decision *interruptibleReadDecision) (res interruptibleReadResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			res = interruptibleReadResult{err: fmt.Errorf("acp: reader panicked: %v", recovered)}
+		}
+		decision.complete()
+	}()
+	res.n, res.err = r.inner.Read(p)
+	return res
+}
+
 func (r *interruptibleReader) Read(p []byte) (int, error) {
 	resultCh := make(chan interruptibleReadResult, 1)
 	var decision interruptibleReadDecision
 	go func() {
-		n, err := r.inner.Read(p)
-		decision.complete()
-		resultCh <- interruptibleReadResult{n, err}
+		resultCh <- r.readInner(p, &decision)
 	}()
 	select {
 	case res := <-resultCh:

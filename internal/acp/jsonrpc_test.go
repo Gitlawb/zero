@@ -257,23 +257,51 @@ func TestInterruptibleReaderPrefersDecidedResultOverCancellation(t *testing.T) {
 	}
 }
 
-// TestInterruptibleReadCompletionWinsBeforeResultPublication covers the gap
-// after inner.Read returns and claims completion but before its goroutine sends
-// the result. Cancellation must not reclassify that finished read as interrupted.
+// TestInterruptibleReadCompletionWinsBeforeResultPublication exercises the
+// actual inner-read wrapper at the handoff between the underlying Read and the
+// helper goroutine's result publication. Cancellation must not reclassify a
+// result returned by this wrapper as interrupted.
 func TestInterruptibleReadCompletionWinsBeforeResultPublication(t *testing.T) {
+	wantErr := errors.New("read failed")
+	read := testReader(func(p []byte) (int, error) {
+		return copy(p, "x"), wantErr
+	})
+	r := newInterruptibleReader(context.Background(), read, nil)
 	var decision interruptibleReadDecision
-	decision.complete()
-
-	// An unbuffered send cannot publish until the receive below, leaving the
-	// result deliberately unpublished while cancellation tries to claim the call.
+	readComplete := make(chan struct{})
 	resultCh := make(chan interruptibleReadResult)
 	go func() {
-		resultCh <- interruptibleReadResult{err: errors.New("read failed")}
+		res := r.readInner(make([]byte, 8), &decision)
+		close(readComplete)
+		resultCh <- res
 	}()
-	claimed := decision.interrupt()
-	<-resultCh
-	if claimed {
+
+	<-readComplete
+	if decision.interrupt() {
 		t.Fatal("cancellation claimed a read that completed before result publication")
+	}
+	res := <-resultCh
+	if res.n != 1 || !errors.Is(res.err, wantErr) {
+		t.Fatalf("inner read result = (%d, %v), want (1, %v)", res.n, res.err, wantErr)
+	}
+}
+
+func TestConnServeReportsReaderPanicAsTerminalError(t *testing.T) {
+	read := testReader(func([]byte) (int, error) {
+		panic("boom")
+	})
+	conn := NewConn(read, io.Discard)
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(context.Background()) }()
+
+	select {
+	case err := <-done:
+		const want = "acp: reader panicked: boom"
+		if err == nil || err.Error() != want {
+			t.Fatalf("Serve returned %v, want %q", err, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after reader panic")
 	}
 }
 
