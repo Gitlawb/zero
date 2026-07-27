@@ -77,6 +77,8 @@ var (
 	procNetLocalGroupAddMembers = netapi32.NewProc("NetLocalGroupAddMembers")
 	procNetUserDel              = netapi32.NewProc("NetUserDel")
 	procNetUserSetInfo          = netapi32.NewProc("NetUserSetInfo")
+	procNetUserGetInfo          = netapi32.NewProc("NetUserGetInfo")
+	procNetApiBufferFree        = netapi32.NewProc("NetApiBufferFree")
 )
 
 // userInfo1 mirrors USER_INFO_1. Field order and widths must match the Win32
@@ -317,6 +319,49 @@ func addWindowsSandboxUserToGroup(username string) error {
 	return netAPIStatus("NetLocalGroupAddMembers", status, errorMemberInAlias)
 }
 
+// errWindowsSandboxNameCollision reports that the derived account name is taken
+// by a local account Zero did not create. Setup refuses rather than adopting it.
+var errWindowsSandboxNameCollision = errors.New("a local account with Zero's derived sandbox name already exists and was not created by Zero")
+
+// windowsSandboxUserIsManaged reports whether a local account is one Zero
+// created, by reading back the comment provisioning stamps on it.
+//
+// This is the gate on adopting an existing account. The name is derived, not
+// discovered, so an account can be sitting on it for reasons that have nothing
+// to do with Zero, and taking it over means resetting a stranger's password.
+//
+// A missing account is not managed rather than an error, so callers can use this
+// as a plain question without special-casing absence.
+func windowsSandboxUserIsManaged(username string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return false, err
+	}
+	var buffer *byte
+	status, _, _ := procNetUserGetInfo.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		1, // level: USER_INFO_1
+		uintptr(unsafe.Pointer(&buffer)),
+	)
+	runtime.KeepAlive(name)
+	if status == nerrUserNotFound {
+		return false, nil
+	}
+	if err := netAPIStatus("NetUserGetInfo", status); err != nil {
+		return false, err
+	}
+	if buffer == nil {
+		return false, nil
+	}
+	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
+	info := (*userInfo1)(unsafe.Pointer(buffer))
+	if info.Comment == nil {
+		return false, nil
+	}
+	return windows.UTF16PtrToString(info.Comment) == windowsSandboxUserComment, nil
+}
+
 // resolveWindowsSandboxSID looks up the SID for a provisioned principal. The SID
 // is the durable handle: account names can collide with a pre-existing local
 // user, so every ACE and firewall rule is keyed to the SID rather than the name.
@@ -341,36 +386,49 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // live. The returned value is always the account's actual password, including
 // when the account already existed, because that case is reset explicitly
 // below.
-func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, string, error) {
+func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, string, bool, error) {
 	if err := ensureWindowsSandboxGroup(); err != nil {
-		return windowsSandboxIdentity{}, "", err
+		return windowsSandboxIdentity{}, "", false, err
 	}
 	username := windowsSandboxUserName(workspaceKey)
 	password, err := newWindowsSandboxPassword()
 	if err != nil {
-		return windowsSandboxIdentity{}, "", err
+		return windowsSandboxIdentity{}, "", false, err
 	}
 	existed, err := ensureWindowsSandboxUser(username, password)
 	if err != nil {
-		return windowsSandboxIdentity{}, "", err
+		return windowsSandboxIdentity{}, "", false, err
 	}
 	if existed {
-		// NetUserAdd left the account untouched, so the password above is not yet
+		// Prove the account is ours before touching it. The name is derived from a
+		// workspace hash rather than discovered, so it can be occupied by an
+		// account that has nothing to do with Zero, whether by coincidence or
+		// because somebody created it deliberately. Adopting one means resetting
+		// its password, which is not something to do on the strength of a name
+		// matching a pattern we generate ourselves.
+		managed, err := windowsSandboxUserIsManaged(username)
+		if err != nil {
+			return windowsSandboxIdentity{}, "", false, err
+		}
+		if !managed {
+			return windowsSandboxIdentity{}, "", false, fmt.Errorf("%w: %q", errWindowsSandboxNameCollision, username)
+		}
+		// Ours, and NetUserAdd left it untouched, so the password above is not yet
 		// its password. Set it, or the secret stored by the caller would never
 		// authenticate and every command would fail to log on with a principal
 		// that looks perfectly provisioned.
 		if err := resetWindowsSandboxUserPassword(username, password); err != nil {
-			return windowsSandboxIdentity{}, "", err
+			return windowsSandboxIdentity{}, "", false, err
 		}
 	}
 	if err := addWindowsSandboxUserToGroup(username); err != nil {
-		return windowsSandboxIdentity{}, "", err
+		return windowsSandboxIdentity{}, "", !existed, err
 	}
 	sid, err := resolveWindowsSandboxSID(username)
 	if err != nil {
-		return windowsSandboxIdentity{}, "", err
+		return windowsSandboxIdentity{}, "", !existed, err
 	}
-	return windowsSandboxIdentity{Username: username, SID: sid}, password, nil
+	return windowsSandboxIdentity{Username: username, SID: sid}, password, !existed, nil
 }
 
 // removeWindowsSandboxIdentity deletes a provisioned principal. Callers must
