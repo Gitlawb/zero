@@ -142,10 +142,10 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	if err != nil {
 		return windowsSandboxIdentity{}, err
 	}
-	// A pre-existing account keeps its old password, which this new one does not
-	// match, so the secret is rewritten every run to stay in step with whatever
-	// NetUserAdd left in place. On a fresh account the two agree by construction;
-	// on an existing one the caller resets it via ensureWindowsSandboxUser.
+	// The secret is rewritten every run so it stays in step with the account.
+	// provisionWindowsSandboxIdentity guarantees the password it returns is the
+	// account's real one, resetting it explicitly when the account already
+	// existed, so this write is always storing something that can log on.
 	if err := writeWindowsSandboxSecret(secretPath, password); err != nil {
 		return windowsSandboxIdentity{}, err
 	}

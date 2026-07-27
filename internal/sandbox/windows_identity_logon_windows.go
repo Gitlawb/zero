@@ -19,6 +19,7 @@ package sandbox
 
 import (
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -118,6 +119,9 @@ func grantWindowsSandboxLogonRights(sid *windows.SID) error {
 		uintptr(policyCreateAccount|policyLookupNames),
 		uintptr(unsafe.Pointer(&policy)),
 	)
+	// LsaOpenPolicy borrows the attributes struct by address, so it has to stay
+	// reachable until the call has returned.
+	runtime.KeepAlive(attributes)
 	if err := lsaStatusError("LsaOpenPolicy", status); err != nil {
 		return err
 	}
@@ -144,11 +148,14 @@ func grantWindowsSandboxLogonRights(sid *windows.SID) error {
 			uintptr(unsafe.Pointer(&entry)),
 			1,
 		)
+		// Both the descriptor and the buffer it points at are borrowed by the
+		// call. Kept alive before the error check, not after, so the failure path
+		// does not return with them already collectable.
+		runtime.KeepAlive(entry)
+		runtimeKeepAliveUint16(buffer)
 		if err := lsaStatusError("LsaAddAccountRights("+right+")", status); err != nil {
 			return err
 		}
-		// Keep the backing buffer alive until the call has returned.
-		runtimeKeepAliveUint16(buffer)
 	}
 	return nil
 }
@@ -183,6 +190,10 @@ func logonWindowsSandboxPrincipal(username string, password string) (windows.Tok
 		logon32ProviderDefault,
 		uintptr(unsafe.Pointer(&token)),
 	)
+	// The three strings are borrowed for the duration of the call.
+	runtime.KeepAlive(user)
+	runtime.KeepAlive(domain)
+	runtime.KeepAlive(secret)
 	if result == 0 {
 		if callErr != nil && callErr != windows.ERROR_SUCCESS {
 			return 0, fmt.Errorf("LogonUser(%s): %w", username, callErr)
