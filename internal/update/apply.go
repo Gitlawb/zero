@@ -1,7 +1,6 @@
 package update
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -69,7 +68,7 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 	method := DetectInstallMethod(executablePath)
 	switch method {
 	case InstallMethodNpm:
-		if err := applyNpmUpdate(ctx, options.JSON); err != nil {
+		if err := applyNpmUpdate(ctx); err != nil {
 			return ApplyResult{}, err
 		}
 		return ApplyResult{
@@ -110,27 +109,15 @@ func FormatApply(result ApplyResult) string {
 	return strings.Join(lines, "\n")
 }
 
-func applyNpmUpdate(ctx context.Context, jsonOutput bool) error {
+func applyNpmUpdate(ctx context.Context) error {
 	npmPath, err := exec.LookPath("npm")
 	if err != nil {
 		return fmt.Errorf("npm not found on PATH: reinstall with `npm install -g %s@latest`", npmPackageName)
 	}
 	command := exec.CommandContext(ctx, npmPath, "install", "-g", npmPackageName+"@latest")
+	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	var captured bytes.Buffer
-	if jsonOutput {
-		// The caller writes a JSON result to stdout after this returns;
-		// npm's own progress output must stay off stdout so it doesn't get
-		// interleaved with (and corrupt) that JSON. Still capture it so a
-		// failure can report what npm printed.
-		command.Stdout = &captured
-	} else {
-		command.Stdout = os.Stdout
-	}
 	if err := command.Run(); err != nil {
-		if jsonOutput && captured.Len() > 0 {
-			return fmt.Errorf("npm install -g %s@latest: %w\n%s", npmPackageName, err, captured.String())
-		}
 		return fmt.Errorf("npm install -g %s@latest: %w", npmPackageName, err)
 	}
 	return nil

@@ -2,13 +2,11 @@ package update
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -337,110 +335,4 @@ func TestVerifyArchiveChecksumRejectsFilenameMismatch(t *testing.T) {
 	if !strings.Contains(err.Error(), decoyName) || !strings.Contains(err.Error(), "real.tar.gz") {
 		t.Fatalf("expected error to name both the referenced file and the expected one, got %q", err)
 	}
-}
-
-// jsonOutput=true means the caller writes a JSON result to stdout right
-// after Apply returns, so npm's own progress output must not land on stdout
-// too, or it corrupts the JSON for any script/CI consumer parsing it.
-func TestApplyNpmUpdateKeepsStdoutCleanInJSONMode(t *testing.T) {
-	fakeBin := t.TempDir()
-	writeFakeNPMInstall(t, fakeBin, "npm install output", 0)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	stdout := redirectStdout(t)
-
-	if err := applyNpmUpdate(context.Background(), true); err != nil {
-		t.Fatalf("applyNpmUpdate: %v", err)
-	}
-
-	if captured := stdout(); captured != "" {
-		t.Fatalf("expected nothing written to stdout in JSON mode, got %q", captured)
-	}
-}
-
-func TestApplyNpmUpdateReportsCapturedOutputOnFailureInJSONMode(t *testing.T) {
-	fakeBin := t.TempDir()
-	writeFakeNPMInstall(t, fakeBin, "npm install boom", 1)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	err := applyNpmUpdate(context.Background(), true)
-	if err == nil {
-		t.Fatal("expected error when npm install fails")
-	}
-	if !strings.Contains(err.Error(), "npm install boom") {
-		t.Fatalf("expected error to include npm's captured output, got %q", err)
-	}
-}
-
-func TestApplyNpmUpdateStreamsToStdoutOutsideJSONMode(t *testing.T) {
-	fakeBin := t.TempDir()
-	writeFakeNPMInstall(t, fakeBin, "npm install output", 0)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	stdout := redirectStdout(t)
-
-	if err := applyNpmUpdate(context.Background(), false); err != nil {
-		t.Fatalf("applyNpmUpdate: %v", err)
-	}
-
-	if captured := stdout(); !strings.Contains(captured, "npm install output") {
-		t.Fatalf("expected npm output on stdout outside JSON mode, got %q", captured)
-	}
-}
-
-// redirectStdout swaps os.Stdout for a pipe for the rest of the test and
-// returns a function that restores the original and yields everything
-// written in between.
-func redirectStdout(t *testing.T) func() string {
-	t.Helper()
-	original := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = writer
-
-	done := make(chan string, 1)
-	go func() {
-		data, _ := io.ReadAll(reader)
-		done <- string(data)
-	}()
-
-	t.Cleanup(func() {
-		os.Stdout = original
-	})
-
-	return func() string {
-		_ = writer.Close()
-		os.Stdout = original
-		captured := <-done
-		_ = reader.Close()
-		return captured
-	}
-}
-
-// writeFakeNPMInstall writes a fake `npm` on PATH that prints stdoutLine
-// (a single line, no special shell/batch characters) and exits with
-// exitCode.
-func writeFakeNPMInstall(t *testing.T, dir string, stdoutLine string, exitCode int) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		path := filepath.Join(dir, "npm.cmd")
-		content := "@echo off\r\n" +
-			"echo " + stdoutLine + "\r\n" +
-			"exit /b " + strconv.Itoa(exitCode) + "\r\n"
-		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-		return
-	}
-	path := filepath.Join(dir, "npm")
-	content := "#!/bin/sh\necho " + shellQuote(stdoutLine) + "\nexit " + strconv.Itoa(exitCode) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-		t.Fatalf("WriteFile(%s): %v", path, err)
-	}
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

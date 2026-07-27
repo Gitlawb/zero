@@ -12,7 +12,6 @@ zero update --check --target windows-x64
 
 zero upgrade
 zero update --apply
-zero update --apply --json
 ```
 
 `--check` and `--apply` are mutually exclusive. `zero update` requires one of
@@ -37,7 +36,11 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
   later invocation, since it can't be overwritten while running.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
-- `--json` prints the same result in a machine-readable format.
+- `--json` serializes Zero's final result. For npm-managed installs, npm may
+  also write progress output to stdout, so neither
+  `zero update --apply --json` nor `zero upgrade --json` is guaranteed to
+  produce a single parseable JSON document. Use `--check --json` for
+  machine-readable automation.
 
 Useful flags:
 

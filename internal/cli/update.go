@@ -60,7 +60,6 @@ func runUpdateCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		Repository:     options.repository,
 		Endpoint:       options.endpoint,
 		Timeout:        options.timeout,
-		JSON:           options.json,
 	}
 	if options.target != "" {
 		target, err := update.ResolveTarget(options.target)
