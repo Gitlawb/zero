@@ -30,6 +30,36 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Make on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: choco install make --no-progress -y
+
+      - name: Validate quality targets with stock macOS Make
+        if: matrix.os == 'macos-latest'
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: grep.patternType
+          GIT_CONFIG_VALUE_0: fixed
+        run: make -n vulncheck
+
+      - name: Check vulnerabilities through native Windows Make
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: make vulncheck
+
+      - name: Check dead code through native Windows Make
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: cmd
+        run: make deadcode
+
+      - name: Run static lint through native Windows Make
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: cmd
+        run: make lint-static
+
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -100,27 +130,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # govulncheck, deadcode, and golangci-lint each resolve a toolchain from
-      # their own modules, which can drop below the version go.mod requires and
-      # then fail to load our packages. Pin GOTOOLCHAIN to the go.mod toolchain
-      # so all three run under it.
-      - name: Pin toolchain from go.mod
-        run: |
-          toolchain="$(awk '/^toolchain /{print $2}' go.mod)"
-          echo "GOTOOLCHAIN=${toolchain:-auto}" >> "$GITHUB_ENV"
-
       # Hard gate: fails the build when code reaches a known vulnerability. A stdlib
       # CVE is cleared by a toolchain bump (see go.mod). May also flag a newly
       # published advisory on an unrelated PR — intentional: do not ship known vulns.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+        run: make vulncheck
 
       # Advisory: reports functions unreachable from any cmd/* main so dormant
       # code is visible in CI. Non-blocking while the dormant subsystems are
       # still being wired or removed.
       - name: deadcode (advisory)
         continue-on-error: true
-        run: go run golang.org/x/tools/cmd/deadcode@v0.46.0 -test=false ./...
+        run: make deadcode
 
       # Advisory: catches what deadcode's whole-program reachability analysis
       # doesn't, unused private functions/assignments reachable within a
@@ -130,4 +151,4 @@ jobs:
       # the repo are cleaned up incrementally (see #527).
       - name: golangci-lint (advisory)
         continue-on-error: true
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...
+        run: make lint-static

@@ -16,7 +16,11 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const grantSchemaVersion = 3
+const (
+	grantSchemaVersion = 3
+	grantLockTimeout   = 5 * time.Second
+	grantLockRetry     = 10 * time.Millisecond
+)
 
 type Grant struct {
 	ToolName   string        `json:"toolName"`
@@ -139,7 +143,40 @@ func (store *GrantStore) ConsumeMigrationNotice() (string, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	// Look for a pending notice WITHOUT taking the interprocess lock. Acquiring
+	// that lock creates the grants directory and opens <grants>.lockfile, so doing
+	// it unconditionally would make this call require a WRITABLE grants directory
+	// even when it has nothing to write. Every startup and every `zero exec` calls
+	// this, so a user with no grants file whose configured grants path (or its
+	// parent) sits on a read-only mount would fail outright with "failed to
+	// migrate sandbox grants", where reading alone reports an empty state and
+	// writes nothing.
+	state, needsMigration, err := store.readStateFile(false)
+	if err != nil {
+		return "", err
+	}
+	if !needsMigration && (state.Migration == nil || !state.Migration.NoticePending) {
+		return "", nil
+	}
+	// Past here a write is genuinely required — either a schema/policy migration,
+	// which only a lock holder may perform, or clearing NoticePending — so the
+	// lock is warranted and a read-only grants path legitimately fails (as it did
+	// before this lock existed, via readState's own migration path).
+	//
+	// Clearing the pending flag is a read-modify-write like any other mutator, so
+	// it takes the same interprocess lock: two frontends starting at once must not
+	// both read NoticePending, both print the notice, and clobber each other's
+	// write of the rest of the state.
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	// Re-read under the lock. The unlocked peek above is only a snapshot: another
+	// process may have consumed the notice or migrated the file while this one
+	// waited, and when needsMigration was set that snapshot's contents are
+	// meaningless by readStateFile's contract.
+	state, err = store.readStateLocked()
 	if err != nil {
 		return "", err
 	}
@@ -161,7 +198,13 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return Grant{}, err
+	}
+	defer unlock()
+
+	state, err := store.readStateLocked()
 	if err != nil {
 		return Grant{}, err
 	}
@@ -193,7 +236,13 @@ func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPr
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	defer unlock()
+
+	state, err := store.readStateLocked()
 	if err != nil {
 		return CommandPrefixGrant{}, err
 	}
@@ -337,7 +386,13 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -372,7 +427,13 @@ func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, err
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -407,7 +468,13 @@ func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, err
 func (store *GrantStore) Clear() (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	state, err := store.readState()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
+	state, err := store.readStateLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -537,7 +604,52 @@ func reconcileScope(scope string, kind ScopeKind) (string, ScopeKind) {
 	return scope, kind
 }
 
+// readState reads the grant file for a caller that does NOT hold the
+// interprocess lock (the lookup/list paths). A schema or policy migration has to
+// write — a backup plus the migrated state — so it is performed under the lock,
+// and the read is retaken there because another process may have migrated the
+// file while this one waited.
 func (store *GrantStore) readState() (grantFile, error) {
+	state, needsMigration, err := store.readStateFile(false)
+	if err != nil || !needsMigration {
+		return state, err
+	}
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return grantFile{}, err
+	}
+	defer unlock()
+	return store.readStateLocked()
+}
+
+// readStateLocked reads the grant file for a caller that already holds the
+// interprocess lock, so a migration writes through directly instead of
+// re-acquiring it (which would deadlock against the caller's own lock).
+func (store *GrantStore) readStateLocked() (grantFile, error) {
+	state, _, err := store.readStateFile(true)
+	return state, err
+}
+
+// readStateFile decodes the grant file. needsMigration reports that the state on
+// disk must be rewritten (legacy schema or a changed policy version) and that the
+// caller has to retake this read while holding the interprocess lock; the
+// returned state is meaningless in that case.
+func (store *GrantStore) readStateFile(locked bool) (grantFile, bool, error) {
+	state, err := store.decodeState(locked)
+	if err != nil {
+		if errors.Is(err, errGrantMigrationNeedsLock) {
+			return grantFile{}, true, nil
+		}
+		return grantFile{}, false, err
+	}
+	return state, false, nil
+}
+
+// errGrantMigrationNeedsLock is the internal signal from decodeState that the
+// file needs a migration write, which only a lock holder may perform.
+var errGrantMigrationNeedsLock = errors.New("sandbox grants file needs a migration write")
+
+func (store *GrantStore) decodeState(locked bool) (grantFile, error) {
 	data, err := os.ReadFile(store.filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -559,12 +671,18 @@ func (store *GrantStore) readState() (grantFile, error) {
 		return grantFile{}, store.invalidGrantFile(err)
 	}
 	if head.SchemaVersion == 1 || head.SchemaVersion == 2 {
+		if !locked {
+			return grantFile{}, errGrantMigrationNeedsLock
+		}
 		return store.migrateLegacyState(data, head.SchemaVersion, head.Grants, head.CommandPrefixes)
 	}
 	if head.SchemaVersion != grantSchemaVersion {
 		return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: unsupported schemaVersion", store.filePath)
 	}
 	if head.PolicyVersion != execution.PolicyVersion {
+		if !locked {
+			return grantFile{}, errGrantMigrationNeedsLock
+		}
 		return store.migrateChangedPolicy(data, head.PolicyVersion, head.Grants, head.CommandPrefixes)
 	}
 	buckets := map[string][]Grant{}
@@ -798,6 +916,36 @@ func (store *GrantStore) writeState(state grantFile) error {
 		return err
 	}
 	return nil
+}
+
+func (store *GrantStore) lockStateFile() (func(), error) {
+	lockPath := store.filePath + ".lockfile"
+	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(grantLockTimeout)
+	for {
+		locked, err := tryLockGrantFile(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if locked {
+			return func() {
+				_ = unlockGrantFile(file)
+				_ = file.Close()
+			}, nil
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf("timed out waiting for sandbox grants lock at %s", lockPath)
+		}
+		time.Sleep(grantLockRetry)
+	}
 }
 
 func normalizeStoredGrant(name string, grant Grant) (Grant, error) {

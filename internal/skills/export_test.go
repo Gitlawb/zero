@@ -17,6 +17,7 @@ func Info(dir string, name string) (SkillInfo, bool) {
 			info.Hash = entry.Hash
 		}
 	}
+	info.HashDrift = skillHashDrift(skill, info.Hash)
 	return info, true
 }
 

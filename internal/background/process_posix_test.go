@@ -150,6 +150,8 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 	// The forked child must no longer be running. An orphaned zombie is already
 	// dead but may remain visible briefly until the platform's init reaps it.
 	deadline := time.Now().Add(2 * time.Second)
+	// processStopped treats only ESRCH or an observed zombie state as stopped;
+	// other errors (for example EPERM) remain live and keep polling.
 	for !processStopped(childPID) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
