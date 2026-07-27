@@ -290,7 +290,7 @@ func writeTestPDF(t *testing.T, dir, name, text string) string {
 	xrefStart := buf.Len()
 	buf.WriteString("xref\n0 " + strconv.Itoa(len(offsets)+1) + "\n0000000000 65535 f \n")
 	for _, off := range offsets {
-		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", off))
+		fmt.Fprintf(&buf, "%010d 00000 n \n", off)
 	}
 	buf.WriteString("trailer\n<< /Size " + strconv.Itoa(len(offsets)+1) + " /Root 1 0 R >>\nstartxref\n" + strconv.Itoa(xrefStart) + "\n%%EOF\n")
 

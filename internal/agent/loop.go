@@ -1617,9 +1617,15 @@ func sandboxRestrictedShellRetryCandidate(call ToolCall, args map[string]any, re
 
 func sandboxDeniedShellResult(result tools.Result) bool {
 	if result.ExecutionOutcome != nil {
-		// Typed denials must be handled by their exact capability path. Never
-		// turn a structured narrow denial into the legacy unrestricted retry.
-		return false
+		// Only a typed platform denial that explicitly requests unrestricted
+		// recovery may enter the legacy retry path. Narrow capability denials
+		// remain on their exact capability path.
+		denial := result.ExecutionOutcome.Denial
+		return denial != nil &&
+			denial.Source == execution.DenialSourcePlatformSandbox &&
+			denial.Capability.Kind == execution.CapabilityUnrestricted &&
+			denial.Recoverable &&
+			denial.NextAction == execution.DenialNextActionRequestApproval
 	}
 	return result.Status == tools.StatusError && result.Meta[tools.SandboxLikelyDeniedMeta] == "true"
 }

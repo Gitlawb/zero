@@ -1360,7 +1360,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
-		if line.permOption && !(m.pendingPermission != nil && m.pendingPermission.typing) {
+		if line.permOption && (m.pendingPermission == nil || !m.pendingPermission.typing) {
 			// A left-click on a permission-popup option resolves it directly. The
 			// typing guard is defence-in-depth: renderFocusedPermissionPrompt already
 			// returns nil offsets in feedback mode, so no option row is registered as

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -91,6 +92,29 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 	assertProcessTerminatedIfStarted(t, pidFile)
 }
 
+// providerCommandTestBudget bounds the two background-child tests below, and is
+// deliberately NOT providerCommandTimeout. Those tests assert which error each
+// cmd.Wait path yields and that the leftover descendant is killed; neither is a
+// claim about how fast Windows can start a process. Driving them through
+// LoadProviderCommand billed the fixture's own startup to the production 5s
+// budget, so on a loaded runner the outer timer won the select in
+// runProviderCommand: the nonzero-exit test saw a timeout instead of the exit
+// status it asserts, and the timer's Terminate killed the background child
+// before it recorded its PID, putting the PID file permanently out of reach no
+// matter how long the assertion polled for it.
+//
+// This is a hang-breaker, not a tuned margin. Nothing in a healthy run waits on
+// it, since both tests return about one WaitDelay after the fixture exits.
+const providerCommandTestBudget = 60 * time.Second
+
+// backgroundChildLifetime must exceed providerCommandTestBudget so that a child
+// dying of old age is unobservable: any run where runProviderCommand has not
+// returned yet trips the budget first. That is what lets both tests drop their
+// old elapsed-versus-lifetime bounds. "Still alive when the call returned" is
+// now true by construction, so a child found dead afterwards can only have been
+// killed by proc.Terminate.
+const backgroundChildLifetime = 120 * time.Second
+
 // TestLoadProviderCommandTerminatesBackgroundChild covers a command that
 // exits immediately but leaves a detached child holding the inherited
 // stdout/stderr pipes open (e.g. `sleep 600 & exit`). cmd.Wait() only
@@ -98,24 +122,22 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 // leftover child instead of just returning and leaking it.
 func TestLoadProviderCommandTerminatesBackgroundChild(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "bg.pid")
-	childLifetime := 10 * time.Second
 	command := writeCommand(t, commandScript{
 		Stdout:                 `{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}`,
-		BackgroundSleepSeconds: int(childLifetime / time.Second),
+		BackgroundSleepSeconds: int(backgroundChildLifetime / time.Second),
 		BackgroundPidFile:      pidFile,
 	})
 
-	start := time.Now()
-	_, err := LoadProviderCommand(command)
-	elapsed := time.Since(start)
+	_, _, err := runProviderCommand(command, providerCommandTestBudget)
 	if err == nil {
-		t.Fatal("LoadProviderCommand() error = nil, want error from WaitDelay-bounded wait")
+		t.Fatal("runProviderCommand() error = nil, want error from WaitDelay-bounded wait")
 	}
-	if !strings.Contains(err.Error(), "timed out after 5s") {
-		t.Fatalf("error = %q, want timeout", err.Error())
-	}
-	if elapsed >= childLifetime {
-		t.Fatalf("returned after %s, want before the background child finishes naturally after %s", elapsed, childLifetime)
+	// Name the exact path. The outer-timer path reports the bare sentinel, so
+	// matching only that, or the "timed out after 5s" text this test used to
+	// match, would also be satisfied by a slow runner taking precisely the path
+	// this test exists to rule out.
+	if !errors.Is(err, errProviderCommandTimeout) || !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("error = %v, want errProviderCommandTimeout wrapping exec.ErrWaitDelay", err)
 	}
 	assertProcessTerminated(t, pidFile)
 }
@@ -128,27 +150,54 @@ func TestLoadProviderCommandTerminatesBackgroundChild(t *testing.T) {
 // be terminated on that path.
 func TestLoadProviderCommandTerminatesBackgroundChildOnFailure(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "bg-fail.pid")
-	childLifetime := 10 * time.Second
 	command := writeCommand(t, commandScript{
 		Stderr:                 "boom",
 		ExitCode:               7,
-		BackgroundSleepSeconds: int(childLifetime / time.Second),
+		BackgroundSleepSeconds: int(backgroundChildLifetime / time.Second),
 		BackgroundPidFile:      pidFile,
 	})
 
-	start := time.Now()
-	_, err := LoadProviderCommand(command)
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("LoadProviderCommand() error = nil, want failure from nonzero exit")
+	_, _, err := runProviderCommand(command, providerCommandTestBudget)
+	// The shell's own exit status has to survive. A timeout here means the
+	// budget swallowed it, which is exactly what this test kept reporting on CI.
+	if errors.Is(err, errProviderCommandTimeout) {
+		t.Fatalf("error = %v, want the shell's exit status rather than a timeout", err)
 	}
-	if !strings.Contains(err.Error(), "exit status") {
-		t.Fatalf("error = %q, want exit status failure", err.Error())
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("error = %v, want *exec.ExitError from the nonzero exit", err)
 	}
-	if elapsed >= childLifetime {
-		t.Fatalf("returned after %s, want before the background child finishes naturally after %s", elapsed, childLifetime)
+	if exitErr.ExitCode() != 7 {
+		t.Fatalf("exit code = %d, want 7", exitErr.ExitCode())
 	}
 	assertProcessTerminated(t, pidFile)
+}
+
+func TestAssertProcessTerminatedWaitsForDelayedPIDFile(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "delayed.pid")
+	firstMissing := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		<-firstMissing
+		tempFile := pidFile + ".tmp"
+		if err := os.WriteFile(tempFile, []byte("2147483647\n"), 0o600); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- os.Rename(tempFile, pidFile)
+	}()
+
+	missingObserved := false
+	assertProcessTerminatedAfterMissing(t, pidFile, func() {
+		missingObserved = true
+		close(firstMissing)
+	})
+	if !missingObserved {
+		t.Fatal("PID file existed before the missing-file polling path was exercised")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write delayed pid file: %v", err)
+	}
 }
 
 func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
@@ -167,16 +216,41 @@ func assertProcessTerminatedIfStarted(t *testing.T, pidFile string) {
 func assertProcessTerminated(t *testing.T, pidFile string) {
 	t.Helper()
 
-	data, err := os.ReadFile(pidFile)
+	assertProcessTerminatedAfterMissing(t, pidFile, nil)
+}
+
+func assertProcessTerminatedAfterMissing(t *testing.T, pidFile string, onMissing func()) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var data []byte
+	var err error
+	missingObserved := false
+	for time.Now().Before(deadline) {
+		data, err = os.ReadFile(pidFile)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read sleeper pid file: %v", err)
+		}
+		if !missingObserved {
+			missingObserved = true
+			if onMissing != nil {
+				onMissing()
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("read sleeper pid file: %v", err)
+		t.Fatalf("read sleeper pid file before timeout: %v", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		t.Fatalf("parse sleeper pid %q: %v", data, err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			return
@@ -253,8 +327,33 @@ func writeCommand(t *testing.T, script commandScript) string {
 				"Set-Content -LiteralPath '" + psSingleQuote(readyFile) + "' -Value ready -Encoding Ascii; " +
 				"Start-Sleep -Seconds " + itoa(script.BackgroundSleepSeconds)
 			lines = append(lines, "start /B powershell -NoProfile -Command \""+bgSleep+"\"")
-			waitForReady := "while (-not (Test-Path -LiteralPath '" + psSingleQuote(readyFile) + "')) { Start-Sleep -Milliseconds 10 }"
-			lines = append(lines, "powershell -NoProfile -Command \""+waitForReady+"\"")
+			// Wait for the child to record its PID before exiting, so the PID is
+			// on disk while the tree is still alive: runProviderCommand kills the
+			// tree one WaitDelay after the script exits, and a child that has not
+			// written by then never will.
+			//
+			// This waits in cmd itself. Spawning a second PowerShell just to poll
+			// cost another interpreter cold start, and that start is pure overhead
+			// added AFTER the PID is already written. On a loaded runner it pushed
+			// the script's exit past the 5s provider-command timeout, so the
+			// nonzero-exit test saw a timeout instead of the exit status it
+			// asserts. The wait is also bounded now: giving up and letting the PID
+			// assertion fail is far more diagnosable than blocking until the
+			// timeout fires and reporting an unrelated error. Each iteration is
+			// about a second, since `ping -n 2` sleeps between its two echoes,
+			// so the ceiling is roughly 15s: far longer than any cold PowerShell
+			// start seen on a runner, and far shorter than
+			// providerCommandTestBudget, so giving up surfaces a legible
+			// PID-file failure rather than a timeout that hides the real cause.
+			lines = append(lines,
+				":zeroWaitReady",
+				"if exist \""+readyFile+"\" goto zeroReady",
+				"set /a ZERO_READY_TRIES+=1",
+				"if %ZERO_READY_TRIES% GEQ 15 goto zeroReady",
+				"ping -n 2 127.0.0.1 >nul",
+				"goto zeroWaitReady",
+				":zeroReady",
+			)
 		}
 		lines = append(lines, "exit /b "+itoa(script.ExitCode))
 		if err := os.WriteFile(path, []byte(strings.Join(lines, "\r\n")), 0o700); err != nil {

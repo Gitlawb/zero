@@ -211,6 +211,9 @@ func (m model) statusLine(width int) string {
 		if dictation := m.dictationStatusChip(); dictation != "" {
 			return fitStyledLine(prefix+btwChip+dictation, width)
 		}
+		if goalSummary := m.goalFooterSummary(); goalSummary != "" {
+			left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render("◎ ") + zeroTheme.muted.Render(goalSummary)
+		}
 		return fitStyledLine(left, width)
 	}
 
@@ -240,6 +243,9 @@ func (m model) statusLine(width int) string {
 	// Active loops surface a persistent "↻ N loops · next 3:05pm" segment so a
 	// running loop is always visible (hidden during an exit/cancel confirm above).
 	if !m.exitConfirmActive && !m.cancelConfirmActive {
+		if goalSummary := m.goalFooterSummary(); goalSummary != "" {
+			left += separator + zeroTheme.accent.Render("◎ ") + zeroTheme.muted.Render(goalSummary)
+		}
 		if loopSummary := m.loopFooterSummary(); loopSummary != "" {
 			left += separator + zeroTheme.accent.Render("↻ ") + zeroTheme.muted.Render(loopSummary)
 		}
