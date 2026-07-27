@@ -81,8 +81,8 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 		if err != nil {
 			return WindowsNetworkPlan{}, err
 		}
-		if strings.TrimSpace(groupSID) != "" {
-			identitySIDs = append(identitySIDs, groupSID)
+		if trimmed := strings.TrimSpace(groupSID); trimmed != "" {
+			identitySIDs = append(identitySIDs, trimmed)
 		}
 	}
 	return WindowsNetworkPlan{

@@ -269,7 +269,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 			_ = revokeWindowsSandboxLogonRightsFn(identity.SID)
 		}
 		if created {
-			_ = removeWindowsSandboxIdentity(identity.Username)
+			_ = removeWindowsSandboxIdentity(identity.Username, key)
 		}
 		return cleanupErr
 	}
@@ -525,7 +525,7 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, r
 	} else if !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 		return err
 	}
-	if err := removeWindowsSandboxIdentity(username); err != nil {
+	if err := removeWindowsSandboxIdentity(username, key); err != nil {
 		return err
 	}
 	// Last, and only once the account is actually gone, so a failure anywhere

@@ -213,7 +213,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	// previous run. Provisioning no longer resets an adopted account's password,
 	// so a leftover account would otherwise be adopted with a password this test
 	// never learns.
-	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01", windowsSandboxRoleOffline))
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01", windowsSandboxRoleOffline), "ziptest01")
 
 	identity, password, _, err := provisionWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
 	if err != nil {
@@ -228,7 +228,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			t.Errorf("cleanup: revoke logon rights: %v", err)
 		}
-		if err := removeWindowsSandboxIdentity(identity.Username); err != nil {
+		if err := removeWindowsSandboxIdentity(identity.Username, "ziptest01"); err != nil {
 			t.Errorf("cleanup: remove principal: %v", err)
 		}
 	})
@@ -284,7 +284,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	_ = token.Close()
 	t.Cleanup(func() {
 		_ = revokeWindowsSandboxLogonRights(setupIdentity.SID)
-		_ = removeWindowsSandboxIdentity(setupIdentity.Username)
+		_ = removeWindowsSandboxIdentity(setupIdentity.Username, "ziptest01")
 	})
 	// Lookup must find what provisioning created.
 	found, err := lookupWindowsSandboxIdentity("ziptest01", windowsSandboxRoleOffline)
@@ -318,7 +318,7 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 	const key = "ziplogon01"
 	// A leftover account from an interrupted run would keep its old password,
 	// which the freshly generated one will not match, so start from a clean slate.
-	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key, windowsSandboxRoleOffline))
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key, windowsSandboxRoleOffline), key)
 
 	identity, password, _, err := provisionWindowsSandboxIdentity(key, windowsSandboxRoleOffline)
 	if err != nil {
@@ -330,7 +330,7 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			t.Errorf("cleanup: revoke logon rights: %v", err)
 		}
-		if err := removeWindowsSandboxIdentity(identity.Username); err != nil {
+		if err := removeWindowsSandboxIdentity(identity.Username, key); err != nil {
 			t.Errorf("cleanup: remove principal: %v", err)
 		}
 	})
