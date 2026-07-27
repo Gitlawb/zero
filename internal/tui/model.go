@@ -245,10 +245,13 @@ type model struct {
 	loopCounter     int
 	loopTicking     bool
 	loopLeavePrompt commandKind
-	exiting         bool
-	runCancel       context.CancelFunc
-	runID           int
-	activeRunID     int
+	// goalContinuationsSuspended keeps a hidden parent from launching autonomous
+	// work while the user is in an isolated BTW conversation.
+	goalContinuationsSuspended bool
+	exiting                    bool
+	runCancel                  context.CancelFunc
+	runID                      int
+	activeRunID                int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -585,6 +588,7 @@ type agentResponseMsg struct {
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
+	goalAware     bool
 	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
@@ -2415,6 +2419,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingText = nil
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
+		if msg.goalAware {
+			m = m.reconcileGoalAfterRun(msg.usageEvents, msg.err)
+		}
 		// Roll the completed run's wall-time into the session's rolling average so
 		// /context can surface typical turn latency, not just token counts.
 		if msg.turnElapsed > 0 {
@@ -2469,8 +2476,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// other loops remain.
 			m, loopTickCmd = m.ensureLoopTick()
 		}
+		hadQueuedMessage := strings.TrimSpace(m.queuedMessage) != ""
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		var goalCmd tea.Cmd
+		if msg.goalAware && !hadQueuedMessage && msg.specReview == nil {
+			next, goalCmd = next.launchGoalContinuationIfReady()
+		}
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
@@ -4346,6 +4358,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
 		return m.handleLoopCommand(command.text)
+	case commandGoal:
+		return m.handleGoalCommand(command.text)
 	case commandExit:
 		// Closing the session stops its foreground loops mid-task; warn once so a
 		// token-spending loop isn't ended by reflex.
@@ -4750,6 +4764,14 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			text: "session create error: " + err.Error(),
 		})
 	} else {
+		if m.activeLoopID == "" && sessions.IsResumableKind(m.activeSession.SessionKind) &&
+			m.activeSession.Goal != nil && m.activeSession.Goal.Status == sessions.GoalStatusActive {
+			if updated, resetErr := m.sessionStore.ResetGoalContinuations(m.activeSession.SessionID); resetErr != nil {
+				m = m.appendGoalError("reset automatic continuation count: " + resetErr.Error())
+			} else {
+				m.activeSession = updated
+			}
+		}
 		agentPrompt := m.sessionPrompt(prompt)
 		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
 			"role":    "user",
@@ -4893,6 +4915,8 @@ func (m *model) rememberInput(value string) {
 }
 
 func (m *model) cancelRun() {
+	goalWasActive := m.pending && m.activeSession.Goal != nil &&
+		m.activeSession.Goal.Status == sessions.GoalStatusActive
 	if m.runCancel != nil {
 		m.runCancel()
 	}
@@ -4941,6 +4965,18 @@ func (m *model) cancelRun() {
 			"message": "Run cancelled.",
 		}); err == nil {
 			*m = next
+		}
+	}
+	if goalWasActive && m.sessionStore != nil && m.activeSession.SessionID != "" {
+		updated, event, err := m.sessionStore.PauseGoalIfActive(m.activeSession.SessionID, "run cancelled by user")
+		if err != nil {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Goal: pause after cancellation: " + err.Error()})
+		} else {
+			m.activeSession = updated
+			if event != nil {
+				m.sessionEvents = append(m.sessionEvents, *event)
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Goal paused. Use /goal resume to continue."})
+			}
 		}
 	}
 	m.pending = false
@@ -4992,9 +5028,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
 		options := m.agentOptions
-		options.Registry = m.registry
+		options.Registry = cloneToolRegistry(m.registry)
+		goalAwareRun := !runOptions.specDraft && m.activeLoopID == "" &&
+			sessions.IsResumableKind(m.activeSession.SessionKind)
+		if goalAwareRun {
+			options.Registry = m.goalRegistry()
+		}
 		if runOptions.registry != nil {
-			options.Registry = runOptions.registry
+			options.Registry = cloneToolRegistry(runOptions.registry)
+			if goalAwareRun && m.activeSession.SessionID != "" {
+				for _, tool := range tools.NewGoalTools(m.sessionStore, m.activeSession.SessionID) {
+					options.Registry.Register(tool)
+				}
+			}
 		}
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
@@ -5002,6 +5048,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
+		}
+		if goalAwareRun {
+			options.SystemPrompt = m.goalSystemPrompt(options.SystemPrompt)
 		}
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
@@ -5411,7 +5460,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5421,10 +5470,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 		}
 		flushReasoning(m.now())
 		elapsed := m.now().Sub(started)
@@ -5449,7 +5498,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
 	}
 }
 

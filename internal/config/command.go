@@ -77,7 +77,13 @@ func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, 
 			proc.Terminate()
 		}
 		if errors.Is(err, exec.ErrWaitDelay) {
-			return stdout.Bytes(), stderr.Bytes(), errProviderCommandTimeout
+			// Wrap rather than replace. A descendant holding the inherited pipes
+			// open and the command never finishing at all are different failures
+			// that both collapsed into the same bare sentinel, which left callers
+			// and tests unable to tell which one happened. Callers that only ask
+			// errors.Is(err, errProviderCommandTimeout) are unaffected, so the
+			// message LoadProviderCommand reports is unchanged.
+			return stdout.Bytes(), stderr.Bytes(), fmt.Errorf("%w: %w", errProviderCommandTimeout, err)
 		}
 		return stdout.Bytes(), stderr.Bytes(), err
 	case <-timer.C:

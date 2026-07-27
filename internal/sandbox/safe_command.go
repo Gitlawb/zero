@@ -430,25 +430,70 @@ func shellDashCPayload(program string, fields []string) string {
 // name: it strips shell quoting/escaping characters (", ', `, \) wherever they
 // appear in the token (including embedded ones like `vi\m` or `v"i"m`), strips
 // leading command-substitution markers, removes any directory prefix (so
-// /usr/bin/vim and C:\tools\vim.exe match "vim"), and lowercases. This closes
-// path/quote/substitution evasions of the detector.
+// /usr/bin/vim and C:\tools\vim.exe match "vim"), removes Windows executable
+// suffixes, and lowercases. This closes path/quote/substitution evasions of the
+// detector and keeps curl.exe/npm.cmd equivalent to curl/npm for risk analysis.
 func normalizeProgramToken(field string) string {
 	token := strings.TrimSpace(field)
 	token = strings.TrimLeft(token, "$(")
 	token = strings.TrimRight(token, ")")
-	// Strip shell quoting/escaping characters (", ', `, \) wherever they appear
-	// in the token — surrounding, embedded, or as a mid-word escape — so
-	// "vim", v"i"m, 'v'im, and vi\m all collapse to the program name. This is
-	// done BEFORE the directory-prefix trim so an escape can't masquerade as a
-	// path separator (e.g. vi\m must become vim, not m).
-	token = stripChars(token, "\"'`\\")
-	// Strip a directory prefix so /usr/bin/vim reduces to the basename. (A
-	// Windows-style backslash path separator is already removed above, so only
-	// the POSIX separator remains to split on.)
-	if i := strings.LastIndex(token, "/"); i >= 0 {
-		token = token[i+1:]
+	// PowerShell commonly invokes drive-letter, UNC, and relative paths. Extract
+	// their basename while backslashes still carry path-separator meaning;
+	// removing them first would turn C:\tools\curl.exe into c:toolscurl.exe and
+	// bypass the canonical curl risk entry.
+	pathToken := stripChars(token, "\"'`")
+	if windowsPathBasename, ok := windowsExecutablePathBasename(pathToken); ok {
+		token = windowsPathBasename
+	} else {
+		// Strip shell quoting/escaping characters (", ', `, \) wherever they
+		// appear in the token — surrounding, embedded, or as a mid-word escape
+		// — so "vim", v"i"m, 'v'im, and vi\m all collapse to the program name.
+		token = stripChars(token, "\"'`\\")
+		// Strip a directory prefix so /usr/bin/vim reduces to the basename.
+		if i := strings.LastIndex(token, "/"); i >= 0 {
+			token = token[i+1:]
+		}
 	}
-	return strings.ToLower(token)
+	token = strings.ToLower(token)
+	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+		if strings.HasSuffix(token, suffix) {
+			return strings.TrimSuffix(token, suffix)
+		}
+	}
+	return token
+}
+
+func windowsExecutablePathBasename(token string) (string, bool) {
+	drivePath := len(token) >= 3 &&
+		((token[0] >= 'a' && token[0] <= 'z') || (token[0] >= 'A' && token[0] <= 'Z')) &&
+		token[1] == ':'
+	uncPath := strings.HasPrefix(token, `\\`)
+	explicitRelativePath := strings.HasPrefix(token, `.\`) || strings.HasPrefix(token, `..\`)
+	backslashRelativePath := strings.ContainsRune(token, '\\') && hasWindowsExecutableSuffix(token)
+	if !drivePath && !uncPath && !explicitRelativePath && !backslashRelativePath {
+		return "", false
+	}
+	index := strings.LastIndexAny(token, `\/`)
+	if index >= 0 {
+		if index+1 >= len(token) {
+			return "", false
+		}
+		return token[index+1:], true
+	}
+	if drivePath && len(token) > 2 {
+		return token[2:], true
+	}
+	return "", false
+}
+
+func hasWindowsExecutableSuffix(token string) bool {
+	token = strings.ToLower(token)
+	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+		if strings.HasSuffix(token, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripChars returns s with every rune in cutset removed.
