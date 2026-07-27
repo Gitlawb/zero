@@ -182,10 +182,9 @@ type credentialDenyPaths struct {
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
-// cloud credential stores, the file GOOGLE_APPLICATION_CREDENTIALS points to,
-// and Zero's own config/credential/token directory so sandboxed commands
-// cannot read secrets under the read-all workspace posture. Four deliberate
-// limits:
+// credential stores, including tool configuration files discoverable through
+// the preserved caller environment and Zero's own config/token stores. Four
+// deliberate limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
@@ -289,12 +288,67 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 			configDirs = append(configDirs, filepath.Join(home, ".config"))
 		}
 	}
+	cloudSDKConfigDirs := resolveCredentialOverridePaths(credentialEnvValue(env, "CLOUDSDK_CONFIG"), baseDirs)
+	if len(cloudSDKConfigDirs) == 0 {
+		for _, configDir := range configDirs {
+			cloudSDKConfigDirs = append(cloudSDKConfigDirs, filepath.Join(configDir, "gcloud"))
+		}
+		// gcloud's default remains ~/.config/gcloud even when XDG_CONFIG_HOME is
+		// set. Keep both roots so the deny follows the tool as well as the
+		// preserved upstream config-home baseline.
+		for _, home := range homes {
+			cloudSDKConfigDirs = append(cloudSDKConfigDirs, filepath.Join(home, ".config", "gcloud"))
+		}
+	}
+	npmUserConfigs := resolveCredentialOverridePaths(firstNonEmpty(
+		credentialEnvValue(env, "NPM_CONFIG_USERCONFIG"),
+		credentialEnvValue(env, "npm_config_userconfig"),
+	), baseDirs)
+	if len(npmUserConfigs) == 0 {
+		for _, home := range homes {
+			npmUserConfigs = append(npmUserConfigs, filepath.Join(home, ".npmrc"))
+		}
+	}
+	ghConfigDirs := resolveCredentialOverridePaths(credentialEnvValue(env, "GH_CONFIG_DIR"), baseDirs)
+	if len(ghConfigDirs) == 0 {
+		for _, configDir := range configDirs {
+			ghConfigDirs = append(ghConfigDirs, filepath.Join(configDir, "gh"))
+		}
+	}
+	netrcs := resolveCredentialOverridePaths(credentialEnvValue(env, "NETRC"), baseDirs)
+	if len(netrcs) == 0 {
+		for _, home := range homes {
+			netrcs = append(netrcs, filepath.Join(home, ".netrc"))
+		}
+	}
+	dockerConfigDirs := resolveCredentialOverridePaths(credentialEnvValue(env, "DOCKER_CONFIG"), baseDirs)
+	if len(dockerConfigDirs) == 0 {
+		for _, home := range homes {
+			dockerConfigDirs = append(dockerConfigDirs, filepath.Join(home, ".docker"))
+		}
+	}
+	var kubeConfigs []string
+	if kubeConfig := strings.TrimSpace(credentialEnvValue(env, "KUBECONFIG")); kubeConfig != "" {
+		for _, entry := range filepath.SplitList(kubeConfig) {
+			kubeConfigs = append(kubeConfigs, resolveCredentialOverridePaths(entry, baseDirs)...)
+		}
+	} else {
+		for _, home := range homes {
+			kubeConfigs = append(kubeConfigs, filepath.Join(home, ".kube", "config"))
+		}
+	}
 	return credentialPathOptions{
-		Homes:             homes,
-		GoogleCredentials: resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
-		ZeroConfigDirs:    dedupeStrings(configDirs),
-		OAuthTokens:       resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_OAUTH_TOKENS_PATH"), baseDirs),
-		MCPOAuthTokens:    resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"), baseDirs),
+		Homes:              homes,
+		ConfigDirs:         dedupeStrings(configDirs),
+		CloudSDKConfigDirs: dedupeStrings(cloudSDKConfigDirs),
+		GoogleCredentials:  resolveCredentialOverridePaths(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDirs),
+		NPMUserConfigs:     dedupeStrings(npmUserConfigs),
+		GHConfigDirs:       dedupeStrings(ghConfigDirs),
+		Netrcs:             dedupeStrings(netrcs),
+		DockerConfigDirs:   dedupeStrings(dockerConfigDirs),
+		KubeConfigs:        dedupeStrings(kubeConfigs),
+		OAuthTokens:        resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_OAUTH_TOKENS_PATH"), baseDirs),
+		MCPOAuthTokens:     resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"), baseDirs),
 	}
 }
 
@@ -310,11 +364,17 @@ func credentialEnvValue(env []string, key string) string {
 }
 
 type credentialPathOptions struct {
-	Homes             []string
-	GoogleCredentials []string
-	ZeroConfigDirs    []string
-	OAuthTokens       []string
-	MCPOAuthTokens    []string
+	Homes              []string
+	ConfigDirs         []string
+	CloudSDKConfigDirs []string
+	GoogleCredentials  []string
+	NPMUserConfigs     []string
+	GHConfigDirs       []string
+	Netrcs             []string
+	DockerConfigDirs   []string
+	KubeConfigs        []string
+	OAuthTokens        []string
+	MCPOAuthTokens     []string
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
@@ -330,14 +390,33 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		}
 		homeDirs := []string{
 			filepath.Join(home, ".aws"),
-			filepath.Join(home, ".config", "gcloud"),
 			filepath.Join(home, ".azure"),
 		}
 		candidates = append(candidates, homeDirs...)
 		dirs = append(dirs, homeDirs...)
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
-	for _, configDir := range options.ZeroConfigDirs {
+	candidates = append(candidates, options.NPMUserConfigs...)
+	candidates = append(candidates, options.Netrcs...)
+	candidates = append(candidates, options.KubeConfigs...)
+	for _, dockerConfigDir := range options.DockerConfigDirs {
+		if strings.TrimSpace(dockerConfigDir) != "" {
+			candidates = append(candidates, filepath.Join(dockerConfigDir, "config.json"))
+		}
+	}
+	for _, ghConfigDir := range options.GHConfigDirs {
+		if strings.TrimSpace(ghConfigDir) != "" {
+			candidates = append(candidates, filepath.Join(ghConfigDir, "hosts.yml"))
+		}
+	}
+	for _, cloudSDKConfigDir := range options.CloudSDKConfigDirs {
+		if strings.TrimSpace(cloudSDKConfigDir) == "" {
+			continue
+		}
+		candidates = append(candidates, cloudSDKConfigDir)
+		dirs = append(dirs, cloudSDKConfigDir)
+	}
+	for _, configDir := range options.ConfigDirs {
 		if strings.TrimSpace(configDir) == "" {
 			continue
 		}
@@ -613,11 +692,12 @@ func resolveCredentialOverridePaths(override string, baseDirs []string) []string
 
 // userGitConfigReadPaths returns the user's global git config FILES so a
 // sandboxed git can read identity and config (user.name/email, aliases) instead
-// of failing with "unable to access ~/.gitconfig". It is deliberately the config
-// files only — not the ~/.config/git directory, which can hold an XDG credential
-// store — so credentials and the rest of HOME stay unreadable. Granted at the
-// macOS-seatbelt read rule (not the cross-platform PermissionProfile) so the
-// HOME-dependent paths don't leak into the platform-agnostic policy snapshot.
+// of failing with "unable to access ~/.gitconfig". On macOS, where reads are
+// allow-listed, granting only these files avoids exposing the surrounding
+// configuration directory. Linux uses a read-all profile with explicit
+// credential deny rules. The paths are granted at the macOS seatbelt read rule
+// rather than the cross-platform PermissionProfile so HOME-dependent paths
+// don't leak into the platform-agnostic policy snapshot.
 func userGitConfigReadPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {

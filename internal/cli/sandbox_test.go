@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -491,7 +492,14 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	t.Setenv("HOME", emptyHome)
 	t.Setenv("USERPROFILE", emptyHome)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(emptyHome, ".config"))
+	t.Setenv("CLOUDSDK_CONFIG", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("NPM_CONFIG_USERCONFIG", "")
+	t.Setenv("npm_config_userconfig", "")
+	t.Setenv("GH_CONFIG_DIR", "")
+	t.Setenv("NETRC", "")
+	t.Setenv("DOCKER_CONFIG", "")
+	t.Setenv("KUBECONFIG", "")
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	store := newSandboxTestStore(t)
@@ -553,25 +561,33 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	profile, _ := plan["permissionProfile"].(map[string]any)
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
 	wantDenyRead := []string(nil)
+	credentialHome := emptyHome
 	if runtime.GOOS != "windows" {
-		credentialHome := emptyHome
 		if resolved, err := filepath.EvalSymlinks(emptyHome); err == nil {
 			credentialHome = resolved
 		}
 		wantDenyRead = []string{
 			filepath.Join(credentialHome, ".aws"),
-			filepath.Join(credentialHome, ".config", "gcloud"),
 			filepath.Join(credentialHome, ".azure"),
+			filepath.Join(credentialHome, ".npmrc"),
+			filepath.Join(credentialHome, ".netrc"),
+			filepath.Join(credentialHome, ".kube", "config"),
+			filepath.Join(credentialHome, ".docker", "config.json"),
+			filepath.Join(credentialHome, ".config", "gh", "hosts.yml"),
+			filepath.Join(credentialHome, ".config", "gcloud"),
 			filepath.Join(credentialHome, ".config", "zero"),
 		}
 	}
-	if gotDenyRead := jsonStringSlice(fileSystem["denyReadIfExists"]); !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
+	gotDenyRead := jsonStringSlice(fileSystem["denyReadIfExists"])
+	sort.Strings(gotDenyRead)
+	sort.Strings(wantDenyRead)
+	if !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
 		t.Fatalf("manager credential deny baseline = %#v, want %#v", gotDenyRead, wantDenyRead)
 	}
 	wantCarveouts := []string(nil)
 	wantEnsureDirs := []string(nil)
 	if runtime.GOOS != "windows" {
-		zeroDir := wantDenyRead[len(wantDenyRead)-1]
+		zeroDir := filepath.Join(credentialHome, ".config", "zero")
 		wantCarveouts = []string{
 			filepath.Join(zeroDir, "plugins"),
 			filepath.Join(zeroDir, "specialists"),

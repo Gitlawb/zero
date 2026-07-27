@@ -83,10 +83,10 @@ func runProvidersDetect(args []string, stdout io.Writer, stderr io.Writer, deps 
 func parseProviderDetectArgs(args []string) (providerDetectOptions, bool, error) {
 	options := providerDetectOptions{}
 	for _, arg := range args {
-		switch {
-		case arg == "-h" || arg == "--help" || arg == "help":
+		switch arg {
+		case "-h", "--help", "help":
 			return options, true, nil
-		case arg == "--json":
+		case "--json":
 			options.json = true
 		default:
 			return options, false, execUsageError{fmt.Sprintf("unexpected argument %q", arg)}

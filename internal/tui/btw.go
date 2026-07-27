@@ -83,6 +83,7 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 		})
 	}
 	parent.btw = btwState{}
+	parent.goalContinuationsSuspended = true
 	// A scrollback print that was already scheduled may acknowledge after the
 	// side surface is active. The hidden model does not receive that unscoped
 	// acknowledgement, so clear its print latch and rebuild on return.
@@ -175,6 +176,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	}
 	m, _ = m.clearLoopsForSessionSwitch()
 	parent := *m.btw.parent
+	parent.goalContinuationsSuspended = false
 	parent.btwRunIDSeq = maxInt(parent.btwRunIDSeq, m.runID)
 	parent.btw = btwState{}
 	// A hidden parent completion may have scheduled an unscoped git-sweep result
@@ -196,13 +198,15 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		text: "Returned from the isolated BTW conversation. Its messages were not added to this session.",
 	})
 	parent.resetFlushFrontier("· returned from btw ·")
-	return parent, batchCommands(sweepCmd, spinnerCmd)
+	var goalCmd tea.Cmd
+	parent, goalCmd = parent.launchGoalContinuationIfReady()
+	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd)
 }
 
 func btwCommandUnavailable(command parsedCommand) bool {
 	arg := strings.ToLower(strings.TrimSpace(command.text))
 	switch command.kind {
-	case commandNew, commandResume, commandRetitle, commandSpec, commandLoop,
+	case commandNew, commandResume, commandRetitle, commandSpec, commandLoop, commandGoal,
 		commandRewind, commandCompact, commandSTTModel, commandMCP:
 		return true
 	case commandModel:

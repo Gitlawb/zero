@@ -38,7 +38,7 @@ func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string) error
 	}
 	writeRoots := landlockWritableRoots(profile.FileSystem, cwd)
 	if len(writeRoots) == 0 {
-		return errors.New("Landlock requires at least one writable root")
+		return errors.New("Landlock requires at least one writable root") //nolint:staticcheck // Preserve the proper name and established user-facing text.
 	}
 	return installLandlockFilesystemRules(writeRoots)
 }
