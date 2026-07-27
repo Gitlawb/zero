@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -213,7 +214,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	// from being explained by residue from a previous one.
 	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01"))
 
-	identity, password, err := provisionWindowsSandboxIdentity("ziptest01")
+	identity, password, _, err := provisionWindowsSandboxIdentity("ziptest01")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	}
 	// Re-running must converge on the same principal rather than failing or
 	// creating a second account.
-	again, secondPassword, err := provisionWindowsSandboxIdentity("ziptest01")
+	again, secondPassword, _, err := provisionWindowsSandboxIdentity("ziptest01")
 	if err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 	// which the freshly generated one will not match, so start from a clean slate.
 	_ = removeWindowsSandboxIdentity(windowsSandboxUserName(key))
 
-	identity, password, err := provisionWindowsSandboxIdentity(key)
+	identity, password, _, err := provisionWindowsSandboxIdentity(key)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -387,4 +388,51 @@ func TestLookupWindowsSandboxIdentityRejectsNonUserAccount(t *testing.T) {
 		return
 	}
 	t.Skip("no well-known non-user account resolved on this machine")
+}
+
+// The account name is derived from a workspace hash, not discovered, so it can
+// be occupied by a local account that has nothing to do with Zero. Adopting one
+// means resetting a stranger's password, so provisioning has to prove ownership
+// first and refuse otherwise.
+//
+// Driven against real accounts every Windows install carries, which are
+// definitively not ours. Unprivileged: it only has to establish that they are
+// not classified as managed, so nothing is ever created or modified.
+func TestWindowsSandboxUserIsManagedRefusesForeignAccounts(t *testing.T) {
+	checked := 0
+	for _, name := range []string{"Administrator", "Guest", "DefaultAccount"} {
+		managed, err := windowsSandboxUserIsManaged(name)
+		if err != nil {
+			// Localized or disabled installs may not carry every one of these.
+			continue
+		}
+		checked++
+		if managed {
+			t.Fatalf("%q classified as a Zero sandbox principal; provisioning would reset its password", name)
+		}
+	}
+	if checked == 0 {
+		t.Skip("no well-known local account could be queried on this machine")
+	}
+	// An absent account must answer false rather than error, since provisioning
+	// asks this question about names that usually do not exist yet.
+	managed, err := windowsSandboxUserIsManaged("zero-sbx-nosuchacct")
+	if err != nil {
+		t.Fatalf("querying a missing account: %v", err)
+	}
+	if managed {
+		t.Fatal("a missing account was classified as managed")
+	}
+}
+
+// The refusal has to be a typed, recognisable collision rather than a generic
+// failure, so setup can say what is wrong instead of reporting a Win32 status.
+func TestWindowsSandboxNameCollisionIsTyped(t *testing.T) {
+	wrapped := fmt.Errorf("%w: %q", errWindowsSandboxNameCollision, "zero-sbx-dexample")
+	if !errors.Is(wrapped, errWindowsSandboxNameCollision) {
+		t.Fatal("collision error does not match its sentinel")
+	}
+	if !strings.Contains(wrapped.Error(), "not created by Zero") {
+		t.Fatalf("collision message = %q, want it to say the account is not ours", wrapped.Error())
+	}
 }
