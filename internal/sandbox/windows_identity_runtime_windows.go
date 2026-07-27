@@ -131,24 +131,63 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 // therefore cleaned up, rather than an account nothing holds the secret for.
 func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) (windowsSandboxIdentity, error) {
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
-	identity, password, err := provisionWindowsSandboxIdentity(key)
+	identity, password, created, err := provisionWindowsSandboxIdentity(key)
+
+	// Undo whatever this run actually did, in reverse, on any failure after the
+	// account exists. Without it a failure between creating the account and
+	// storing its secret left the account behind with no caller able to remove
+	// it: the rollback the setup path installs is only built once this function
+	// has returned successfully.
+	//
+	// Scoped to what THIS run created on purpose. An account that already existed
+	// and belongs to Zero is a working principal from an earlier setup, and
+	// deleting it because a later run failed would turn a partial failure into a
+	// total one.
+	rightsGranted := false
+	secretWritten := false
+	secretPath := ""
+	undo := func() {
+		if secretWritten && secretPath != "" {
+			// Dropping the secret is also the repair for a pre-existing account
+			// whose password this run reset: the stored secret no longer matches,
+			// and absent beats stale, since the command path treats a missing
+			// secret as "not provisioned" and falls back rather than failing.
+			_ = removeWindowsSandboxSecret(secretPath)
+		}
+		if identity.SID != nil && rightsGranted {
+			_ = revokeWindowsSandboxLogonRights(identity.SID)
+		}
+		if created {
+			_ = removeWindowsSandboxIdentity(identity.Username)
+		}
+	}
+
 	if err != nil {
+		// provisionWindowsSandboxIdentity can fail after creating the account, so
+		// this path needs the same cleanup even though nothing below ran.
+		undo()
 		return windowsSandboxIdentity{}, err
 	}
 	if err := grantWindowsSandboxLogonRights(identity.SID); err != nil {
+		undo()
 		return windowsSandboxIdentity{}, err
 	}
-	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, identity.Username)
+	rightsGranted = true
+	secretPath, err = windowsSandboxSecretPath(config.SandboxHome, identity.Username)
 	if err != nil {
+		undo()
 		return windowsSandboxIdentity{}, err
 	}
 	// The secret is rewritten every run so it stays in step with the account.
 	// provisionWindowsSandboxIdentity guarantees the password it returns is the
 	// account's real one, resetting it explicitly when the account already
-	// existed, so this write is always storing something that can log on.
+	// existed and belongs to Zero, so this write is always storing something that
+	// can log on.
 	if err := writeWindowsSandboxSecret(secretPath, password); err != nil {
+		undo()
 		return windowsSandboxIdentity{}, err
 	}
+	secretWritten = true
 	return identity, nil
 }
 
