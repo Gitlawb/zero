@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,6 +183,9 @@ func TestConnServePreservesReadErrorBufferedAlongsideAPriorLine(t *testing.T) {
 	})
 	writeStarted := make(chan struct{}, 1)
 	releaseWrite := make(chan struct{})
+	var releaseWriteOnce sync.Once
+	release := func() { releaseWriteOnce.Do(func() { close(releaseWrite) }) }
+	t.Cleanup(release)
 	writer := testWriter(func(p []byte) (int, error) {
 		select {
 		case writeStarted <- struct{}{}:
@@ -199,9 +203,13 @@ func TestConnServePreservesReadErrorBufferedAlongsideAPriorLine(t *testing.T) {
 	// only) read has already returned and is being processed — cancelling now
 	// lands squarely in the gap between that read and the loop's next one, never
 	// racing an in-flight interruptibleReader.Read call.
-	<-writeStarted
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not reach the synchronous write")
+	}
 	cancel()
-	close(releaseWrite)
+	release()
 
 	select {
 	case err := <-done:
