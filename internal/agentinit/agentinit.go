@@ -40,14 +40,14 @@ func FormatFacts(info repoinfo.Info) string {
 	b.WriteString("Pre-computed repository facts (from a local scan — verify and fill gaps):\n")
 
 	if info.PrimaryLanguage != "" {
-		b.WriteString(fmt.Sprintf("- Primary language: %s (of %d detected)\n", info.PrimaryLanguage, info.LanguageCount))
+		fmt.Fprintf(&b, "- Primary language: %s (of %d detected)\n", info.PrimaryLanguage, info.LanguageCount)
 	}
 	if langs := topLanguages(info.Languages, 5); langs != "" {
 		b.WriteString("- Languages: " + langs + "\n")
 	}
-	b.WriteString(fmt.Sprintf("- Size: ~%d files, ~%d LOC, max dir depth %d\n", info.FileCount, info.LOCEstimate, info.MaxDepth))
+	fmt.Fprintf(&b, "- Size: ~%d files, ~%d LOC, max dir depth %d\n", info.FileCount, info.LOCEstimate, info.MaxDepth)
 	if info.WorkspaceType != "" && info.WorkspaceType != "none" {
-		b.WriteString(fmt.Sprintf("- Workspace: %s (%d packages)\n", info.WorkspaceType, info.WorkspacePackageCount))
+		fmt.Fprintf(&b, "- Workspace: %s (%d packages)\n", info.WorkspaceType, info.WorkspacePackageCount)
 	}
 	if len(info.BuildTools) > 0 {
 		b.WriteString("- Build tools: " + strings.Join(info.BuildTools, ", ") + "\n")

@@ -76,9 +76,10 @@ type LockEntry struct {
 // SkillInfo bundles a discovered skill with its recorded source and hash, for
 // `skill info`.
 type SkillInfo struct {
-	Skill  Skill  `json:"skill"`
-	Source string `json:"source,omitempty"`
-	Hash   string `json:"hash,omitempty"`
+	Skill     Skill  `json:"skill"`
+	Source    string `json:"source,omitempty"`
+	Hash      string `json:"hash,omitempty"`
+	HashDrift bool   `json:"hashDrift"`
 }
 
 // Install fetches the skill at options.Source and copies its SKILL.md into
@@ -275,6 +276,7 @@ func InfoFromRoots(primaryDir string, roots []string, name string) (SkillInfo, b
 			info.Hash = entry.Hash
 		}
 	}
+	info.HashDrift = skillHashDrift(skill, info.Hash)
 	return info, true
 }
 
@@ -480,4 +482,20 @@ func validSkillName(name string) bool {
 func hashContent(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// skillHashDrift reports whether the on-disk SKILL.md no longer matches the
+// lockfile hash recorded at install time. Missing lock hashes never count as
+// drift (agents-only / unlocked skills). A locked skill whose SKILL.md cannot
+// be read is treated as drifted — not as a clean match.
+func skillHashDrift(skill Skill, lockHash string) bool {
+	lockHash = strings.TrimSpace(lockHash)
+	if lockHash == "" {
+		return false
+	}
+	data, err := os.ReadFile(skill.Path)
+	if err != nil {
+		return true
+	}
+	return hashContent(data) != lockHash
 }

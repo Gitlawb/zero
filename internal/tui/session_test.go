@@ -1056,6 +1056,35 @@ func TestResumedPromptIncludesSessionContext(t *testing.T) {
 	}
 }
 
+func TestResumeActiveGoalDoesNotStartAutomaticRun(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "resume_active_goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateGoal(session.SessionID, "Wait for explicit resume", 0); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:     &scriptedProvider{},
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.input.SetValue("/resume " + session.SessionID)
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil || next.pending {
+		t.Fatal("resuming a session unexpectedly started a billed goal run")
+	}
+	if next.activeSession.Goal == nil || next.activeSession.Goal.Status != sessions.GoalStatusActive {
+		t.Fatalf("active goal was not restored: %#v", next.activeSession.Goal)
+	}
+	if !transcriptContains(next.transcript, "run /goal resume to continue") {
+		t.Fatalf("resume did not explain how to continue the goal: %#v", next.transcript)
+	}
+}
+
 func TestResumeCommandReportsMissingSession(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t)})
 	m.input.SetValue("/resume missing_session")

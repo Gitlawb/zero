@@ -225,7 +225,7 @@ func (backend Backend) SandboxEnvMarkers(policy Policy) []string {
 	if policy.Mode == ModeDisabled {
 		return nil
 	}
-	if !(backend.CommandWrapping && backend.Available) && backend.Name != BackendWSL {
+	if (!backend.CommandWrapping || !backend.Available) && backend.Name != BackendWSL {
 		return nil
 	}
 	name := backend.Name

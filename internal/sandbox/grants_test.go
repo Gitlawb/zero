@@ -1,10 +1,13 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
@@ -67,6 +70,246 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 	}
 	if len(grants) != 0 {
 		t.Fatalf("expected no grants after clear, got %#v", grants)
+	}
+}
+
+func TestGrantStoreSerializesWritesAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := storeB.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("Grant completed while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: storeB is waiting for storeA to release the lock.
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Grant returned error after file lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Grant did not complete after file lock release")
+	}
+}
+
+// TestGrantStoreSerializesMigrationNoticeAcrossStores covers the other
+// read-modify-write on the state file: clearing the pending flag. Two frontends
+// starting at once must not both read it as pending and clobber each other.
+func TestGrantStoreSerializesMigrationNoticeAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	if err := writeText(path, `{"schemaVersion":1,"grants":{"write_file":{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}}}`); err != nil {
+		t.Fatalf("write v1 grants: %v", err)
+	}
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+	// Migrate first, so the notice is pending and the lock contention below is
+	// about consuming it rather than about the migration write.
+	if _, err := storeA.List(); err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		notice, err := storeB.ConsumeMigrationNotice()
+		if err == nil && notice == "" {
+			err = errors.New("expected the pending migration notice")
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("ConsumeMigrationNotice completed while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: storeB is waiting for storeA to release the lock.
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ConsumeMigrationNotice after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConsumeMigrationNotice did not complete after file lock release")
+	}
+	// The flag write landed, so the notice is not reported twice.
+	if again, err := storeA.ConsumeMigrationNotice(); err != nil || again != "" {
+		t.Fatalf("second ConsumeMigrationNotice = %q err=%v, want empty", again, err)
+	}
+}
+
+// TestConsumeMigrationNoticeWritesNothingWithoutAPendingNotice is the regression
+// test for jatmn's #755 finding: ConsumeMigrationNotice took the interprocess
+// lock unconditionally, and acquiring that lock MkdirAlls the grants directory
+// and creates <grants>.lockfile. Every startup and every `zero exec` calls this,
+// so it turned "read the grants state" into "require a writable grants
+// directory" — a user with no grants file whose grants path sat on a read-only
+// mount failed outright with "failed to migrate sandbox grants".
+//
+// Asserting that nothing is created is the portable form of that requirement: it
+// holds identically on every OS and as any user, unlike a read-only-directory
+// test (see the sibling test, which cannot run everywhere).
+func TestConsumeMigrationNoticeWritesNothingWithoutAPendingNotice(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "config")
+	path := filepath.Join(dir, "sandbox-grants.json")
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil {
+		t.Fatalf("ConsumeMigrationNotice with no grants file: %v", err)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty when nothing was migrated", notice)
+	}
+	// Nothing at all may be created: not the lock file, not the grants file, not
+	// even the directory that would hold them.
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(dir)
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("the grants directory was created (contents: %v); reading a state with no pending notice must not require a writable directory", names)
+	}
+}
+
+// TestConsumeMigrationNoticeToleratesAReadOnlyGrantsDirectory exercises the
+// actual failure from the same finding, rather than only its portable proxy
+// above: with the grants directory read-only and no grants file, the pre-fix
+// code failed at MkdirAll/OpenFile for the lock file.
+//
+// It cannot run everywhere — Windows ignores the mode bits used here, and root
+// bypasses directory permissions entirely — so it skips instead of pretending to
+// cover those platforms.
+func TestConsumeMigrationNoticeToleratesAReadOnlyGrantsDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory mode bits do not deny writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so a read-only directory cannot be simulated")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sandbox-grants.json")
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("cannot make the grants directory read-only: %v", err)
+	}
+	// Restore write permission so t.TempDir's cleanup can remove the directory.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// Confirm the directory really is read-only here; otherwise this test would
+	// pass without exercising anything.
+	if probe, err := os.OpenFile(filepath.Join(dir, ".probe"), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+		_ = probe.Close()
+		t.Skip("this filesystem still allows writes to a 0500 directory")
+	}
+
+	notice, err := store.ConsumeMigrationNotice()
+	if err != nil {
+		t.Fatalf("ConsumeMigrationNotice on a read-only grants directory: %v", err)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty when nothing was migrated", notice)
+	}
+}
+
+// TestGrantStoreMigrationTakesTheFileLock covers the migrations that write
+// through readState: a legacy file must not be rewritten (nor its backup written)
+// while another process holds the lock, or two processes could both migrate and
+// one would clobber the other's result.
+func TestGrantStoreMigrationTakesTheFileLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":1,"grants":{"write_file":{"toolName":"write_file","decision":"allow","approvedAt":"2026-06-05T14:30:00Z"}}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatalf("write v1 grants: %v", err)
+	}
+	storeA, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore A returned error: %v", err)
+	}
+	storeB, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewGrantStore B returned error: %v", err)
+	}
+
+	unlock, err := storeA.lockStateFile()
+	if err != nil {
+		t.Fatalf("lockStateFile returned error: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := storeB.List()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("the migration ran while another store held the file lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		if raw, err := os.ReadFile(path); err != nil {
+			unlock()
+			t.Fatalf("ReadFile grants: %v", err)
+		} else if string(raw) != original {
+			unlock()
+			t.Fatalf("the grant file was rewritten while the lock was held:\n%s", raw)
+		}
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("List after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the migration did not complete after file lock release")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile migrated grants: %v", err)
+	}
+	if !strings.Contains(string(raw), `"schemaVersion": 3`) {
+		t.Fatalf("grant file was not migrated after the lock was released:\n%s", raw)
 	}
 }
 
