@@ -27,6 +27,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -75,6 +76,7 @@ var (
 	procNetLocalGroupAdd        = netapi32.NewProc("NetLocalGroupAdd")
 	procNetLocalGroupAddMembers = netapi32.NewProc("NetLocalGroupAddMembers")
 	procNetUserDel              = netapi32.NewProc("NetUserDel")
+	procNetUserSetInfo          = netapi32.NewProc("NetUserSetInfo")
 )
 
 // userInfo1 mirrors USER_INFO_1. Field order and widths must match the Win32
@@ -88,6 +90,12 @@ type userInfo1 struct {
 	Comment     *uint16
 	Flags       uint32
 	ScriptPath  *uint16
+}
+
+// userInfo1003 mirrors USER_INFO_1003, the password-only form NetUserSetInfo
+// takes when nothing else about the account should change.
+type userInfo1003 struct {
+	Password *uint16
 }
 
 // localGroupInfo1 mirrors LOCALGROUP_INFO_1.
@@ -199,29 +207,34 @@ func ensureWindowsSandboxGroup() error {
 		uintptr(unsafe.Pointer(&info)),
 		0,
 	)
-	// Keep info alive across the call: the struct holds pointers into Go memory
-	// that the syscall dereferences.
-	defer func() { _ = info }()
+	// The struct holds pointers into Go memory that the syscall dereferences, so
+	// it has to stay reachable until the call has returned.
+	runtime.KeepAlive(info)
+	runtime.KeepAlive(name)
+	runtime.KeepAlive(comment)
 	return netAPIStatus("NetLocalGroupAdd", status, nerrGroupExists, errorAliasExists)
 }
 
-// ensureWindowsSandboxUser creates a sandbox account with the supplied password,
-// or leaves an existing account alone. The account is a plain local user with no
-// home directory or logon script, flagged so its password never expires (nobody
-// is there to rotate it) and so it is a normal, enabled account LogonUser can
-// authenticate.
-func ensureWindowsSandboxUser(username string, password string) error {
+// ensureWindowsSandboxUser creates a sandbox account with the supplied password.
+// The account is a plain local user with no home directory or logon script,
+// flagged so its password never expires (nobody is there to rotate it) and so it
+// is a normal, enabled account LogonUser can authenticate.
+//
+// It reports whether the account already existed, because NetUserAdd leaves such
+// an account completely untouched, password included. The caller has to reset it
+// or the secret it goes on to store would not be the account's password at all.
+func ensureWindowsSandboxUser(username string, password string) (bool, error) {
 	name, err := windows.UTF16PtrFromString(username)
 	if err != nil {
-		return err
+		return false, err
 	}
 	secret, err := windows.UTF16PtrFromString(password)
 	if err != nil {
-		return err
+		return false, err
 	}
 	comment, err := windows.UTF16PtrFromString(windowsSandboxUserComment)
 	if err != nil {
-		return err
+		return false, err
 	}
 	info := userInfo1{
 		Name:     name,
@@ -236,8 +249,47 @@ func ensureWindowsSandboxUser(username string, password string) error {
 		uintptr(unsafe.Pointer(&info)),
 		0,
 	)
-	defer func() { _ = info }()
-	return netAPIStatus("NetUserAdd", status, nerrUserExists)
+	// The struct holds pointers into Go memory that the call dereferences, so
+	// everything it borrows has to outlive the call.
+	runtime.KeepAlive(info)
+	runtime.KeepAlive(name)
+	runtime.KeepAlive(secret)
+	runtime.KeepAlive(comment)
+	if status == nerrUserExists {
+		return true, nil
+	}
+	return false, netAPIStatus("NetUserAdd", status)
+}
+
+// resetWindowsSandboxUserPassword sets the password on an account that already
+// existed, so the secret the caller stores is actually the account's password.
+//
+// Without this, re-running setup produced a fresh random password, wrote it to
+// disk, and left the account authenticating with the old one, so every later
+// command failed to log on with a principal that looked correctly provisioned.
+func resetWindowsSandboxUserPassword(username string, password string) error {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return err
+	}
+	secret, err := windows.UTF16PtrFromString(password)
+	if err != nil {
+		return err
+	}
+	// USER_INFO_1003 is a password-only update, so nothing else about the
+	// account is disturbed.
+	info := userInfo1003{Password: secret}
+	status, _, _ := procNetUserSetInfo.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		1003, // level: USER_INFO_1003
+		uintptr(unsafe.Pointer(&info)),
+		0,
+	)
+	runtime.KeepAlive(info)
+	runtime.KeepAlive(name)
+	runtime.KeepAlive(secret)
+	return netAPIStatus("NetUserSetInfo", status)
 }
 
 // addWindowsSandboxUserToGroup puts a principal in the managed group, ignoring
@@ -259,7 +311,9 @@ func addWindowsSandboxUserToGroup(username string) error {
 		uintptr(unsafe.Pointer(&entry)),
 		1, // one member
 	)
-	defer func() { _ = entry }()
+	runtime.KeepAlive(entry)
+	runtime.KeepAlive(group)
+	runtime.KeepAlive(member)
 	return netAPIStatus("NetLocalGroupAddMembers", status, errorMemberInAlias)
 }
 
@@ -282,11 +336,11 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // the caller needs to mint a token with LogonUser. It is idempotent, so setup
 // can run repeatedly.
 //
-// The password is returned rather than stored: on an account that already
-// existed the returned value is the NEW password only if the caller resets it,
-// so callers that need to log in must treat a pre-existing account as requiring
-// a reset. That is handled a layer up, where the secret has somewhere safe to
-// live; keeping it out of this file means no credential is written to disk here.
+// The password is returned rather than stored, so no credential is written to
+// disk here; that happens a layer up where the secret has somewhere safe to
+// live. The returned value is always the account's actual password, including
+// when the account already existed, because that case is reset explicitly
+// below.
 func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, string, error) {
 	if err := ensureWindowsSandboxGroup(); err != nil {
 		return windowsSandboxIdentity{}, "", err
@@ -296,8 +350,18 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 	if err != nil {
 		return windowsSandboxIdentity{}, "", err
 	}
-	if err := ensureWindowsSandboxUser(username, password); err != nil {
+	existed, err := ensureWindowsSandboxUser(username, password)
+	if err != nil {
 		return windowsSandboxIdentity{}, "", err
+	}
+	if existed {
+		// NetUserAdd left the account untouched, so the password above is not yet
+		// its password. Set it, or the secret stored by the caller would never
+		// authenticate and every command would fail to log on with a principal
+		// that looks perfectly provisioned.
+		if err := resetWindowsSandboxUserPassword(username, password); err != nil {
+			return windowsSandboxIdentity{}, "", err
+		}
 	}
 	if err := addWindowsSandboxUserToGroup(username); err != nil {
 		return windowsSandboxIdentity{}, "", err
