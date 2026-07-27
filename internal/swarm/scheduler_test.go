@@ -164,6 +164,25 @@ func TestSchedulerCloseStopsJobs(t *testing.T) {
 	}
 }
 
+func TestSchedulerCreatedAfterSwarmCloseIsClosed(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	sw.Close()
+
+	sched := sw.Scheduler()
+	sched.mu.Lock()
+	closed := sched.closed
+	sched.mu.Unlock()
+	if !closed {
+		t.Fatal("scheduler created after Swarm.Close was not closed")
+	}
+	if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour}); err == nil {
+		t.Fatal("Add on a scheduler created after Swarm.Close should fail")
+	}
+	if got := len(sched.List()); got != 0 {
+		t.Fatalf("scheduler created after Swarm.Close has %d jobs, want 0", got)
+	}
+}
+
 func TestSchedulerAddRejectedAfterContextCancel(t *testing.T) {
 	sw := newSwarmFor(t, newLauncher(okFor))
 	sched := sw.Scheduler()

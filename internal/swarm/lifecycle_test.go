@@ -592,6 +592,116 @@ func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
 	}
 }
 
+// TestAdmittedDispatchDoesNotLaunchAfterClose covers an operation that won a
+// lifecycle ticket before shutdown but did not reach dispatch until after Close
+// set closed. The ticket keeps Close from returning early, but it must not permit
+// a new external launch with the already-cancelled swarm context.
+func TestAdmittedDispatchDoesNotLaunchAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+	sw.maxTeamSize = 1
+
+	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
+		t.Fatalf("Register late task: %v", err)
+	}
+	release, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		t.Fatalf("beginLifecycleAdmission: %v", err)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+
+	sw.dispatchAdmitted(MemberSpec{
+		ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team",
+	})
+	release()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the admitted dispatch finished")
+	}
+	if got := len(l.recorded()); got != 0 {
+		t.Fatalf("launches after closed was set = %d, want 0", got)
+	}
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after rejected launch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get("late-task")
+	if !ok {
+		t.Fatal("late task vanished")
+	}
+	if task.Status != StatusFailed || !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("late task after Close = %+v, want failed with ErrSwarmClosed", task)
+	}
+}
+
+func TestCloseRacesLifecycleAdmission(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	sw := newSwarmFor(t, l)
+
+	const spawns = 64
+	start := make(chan struct{})
+	results := make(chan struct {
+		id  string
+		err error
+	}, spawns)
+	var callers sync.WaitGroup
+	callers.Add(spawns)
+	for i := 0; i < spawns; i++ {
+		go func() {
+			defer callers.Done()
+			<-start
+			id, err := sw.Spawn(Policy{}, "team", "teammate", "racing task", "")
+			results <- struct {
+				id  string
+				err error
+			}{id: id, err: err}
+		}()
+	}
+	closed := make(chan struct{})
+	go func() {
+		<-start
+		sw.Close()
+		close(closed)
+	}()
+
+	close(start)
+	callers.Wait()
+	<-closed
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			if !errors.Is(result.err, ErrSwarmClosed) {
+				t.Fatalf("Spawn racing Close error = %v, want ErrSwarmClosed", result.err)
+			}
+			continue
+		}
+		task, ok := sw.Coordinator().Get(result.id)
+		if !ok || !task.Status.terminal() {
+			t.Fatalf("admitted task %q after Close = %+v, want terminal", result.id, task)
+		}
+	}
+	for _, task := range sw.Coordinator().List() {
+		if !task.Status.terminal() {
+			t.Fatalf("task %q remained %s after Close", task.ID, task.Status)
+		}
+	}
+}
+
 // TestCloseFailsQueuedSpecOnLateCreatedTeam is the regression test for queue
 // sweeping after shutdown begins. Spawn/Handoff/AdoptOrphans calls that obtained
 // tickets before closed flipped can still create a team and append to its queue.
@@ -602,13 +712,9 @@ func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
 // Close, then the first creates and fills a previously unseen one-slot team and
 // the second queues behind it after Close has flipped closed.
 func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
-	l := &ignoresCancelLauncher{hold: make(chan struct{})}
-	sw := newSwarmFor(t, l)
+	sw := newSwarmFor(t, newLauncher(okFor))
 	sw.maxTeamSize = 1
 
-	if _, err := sw.coord.Register("running-task", "running-agent", "team", "running work"); err != nil {
-		t.Fatalf("Register running task: %v", err)
-	}
 	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
 		t.Fatalf("Register late task: %v", err)
 	}
@@ -640,14 +746,19 @@ func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
 	default:
 	}
 
-	// Neither dispatch ran before Close took its old, buggy team snapshot. The
-	// first creates the team and fills its only slot; the second queues.
-	sw.dispatchAdmitted(runningSpec)
-	firstRelease()
-	sw.dispatchAdmitted(queuedSpec)
-	secondRelease()
+	// Neither operation touched a team before Close took its old, buggy snapshot.
+	// Finish the team-admission portion of both operations while their tickets are
+	// still held: the first creates the team and fills its only slot; the second
+	// appends to that late-created team's queue.
 	team := sw.team("team")
-	close(l.hold)
+	if !team.admit(runningSpec) {
+		t.Fatal("first spec should take the late-created team's only slot")
+	}
+	firstRelease()
+	if team.admit(queuedSpec) {
+		t.Fatal("second spec should queue on the late-created team")
+	}
+	secondRelease()
 
 	select {
 	case <-closed:
@@ -668,44 +779,6 @@ func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
 	if !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
 		t.Fatalf("late-queued task err = %q, want it to mention %q", task.Err, ErrSwarmClosed.Error())
 	}
-	for _, s := range l.recorded() {
-		if s.ID == "late-agent" {
-			t.Fatal("late-queued spec must never launch once shutdown began")
-		}
-	}
-}
-
-// ignoresCancelLauncher blocks in Launch on an explicit hold channel, ignoring
-// context cancellation entirely — unlike controllableLauncher, which races the
-// same gate against ctx.Done(). Used where a test needs a member to keep
-// occupying its slot no matter when Close's cancel() fires, so a slot-count
-// assumption (e.g. "both slots are still full") can't be invalidated by
-// scheduling.
-type ignoresCancelLauncher struct {
-	mu    sync.Mutex
-	specs []MemberSpec
-	hold  chan struct{}
-}
-
-func (l *ignoresCancelLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
-	l.mu.Lock()
-	l.specs = append(l.specs, spec)
-	l.mu.Unlock()
-	h := &funcHandle{id: spec.ID, done: make(chan struct{})}
-	go func() {
-		defer close(h.done)
-		<-l.hold
-		h.res = MemberResult{Result: "ok:" + spec.Task}
-	}()
-	return h, nil
-}
-
-func (l *ignoresCancelLauncher) recorded() []MemberSpec {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]MemberSpec, len(l.specs))
-	copy(out, l.specs)
-	return out
 }
 
 // TestAfterExitAdmittedFailsDequeuedSpecAfterClose is the regression test for

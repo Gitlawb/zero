@@ -189,9 +189,9 @@ func (s *Swarm) Close() {
 				_ = s.coord.Fail(spec.TaskID, ErrSwarmClosed.Error())
 			}
 		}
-		// The watchers admitted work may still be starting: a spawn in flight adds
-		// one after its own ticket already released, so waiting on lifecycleWork
-		// alone could miss it.
+		// Every watcher is added while its admitting lifecycle ticket is still held,
+		// so lifecycleWork.Wait above also orders every Add before this Wait. The
+		// watcher itself can outlive that ticket, which is why both waits are needed.
 		s.watchers.Wait()
 	})
 }

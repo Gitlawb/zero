@@ -76,9 +76,13 @@ func (s *Swarm) dispatchAdmitted(spec MemberSpec) {
 // failure fails the task and frees the slot.
 // The caller must hold an admission ticket from beginLifecycleAdmission.
 func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
-	handle, err := s.launcher.Launch(s.baseCtx, spec)
+	handle, err := s.launchMemberAdmitted(spec)
 	if err != nil {
 		_ = s.coord.Fail(spec.TaskID, "launch: "+err.Error())
+		if err == ErrSwarmClosed {
+			t.releaseSlot()
+			return
+		}
 		s.afterExitAdmitted(t)
 		return
 	}
@@ -90,6 +94,20 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 		defer s.watchers.Done()
 		s.watch(t, m, spec)
 	}()
+}
+
+// launchMemberAdmitted re-checks shutdown at the last internal boundary before
+// invoking the external launcher. A lifecycle ticket proves the operation won
+// admission before Close, but the caller may not reach its launch until after
+// Close has set closed; in that case no new member should be started.
+func (s *Swarm) launchMemberAdmitted(spec MemberSpec) (MemberHandle, error) {
+	s.lifecycleMu.RLock()
+	closed := s.closed
+	s.lifecycleMu.RUnlock()
+	if closed {
+		return nil, ErrSwarmClosed
+	}
+	return s.launcher.Launch(s.baseCtx, spec)
 }
 
 // watch awaits a member, applies bounded relaunch on temporary failures, records
@@ -105,7 +123,7 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 		if err != nil {
 			if isRetryable(err) && m.restarts < maxMemberRestarts {
 				if release, admitErr := s.beginLifecycleAdmission(); admitErr == nil {
-					nh, relErr := s.launcher.Launch(s.baseCtx, spec)
+					nh, relErr := s.launchMemberAdmitted(spec)
 					release()
 					if relErr == nil {
 						m.restarts++
