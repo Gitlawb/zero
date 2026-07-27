@@ -525,11 +525,23 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, r
 	} else if !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 		return err
 	}
+	// A foreign account under our derived name is left in place deliberately, and
+	// that is the goal state for teardown: no principal of ours exists under it.
+	// Surfacing it as a teardown failure would make setup rollback report an
+	// error for having correctly declined to delete somebody else's account.
 	if err := removeWindowsSandboxIdentity(username, key); err != nil {
-		return err
+		if !errors.Is(err, errWindowsSandboxForeignAccountRetained) {
+			return err
+		}
+		// The record is KEPT in that case. It names paths this role's principal
+		// was granted, and a foreign account holding the name is not evidence
+		// those grants are gone — dropping the record would leave them
+		// unrevokable, which is the whole failure it exists to prevent. A record
+		// with no principal is revoked harmlessly by the next setup.
+		return nil
 	}
-	// Last, and only once the account is actually gone, so a failure anywhere
-	// above leaves the record describing a principal that still exists.
+	// Otherwise last, and only once the account is actually gone, so a failure
+	// anywhere above leaves the record describing a principal that still exists.
 	//
 	// It describes grants for a SID that no longer resolves, and leaving it would
 	// have the next setup revoke those paths on behalf of a freshly minted SID

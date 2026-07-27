@@ -192,6 +192,22 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
+	// Refuse to install filters that would not cover the principals just
+	// provisioned. The ordering above is what makes them cover it, and nothing at
+	// this call site shows that, so assert it rather than trusting it to survive
+	// a later refactor. Installing anyway would leave a machine reporting a
+	// successful setup while every offline principal had an open network.
+	if groupSID, groupErr := resolveWindowsSandboxOfflineGroupSID(); groupErr == nil {
+		if !WindowsNetworkPlanCoversPrincipals(networkPlan, groupSID) {
+			err := errors.New("network block filters do not name the sandbox offline group, so they would not apply to any sandbox principal; the network plan must be built after principals are provisioned")
+			if rollbackErr := rollback(); rollbackErr != nil {
+				fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
+				return 1
+			}
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+			return 1
+		}
+	}
 	if err := applyWindowsNetworkPlanFn(networkPlan); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)

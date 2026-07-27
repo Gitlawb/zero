@@ -94,6 +94,31 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 	}, nil
 }
 
+// WindowsNetworkPlanCoversPrincipals reports whether a plan's block filters name
+// the offline group, which is the only thing that makes them apply to a sandbox
+// principal.
+//
+// This exists to be asserted, not consulted. The plan must be built AFTER
+// provisioning, because provisioning is what creates the group it resolves; a
+// plan built first names only the offline marker and leaves every offline
+// principal with an open network while setup reports success. That is a control
+// that enforces nothing while claiming to work, and the ordering which prevents
+// it is invisible at the call site, so a later refactor can undo it silently.
+func WindowsNetworkPlanCoversPrincipals(plan WindowsNetworkPlan, offlineGroupSID string) bool {
+	offlineGroupSID = strings.TrimSpace(offlineGroupSID)
+	if offlineGroupSID == "" {
+		// No group provisioned on this host, so there is no principal for the
+		// filters to miss and nothing to assert.
+		return true
+	}
+	for _, sid := range plan.IdentitySIDs {
+		if strings.EqualFold(strings.TrimSpace(sid), offlineGroupSID) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveWindowsSandboxOfflineGroupSIDHook resolves the local group that
 // network-denied principals belong to. It is wired up on Windows only, so this
 // file stays free of Win32 calls and the plan on other platforms is unchanged.

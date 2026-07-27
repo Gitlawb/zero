@@ -228,7 +228,7 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			t.Errorf("cleanup: revoke logon rights: %v", err)
 		}
-		if err := removeWindowsSandboxIdentity(identity.Username, "ziptest01"); err != nil {
+		if err := removeWindowsSandboxIdentity(identity.Username, "ziptest01"); err != nil && !errors.Is(err, errWindowsSandboxForeignAccountRetained) {
 			t.Errorf("cleanup: remove principal: %v", err)
 		}
 	})
@@ -330,7 +330,7 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			t.Errorf("cleanup: revoke logon rights: %v", err)
 		}
-		if err := removeWindowsSandboxIdentity(identity.Username, key); err != nil {
+		if err := removeWindowsSandboxIdentity(identity.Username, key); err != nil && !errors.Is(err, errWindowsSandboxForeignAccountRetained) {
 			t.Errorf("cleanup: remove principal: %v", err)
 		}
 	})

@@ -914,7 +914,13 @@ func removeWindowsSandboxIdentity(username string, workspaceKey string) error {
 		return err
 	}
 	if !managed {
-		return nil
+		// Distinguishable rather than a bare nil. Leaving the account alone is
+		// right, and callers that only want the goal state ("no principal of ours
+		// under this name") can treat it as success by matching this sentinel. But
+		// reporting a plain success would tell an operator that cleanup completed
+		// when a name they may care about was deliberately left in place, which is
+		// the one detail worth surfacing here.
+		return fmt.Errorf("%w: %q", errWindowsSandboxForeignAccountRetained, username)
 	}
 	name, err := windows.UTF16PtrFromString(username)
 	if err != nil {
@@ -924,6 +930,12 @@ func removeWindowsSandboxIdentity(username string, workspaceKey string) error {
 	runtime.KeepAlive(name)
 	return netAPIStatus("NetUserDel", status, nerrUserNotFound)
 }
+
+// errWindowsSandboxForeignAccountRetained reports that removal left an account
+// in place because it is not one Zero created. It is not a failure to clean up,
+// it is a refusal to delete somebody else's account, and teardown paths treat it
+// as success.
+var errWindowsSandboxForeignAccountRetained = errors.New("left a local account in place because Zero did not create it")
 
 // errWindowsSandboxIdentityUnavailable reports that no sandbox principal has
 // been provisioned yet, so callers can fall back to the restricted-token

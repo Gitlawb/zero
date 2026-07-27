@@ -186,3 +186,40 @@ func TestNetworkInfraPlanPropagatesOfflineGroupLookupFailure(t *testing.T) {
 		t.Fatal("a failed offline-group lookup produced a plan; the filters would not cover any principal")
 	}
 }
+
+// The ordering that makes the block filters apply to sandbox principals is
+// invisible at the call site: the plan must be built AFTER provisioning,
+// because provisioning creates the group the filters name. A plan built first
+// names only the offline marker, and a machine would then report a successful
+// setup while every offline principal had an open network.
+//
+// Asserted on the predicate setup checks before installing anything, so moving
+// the plan build back ahead of provisioning fails loudly instead of silently
+// producing a control that enforces nothing.
+func TestNetworkPlanCoverageDetectsPrincipalsLeftUncovered(t *testing.T) {
+	const groupSID = "S-1-5-32-4242"
+
+	// What a plan built BEFORE provisioning looks like: marker only.
+	tooEarly := WindowsNetworkPlan{IdentitySIDs: []string{"S-1-15-3-1111"}}
+	if WindowsNetworkPlanCoversPrincipals(tooEarly, groupSID) {
+		t.Fatal("a plan naming only the offline marker was reported as covering principals; the ordering guard would not fire")
+	}
+
+	// And after: marker plus the group.
+	correct := WindowsNetworkPlan{IdentitySIDs: []string{"S-1-15-3-1111", groupSID}}
+	if !WindowsNetworkPlanCoversPrincipals(correct, groupSID) {
+		t.Fatal("a plan naming the offline group was reported as not covering principals; setup would refuse a correct plan")
+	}
+	// SID comparison is case-insensitive, so a differently-cased resolve does not
+	// read as a missing group and block a valid setup.
+	mixed := WindowsNetworkPlan{IdentitySIDs: []string{strings.ToLower(groupSID)}}
+	if !WindowsNetworkPlanCoversPrincipals(mixed, groupSID) {
+		t.Fatal("case difference read as a missing group")
+	}
+
+	// A host with no group provisioned has no principal to miss, so there is
+	// nothing to assert and setup must not refuse.
+	if !WindowsNetworkPlanCoversPrincipals(tooEarly, "") {
+		t.Fatal("an unprovisioned host was treated as a coverage failure")
+	}
+}
