@@ -220,8 +220,3 @@ func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
 func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(t.bgSel)
 }
-
-// onPerm paints on the permission-card tint.
-func (t tuiTheme) onPerm(style lipgloss.Style) lipgloss.Style {
-	return style.Background(t.bgPerm)
-}

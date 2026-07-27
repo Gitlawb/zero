@@ -151,10 +151,11 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
 	binaryName := "zero"
 	optionalName := "zero-seccomp"
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		binaryName = "zero.exe"
 		optionalName = "zero-windows-command-runner.exe"
-	} else if runtime.GOOS == "darwin" {
+	case "darwin":
 		t.Skip("macOS ships no optional helper binaries to refresh")
 	}
 
