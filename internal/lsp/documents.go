@@ -173,7 +173,13 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 				return false // no fresh publish for this sync arrived in time
 			case <-s.client.closed:
 				s.cancelWaiter(uri, ch)
-				return false // the failed client cannot publish diagnostics now
+				// The publish waiter and client closure can become ready together.
+				// Re-check under the session lock so select's random choice cannot
+				// discard a fresh publish that the handler recorded before closure.
+				s.mu.Lock()
+				fresh := s.publishSeq[uri] > baseline
+				s.mu.Unlock()
+				return fresh
 			case <-ch:
 				continue // a fresh publish arrived; loop into the debounce check
 			}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -358,6 +359,66 @@ func TestWaitForDiagnosticsReturnsWhenClientCloses(t *testing.T) {
 	sess.mu.Unlock()
 	if waiters != 0 {
 		t.Fatalf("client failure left %d diagnostic waiters registered", waiters)
+	}
+}
+
+func TestWaitForDiagnosticsPreservesPublishHandledBeforeClientCloses(t *testing.T) {
+	// Keep the test goroutine running while it closes both signals so the waiter
+	// observes the publish and client closure as simultaneously ready. Without
+	// re-checking publishSeq, select could randomly choose closure and discard the
+	// fresh diagnostics that handleNotification had already recorded.
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	params, err := json.Marshal(PublishDiagnosticsParams{
+		URI:         PathToURI("/repo/main.go"),
+		Diagnostics: []Diagnostic{{Message: "fresh"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		client := &Client{
+			pending: make(map[int64]chan rpcResponse),
+			closed:  make(chan struct{}),
+		}
+		uri := PathToURI("/repo/main.go")
+		sess := &session{
+			client:      client,
+			diagnostics: map[string][]Diagnostic{},
+			lastPublish: map[string]time.Time{},
+			publishSeq:  map[string]int64{},
+			waiters:     map[string][]chan struct{}{},
+		}
+		waitDone := make(chan bool, 1)
+		go func() {
+			waitDone <- sess.waitForDiagnostics(context.Background(), uri, time.Second, 0)
+		}()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			sess.mu.Lock()
+			waiting := len(sess.waiters[uri]) == 1
+			sess.mu.Unlock()
+			if waiting {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("diagnostic wait was not registered")
+			}
+			time.Sleep(time.Millisecond)
+		}
+
+		sess.handleNotification("textDocument/publishDiagnostics", params, 1)
+		client.failPending(errors.New("server exited after publishing"))
+		select {
+		case fresh := <-waitDone:
+			if !fresh {
+				t.Fatalf("iteration %d discarded diagnostics handled before client closure", i)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("diagnostic wait did not wake when the client failed")
+		}
 	}
 }
 
