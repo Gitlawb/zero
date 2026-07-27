@@ -208,10 +208,28 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	if !windowsProcessIsElevated() {
 		t.Skip("provisioning requires an elevated process")
 	}
+	// A leftover account from an interrupted run is harmless now that
+	// provisioning resets the password, but starting clean keeps a failure here
+	// from being explained by residue from a previous one.
+	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01"))
+
 	identity, password, err := provisionWindowsSandboxIdentity("ziptest01")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
+	// Registered immediately after provisioning so every failure path below is
+	// covered. This test grants a real batch-logon right to a real local account;
+	// leaving either behind on a developer machine is not acceptable residue, and
+	// rights are revoked before the account so nothing is left keyed to a SID that
+	// no longer resolves.
+	t.Cleanup(func() {
+		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
+			t.Errorf("cleanup: revoke logon rights: %v", err)
+		}
+		if err := removeWindowsSandboxIdentity(identity.Username); err != nil {
+			t.Errorf("cleanup: remove principal: %v", err)
+		}
+	})
 	if identity.SID == nil {
 		t.Fatal("provisioned identity has no SID")
 	}
@@ -283,8 +301,13 @@ func TestGrantLogonRightsAndMintPrincipalToken(t *testing.T) {
 		t.Fatalf("provision: %v", err)
 	}
 	t.Cleanup(func() {
+		// Rights first, then the account: the reverse order strands an LSA entry
+		// keyed to a SID that no longer resolves.
+		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
+			t.Errorf("cleanup: revoke logon rights: %v", err)
+		}
 		if err := removeWindowsSandboxIdentity(identity.Username); err != nil {
-			t.Errorf("cleanup: %v", err)
+			t.Errorf("cleanup: remove principal: %v", err)
 		}
 	})
 

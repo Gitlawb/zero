@@ -210,5 +210,17 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	if err := removeWindowsSandboxSecret(secretPath); err != nil {
 		return err
 	}
+	// Drop the LSA account rights before the account itself. Deleting the account
+	// first would leave its rights behind keyed to a SID that no longer resolves,
+	// which is the same orphaned residue the trustee-keyed ACE revocation exists
+	// to avoid. A principal that was never provisioned has no SID to resolve and
+	// nothing to revoke, so that case is not an error.
+	if identity, err := lookupWindowsSandboxIdentity(windowsSandboxWorkspaceKey(config.WorkspaceRoots)); err == nil {
+		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+		return err
+	}
 	return removeWindowsSandboxIdentity(username)
 }

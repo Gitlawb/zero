@@ -18,6 +18,7 @@ package sandbox
 // needs no special privilege once the batch right is in place.
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"unsafe"
@@ -51,7 +52,10 @@ var (
 	procLsaOpenPolicy       = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaOpenPolicy")
 	procLsaClose            = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaClose")
 	procLsaAddAccountRights = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaAddAccountRights")
-	procLsaNtStatusToWinErr = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaNtStatusToWinError")
+	// Retiring a principal has to drop its rights as well as its account, or the
+	// LSA policy database keeps an entry keyed to a SID that no longer resolves.
+	procLsaRemoveAccountRights = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaRemoveAccountRights")
+	procLsaNtStatusToWinErr    = windows.NewLazySystemDLL("advapi32.dll").NewProc("LsaNtStatusToWinError")
 )
 
 // lsaUnicodeString mirrors LSA_UNICODE_STRING. Length and MaximumLength are
@@ -156,6 +160,58 @@ func grantWindowsSandboxLogonRights(sid *windows.SID) error {
 		if err := lsaStatusError("LsaAddAccountRights("+right+")", status); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// revokeWindowsSandboxLogonRights drops every account right held by a principal
+// and removes its entry from the LSA policy database.
+//
+// This is the logon-rights counterpart to revoking ACEs by trustee, and it has
+// the same reason to exist: deleting the account on its own leaves the rights
+// behind, keyed to a SID that no longer resolves, which is the orphaned residue
+// this model is supposed to avoid. It must therefore run BEFORE the account is
+// deleted, while the SID is still resolvable.
+//
+// Removing all rights rather than naming them is deliberate. The principal is
+// being retired, so anything keyed to it should go, including rights a previous
+// version of setup granted and this one no longer knows about.
+//
+// Requires an elevated caller. A principal that holds no rights is not an error:
+// LsaRemoveAccountRights reports ERROR_FILE_NOT_FOUND for an account with no LSA
+// entry, which is the state teardown is trying to reach anyway.
+func revokeWindowsSandboxLogonRights(sid *windows.SID) error {
+	if sid == nil {
+		return fmt.Errorf("revoke sandbox logon rights: nil SID")
+	}
+	var attributes lsaObjectAttributes
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	var policy windows.Handle
+	status, _, _ := procLsaOpenPolicy.Call(
+		0, // local system
+		uintptr(unsafe.Pointer(&attributes)),
+		uintptr(policyCreateAccount|policyLookupNames),
+		uintptr(unsafe.Pointer(&policy)),
+	)
+	runtime.KeepAlive(attributes)
+	if err := lsaStatusError("LsaOpenPolicy", status); err != nil {
+		return err
+	}
+	defer procLsaClose.Call(uintptr(policy))
+
+	status, _, _ = procLsaRemoveAccountRights.Call(
+		uintptr(policy),
+		uintptr(unsafe.Pointer(sid)),
+		1, // AllRights: drop everything and delete the LSA account object
+		0, // UserRights ignored when AllRights is set
+		0, // CountOfRights likewise
+	)
+	runtime.KeepAlive(sid)
+	if err := lsaStatusError("LsaRemoveAccountRights", status); err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
