@@ -102,16 +102,40 @@ func DetectLocalRuntimes(ctx context.Context, options LocalDetectOptions) []Dete
 // SetupAction returns the no-key onboarding action for a detected local runtime.
 func (runtime DetectedLocalRuntime) SetupAction() Action {
 	descriptor := providercatalog.Descriptor{ID: runtime.CatalogID, RequiresAuth: false}
-	command := SetupCommand(descriptor, runtime.Name, true)
+	model := runtime.AdoptModel()
+	command := SetupCommandWithModel(descriptor, runtime.Name, model, true)
 	name := strings.TrimSpace(runtime.Name)
 	if name == "" {
 		name = runtime.CatalogID
 	}
+	detail := "Detected " + name + " on " + runtime.BaseURL + " — no API key required."
+	if model != "" {
+		detail = "Detected " + name + " on " + runtime.BaseURL + " serving " + model + " — no API key required."
+	}
 	return Action{
 		Label:   "Use local runtime",
 		Command: command,
-		Detail:  "Detected " + name + " on " + runtime.BaseURL + " — no API key required.",
+		Detail:  detail,
 	}
+}
+
+// AdoptModel returns the model id the adopt command should pin. The catalog
+// DefaultModel is a placeholder for local runtimes ("local-model"), so prefer it
+// only when the probe actually saw it and otherwise take the first id the server
+// advertised. Returns "" when the probe parsed no ids at all, which leaves the
+// command on the catalog default rather than inventing one.
+func (runtime DetectedLocalRuntime) AdoptModel() string {
+	if len(runtime.Models) == 0 {
+		return ""
+	}
+	if want := strings.TrimSpace(runtime.DefaultModel); want != "" {
+		for _, id := range runtime.Models {
+			if strings.TrimSpace(id) == want {
+				return want
+			}
+		}
+	}
+	return strings.TrimSpace(runtime.Models[0])
 }
 
 func probeLocalRuntime(ctx context.Context, client *http.Client, timeout time.Duration, candidate LocalRuntime) ([]string, bool) {

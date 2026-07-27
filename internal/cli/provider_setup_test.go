@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -64,5 +65,27 @@ func TestValidateProviderRuntimeReadyCustomEndpoint(t *testing.T) {
 				t.Fatalf("validateProviderRuntimeReady() error = %v, wantErr %v", err, c.wantErr)
 			}
 		})
+	}
+}
+
+// atomic-chat-local without --model would persist the catalog placeholder
+// "local-model", which the Atomic Chat server never serves, so the first
+// completion fails. Adding it must require a real model instead.
+func TestProviderProfileForAddRequiresModelForAtomicChatLocal(t *testing.T) {
+	if _, err := providerProfileForAdd(providerAddOptions{catalogID: "atomic-chat-local"}); err == nil {
+		t.Fatalf("providerProfileForAdd(atomic-chat-local, no --model) = nil error, want a require-model error")
+	} else if !strings.Contains(err.Error(), "--model") {
+		t.Fatalf("error should tell the user to pass --model, got %v", err)
+	}
+
+	profile, err := providerProfileForAdd(providerAddOptions{catalogID: "atomic-chat-local", model: "unsloth/gemma-4-E2B-it-GGUF"})
+	if err != nil {
+		t.Fatalf("providerProfileForAdd(atomic-chat-local, --model) returned error: %v", err)
+	}
+	if profile.Model != "unsloth/gemma-4-E2B-it-GGUF" {
+		t.Fatalf("profile.Model = %q, want the explicit model", profile.Model)
+	}
+	if profile.Model == "local-model" {
+		t.Fatalf("profile persisted the catalog placeholder")
 	}
 }

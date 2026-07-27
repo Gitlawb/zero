@@ -69,6 +69,37 @@ func TestSetupCommandForOpenAICustomAndLocalProviders(t *testing.T) {
 	}
 }
 
+// A local runtime's model id comes from its /v1/models response, which is not
+// trusted. SetupCommandWithModel must render it so a hostile id cannot execute
+// when the adopt command is pasted into a shell.
+func TestSetupCommandWithModelQuotesShellMetacharacters(t *testing.T) {
+	ollama, err := providercatalog.Require("ollama")
+	if err != nil {
+		t.Fatalf("Require(ollama) returned error: %v", err)
+	}
+	cases := []struct {
+		name  string
+		model string
+	}{
+		{"command substitution", "$(touch pwned)"},
+		{"backticks", "`id`"},
+		{"semicolon chain", "gpt;rm -rf /"},
+		{"whitespace", "my model"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SetupCommandWithModel(ollama, "local", tt.model, false)
+			wantQuoted := "'" + strings.ReplaceAll(tt.model, "'", `'\''`) + "'"
+			if !strings.Contains(got, wantQuoted) {
+				t.Fatalf("model must be single-quoted; got %q, want it to contain %q", got, wantQuoted)
+			}
+			if strings.Contains(got, `"`+tt.model+`"`) {
+				t.Fatalf("model rendered inside double quotes still expands: %q", got)
+			}
+		})
+	}
+}
+
 func TestUseAndCheckCommands(t *testing.T) {
 	if got, want := UseCommand("fast"), "zero providers use fast"; got != want {
 		t.Fatalf("UseCommand() = %q, want %q", got, want)

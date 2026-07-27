@@ -1,7 +1,6 @@
 package provideronboarding
 
 import (
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -25,9 +24,25 @@ func (state ProviderState) Actions() []Action {
 }
 
 func SetupCommand(descriptor providercatalog.Descriptor, name string, setActive bool) string {
+	return setupCommand(descriptor, name, "", setActive)
+}
+
+// SetupCommandWithModel is SetupCommand with an explicit --model. A local
+// runtime serves whichever model the user loaded, so its catalog DefaultModel is
+// only a placeholder: an adopt command that omits --model persists that
+// placeholder and the first completion fails with an unknown-model response.
+// An empty model falls back to SetupCommand's behaviour.
+func SetupCommandWithModel(descriptor providercatalog.Descriptor, name string, model string, setActive bool) string {
+	return setupCommand(descriptor, name, model, setActive)
+}
+
+func setupCommand(descriptor providercatalog.Descriptor, name string, model string, setActive bool) string {
 	parts := []string{"zero", "providers", "add", strings.TrimSpace(descriptor.ID)}
 	if name = strings.TrimSpace(name); name != "" {
 		parts = append(parts, "--name", name)
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		parts = append(parts, "--model", model)
 	}
 	if descriptor.RequiresAuth && len(descriptor.AuthEnvVars) > 0 {
 		if env := strings.TrimSpace(descriptor.AuthEnvVars[0]); env != "" {
@@ -172,8 +187,23 @@ func joinCommand(parts []string) string {
 }
 
 func commandArg(value string) string {
+	if shellSafeArg(value) {
+		return value
+	}
+	// Wrap anything else in POSIX single quotes so the shell treats it
+	// literally: no parameter, command ($(...)), or backtick expansion. An
+	// embedded single quote is emitted by closing the quote, escaping it, and
+	// reopening ('\''). strconv.Quote would use double quotes, which still
+	// expand $(...) and backticks, so a model id from an untrusted local
+	// /v1/models response could then execute when the adopt command is pasted.
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// shellSafeArg reports whether value can appear unquoted in a POSIX shell
+// command line. Only characters that never trigger shell processing qualify.
+func shellSafeArg(value string) bool {
 	if value == "" {
-		return strconv.Quote(value)
+		return false
 	}
 	for _, r := range value {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -183,8 +213,8 @@ func commandArg(value string) string {
 		case '-', '_', '.', '/', ':', '@':
 			continue
 		default:
-			return strconv.Quote(value)
+			return false
 		}
 	}
-	return value
+	return true
 }
