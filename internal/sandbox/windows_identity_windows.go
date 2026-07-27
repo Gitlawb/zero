@@ -119,7 +119,7 @@ func (identity windowsSandboxIdentity) String() string {
 }
 
 // windowsSandboxUserName derives a stable account name for a workspace key. The
-// key is hashed by the caller (see sandboxRuntimeKey) so the name reveals no
+// key is hashed by the caller (see windowsSandboxWorkspaceKey) so the name reveals no
 // path, and it is truncated to the 20-character local-account limit. The same
 // workspace always maps to the same account, so re-running setup reuses the
 // principal instead of accumulating accounts.
@@ -339,7 +339,30 @@ func lookupWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, 
 	username := windowsSandboxUserName(workspaceKey)
 	sid, err := resolveWindowsSandboxSID(username)
 	if err != nil {
-		return windowsSandboxIdentity{}, errWindowsSandboxIdentityUnavailable
+		return windowsSandboxIdentity{}, classifyWindowsSandboxLookupError(err)
 	}
 	return windowsSandboxIdentity{Username: username, SID: sid}, nil
+}
+
+// classifyWindowsSandboxLookupError decides whether a failed SID resolution
+// means "setup has not run" or "this principal exists but is unusable".
+//
+// Only "no such account" is the former. Every other failure is a principal the
+// caller must not paper over, including the deliberate refusal in
+// resolveWindowsSandboxSID of a name squatted by a group or alias. Collapsing
+// those into the unavailable sentinel would turn a real conflict into a silent
+// fall back to the restricted token, which is exactly the case that should
+// reach the operator rather than be absorbed.
+//
+// Split out from the lookup so the decision can be asserted on its own: the
+// lookup derives its account name from a workspace key, so a test cannot hand
+// it a name that resolves to a group.
+func classifyWindowsSandboxLookupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		return errWindowsSandboxIdentityUnavailable
+	}
+	return err
 }
