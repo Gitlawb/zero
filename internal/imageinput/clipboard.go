@@ -2,6 +2,7 @@ package imageinput
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,13 @@ import (
 // clipboard, or (nil, "", nil) when the clipboard has no image. Called when
 // text clipboard is empty (the user pasted a screenshot). The media type is
 // sniffed from the bytes, not trusted from the clipboard.
+// ErrClipboardImageUnreadable reports that the clipboard holds an image the host
+// has no way to extract. It is deliberately distinct from "no image on the
+// clipboard", which is an ordinary no-op: this one is actionable, and silence is
+// the wrong response to it.
+var ErrClipboardImageUnreadable = errors.New(
+	"the clipboard holds an image but no helper on this host can read it; on macOS install pngpaste (brew install pngpaste) or a Python with pyobjc")
+
 func ReadClipboardImage() ([]byte, string, error) {
 	data, err := readClipboardImageBytes()
 	if err != nil {
@@ -117,11 +125,17 @@ if data:
 "`)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
+	// Past this point the clipboard is KNOWN to hold an image, because the
+	// clipboard-info probe above said so. So a failure here is not "no image", it
+	// is "there is an image and nothing on this host can extract it", and
+	// reporting it as absence is what left users staring at a paste that silently
+	// did nothing. Neither helper ships with macOS: pngpaste is Homebrew-only and
+	// Apple dropped the bundled PyObjC, so a stock Mac reaches this every time.
 	if err := cmd.Run(); err != nil {
-		return nil, nil
+		return nil, ErrClipboardImageUnreadable
 	}
 	if stdout.Len() == 0 {
-		return nil, nil
+		return nil, ErrClipboardImageUnreadable
 	}
 	return stdout.Bytes(), nil
 }

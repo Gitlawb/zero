@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/imageinput"
 )
 
 func TestComposerInsertNewlineAtCursor(t *testing.T) {
@@ -518,5 +520,55 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 				t.Fatalf("cursor = %d, want %d", got, tc.wantCursor)
 			}
 		})
+	}
+}
+
+// A clipboard that holds an image the host cannot extract must say so. This is
+// the macOS case: neither pngpaste nor PyObjC ships with the OS, so the reader
+// fails on a stock Mac, and reporting that as "no image" meant Ctrl+V did
+// nothing at all with no explanation. Silence is the wrong answer to a
+// condition the user can act on.
+func TestClipboardImageUnreadableSurfacesToUser(t *testing.T) {
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) {
+		return nil, "", imageinput.ErrClipboardImageUnreadable
+	}
+
+	m := newModel(context.Background(), Options{})
+	_, cmd := m.Update(testKeyCtrl('v'))
+	if cmd == nil {
+		t.Fatal("no command issued; the clipboard image probe never ran")
+	}
+	msg := execCmd(cmd)
+	image, ok := msg.(clipboardImageMsg)
+	if !ok {
+		t.Fatalf("probe returned %T, want clipboardImageMsg carrying the failure", msg)
+	}
+	if image.err == nil {
+		t.Fatal("the unreadable-clipboard failure was swallowed; the user is told nothing")
+	}
+	// The message has to name the remedy, since the whole point is that the user
+	// can fix this by installing something.
+	if !strings.Contains(image.err.Error(), "pngpaste") {
+		t.Fatalf("error = %q, want it to name what to install", image.err.Error())
+	}
+
+	// And it must reach the transcript as an error row rather than stopping at
+	// the message, which is where the old silent no-op ended.
+	updated, _ := m.Update(image)
+	next, ok := updated.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", updated)
+	}
+	found := false
+	for _, row := range next.transcript {
+		if row.kind == rowError && strings.Contains(row.text, "Clipboard image read failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("the failure never reached the transcript; the user still sees nothing")
 	}
 }
