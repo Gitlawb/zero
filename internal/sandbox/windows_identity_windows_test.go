@@ -220,13 +220,30 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	}
 	// Re-running must converge on the same principal rather than failing or
 	// creating a second account.
-	again, _, err := provisionWindowsSandboxIdentity("ziptest01")
+	again, secondPassword, err := provisionWindowsSandboxIdentity("ziptest01")
 	if err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
 	if again.Username != identity.Username || !again.SID.Equals(identity.SID) {
 		t.Fatalf("provisioning is not idempotent: %s then %s", identity, again)
 	}
+	// The password returned for an account that already existed has to BE that
+	// account's password. NetUserAdd leaves an existing account entirely alone,
+	// so without an explicit reset this second value is a fresh random string
+	// that never authenticates, and the caller would store it as the secret and
+	// leave every later command failing to log on with a principal that looks
+	// correctly provisioned. Logging on is the only honest way to assert it.
+	if secondPassword == "" {
+		t.Fatal("second provision returned an empty password")
+	}
+	if err := grantWindowsSandboxLogonRights(again.SID); err != nil {
+		t.Fatalf("grant logon rights: %v", err)
+	}
+	token, err := logonWindowsSandboxPrincipal(again.Username, secondPassword)
+	if err != nil {
+		t.Fatalf("logon with the password from the second provision: %v", err)
+	}
+	_ = token.Close()
 	// Lookup must find what provisioning created.
 	found, err := lookupWindowsSandboxIdentity("ziptest01")
 	if err != nil {
