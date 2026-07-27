@@ -384,7 +384,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	netrc := filepath.Join(home, ".netrc")
 	dockerConfig := filepath.Join(home, ".docker", "config.json")
 	kubeConfig := filepath.Join(home, ".kube", "config")
-	zeroConfig := filepath.Join(home, ".config", "zero", "config.json")
+	zeroConfig := filepath.Join(home, ".config", "zero")
 	if err := mkdirAll(
 		awsDir,
 		gcloudDir,
@@ -396,9 +396,15 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{npmrc, ghHosts, netrc, dockerConfig, kubeConfig, zeroConfig} {
+		if path == zeroConfig {
+			continue
+		}
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.MkdirAll(zeroConfig, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	keyFile := filepath.Join(home, "sa-key.json")
 	if err := os.WriteFile(keyFile, []byte("{}"), 0o600); err != nil {
@@ -476,6 +482,9 @@ func TestCredentialDenyReadPathsForEnvironmentHonorsConfigOverrides(t *testing.T
 			t.Fatal(err)
 		}
 		if path == zeroConfig {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			continue
 		}
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
