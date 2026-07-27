@@ -212,6 +212,14 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 		candidates = append(candidates,
 			filepath.Join(home, ".aws"),
 			filepath.Join(home, ".azure"),
+			// git's credential store backend, which holds host passwords and
+			// personal access tokens in cleartext. Denied rather than the whole
+			// of ~/.ssh, because these cost nothing functionally: git reads them
+			// through a credential helper for authentication, not for identity,
+			// so a sandboxed git still works and simply cannot authenticate as
+			// the user. SSH key material is a harder trade and is tracked
+			// separately (#815).
+			filepath.Join(home, ".git-credentials"),
 		)
 	}
 	npmUserConfig := strings.TrimSpace(env.NPMUserConfig)
@@ -233,6 +241,12 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 	if configHome != "" {
 		candidates = append(candidates,
 			filepath.Join(configHome, "zero"),
+			// The XDG location of the same git credential store. Denying the file
+			// rather than the directory is deliberate: ~/.config/git also holds
+			// the global git config, which userGitConfigReadPaths grants on
+			// purpose so a sandboxed git can read user.name and aliases instead
+			// of failing outright.
+			filepath.Join(configHome, "git", "credentials"),
 		)
 	}
 	cloudSDKConfig := strings.TrimSpace(env.CloudSDKConfig)
