@@ -29,6 +29,7 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 	// does. See the POST handler for why that ordering has to be forced.
 	headSeen := make(chan struct{})
 	var headOnce sync.Once
+	var prewarmWaitTimedOut atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodHead:
@@ -59,6 +60,11 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 			select {
 			case <-headSeen:
 			case <-time.After(10 * time.Second):
+				// Record it. A probe that shows up after this gave up would still
+				// leave heads at 1, so the count alone proves the probe was
+				// eventually received, not that it was ordered before the turn,
+				// which is the whole claim of this test.
+				prewarmWaitTimedOut.Store(true)
 			}
 			posts.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -105,8 +111,13 @@ func TestRunExecOptimizedSessionUnderGate(t *testing.T) {
 	if got := posts.Load(); got < 1 {
 		t.Fatalf("server saw %d chat-completions POSTs, want >= 1", got)
 	}
-	// No polling: the turn above could not complete until the probe landed, or
-	// until the guard above gave up, so the count is settled by this point.
+	// Checked before the count, because the count cannot tell the two apart: a
+	// probe that arrived only after the guard expired still leaves heads at 1.
+	if prewarmWaitTimedOut.Load() {
+		t.Fatal("the turn was not held until the prewarm probe arrived; the probe did not precede it")
+	}
+	// No polling: the turn above could not complete until the probe landed, so
+	// the count is settled by this point.
 	if got := heads.Load(); got != 1 {
 		t.Fatalf("server saw %d prewarm HEAD probes, want exactly 1", got)
 	}
