@@ -91,8 +91,14 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
 	identity, err := lookupWindowsSandboxIdentity(key)
 	if err != nil {
-		// Not provisioned: fall back quietly, this is the default state.
-		return 0, false, nil
+		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+			// Not provisioned: fall back quietly, this is the default state.
+			return 0, false, nil
+		}
+		// The name resolves to something that is not a usable principal, most
+		// likely squatted by a local group or alias. That is a conflict an
+		// operator has to see, not a reason to pretend setup never ran.
+		return 0, false, err
 	}
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, identity.Username)
 	if err != nil {

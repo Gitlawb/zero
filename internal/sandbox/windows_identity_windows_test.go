@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -309,4 +310,41 @@ func TestLookupWindowsSandboxIdentityUnprovisioned(t *testing.T) {
 	if err != errWindowsSandboxIdentityUnavailable {
 		t.Fatalf("error = %v, want errWindowsSandboxIdentityUnavailable", err)
 	}
+}
+
+// A name that resolves to something other than a user account is a conflict,
+// not an absent principal, and must not be reported as "setup has not run": the
+// command path treats that sentinel as permission to fall back silently, so
+// collapsing the two would hide a squatted account behind a quiet downgrade to
+// the restricted token.
+//
+// Every machine already has well-known non-user names to test against, so this
+// needs no privilege and no provisioning.
+func TestLookupWindowsSandboxIdentityRejectsNonUserAccount(t *testing.T) {
+	// Groups that exist on any Windows install. Whichever resolves first is
+	// enough; localized machines may not carry the English name.
+	for _, group := range []string{"Administrators", "Users", "Guests"} {
+		sid, _, accountType, err := windows.LookupSID("", group)
+		if err != nil || sid == nil {
+			continue
+		}
+		if accountType == windows.SidTypeUser {
+			continue
+		}
+		resolveErr := func() error {
+			_, err := resolveWindowsSandboxSID(group)
+			return err
+		}()
+		if resolveErr == nil {
+			t.Fatalf("resolveWindowsSandboxSID(%q) accepted a non-user account (type %d)", group, accountType)
+		}
+		// The classification is the part that matters: the sentinel is what
+		// licenses the command path to fall back silently, so this refusal must
+		// survive it rather than be folded into it.
+		if classified := classifyWindowsSandboxLookupError(resolveErr); errors.Is(classified, errWindowsSandboxIdentityUnavailable) {
+			t.Fatalf("non-user account %q classified as unprovisioned, which would silently downgrade to the restricted token: %v", group, classified)
+		}
+		return
+	}
+	t.Skip("no well-known non-user account resolved on this machine")
 }
