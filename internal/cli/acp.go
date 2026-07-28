@@ -27,6 +27,8 @@ Usage:
 Not meant to be run interactively — point your editor's ACP / external-agent
 setting at "zero acp".`
 
+var acpSignalContext = signalContext
+
 // runACP serves ACP over stdio so an editor can drive ZERO's agent core. It
 // speaks JSON-RPC 2.0 (newline-delimited JSON) on stdin/stdout; stderr stays free
 // for human-readable diagnostics. The session lifecycle maps onto ZERO's own
@@ -75,7 +77,7 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		AgentInfo:            acp.Implementation{Name: "zero", Version: version},
 	})
 
-	ctx, stop := signalContext()
+	ctx, stop := acpSignalContext()
 	defer stop()
 	if err := conn.Serve(ctx); err != nil {
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)

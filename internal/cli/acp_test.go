@@ -2,9 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +19,22 @@ type acpTestWriter func([]byte) (int, error)
 
 func (w acpTestWriter) Write(p []byte) (int, error) { return w(p) }
 
+func installACPTestContext(t *testing.T) context.CancelFunc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	previous := acpSignalContext
+	acpSignalContext = func() (context.Context, context.CancelFunc) {
+		return ctx, cancel
+	}
+	t.Cleanup(func() {
+		cancel()
+		acpSignalContext = previous
+	})
+	return cancel
+}
+
 func TestRunACPCancellationPreservesTerminalReadError(t *testing.T) {
+	cancel := installACPTestContext(t)
 	wantErr := errors.New("transport read failed")
 	reader := acpTestReader(func(p []byte) (int, error) {
 		return copy(p, `{"jsonrpc":"1.0","id":1}`+"\n"), wantErr
@@ -43,14 +58,9 @@ func TestRunACPCancellationPreservesTerminalReadError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("ACP did not reach the response write")
 	}
-	if err := signalInterrupt(); err != nil {
-		close(releaseWrite)
-		t.Fatalf("send interrupt: %v", err)
-	}
-	// Keep Serve in the synchronous write until signal.NotifyContext has had a
-	// chance to cancel its context; the regression requires the error to surface
-	// while cancellation is already observable by runACP.
-	time.Sleep(50 * time.Millisecond)
+	// Keep Serve in the synchronous write until cancellation is observable. The
+	// regression requires the genuine read error to win over that cancellation.
+	cancel()
 	close(releaseWrite)
 
 	select {
@@ -66,7 +76,8 @@ func TestRunACPCancellationPreservesTerminalReadError(t *testing.T) {
 	}
 }
 
-func TestRunACPSIGINTStillExitsCleanly(t *testing.T) {
+func TestRunACPIdleCancellationExitsCleanly(t *testing.T) {
+	cancel := installACPTestContext(t)
 	pipeReader, pipeWriter := io.Pipe()
 	t.Cleanup(func() { _ = pipeWriter.Close() })
 	readStarted := make(chan struct{}, 1)
@@ -82,9 +93,7 @@ func TestRunACPSIGINTStillExitsCleanly(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("ACP did not begin reading")
 	}
-	if err := signalInterrupt(); err != nil {
-		t.Fatalf("send interrupt: %v", err)
-	}
+	cancel()
 
 	select {
 	case code := <-done:
@@ -92,7 +101,7 @@ func TestRunACPSIGINTStillExitsCleanly(t *testing.T) {
 			t.Fatalf("exit code = %d, want success %d; stderr: %s", code, exitSuccess, stderr.String())
 		}
 	case <-time.After(time.Second):
-		t.Fatal("ACP did not exit after SIGINT")
+		t.Fatal("ACP did not exit after cancellation")
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
@@ -108,12 +117,4 @@ type acpNotifyingReadCloser struct {
 func (r *acpNotifyingReadCloser) Read(p []byte) (int, error) {
 	r.once.Do(func() { r.readStarted <- struct{}{} })
 	return r.ReadCloser.Read(p)
-}
-
-func signalInterrupt() error {
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		return err
-	}
-	return process.Signal(os.Interrupt)
 }
