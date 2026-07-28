@@ -24,6 +24,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -260,6 +261,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		registry.Register(tools.NewEscalateModelTool())
 	}
 	var specialistRuntime *agentToolRuntime
+	var planGate *specialist.PostureGate
+	// Created before registration so the tool can hold it; its inner exec
+	// recorder is attached once the session exists (below). A nil inner is a
+	// no-op, so events before that point are simply not recorded — recording is
+	// best-effort and must never be the thing that fails a run.
+	planRecorder := &planSessionRecorder{}
 	if shouldRegisterExecSpecialistTools(options) {
 		// Specialist tools register before the full config resolve below (so
 		// --list-tools stays offline). swarm.maxTeamSize is not affected by
@@ -270,7 +277,22 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
 		}
 		var err error
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize)
+		// The posture is fixed for a headless run, so the gate is set once here
+		// rather than flipping. It is still a POINTER for the same reason the
+		// TUI needs one: the tool holds it for the process's life.
+		planGate = &specialist.PostureGate{}
+		planGate.Set(execProfile.IsZeromaxing())
+		specialistRuntime, err = registerSpecialistToolsWith(registry, workspaceRoot, maxTeamSize, orchestrateWiring{
+			Gate:     planGate,
+			Recorder: planRecorder,
+			PlanContext: specialist.PlanTaskContext{
+				Cwd: workspaceRoot,
+				// Resolved permission mode is not available this early; the
+				// executor applies its own fail-safe mapping from an empty mode
+				// (never unsafe), so a plan task can never exceed the parent.
+				PermissionMode: "",
+			},
+		})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}
@@ -664,6 +686,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
+	planRecorder.recorder = &sessionRecorder
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
@@ -871,6 +894,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// {"type":"done","exit_code":0} that would otherwise mask the incomplete exit.
 	// An `error` event (not just a warning) is emitted so log/cron consumers that
 	// scan for type=="error" can recover the reason.
+	// A plan that did not fully complete is work left undone, which is exactly
+	// what exitIncomplete exists for. Folded into the EXISTING incomplete path
+	// rather than a second exit route, so a plan and a stalled loop report the
+	// same way. Does not override an incompleteness the loop already found.
+	if reason, planIncomplete := planRecorder.Incomplete(); planIncomplete && !result.Incomplete {
+		result.Incomplete = true
+		result.IncompleteReason = reason
+	}
 	if result.Incomplete {
 		reason := result.IncompleteReason
 		if reason == "" {

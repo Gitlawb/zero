@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/specialist"
 )
 
 // (a) CLI: an explicit --reasoning-effort survives zeromaxing. The profile
@@ -411,5 +412,46 @@ func TestExecDeltaShowsTheCallersOwnTurnBudget(t *testing.T) {
 	}
 	if n := strings.Count(stderr, "reasoning effort:"); n != 1 {
 		t.Fatalf("exactly one reasoning-effort statement expected, found %d:\n%s", n, stderr)
+	}
+}
+
+// A partial plan must reach the PROCESS exit code, not just the tool result.
+//
+// Asserting the executor's status missed the tool's status; asserting the
+// tool's status would miss the exit code the same way. This is the third link,
+// asserted at the boundary that actually matters to a caller.
+func TestPlanPartialMapsToIncompleteExit(t *testing.T) {
+	recorder := &planSessionRecorder{}
+	if _, incomplete := recorder.Incomplete(); incomplete {
+		t.Fatal("a recorder that saw no plan must not mark the run incomplete")
+	}
+	plan, err := specialist.ParsePlan(map[string]any{
+		"name":   "p",
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "x"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(10)},
+	}, specialist.Limits{MaxTasks: 5, MaxTokens: 100})
+	if err != nil {
+		t.Fatalf("ParsePlan: %v", err)
+	}
+	// A COMPLETED plan leaves the run alone.
+	recorder.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 1})
+	if _, incomplete := recorder.Incomplete(); incomplete {
+		t.Fatal("a completed plan must not mark the run incomplete")
+	}
+	// A PARTIAL one does, and names the counts.
+	recorder.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanPartial, Succeeded: 1, Skipped: 2})
+	reason, incomplete := recorder.Incomplete()
+	if !incomplete {
+		t.Fatal("a partial plan must mark the run incomplete, which is exit 4")
+	}
+	for _, want := range []string{"partial", "1 succeeded", "2 skipped"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("the reason must carry %q: %q", want, reason)
+		}
+	}
+	// FAILED outranks partial: if any plan failed outright, that is the story.
+	recorder.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanFailed})
+	if reason, _ := recorder.Incomplete(); !strings.Contains(reason, "failed") {
+		t.Fatalf("a failed plan must outrank a partial one: %q", reason)
 	}
 }
