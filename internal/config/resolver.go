@@ -163,6 +163,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Notify:         cfg.Notify,
 		Tools:          cfg.Tools,
 		Swarm:          cfg.Swarm,
+		Profiles:       cfg.Profiles,
 		Preferences:    cfg.Preferences,
 		KeyBindings:    cfg.KeyBindings,
 		LocalControl:   cfg.LocalControl,
@@ -252,6 +253,12 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
+	// User config is higher-trust and may turn the zeromaxing posture off. It is
+	// presence-only here too (with omitempty a false is indistinguishable from
+	// absent); re-enabling is done by removing the key.
+	if src.Profiles.DisableZeromaxing {
+		dst.Profiles.DisableZeromaxing = true
+	}
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
@@ -324,6 +331,16 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
+	}
+	// Profiles.DisableZeromaxing from project config may only TIGHTEN (turn the
+	// posture OFF), never WEAKEN (turn it back on). A cloned repo must not be
+	// able to switch a cost multiplier on for whoever opens it — the same
+	// posture as Sandbox.Network's allow/deny rule above, and for the same
+	// reason: project config is not trust-gated. Because the field is
+	// presence-only, an attempted "enable" arrives as a false that this simply
+	// ignores — silently, like an ignored network "allow", not as an error.
+	if src.Profiles.DisableZeromaxing {
+		dst.Profiles.DisableZeromaxing = true
 	}
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project

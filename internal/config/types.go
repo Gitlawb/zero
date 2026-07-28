@@ -322,6 +322,20 @@ type SwarmConfig struct {
 	MaxTeamSize int `json:"maxTeamSize,omitempty"`
 }
 
+// ProfilesConfig gates the execution-profile catalog.
+type ProfilesConfig struct {
+	// DisableZeromaxing turns the zeromaxing posture off for this workspace, so
+	// /effort zeromaxing, /profile zeromaxing and --exec-profile zeromaxing are
+	// refused with a reason.
+	//
+	// Deliberately a DISABLE-only boolean, mirroring Sandbox.BlockUnixSockets
+	// and the tighten-only Sandbox.Network rule: a project .zero/config.json may
+	// set it true, but can never set it back to false, so a cloned repo cannot
+	// switch a cost multiplier ON for whoever opens it. Only global user config
+	// may leave it off. See mergeProjectConfig.
+	DisableZeromaxing bool `json:"disableZeromaxing,omitempty"`
+}
+
 func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	type rawTools struct {
 		DeferThreshold *int `json:"deferThreshold"`
@@ -348,6 +362,7 @@ type FileConfig struct {
 	Notify         NotifyConfig       `json:"notify,omitempty"`
 	Tools          ToolsConfig        `json:"tools,omitempty"`
 	Swarm          SwarmConfig        `json:"swarm,omitempty"`
+	Profiles       ProfilesConfig     `json:"profiles,omitempty"`
 	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
 	KeyBindings    KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
@@ -364,6 +379,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Notify         NotifyConfig        `json:"notify,omitempty"`
 		Tools          ToolsConfig         `json:"tools,omitempty"`
 		Swarm          SwarmConfig         `json:"swarm,omitempty"`
+		Profiles       ProfilesConfig      `json:"profiles,omitempty"`
 		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
 		KeyBindings    KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
@@ -378,6 +394,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Notify:         cfg.Notify,
 		Tools:          cfg.Tools,
 		Swarm:          cfg.Swarm,
+		Profiles:       cfg.Profiles,
 		Preferences:    cfg.Preferences,
 		KeyBindings:    cfg.KeyBindings,
 	}
@@ -427,6 +444,7 @@ type ResolvedConfig struct {
 	Notify         NotifyConfig
 	Tools          ToolsConfig
 	Swarm          SwarmConfig
+	Profiles       ProfilesConfig
 	Preferences    PreferencesConfig
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
@@ -488,6 +506,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Notify          NotifyConfig               `json:"notify"`
 		Tools           ToolsConfig                `json:"tools"`
 		Swarm           SwarmConfig                `json:"swarm"`
+		Profiles        ProfilesConfig             `json:"profiles"`
 		Preferences     PreferencesConfig          `json:"preferences"`
 		KeyBindings     KeyBindingsConfig          `json:"keybindings"`
 		LocalControl    LocalControlConfig         `json:"localControl"`
@@ -516,6 +535,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Notify = raw.Notify
 	cfg.Tools = raw.Tools
 	cfg.Swarm = raw.Swarm
+	cfg.Profiles = raw.Profiles
 	cfg.Preferences = raw.Preferences
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
