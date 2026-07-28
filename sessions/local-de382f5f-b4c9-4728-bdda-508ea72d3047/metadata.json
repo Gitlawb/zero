@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T09:48:33.174Z",
-  "durationMs": 5793678,
+  "endedAt": "2026-08-15T09:48:41.609Z",
+  "durationMs": 5802121,
   "status": "running",
   "tokens": {
     "total": 18338,
@@ -16,12 +16,12 @@
   },
   "toolCalls": 30,
   "lines": {
-    "added": 285,
-    "removed": 12
+    "added": 419,
+    "removed": 56
   },
   "filesChanged": [
+    "internal/agent/export_test.go",
     "internal/cli/exec.go",
-    "internal/cli/exec_parse.go",
     "internal/cli/exec_zeromaxing_test.go",
     "internal/execprofile/profile.go",
     "internal/execprofile/zeromaxing_test.go",
@@ -31,9 +31,9 @@
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "3396037773d4eb390abc1a7018ff296d40322964",
+    "headAfter": "766be2a6735e16b8eb16696e90289277dd94de2d",
     "commitShas": [
-      "3396037773d4eb390abc1a7018ff296d40322964"
+      "766be2a6735e16b8eb16696e90289277dd94de2d"
     ]
   },
   "summary": "rerere auto-resolved it. Let me run a loop that auto-continues **only** when rerere leaves zero conflict markers, and stops for anything needing judgment:",
