@@ -699,6 +699,11 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		"XAI_API_KEY=xai-12345",
 		"HUGGINGFACE_API_KEY=hf_12345",
 		"GOOGLE_APPLICATION_CREDENTIALS=/home/user/sa-key.json",
+		// Both forms of the daemon bridge token. The inline one was already
+		// scrubbed; the file form was not, which left a sandboxed command the
+		// path to read it from (#677).
+		"ZERO_DAEMON_REMOTE_TOKEN=bridge-token-inline",
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE=/home/user/.zero/remote-token",
 		"COMPANY_LLM_SECRET=custom-secret",
 		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
 		"zero_oauth_second_client_secret=case-insensitive-secret",
