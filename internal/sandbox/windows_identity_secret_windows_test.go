@@ -130,13 +130,28 @@ func TestWindowsSandboxSecretMissingIsSentinel(t *testing.T) {
 }
 
 // An empty file is a half-written secret, not a valid empty password.
+//
+// Both seeds matter and only one of them tests what the name says. A
+// zero-length file is the truncated-write case, and it is the only one that
+// reaches the length check. Whitespace is several bytes, so it travels on to
+// DPAPI and fails to unprotect instead, which is the path
+// TestWindowsSandboxSecretRejectsLegacyPlaintext already covers. Seeding only
+// the whitespace, as this did, left the branch in the test's own name
+// unexercised.
 func TestWindowsSandboxSecretEmptyIsSentinel(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "empty.secret")
-	if err := os.WriteFile(path, []byte("   \r\n"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if _, err := readWindowsSandboxSecret(path); err != errWindowsSandboxIdentityUnavailable {
-		t.Fatalf("empty secret returned %v, want the unavailable sentinel", err)
+	for name, seed := range map[string][]byte{
+		"truncated write": {},
+		"whitespace only": []byte("   \r\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "empty.secret")
+			if err := os.WriteFile(path, seed, 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if _, err := readWindowsSandboxSecret(path); err != errWindowsSandboxIdentityUnavailable {
+				t.Fatalf("secret of %d bytes returned %v, want the unavailable sentinel", len(seed), err)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,155 @@
+//go:build windows
+
+package sandbox
+
+import (
+	"errors"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+// stubWindowsProvisioning replaces the four provisioning syscalls so the
+// function can run on an ordinary machine. Every one of them needs an elevated
+// caller and a real local account, so without this the test would stop at the
+// first call and never reach the behaviour it is named for.
+func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, sidErr error) {
+	t.Helper()
+	prevGroup, prevUser := ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn
+	prevAdd, prevSID := addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn
+	t.Cleanup(func() {
+		ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn = prevGroup, prevUser
+		addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn = prevAdd, prevSID
+	})
+
+	ensureWindowsSandboxGroupFn = func() error { return nil }
+	ensureWindowsSandboxUserFn = func(string, string) (bool, error) { return existed, nil }
+	addWindowsSandboxUserToGroupFn = func(string) error { return groupErr }
+	resolveWindowsSandboxSIDFn = func(username string) (*windows.SID, error) {
+		if sidErr != nil {
+			return nil, sidErr
+		}
+		return windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	}
+}
+
+// A failure after the account has been created must still hand back the name.
+//
+// The caller's rollback deletes by identity.Username, so returning a zero
+// identity alongside created=true asked it to delete "" and quietly left the
+// account this run had just made. Group attachment is the case that matters
+// most: it is the enforcement boundary and it can fail under local policy.
+func TestProvisionWindowsSandboxIdentityReturnsNameForRollback(t *testing.T) {
+	groupFailure := errors.New("group attachment refused by policy")
+	sidFailure := errors.New("sid lookup failed")
+
+	for name, testCase := range map[string]struct {
+		groupErr error
+		sidErr   error
+	}{
+		"group attachment fails": {groupErr: groupFailure},
+		"sid resolution fails":   {sidErr: sidFailure},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubWindowsProvisioning(t, false, testCase.groupErr, testCase.sidErr)
+
+			identity, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+			if err == nil {
+				t.Fatal("provisioning reported success despite an injected failure")
+			}
+			if !created {
+				t.Fatal("created = false, so the rollback would skip an account this run made")
+			}
+			// The whole point: without a name there is nothing to delete.
+			if identity.Username == "" {
+				t.Fatal("identity carries no username, so the rollback deletes \"\" and strands the account")
+			}
+			if want := windowsSandboxUserName("workspacekey"); identity.Username != want {
+				t.Fatalf("username = %q, want %q", identity.Username, want)
+			}
+		})
+	}
+}
+
+// An account that already existed must not be deleted because a later step
+// failed. created=false is what stops the rollback turning a partial failure
+// into the loss of a working principal from an earlier setup.
+func TestProvisionWindowsSandboxIdentityDoesNotClaimPreexistingAccount(t *testing.T) {
+	stubWindowsProvisioning(t, true, errors.New("group attachment refused"), nil)
+
+	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+	if err == nil {
+		t.Fatal("provisioning reported success despite an injected failure")
+	}
+	// created is the whole assertion. It is what stops the rollback deleting an
+	// account it did not make, and it must stay false however provisioning
+	// fails. The identity is deliberately not checked: an adopted account exits
+	// early at the ownership check, which is a real syscall and not stubbed
+	// here, so asserting on the name would be testing the stub rather than the
+	// contract.
+	if created {
+		t.Fatal("created = true for an account this run did not create; rollback would delete a working principal")
+	}
+}
+
+// The write grant has to include delete.
+//
+// FILE_GENERIC_WRITE covers creating and modifying but not removing or
+// renaming, and a rename needs delete on the source. The old same-user token hid
+// this because the caller already held inherited rights on its own tree; a
+// principal is a separate account with none, so without these it can write files
+// it can never remove, which fails ordinary editing and most git operations
+// rather than an edge case.
+func TestWindowsACLAllowWriteGrantsDelete(t *testing.T) {
+	mode, mask, err := windowsACLAccess(WindowsACLAllowWrite)
+	if err != nil {
+		t.Fatalf("windowsACLAccess: %v", err)
+	}
+	if mode != windows.GRANT_ACCESS {
+		t.Fatalf("mode = %v, want GRANT_ACCESS", mode)
+	}
+	// Atomic bits only. FILE_GENERIC_READ and FILE_GENERIC_WRITE both carry
+	// READ_CONTROL and SYNCHRONIZE, so testing a composite constant with & is
+	// satisfied by any grant at all and proves nothing.
+	for label, bit := range map[string]windows.ACCESS_MASK{
+		"DELETE":            windows.DELETE,
+		"FILE_DELETE_CHILD": windowsFileDeleteChild,
+		"FILE_WRITE_DATA":   windows.FILE_WRITE_DATA,
+	} {
+		if mask&bit == 0 {
+			t.Errorf("write grant is missing %s", label)
+		}
+	}
+	// Granting these would let the principal rewrite the very restrictions
+	// placed on it. They are in the deny mask for that reason and must not
+	// appear here.
+	for label, bit := range map[string]windows.ACCESS_MASK{
+		"WRITE_DAC":   windows.WRITE_DAC,
+		"WRITE_OWNER": windows.WRITE_OWNER,
+	} {
+		if mask&bit != 0 {
+			t.Errorf("write grant unexpectedly includes %s", label)
+		}
+	}
+}
+
+// The read grant must stay read-only. Widening the write mask above is only
+// safe if this one did not move with it.
+func TestWindowsACLAllowReadGrantsNoDelete(t *testing.T) {
+	_, mask, err := windowsACLAccess(WindowsACLAllowRead)
+	if err != nil {
+		t.Fatalf("windowsACLAccess: %v", err)
+	}
+	// Atomic bits, for the same reason as above: the read and write composites
+	// overlap on the standard rights, so a composite check here would report a
+	// failure that is not real.
+	for label, bit := range map[string]windows.ACCESS_MASK{
+		"DELETE":            windows.DELETE,
+		"FILE_DELETE_CHILD": windowsFileDeleteChild,
+		"FILE_WRITE_DATA":   windows.FILE_WRITE_DATA,
+	} {
+		if mask&bit != 0 {
+			t.Errorf("read grant unexpectedly includes %s", label)
+		}
+	}
+}
