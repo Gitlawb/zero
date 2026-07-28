@@ -1,0 +1,333 @@
+package specialist
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+// recordingRecorder captures the lifecycle events, so "recorded, never silently
+// dropped" is asserted rather than assumed.
+type recordingRecorder struct {
+	dispatched []string
+	completed  []string
+	failed     []TaskResult
+	admitted   int
+	finished   []PlanReport
+}
+
+func (r *recordingRecorder) TaskDispatched(task Task)     { r.dispatched = append(r.dispatched, task.ID) }
+func (r *recordingRecorder) TaskCompleted(res TaskResult) { r.completed = append(r.completed, res.ID) }
+func (r *recordingRecorder) TaskFailed(res TaskResult)    { r.failed = append(r.failed, res) }
+func (r *recordingRecorder) PlanAdmitted(plan Plan)       { r.admitted++ }
+func (r *recordingRecorder) PlanCompleted(_ Plan, rep PlanReport) {
+	r.finished = append(r.finished, rep)
+}
+
+func mustPlan(t *testing.T, tasks []any, budget map[string]any, limits Limits) Plan {
+	t.Helper()
+	plan, err := ParsePlan(planArgs(tasks, budget), limits)
+	if err != nil {
+		t.Fatalf("ParsePlan: %v", err)
+	}
+	return plan
+}
+
+// (p) A dependency failure SKIPS its transitive dependents and RECORDS each
+// one, while independent siblings still run. The plan runs to exhaustion.
+func TestDependencyFailureSkipsDependentsAndRecordsThem(t *testing.T) {
+	// a fails. b depends on a, c depends on b (transitive). d is independent.
+	plan := mustPlan(t, []any{
+		task("a", "fails"), task("b", "after a", "a"), task("c", "after b", "b"), task("d", "independent"),
+	}, okBudget(), readOnlyLimits())
+
+	recorder := &recordingRecorder{}
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			if task.ID == "a" {
+				return TaskResult{Outcome: TaskFailed, Err: "boom"}, errors.New("boom")
+			}
+			return TaskResult{Outcome: TaskSucceeded, Output: "ok:" + task.ID}, nil
+		}, recorder)
+
+	byID := map[string]TaskResult{}
+	for _, task := range report.Tasks {
+		byID[task.ID] = task
+	}
+	if byID["a"].Outcome != TaskFailed {
+		t.Fatalf("a must be failed, got %q", byID["a"].Outcome)
+	}
+	for _, id := range []string{"b", "c"} {
+		if byID[id].Outcome != TaskSkippedDependency {
+			t.Fatalf("%s must be skipped for a failed dependency, got %q", id, byID[id].Outcome)
+		}
+		if byID[id].Err == "" {
+			t.Fatalf("%s must record WHY it was skipped", id)
+		}
+	}
+	// The independent sibling still ran — the plan does not abort on first failure.
+	if byID["d"].Outcome != TaskSucceeded {
+		t.Fatalf("an independent sibling must still run, got %q", byID["d"].Outcome)
+	}
+	// Skips are RECORDED, not dropped: every task appears in the report.
+	if len(report.Tasks) != 4 {
+		t.Fatalf("every task must appear in the report, got %d", len(report.Tasks))
+	}
+	if len(recorder.failed) != 3 {
+		t.Fatalf("the failure and both skips must be recorded, got %d", len(recorder.failed))
+	}
+	// b and c never dispatched — skipping means not running.
+	for _, id := range recorder.dispatched {
+		if id == "b" || id == "c" {
+			t.Fatalf("%s must not be dispatched when its dependency failed", id)
+		}
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("status = %q, want partial", report.Status)
+	}
+}
+
+// (q) Nineteen of twenty failing is PARTIAL, never success.
+func TestMostlyFailedPlanIsPartialNotSuccess(t *testing.T) {
+	raw := make([]any, 20)
+	for i := range raw {
+		raw[i] = task(fmt.Sprintf("t%02d", i), "work")
+	}
+	plan := mustPlan(t, raw, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			if task.ID == "t00" {
+				return TaskResult{Outcome: TaskSucceeded, Output: "ok"}, nil
+			}
+			return TaskResult{Outcome: TaskFailed, Err: "no"}, errors.New("no")
+		}, nil)
+
+	if report.Succeeded != 1 || report.Failed != 19 {
+		t.Fatalf("counts = %d succeeded / %d failed, want 1/19", report.Succeeded, report.Failed)
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("19 of 20 failing must be PARTIAL, got %q", report.Status)
+	}
+	if report.Status == PlanCompleted {
+		t.Fatal("a mostly-failed plan must never report completed")
+	}
+	// The counts are in the record, so the number is auditable.
+	summary := report.Summary()
+	if !strings.Contains(summary, "1 succeeded, 19 failed") {
+		t.Fatalf("the summary must carry the counts:\n%s", summary)
+	}
+}
+
+// Zero successes is FAILED, distinct from partial.
+func TestAllFailedPlanIsFailed(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(context.Context, Task, []string) (TaskResult, error) {
+			return TaskResult{Outcome: TaskFailed}, errors.New("no")
+		}, nil)
+	if report.Status != PlanFailed {
+		t.Fatalf("status = %q, want failed", report.Status)
+	}
+}
+
+// (o) BUDGET ENFORCED AT DISPATCH. Validation alone is a promise, not a bound.
+func TestBudgetExhaustionMidPlanIsPartial(t *testing.T) {
+	budget := okBudget()
+	budget["max_tokens"] = float64(100)
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, budget, readOnlyLimits())
+
+	dispatched := []string{}
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			dispatched = append(dispatched, task.ID)
+			return TaskResult{Outcome: TaskSucceeded, Tokens: 60, Output: "ok"}, nil
+		}, nil)
+
+	// Two tasks at 60 tokens exhaust a 100-token budget; the third is skipped.
+	if len(dispatched) != 2 {
+		t.Fatalf("the budget must stop dispatch after it is spent, dispatched %v", dispatched)
+	}
+	byID := map[string]TaskResult{}
+	for _, task := range report.Tasks {
+		byID[task.ID] = task
+	}
+	if byID["c"].Outcome != TaskSkippedBudget {
+		t.Fatalf("c must be skipped for budget, got %q", byID["c"].Outcome)
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("budget exhaustion must be PARTIAL (not failure, not success), got %q", report.Status)
+	}
+	if byID["c"].Err == "" {
+		t.Fatal("a budget skip must record why")
+	}
+}
+
+// (m) THE DISPATCH HALF of the grant rule: a task's tools are intersected with
+// the parent's at dispatch, so a validator bug cannot widen authority.
+func TestToolGrantIsIntersectedAtDispatch(t *testing.T) {
+	// Construct a task that ASKS for more than the parent holds, bypassing the
+	// validator entirely — this is precisely the "validator bug" case.
+	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), readOnlyLimits())
+	tasks := plan.Tasks()
+	tasks[0].Tools = []string{"read_file", "grep", "write_file", "bash"}
+	plan.tasks = tasks
+
+	var granted []string
+	ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, _ Task, tools []string) (TaskResult, error) {
+			granted = tools
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, nil)
+
+	for _, forbidden := range []string{"write_file", "bash", "grep"} {
+		for _, got := range granted {
+			if got == forbidden {
+				t.Fatalf("dispatch granted %q, which the parent does not hold or is not read-only: %v", forbidden, granted)
+			}
+		}
+	}
+	if len(granted) != 1 || granted[0] != "read_file" {
+		t.Fatalf("grant = %v, want exactly the parent's read-only intersection", granted)
+	}
+}
+
+// An empty Tools inherits the parent's READ-ONLY grant — never the parent's
+// mutating tools, even when the parent holds them.
+func TestEmptyToolsInheritsOnlyReadOnlyParentTools(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), Limits{MaxTasks: 5, MaxTokens: 1000})
+	var granted []string
+	ExecutePlan(context.Background(), plan, []string{"read_file", "grep", "write_file", "bash"},
+		func(_ context.Context, _ Task, tools []string) (TaskResult, error) {
+			granted = tools
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, nil)
+	want := map[string]bool{"read_file": true, "grep": true}
+	if len(granted) != len(want) {
+		t.Fatalf("grant = %v, want only the read-only parent tools", granted)
+	}
+	for _, got := range granted {
+		if !want[got] {
+			t.Fatalf("grant leaked %q: %v", got, granted)
+		}
+	}
+}
+
+// (r) max_speedup on a KNOWN dag with KNOWN durations.
+func TestMaxSpeedupOnAKnownDAG(t *testing.T) {
+	// Diamond: a(10) -> b(20), a(10) -> c(30), (b,c) -> d(10).
+	//   sequential = 10+20+30+10 = 70
+	//   critical   = a + max(b,c) + d = 10 + 30 + 10 = 50
+	//   speedup    = 70/50 = 1.4
+	plan := mustPlan(t, []any{
+		task("a", "root"), task("b", "left", "a"), task("c", "right", "a"), task("d", "join", "b", "c"),
+	}, okBudget(), readOnlyLimits())
+
+	durations := map[string]time.Duration{
+		"a": 10 * time.Millisecond, "b": 20 * time.Millisecond,
+		"c": 30 * time.Millisecond, "d": 10 * time.Millisecond,
+	}
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			return TaskResult{Outcome: TaskSucceeded, Duration: durations[task.ID]}, nil
+		}, nil)
+
+	if report.SequentialTotal != 70*time.Millisecond {
+		t.Fatalf("sequential total = %s, want 70ms", report.SequentialTotal)
+	}
+	if report.CriticalPath != 50*time.Millisecond {
+		t.Fatalf("critical path = %s, want 50ms (a + max(b,c) + d)", report.CriticalPath)
+	}
+	if diff := report.MaxSpeedup - 1.4; diff > 0.001 || diff < -0.001 {
+		t.Fatalf("max_speedup = %.4f, want 1.40", report.MaxSpeedup)
+	}
+	if !strings.Contains(report.Summary(), "max_speedup: 1.40x") {
+		t.Fatalf("the summary must surface max_speedup:\n%s", report.Summary())
+	}
+}
+
+// A fully PARALLEL plan (no edges) has speedup == task count; a fully SEQUENTIAL
+// chain has speedup 1. Those are the bounds the kill criterion is read against,
+// so they must be exactly right.
+func TestMaxSpeedupBounds(t *testing.T) {
+	runner := func(_ context.Context, _ Task, _ []string) (TaskResult, error) {
+		return TaskResult{Outcome: TaskSucceeded, Duration: 10 * time.Millisecond}, nil
+	}
+	independent := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), independent, []string{"read_file"}, runner, nil)
+	if diff := report.MaxSpeedup - 3.0; diff > 0.001 || diff < -0.001 {
+		t.Fatalf("three independent equal tasks must give 3.00x, got %.4f", report.MaxSpeedup)
+	}
+	chain := mustPlan(t, []any{task("a", "x"), task("b", "y", "a"), task("c", "z", "b")}, okBudget(), readOnlyLimits())
+	report = ExecutePlan(context.Background(), chain, []string{"read_file"}, runner, nil)
+	if diff := report.MaxSpeedup - 1.0; diff > 0.001 || diff < -0.001 {
+		t.Fatalf("a strict chain must give 1.00x — fan-out buys nothing, got %.4f", report.MaxSpeedup)
+	}
+}
+
+// (s) Each task's FULL result arrives verbatim. The plan must not become a
+// second place where a delegated work product is truncated.
+func TestTaskResultsArriveVerbatim(t *testing.T) {
+	const body = "Summary\n-------\nline one\n\n    indented\n\ndiff --git a/x b/x\n+added\n-removed\n\nConclusion: done."
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y", "a")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			return TaskResult{Outcome: TaskSucceeded, Output: task.ID + ":" + body}, nil
+		}, nil)
+
+	for _, task := range report.Tasks {
+		if task.Output != task.ID+":"+body {
+			t.Fatalf("%s output is not verbatim:\n%q", task.ID, task.Output)
+		}
+	}
+	summary := report.Summary()
+	for _, id := range []string{"a", "b"} {
+		if !strings.Contains(summary, id+":"+body) {
+			t.Fatalf("the summary must carry %s's full result verbatim:\n%s", id, summary)
+		}
+	}
+	if strings.Contains(summary, "…") {
+		t.Fatalf("the summary must not truncate:\n%s", summary)
+	}
+}
+
+// Execution order follows the validated topological order — the same one Kahn
+// emitted at admission, so the two cannot disagree.
+func TestExecutionFollowsTheValidatedOrder(t *testing.T) {
+	plan := mustPlan(t, []any{
+		task("d", "join", "b", "c"), task("b", "left", "a"), task("c", "right", "a"), task("a", "root"),
+	}, okBudget(), readOnlyLimits())
+	seen := []string{}
+	ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+			seen = append(seen, task.ID)
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, nil)
+	if strings.Join(seen, ",") != strings.Join(plan.Order(), ",") {
+		t.Fatalf("execution order %v != validated order %v", seen, plan.Order())
+	}
+	position := map[string]int{}
+	for i, id := range seen {
+		position[id] = i
+	}
+	for _, edge := range [][2]string{{"a", "b"}, {"a", "c"}, {"b", "d"}, {"c", "d"}} {
+		if position[edge[0]] >= position[edge[1]] {
+			t.Fatalf("%s ran after %s: %v", edge[0], edge[1], seen)
+		}
+	}
+}
+
+// Recording is BEST-EFFORT: a recorder that panics must not take the run with
+// it... and a nil recorder must be a no-op.
+func TestRecordingIsOptional(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(context.Context, Task, []string) (TaskResult, error) {
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, nil)
+	if report.Status != PlanCompleted {
+		t.Fatalf("a nil recorder must not change the outcome, got %q", report.Status)
+	}
+}

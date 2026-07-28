@@ -46,7 +46,7 @@ func TestZeromaxingReminderSchedule(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := zeromaxingReminders(tc.posture, tc.turn)
+			got := zeromaxingReminders(tc.posture, tc.turn, false)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("zeromaxingReminders(%v, %d) = %#v, want %#v", tc.posture, tc.turn, got, tc.want)
 			}
@@ -59,7 +59,7 @@ func TestZeromaxingEnterAndExitFireExactlyOncePerRun(t *testing.T) {
 	count := func(posture Zeromaxing, needle string) int {
 		n := 0
 		for turn := 1; turn <= 50; turn++ {
-			for _, line := range zeromaxingReminders(posture, turn) {
+			for _, line := range zeromaxingReminders(posture, turn, false) {
 				if line == needle {
 					n++
 				}
@@ -89,9 +89,9 @@ func TestZeromaxingEnterAndExitFireExactlyOncePerRun(t *testing.T) {
 // invisible today (it rides below the cache breakpoint) and a silent cost bug
 // the moment anyone moved this text into the system prompt.
 func TestZeromaxingStillOnNoticeIsInvariant(t *testing.T) {
-	first := zeromaxingReminders(ZeromaxingEntering, 2)
+	first := zeromaxingReminders(ZeromaxingEntering, 2, false)
 	for turn := 3; turn <= 40; turn++ {
-		if got := zeromaxingReminders(ZeromaxingEntering, turn); !reflect.DeepEqual(got, first) {
+		if got := zeromaxingReminders(ZeromaxingEntering, turn, false); !reflect.DeepEqual(got, first) {
 			t.Fatalf("still-on drifted at turn %d: %#v vs %#v", turn, got, first)
 		}
 	}
@@ -116,6 +116,46 @@ func TestZeromaxingRemindersPromiseNoOrchestration(t *testing.T) {
 			if strings.Contains(lower, word) {
 				t.Fatalf("Phase 1 has no orchestration; reminder must not mention %q: %q", word, notice)
 			}
+		}
+	}
+}
+
+// Phase 1's no-orchestration rule, now CONDITIONAL rather than absolute.
+//
+// The rule was never "never mention a tool" — it was "never promise a
+// capability the run does not have". With the orchestrate tool actually
+// advertised, naming it is accurate; without it, naming it would be the
+// prompt-level lie the original test guarded against. Both directions asserted,
+// because deleting the guard and keeping only the positive case would lose
+// exactly the protection that mattered.
+func TestOrchestrateIsNamedOnlyWhenItExists(t *testing.T) {
+	withTool := zeromaxingReminders(ZeromaxingEntering, 1, true)
+	withoutTool := zeromaxingReminders(ZeromaxingEntering, 1, false)
+
+	joined := func(lines []string) string { return strings.Join(lines, "\n") }
+
+	if !strings.Contains(joined(withTool), "orchestrate") {
+		t.Fatalf("with the tool available the enter notice must name it:\n%s", joined(withTool))
+	}
+	if strings.Contains(joined(withoutTool), "orchestrate") {
+		t.Fatalf("without the tool NOTHING may mention it:\n%s", joined(withoutTool))
+	}
+	// The unavailable case keeps Phase 1's original vocabulary guard intact.
+	for _, word := range []string{"orchestrat", "workflow", "fan-out", "worker", "delegate", "parallel"} {
+		if strings.Contains(strings.ToLower(joined(withoutTool)), word) {
+			t.Fatalf("without the tool the reminders must not mention %q:\n%s", word, joined(withoutTool))
+		}
+	}
+	// The notice is one-shot like the rest: it rides the enter turn only.
+	for turn := 2; turn <= 5; turn++ {
+		if strings.Contains(joined(zeromaxingReminders(ZeromaxingEntering, turn, true)), "orchestrate") {
+			t.Fatalf("the orchestrate notice must fire once, not on turn %d", turn)
+		}
+	}
+	// Every OTHER posture state stays silent about it.
+	for _, posture := range []Zeromaxing{ZeromaxingOff, ZeromaxingActive, ZeromaxingExiting} {
+		if strings.Contains(joined(zeromaxingReminders(posture, 1, true)), "orchestrate") {
+			t.Fatalf("posture %v must not name the tool", posture)
 		}
 	}
 }

@@ -369,6 +369,10 @@ type Options struct {
 	// separate from Profile: zeromaxing arms no escalation triggers, so
 	// Profile.Policy() returns nil for it and could not carry this.
 	Zeromaxing Zeromaxing
+	// OrchestrateAvailable reports whether the orchestrate tool is actually
+	// advertised this run, so the enter notice names it only when it exists.
+	// Zero value false keeps every existing caller's prompt unchanged.
+	OrchestrateAvailable bool
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,

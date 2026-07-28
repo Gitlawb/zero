@@ -262,7 +262,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// the system prompt, which is built once per run and must stay
 		// byte-stable so the provider's cached prefix survives. See
 		// internal/agent/zeromaxing.go.
-		for _, reminder := range zeromaxingReminders(options.Zeromaxing, result.Turns) {
+		for _, reminder := range zeromaxingReminders(options.Zeromaxing, result.Turns, options.OrchestrateAvailable) {
 			messages = append(messages, zeroruntime.Message{
 				Role:    zeroruntime.MessageRoleUser,
 				Content: reminder,
