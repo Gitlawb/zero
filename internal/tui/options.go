@@ -45,13 +45,19 @@ type Options struct {
 	SessionStore                *sessions.Store
 	SandboxStore                *sandbox.GrantStore
 	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
+	// ZeromaxingDisabled carries resolved config's profiles.disableZeromaxing so
+	// /effort and /profile refuse the posture on exactly the same rule the
+	// headless exec path applies. Resolved config already folded the
+	// project-scope tighten-only merge, so a project .zero/config.json can set
+	// it but never clear it.
+	ZeromaxingDisabled  bool
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

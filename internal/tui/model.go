@@ -149,20 +149,33 @@ type model struct {
 	execProfileTurnsTouched       bool
 	execProfileEffortTouched      bool
 	execProfileSelfCorrectTouched bool
-	responseStyle                 string
-	keyBindings                   keyBindings
-	themeMode                     themeMode // palette preference: auto (default), dark, light
-	hasDarkBg                     bool      // last terminal background-detection result (auto mode)
-	userAgent                     string
-	compactRequests               int
-	compactInFlight               bool
-	compactFrame                  int
-	lastCompactResult             *CompactResult
-	lastCompactError              string
-	unpricedRequests              int
-	unpricedTokens                int
-	lastUsage                     usage.Normalized
-	lastUsageSeen                 bool
+	// zeromaxing tracks where the session sits in the zeromaxing posture
+	// lifecycle so the agent loop can inject the enter/still-on/exit reminders.
+	// It spans runs (unlike headless exec, where a process is one run), which is
+	// why Active and Exiting exist: selecting it makes the NEXT run Entering,
+	// the run after that Active, and leaving it makes the next run Exiting once.
+	zeromaxing agent.Zeromaxing
+	// zeromaxingDisabled mirrors resolved config's profiles.disableZeromaxing so
+	// /effort and /profile consult the same rule the headless path applies.
+	zeromaxingDisabled bool
+	// execProfileEffortUnraised names the effort level a profile asked for but
+	// could not apply on the active model, so the status output can say what it
+	// did not raise instead of silently pretending it did.
+	execProfileEffortUnraised modelregistry.ReasoningEffort
+	responseStyle             string
+	keyBindings               keyBindings
+	themeMode                 themeMode // palette preference: auto (default), dark, light
+	hasDarkBg                 bool      // last terminal background-detection result (auto mode)
+	userAgent                 string
+	compactRequests           int
+	compactInFlight           bool
+	compactFrame              int
+	lastCompactResult         *CompactResult
+	lastCompactError          string
+	unpricedRequests          int
+	unpricedTokens            int
+	lastUsage                 usage.Normalized
+	lastUsageSeen             bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -882,6 +895,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore:                sessionStore,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
+		zeromaxingDisabled:          options.ZeromaxingDisabled,
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
@@ -2344,6 +2358,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		m.pending = false
+		m = m.advanceZeromaxing()        // the one-shot enter/exit notices are now spent
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// A newline-triggered redraw deferred by the stream-clear throttle
 		// (see agentTextMsg) may never get a later newline or fade tick to
@@ -5001,6 +5016,7 @@ func (m *model) cancelRun() {
 		}
 	}
 	m.pending = false
+	*m = m.advanceZeromaxing() // a cancelled run spends the one-shot notices too
 	m.runCancel = nil
 	m.activeRunID = 0
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling

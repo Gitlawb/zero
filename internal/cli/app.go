@@ -837,6 +837,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		SessionStore:       deps.newSessionStore(),
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
+		ZeromaxingDisabled: resolved.Profiles.DisableZeromaxing,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {

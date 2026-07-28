@@ -173,6 +173,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// mode-supplied model flows through the same resolution (and deprecation
 	// notice) path as an explicit --model. Explicit flags still win: applyExecMode
 	// only fills fields the caller left unset.
+	// --reasoning-effort zeromaxing selects the POSTURE, not a provider effort
+	// level. Normalize it into the profile selection before mode/profile
+	// expansion so /effort zeromaxing and --exec-profile zeromaxing resolve to
+	// exactly the same state, and so the posture name can never survive into a
+	// provider request. Runs before applyExecMode, leaving the documented
+	// precedence ordering (flag > mode > profile) exactly as it was.
+	if err := normalizeZeromaxingEffort(&options); err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
 	if err := applyExecMode(&options); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -286,6 +295,23 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+	}
+	// Profile selection refusal, evaluated once config is resolved (the disable
+	// flag lives there). execprofile.SelectionRefusal is the ONE rule; the TUI
+	// /effort and /profile paths call the same function, so the selection
+	// decision cannot drift between surfaces — see
+	// TestSelectionRefusalAgreesAcrossPaths.
+	if refusal := execprofile.SelectionRefusal(execProfile, resolved.Profiles.DisableZeromaxing); refusal != "" {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat,
+			fmt.Sprintf("cannot use execution profile %q: %s.", execProfile.Name, refusal))
+	}
+	// State what it actually changes, at selection time. Burying the real delta
+	// in a PR body is how a posture ends up documented as doing things it does
+	// not do.
+	if execProfile.IsZeromaxing() {
+		if _, err := fmt.Fprintln(stderr, execprofile.Delta); err != nil {
+			return exitCrash
+		}
 	}
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
@@ -653,6 +679,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SelfCorrect:          selfCorrector,
 		FileDiagnostics:      fileDiagnostics,
 		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
+		// A headless run that selected the posture is by definition entering it:
+		// the process starts, runs once, exits, so there is no earlier turn for
+		// it to have been active across.
+		Zeromaxing: execZeromaxing(execProfile),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -1203,6 +1233,41 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 	return profile, effortFilled, nil
 }
 
+// normalizeZeromaxingEffort folds `--reasoning-effort zeromaxing` into
+// `--exec-profile zeromaxing`. The posture is one thing with one name, reachable
+// from either flag, so this is a rename rather than a second implementation.
+//
+// A conflicting explicit --exec-profile is a usage error rather than a silent
+// winner: the user asked for two different postures and deserves to be told,
+// not to have one quietly discarded.
+func normalizeZeromaxingEffort(options *execOptions) error {
+	if !strings.EqualFold(strings.TrimSpace(options.reasoningEffort), execprofile.Name) {
+		return nil
+	}
+	if selected := strings.TrimSpace(options.execProfile); selected != "" &&
+		!strings.EqualFold(selected, execprofile.Name) {
+		return execUsageError{fmt.Sprintf(
+			"--reasoning-effort %s selects the %s execution profile, which conflicts with --exec-profile %s. Pass one of them.",
+			execprofile.Name, execprofile.Name, selected)}
+	}
+	options.execProfile = execprofile.Name
+	// Clear the effort so the profile FILLS it (with "high"). Leaving the
+	// posture name here would carry it into forwardedReasoningEffort.
+	options.reasoningEffort = ""
+	return nil
+}
+
+// execZeromaxing maps a selected profile onto the run's posture lifecycle. A
+// headless exec run is one process for one run, so selecting the posture means
+// entering it and anything else means off — the Active/Exiting states only
+// arise in a session that outlives a single run (the TUI).
+func execZeromaxing(profile execprofile.Profile) agent.Zeromaxing {
+	if profile.IsZeromaxing() {
+		return agent.ZeromaxingEntering
+	}
+	return agent.ZeromaxingOff
+}
+
 // specProfileEffortFilled reports whether the profile's effort fill actually
 // governs the spec-draft run. An explicit --spec-reasoning-effort replaces the
 // filled effort for the draft, so the escalation's effort restore must not arm
@@ -1318,6 +1383,16 @@ func discoveredModelContextWindow(ctx context.Context, profile config.ProviderPr
 func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, requested string) string {
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
+		return ""
+	}
+	// LOAD-BEARING GUARD. "zeromaxing" is a Zero posture name, never a provider
+	// effort level. normalizeZeromaxingEffort already converts it into a profile
+	// selection long before this point, so reaching here means something
+	// upstream regressed — and the failure mode would be a provider request
+	// carrying a parameter value no provider defines. Refuse it at the boundary
+	// rather than trusting the caller. Pinned by
+	// TestZeromaxingIsNeverForwardedToAProvider.
+	if strings.EqualFold(requested, execprofile.Name) {
 		return ""
 	}
 	entry, ok := registry.Get(strings.TrimSpace(modelID))
