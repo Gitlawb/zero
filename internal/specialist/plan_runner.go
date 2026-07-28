@@ -1,0 +1,118 @@
+package specialist
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+// PlanTaskContext is the per-RUN state a plan task inherits from its parent.
+//
+// It is captured at registration and does not change for the process's life —
+// unlike the posture, which flips between runs and therefore lives behind a
+// PostureGate pointer. Everything here is genuinely run-invariant (paths,
+// workspace) or supplied per-call.
+type PlanTaskContext struct {
+	Executor Executor
+	Cwd      string
+	// ParentSessionID / ParentModel / PermissionMode / Depth describe the run
+	// issuing the plan, so a task inherits exactly the parent's policy.
+	ParentSessionID string
+	ParentModel     string
+	PermissionMode  string
+	Depth           int
+	// SpecialistName is the read-only specialist each plan task runs as.
+	SpecialistName string
+}
+
+// NewPlanRunner adapts Executor.Run into a PlanRunner.
+//
+// LIFETIME, deliberately: the returned closure captures only run-INVARIANT
+// state — the executor, the workspace, the parent's identity and policy. It
+// captures NO context. The ctx it uses is the one ExecutePlan hands it per
+// task, which is the tool call's own context, so a cancelled run cancels the
+// task in flight. Capturing a context at construction is precisely how the
+// prototype's background goroutine kept running after cancellation, and a
+// runner that outlived its plan would do it again.
+//
+// The runner does not outlive the plan in any meaningful sense either: it is
+// synchronous, returns before ExecutePlan moves to the next task, and holds no
+// goroutine of its own.
+func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
+	return func(ctx context.Context, task Task, grantedTools []string) (TaskResult, error) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		// Honour cancellation BEFORE launching a child: a cancelled plan must
+		// not spend another task's budget.
+		if err := ctx.Err(); err != nil {
+			return TaskResult{Outcome: TaskFailed, Err: err.Error()}, err
+		}
+
+		started := time.Now()
+		manifest := planTaskManifest(planCtx.SpecialistName, grantedTools)
+		res, err := planCtx.Executor.Run(ctx, TaskParameters{
+			Name:        planCtx.SpecialistName,
+			Prompt:      task.Prompt,
+			Description: "plan task " + task.ID,
+			Manifest:    &manifest,
+		}, TaskRunOptions{
+			ParentSessionID: planCtx.ParentSessionID,
+			ParentModel:     planCtx.ParentModel,
+			CurrentDepth:    planCtx.Depth,
+			Cwd:             planCtx.Cwd,
+			PermissionMode:  planCtx.PermissionMode,
+			// Explicitly NOT MemberAutonomy: Phase 2 tasks are read-only, and
+			// granting it here would be the authority widening that was ruled
+			// out as needing its own decision.
+		})
+		result := TaskResult{
+			ID:        task.ID,
+			Duration:  time.Since(started),
+			SessionID: res.SessionID,
+			Output:    res.Result.Output,
+			// The meter the plan budget is spent from. A task whose stream
+			// reported no usage costs 0 here, which is honest — but it means a
+			// provider that never reports usage cannot be budget-bounded by
+			// token count; MaxWall is the backstop in that case.
+			Tokens: res.TotalTokens,
+		}
+		if err != nil {
+			result.Outcome = TaskFailed
+			result.Err = err.Error()
+			return result, err
+		}
+		if res.Result.Status == tools.StatusError {
+			// The child ran but its task FAILED. Surfacing it as success would
+			// let a plan report work that did not happen.
+			result.Outcome = TaskFailed
+			result.Err = res.Result.Output
+			return result, nil
+		}
+		result.Outcome = TaskSucceeded
+		return result, nil
+	}
+}
+
+// planTaskManifest builds the inline manifest a plan task runs under. The tool
+// list is the ALREADY-INTERSECTED grant ExecutePlan computed, so this cannot
+// widen it — it only carries it.
+func planTaskManifest(name string, grantedTools []string) Manifest {
+	if strings.TrimSpace(name) == "" {
+		name = "explorer"
+	}
+	return Manifest{
+		Metadata: Metadata{
+			Name:        name,
+			Description: "Read-only plan task.",
+			Tools:       grantedTools,
+		},
+		SystemPrompt: "You are executing one task of a larger plan. You have read-only tools. " +
+			"Complete exactly the task described and report what you found; do not attempt to modify anything.",
+		Location:      LocationBuiltin,
+		FilePath:      "(plan)",
+		ResolvedTools: grantedTools,
+	}
+}

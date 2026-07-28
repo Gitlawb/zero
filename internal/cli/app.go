@@ -1056,7 +1056,30 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 	return r.specialists
 }
 
+// orchestrateWiring carries what registerSpecialistTools needs to wire the
+// plan tool. A zero value leaves the tool registered but permanently off, which
+// is the posture-off behaviour every existing caller already gets.
+type orchestrateWiring struct {
+	// Gate is the shared posture flag. A POINTER, not a closure over caller
+	// state: the TUI model is a value type copied on every update, so a closure
+	// would freeze the posture as it was at registration.
+	Gate *specialist.PostureGate
+	// Recorder receives plan lifecycle events; nil disables recording.
+	Recorder specialist.PlanRecorder
+	// ParentTools is the run's grant. A plan task may narrow it, never widen.
+	ParentTools []string
+	// PlanContext supplies the run-invariant state a plan task inherits.
+	PlanContext specialist.PlanTaskContext
+}
+
 func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
+	return registerSpecialistToolsWith(registry, workspaceRoot, maxTeamSize, orchestrateWiring{})
+}
+
+// registerSpecialistToolsWith is registerSpecialistTools plus the orchestrate
+// tool. Split so every existing caller keeps its exact behaviour and the new
+// wiring is opt-in at the call site rather than a signature change.
+func registerSpecialistToolsWith(registry *tools.Registry, workspaceRoot string, maxTeamSize int, wiring orchestrateWiring) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -1080,6 +1103,27 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
+	// The orchestrate tool. Registered ALWAYS and gated by Safety(): with the
+	// posture off it reports PermissionDeny, so it is never advertised and the
+	// prefix is byte-identical to a build without it. Registering conditionally
+	// would not work — the TUI builds its registry once per session and clones
+	// tool POINTERS per run, so a tool added on a posture flip would never
+	// reach a run already holding a clone.
+	planContext := wiring.PlanContext
+	planContext.Executor = executor
+	if strings.TrimSpace(planContext.Cwd) == "" {
+		planContext.Cwd = workspaceRoot
+	}
+	if strings.TrimSpace(planContext.SpecialistName) == "" {
+		planContext.SpecialistName = "explorer"
+	}
+	registry.Register(&specialist.OrchestrateTool{
+		PostureActive: wiring.Gate.Active,
+		RunTask:       specialist.NewPlanRunner(planContext),
+		Recorder:      wiring.Recorder,
+		ParentTools:   wiring.ParentTools,
+		Depth:         planContext.Depth,
+	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }
 

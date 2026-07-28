@@ -199,6 +199,13 @@ func manifestIsReadOnly(manifest Manifest) bool {
 type ExecResult struct {
 	Result    tools.Result
 	SessionID string
+	// TotalTokens is the child's own token usage, when the stream reported it.
+	// Additive and zero when unknown, so every existing caller is unchanged.
+	// The plan executor meters its budget from this: without it the budget was
+	// enforced at dispatch against a counter that never moved, so it could
+	// never fire — found by driving the real binary, invisible to a unit test
+	// whose fake runner fabricated its own token counts.
+	TotalTokens int
 }
 
 type ChildRunResult struct {
@@ -587,8 +594,9 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 	rolledUp := executor.rollUpSpecialistUsage(accounting, summary)
 	executor.recordSpecialistStop(accounting, summary, summary.Status, summary.ExitCode, nil, rolledUp)
 	return ExecResult{
-		Result:    BuildFinalResult(run.Events, run.Stderr, run.ExitCode, run.Signal),
-		SessionID: built.SessionID,
+		Result:      BuildFinalResult(run.Events, run.Stderr, run.ExitCode, run.Signal),
+		SessionID:   built.SessionID,
+		TotalTokens: summary.Usage.EffectiveTotalTokens(),
 	}, nil
 }
 
