@@ -182,11 +182,7 @@ func Format(result Result) string {
 			"Release: " + result.ReleaseURL,
 		}
 		lines = appendAssetLines(lines, result.ReleaseAsset)
-		if target := releaseAssetTarget(result.ReleaseAsset); target != "" {
-			lines = append(lines, "Download the verified "+target+" release asset, then replace the current zero binary.")
-		} else {
-			lines = append(lines, "Download the verified release asset, then replace the current zero binary.")
-		}
+		lines = append(lines, "Run `zero upgrade` to download, verify, and install the latest release.")
 		return strings.Join(lines, "\n")
 	}
 	lines := []string{

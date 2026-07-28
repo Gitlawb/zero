@@ -436,8 +436,11 @@ func TestFormatResult(t *testing.T) {
 	if !strings.Contains(output, "Release asset: zero-v0.2.0-linux-x64.tar.gz") || !strings.Contains(output, "Checksum asset: zero-v0.2.0-linux-x64.tar.gz.sha256") {
 		t.Fatalf("update output did not include release assets: %q", output)
 	}
-	if !strings.Contains(output, "Release target: linux-x64") || !strings.Contains(output, "Download the verified linux-x64 release asset") {
+	if !strings.Contains(output, "Release target: linux-x64") {
 		t.Fatalf("update output did not include target-specific guidance: %q", output)
+	}
+	if !strings.Contains(output, "Run `zero upgrade` to download, verify, and install") {
+		t.Fatalf("update output did not include upgrade guidance: %q", output)
 	}
 	if strings.Contains(output, "your platform") {
 		t.Fatalf("update output should not use ambiguous platform wording: %q", output)

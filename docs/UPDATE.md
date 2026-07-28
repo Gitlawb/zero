@@ -32,8 +32,9 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 - Standalone installs download the release archive, verify its checksum,
   extract it, and atomically replace the running binary plus any installed
   optional sandbox helpers.
-- On Windows, the running executable is renamed aside and cleaned up on a
-  later invocation, since it can't be overwritten while running.
+- On Windows, the running executable is renamed aside and cleaned up on the
+  next `zero update --apply` or `zero upgrade`, since it can't be overwritten
+  while running.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
 - `--json` serializes Zero's final result. For npm-managed installs, npm may
@@ -46,8 +47,8 @@ Useful flags:
 
 | Flag | Purpose |
 |---|---|
-| `--repo <owner/repo>` | Check another GitHub repository. |
-| `--endpoint <url\|owner/repo>` | Check a specific release API URL or repository slug. |
+| `--repo <owner/repo>` | Use another GitHub repository for `--check` and `--apply`/`upgrade`. |
+| `--endpoint <url\|owner/repo>` | Use a specific release API URL or repository slug for `--check` and `--apply`/`upgrade`. |
 | `--timeout <duration>` | Override the default release check timeout. |
 | `--target <platform-arch>` | Validate release metadata for another supported target (`--check` only). |
 

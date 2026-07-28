@@ -1457,6 +1457,20 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 	}
 }
 
+func TestTopLevelHelpDocumentsRequiredUpdateMode(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"--help"}, &stdout, &stderr, appDeps{})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "update     Check or apply Zero CLI updates (requires --check or --apply)") {
+		t.Fatalf("expected top-level help to document required update mode, got %q", got)
+	}
+}
+
 func TestRunUpdateReportsUpToDate(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

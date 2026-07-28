@@ -1196,7 +1196,7 @@ Commands:
   mcp        Manage MCP backend settings
   auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
-  update     Check for or apply Zero CLI updates
+  update     Check or apply Zero CLI updates (requires --check or --apply)
   upgrade    Download, verify, and install available Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
