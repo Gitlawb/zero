@@ -21,9 +21,13 @@ var dialPreSendErrnos = []error{
 	syscall.ECONNREFUSED,
 	syscall.ENETUNREACH,
 	syscall.EHOSTUNREACH,
+	syscall.ETIMEDOUT,
 	windows.WSAECONNREFUSED,
 	windows.WSAENETUNREACH,
 	windows.WSAEHOSTUNREACH,
+	// Same reasoning as the POSIX ETIMEDOUT entry, with the Winsock code a real
+	// Windows connect timeout actually carries.
+	windows.WSAETIMEDOUT,
 }
 
 // isConnResetErrno reports whether err carries a connection-reset errno, the

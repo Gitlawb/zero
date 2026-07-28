@@ -191,6 +191,15 @@ func SendWithRetry(
 		// play, which this package has always retried. Guarding on redirects here
 		// would not close a gap, it would make a rate-limited completion behind a
 		// redirecting gateway fail outright instead of backing off.
+		// The transport hop succeeded, so the connect phase is healthy again and
+		// the pre-send budget starts over. It bounds CONSECUTIVE connect failures,
+		// not the lifetime of the call: without this reset, two early dial retries
+		// followed by a 429 and then one more dial blip would surface a transport
+		// error while the status budget still had room, which is the coupling
+		// these two counters were split apart to remove. Total work stays bounded,
+		// since every reset costs a status attempt and those are capped.
+		preSendAttempts = 0
+
 		if ShouldRetryStatus(response.StatusCode) {
 			statusAttempts++
 			if statusAttempts < maxAttempts {
@@ -260,6 +269,16 @@ func isPreSendTransportError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || isConnResetErrno(err) {
 		return false
 	}
+	// A CONNECT-phase timeout is provably pre-send for the same structural reason
+	// a refused dial is: the connection was never established, so no request
+	// bytes left this host. It has to be admitted BEFORE the wording exclusions
+	// below, because net surfaces it with "i/o timeout" in the message, which the
+	// blanket exclusion would otherwise reject. The gate is what keeps that safe:
+	// a post-send read timeout is also Timeout(), but carries Op "read", so it
+	// never reaches here.
+	if opErr := connectOpError(err); opErr != nil && opErr.Timeout() {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "broken pipe") ||
@@ -278,7 +297,7 @@ func isPreSendTransportError(err error) bool {
 	// (WSAECONNREFUSED etc.), which does NOT satisfy errors.Is against the POSIX
 	// syscall.ECONNREFUSED, so the Windows list adds those codes. The string
 	// markers only catch a POSIX dial error already flattened past its errno.
-	if dialOpError(err) != nil {
+	if connectOpError(err) != nil {
 		for _, errno := range dialPreSendErrnos {
 			if errors.Is(err, errno) {
 				return true
@@ -301,14 +320,21 @@ func isPreSendTransportError(err error) bool {
 	return false
 }
 
-// dialOpError returns the outermost *net.OpError in err's chain when its Op is
-// "dial", else nil. Go tags a connection-establishment failure with Op "dial";
-// a failure on an already-established connection carries Op "read"/"write". This
-// is how isPreSendTransportError scopes the pre-send errno/wording match to the
-// connect phase so a post-send failure can't be misclassified as pre-send.
-func dialOpError(err error) *net.OpError {
+// connectOpError returns the outermost *net.OpError in err's chain when it comes
+// from the connection-establishment phase, else nil. Go tags a direct dial with
+// Op "dial" and a failed CONNECT through an HTTP proxy with Op "proxyconnect";
+// a failure on an already-established connection carries Op "read"/"write".
+// This is how isPreSendTransportError scopes the pre-send match to the connect
+// phase so a post-send failure can't be misclassified as pre-send.
+//
+// "proxyconnect" belongs here for the same reason "dial" does: when HTTPS_PROXY
+// is set and the CONNECT fails, the tunnel to the model host was never built, so
+// no request bytes reached it. Omitting it meant every pre-send failure behind a
+// corporate proxy fell through to no-retry, which is the environment where
+// transient connect failures are most common.
+func connectOpError(err error) *net.OpError {
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
 		return opErr
 	}
 	return nil

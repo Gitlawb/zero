@@ -17,6 +17,10 @@ var dialPreSendErrnos = []error{
 	syscall.ECONNREFUSED,
 	syscall.ENETUNREACH,
 	syscall.EHOSTUNREACH,
+	// A connect timeout is normally caught by the Timeout() check on the connect
+	// gate; this covers the case where the errno survives but the timeout flag
+	// does not, e.g. an error rebuilt from the errno alone.
+	syscall.ETIMEDOUT,
 }
 
 // isConnResetErrno reports whether err carries a connection-reset errno, the

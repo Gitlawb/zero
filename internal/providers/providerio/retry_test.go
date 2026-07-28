@@ -595,3 +595,108 @@ func TestSendWithRetryRetriesRedirectedRetryableStatus(t *testing.T) {
 		t.Fatalf("transport called %d times, want 4 (redirect, 429, redirect, 200)", got)
 	}
 }
+
+// A CONNECT-phase timeout is provably pre-send: the connection was never
+// established, so no request bytes left this host. It reaches the classifier
+// carrying "i/o timeout", which the blanket wording exclusion rejects, so
+// admitting it depends on the connect gate running first.
+//
+// The post-send counterpart is the point of the table: a read timeout is also
+// Timeout(), and must stay excluded, or a reply that timed out mid-generation
+// would replay a completion the server already billed.
+func TestPreSendClassifiesConnectTimeouts(t *testing.T) {
+	timeoutErr := &timeoutError{}
+	for name, testCase := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"dial timeout": {
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr},
+			want: true,
+		},
+		"proxy connect timeout": {
+			err:  &net.OpError{Op: "proxyconnect", Net: "tcp", Err: timeoutErr},
+			want: true,
+		},
+		"read timeout stays post-send": {
+			err:  &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr},
+			want: false,
+		},
+		"write timeout stays post-send": {
+			err:  &net.OpError{Op: "write", Net: "tcp", Err: timeoutErr},
+			want: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := isPreSendTransportError(testCase.err); got != testCase.want {
+				t.Fatalf("isPreSendTransportError(%v) = %v, want %v", testCase.err, got, testCase.want)
+			}
+		})
+	}
+}
+
+// A failed CONNECT through an HTTP proxy is pre-send for the same structural
+// reason a refused dial is, but net tags it Op "proxyconnect", so a gate
+// matching only "dial" left every pre-send failure behind a corporate proxy
+// unretried.
+func TestPreSendClassifiesProxyConnectRefusal(t *testing.T) {
+	err := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: syscall.ECONNREFUSED}
+	if !isPreSendTransportError(err) {
+		t.Fatal("a refused proxy CONNECT was not classified pre-send; no request bytes reached the model host")
+	}
+	// The op still has to be a connect phase. The same errno on an established
+	// connection is post-send and must not replay a POST.
+	post := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNREFUSED}
+	if isPreSendTransportError(post) {
+		t.Fatal("a read-phase error was classified pre-send")
+	}
+}
+
+// timeoutError is a net.Error whose Timeout() is true, matching the shape
+// net/http surfaces for a connect deadline.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+// The pre-send budget bounds CONSECUTIVE connect failures, not the lifetime of
+// the call. Without a reset on a successful hop, an early run of dial blips
+// permanently spends the budget, so a later blip surfaces as a transport error
+// while the status budget still has room. That is the coupling the two counters
+// were split apart to remove, in the one ordering the earlier tests did not
+// cover: pre-send, then status, then pre-send again.
+func TestPreSendBudgetResetsAfterSuccessfulHop(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1, 2:
+			// Two connect failures, spending the pre-send budget under the old
+			// lifetime accounting.
+			return nil, refused
+		case 3:
+			// A hop that reaches the server. It declines, so the request was not
+			// accepted and retrying stays safe.
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody, Request: r}, nil
+		case 4:
+			// One more connect blip. With a lifetime cap this surfaces as an
+			// error; the call should still recover.
+			return nil, refused
+		default:
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}
+	})}
+
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "https://origin.invalid/v1", []byte("{}"), nil, 3)
+	if err != nil {
+		t.Fatalf("interleaved connect and status failures returned %v; the pre-send budget did not reset after the hop that reached the server", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&calls); got != 5 {
+		t.Fatalf("transport called %d times, want 5 (dial, dial, 429, dial, 200)", got)
+	}
+}
