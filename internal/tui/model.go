@@ -1703,6 +1703,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
 			}
+		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
+			// Ctrl+V probes the clipboard for an IMAGE only. Text pasting stays
+			// exclusively on the terminal's bracketed-paste path (Bubble's own
+			// Ctrl+V binding is disabled in newModel for exactly that reason), so
+			// this cannot double-insert text. It is needed because a clipboard
+			// holding a screenshot produces no bracketed paste at all: the terminal
+			// has no text to send, so routePaste never runs and its empty-content
+			// image probe never fires. Right-click paste reached that probe only
+			// because it always delivers a clipboardReadMsg, empty or not.
+			// readClipboardImageCmd yields no message when the clipboard holds no
+			// image, so Ctrl+V with text on the clipboard stays a no-op here and is
+			// handled by the bracketed paste exactly as before.
+			//
+			// Cmd+V is matched too, since macOS reports Command as ModSuper rather
+			// than ModCtrl. That only helps on terminals that deliver the key to the
+			// application: one that handles Cmd+V itself pastes the clipboard TEXT
+			// and sends no key event, so an image-only clipboard still produces
+			// nothing for this to react to.
+			if m.noBlockingModal() {
+				return m, readClipboardImageCmd()
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {

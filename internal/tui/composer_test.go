@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/imageinput"
 )
 
 func TestComposerInsertNewlineAtCursor(t *testing.T) {
@@ -129,19 +131,74 @@ func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 	}
 }
 
-func TestCtrlVDoesNotPasteIntoComposer(t *testing.T) {
+// Ctrl+V must never insert TEXT: bracketed paste is the only text path, so
+// letting Bubble's own Ctrl+V binding also read the clipboard would double-paste.
+// It may return a command, but that command is the image probe below, never a
+// text paste, so the composer contents are unchanged either way.
+func TestCtrlVDoesNotPasteTextIntoComposer(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("hello")
 	m.input.CursorEnd()
 
-	updated, cmd := m.Update(testKeyCtrl('v'))
+	updated, _ := m.Update(testKeyCtrl('v'))
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("ctrl+v should not run the textinput clipboard paste command")
-	}
 	if got := next.composerValue(); got != "hello" {
 		t.Fatalf("composer value after ctrl+v = %q, want unchanged", got)
+	}
+}
+
+// Ctrl+V probes the clipboard for an image (#534). A clipboard holding a
+// screenshot produces no bracketed paste at all, so without this the empty-paste
+// image probe in routePaste never runs and Ctrl+V does nothing, which is exactly
+// what users reported: right-click paste attached the image, Ctrl+V did not.
+func TestCtrlVProbesClipboardForImage(t *testing.T) {
+	// Stubbed BEFORE Update, so the command Update returns is the one that runs.
+	// Asserting only that some command came back, then running a freshly built
+	// probe, would pass even if the key never reached the image route at all.
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) {
+		return []byte("png-bytes"), "image/png", nil
+	}
+
+	// Both modifiers: macOS reports Command as ModSuper, so a handler matching
+	// only ModCtrl leaves Cmd+V doing nothing on the platform where screenshots
+	// are most often on the clipboard.
+	for name, key := range map[string]tea.KeyPressMsg{
+		"ctrl+v": testKeyCtrl('v'),
+		"cmd+v":  testKeyPressMod('v', tea.ModSuper),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			_, cmd := m.Update(key)
+			if cmd == nil {
+				t.Fatal("no command issued; the clipboard image probe never ran")
+			}
+			image, ok := execCmd(cmd).(clipboardImageMsg)
+			if !ok {
+				t.Fatal("the command issued was not the clipboard image probe")
+			}
+			if string(image.data) != "png-bytes" || image.mediaType != "image/png" {
+				t.Fatalf("unexpected image message: %+v", image)
+			}
+		})
+	}
+}
+
+// With no image on the clipboard the probe stays silent: Ctrl+V while copying
+// text must not emit a notice or disturb the composer. Driven through Update
+// rather than by calling the probe directly, so this covers the real key route
+// and not just the command in isolation.
+func TestClipboardImageProbeSilentWithoutImage(t *testing.T) {
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) { return nil, "", nil }
+
+	m := newModel(context.Background(), Options{})
+	_, cmd := m.Update(testKeyCtrl('v'))
+	if msg := execCmd(cmd); msg != nil {
+		t.Fatalf("probe emitted %T with no image on the clipboard, want no message", msg)
 	}
 }
 
@@ -463,5 +520,55 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 				t.Fatalf("cursor = %d, want %d", got, tc.wantCursor)
 			}
 		})
+	}
+}
+
+// A clipboard that holds an image the host cannot extract must say so. This is
+// the macOS case: neither pngpaste nor PyObjC ships with the OS, so the reader
+// fails on a stock Mac, and reporting that as "no image" meant Ctrl+V did
+// nothing at all with no explanation. Silence is the wrong answer to a
+// condition the user can act on.
+func TestClipboardImageUnreadableSurfacesToUser(t *testing.T) {
+	original := readClipboardImage
+	t.Cleanup(func() { readClipboardImage = original })
+	readClipboardImage = func() ([]byte, string, error) {
+		return nil, "", imageinput.ErrClipboardImageUnreadable
+	}
+
+	m := newModel(context.Background(), Options{})
+	_, cmd := m.Update(testKeyCtrl('v'))
+	if cmd == nil {
+		t.Fatal("no command issued; the clipboard image probe never ran")
+	}
+	msg := execCmd(cmd)
+	image, ok := msg.(clipboardImageMsg)
+	if !ok {
+		t.Fatalf("probe returned %T, want clipboardImageMsg carrying the failure", msg)
+	}
+	if image.err == nil {
+		t.Fatal("the unreadable-clipboard failure was swallowed; the user is told nothing")
+	}
+	// The message has to name the remedy, since the whole point is that the user
+	// can fix this by installing something.
+	if !strings.Contains(image.err.Error(), "pngpaste") {
+		t.Fatalf("error = %q, want it to name what to install", image.err.Error())
+	}
+
+	// And it must reach the transcript as an error row rather than stopping at
+	// the message, which is where the old silent no-op ended.
+	updated, _ := m.Update(image)
+	next, ok := updated.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", updated)
+	}
+	found := false
+	for _, row := range next.transcript {
+		if row.kind == rowError && strings.Contains(row.text, "Clipboard image read failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("the failure never reached the transcript; the user still sees nothing")
 	}
 }
