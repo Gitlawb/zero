@@ -415,6 +415,13 @@ type Options struct {
 	// byte-identical: no observation, no escalation, no counters. Same opt-in
 	// convention as Trace and SelfCorrect.
 	Profile *ProfilePolicy
+	// Zeromaxing reports where this run sits in the zeromaxing execution
+	// posture's lifecycle, driving the model-facing reminders the turn loop
+	// appends. The zero value (ZeromaxingOff) suppresses every reminder, so a
+	// caller that never heard of it is byte-identical to today. Deliberately
+	// separate from Profile: zeromaxing arms no escalation triggers, so
+	// Profile.Policy() returns nil for it and could not carry this.
+	Zeromaxing Zeromaxing
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,

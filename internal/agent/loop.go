@@ -269,6 +269,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
 
+		// The zeromaxing posture's reminders. Appended to the CONVERSATION tail
+		// as user-role messages — the same channel as the diagnostics nudge
+		// below and the failure/plan hints later in the turn — and never into
+		// the system prompt, which is built once per run and must stay
+		// byte-stable so the provider's cached prefix survives. See
+		// internal/agent/zeromaxing.go.
+		for _, reminder := range zeromaxingReminders(options.Zeromaxing, result.Turns) {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: reminder,
+			})
+		}
+
 		// Deliver background post-edit diagnostics from the previous turn's edits
 		// BEFORE compaction so the nudge is part of the request being budgeted.
 		// A brief wait at most (asyncDiagnosticsDrainTimeout); an unfinished check
