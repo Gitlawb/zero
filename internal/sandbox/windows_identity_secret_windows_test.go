@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,18 @@ func windowsSecretACEList(dacl *windows.ACL) ([]*windows.SID, error) {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, index, &ace); err != nil {
 			return nil, err
+		}
+		// GetAce hands back a generic ACE_HEADER and we reinterpret it. That is
+		// only sound for the fixed-layout types: an object ACE carries Flags and
+		// two GUIDs ahead of the trustee, so SidStart would land mid-structure
+		// and Copy would read whatever bytes happen to be there. The caller's
+		// "unexpected trustee" assertion would then print a nonsense SID instead
+		// of naming the ACE that does not belong, which is the opposite of what
+		// a failing test should do. Nothing under test builds anything but
+		// allowed ACEs today, so this exists to keep the failure legible if that
+		// ever changes.
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return nil, fmt.Errorf("ACE %d has type %d, want ACCESS_ALLOWED_ACE_TYPE (%d); refusing to decode its trustee", index, ace.Header.AceType, windows.ACCESS_ALLOWED_ACE_TYPE)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		copied, err := sid.Copy()
