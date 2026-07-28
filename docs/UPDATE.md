@@ -37,6 +37,10 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
   while running.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
+- `--repo` and `--endpoint` are ignored when applying to an npm-managed
+  install: that path delegates to `npm install -g @gitlawb/zero@latest` and
+  takes its release from the npm registry, not from GitHub. They still apply to
+  `--check` there.
 - `--json` serializes Zero's final result. For npm-managed installs, npm may
   also write progress output to stdout, so neither
   `zero update --apply --json` nor `zero upgrade --json` is guaranteed to

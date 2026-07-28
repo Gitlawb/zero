@@ -182,7 +182,7 @@ func Format(result Result) string {
 			"Release: " + result.ReleaseURL,
 		}
 		lines = appendAssetLines(lines, result.ReleaseAsset)
-		lines = append(lines, "Run `zero upgrade` to download, verify, and install the latest release.")
+		lines = append(lines, upgradeGuidance(result.ReleaseAsset))
 		return strings.Join(lines, "\n")
 	}
 	lines := []string{
@@ -212,6 +212,42 @@ func releaseAssetTarget(asset AssetCheck) string {
 		return ""
 	}
 	return asset.Platform + "-" + asset.Arch
+}
+
+// localReleaseTarget is the release target of the machine running this process,
+// or "" when no release archive is published for it (Termux, for example).
+func localReleaseTarget() string {
+	platform, err := releasePlatform(runtime.GOOS)
+	if err != nil {
+		return ""
+	}
+	arch, err := releaseArch(runtime.GOARCH)
+	if err != nil {
+		return ""
+	}
+	return platform + "-" + arch
+}
+
+// upgradeGuidance returns the next step for an available update. `zero upgrade`
+// only ever installs onto THIS machine, so recommending it after a `--check
+// --target <other>` would answer a question about one machine with an action
+// that changes another. A cross-target check gets the manual instruction
+// instead, and says plainly which machine `zero upgrade` would have touched.
+//
+// An asset with no target recorded is the ordinary current-platform check (the
+// target fields are only populated when a target was resolved), so it keeps the
+// upgrade recommendation.
+func upgradeGuidance(asset AssetCheck) string {
+	target := releaseAssetTarget(asset)
+	local := localReleaseTarget()
+	if target == "" || target == local {
+		return "Run `zero upgrade` to download, verify, and install the latest release."
+	}
+	guidance := "Download the verified " + target + " release asset and replace the zero binary on that machine."
+	if local == "" {
+		return guidance + " `zero upgrade` installs onto this machine only."
+	}
+	return guidance + " `zero upgrade` installs onto this machine (" + local + ") instead."
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {

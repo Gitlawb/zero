@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -439,11 +440,24 @@ func TestFormatResult(t *testing.T) {
 	if !strings.Contains(output, "Release target: linux-x64") {
 		t.Fatalf("update output did not include target-specific guidance: %q", output)
 	}
-	if !strings.Contains(output, "Run `zero upgrade` to download, verify, and install") {
-		t.Fatalf("update output did not include upgrade guidance: %q", output)
-	}
 	if strings.Contains(output, "your platform") {
 		t.Fatalf("update output should not use ambiguous platform wording: %q", output)
+	}
+
+	// The upgrade recommendation is about THIS machine, so it depends on whether
+	// the checked target is this machine — assert it against the local target
+	// rather than the fixed linux-x64 fixture above, which is a cross-target
+	// check anywhere but linux/amd64.
+	local := Format(Result{
+		CurrentVersion:  "0.1.0",
+		LatestVersion:   "0.2.0",
+		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		TagName:         "v0.2.0",
+		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH),
+		UpdateAvailable: true,
+	})
+	if !strings.Contains(local, "Run `zero upgrade` to download, verify, and install") {
+		t.Fatalf("current-platform check did not recommend zero upgrade: %q", local)
 	}
 
 	output = Format(Result{
@@ -459,6 +473,38 @@ func TestFormatResult(t *testing.T) {
 	}
 	if !strings.Contains(output, "Release target: linux-x64") {
 		t.Fatalf("up-to-date output did not include release target: %q", output)
+	}
+}
+
+// TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade is the regression test
+// for jatmn's #489 finding: `zero update --check --target <other>` answers a
+// question about a different machine, but the output recommended `zero upgrade`,
+// which only ever installs onto this one. That replaced the target-specific
+// manual-download guidance the flag used to print.
+func TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade(t *testing.T) {
+	// Pick a target that is definitely not this machine.
+	goos, goarch := "linux", "amd64"
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		goos, goarch = "windows", "arm64"
+	}
+	other := assetCheckForTest(t, "v0.2.0", goos, goarch)
+	output := Format(Result{
+		CurrentVersion:  "0.1.0",
+		LatestVersion:   "0.2.0",
+		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		TagName:         "v0.2.0",
+		ReleaseAsset:    other,
+		UpdateAvailable: true,
+	})
+	if strings.Contains(output, "Run `zero upgrade`") {
+		t.Fatalf("a cross-target check must not recommend the local upgrade: %q", output)
+	}
+	target := other.Platform + "-" + other.Arch
+	if !strings.Contains(output, "Download the verified "+target+" release asset") {
+		t.Fatalf("cross-target check lost its target-specific guidance: %q", output)
+	}
+	if !strings.Contains(output, "installs onto this machine") {
+		t.Fatalf("cross-target check should say which machine zero upgrade would touch: %q", output)
 	}
 }
 
