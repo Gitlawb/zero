@@ -83,6 +83,13 @@ func createStagingDirectory(parent *os.File) (string, unix.Stat_t, error) {
 		}
 		var created unix.Stat_t
 		if err := unix.Fstatat(int(parent.Fd()), name, &created, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			// Nothing else knows this name yet, so a failure here would otherwise
+			// leave an empty .zero-stage-* directory behind for good. Removing it
+			// with rmdir semantics is safe without a prior identity check: the name
+			// was minted from fresh randomness moments ago, and rmdir refuses
+			// anything that is not an empty directory, so the worst an entry
+			// substituted in that window can do is make this call fail.
+			_ = unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
 			return "", unix.Stat_t{}, err
 		}
 		return name, created, nil

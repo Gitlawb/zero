@@ -99,7 +99,14 @@ func verifyFreshRegularFile(handle windows.Handle, path string) error {
 // there is no second lookup to win.
 func (staged *stagedBinary) promote(targetPath string) error {
 	oldPath := targetPath + ".old"
-	_ = os.Remove(oldPath) // best-effort cleanup of a leftover from a previous upgrade
+	if !oldBinaryPreserved(oldPath) {
+		// Best-effort cleanup of a leftover from a previous upgrade. Skipped when a
+		// failed restore marked this copy as the last known-good binary: the rename
+		// below replaces it anyway if it succeeds, so removing it up front only
+		// creates a window where a failure to rename the running binary aside
+		// leaves neither a recovery copy nor a marker explaining its absence.
+		_ = os.Remove(oldPath)
+	}
 	if err := os.Rename(targetPath, oldPath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
@@ -122,6 +129,10 @@ func (staged *stagedBinary) promote(targetPath string) error {
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)
 	}
+	// The installed binary is verified again, so any earlier "this .old is the
+	// last known-good copy" marker no longer describes reality — and oldPath now
+	// holds what this promotion replaced, not what that marker was written about.
+	clearOldBinaryPreserved(oldPath)
 	staged.path = targetPath
 	staged.promoted = true
 	return nil

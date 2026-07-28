@@ -120,6 +120,101 @@ func TestCleanupStaleBinaryPreservesOldWhenTargetIsAbsent(t *testing.T) {
 	}
 }
 
+// TestCleanupStaleBinaryPreservesMarkedOldWhenTargetExists covers jatmn's #751
+// P3 follow-up: after ErrTargetPossiblyTampered, targetPath holds exactly the
+// bytes the updater could NOT verify while .old holds the ones it could. The
+// next Apply saw a present target and deleted .old as an ordinary leftover,
+// erasing the recovery copy the failure had just told the operator to use.
+func TestCleanupStaleBinaryPreservesMarkedOldWhenTargetExists(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	markOldBinaryPreserved(oldPath)
+
+	CleanupStaleBinary(targetPath)
+
+	got, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatalf("marked recovery copy was removed: %v", err)
+	}
+	if string(got) != "known-good" {
+		t.Fatalf("preserved old binary = %q, want known-good", got)
+	}
+	if _, err := os.Stat(oldPath + oldBinaryPreservedSuffix); err != nil {
+		t.Fatalf("marker must survive alongside the copy it protects: %v", err)
+	}
+
+	// Once the marker is cleared — which a successful promotion does — the copy
+	// is an ordinary leftover again.
+	clearOldBinaryPreserved(oldPath)
+	CleanupStaleBinary(targetPath)
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("unmarked old binary was not removed: %v", err)
+	}
+}
+
+// TestRestoreOriginalBinaryMarksPreservedCopy pins the other half: the path that
+// reports "original preserved at <.old>" is the path that makes that true across
+// runs.
+func TestRestoreOriginalBinaryMarksPreservedCopy(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	// Hold the target with no sharing so the restore rename cannot replace it,
+	// which is the condition ErrTargetPossiblyTampered describes.
+	blocker, err := openWithoutSharing(targetPath)
+	if err != nil {
+		t.Skipf("cannot hold the target exclusively on this filesystem: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
+
+	err = restoreOriginalBinary(oldPath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if !oldBinaryPreserved(oldPath) {
+		t.Fatal("a failed restore must mark the preserved copy so later cleanup keeps it")
+	}
+	CleanupStaleBinary(targetPath)
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("recovery copy was removed after a failed restore: %v", err)
+	}
+}
+
+// openWithoutSharing opens an existing file denying every share mode, so a
+// rename onto it fails the way a principal squatting the executable path does.
+func openWithoutSharing(path string) (*os.File, error) {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
 func TestCleanupStaleBinaryRemovesOldWhenTargetExists(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")
