@@ -94,12 +94,77 @@ var (
 		ReasoningEffort: "high",
 		SelfCorrect:     true,
 	}
+
+	// Zeromaxing is the top posture: thorough's knobs with double the turn
+	// budget again, plus the loop-posture reminders the agent injects while it
+	// is active (see agent.Zeromaxing).
+	//
+	// HONEST DELTA over thorough: the turn budget, and nothing else. Effort is
+	// already at the ceiling and self-correction is already armed. Delta states
+	// that to the user's face rather than leaving it in a commit message — a
+	// posture whose advertised behaviour exceeds its real behaviour is worse
+	// than no posture at all.
+	//
+	// ReasoningEffort is "high" and MUST STAY "high" — pinned by
+	// TestZeromaxingReasoningEffortStaysHigh. "high" is the top rung every
+	// provider actually maps: anthropic's thinkingBudgetForEffort and its gemini
+	// twin fall through to their default arm (budget 0 => extended thinking
+	// DISABLED) for anything above it, and the openai mapper drops the field
+	// entirely. Raising this to "xhigh"/"max" would silently turn thinking OFF —
+	// a downgrade wearing an upgrade's name. Raising the real ceiling means
+	// teaching the providers those tiers first.
+	Zeromaxing = Profile{
+		Name:            "zeromaxing",
+		MaxTurns:        320,
+		ReasoningEffort: "high",
+		SelfCorrect:     true,
+	}
 )
 
 var catalog = map[string]Profile{
-	Balanced.Name: Balanced,
-	Fast.Name:     Fast,
-	Thorough.Name: Thorough,
+	Balanced.Name:   Balanced,
+	Fast.Name:       Fast,
+	Thorough.Name:   Thorough,
+	Zeromaxing.Name: Zeromaxing,
+}
+
+// Delta is the user-facing statement of what selecting zeromaxing actually
+// changes, shown by /effort, /profile, and the exec selection notice. It is
+// deliberately concrete and deliberately admits the two knobs it does NOT move:
+// a user paying for a higher posture is owed the real delta, not a slogan.
+//
+// The child-budget sentence is not a caveat, it is the point: zeromaxing is a
+// maximal posture, so the raised budget is exported to spawned sub-agents
+// exactly as /turns does (asserted by TestZeromaxingTurnBudgetPropagatesToChildren).
+const Delta = "zeromaxing raises the tool-turn budget to 320 (thorough uses 160) and applies that budget to spawned sub-agents too. " +
+	"Reasoning effort and post-edit self-correction are unchanged from thorough: effort is already at the highest level providers accept, and self-correction is already armed."
+
+// Name is the single spelling of this posture, everywhere: /effort zeromaxing,
+// /profile zeromaxing, --exec-profile zeromaxing, --reasoning-effort zeromaxing.
+// One name, one table — no aliases, so there is no second spelling to keep in
+// step with this one.
+const Name = "zeromaxing"
+
+// IsZeromaxing reports whether p is the zeromaxing posture. Callers use it
+// instead of comparing name strings so the literal lives in exactly one place.
+func (p Profile) IsZeromaxing() bool { return p.Name == Name }
+
+// SelectionRefusal returns a non-empty, user-facing reason when the named
+// profile may not be selected here, or "" when selection is allowed.
+//
+// It is the ONE authoritative selection rule, called by BOTH the headless exec
+// path and the TUI /effort + /profile paths. Those paths already differ in how
+// they apply a profile's knobs; letting each decide selection independently is
+// exactly how a rule gets applied to one call path and silently omitted from
+// its sibling. TestSelectionRefusalAgreesAcrossPaths pins that they agree.
+//
+// disabled comes from resolved config. A project .zero/config.json may set it
+// (DISABLE) but can never clear it (ENABLE) — see mergeProjectConfig.
+func SelectionRefusal(p Profile, disabled bool) string {
+	if p.IsZeromaxing() && disabled {
+		return "the zeromaxing posture is disabled for this workspace (profiles.disableZeromaxing in config)"
+	}
+	return ""
 }
 
 // Lookup resolves a profile by name, case-insensitively and ignoring
