@@ -63,17 +63,31 @@ func TestCredentialDenyReadPathsCoversGitCredentialStores(t *testing.T) {
 // An explicit read grant still wins, matching how every other entry behaves: a
 // user who deliberately scopes a workspace over one of these paths is not
 // overridden by the default deny.
+//
+// Asserted from both sides on purpose. Checking only that the path is absent
+// under an allowRead is satisfied just as well by a deny rule that was never
+// added, so the run without allowRead has to establish that there is something
+// there for the grant to override.
 func TestGitCredentialDenyYieldsToExplicitAllowRead(t *testing.T) {
 	home := t.TempDir()
 	gitCredentials := filepath.Join(home, ".git-credentials")
 	if err := os.WriteFile(gitCredentials, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	denied := credentialDenyReadPathsForEnvironment(credentialPathEnvironment{Home: home}, []string{home})
-	for _, entry := range denied {
-		if entry == normalizeProfilePath(gitCredentials) {
-			t.Fatalf("explicit allowRead %q did not re-include the credential store", home)
+	target := normalizeProfilePath(gitCredentials)
+	listed := func(entries []string) bool {
+		for _, entry := range entries {
+			if entry == target {
+				return true
+			}
 		}
+		return false
+	}
+
+	if !listed(credentialDenyReadPathsForEnvironment(credentialPathEnvironment{Home: home}, nil)) {
+		t.Fatalf("~/.git-credentials is not denied without an allowRead; nothing for the grant to override")
+	}
+	if listed(credentialDenyReadPathsForEnvironment(credentialPathEnvironment{Home: home}, []string{home})) {
+		t.Fatalf("explicit allowRead %q did not re-include the credential store", home)
 	}
 }
