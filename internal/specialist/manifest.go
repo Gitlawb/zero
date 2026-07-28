@@ -476,6 +476,14 @@ func loadDirectory(dir string, location Location) ([]Manifest, []string, error) 
 	manifests := []Manifest{}
 	warnings := []string{}
 	for _, entry := range entries {
+		// Only *.md is a specialist. Everything else in the directory is
+		// deliberately invisible here, including the two kinds of sibling an
+		// interrupted overwrite can leave: a .specialist-*.tmp replacement that was
+		// never published, and a .zero-replace-*.backup holding an original whose
+		// rollback failed on Windows. Neither is a manifest, and guessing that one
+		// of them is would be worse than the gap. The recovery for a backup that
+		// really does hold the last good copy is a manual rename, spelled out both
+		// in the fsutil error that reports it and in docs/SPECIALISTS.md.
 		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
 			continue
 		}

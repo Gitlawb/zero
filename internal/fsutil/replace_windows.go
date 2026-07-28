@@ -105,7 +105,7 @@ func replaceExistingWithCleanup(src, dst string, replace func(string, string, st
 	if errors.Is(callErr, errorInvalidFunction) || errors.Is(callErr, errorNotSupported) {
 		callErr = fmt.Errorf("atomic replacement is not supported for %s: %w", dst, callErr)
 	}
-	return recoverPartialReplace(callErr, src, dst, backup, restore)
+	return recoverPartialReplace(callErr, dst, backup, restore)
 }
 
 func callReplaceFile(replacedPath, replacementPath, backupPath string) error {
@@ -190,10 +190,18 @@ func cleanupReplaceBackup(callErr error, backup string) error {
 //     original names, so the failed write can discard src normally.
 //   - ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 (1177) leaves src in place and moves the
 //     original destination to backup. Moving backup back to dst rolls the failed
-//     overwrite back without losing the original content or its DACL. The src
-//     file, including any streams it inherited during the failed operation, stays
-//     under the caller's temporary name for the caller's normal cleanup.
-func recoverPartialReplace(callErr error, src, dst, backup string, restore func(string, string) error) error {
+//     overwrite back without losing the original content or its DACL.
+//
+// The replacement is left alone either way — nothing here deletes what it was
+// handed — but the errors below deliberately say nothing about where it ended up,
+// which is also why its path is not a parameter. Whether it still exists when the
+// error surfaces is the caller's business: the specialist writer, the only caller
+// today, removes its temporary file in a deferred cleanup, so an error promising
+// a replacement "remains at" that path would send an operator looking for a file
+// that was already gone. What these errors do describe is what this function
+// itself left on disk — the state of dst, and of the managed backup holding the
+// original.
+func recoverPartialReplace(callErr error, dst, backup string, restore func(string, string) error) error {
 	if !errors.Is(callErr, errorUnableToMoveReplacement2) {
 		// For 1175, 1176, unsupported volumes, and ordinary failures, Windows
 		// documents that dst remains at its original name. Remove any redundant
@@ -206,10 +214,10 @@ func recoverPartialReplace(callErr error, src, dst, backup string, restore func(
 	}
 
 	if _, err := os.Lstat(backup); err != nil {
-		return fmt.Errorf("replace %s: %w (original backup expected at %s is unavailable: %v; replacement remains at %s)", dst, callErr, backup, err, src)
+		return fmt.Errorf("replace %s: %w (original backup expected at %s is unavailable: %v)", dst, callErr, backup, err)
 	}
 	if _, err := os.Lstat(dst); err == nil {
-		return fmt.Errorf("replace %s: %w (destination unexpectedly exists; original remains at backup %s and replacement at %s)", dst, callErr, backup, src)
+		return fmt.Errorf("replace %s: %w (destination unexpectedly exists; the original also remains at backup %s)", dst, callErr, backup)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("replace %s: %w (inspect destination before restoring backup %s: %v)", dst, callErr, backup, err)
 	}
@@ -217,7 +225,16 @@ func recoverPartialReplace(callErr error, src, dst, backup string, restore func(
 		// Only callErr is wrapped. Exposing a sharing violation from the exhausted
 		// rollback would make the outer ReplaceWithRetry call retry after the
 		// filesystem was already mutated.
-		return fmt.Errorf("replace %s: %w (original survives at backup %s; restoring it failed: %v; replacement remains at %s)", dst, callErr, backup, err, src)
+		//
+		// This is the one terminal state that needs a human: nothing is at dst, and
+		// the original's only copy is under a name no tool looks for (the specialist
+		// loader reads *.md and skips everything else), so it is invisible until
+		// somebody moves it back. Say that outright rather than leaving an operator
+		// to infer it from a bare error code.
+		return fmt.Errorf(
+			"replace %s: %w (rolling the original back failed: %v; %s no longer exists and the original survives only as %s, which must be moved back by hand to restore it)",
+			dst, callErr, err, dst, backup,
+		)
 	}
-	return fmt.Errorf("replace %s: %w (original was restored; replacement remains at %s for cleanup)", dst, callErr, src)
+	return fmt.Errorf("replace %s: %w (the original was restored)", dst, callErr)
 }

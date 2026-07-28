@@ -114,6 +114,12 @@ func writeSpecialistAtomicWith(path string, content string, rename func(string, 
 		return fmt.Errorf("create temporary specialist file: %w", err)
 	}
 	tempPath := temp.Name()
+	// The temporary file never survives this function, on any path: a successful
+	// replace has already consumed it, and every failure — including the Windows
+	// partial-replace recoveries in fsutil — discards it here. Recovery from a
+	// failed overwrite is therefore always about the ORIGINAL (which fsutil either
+	// rolls back or names in its error), never about this file, and no error text
+	// should tell an operator to go looking for it.
 	defer func() {
 		_ = temp.Close()
 		_ = os.Remove(tempPath)

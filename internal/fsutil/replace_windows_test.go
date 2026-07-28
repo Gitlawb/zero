@@ -349,6 +349,7 @@ func TestReplaceExistingRollsBack1177AndRetriesTransientRestore(t *testing.T) {
 	if restoreAttempts != 3 {
 		t.Fatalf("restore attempts = %d, want transient lock failures retried", restoreAttempts)
 	}
+	assertErrorDoesNotAdvertiseReplacement(t, err, src)
 	assertFileContent(t, dst, "old")
 	assertFileContent(t, src, "new")
 	if _, err := os.Lstat(backupPath); !os.IsNotExist(err) {
@@ -394,6 +395,16 @@ func TestReplaceExistingPreserves1177BackupWhenRollbackFails(t *testing.T) {
 	if !strings.Contains(err.Error(), backupPath) {
 		t.Fatalf("error = %v, want retained backup path %q", err, backupPath)
 	}
+	// The terminal state an operator has to fix by hand: the original exists only
+	// under the backup name and nothing is at dst, so the error has to name both
+	// and say what to do, not just report the Windows code.
+	if !strings.Contains(err.Error(), dst) {
+		t.Fatalf("error = %v, want the destination %q an operator must restore to", err, dst)
+	}
+	if !strings.Contains(err.Error(), "moved back by hand") {
+		t.Fatalf("error = %v, want an explicit instruction to move the backup back", err)
+	}
+	assertErrorDoesNotAdvertiseReplacement(t, err, src)
 	if _, err := os.Lstat(dst); !os.IsNotExist(err) {
 		t.Fatalf("destination should remain absent after failed rollback: %v", err)
 	}
@@ -455,7 +466,7 @@ func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
 				t.Fatalf("WriteFile dst: %v", err)
 			}
 
-			if err := recoverPartialReplace(tc.code, src, dst, backup, nil); !errors.Is(err, tc.code) {
+			if err := recoverPartialReplace(tc.code, dst, backup, nil); !errors.Is(err, tc.code) {
 				t.Fatalf("error = %v, want the original %v unchanged", err, tc.code)
 			}
 			assertFileContent(t, dst, "old")
@@ -464,6 +475,21 @@ func TestRecoverPartialReplaceLeavesIntactStatesAlone(t *testing.T) {
 				t.Fatalf("unexpected backup residue: %v", err)
 			}
 		})
+	}
+}
+
+// assertErrorDoesNotAdvertiseReplacement guards the messaging fixed for jatmn's
+// #757 P3 finding: recovery errors used to say the replacement "remains at" the
+// caller's temporary path, but the only caller removes that file in a deferred
+// cleanup before the error ever surfaces. Recovery is always about the original,
+// so an operator must never be sent looking for the replacement.
+func assertErrorDoesNotAdvertiseReplacement(t *testing.T, err error, replacement string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a partial-replacement error")
+	}
+	if strings.Contains(err.Error(), replacement) {
+		t.Fatalf("error = %v, must not point an operator at the replacement %q, which its caller deletes", err, replacement)
 	}
 }
 

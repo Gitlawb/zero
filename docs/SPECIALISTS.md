@@ -138,3 +138,37 @@ output or stop a still-running task by id.
 If Zero is restarted while a background task is still marked `running`, the new
 manager marks that task `error` and clears its PID. This avoids sending
 `TaskStop` to a stale PID that may now belong to an unrelated process.
+
+## Recovering an Interrupted Overwrite
+
+Overwriting a specialist (`--force`) publishes the new file atomically, so an
+interrupted write leaves either the old manifest or the new one — never a
+half-written file. Windows has one rare exception worth knowing about.
+
+There, the swap goes through `ReplaceFileW`, which preserves the destination's
+security descriptor instead of silently replacing it with the directory's
+inherited one. If it fails with `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2` (1177),
+Zero has already moved your original aside and tries to move it back. That
+rollback almost always succeeds, and the failed write changes nothing.
+
+If the rollback itself fails — typically because another process is holding a
+lock on the file — the original is not lost, but it is left under a name Zero
+does not read:
+
+```text
+<specialist dir>/.zero-replace-<random>.backup
+```
+
+Only `*.md` files are loaded as specialists, so until that file is renamed the
+specialist will not appear in `zero specialist list` or resolve by name. The
+error Zero prints names both paths; recover by closing whatever holds the lock
+and renaming the backup back:
+
+```powershell
+Move-Item .zero-replace-<random>.backup <name>.md
+```
+
+A `.zero-replace-*.backup` can also linger after a *successful* overwrite if the
+backup could not be deleted afterward. That case is reported as a warning rather
+than an error — the new manifest is already in place, and the leftover file is
+safe to delete.
