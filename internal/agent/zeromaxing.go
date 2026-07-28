@@ -64,6 +64,14 @@ const (
 	ZeromaxingBudgetNotice = "Budget guideline under zeromaxing: the larger turn budget is for depth on one task, not for widening its scope. " +
 		"Finish what was asked, verify it, and stop — do not start adjacent work because there are turns left."
 
+	// ZeromaxingOrchestrateNotice is appended to the enter notice ONLY when the
+	// orchestrate tool is actually available this run. Phase 1 deliberately
+	// promised no orchestration; naming a tool the run does not have would be a
+	// prompt-level lie the model would try to act on, which is why this is
+	// conditional rather than folded into the enter notice.
+	ZeromaxingOrchestrateNotice = "You also have the orchestrate tool: it runs a declared plan of read-only sub-agent tasks in dependency order, sequentially. " +
+		"Use it when a task splits into independent read-heavy pieces; declare depends_on so the plan records which work was genuinely independent."
+
 	// ZeromaxingStillOnNotice repeats on every continuing turn.
 	//
 	// It is intentionally short and FIXED. Do not add a turn number, a
@@ -85,14 +93,18 @@ const (
 // (posture, turn), and it has no memory. That is what makes "enter exactly
 // once" and "still-on never on the first turn" testable as data rather than as
 // a sequence of observed side effects.
-func zeromaxingReminders(posture Zeromaxing, turn int) []string {
+func zeromaxingReminders(posture Zeromaxing, turn int, orchestrateAvailable bool) []string {
 	if turn < 1 {
 		return nil
 	}
 	switch posture {
 	case ZeromaxingEntering:
 		if turn == 1 {
-			return []string{ZeromaxingEnterNotice, ZeromaxingBudgetNotice}
+			notices := []string{ZeromaxingEnterNotice, ZeromaxingBudgetNotice}
+			if orchestrateAvailable {
+				notices = append(notices, ZeromaxingOrchestrateNotice)
+			}
+			return notices
 		}
 		return []string{ZeromaxingStillOnNotice}
 	case ZeromaxingActive:
