@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // recordingRecorder captures the lifecycle events, so "recorded, never silently
@@ -331,3 +333,96 @@ func TestRecordingIsOptional(t *testing.T) {
 		t.Fatalf("a nil recorder must not change the outcome, got %q", report.Status)
 	}
 }
+
+// THE GUARD THE BUDGET DEFECT NEEDED.
+//
+// The budget was enforced at dispatch against a counter that never moved,
+// because NewPlanRunner never populated TaskResult.Tokens. Every executor test
+// passed because their fake runners fabricated their own token counts — a fake
+// that invents numbers cannot catch a PRODUCER that never produces them.
+//
+// So this drives the REAL runner (NewPlanRunner over a stubbed Executor whose
+// child reports usage) and asserts a max_tokens=1 plan stops after the first
+// task. If the runner stops populating Tokens, this fails; a fake-runner test
+// never would.
+func TestRealRunnerFeedsTheBudgetMeter(t *testing.T) {
+	launched := []string{}
+	executor := Executor{
+		BinaryPath: "/bin/true",
+		NewSessionID: func() (string, error) {
+			return "specialist_00000000000000000000000a", nil
+		},
+		Load: func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			launched = append(launched, strings.Join(args, " "))
+			// A child that reports usage, exactly as a real provider stream does.
+			return ChildRunResult{
+				Started: true,
+				Events: []streamjson.Event{
+					{Type: "assistant", Text: "done"},
+					{Type: "usage", TotalTokens: intPtrForTest(500)},
+				},
+			}, nil
+		},
+	}
+	runner := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
+
+	budget := okBudget()
+	budget["max_tokens"] = float64(1) // one token: the first task alone blows it
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, budget, readOnlyLimits())
+
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"}, runner, nil)
+
+	// The REAL runner must have reported the child's tokens...
+	if report.TokensUsed <= 0 {
+		t.Fatalf("the real runner reported %d tokens; the budget meter never moves and enforcement can never fire",
+			report.TokensUsed)
+	}
+	// ...so exactly one task ran and the rest were skipped for budget.
+	if len(launched) != 1 {
+		t.Fatalf("a 1-token budget must stop after the first task, launched %d children", len(launched))
+	}
+	byID := map[string]TaskResult{}
+	for _, task := range report.Tasks {
+		byID[task.ID] = task
+	}
+	for _, id := range []string{"b", "c"} {
+		if byID[id].Outcome != TaskSkippedBudget {
+			t.Fatalf("%s must be skipped for budget, got %q", id, byID[id].Outcome)
+		}
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("status = %q, want partial", report.Status)
+	}
+}
+
+// The runner uses the ctx handed to it PER TASK, not one captured at
+// construction — a captured context is how the prototype's goroutine ignored
+// cancellation.
+func TestRealRunnerHonoursThePerCallContext(t *testing.T) {
+	launched := 0
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(context.Context, string, []string, func(streamjson.Event)) (ChildRunResult, error) {
+			launched++
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	runner := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled BEFORE the plan runs
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(ctx, plan, []string{"read_file"}, runner, nil)
+
+	if launched != 0 {
+		t.Fatalf("a cancelled context must launch no children, launched %d", launched)
+	}
+	if report.Status != PlanFailed {
+		t.Fatalf("a cancelled plan must not report success, got %q", report.Status)
+	}
+}
+
+func intPtrForTest(v int) *int { return &v }

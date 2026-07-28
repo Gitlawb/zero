@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -50,7 +51,13 @@ type Options struct {
 	// headless exec path applies. Resolved config already folded the
 	// project-scope tighten-only merge, so a project .zero/config.json can set
 	// it but never clear it.
-	ZeromaxingDisabled  bool
+	ZeromaxingDisabled bool
+	// ZeromaxingGate is the SHARED posture flag the orchestrate tool reads. A
+	// pointer, not a bool: the tool is registered once and the registry is
+	// cloned per run copying tool POINTERS, so the flip has to be visible
+	// through shared state rather than through re-registration or a closure
+	// over this value-typed model. nil disables the posture for the tool.
+	ZeromaxingGate      *specialist.PostureGate
 	MCPPermissionStore  *mcp.PermissionStore
 	MCPTokenStore       *mcp.TokenStore
 	MCPCommand          func(context.Context, []string) MCPCommandResult

@@ -706,7 +706,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
 	executionRunner.SetPreparer(sandboxEngine)
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
+	// One gate shared by the registered tool and the TUI that flips it.
+	zeromaxingGate := &specialist.PostureGate{}
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize,
+		orchestrateWiring{
+			Gate:        zeromaxingGate,
+			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot},
+		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
@@ -838,6 +844,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
 		ZeromaxingDisabled: resolved.Profiles.DisableZeromaxing,
+		ZeromaxingGate:     zeromaxingGate,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
@@ -1072,14 +1079,10 @@ type orchestrateWiring struct {
 	PlanContext specialist.PlanTaskContext
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
-	return registerSpecialistToolsWith(registry, workspaceRoot, maxTeamSize, orchestrateWiring{})
-}
-
-// registerSpecialistToolsWith is registerSpecialistTools plus the orchestrate
-// tool. Split so every existing caller keeps its exact behaviour and the new
-// wiring is opt-in at the call site rather than a signature change.
-func registerSpecialistToolsWith(registry *tools.Registry, workspaceRoot string, maxTeamSize int, wiring orchestrateWiring) (*agentToolRuntime, error) {
+// registerSpecialistTools registers the specialist, swarm and orchestrate tools.
+// The wiring argument carries what the orchestrate tool needs; a zero value
+// leaves it registered but permanently off, which is the posture-off behaviour.
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, wiring orchestrateWiring) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err

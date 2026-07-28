@@ -30,6 +30,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -158,6 +159,9 @@ type model struct {
 	// zeromaxingDisabled mirrors resolved config's profiles.disableZeromaxing so
 	// /effort and /profile consult the same rule the headless path applies.
 	zeromaxingDisabled bool
+	// zeromaxingGate is the shared flag the orchestrate tool reads. Written on
+	// every posture transition so a run started afterwards sees it.
+	zeromaxingGate *specialist.PostureGate
 	// execProfileEffortUnraised names the effort level a profile asked for but
 	// could not apply on the active model, so the status output can say what it
 	// did not raise instead of silently pretending it did.
@@ -896,6 +900,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
 		zeromaxingDisabled:          options.ZeromaxingDisabled,
+		zeromaxingGate:              options.ZeromaxingGate,
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
