@@ -77,7 +77,7 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 
 	ctx, stop := signalContext()
 	defer stop()
-	if err := conn.Serve(ctx); err != nil && ctx.Err() == nil {
+	if err := conn.Serve(ctx); err != nil {
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)
 	}
 	return exitSuccess
