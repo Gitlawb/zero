@@ -223,7 +223,22 @@ func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool) ([]wind
 func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACCESS_MASK, error) {
 	switch action {
 	case WindowsACLAllowWrite:
-		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE, nil
+		// DELETE and FILE_DELETE_CHILD are part of the grant, not extras.
+		// FILE_GENERIC_WRITE covers creating and modifying but not removing or
+		// renaming, and a rename needs delete access on the source. Under the
+		// old same-user token that gap was invisible, because the caller already
+		// held inherited rights on its own tree; a sandbox principal is a
+		// separate account with no such inheritance, so without these it can
+		// write a file it can never delete. Ordinary editing and most git
+		// operations rewrite files by replacing them, so the omission fails
+		// normal work rather than an edge case.
+		//
+		// WindowsACLDenyWrite below already treats delete as part of write. This
+		// keeps the grant symmetric with the deny instead of covering less.
+		// WRITE_DAC and WRITE_OWNER stay out on purpose: they are in the deny
+		// mask to stop the principal rewriting its own restrictions, and
+		// granting them here would hand back exactly that.
+		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE | windows.DELETE | windowsFileDeleteChild, nil
 	case WindowsACLAllowRead:
 		// Read and traverse without write. A sandbox principal is a separate
 		// account with no inherent access to the caller's tree, so a read-only
