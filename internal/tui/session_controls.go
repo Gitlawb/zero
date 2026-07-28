@@ -715,6 +715,10 @@ func (m model) handleProfileCommand(args string) (model, string) {
 		m.zeromaxing = agent.ZeromaxingEntering
 	}
 	m.agentOptions.Zeromaxing = m.zeromaxing
+	// The orchestrate tool reads this. Written through the SHARED gate pointer,
+	// which is what a run's cloned registry also holds — see
+	// TestClonedRegistrySharesTheGatePointer.
+	m.zeromaxingGate.Set(m.zeromaxingActive())
 	return m, m.profileText()
 }
 
@@ -756,6 +760,9 @@ func (m model) revertExecProfile() model {
 		m.zeromaxing = agent.ZeromaxingExiting
 	}
 	m.agentOptions.Zeromaxing = m.zeromaxing
+	// Leaving the posture takes the tool away with it. Exiting is already
+	// "off" for zeromaxingActive, so this clears the gate.
+	m.zeromaxingGate.Set(m.zeromaxingActive())
 	m.agentOptions.Profile = nil
 	m.execProfileName = ""
 	m.execProfileDisplacedMaxTurns = 0

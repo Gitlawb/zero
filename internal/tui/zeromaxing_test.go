@@ -10,6 +10,8 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -730,4 +732,143 @@ func forwardedEffortForTest(registry modelregistry.Registry, modelID, requested 
 		return ""
 	}
 	return string(effective)
+}
+
+// gateModel builds a session holding a real shared gate.
+func gateModel(t *testing.T, gate *specialist.PostureGate) model {
+	t.Helper()
+	return newModel(context.Background(), Options{
+		ProviderName: "anthropic", ModelName: "claude-sonnet-4.5", Provider: &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
+		ZeromaxingGate:  gate,
+		NewProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+	})
+}
+
+// The gate is written on posture ON and OFF, asserted through the REAL handlers
+// rather than a helper — a helper test is what missed the wiring four times in
+// this feature.
+func TestPostureTransitionsWriteTheSharedGate(t *testing.T) {
+	for _, route := range []struct {
+		name string
+		on   func(model) (model, string)
+		off  func(model) (model, string)
+	}{
+		{"/effort",
+			func(m model) (model, string) { return m.handleEffortCommand(execprofile.Name) },
+			func(m model) (model, string) { return m.handleEffortCommand("auto") }},
+		{"/profile",
+			func(m model) (model, string) { return m.handleProfileCommand(execprofile.Name) },
+			func(m model) (model, string) { return m.handleProfileCommand("balanced") }},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			gate := &specialist.PostureGate{}
+			m := gateModel(t, gate)
+			if gate.Active() {
+				t.Fatal("a fresh session must leave the gate off")
+			}
+			m, _ = route.on(m)
+			if !gate.Active() {
+				t.Fatalf("%s <posture> must turn the gate ON", route.name)
+			}
+			m, _ = route.off(m)
+			if gate.Active() {
+				t.Fatalf("%s <off> must turn the gate OFF", route.name)
+			}
+			_ = m
+		})
+	}
+}
+
+// A REFUSED selection must not arm the gate — a disabled workspace must not end
+// up with the tool live.
+func TestRefusedSelectionDoesNotArmTheGate(t *testing.T) {
+	gate := &specialist.PostureGate{}
+	m := newModel(context.Background(), Options{
+		ProviderName: "anthropic", ModelName: "claude-sonnet-4.5", Provider: &fakeProvider{},
+		ProviderProfile:    config.ProviderProfile{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
+		ZeromaxingGate:     gate,
+		ZeromaxingDisabled: true,
+		NewProvider:        func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+	})
+	if _, text := m.handleEffortCommand(execprofile.Name); !strings.Contains(text, "Cannot use") {
+		t.Fatalf("setup: the selection should have been refused:\n%s", text)
+	}
+	if gate.Active() {
+		t.Fatal("a refused selection must leave the gate off")
+	}
+}
+
+// A nil gate must not panic — a caller that never wires one simply has no tool.
+func TestNilGateIsSafe(t *testing.T) {
+	m := gateModel(t, nil)
+	m, _ = m.handleEffortCommand(execprofile.Name)
+	m, _ = m.handleEffortCommand("auto")
+	_ = m
+}
+
+// THE cloneToolRegistry HAZARD, proved rather than assumed.
+//
+// The TUI registers the tool once and clones the registry per run; the clone
+// copies tool POINTERS. If the gate were a value or a closure over the model,
+// the clone's tool would read a stale posture. This asserts the tool reachable
+// from a CLONE observes a flip written after the clone was taken.
+func TestClonedRegistrySharesTheGatePointer(t *testing.T) {
+	gate := &specialist.PostureGate{}
+	registry := tools.NewRegistry()
+	registry.Register(&specialist.OrchestrateTool{PostureActive: gate.Active})
+
+	// Clone FIRST, flip the posture AFTER — the order that would break a
+	// captured copy.
+	clone := cloneToolRegistry(registry)
+	raw, ok := clone.Get(specialist.OrchestrateToolName)
+	if !ok {
+		t.Fatal("the clone must carry the tool")
+	}
+	// Read Deferred through the same interface the partition uses, so this
+	// exercises the real path rather than a concrete type assertion.
+	deferred := func() bool {
+		d, ok := raw.(interface{ Deferred() bool })
+		if !ok {
+			t.Fatal("the cloned tool must still implement Deferred")
+		}
+		return d.Deferred()
+	}
+	cloned := raw
+	if !deferred() || cloned.Safety().Permission != tools.PermissionDeny {
+		t.Fatal("before the flip the cloned tool must be off")
+	}
+
+	gate.Set(true)
+
+	if deferred() {
+		t.Fatal("the CLONED tool must observe a posture flip written after cloning")
+	}
+	if got := cloned.Safety().Permission; got != tools.PermissionAllow {
+		t.Fatalf("cloned tool permission = %v, want Allow after the flip", got)
+	}
+	// ...and back off again.
+	gate.Set(false)
+	if !deferred() || cloned.Safety().Permission != tools.PermissionDeny {
+		t.Fatal("the cloned tool must observe the posture being turned off too")
+	}
+}
+
+// Concurrent write/read, for -race: the TUI writes the gate from its update
+// loop while a run's tool dispatch reads it from the agent goroutine.
+func TestGateIsSafeUnderConcurrentAccess(t *testing.T) {
+	gate := &specialist.PostureGate{}
+	tool := &specialist.OrchestrateTool{PostureActive: gate.Active}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			gate.Set(i%2 == 0)
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		_ = tool.Deferred()
+		_ = tool.Safety().Permission
+	}
+	<-done
 }

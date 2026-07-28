@@ -282,7 +282,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// TUI needs one: the tool holds it for the process's life.
 		planGate = &specialist.PostureGate{}
 		planGate.Set(execProfile.IsZeromaxing())
-		specialistRuntime, err = registerSpecialistToolsWith(registry, workspaceRoot, maxTeamSize, orchestrateWiring{
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize, orchestrateWiring{
 			Gate:     planGate,
 			Recorder: planRecorder,
 			PlanContext: specialist.PlanTaskContext{
