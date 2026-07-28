@@ -99,17 +99,39 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	if !modelregistry.ValidReasoningEffort(requested) {
 		return m, m.effortStatusCard(args, "Unknown reasoning effort: "+args)
 	}
-	efforts := m.availableReasoningEfforts()
-	if len(efforts) == 0 {
+	efforts, known := m.availableReasoningEffortsKnown()
+	// A model the catalog VOUCHES for is authoritative: an empty ring there
+	// genuinely means no reasoning controls, and a level outside the ring is
+	// genuinely unsupported. A model with no catalog entry is a different case
+	// — a custom endpoint the catalog cannot vouch for either way — and
+	// refusing there is a false negative. The headless path already forwards in
+	// exactly that case ("no support claim can be made for it"), and since the
+	// bug-1 fix the profile fill does too; this is the third consumer of the
+	// same question, and it used to answer it differently from the other two.
+	switch {
+	case known && len(efforts) == 0:
 		return m, m.effortStatusCard("", "Active model does not expose reasoning effort controls.")
-	}
-	if !reasoningEffortAllowed(efforts, requested) {
+	case known && !reasoningEffortAllowed(efforts, requested):
 		return m, m.effortStatusCard(string(requested),
 			fmt.Sprintf("Reasoning effort %q is not supported by %s.", requested, displayValue(m.modelName, "the active model")))
 	}
 
 	m.reasoningEffort = requested
 	m = m.markProfileEffortTouched()
+	if !known {
+		// Deliberately says MAY reject, not "is ignored". The claim that an
+		// unsupported value is silently ignored could not be verified against a
+		// real provider, and this repo contradicts itself about it:
+		// modelregistry/catalog.go says unknown fields are ignored, while
+		// providers/factory.go, providers/openai/provider.go and
+		// providers/openai/types.go all record strict openai-compatible
+		// gateways rejecting them with a 400 — DisablePromptCacheKey exists
+		// precisely because one did. Promising "ignored" would be an unverified
+		// reassurance on the path where it fails.
+		return m, m.effortStatusCard(string(requested),
+			fmt.Sprintf("Stored for this session and forwarded to %s. This model is not in Zero's catalog, so Zero cannot confirm it accepts that level — a provider that validates the parameter may reject the request.",
+				displayValue(m.modelName, "the active model")))
+	}
 	return m, m.effortStatusCard(string(requested), "Reasoning effort preference is stored for this TUI session.")
 }
 
@@ -234,15 +256,25 @@ func (m model) effortText() string {
 		{Key: "active effort", Value: m.effortDisplay()},
 		{Key: "model", Value: displayValue(m.modelName, "none")},
 	}
+	_, ringKnown := m.availableReasoningEffortsKnown()
 	actions := []string{"use /effort <value> to switch", "/effort " + execprofile.Name + " for the maximal posture", "/effort auto to clear"}
 	// The SAME resolved-state line /profile status renders, so the two surfaces
 	// cannot disagree about what actually reaches the provider.
 	stateLines := append([]string{m.resolvedPostureLine()}, m.zeromaxingNotes()...)
 	if len(efforts) == 0 {
-		fields = append(fields, commandField{Key: "available", Value: "none for active model"})
+		// "none" and "unknown" are different answers and used to render the
+		// same. A user on a custom endpoint was told the model has no reasoning
+		// controls, when the truth is that Zero has no entry for it — and levels
+		// set there ARE forwarded.
+		available, summary := "none for active model", "no reasoning controls on this model"
+		if !ringKnown {
+			available = "not listed — model is not in Zero's catalog"
+			summary = "levels are not listed for this model; they can still be set and are forwarded, but the provider may reject them"
+		}
+		fields = append(fields, commandField{Key: "available", Value: available})
 		return renderCommandCardTranscript(commandCard{
 			Title:    "Effort",
-			Summary:  []string{"active effort: " + m.effortDisplay(), "no reasoning controls on this model"},
+			Summary:  []string{"active effort: " + m.effortDisplay(), summary},
 			Sections: []commandCardSection{{Title: "State", Fields: fields, Lines: stateLines}},
 			Actions:  actions,
 		})

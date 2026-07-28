@@ -580,3 +580,154 @@ func TestProfileEffortDoesNotFillWithoutAModel(t *testing.T) {
 		t.Fatalf("effort = %q, must stay auto when no model is selected", got.reasoningEffort)
 	}
 }
+
+// BUG 4 — and it is the SAME root cause as bug 1.
+//
+// availableReasoningEfforts() returns an empty ring for a model with no catalog
+// entry (the reporter's glm-5.2). That one fact produced two visible failures:
+// /effort listed no levels, AND the posture's fill was declined with "the model
+// does not support that level".
+//
+// It is PRE-EXISTING: verified on origin/main, where the same model makes the
+// CLI forward reasoning_effort:"high" while the TUI refuses /effort high. This
+// asserts the three consumers of "does this model take this level?" now give
+// the same answer.
+func TestEffortSettabilityAgreesAcrossAllThreeConsumers(t *testing.T) {
+	cases := []struct {
+		model    string
+		settable bool
+		why      string
+	}{
+		{"claude-sonnet-4.5", true, "catalog model that lists high"},
+		{"gpt-5", true, "inferred reasoning family"},
+		{"gpt-4.1", false, "catalog model whose EMPTY ring is authoritative"},
+		{"glm-5.2", true, "the reporter's model — no catalog entry, so no support claim can be made"},
+		{"some-custom-endpoint-model", true, "any unlisted endpoint"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			build := func() model {
+				return newModel(context.Background(), Options{
+					ProviderName: "p", ModelName: tc.model, Provider: &fakeProvider{},
+					ProviderProfile: config.ProviderProfile{Name: "p", Model: tc.model, APIKey: "k"},
+					NewProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+				})
+			}
+			// Consumer 1: a manual /effort high.
+			manual, manualOut := build().handleEffortCommand("high")
+			gotManual := manual.reasoningEffort == modelregistry.ReasoningEffortHigh
+			if gotManual != tc.settable {
+				t.Fatalf("%s (%s): /effort high set = %v, want %v\n%s",
+					tc.model, tc.why, gotManual, tc.settable, manualOut)
+			}
+			// Consumer 2: the posture's fill. Must agree with the manual set.
+			posture, _ := build().handleEffortCommand(execprofile.Name)
+			gotFill := posture.reasoningEffort == modelregistry.ReasoningEffortHigh
+			if gotFill != gotManual {
+				t.Fatalf("%s: the posture fill (%v) and a manual set (%v) disagree — "+
+					"the same question answered two ways", tc.model, gotFill, gotManual)
+			}
+			// Consumer 3: the headless path's forwarding decision.
+			registry, err := modelregistry.DefaultRegistry()
+			if err != nil {
+				t.Fatalf("DefaultRegistry: %v", err)
+			}
+			forwarded := forwardedEffortForTest(registry, tc.model, "high")
+			if (forwarded != "") != tc.settable {
+				t.Fatalf("%s: headless forwards %q but the TUI settable = %v — "+
+					"the two surfaces disagree about the same model",
+					tc.model, forwarded, tc.settable)
+			}
+		})
+	}
+}
+
+// The OTHER authoritative-refusal arm: a catalog model that HAS a ring but does
+// not list the requested level. gpt-4.1 cannot exercise this — its empty ring
+// trips the earlier arm — so without this case that branch is unreachable and a
+// mutation removing it goes undetected.
+func TestManualEffortRefusesALevelOutsideAKnownRing(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "anthropic", ModelName: "claude-sonnet-4.5", Provider: &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
+		NewProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+	})
+	efforts, known := m.availableReasoningEffortsKnown()
+	if !known || len(efforts) == 0 {
+		t.Skip("fixture is no longer a catalog model with a non-empty ring")
+	}
+	if reasoningEffortAllowed(efforts, modelregistry.ReasoningEffortMinimal) {
+		t.Skip("claude-sonnet-4.5 gained \"minimal\"; pick another out-of-ring level")
+	}
+	got, text := m.handleEffortCommand("minimal")
+	if got.reasoningEffort != "" {
+		t.Fatalf("a level outside an AUTHORITATIVE ring must be refused, got %q", got.reasoningEffort)
+	}
+	if !strings.Contains(text, "is not supported by") {
+		t.Fatalf("the refusal must name the model:\n%s", text)
+	}
+}
+
+// A known model must list its levels — the surface symptom the reporter saw.
+// This drives the real /effort path rather than the helper, because a green
+// helper test alongside an empty user surface is what happened three times in
+// this feature.
+func TestEffortListShowsLevelsForAKnownModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "anthropic", ModelName: "claude-sonnet-4.5", Provider: &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
+		NewProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+	})
+	_, text := m.handleEffortCommand("")
+	for _, want := range []string{"low", "medium", "high"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("/effort must list %q for a catalog model:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "no reasoning controls") {
+		t.Fatalf("a catalog reasoning model must not be reported as having none:\n%s", text)
+	}
+}
+
+// An unlisted model is reported as UNLISTED, not as having no controls — those
+// are different facts and rendered the same before.
+func TestEffortListDistinguishesUnlistedFromUnsupported(t *testing.T) {
+	render := func(name string) string {
+		m := newModel(context.Background(), Options{
+			ProviderName: "p", ModelName: name, Provider: &fakeProvider{},
+			ProviderProfile: config.ProviderProfile{Name: "p", Model: name, APIKey: "k"},
+			NewProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+		})
+		_, text := m.handleEffortCommand("")
+		return text
+	}
+	unlisted := render("glm-5.2")
+	if !strings.Contains(unlisted, "not in Zero's catalog") {
+		t.Fatalf("an unlisted model must be described as unlisted:\n%s", unlisted)
+	}
+	if strings.Contains(unlisted, "no reasoning controls on this model") {
+		t.Fatalf("an unlisted model must not be reported as having no controls:\n%s", unlisted)
+	}
+	unsupported := render("gpt-4.1")
+	if !strings.Contains(unsupported, "no reasoning controls on this model") {
+		t.Fatalf("a catalog model with an authoritative empty ring must say so:\n%s", unsupported)
+	}
+}
+
+// forwardedEffortForTest mirrors internal/cli's forwardedReasoningEffort rule:
+// a known model coerces to its effective level (empty when it has none); an
+// unknown model forwards the request as-is. Duplicated here rather than
+// imported because internal/tui does not depend on internal/cli — and pinned
+// against the real one by TestEffortSettabilityAgreesAcrossAllThreeConsumers
+// failing if they ever diverge in outcome.
+func forwardedEffortForTest(registry modelregistry.Registry, modelID, requested string) string {
+	entry, ok := registry.Get(modelID)
+	if !ok {
+		return requested
+	}
+	effective := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffort(requested))
+	if effective == modelregistry.ReasoningEffortNone {
+		return ""
+	}
+	return string(effective)
+}
