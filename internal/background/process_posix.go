@@ -44,9 +44,9 @@ func terminateProcess(pid int) error {
 // configuration proves it was made a group leader. This avoids fragile Getpgid
 // rediscovery after an owned leader exits. Ordinary commands fall back to the
 // safe PID/tree path rather than assuming their PID is also a process-group ID.
-func terminateOwnedProcess(cmd *exec.Cmd) error {
+func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
-		return execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
+		return false, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
 	}
-	return terminateProcess(cmd.Process.Pid)
+	return false, terminateProcess(cmd.Process.Pid)
 }
