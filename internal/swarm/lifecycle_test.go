@@ -646,6 +646,102 @@ func TestAdmittedDispatchDoesNotLaunchAfterClose(t *testing.T) {
 	}
 }
 
+// TestCloseBetweenLaunchPrecheckAndReturn rejects and reaps a handle created by
+// a Launch that straddles shutdown. The launch has passed the pre-check when it
+// enters the gate; Close then sets closed and cancels its context before the
+// launcher is allowed to return successfully.
+func TestCloseBetweenLaunchPrecheckAndReturn(t *testing.T) {
+	launcher := &closeRaceLauncher{
+		entered: make(chan struct{}),
+		finish:  make(chan struct{}),
+		waited:  make(chan struct{}),
+	}
+	sw := newSwarmFor(t, launcher)
+
+	spawned := make(chan string, 1)
+	go func() {
+		id, _ := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		spawned <- id
+	}()
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(launcher.finish)
+
+	var id string
+	select {
+	case id = <-spawned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Spawn did not return after Launch")
+	}
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after late handle was reaped")
+	}
+	select {
+	case <-launcher.waited:
+	default:
+		t.Fatal("late handle was not reaped")
+	}
+
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced Launch = %d, want 0", got)
+	}
+	if got := len(team.liveAgents()); got != 0 {
+		t.Fatalf("registered members after close-raced Launch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get(id)
+	if !ok {
+		t.Fatal("task vanished")
+	}
+	if task.Status != StatusFailed || !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("task after close-raced Launch = %+v, want failed with ErrSwarmClosed", task)
+	}
+}
+
+type closeRaceLauncher struct {
+	entered chan struct{}
+	finish  chan struct{}
+	waited  chan struct{}
+	once    sync.Once
+}
+
+func (l *closeRaceLauncher) Launch(ctx context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return &closeRaceHandle{id: spec.ID, ctx: ctx, waited: l.waited}, nil
+}
+
+type closeRaceHandle struct {
+	id     string
+	ctx    context.Context
+	waited chan struct{}
+	once   sync.Once
+}
+
+func (h *closeRaceHandle) ID() string { return h.id }
+
+func (h *closeRaceHandle) Wait() (MemberResult, error) {
+	<-h.ctx.Done()
+	h.once.Do(func() { close(h.waited) })
+	return MemberResult{}, h.ctx.Err()
+}
+
 func TestCloseRacesLifecycleAdmission(t *testing.T) {
 	gate := make(chan struct{})
 	l := newLauncher(okFor)

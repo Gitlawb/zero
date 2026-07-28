@@ -86,6 +86,24 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 		s.afterExitAdmitted(t)
 		return
 	}
+
+	// Launch is external code and therefore runs without lifecycleMu held. Close
+	// may have won after launchMemberAdmitted's pre-check but before Launch
+	// returned. Commit the new member while holding the read lock so this check,
+	// registration, status transition, and watcher Add are atomic with respect to
+	// Close setting closed and beginning its waits.
+	s.lifecycleMu.RLock()
+	if s.closed {
+		s.lifecycleMu.RUnlock()
+		// The launch context was cancelled by Close. Reap the returned handle so a
+		// successfully-created process/goroutine is not abandoned. MemberHandle has
+		// no separate cancellation operation; Launch's context is its cancellation
+		// contract.
+		_, _ = handle.Wait()
+		_ = s.coord.Fail(spec.TaskID, "launch: "+ErrSwarmClosed.Error())
+		t.releaseSlot()
+		return
+	}
 	m := &Member{ID: spec.ID, AgentType: spec.AgentType, TaskID: spec.TaskID, handle: handle}
 	t.addMember(m)
 	_ = s.coord.SetStatus(spec.TaskID, StatusRunning)
@@ -94,6 +112,7 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 		defer s.watchers.Done()
 		s.watch(t, m, spec)
 	}()
+	s.lifecycleMu.RUnlock()
 }
 
 // launchMemberAdmitted re-checks shutdown at the last internal boundary before
