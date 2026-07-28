@@ -3,10 +3,14 @@
 package update
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // TestPromoteInstallsTheStagedObjectNotTheStagedPath is the regression test for
@@ -118,6 +122,46 @@ func TestPromoteRejectsALyingRenameByHandle(t *testing.T) {
 	}
 	if _, err := os.Stat(targetPath + ".old"); !os.IsNotExist(err) {
 		t.Fatalf(".old leftover survived a successful restore: %v", err)
+	}
+}
+
+// A promotion failure followed by a blocked restore is security-relevant all
+// the way through installBinary; its contextual wrappers must not erase the
+// sentinel that callers of Apply use to distinguish possible path tampering.
+func TestInstallBinaryPreservesPossibleTamperingError(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	original := renameFileByHandle
+	var conflicting windows.Handle
+	renameFileByHandle = func(_ *os.File, target string) error {
+		pathPtr, err := windows.UTF16PtrFromString(target)
+		if err != nil {
+			return err
+		}
+		conflicting, err = windows.CreateFile(pathPtr, windows.GENERIC_WRITE, 0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return fmt.Errorf("create conflicting target: %w", err)
+		}
+		return errors.New("injected promotion failure")
+	}
+	t.Cleanup(func() {
+		renameFileByHandle = original
+		if conflicting != 0 {
+			_ = windows.CloseHandle(conflicting)
+		}
+	})
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want it to wrap ErrTargetPossiblyTampered", err)
 	}
 }
 

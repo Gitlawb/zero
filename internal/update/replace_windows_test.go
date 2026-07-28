@@ -97,3 +97,50 @@ func TestCleanupStaleBinaryPreservesUnverifiableStagingFiles(t *testing.T) {
 		t.Fatalf("unverifiable staging file must be preserved: %v", err)
 	}
 }
+
+func TestCleanupStaleBinaryPreservesOldWhenTargetIsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+
+	CleanupStaleBinary(targetPath)
+
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Fatalf("target must not be created: %v", err)
+	}
+	got, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatalf("ReadFile preserved old binary: %v", err)
+	}
+	if string(got) != "known-good" {
+		t.Fatalf("preserved old binary = %q, want known-good", got)
+	}
+}
+
+func TestCleanupStaleBinaryRemovesOldWhenTargetExists(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("current"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+
+	CleanupStaleBinary(targetPath)
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("stale old binary was not removed: %v", err)
+	}
+	got, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(got) != "current" {
+		t.Fatalf("target = %q, want current", got)
+	}
+}

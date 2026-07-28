@@ -52,9 +52,14 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 	return fmt.Errorf("%w: %v", ErrTargetPossiblyTampered, err)
 }
 
-// CleanupStaleBinary best-effort removes the known "<path>.old" copy. Random
-// staging files are preserved because their public name is not proof that this
-// updater created them.
+// CleanupStaleBinary best-effort removes the known "<path>.old" copy, but only
+// after confirming targetPath exists. If targetPath is absent or cannot be
+// inspected, .old may be the only known-good binary left by an interrupted
+// promotion and is preserved. Random staging files are also preserved because
+// their public name is not proof that this updater created them.
 func CleanupStaleBinary(targetPath string) {
+	if _, err := os.Lstat(targetPath); err != nil {
+		return
+	}
 	_ = os.Remove(targetPath + ".old")
 }

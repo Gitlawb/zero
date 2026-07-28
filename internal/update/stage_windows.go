@@ -118,7 +118,7 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	}
 	if renameErr != nil {
 		if restoreErr := restoreOriginalBinary(oldPath, targetPath); restoreErr != nil {
-			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %v (original preserved at %s)", renameErr, restoreErr, oldPath)
+			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %w (original preserved at %s)", renameErr, restoreErr, oldPath)
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)
 	}
