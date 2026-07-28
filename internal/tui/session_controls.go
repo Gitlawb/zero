@@ -707,7 +707,7 @@ func (m model) resolvedPostureLine() string {
 func (m model) zeromaxingNotes() []string {
 	notes := []string{}
 	if m.execProfileName == execprofile.Name {
-		notes = append(notes, execprofile.Delta)
+		notes = append(notes, execprofile.Delta(m.selfCorrectTransition()))
 	}
 	if m.execProfileEffortUnraised != "" {
 		notes = append(notes, fmt.Sprintf(
@@ -1332,6 +1332,26 @@ func formatUnpricedUsage(requests int, tokens int) string {
 		requestLabel = "request"
 	}
 	return fmt.Sprintf("%d %s, %d tokens, cost unavailable", requests, requestLabel, tokens)
+}
+
+// selfCorrectTransition reports what the posture is ACTUALLY doing to post-edit
+// verification right now — not what it did at selection time, because
+// /selfcorrect can be used afterwards and the status output must not keep
+// claiming a raise the session no longer has.
+//
+// execProfileArmedSelfCorrect records that the profile turned it on; combined
+// with the live selfCorrectTests bit that distinguishes all three cases.
+func (m model) selfCorrectTransition() execprofile.SelfCorrectTransition {
+	switch {
+	case !m.selfCorrectTests:
+		// The posture wants it on, so it being off means the user turned it
+		// back off explicitly.
+		return execprofile.SelfCorrectOverridden
+	case m.execProfileArmedSelfCorrect:
+		return execprofile.SelfCorrectRaised
+	default:
+		return execprofile.SelfCorrectAlreadyOn
+	}
 }
 
 // zeromaxingChipLabel is the footer indicator for the zeromaxing posture. Kept

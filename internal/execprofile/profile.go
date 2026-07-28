@@ -128,16 +128,63 @@ var catalog = map[string]Profile{
 	Zeromaxing.Name: Zeromaxing,
 }
 
+// SelfCorrectTransition is what selecting the posture does to post-edit
+// verification, relative to the state the caller is ACTUALLY in.
+//
+// It exists because the honest answer is caller-specific. Saying
+// "self-correction is already armed" is true when comparing zeromaxing to
+// thorough and false for a user sitting on the LSP-only default, who is about
+// to be moved to the full project test plan without being told. A user reads
+// this to learn what changes for THEM, not to learn how two profiles differ.
+type SelfCorrectTransition int
+
+const (
+	// SelfCorrectRaised: post-edit verification was LSP-only and the posture
+	// adds the project test plan. The common case, and the one the old wording
+	// got wrong.
+	SelfCorrectRaised SelfCorrectTransition = iota
+	// SelfCorrectAlreadyOn: the deeper verification was already on, so the
+	// posture genuinely changes nothing here.
+	SelfCorrectAlreadyOn
+	// SelfCorrectOverridden: an explicit /selfcorrect choice is holding it at
+	// lsp despite the posture. Reporting a raise here would describe behaviour
+	// that is not happening.
+	SelfCorrectOverridden
+)
+
+// selfCorrectLine renders the transition using /selfcorrect's own vocabulary
+// (lsp / tests), so the line names states the user can actually type.
+func (t SelfCorrectTransition) selfCorrectLine() string {
+	switch t {
+	case SelfCorrectAlreadyOn:
+		return "self-correct: unchanged (tests)"
+	case SelfCorrectOverridden:
+		return "self-correct: lsp (your /selfcorrect choice overrides the posture)"
+	default:
+		return "self-correct: lsp → tests"
+	}
+}
+
 // Delta is the user-facing statement of what selecting zeromaxing actually
 // changes, shown by /effort, /profile, and the exec selection notice. It is
-// deliberately concrete and deliberately admits the two knobs it does NOT move:
-// a user paying for a higher posture is owed the real delta, not a slogan.
+// deliberately concrete and deliberately admits what it does NOT move: a user
+// paying for a higher posture is owed the real delta, not a slogan.
 //
 // The child-budget sentence is not a caveat, it is the point: zeromaxing is a
 // maximal posture, so the raised budget is exported to spawned sub-agents
 // exactly as /turns does (asserted by TestZeromaxingTurnBudgetPropagatesToChildren).
-const Delta = "zeromaxing raises the tool-turn budget to 320 (thorough uses 160) and applies that budget to spawned sub-agents too. " +
-	"Reasoning effort and post-edit self-correction are unchanged from thorough: effort is already at the highest level providers accept, and self-correction is already armed."
+func Delta(selfCorrect SelfCorrectTransition) string {
+	return DeltaBudgetLine + " " + DeltaEffortLine + " " + selfCorrect.selfCorrectLine() + "."
+}
+
+// The fixed clauses, exported so tests assert on the same bytes users read.
+const (
+	DeltaBudgetLine = "zeromaxing raises the tool-turn budget to 320 (thorough uses 160) and applies that budget to spawned sub-agents too."
+	// Effort genuinely is caller-independent: "high" is the ceiling every
+	// provider accepts, so there is no state a caller can be in where the
+	// posture raises it further.
+	DeltaEffortLine = "reasoning effort: unchanged — already at the highest level providers accept."
+)
 
 // Name is the single spelling of this posture, everywhere: /effort zeromaxing,
 // /profile zeromaxing, --exec-profile zeromaxing, --reasoning-effort zeromaxing.

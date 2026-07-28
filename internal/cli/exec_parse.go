@@ -573,6 +573,14 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 		// posture and has no meaning for a draft, so it is not accepted here.
 		switch strings.ToLower(next) {
 		case "low", "medium", "high":
+		case execprofile.Name:
+			// Rejecting this with the generic "Expected low, medium, or high"
+			// reads like a bug to anyone who just learned the name works on
+			// --reasoning-effort. Say why it does not apply, and name the two
+			// flags that do what they were reaching for.
+			return "", index, execUsageError{fmt.Sprintf(
+				"invalid %s %q. %s is a run posture, not a reasoning level, so it does not apply to spec drafting. Use %s high for the draft, or --reasoning-effort %s to run under the posture.",
+				flag, next, execprofile.Name, flag, execprofile.Name)}
 		default:
 			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, or high.", flag, next)}
 		}
