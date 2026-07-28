@@ -161,6 +161,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 	if config.UseLandlock {
 		return linuxSandboxBwrapPlan{}, errors.New("linux landlock helper mode is not implemented yet")
 	}
+	if err := validateLinuxBwrapPermissionProfile(config.PermissionProfile); err != nil {
+		return linuxSandboxBwrapPlan{}, err
+	}
 	helperPath := strings.TrimSpace(options.HelperPath)
 	if helperPath == "" {
 		return linuxSandboxBwrapPlan{}, errors.New("linux sandbox helper path is required")
@@ -215,6 +218,13 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		Args:                   args,
 		ProtectedCreateTargets: filesystemPlan.ProtectedCreateTargets,
 	}, nil
+}
+
+func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
+	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
+		return fmt.Errorf("bubblewrap cannot securely deny process-trusted credential file across atomic replacement: %s", strings.Join(files, ", "))
+	}
+	return nil
 }
 
 func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {

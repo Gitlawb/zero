@@ -166,6 +166,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if backend.Name == "" {
 		backend = Backend{Name: BackendUnavailable, Message: "native sandbox backend was not selected"}
 	}
+	backend = inferBackendCapabilities(backend)
 	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
@@ -179,6 +180,13 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		preference = SandboxPreferenceForbid
 	}
 	profile := permissionProfileFromPolicy(workspaceRoot, policy, engine.scope, spec.Dir, spec.Env)
+	// Validate in the main process before creating runtime state or launching a
+	// potentially version-skewed helper. Keep the helper check as defense in depth.
+	if preference != SandboxPreferenceForbid && backend.Name == BackendLinuxBwrap && backend.Available && backend.CommandWrapping && backend.NativeIsolation {
+		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+			return CommandPlan{}, err
+		}
+	}
 	var runtimeCleanup func()
 	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
 		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
@@ -792,7 +800,12 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 }
 
 func denyReadRules(fs FileSystemPolicy) []string {
-	return denySeatbeltPathRules("file-read*", dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...)))
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	rules := denySeatbeltPathRules("file-read*", denied)
+	// Process-trusted final names have already had only their parent
+	// canonicalized. Preserve that terminal pathname here: normalizing it again
+	// would follow a terminal symlink and lose the atomic-replacement deny.
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", fs.ProcessTrustedDenyReadFiles)...))
 }
 
 // denyReadCarveoutRules re-allows reads for the non-secret subtrees of a denied
@@ -858,12 +871,16 @@ func denyWriteRulesFromPaths(paths []string) []string {
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	resolved := normalizeProfilePaths(paths)
-	if len(resolved) == 0 {
+	return denySeatbeltNormalizedPathRules(action, normalizeProfilePaths(paths))
+}
+
+func denySeatbeltNormalizedPathRules(action string, paths []string) []string {
+	paths = dedupeStrings(paths)
+	if len(paths) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(resolved)*2)
-	for _, path := range resolved {
+	out := make([]string, 0, len(paths)*2)
+	for _, path := range paths {
 		filters := []string{`(subpath "` + sandboxProfileString(path) + `")`}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			filters = []string{`(literal "` + sandboxProfileString(path) + `")`}

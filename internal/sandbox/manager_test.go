@@ -845,14 +845,197 @@ func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingC
 			t.Errorf("EnsureDenyReadDirs = %#v, must not include command-controlled dir %q", fs.EnsureDenyReadDirs, unwanted)
 		}
 	}
-
-	_ = buildLinuxBwrapFilesystemPlan(plan.PermissionProfile)
-	if info, err := os.Stat(parentZero); err != nil || !info.IsDir() {
-		t.Fatalf("trusted process credential dir was not created: info=%v err=%v", info, err)
+	if !stringSliceContains(fs.ProcessTrustedDenyReadFiles, normalizeProfilePath(parentToken)) {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, want process override %q", fs.ProcessTrustedDenyReadFiles, parentToken)
 	}
-	for _, unwanted := range append([]string{childZero, childToken + credentialPublicationDirSuffix}, childCredentialPaths...) {
+	if stringSliceContains(fs.ProcessTrustedDenyReadFiles, normalizeProfilePath(childToken)) {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, must not trust command override %q", fs.ProcessTrustedDenyReadFiles, childToken)
+	}
+
+	config := LinuxSandboxHelperConfig{
+		SandboxPolicyCWD:  workspace,
+		CommandCWD:        workspace,
+		PermissionProfile: plan.PermissionProfile,
+		Command:           []string{"true"},
+	}
+	if _, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{Config: config, HelperPath: "/usr/bin/zero-linux-sandbox"}); err == nil || !strings.Contains(err.Error(), "atomic replacement") {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs error = %v, want fail-closed atomic replacement error", err)
+	}
+	for _, unwanted := range append([]string{parentZero, parentToken + credentialPublicationDirSuffix, childZero, childToken + credentialPublicationDirSuffix}, childCredentialPaths...) {
 		if _, err := os.Stat(unwanted); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("command-controlled credential dir %q was created on the host: %v", unwanted, err)
+			t.Fatalf("failed bwrap planning created credential path %q on the host: %v", unwanted, err)
+		}
+	}
+}
+
+func TestCommandControlledConfigAncestorDoesNotSuppressProcessTrustedFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	commandConfig := filepath.Join(t.TempDir(), "command-config")
+	tokenPath := filepath.Join(commandConfig, "zero", "oauth-tokens.json")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+
+	profile := permissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil, t.TempDir(), []string{"XDG_CONFIG_HOME=" + commandConfig})
+	if !stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, normalizeProfilePath(tokenPath)) {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, command-controlled config ancestor must not suppress %q", profile.FileSystem.ProcessTrustedDenyReadFiles, tokenPath)
+	}
+}
+
+func TestProcessTrustedFileMarkerRequiresStrictUserDenyAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	tokenPath := filepath.Join(home, "stores", "oauth-tokens.json")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+
+	exactPolicy := DefaultPolicy()
+	exactPolicy.DenyRead = []string{tokenPath}
+	exact := PermissionProfileFromPolicy(t.TempDir(), exactPolicy, nil)
+	if !stringSliceContains(exact.FileSystem.ProcessTrustedDenyReadFiles, normalizeProfilePath(tokenPath)) {
+		t.Fatalf("exact user file deny removed fail-closed marker: %#v", exact.FileSystem.ProcessTrustedDenyReadFiles)
+	}
+
+	directoryPolicy := DefaultPolicy()
+	directoryPolicy.DenyRead = []string{filepath.Dir(tokenPath)}
+	directory := PermissionProfileFromPolicy(t.TempDir(), directoryPolicy, nil)
+	if stringSliceContains(directory.FileSystem.ProcessTrustedDenyReadFiles, normalizeProfilePath(tokenPath)) {
+		t.Fatalf("user directory deny did not remove covered marker: %#v", directory.FileSystem.ProcessTrustedDenyReadFiles)
+	}
+}
+
+func TestProcessTrustedFinalPathsPreserveTerminalSymlinkNamesDespiteTargetAllowRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	home := t.TempDir()
+	zeroDir := filepath.Join(home, ".config", "zero")
+	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(zeroDir, "oauth-tokens.json")
+	if err := os.WriteFile(target, []byte("tokens"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "token-link")
+	if err := os.Symlink(target, outside); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", outside)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	policy := DefaultPolicy()
+	policy.AllowRead = []string{target}
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), policy, nil)
+	for _, want := range []string{normalizeCredentialFinalPath(outside), normalizeCredentialFinalPath(outside + ".secret")} {
+		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
+			t.Errorf("DenyReadIfExists = %#v, want lexical final pathname %q", profile.FileSystem.DenyReadIfExists, want)
+		}
+		if !stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, want) {
+			t.Errorf("ProcessTrustedDenyReadFiles = %#v, want lexical final pathname %q", profile.FileSystem.ProcessTrustedDenyReadFiles, want)
+		}
+		sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+		if !strings.Contains(sbpl, `(literal "`+sandboxProfileString(want)+`")`) {
+			t.Errorf("Seatbelt profile missing lexical deny pathname %q:\n%s", want, sbpl)
+		}
+	}
+}
+
+func TestProcessTrustedExactAllowReadDoesNotIncludeSecret(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	tokenPath := filepath.Join(t.TempDir(), "store", "oauth-tokens.json")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	policy := DefaultPolicy()
+	policy.AllowRead = []string{tokenPath}
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), policy, nil)
+	primary := normalizeCredentialFinalPath(tokenPath)
+	secret := normalizeCredentialFinalPath(tokenPath + ".secret")
+	if stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, primary) {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, exact AllowRead must opt primary out", profile.FileSystem.ProcessTrustedDenyReadFiles)
+	}
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, secret) || !stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, secret) {
+		t.Fatalf("exact primary AllowRead must retain secret deny and marker: denies=%#v markers=%#v", profile.FileSystem.DenyReadIfExists, profile.FileSystem.ProcessTrustedDenyReadFiles)
+	}
+	if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), secret) {
+		t.Fatalf("validateLinuxBwrapPermissionProfile error = %v, want fail-closed secret marker", err)
+	}
+}
+
+func TestProcessTrustedFileMarkerHonorsOutOfTreeAllowRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	tokenPath := filepath.Join(t.TempDir(), "allowed", "oauth-tokens.json")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	policy := DefaultPolicy()
+	policy.AllowRead = []string{filepath.Dir(tokenPath)}
+
+	profile := PermissionProfileFromPolicy(t.TempDir(), policy, nil)
+	if stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(tokenPath)) {
+		t.Fatalf("DenyReadIfExists = %#v, AllowRead must opt out of token deny", profile.FileSystem.DenyReadIfExists)
+	}
+	if len(profile.FileSystem.ProcessTrustedDenyReadFiles) != 0 {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, AllowRead opt-out must not retain marker", profile.FileSystem.ProcessTrustedDenyReadFiles)
+	}
+}
+
+func TestEngineBuildCommandPlanValidatesBwrapBeforeCreatingRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	tokenPath := filepath.Join(home, "trusted-store", "tokens.json")
+	runtimeCache := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	oldUserCacheDir := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return runtimeCache, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = oldUserCacheDir })
+
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend: Backend{
+			Name: BackendLinuxBwrap, Available: true, Platform: "linux",
+			Executable: "/usr/bin/zero-linux-sandbox",
+		},
+	})
+	if _, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: workspace}); err == nil || !strings.Contains(err.Error(), "atomic replacement") {
+		t.Fatalf("BuildCommandPlan error = %v, want fail-closed atomic replacement error", err)
+	}
+	for _, unwanted := range []string{runtimeCache, filepath.Join(home, ".config", "zero"), tokenPath + credentialPublicationDirSuffix} {
+		if _, err := os.Stat(unwanted); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed main-process validation created path %q: %v", unwanted, err)
 		}
 	}
 }
@@ -910,6 +1093,9 @@ func TestPermissionProfileDropsRedundantAutomaticMasksInsideZeroDir(t *testing.T
 	}
 	if stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(tokenPath+credentialPublicationDirSuffix)) {
 		t.Fatalf("EnsureDenyReadDirs = %#v, redundant nested publication dir must not be created", fs.EnsureDenyReadDirs)
+	}
+	if len(fs.ProcessTrustedDenyReadFiles) != 0 {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, default config-directory mask must cover token path", fs.ProcessTrustedDenyReadFiles)
 	}
 }
 

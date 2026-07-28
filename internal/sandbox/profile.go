@@ -41,10 +41,16 @@ type FileSystemPolicy struct {
 	// may create (0700) so a mask exists for them. bubblewrap cannot mount over
 	// a path that is absent when the namespace is assembled, so without this a
 	// store created mid-session would be readable by an already-running sandbox.
-	EnsureDenyReadDirs   []string `json:"ensureDenyReadDirs,omitempty"`
-	DenyWrite            []string `json:"denyWrite,omitempty"`
-	IncludePlatformRoots bool     `json:"includePlatformRoots,omitempty"`
-	AllowTemp            bool     `json:"allowTemp,omitempty"`
+	EnsureDenyReadDirs []string `json:"ensureDenyReadDirs,omitempty"`
+	// ProcessTrustedDenyReadFiles are final credential-store pathnames derived
+	// only from Zero's own process environment. Mount-based Linux cannot
+	// durably deny an individual pathname because an atomic rename can replace
+	// and detach the mount; its planner must fail closed while any remain after
+	// profile finalization. Pathname-policy backends enforce these normally.
+	ProcessTrustedDenyReadFiles []string `json:"processTrustedDenyReadFiles,omitempty"`
+	DenyWrite                   []string `json:"denyWrite,omitempty"`
+	IncludePlatformRoots        bool     `json:"includePlatformRoots,omitempty"`
+	AllowTemp                   bool     `json:"allowTemp,omitempty"`
 }
 
 type WritableRoot struct {
@@ -118,16 +124,17 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	credentials = finalizeCredentialDenyPaths(credentials, userDenyRead)
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
-			Kind:                 FileSystemRestricted,
-			ReadRoots:            readRoots,
-			WriteRoots:           writeRoots,
-			DenyRead:             userDenyRead,
-			DenyReadIfExists:     credentials.Paths,
-			DenyReadCarveouts:    credentials.Carveouts,
-			EnsureDenyReadDirs:   credentials.EnsureDirs,
-			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
-			IncludePlatformRoots: true,
-			AllowTemp:            true,
+			Kind:                        FileSystemRestricted,
+			ReadRoots:                   readRoots,
+			WriteRoots:                  writeRoots,
+			DenyRead:                    userDenyRead,
+			DenyReadIfExists:            credentials.Paths,
+			DenyReadCarveouts:           credentials.Carveouts,
+			EnsureDenyReadDirs:          credentials.EnsureDirs,
+			ProcessTrustedDenyReadFiles: credentials.ProcessTrustedFinalFiles,
+			DenyWrite:                   normalizeProfilePaths(policy.DenyWrite),
+			IncludePlatformRoots:        true,
+			AllowTemp:                   true,
 		},
 		Network: NetworkPolicy{Mode: NormalizeNetworkMode(policy.Network)},
 	}
@@ -175,10 +182,11 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 // them, the trusted non-secret subtrees that stay readable, and the trusted
 // Zero-owned directories a mount-based backend may create so its mask exists.
 type credentialDenyPaths struct {
-	Paths      []string
-	Carveouts  []string
-	EnsureDirs []string
-	Dirs       []string
+	Paths                    []string
+	Carveouts                []string
+	EnsureDirs               []string
+	Dirs                     []string
+	ProcessTrustedFinalFiles []string
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
@@ -217,10 +225,32 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 	// carveouts or host directories. CommandSpec.Env can contain project-controlled
 	// MCP environment overrides, so it contributes deny-if-present paths only.
 	processBaseDirs := credentialProcessBaseDirs()
+	processOptions := credentialPathOptionsFromEnvironment(processBaseDirs, os.Environ())
 	trusted := credentialDenyReadPathsIn(
-		credentialPathOptionsFromEnvironment(processBaseDirs, os.Environ()),
+		processOptions,
 		policy.AllowRead,
 	)
+	processFinalFiles := append(
+		append([]string{}, processOptions.OAuthTokens...),
+		processOptions.MCPOAuthTokens...,
+	)
+	allowRoots := normalizeProfilePaths(policy.AllowRead)
+	for _, file := range processFinalFiles {
+		// The token blob and encryption key are independently atomically replaced.
+		// Preserve each terminal lexical name: rename replaces a terminal symlink
+		// rather than following it, so allowing only its resolved target must not
+		// expose the replacement pathname (nor does allowing the blob imply its key).
+		for _, final := range []string{file, file + ".secret"} {
+			candidate := normalizeCredentialFinalPath(final)
+			if candidate == "" || credentialPathReincluded(allowRoots, candidate) {
+				continue
+			}
+			trusted.Paths = append(trusted.Paths, candidate)
+			trusted.ProcessTrustedFinalFiles = append(trusted.ProcessTrustedFinalFiles, candidate)
+		}
+	}
+	trusted.Paths = dedupeStrings(trusted.Paths)
+	trusted.ProcessTrustedFinalFiles = dedupeStrings(trusted.ProcessTrustedFinalFiles)
 	appendUntrusted := func(options credentialPathOptions) {
 		paths := credentialDenyReadPathsIn(options, policy.AllowRead)
 		trusted.Paths = append(trusted.Paths, paths.Paths...)
@@ -657,7 +687,41 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
 	credentials.EnsureDirs = credentialRetainedDirs(credentials.Paths, credentials.EnsureDirs)
+	credentials.ProcessTrustedFinalFiles = credentialRetainedFiles(
+		credentials.ProcessTrustedFinalFiles,
+		userDenyRead,
+		credentials.EnsureDirs,
+	)
 	return credentials
+}
+
+// credentialRetainedFiles drops fail-closed file markers only when a durable
+// directory mask strictly contains the file. Exact file mounts are vulnerable
+// to atomic replacement, and Dirs may include command-controlled candidates;
+// only user directory ancestors and retained trusted EnsureDirs qualify.
+func credentialRetainedFiles(files, userDenied, trustedDeniedDirs []string) []string {
+	var out []string
+	for _, file := range files {
+		covered := false
+		for _, dir := range userDenied {
+			if file != dir && pathWithinRoot(dir, file) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			for _, dir := range trustedDeniedDirs {
+				if file != dir && pathWithinRoot(dir, file) {
+					covered = true
+					break
+				}
+			}
+		}
+		if !covered {
+			out = append(out, file)
+		}
+	}
+	return dedupeStrings(out)
 }
 
 // resolveCredentialOverridePaths mirrors the token stores' own override
@@ -772,6 +836,21 @@ func normalizeProfilePath(entry string) string {
 			return filepath.Join(append([]string{resolved}, tail...)...)
 		}
 	}
+}
+
+// normalizeCredentialFinalPath canonicalizes only the parent of an absolute,
+// already-resolved credential override and rejoins its terminal lexical name.
+// normalizeProfilePath supplies deepest-existing-ancestor handling for a
+// missing parent without following a terminal symlink that os.Rename replaces.
+func normalizeCredentialFinalPath(path string) string {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return ""
+	}
+	parent := normalizeProfilePath(filepath.Dir(filepath.Clean(path)))
+	if parent == "" {
+		return ""
+	}
+	return filepath.Join(parent, filepath.Base(filepath.Clean(path)))
 }
 
 // normalizeProfilePathLexically expands and absolutizes a profile path without
