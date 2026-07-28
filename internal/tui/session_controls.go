@@ -403,6 +403,55 @@ func reasoningEffortsFromModels(models []providermodeldiscovery.Model, modelName
 	return nil, false
 }
 
+// availableReasoningEffortsKnown returns the active model's effort ring AND
+// whether that ring is AUTHORITATIVE — i.e. the model has a catalog entry, so an
+// empty ring genuinely means "no reasoning controls" rather than "we have never
+// heard of this model".
+//
+// The distinction already existed at the model-SWITCH site (command_center.go
+// passes `target.entry != nil` as ringKnown) but not at the profile FILL site,
+// which used the plain allowed-check and so treated an unknown model as a model
+// that had refused. The headless path makes the opposite call — an unknown model
+// forwards the requested effort as-is, "since no support claim can be made for
+// it" — so the two surfaces disagreed about the same model.
+func (m model) availableReasoningEffortsKnown() ([]modelregistry.ReasoningEffort, bool) {
+	name := strings.TrimSpace(m.modelName)
+	if name == "" {
+		return nil, false
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return nil, false
+	}
+	_, known := registry.Get(name)
+	return registry.ReasoningEfforts(name), known
+}
+
+// profileEffortApplies reports whether a profile may fill `want` on the active
+// model. It fills when the model is KNOWN to support the level, and also when
+// the ring is not authoritative: an unknown endpoint may well support it, and
+// declining would be a false negative that silently drops the posture's effort.
+// Only a model the catalog vouches for as lacking the level blocks the fill.
+func (m model) profileEffortApplies(want modelregistry.ReasoningEffort) bool {
+	// No model selected: there is nothing to make a support claim about, so the
+	// profile does not fill. Distinct from an UNKNOWN model, which is a real
+	// endpoint that may well accept the level — conflating the two was the
+	// over-reach the pre-existing fast-posture test caught.
+	if strings.TrimSpace(m.modelName) == "" {
+		return false
+	}
+	efforts, known := m.availableReasoningEffortsKnown()
+	if reasoningEffortAllowed(efforts, want) {
+		return true
+	}
+	// A catalog entry is authoritative: an empty ring there genuinely means the
+	// model has no reasoning controls, so do not fill. Without an entry the
+	// catalog cannot vouch either way, and declining would be a false negative
+	// that silently drops the posture's effort — the headless path forwards it
+	// in exactly this case ("no support claim can be made for it").
+	return !known
+}
+
 func (m model) effortDisplay() string {
 	if m.reasoningEffort == "" {
 		return "auto"
@@ -610,7 +659,7 @@ func (m model) handleProfileCommand(args string) (model, string) {
 	// gating. An explicit user choice always wins over the profile.
 	m.execProfileEffortUnraised = ""
 	if want := modelregistry.ReasoningEffort(profile.ReasoningEffort); want != "" && m.reasoningEffort == "" {
-		if reasoningEffortAllowed(m.availableReasoningEfforts(), want) {
+		if m.profileEffortApplies(want) {
 			m.reasoningEffort = want
 			m.execProfileAppliedEffort = want
 		} else {
@@ -705,16 +754,33 @@ func (m model) resolvedPostureLine() string {
 // zeromaxingNotes returns the honest-delta lines for the active posture: what
 // it really changes, and anything it could NOT apply on this model.
 func (m model) zeromaxingNotes() []string {
-	notes := []string{}
-	if m.execProfileName == execprofile.Name {
-		notes = append(notes, execprofile.Delta(m.selfCorrectTransition()))
+	if m.execProfileName != execprofile.Name {
+		return nil
 	}
-	if m.execProfileEffortUnraised != "" {
-		notes = append(notes, fmt.Sprintf(
-			"reasoning effort NOT raised to %s: the active model does not support that level; the rest of the posture still applies",
-			m.execProfileEffortUnraised))
+	// ONE source. The effort clause used to live here as a second, separate
+	// line while Delta carried its own fixed "unchanged" claim, and the two
+	// could contradict each other — they did, in real use. Now every clause
+	// comes from one DeltaState, so exactly one effort statement exists.
+	return []string{execprofile.Delta(execprofile.DeltaState{
+		CurrentMaxTurns: m.execProfileDisplacedMaxTurns,
+		Effort:          m.effortTransition(),
+		SelfCorrect:     m.selfCorrectTransition(),
+	})}
+}
+
+// effortTransition reports what the posture did to reasoning effort on this
+// model, from the session's live state.
+func (m model) effortTransition() execprofile.EffortTransition {
+	switch {
+	case m.execProfileEffortUnraised != "":
+		return execprofile.EffortNotSupported
+	case m.execProfileAppliedEffort != "":
+		return execprofile.EffortRaised
+	default:
+		// The posture wanted to fill and did not, and did not record a refusal:
+		// the caller already had an effort of their own.
+		return execprofile.EffortKeptExplicit
 	}
-	return notes
 }
 
 func (m model) profileText() string {

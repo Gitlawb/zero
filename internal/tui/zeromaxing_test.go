@@ -288,17 +288,21 @@ func TestSelectionRefusalAgreesAcrossPaths(t *testing.T) {
 // (l) Degrade honestly. On a model with no effort ring the fill is skipped — and
 // the status output must SAY so, while the rest of the posture still applies.
 func TestZeromaxingOnUnsupportedModelStatesWhatItCouldNotRaise(t *testing.T) {
+	// gpt-4.1 is a CATALOG model with no reasoning capability, so its empty ring
+	// is authoritative. A custom endpoint with no catalog entry is deliberately
+	// NOT used here: the catalog cannot vouch for it either way, so the posture
+	// fills optimistically there (see TestProfileEffortFillsOnAnUnknownModel).
 	m := newModel(context.Background(), Options{
-		ProviderName:    "ollama",
-		ModelName:       "kimi-k2.7-code:cloud",
+		ProviderName:    "openai",
+		ModelName:       "gpt-4.1",
 		Provider:        &fakeProvider{},
-		ProviderProfile: config.ProviderProfile{Name: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-4.1", APIKey: "k"},
 		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
 			return &fakeProvider{}, nil
 		},
 	})
 	if len(m.availableReasoningEfforts()) != 0 {
-		t.Skip("this model gained an effort ring; the fixture no longer exercises the unsupported path")
+		t.Skip("gpt-4.1 gained an effort ring; the fixture no longer exercises the known-lacking path")
 	}
 
 	m, text := m.handleEffortCommand(execprofile.Name)
@@ -369,25 +373,56 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 	_, effortStatus := m.handleEffortCommand("")
 	_, profileStatus := m.handleProfileCommand("status")
 
+	delta := execprofile.Delta(execprofile.DeltaState{
+		CurrentMaxTurns: m.execProfileDisplacedMaxTurns,
+		Effort:          m.effortTransition(),
+		SelfCorrect:     m.selfCorrectTransition(),
+	})
 	for surface, text := range map[string]string{"/effort": effortStatus, "/profile status": profileStatus} {
 		for _, want := range []string{"effort: high", "profile: " + execprofile.Name, "turns: 320"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s must show %q in its resolved state line:\n%s", surface, want, text)
 			}
 		}
-		if !strings.Contains(text, execprofile.DeltaBudgetLine) {
+		if !strings.Contains(text, "turn budget:") {
 			t.Fatalf("%s must state the real delta:\n%s", surface, text)
 		}
-		for _, want := range []string{"320", "160", "sub-agents"} {
+		for _, want := range []string{"320", "sub-agents", "reasoning effort:", "self-correct:"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s must mention %q:\n%s", surface, want, text)
+			}
+		}
+		// (3) The delta is caller-relative: thorough's budget is about two
+		// profiles, not about this user, and must not appear.
+		if strings.Contains(text, "160") {
+			t.Fatalf("%s must not compare against thorough's budget:\n%s", surface, text)
+		}
+		// (2) EXACTLY ONE effort TRANSITION statement.
+		//
+		// Counted over the delta, not the whole card: /profile legitimately
+		// shows current state ("reasoning effort: high") alongside the delta's
+		// transition ("reasoning effort: raised to high"), and those are
+		// different claims. What must never happen twice is the transition —
+		// that duplication is what let "unchanged" and "NOT raised" coexist.
+		if n := strings.Count(text, delta); n != 1 {
+			t.Fatalf("%s must carry the delta exactly once, found %d:\n%s", surface, n, text)
+		}
+		for _, pair := range [][2]string{
+			{"NOT raised", "raised to"},
+			{"NOT raised", "reasoning effort: unchanged"},
+			{"reasoning effort: unchanged", "raised to"},
+		} {
+			if strings.Contains(text, pair[0]) && strings.Contains(text, pair[1]) &&
+				!strings.Contains(pair[1], pair[0]) {
+				t.Fatalf("%s makes two different effort claims (%q and %q):\n%s",
+					surface, pair[0], pair[1], text)
 			}
 		}
 	}
 	// Other profiles must NOT carry the posture's delta text.
 	other := zeromaxingTestModel(t, false)
 	_, otherText := other.handleProfileCommand("thorough")
-	if strings.Contains(otherText, execprofile.DeltaBudgetLine) {
+	if strings.Contains(otherText, "turn budget:") {
 		t.Fatalf("thorough must not claim the posture's delta:\n%s", otherText)
 	}
 }
@@ -468,5 +503,80 @@ func TestSelfCorrectTransitionAlreadyOn(t *testing.T) {
 	}
 	if strings.Contains(text, "lsp → tests") {
 		t.Fatalf("must not claim a transition that did not happen:\n%s", text)
+	}
+}
+
+// BUG 1 REGRESSION — and the hole it came from.
+//
+// The posture's effort fill silently did not happen on a custom/unknown model:
+// /effort zeromaxing left the effort at "auto" while --exec-profile zeromaxing
+// on the SAME model sent reasoning_effort:"high" on the wire. Same posture,
+// same model, two answers.
+//
+// THE HOLE: every existing test asserted a surface against its OWN expectation.
+// The TUI tests used claude-sonnet-4.5 (has high → fill works) and an unknown
+// model (no fill → "correct" by the TUI's own rule). The CLI tests asserted the
+// CLI's rule. Both suites were green while the two paths disagreed, because
+// nothing compared them AGAINST EACH OTHER for the same model. A unit test on
+// either helper could never have caught it.
+//
+// This is that missing comparison.
+func TestProfileEffortFillAgreesWithTheHeadlessPath(t *testing.T) {
+	for _, tc := range []struct {
+		model    string
+		wantFill bool
+		why      string
+	}{
+		{"claude-sonnet-4.5", true, "catalog model that lists high"},
+		{"gpt-5", true, "inferred reasoning family that lists high"},
+		{"gpt-4.1", false, "catalog model whose EMPTY ring is authoritative"},
+		{"some-custom-endpoint-model", true, "no catalog entry — the catalog cannot vouch either way, so do not decline"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			m := newModel(context.Background(), Options{
+				ProviderName:    "p",
+				ModelName:       tc.model,
+				Provider:        &fakeProvider{},
+				ProviderProfile: config.ProviderProfile{Name: "p", Model: tc.model, APIKey: "k"},
+				NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return &fakeProvider{}, nil
+				},
+			})
+			m, text := m.handleEffortCommand(execprofile.Name)
+
+			filled := m.reasoningEffort == modelregistry.ReasoningEffortHigh
+			if filled != tc.wantFill {
+				t.Fatalf("%s (%s): effort filled = %v, want %v (effort=%q)\n%s",
+					tc.model, tc.why, filled, tc.wantFill, m.reasoningEffort, text)
+			}
+			// The rest of the posture applies either way — a declined effort
+			// must never cost the user the turn budget.
+			if m.agentOptions.MaxTurns != 320 {
+				t.Fatalf("%s: the turn budget must apply regardless of the effort, got %d",
+					tc.model, m.agentOptions.MaxTurns)
+			}
+			// ...and the resolved-state line must not claim an effort the
+			// session does not have.
+			if filled && !strings.Contains(text, "effort: high") {
+				t.Fatalf("%s: filled but the status does not say so:\n%s", tc.model, text)
+			}
+			if !filled && strings.Contains(text, "effort: high") {
+				t.Fatalf("%s: not filled but the status claims high:\n%s", tc.model, text)
+			}
+		})
+	}
+}
+
+// No model selected is NOT "an unknown model": there is nothing to make a
+// support claim about, so the profile must not fill. This is the over-reach the
+// pre-existing fast-posture test caught in the first version of the fix.
+func TestProfileEffortDoesNotFillWithoutAModel(t *testing.T) {
+	m := model{}
+	if m.profileEffortApplies(modelregistry.ReasoningEffortHigh) {
+		t.Fatal("no model name: the profile must not fill an effort")
+	}
+	got, _ := m.handleProfileCommand("fast")
+	if got.reasoningEffort != "" {
+		t.Fatalf("effort = %q, must stay auto when no model is selected", got.reasoningEffort)
 	}
 }

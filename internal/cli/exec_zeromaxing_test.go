@@ -2,6 +2,7 @@ package cli
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -235,8 +236,9 @@ func TestZeromaxingTurnBudgetPropagatesToChildren(t *testing.T) {
 	}
 	// The delta text promises exactly this, so the promise and the number must
 	// not drift apart.
-	if !strings.Contains(execprofile.DeltaBudgetLine, "sub-agents") {
-		t.Fatalf("the budget line must tell the user it reaches sub-agents: %q", execprofile.DeltaBudgetLine)
+	delta := execprofile.Delta(execprofile.DeltaState{CurrentMaxTurns: 80})
+	if !strings.Contains(delta, "sub-agents") {
+		t.Fatalf("the delta must tell the user the budget reaches sub-agents: %q", delta)
 	}
 }
 
@@ -307,8 +309,8 @@ func TestExecSelfCorrectTransitionUsesPreProfileState(t *testing.T) {
 		t.Fatalf("an explicit --self-correct run = %v, want SelfCorrectAlreadyOn", got)
 	}
 	// And the rendered text differs, so the distinction reaches the user.
-	raised := execprofile.Delta(execSelfCorrectTransition(false))
-	already := execprofile.Delta(execSelfCorrectTransition(true))
+	raised := execprofile.Delta(execprofile.DeltaState{CurrentMaxTurns: 80, SelfCorrect: execSelfCorrectTransition(false)})
+	already := execprofile.Delta(execprofile.DeltaState{CurrentMaxTurns: 80, SelfCorrect: execSelfCorrectTransition(true)})
 	if raised == already {
 		t.Fatalf("both states render identically:\n%s", raised)
 	}
@@ -379,5 +381,35 @@ func TestExecPrintsUnchangedWhenSelfCorrectWasAlreadyOn(t *testing.T) {
 	}
 	if strings.Contains(stderr, "lsp → tests") {
 		t.Fatalf("must not claim a transition that did not happen:\n%s", stderr)
+	}
+}
+
+// (3) The budget clause the USER sees must be caller-relative. Asserted through
+// the real exec path: a unit test on budgetLine cannot catch the caller passing
+// the wrong number into it, which is exactly what mutation found.
+func TestExecDeltaShowsTheCallersOwnTurnBudget(t *testing.T) {
+	exitCode, _, stderr := runExecWithEcho(t, []string{
+		"exec", "--exec-profile", execprofile.Name, "hello",
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	// Assert the SHAPE, not a specific origin: the harness's resolved budget is
+	// a fixture value, and pinning it here would test the fixture rather than
+	// the behaviour. What matters is that the origin is the caller's own
+	// resolved budget and the destination is the posture's.
+	transition := regexp.MustCompile(`turn budget: (\d+) → 320`)
+	match := transition.FindStringSubmatch(stderr)
+	if match == nil {
+		t.Fatalf("the delta must state a caller-relative budget transition:\n%s", stderr)
+	}
+	if match[1] == "320" {
+		t.Fatalf("origin and destination are the same; the clause should read \"unchanged\":\n%s", stderr)
+	}
+	if strings.Contains(stderr, "160") {
+		t.Fatalf("the delta must not compare against thorough's budget:\n%s", stderr)
+	}
+	if n := strings.Count(stderr, "reasoning effort:"); n != 1 {
+		t.Fatalf("exactly one reasoning-effort statement expected, found %d:\n%s", n, stderr)
 	}
 }

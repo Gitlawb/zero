@@ -346,7 +346,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// in a PR body is how a posture ends up documented as doing things it does
 	// not do.
 	if execProfile.IsZeromaxing() {
-		if _, err := fmt.Fprintln(stderr, execprofile.Delta(execSelfCorrectTransition(selfCorrectBeforeProfile))); err != nil {
+		delta := execprofile.Delta(execprofile.DeltaState{
+			// resolved.MaxTurns is still the pre-posture budget here: the Delta
+			// notice is printed BEFORE applyProfileTurnBudget displaces it.
+			CurrentMaxTurns: resolved.MaxTurns,
+			Effort:          execEffortTransition(execProfileFilledEffort),
+			SelfCorrect:     execSelfCorrectTransition(selfCorrectBeforeProfile),
+		})
+		if _, err := fmt.Fprintln(stderr, delta); err != nil {
 			return exitCrash
 		}
 	}
@@ -1298,6 +1305,18 @@ func normalizeZeromaxingEffort(options *execOptions) error {
 	// posture name here would carry it into forwardedReasoningEffort.
 	options.reasoningEffort = ""
 	return nil
+}
+
+// execEffortTransition reports what the posture did to reasoning effort for
+// this run. applyExecProfile reports whether it actually filled the effort; it
+// backs off when the caller passed one explicitly. The headless path does not
+// gate the fill on model support (forwardedReasoningEffort coerces later, and
+// prints its own notice), so EffortNotSupported is not reachable here.
+func execEffortTransition(effortFilled bool) execprofile.EffortTransition {
+	if effortFilled {
+		return execprofile.EffortRaised
+	}
+	return execprofile.EffortKeptExplicit
 }
 
 // execSelfCorrectTransition reports what the posture did to post-edit
