@@ -20,6 +20,9 @@ type lspServer interface {
 type session struct {
 	server lspServer
 	client *Client
+	// catchUpGrace bounds catchUpNotifications on a live client. Zero means "do
+	// not wait", which is what the hand-built sessions in tests get by default.
+	catchUpGrace time.Duration
 
 	mu          sync.Mutex
 	open        map[string]bool            // uri -> didOpen sent
@@ -33,8 +36,10 @@ type session struct {
 
 func newSession(server lspServer) *session {
 	s := &session{
-		server:      server,
-		client:      server.Client(),
+		server:       server,
+		client:       server.Client(),
+		catchUpGrace: notificationCatchUpGrace,
+
 		open:        map[string]bool{},
 		versions:    map[string]int{},
 		diagnostics: map[string][]Diagnostic{},
@@ -144,11 +149,23 @@ func (s *session) diagnosticsFor(uri string) []Diagnostic {
 // would land afterward, still satisfy "more than baseline", and hand the new
 // check diagnostics for the wrong text — silently, since many servers omit the
 // version field the staleness check in handleNotification relies on.
-// Baselining against receipt sequence closes that: a notification already
-// enqueued before this call has seq <= baseline no matter when it is handled.
+// Baselining against receipt sequence closes that: a notification whose frame
+// had already come off the wire before this call has seq <= baseline no matter
+// when it is decoded, queued, or handled.
 func (s *session) publishBaseline() int64 {
-	return s.client.NotificationSeq()
+	return s.client.ReceiptSeq()
 }
+
+// notificationCatchUpGrace is the live-client catch-up budget a real session
+// runs with. It exists for the case where the caller's own deadline has already
+// passed: dropping a publish that is sitting accepted-but-unhandled in the queue
+// would report "no diagnostics" for text the server had in fact already answered
+// for, so a brief overrun is preferable to discarding it. It stays short because
+// the caller is by then out of budget, and it costs nothing in the ordinary case
+// — the session's own handler only parses and records, so the worker is
+// virtually always caught up already and no wait happens at all. A closed client
+// is deliberately not bounded by this; see catchUpNotifications.
+const notificationCatchUpGrace = 50 * time.Millisecond
 
 // waitForDiagnostics blocks until a publish newer than baseline arrives for the
 // URI and the server then goes quiet for the debounce window, or until ctx is
@@ -170,31 +187,16 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 			select {
 			case <-ctx.Done():
 				s.cancelWaiter(uri, ch)
-				// Cancellation and a publish can become ready together. As with
-				// client closure below, re-check state rather than letting select's
-				// random choice discard a publish already recorded by the handler.
-				s.mu.Lock()
-				fresh := s.publishSeq[uri] > baseline
-				s.mu.Unlock()
-				return fresh
+				// Cancellation, like closure below, ends the wait on a signal that
+				// says nothing about what the server sent, and either can win a race
+				// against a publish this session has already received. Deciding
+				// "nothing arrived" straight out of the select would discard it, so
+				// both settle identically: let the worker finish what it accepted,
+				// then re-read what got recorded.
+				return s.freshAfterCatchUp(uri, baseline)
 			case <-s.client.closed:
 				s.cancelWaiter(uri, ch)
-				// Closing the transport precedes draining notifications already
-				// accepted by the reader. Wait for that drain before deciding there
-				// was no publish. Hand-built clients have no worker/channel, so skip
-				// the wait for them rather than blocking forever.
-				if drained := s.client.notificationsDone(); drained != nil {
-					select {
-					case <-drained:
-					case <-ctx.Done():
-					}
-				}
-				// Re-check even when ctx and the drain are simultaneously ready:
-				// either may have won after the handler recorded the fresh publish.
-				s.mu.Lock()
-				fresh := s.publishSeq[uri] > baseline
-				s.mu.Unlock()
-				return fresh
+				return s.freshAfterCatchUp(uri, baseline)
 			case <-ch:
 				continue // a fresh publish arrived; loop into the debounce check
 			}
@@ -203,6 +205,7 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 		remaining := debounce - time.Since(last)
 		if remaining <= 0 {
 			s.cancelWaiter(uri, ch)
+			s.catchUpNotifications()
 			return true
 		}
 		timer := time.NewTimer(remaining)
@@ -210,17 +213,72 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 		case <-ctx.Done():
 			timer.Stop()
 			s.cancelWaiter(uri, ch)
-			return true // a fresh publish did arrive; ctx merely cut the debounce short
+			// A fresh publish did arrive; ctx merely cut the debounce short. Catch
+			// the worker up regardless: the caller reads diagnosticsFor the moment
+			// this returns, and a newer publish for this URI may be sitting accepted
+			// but unhandled — it should get the newest received, not the older one
+			// that happened to wake this wait.
+			s.catchUpNotifications()
+			return true
 		case <-s.client.closed:
 			timer.Stop()
 			s.cancelWaiter(uri, ch)
+			// Same, for whatever the server managed to publish before it died.
+			s.catchUpNotifications()
 			return true // preserve the fresh publish already received before failure
 		case <-ch:
 			timer.Stop()
 			continue // a newer publish arrived; re-arm the debounce
 		case <-timer.C:
 			s.cancelWaiter(uri, ch)
+			s.catchUpNotifications()
 			return true // quiet for the full window
+		}
+	}
+}
+
+// freshAfterCatchUp reports whether a publish received after baseline has been
+// recorded for the URI, having first let the notification worker finish frames
+// it already accepted. Receipt is what the answer turns on: a publish that was
+// read off the wire but is still queued would otherwise read as "never arrived".
+func (s *session) freshAfterCatchUp(uri string, baseline int64) bool {
+	s.catchUpNotifications()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.publishSeq[uri] > baseline
+}
+
+// catchUpNotifications waits for the client's notification worker to handle
+// every notification it had already accepted, so a decision made right after
+// cannot miss a publish that was on the wire before it. It returns immediately
+// in the ordinary case, where the worker is already caught up.
+func (s *session) catchUpNotifications() {
+	drained := s.client.notificationsDone()
+	if drained == nil {
+		return // hand-built client (some unit tests): no worker to catch up on
+	}
+	if s.client.IsClosed() {
+		// Wait the worker out instead of time-boxing it. Admission is already
+		// closed so the backlog cannot grow, and a handler's re-entrant Call now
+		// fails immediately rather than blocking on a response that will never
+		// come — the drain is bounded, and it is the last chance these frames get.
+		<-drained
+		return
+	}
+	target := s.client.acceptedNotificationSeq()
+	timer := time.NewTimer(s.catchUpGrace)
+	defer timer.Stop()
+	for {
+		handled, advanced := s.client.handledThrough()
+		if handled >= target {
+			return
+		}
+		select {
+		case <-advanced:
+		case <-drained:
+			return
+		case <-timer.C:
+			return
 		}
 	}
 }

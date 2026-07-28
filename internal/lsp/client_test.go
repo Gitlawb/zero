@@ -480,7 +480,7 @@ func TestClientDrainsAcceptedNotificationsAfterTransportEOF(t *testing.T) {
 	// Wait until the reader has accepted the publish, then fail it while the
 	// sole worker is still in the preceding handler and cannot dequeue it.
 	deadline := time.Now().Add(time.Second)
-	for client.NotificationSeq() != 2 {
+	for client.ReceiptSeq() != 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("publish was not accepted by the read loop")
 		}
@@ -489,6 +489,9 @@ func TestClientDrainsAcceptedNotificationsAfterTransportEOF(t *testing.T) {
 	if err := serverWriter.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Fresh budget: the wait above may have consumed most of the previous one,
+	// which would make this loop fail on nothing worse than slow scheduling.
+	deadline = time.Now().Add(time.Second)
 	for !client.IsClosed() {
 		if time.Now().After(deadline) {
 			t.Fatal("transport EOF did not close client")
@@ -511,6 +514,30 @@ func TestClientDrainsAcceptedNotificationsAfterTransportEOF(t *testing.T) {
 	case <-client.notificationDrained:
 	case <-time.After(time.Second):
 		t.Fatal("notification worker did not report the accepted queue drained")
+	}
+}
+
+// TestReadMessageRejectsOversizedFrame covers jatmn's P3 finding on #759: the
+// notification byte budget was enforced only at enqueue, but readMessage
+// allocates the whole body before anything can tell a notification from a
+// response. A single frame declaring a huge Content-Length was therefore
+// materialized in full and only then measured against a budget it had already
+// blown past. The header is now rejected before the allocation.
+func TestReadMessageRejectsOversizedFrame(t *testing.T) {
+	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", maxFrameBytes+1)
+	_, err := readMessage(bufio.NewReader(strings.NewReader(header)))
+	if err == nil {
+		t.Fatal("an oversized frame must be rejected, not allocated and read")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want the frame-size limit to reject it before reading the body", err)
+	}
+	// A frame at the limit is still legal: the cap rejects what is over it, not
+	// what merely approaches it.
+	body := strings.Repeat("x", 16)
+	atLimit := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	if _, err := readMessage(bufio.NewReader(strings.NewReader(atLimit))); err != nil {
+		t.Fatalf("readMessage of an ordinary frame: %v", err)
 	}
 }
 

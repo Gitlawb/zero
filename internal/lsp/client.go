@@ -14,12 +14,12 @@ import (
 
 // NotificationHandler receives server->client notifications (e.g.
 // textDocument/publishDiagnostics). params is the raw JSON payload. seq is the
-// notification's receipt sequence (see Client.NotificationSeq): the count of
-// notifications read off the wire, including this one, at the moment it was
-// enqueued — NOT when this handler happens to run, which can lag receipt when
-// the queue is backed up. A caller that needs to know whether something newer
-// than a given point has arrived must compare against seq, not against when
-// its own handling code runs.
+// notification's receipt sequence (see Client.ReceiptSeq): the position of the
+// frame it arrived in, stamped the moment that frame came off the wire — NOT
+// when this handler happens to run, which can lag receipt when the queue is
+// backed up. A caller that needs to know whether something newer than a given
+// point has arrived must compare against seq, not against when its own handling
+// code runs.
 type NotificationHandler func(method string, params json.RawMessage, seq int64)
 
 // Client speaks JSON-RPC 2.0 with LSP framing (Content-Length headers) over a
@@ -48,7 +48,16 @@ type Client struct {
 	// closeNotifications has stopped admission and every accepted notification
 	// (including an in-flight handler) has finished.
 	notificationDrained chan struct{}
-	notifySeq           int64 // count of notifications received (enqueued) so far
+	receiptSeq          int64 // frames read off the wire so far (see ReceiptSeq)
+	// acceptedSeq is the receipt seq of the last notification queued for the
+	// worker, handledSeq the seq of the last one whose handler has returned, and
+	// handledWait a channel closed (and replaced) each time handledSeq advances.
+	// Together they let a waiter tell whether the worker has caught up with what
+	// the reader accepted. Both track notifications only; receiptSeq counts every
+	// frame, so the two are compared against each other, never against it.
+	acceptedSeq int64
+	handledSeq  int64
+	handledWait chan struct{}
 }
 
 type notification struct {
@@ -70,6 +79,18 @@ const (
 	notifyQueueLimit     = 4096
 	notifyQueueByteLimit = 16 << 20 // 16 MiB
 )
+
+// maxFrameBytes is the largest single frame this transport will read. Without
+// it the byte budget above would not be authoritative: readMessage allocates the
+// whole body before anything can classify it, so one notification with a huge
+// Content-Length would be materialized in full and only then rejected by
+// enqueueNotification. Capping at the same value keeps that impossible — a
+// notification can never allocate past the budget it is measured against — and
+// bounds what a malformed or hostile header can make this client allocate. A
+// legitimate LSP frame is orders of magnitude smaller; one that is not is a
+// protocol error, and failing the read closes the client so the manager restarts
+// the session.
+const maxFrameBytes = notifyQueueByteLimit
 
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -123,6 +144,7 @@ func NewClient(r io.Reader, w io.Writer) *Client {
 		closed:              make(chan struct{}),
 		notifyReady:         make(chan struct{}, 1),
 		notificationDrained: make(chan struct{}),
+		handledWait:         make(chan struct{}),
 	}
 	go client.notificationLoop()
 	go client.readLoop(bufio.NewReader(r))
@@ -195,6 +217,15 @@ func (c *Client) readLoop(reader *bufio.Reader) {
 			c.failPending(err)
 			return
 		}
+		// Stamp the receipt boundary here — while the frame is nothing but bytes
+		// that have left the wire — rather than at enqueue. Everything below
+		// (json.Unmarshal of a peer-sized payload, then enqueue) runs on this
+		// goroutine while another can be capturing a baseline from ReceiptSeq, so
+		// stamping later would let a publish that was already read be numbered
+		// above a baseline taken after it arrived, and a superseded publish would
+		// then look fresh. Frames that turn out not to be notifications consume a
+		// number too: the sequence is a receipt clock, and gaps in it are fine.
+		seq := c.stampReceipt()
 		var msg incomingMessage
 		if err := json.Unmarshal(body, &msg); err != nil {
 			continue // skip a malformed frame rather than tearing down the session
@@ -206,7 +237,7 @@ func (c *Client) readLoop(reader *bufio.Reader) {
 			// required or the server can block waiting on it (e.g. registerCapability).
 			_ = c.write(outgoingReply{JSONRPC: "2.0", ID: msg.ID, Result: nil})
 		case msg.Method != "":
-			c.enqueueNotification(notification{method: msg.Method, params: msg.Params})
+			c.enqueueNotification(notification{method: msg.Method, params: msg.Params, seq: seq})
 		case hasID:
 			var id int64
 			if err := json.Unmarshal(msg.ID, &id); err == nil {
@@ -234,8 +265,42 @@ func (c *Client) notificationLoop() {
 			if handler != nil {
 				handler(notification.method, notification.params, notification.seq)
 			}
+			c.markHandled(notification.seq)
 		}
 	}
+}
+
+// markHandled records that everything received through seq has now been handled
+// and wakes anyone waiting for the worker to catch up.
+func (c *Client) markHandled(seq int64) {
+	c.notifyMu.Lock()
+	if seq > c.handledSeq {
+		c.handledSeq = seq
+	}
+	wait := c.handledWait
+	c.handledWait = make(chan struct{})
+	c.notifyMu.Unlock()
+	if wait != nil {
+		close(wait)
+	}
+}
+
+// handledThrough returns the receipt seq the worker has finished handling, plus
+// a channel closed the next time that advances. The channel is nil for a Client
+// built without NewClient (some unit tests), which has no worker to advance it.
+func (c *Client) handledThrough() (int64, <-chan struct{}) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.handledSeq, c.handledWait
+}
+
+// acceptedNotificationSeq returns the receipt seq of the most recently queued
+// notification (0 if none). It is the point the worker must reach to have
+// handled everything the reader had accepted at the time of the call.
+func (c *Client) acceptedNotificationSeq() int64 {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.acceptedSeq
 }
 
 // notificationsDone returns the worker completion signal. A nil result means
@@ -245,9 +310,12 @@ func (c *Client) notificationsDone() <-chan struct{} {
 	return c.notificationDrained
 }
 
-// enqueueNotification hands a server notification to the worker loop. It never
-// blocks and never silently discards a message the handler could still act on:
-// the queue grows instead, up to its message and byte limits.
+// enqueueNotification hands a server notification to the worker loop. item.seq
+// must already carry the receipt stamp from stampReceipt: the receipt boundary
+// belongs to the moment the frame left the wire, not to this call, which happens
+// a full json.Unmarshal later. It never blocks and never silently discards a
+// message the handler could still act on: the queue grows instead, up to its
+// message and byte limits.
 //
 // The alternatives to growing are worse. Blocking the read loop when a buffer
 // fills is the deadlock this dispatch exists to avoid — a handler that calls
@@ -289,10 +357,9 @@ func (c *Client) enqueueNotification(item notification) {
 		))
 		return
 	}
-	c.notifySeq++
-	item.seq = c.notifySeq
 	c.notifyQueue = append(c.notifyQueue, item)
 	c.notifyBytes += itemBytes
+	c.acceptedSeq = item.seq
 	c.notifyMu.Unlock()
 
 	select {
@@ -303,17 +370,28 @@ func (c *Client) enqueueNotification(item notification) {
 	}
 }
 
-// NotificationSeq returns the number of notifications received (read off the
-// wire and enqueued) so far, including any still waiting to be dispatched to
-// the handler. A caller that wants to know whether a notification newer than
-// "now" has arrived should snapshot this before triggering whatever produces
-// it, then require a subsequently-observed seq to be strictly greater: a
-// notification already sitting in the queue at snapshot time has seq <= the
-// snapshot, even if the handler doesn't run for it until afterward.
-func (c *Client) NotificationSeq() int64 {
+// stampReceipt claims the next receipt number for a frame that has just been
+// read off the wire. The read loop calls it for every frame before parsing one,
+// so a notification's seq reflects when it arrived rather than when this client
+// got around to decoding and queueing it.
+func (c *Client) stampReceipt() int64 {
 	c.notifyMu.Lock()
 	defer c.notifyMu.Unlock()
-	return c.notifySeq
+	c.receiptSeq++
+	return c.receiptSeq
+}
+
+// ReceiptSeq returns how many frames have been read off the wire so far,
+// including any notification still waiting to be dispatched to the handler. A
+// caller that wants to know whether a notification newer than "now" has arrived
+// should snapshot this before triggering whatever produces it, then require a
+// subsequently-observed seq to be strictly greater: a notification whose frame
+// had already been read at snapshot time has seq <= the snapshot, even if it is
+// still queued and its handler doesn't run until afterward.
+func (c *Client) ReceiptSeq() int64 {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.receiptSeq
 }
 
 func (c *Client) dequeueNotification() (notification, bool, bool) {
@@ -453,6 +531,9 @@ func readMessage(reader *bufio.Reader) ([]byte, error) {
 	}
 	if contentLength < 0 {
 		return nil, errors.New("message missing Content-Length header")
+	}
+	if contentLength > maxFrameBytes {
+		return nil, fmt.Errorf("lsp frame of %d bytes exceeds the %d byte limit", contentLength, maxFrameBytes)
 	}
 	body := make([]byte, contentLength)
 	if _, err := io.ReadFull(reader, body); err != nil {
