@@ -62,12 +62,39 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	if args == "" || args == "list" {
 		return m, m.effortText()
 	}
+	// The zeromaxing posture is selected through the effort namespace as well as
+	// /profile, so it is handled HERE — beside "auto", with an early return,
+	// BEFORE the ReasoningEffort conversion below. It is a posture name, not a
+	// provider effort level: it must never become a ReasoningEffort value and
+	// must never reach a provider request.
+	//
+	// This delegates to handleProfileCommand rather than re-applying the knobs,
+	// so "/effort zeromaxing and /profile zeromaxing resolve identically" is
+	// true by construction instead of by two implementations a test hopes agree.
+	if args == execprofile.Name {
+		return m.handleProfileCommand(execprofile.Name)
+	}
 	if args == "auto" {
+		// "auto" is the effort namespace's off switch, so under zeromaxing it
+		// also leaves the posture (scheduling the one-shot exit notice and
+		// restoring the displaced knobs). Scoped to zeromaxing on purpose: under
+		// fast/thorough, /effort auto keeps its existing meaning of "clear the
+		// effort", and reverting there would wrongly drop the whole profile.
+		if m.execProfileName == execprofile.Name {
+			m = m.revertExecProfile()
+			return m, m.profileText()
+		}
 		m.reasoningEffort = ""
 		m = m.markProfileEffortTouched()
 		return m, m.effortStatusCard("auto", "Reasoning effort selection will follow the active model/provider defaults.")
 	}
 
+	// NOTE: "max" is deliberately NOT handled here. ValidReasoningEffort already
+	// accepts ReasoningEffortMax (models.go), so /effort max continues to parse
+	// as a raw provider level and to fail reasoningEffortAllowed on every
+	// current model — exactly as before this posture existed. That spelling is
+	// RESERVED for a real provider rung once one ships; claiming it for a Zero
+	// posture would burn the name. TestEffortMaxReservationUnchanged pins it.
 	requested := modelregistry.ReasoningEffort(args)
 	if !modelregistry.ValidReasoningEffort(requested) {
 		return m, m.effortStatusCard(args, "Unknown reasoning effort: "+args)
@@ -207,13 +234,16 @@ func (m model) effortText() string {
 		{Key: "active effort", Value: m.effortDisplay()},
 		{Key: "model", Value: displayValue(m.modelName, "none")},
 	}
-	actions := []string{"use /effort <value> to switch", "/effort auto to clear"}
+	actions := []string{"use /effort <value> to switch", "/effort " + execprofile.Name + " for the maximal posture", "/effort auto to clear"}
+	// The SAME resolved-state line /profile status renders, so the two surfaces
+	// cannot disagree about what actually reaches the provider.
+	stateLines := append([]string{m.resolvedPostureLine()}, m.zeromaxingNotes()...)
 	if len(efforts) == 0 {
 		fields = append(fields, commandField{Key: "available", Value: "none for active model"})
 		return renderCommandCardTranscript(commandCard{
 			Title:    "Effort",
 			Summary:  []string{"active effort: " + m.effortDisplay(), "no reasoning controls on this model"},
-			Sections: []commandCardSection{{Title: "State", Fields: fields}},
+			Sections: []commandCardSection{{Title: "State", Fields: fields, Lines: stateLines}},
 			Actions:  actions,
 		})
 	}
@@ -221,7 +251,7 @@ func (m model) effortText() string {
 	return renderCommandCardTranscript(commandCard{
 		Title:    "Effort",
 		Summary:  []string{"active effort: " + m.effortDisplay(), fmt.Sprintf("%d supported level(s)", len(efforts))},
-		Sections: []commandCardSection{{Title: "State", Fields: fields}},
+		Sections: []commandCardSection{{Title: "State", Fields: fields, Lines: stateLines}},
 		Actions:  actions,
 	})
 }
@@ -315,11 +345,22 @@ func (m model) reconcileProfileAfterModelSwitch(efforts []modelregistry.Reasonin
 	case supported && !filled && m.reasoningEffort == "":
 		m.reasoningEffort = want
 		m.execProfileAppliedEffort = want
+		m.execProfileEffortUnraised = "" // the destination model can take it after all
 		m = m.setProfileEffortRestore(true)
 	case !supported && filled && m.reasoningEffort == m.execProfileAppliedEffort:
 		m.reasoningEffort = ""
 		m.execProfileAppliedEffort = ""
+		// Record WHY, exactly as the initial fill does. This is the SIBLING call
+		// path of the fill site in handleProfileCommand: a switch that drops the
+		// profile's effort is the same honesty case, arriving through the other
+		// door, and the two must agree or the status output claims a raise the
+		// run is not making.
+		m.execProfileEffortUnraised = want
 		m = m.setProfileEffortRestore(false)
+	case !supported && !filled:
+		// Never filled and still unsupported: keep the reason fresh for the
+		// destination model rather than leaving a stale one from the source.
+		m.execProfileEffortUnraised = want
 	}
 	return m
 }
@@ -542,6 +583,13 @@ func (m model) handleProfileCommand(args string) (model, string) {
 	if !ok {
 		return m, "Profile\nUsage: /profile [status|" + strings.Join(execprofile.Names(), "|") + "] — switch the next run's loop posture."
 	}
+	// The SAME rule the headless exec path applies, not a second copy of it: a
+	// workspace that disabled zeromaxing must refuse it identically here.
+	// Refuse BEFORE reverting, so a rejected switch leaves the active profile
+	// untouched rather than silently dropping the session to balanced.
+	if refusal := execprofile.SelectionRefusal(profile, m.zeromaxingDisabled); refusal != "" {
+		return m, "Profile\nCannot use " + profile.Name + ": " + refusal + "."
+	}
 	m = m.revertExecProfile()
 	if profile.Name == execprofile.Balanced.Name {
 		return m, m.profileText()
@@ -560,10 +608,18 @@ func (m model) handleProfileCommand(args string) (model, string) {
 	// Reasoning effort: fill only when the session is on auto AND the active
 	// model supports the profile's level, mirroring exec's supported-effort
 	// gating. An explicit user choice always wins over the profile.
+	m.execProfileEffortUnraised = ""
 	if want := modelregistry.ReasoningEffort(profile.ReasoningEffort); want != "" && m.reasoningEffort == "" {
 		if reasoningEffortAllowed(m.availableReasoningEfforts(), want) {
 			m.reasoningEffort = want
 			m.execProfileAppliedEffort = want
+		} else {
+			// Degrade honestly. The headless path already tells the user via
+			// reasoningEffortNotice; the TUI used to skip the fill in SILENCE,
+			// which is the same rule applied to one of two call paths. Record
+			// the level we could not raise so the status output states it — the
+			// rest of the posture (turn budget, self-correct) still applies.
+			m.execProfileEffortUnraised = want
 		}
 	}
 	// Self-correction is presence-only: a profile can arm it but never disarm
@@ -574,6 +630,10 @@ func (m model) handleProfileCommand(args string) (model, string) {
 	}
 	m.agentOptions.Profile = profile.Policy(displacedMaxTurns, m.execProfileAppliedEffort != "")
 	m.execProfileName = profile.Name
+	if profile.IsZeromaxing() {
+		m.zeromaxing = agent.ZeromaxingEntering
+	}
+	m.agentOptions.Zeromaxing = m.zeromaxing
 	return m, m.profileText()
 }
 
@@ -606,16 +666,55 @@ func (m model) revertExecProfile() model {
 	if !m.execProfileSelfCorrectTouched && m.execProfileArmedSelfCorrect && m.selfCorrectTests {
 		m.selfCorrectTests = false
 	}
+	// The FOURTH knob: the posture itself. Leaving zeromaxing must schedule
+	// exactly one exit reminder for the next run — and leaving anything else
+	// must not, which is why this is gated on the profile that was actually
+	// active rather than on "a profile was active". revertExecProfile is
+	// knob-by-knob, and a knob added without a line here is the classic miss.
+	if m.execProfileName == execprofile.Name {
+		m.zeromaxing = agent.ZeromaxingExiting
+	}
+	m.agentOptions.Zeromaxing = m.zeromaxing
 	m.agentOptions.Profile = nil
 	m.execProfileName = ""
 	m.execProfileDisplacedMaxTurns = 0
 	m.execProfileAppliedMaxTurns = 0
 	m.execProfileAppliedEffort = ""
+	m.execProfileEffortUnraised = ""
 	m.execProfileArmedSelfCorrect = false
 	m.execProfileTurnsTouched = false
 	m.execProfileEffortTouched = false
 	m.execProfileSelfCorrectTouched = false
 	return m
+}
+
+// resolvedPostureLine is the unambiguous one-line answer to "what is actually
+// in effect right now": the effort that will reach the provider, the active
+// profile, and the turn budget. Both /effort status and /profile status render
+// it, so the two surfaces can never report different resolved state — showing
+// just "zeromaxing" would hide that the effort the provider receives is "high".
+func (m model) resolvedPostureLine() string {
+	profile := m.execProfileName
+	if profile == "" {
+		profile = execprofile.Balanced.Name + " (default)"
+	}
+	return fmt.Sprintf("effort: %s  ·  profile: %s  ·  turns: %d",
+		m.effortDisplay(), profile, m.agentOptions.MaxTurns)
+}
+
+// zeromaxingNotes returns the honest-delta lines for the active posture: what
+// it really changes, and anything it could NOT apply on this model.
+func (m model) zeromaxingNotes() []string {
+	notes := []string{}
+	if m.execProfileName == execprofile.Name {
+		notes = append(notes, execprofile.Delta)
+	}
+	if m.execProfileEffortUnraised != "" {
+		notes = append(notes, fmt.Sprintf(
+			"reasoning effort NOT raised to %s: the active model does not support that level; the rest of the posture still applies",
+			m.execProfileEffortUnraised))
+	}
+	return notes
 }
 
 func (m model) profileText() string {
@@ -627,7 +726,9 @@ func (m model) profileText() string {
 		"execution profile: " + name,
 		fmt.Sprintf("max tool-turns per run: %d", m.agentOptions.MaxTurns),
 		"reasoning effort: " + m.effortDisplay(),
+		m.resolvedPostureLine(),
 	}
+	lines = append(lines, m.zeromaxingNotes()...)
 	if m.agentOptions.Profile != nil && m.agentOptions.Profile.Escalate != nil {
 		turnTarget := "keeps the pinned turn budget"
 		if target := m.agentOptions.Profile.Escalate.MaxTurns; target > 0 {
@@ -1231,4 +1332,41 @@ func formatUnpricedUsage(requests int, tokens int) string {
 		requestLabel = "request"
 	}
 	return fmt.Sprintf("%d %s, %d tokens, cost unavailable", requests, requestLabel, tokens)
+}
+
+// zeromaxingChipLabel is the footer indicator for the zeromaxing posture. Kept
+// as a constant so the view and its test assert the same bytes.
+const zeromaxingChipLabel = "ZEROMAXING"
+
+// advanceZeromaxing retires the one-shot notices once the run that carried them
+// has finished.
+//
+// Entering -> Active: the enter notice fired on that run's first turn, so every
+// later run reports the posture as already on (its first turn gets still-on,
+// not a second enter).
+//
+// Exiting -> Off: the exit notice fired once and the posture is now simply
+// gone; leaving the state at Exiting would re-announce the exit on every
+// subsequent run.
+//
+// Active and Off are terminal here — this is called after EVERY run, including
+// runs with no posture at all, so it must be a no-op for them.
+func (m model) advanceZeromaxing() model {
+	switch m.zeromaxing {
+	case agent.ZeromaxingEntering:
+		m.zeromaxing = agent.ZeromaxingActive
+	case agent.ZeromaxingExiting:
+		m.zeromaxing = agent.ZeromaxingOff
+	default:
+		return m
+	}
+	m.agentOptions.Zeromaxing = m.zeromaxing
+	return m
+}
+
+// zeromaxingActive reports whether the session currently holds the posture, for
+// the footer chip. Exiting is deliberately excluded: the posture is already off,
+// and the pending notice is only the announcement of that.
+func (m model) zeromaxingActive() bool {
+	return m.zeromaxing == agent.ZeromaxingEntering || m.zeromaxing == agent.ZeromaxingActive
 }

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 )
@@ -553,7 +554,23 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 		default:
 			return "", index, execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", next)}
 		}
-	case "--reasoning-effort", "--spec-reasoning-effort":
+	case "--reasoning-effort":
+		// zeromaxing is accepted here as a POSTURE name, not a provider effort
+		// level: normalizeZeromaxingEffort converts it into the equivalent
+		// --exec-profile selection before anything reads it as an effort, and
+		// forwardedReasoningEffort refuses to forward it even if that regressed.
+		//
+		// "max" is deliberately NOT accepted, exactly as before — the flag has
+		// always rejected it and that spelling stays reserved for a real
+		// provider rung. Adding it here would burn the name.
+		switch strings.ToLower(next) {
+		case "low", "medium", "high", execprofile.Name:
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, high, or %s.", flag, next, execprofile.Name)}
+		}
+	case "--spec-reasoning-effort":
+		// The spec-draft effort is a plain provider level; the posture is a RUN
+		// posture and has no meaning for a draft, so it is not accepted here.
 		switch strings.ToLower(next) {
 		case "low", "medium", "high":
 		default:

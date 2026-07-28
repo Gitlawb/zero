@@ -228,6 +228,16 @@ func (m model) statusLine(width int) string {
 	if m.activeServiceTier() == "priority" {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render("fast")
 	}
+	// The zeromaxing posture sits beside the effort chip: both describe how hard
+	// this session tries, and it raises a cost multiplier, so it stays visible
+	// for as long as it is on rather than only appearing in a status card.
+	//
+	// A separate condition from the fast chip above, not a branch of it: that one
+	// says which service tier the request goes out on, this one how hard the
+	// session tries, and a session can be either, both or neither.
+	if m.zeromaxingActive() {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.amber.Render(zeromaxingChipLabel)
+	}
 	if m.exitConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {
