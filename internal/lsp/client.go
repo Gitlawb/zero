@@ -44,7 +44,11 @@ type Client struct {
 	notifyBytes  int
 	notifyReady  chan struct{}
 	notifyClosed bool
-	notifySeq    int64 // count of notifications received (enqueued) so far
+	// notificationDrained is closed by notificationLoop, and only after
+	// closeNotifications has stopped admission and every accepted notification
+	// (including an in-flight handler) has finished.
+	notificationDrained chan struct{}
+	notifySeq           int64 // count of notifications received (enqueued) so far
 }
 
 type notification struct {
@@ -114,10 +118,11 @@ type incomingMessage struct {
 // server process exits); call Close to stop using the client.
 func NewClient(r io.Reader, w io.Writer) *Client {
 	client := &Client{
-		writer:      w,
-		pending:     make(map[int64]chan rpcResponse),
-		closed:      make(chan struct{}),
-		notifyReady: make(chan struct{}, 1),
+		writer:              w,
+		pending:             make(map[int64]chan rpcResponse),
+		closed:              make(chan struct{}),
+		notifyReady:         make(chan struct{}, 1),
+		notificationDrained: make(chan struct{}),
 	}
 	go client.notificationLoop()
 	go client.readLoop(bufio.NewReader(r))
@@ -212,25 +217,32 @@ func (c *Client) readLoop(reader *bufio.Reader) {
 }
 
 func (c *Client) notificationLoop() {
+	defer close(c.notificationDrained)
 	for {
-		select {
-		case <-c.closed:
-			return
-		case <-c.notifyReady:
-			for {
-				notification, ok := c.dequeueNotification()
-				if !ok {
-					break
+		<-c.notifyReady
+		for {
+			notification, ok, closed := c.dequeueNotification()
+			if !ok {
+				if closed {
+					return
 				}
-				c.mu.Lock()
-				handler := c.handler
-				c.mu.Unlock()
-				if handler != nil {
-					handler(notification.method, notification.params, notification.seq)
-				}
+				break
+			}
+			c.mu.Lock()
+			handler := c.handler
+			c.mu.Unlock()
+			if handler != nil {
+				handler(notification.method, notification.params, notification.seq)
 			}
 		}
 	}
+}
+
+// notificationsDone returns the worker completion signal. A nil result means
+// this Client was constructed without NewClient (as some unit-test clients are)
+// and has no notification worker to wait for.
+func (c *Client) notificationsDone() <-chan struct{} {
+	return c.notificationDrained
 }
 
 // enqueueNotification hands a server notification to the worker loop. It never
@@ -304,11 +316,11 @@ func (c *Client) NotificationSeq() int64 {
 	return c.notifySeq
 }
 
-func (c *Client) dequeueNotification() (notification, bool) {
+func (c *Client) dequeueNotification() (notification, bool, bool) {
 	c.notifyMu.Lock()
 	defer c.notifyMu.Unlock()
 	if len(c.notifyQueue) == 0 {
-		return notification{}, false
+		return notification{}, false, c.notifyClosed
 	}
 	item := c.notifyQueue[0]
 	c.notifyBytes -= len(item.method) + len(item.params)
@@ -319,7 +331,7 @@ func (c *Client) dequeueNotification() (notification, bool) {
 		// burst's worth of capacity (and its already-consumed items) alive.
 		c.notifyQueue = nil
 	}
-	return item, true
+	return item, true, false
 }
 
 func (c *Client) deliver(id int64, resp rpcResponse) {
@@ -349,21 +361,21 @@ func (c *Client) failPending(err error) {
 	})
 }
 
-// closeNotifications stops accepting notifications and releases anything still
-// queued, so a closed client retains nothing. It runs inside closeOnce, after
-// c.closed is signaled: an enqueue racing with shutdown therefore either sees
-// notifyClosed and drops its item, or appends just before the flag is set and has
-// its item cleared here.
-//
-// Queued-but-unhandled notifications are dropped rather than drained: the worker
-// loop is already gone by definition of close, and callers that need diagnostics
-// (Manager.Check) collect them before shutting the client down.
+// closeNotifications atomically stops accepting notifications, then wakes the
+// worker so everything accepted before that boundary is delivered in FIFO order.
+// It deliberately does not wait: a user handler may be blocked, and transport
+// failure, overload, and concurrent Close must never deadlock teardown. The
+// worker exits itself after the accepted queue (including any in-flight handler)
+// has drained. An enqueue racing with shutdown is therefore either accepted and
+// delivered before worker exit, or observes notifyClosed and is rejected.
 func (c *Client) closeNotifications() {
 	c.notifyMu.Lock()
 	c.notifyClosed = true
-	c.notifyQueue = nil
-	c.notifyBytes = 0
 	c.notifyMu.Unlock()
+	select {
+	case c.notifyReady <- struct{}{}:
+	default:
+	}
 }
 
 func (c *Client) readError() error {

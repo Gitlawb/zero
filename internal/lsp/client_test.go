@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -432,7 +433,7 @@ func TestClientNotificationQueueIsLossless(t *testing.T) {
 	}
 
 	for i := 0; i < notificationBurstSize; i++ {
-		item, ok := client.dequeueNotification()
+		item, ok, _ := client.dequeueNotification()
 		if !ok {
 			t.Fatalf("notification %d was discarded by the queue", i)
 		}
@@ -441,7 +442,7 @@ func TestClientNotificationQueueIsLossless(t *testing.T) {
 			t.Fatalf("notification = %q, want %q (queue must stay FIFO)", item.method, want)
 		}
 	}
-	if _, ok := client.dequeueNotification(); ok {
+	if _, ok, _ := client.dequeueNotification(); ok {
 		t.Fatal("queue returned more notifications than were enqueued")
 	}
 	if client.notifyQueue != nil {
@@ -449,6 +450,67 @@ func TestClientNotificationQueueIsLossless(t *testing.T) {
 	}
 	if client.notifyBytes != 0 {
 		t.Fatalf("drained queue retained byte accounting: %d", client.notifyBytes)
+	}
+}
+
+func TestClientDrainsAcceptedNotificationsAfterTransportEOF(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	client := NewClient(clientReader, io.Discard)
+
+	blockStarted := make(chan struct{})
+	releaseBlock := make(chan struct{})
+	handled := make(chan string, 2)
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
+		if method == "block" {
+			close(blockStarted)
+			<-releaseBlock
+		}
+		handled <- method
+	})
+
+	if err := writeMessage(serverWriter, map[string]any{"jsonrpc": "2.0", "method": "block"}); err != nil {
+		t.Fatal(err)
+	}
+	<-blockStarted
+	if err := writeMessage(serverWriter, map[string]any{
+		"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the reader has accepted the publish, then fail it while the
+	// sole worker is still in the preceding handler and cannot dequeue it.
+	deadline := time.Now().Add(time.Second)
+	for client.NotificationSeq() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("publish was not accepted by the read loop")
+		}
+		runtime.Gosched()
+	}
+	if err := serverWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for !client.IsClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("transport EOF did not close client")
+		}
+		runtime.Gosched()
+	}
+	close(releaseBlock)
+
+	for _, want := range []string{"block", "textDocument/publishDiagnostics"} {
+		select {
+		case got := <-handled:
+			if got != want {
+				t.Fatalf("handled %q, want %q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("accepted notification %q was not delivered after EOF", want)
+		}
+	}
+	select {
+	case <-client.notificationDrained:
+	case <-time.After(time.Second):
+		t.Fatal("notification worker did not report the accepted queue drained")
 	}
 }
 
@@ -488,11 +550,11 @@ func TestClientFailsOnNotificationBacklogOverload(t *testing.T) {
 	queuedAfter := len(client.notifyQueue)
 	bytesAfter := client.notifyBytes
 	client.notifyMu.Unlock()
-	if queuedAfter != 0 {
-		t.Fatalf("closed client retained %d queued notifications, want 0", queuedAfter)
+	if queuedAfter != notifyQueueLimit {
+		t.Fatalf("closed client retained %d accepted notifications, want %d pending worker drain", queuedAfter, notifyQueueLimit)
 	}
-	if bytesAfter != 0 {
-		t.Fatalf("closed client retained %d bytes of notification accounting, want 0", bytesAfter)
+	if bytesAfter == 0 {
+		t.Fatal("accepted notifications were discarded instead of left for worker drain")
 	}
 }
 
@@ -532,8 +594,8 @@ func TestClientFailsOnNotificationBacklogByteOverload(t *testing.T) {
 	queuedAfter := len(client.notifyQueue)
 	bytesAfter := client.notifyBytes
 	client.notifyMu.Unlock()
-	if queuedAfter != 0 || bytesAfter != 0 {
-		t.Fatalf("closed client retained %d notifications and %d accounted bytes", queuedAfter, bytesAfter)
+	if queuedAfter != messageCount || bytesAfter != notifyQueueByteLimit {
+		t.Fatalf("accepted backlog changed during close: %d notifications and %d accounted bytes", queuedAfter, bytesAfter)
 	}
 }
 

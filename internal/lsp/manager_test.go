@@ -282,7 +282,7 @@ func TestPublishBaselineRejectsAlreadyQueuedPublish(t *testing.T) {
 
 	// Dispatch the stale item exactly as notificationLoop would: dequeue and
 	// call the handler with the receipt seq it was actually stamped with.
-	item, ok := client.dequeueNotification()
+	item, ok, _ := client.dequeueNotification()
 	if !ok {
 		t.Fatal("stale notification was not queued")
 	}
@@ -297,7 +297,7 @@ func TestPublishBaselineRejectsAlreadyQueuedPublish(t *testing.T) {
 	// The real response — received (and handled) after baseline — must satisfy it.
 	fresh, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Diagnostics: []Diagnostic{{Message: "fresh"}}})
 	client.enqueueNotification(notification{method: "textDocument/publishDiagnostics", params: fresh})
-	item2, ok := client.dequeueNotification()
+	item2, ok, _ := client.dequeueNotification()
 	if !ok {
 		t.Fatal("fresh notification was not queued")
 	}
@@ -418,6 +418,131 @@ func TestWaitForDiagnosticsPreservesPublishHandledBeforeClientCloses(t *testing.
 			}
 		case <-time.After(time.Second):
 			t.Fatal("diagnostic wait did not wake when the client failed")
+		}
+	}
+}
+
+func TestWaitForDiagnosticsDrainsAcceptedPublishAfterTransportEOF(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	client := NewClient(clientReader, io.Discard)
+	uri := PathToURI("/repo/main.go")
+	sess := &session{
+		client:      client,
+		diagnostics: map[string][]Diagnostic{},
+		lastPublish: map[string]time.Time{},
+		publishSeq:  map[string]int64{},
+		waiters:     map[string][]chan struct{}{},
+	}
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	client.SetNotificationHandler(func(method string, params json.RawMessage, seq int64) {
+		if method == "test/block" {
+			close(blocked)
+			<-release
+			return
+		}
+		sess.handleNotification(method, params, seq)
+	})
+
+	if err := writeMessage(serverWriter, map[string]any{"jsonrpc": "2.0", "method": "test/block"}); err != nil {
+		t.Fatal(err)
+	}
+	<-blocked
+	params := PublishDiagnosticsParams{URI: uri, Diagnostics: []Diagnostic{{Message: "fresh"}}}
+	if err := writeMessage(serverWriter, map[string]any{
+		"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for client.NotificationSeq() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("publish was not accepted before EOF")
+		}
+		runtime.Gosched()
+	}
+
+	waitDone := make(chan bool, 1)
+	go func() { waitDone <- sess.waitForDiagnostics(context.Background(), uri, 0, 0) }()
+	if err := serverWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for !client.IsClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("transport EOF did not close client")
+		}
+		runtime.Gosched()
+	}
+	select {
+	case fresh := <-waitDone:
+		t.Fatalf("wait returned %v before accepted notifications drained", fresh)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case fresh := <-waitDone:
+		if !fresh {
+			t.Fatal("wait missed publish accepted before transport EOF")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wait did not finish after notification drain")
+	}
+	if got := sess.diagnosticsFor(uri); len(got) != 1 || got[0].Message != "fresh" {
+		t.Fatalf("diagnostics = %#v, want fresh publish", got)
+	}
+}
+
+func TestWaitForDiagnosticsPreservesPublishHandledAtDeadline(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+	params, err := json.Marshal(PublishDiagnosticsParams{
+		URI: PathToURI("/repo/main.go"), Diagnostics: []Diagnostic{{Message: "fresh"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		client := &Client{closed: make(chan struct{})}
+		uri := PathToURI("/repo/main.go")
+		sess := &session{
+			client:      client,
+			diagnostics: map[string][]Diagnostic{},
+			lastPublish: map[string]time.Time{},
+			publishSeq:  map[string]int64{},
+			waiters:     map[string][]chan struct{}{},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		waitDone := make(chan bool, 1)
+		go func() {
+			waitDone <- sess.waitForDiagnostics(ctx, uri, time.Second, 0)
+		}()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			sess.mu.Lock()
+			waiting := len(sess.waiters[uri]) == 1
+			sess.mu.Unlock()
+			if waiting {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("diagnostic wait was not registered")
+			}
+			runtime.Gosched()
+		}
+
+		// handleNotification records the publish and closes the waiter. Cancel
+		// before yielding under GOMAXPROCS(1), making both cases ready together.
+		sess.handleNotification("textDocument/publishDiagnostics", params, 1)
+		cancel()
+
+		select {
+		case fresh := <-waitDone:
+			if !fresh {
+				t.Fatalf("iteration %d: deadline discarded a publish handled before cancellation", i)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d: wait did not return", i)
 		}
 	}
 }

@@ -170,12 +170,27 @@ func (s *session) waitForDiagnostics(ctx context.Context, uri string, debounce t
 			select {
 			case <-ctx.Done():
 				s.cancelWaiter(uri, ch)
-				return false // no fresh publish for this sync arrived in time
+				// Cancellation and a publish can become ready together. As with
+				// client closure below, re-check state rather than letting select's
+				// random choice discard a publish already recorded by the handler.
+				s.mu.Lock()
+				fresh := s.publishSeq[uri] > baseline
+				s.mu.Unlock()
+				return fresh
 			case <-s.client.closed:
 				s.cancelWaiter(uri, ch)
-				// The publish waiter and client closure can become ready together.
-				// Re-check under the session lock so select's random choice cannot
-				// discard a fresh publish that the handler recorded before closure.
+				// Closing the transport precedes draining notifications already
+				// accepted by the reader. Wait for that drain before deciding there
+				// was no publish. Hand-built clients have no worker/channel, so skip
+				// the wait for them rather than blocking forever.
+				if drained := s.client.notificationsDone(); drained != nil {
+					select {
+					case <-drained:
+					case <-ctx.Done():
+					}
+				}
+				// Re-check even when ctx and the drain are simultaneously ready:
+				// either may have won after the handler recorded the fresh publish.
 				s.mu.Lock()
 				fresh := s.publishSeq[uri] > baseline
 				s.mu.Unlock()
