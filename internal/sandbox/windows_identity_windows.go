@@ -376,6 +376,21 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 	return sid, nil
 }
 
+// Indirected so a test can drive provisioning end to end and inject a failure
+// at the two points that occur AFTER the account exists. Those are the paths
+// whose return value the caller's rollback depends on.
+//
+// All four are seamed rather than just the last two: every step here needs an
+// elevated caller and a real local account, so a test that only replaced the
+// post-creation pair would never get past ensureWindowsSandboxGroup on an
+// ordinary machine and would pass without reaching the code it names.
+var (
+	ensureWindowsSandboxGroupFn    = ensureWindowsSandboxGroup
+	ensureWindowsSandboxUserFn     = ensureWindowsSandboxUser
+	addWindowsSandboxUserToGroupFn = addWindowsSandboxUserToGroup
+	resolveWindowsSandboxSIDFn     = resolveWindowsSandboxSID
+)
+
 // provisionWindowsSandboxIdentity ensures the managed group and one sandbox
 // principal for workspaceKey exist, and returns the identity plus the password
 // the caller needs to mint a token with LogonUser. It is idempotent, so setup
@@ -387,7 +402,7 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // when the account already existed, because that case is reset explicitly
 // below.
 func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, string, bool, error) {
-	if err := ensureWindowsSandboxGroup(); err != nil {
+	if err := ensureWindowsSandboxGroupFn(); err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
 	username := windowsSandboxUserName(workspaceKey)
@@ -395,7 +410,7 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 	if err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
-	existed, err := ensureWindowsSandboxUser(username, password)
+	existed, err := ensureWindowsSandboxUserFn(username, password)
 	if err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
@@ -421,12 +436,21 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 			return windowsSandboxIdentity{}, "", false, err
 		}
 	}
-	if err := addWindowsSandboxUserToGroup(username); err != nil {
-		return windowsSandboxIdentity{}, "", !existed, err
+	// Both failures below can happen AFTER NetUserAdd created the account, so the
+	// name has to come back with them. The caller's rollback deletes by
+	// identity.Username, and returning a zero identity alongside created=true
+	// asked it to delete "", which silently stranded the account this run had
+	// just made. Group attachment in particular is not a formality: it can fail
+	// under local policy, and it is the enforcement boundary, so a half-created
+	// principal is exactly the state worth not leaving behind. The SID is absent
+	// here, which the rollback already tolerates, since nothing has been granted
+	// to it yet.
+	if err := addWindowsSandboxUserToGroupFn(username); err != nil {
+		return windowsSandboxIdentity{Username: username}, "", !existed, err
 	}
-	sid, err := resolveWindowsSandboxSID(username)
+	sid, err := resolveWindowsSandboxSIDFn(username)
 	if err != nil {
-		return windowsSandboxIdentity{}, "", !existed, err
+		return windowsSandboxIdentity{Username: username}, "", !existed, err
 	}
 	return windowsSandboxIdentity{Username: username, SID: sid}, password, !existed, nil
 }
