@@ -742,6 +742,139 @@ func (h *closeRaceHandle) Wait() (MemberResult, error) {
 	return MemberResult{}, h.ctx.Err()
 }
 
+// TestCloseBetweenRetryLaunchPrecheckAndReturn is the retry counterpart of
+// TestCloseBetweenLaunchPrecheckAndReturn: a bounded relaunch wins admission and
+// passes the pre-check, then Close lands while the launcher is inside Launch. The
+// relaunched handle must be reaped rather than adopted, so the watcher never
+// resumes supervising a member started after shutdown began — a relaunch whose
+// member goes on to succeed must not be recorded as the task's outcome.
+func TestCloseBetweenRetryLaunchPrecheckAndReturn(t *testing.T) {
+	launcher := &retryCloseRaceLauncher{
+		entered: make(chan struct{}),
+		finish:  make(chan struct{}),
+		late:    &retryLateHandle{id: "teammate-1"},
+	}
+	sw := newSwarmFor(t, launcher)
+
+	id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// The first member exits retryable, so the watcher is now inside the relaunch.
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered the relaunch Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(launcher.finish)
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the late relaunch handle was reaped")
+	}
+	if got := launcher.launchCount(); got != 2 {
+		t.Fatalf("launch attempts = %d, want 2 (initial + one relaunch)", got)
+	}
+	if got := launcher.late.waitCount(); got != 1 {
+		t.Fatalf("late relaunch handle waits = %d, want 1 (reaped, not supervised)", got)
+	}
+
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced relaunch = %d, want 0", got)
+	}
+	if got := len(team.liveAgents()); got != 0 {
+		t.Fatalf("registered members after close-raced relaunch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get(id)
+	if !ok {
+		t.Fatal("task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("task after close-raced relaunch = %+v, want failed, not the late member's outcome", task)
+	}
+	if task.Result != "" {
+		t.Fatalf("task result after close-raced relaunch = %q, want the late member's result discarded", task.Result)
+	}
+}
+
+// retryCloseRaceLauncher fails its first member with a retryable error, then
+// blocks inside the relaunch's Launch until the test releases it.
+type retryCloseRaceLauncher struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	finish  chan struct{}
+	late    *retryLateHandle
+	once    sync.Once
+}
+
+func (l *retryCloseRaceLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.mu.Lock()
+	l.calls++
+	first := l.calls == 1
+	l.mu.Unlock()
+	if first {
+		return &temporaryHandle{id: spec.ID}, nil
+	}
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return l.late, nil
+}
+
+func (l *retryCloseRaceLauncher) launchCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+// temporaryHandle exits immediately with a retryable error, driving the watcher
+// into its bounded relaunch path.
+type temporaryHandle struct{ id string }
+
+func (h *temporaryHandle) ID() string { return h.id }
+
+func (h *temporaryHandle) Wait() (MemberResult, error) {
+	return MemberResult{}, ErrMemberTemporary
+}
+
+// retryLateHandle models a member whose work does not consult the cancelled
+// launch context and reports success. Adopting it after shutdown would record a
+// post-close result on the task, so a correct shutdown reaps it exactly once and
+// discards what it returns.
+type retryLateHandle struct {
+	id    string
+	mu    sync.Mutex
+	waits int
+}
+
+func (h *retryLateHandle) ID() string { return h.id }
+
+func (h *retryLateHandle) Wait() (MemberResult, error) {
+	h.mu.Lock()
+	h.waits++
+	h.mu.Unlock()
+	return MemberResult{Result: "late result", SessionID: "late-session"}, nil
+}
+
+func (h *retryLateHandle) waitCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.waits
+}
+
 func TestCloseRacesLifecycleAdmission(t *testing.T) {
 	gate := make(chan struct{})
 	l := newLauncher(okFor)

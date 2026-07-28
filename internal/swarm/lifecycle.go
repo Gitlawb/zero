@@ -87,32 +87,46 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 		return
 	}
 
-	// Launch is external code and therefore runs without lifecycleMu held. Close
-	// may have won after launchMemberAdmitted's pre-check but before Launch
-	// returned. Commit the new member while holding the read lock so this check,
-	// registration, status transition, and watcher Add are atomic with respect to
-	// Close setting closed and beginning its waits.
+	committed := s.commitLaunch(handle, func() {
+		m := &Member{ID: spec.ID, AgentType: spec.AgentType, TaskID: spec.TaskID, handle: handle}
+		t.addMember(m)
+		_ = s.coord.SetStatus(spec.TaskID, StatusRunning)
+		s.watchers.Add(1)
+		go func() {
+			defer s.watchers.Done()
+			s.watch(t, m, spec)
+		}()
+	})
+	if !committed {
+		_ = s.coord.Fail(spec.TaskID, "launch: "+ErrSwarmClosed.Error())
+		t.releaseSlot()
+	}
+}
+
+// commitLaunch closes the window between MemberLauncher.Launch returning and the
+// swarm taking ownership of the handle it produced. Launch is external code and
+// therefore runs without lifecycleMu held, so Close may have won after
+// launchMemberAdmitted's pre-check but before Launch returned. adopt runs under
+// the read lock so the shutdown check and everything the caller does to take
+// ownership (registration, status transition, watcher Add, handle swap) are
+// atomic with respect to Close setting closed and beginning its waits.
+//
+// It reports whether the handle was adopted. When shutdown won, the handle is
+// reaped before returning false: its launch context was already cancelled by
+// Close, and MemberHandle has no separate cancellation operation — Launch's
+// context is its cancellation contract — so waiting is how a
+// successfully-created process/goroutine avoids being abandoned. The caller
+// records the terminal outcome for the task it was launching.
+func (s *Swarm) commitLaunch(handle MemberHandle, adopt func()) bool {
 	s.lifecycleMu.RLock()
 	if s.closed {
 		s.lifecycleMu.RUnlock()
-		// The launch context was cancelled by Close. Reap the returned handle so a
-		// successfully-created process/goroutine is not abandoned. MemberHandle has
-		// no separate cancellation operation; Launch's context is its cancellation
-		// contract.
 		_, _ = handle.Wait()
-		_ = s.coord.Fail(spec.TaskID, "launch: "+ErrSwarmClosed.Error())
-		t.releaseSlot()
-		return
+		return false
 	}
-	m := &Member{ID: spec.ID, AgentType: spec.AgentType, TaskID: spec.TaskID, handle: handle}
-	t.addMember(m)
-	_ = s.coord.SetStatus(spec.TaskID, StatusRunning)
-	s.watchers.Add(1)
-	go func() {
-		defer s.watchers.Done()
-		s.watch(t, m, spec)
-	}()
-	s.lifecycleMu.RUnlock()
+	defer s.lifecycleMu.RUnlock()
+	adopt()
+	return true
 }
 
 // launchMemberAdmitted re-checks shutdown at the last internal boundary before
@@ -140,18 +154,10 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 	for {
 		res, err := m.handle.Wait()
 		if err != nil {
-			if isRetryable(err) && m.restarts < maxMemberRestarts {
-				if release, admitErr := s.beginLifecycleAdmission(); admitErr == nil {
-					nh, relErr := s.launchMemberAdmitted(spec)
-					release()
-					if relErr == nil {
-						m.restarts++
-						m.handle = nh
-						continue
-					}
-				}
-				// Fall through if shutdown started or relaunch failed.
+			if isRetryable(err) && m.restarts < maxMemberRestarts && s.relaunchAdmitted(m, spec) {
+				continue
 			}
+			// Fall through if shutdown started or the relaunch failed.
 			// res.SessionID is preserved by the handle even on error, so a member that
 			// ran then failed stays drillable; a pure launch error carries an empty id.
 			_ = s.coord.FailWithSession(m.TaskID, memberError(err), res.SessionID)
@@ -162,6 +168,31 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 	}
 	t.removeMember(m.ID)
 	s.afterExit(t)
+}
+
+// relaunchAdmitted performs one bounded relaunch of an existing member's spec,
+// reporting whether the member was relaunched and its new handle adopted. A
+// relaunch is lifecycle work like any other, so it runs the same three gates an
+// initial launch does: admission (refused outright once shutdown began), the
+// pre-Launch re-check, and the post-Launch commit — the last of which matters
+// because the production FuncLauncher returns a live handle immediately without
+// consulting its context, so a Close landing between the pre-check and the return
+// would otherwise resume supervising a member started after shutdown. When any
+// gate refuses, the caller records the member's terminal failure instead.
+func (s *Swarm) relaunchAdmitted(m *Member, spec MemberSpec) bool {
+	release, err := s.beginLifecycleAdmission()
+	if err != nil {
+		return false
+	}
+	defer release()
+	handle, err := s.launchMemberAdmitted(spec)
+	if err != nil {
+		return false
+	}
+	return s.commitLaunch(handle, func() {
+		m.restarts++
+		m.handle = handle
+	})
 }
 
 // afterExit releases the just-vacated slot and launches the next queued spec, if
