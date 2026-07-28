@@ -83,10 +83,80 @@ func TestZeromaxingKnobsMatchTheDeltaItAdvertises(t *testing.T) {
 	if policy := Zeromaxing.Policy(80, true); policy != nil {
 		t.Fatalf("zeromaxing must arm no escalation policy, got %+v", policy)
 	}
-	for _, want := range []string{"320", "160", "sub-agents"} {
-		if !strings.Contains(DeltaBudgetLine, want) {
-			t.Fatalf("the budget line must state %q: %q", want, DeltaBudgetLine)
+	// The budget clause states the CALLER's transition, not another profile's.
+	got := Delta(DeltaState{CurrentMaxTurns: 80})
+	for _, want := range []string{"turn budget: 80 → 320", "sub-agents"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Delta must state %q:\n%s", want, got)
 		}
+	}
+	// ...and must NOT mention thorough's number, which is about two profiles
+	// rather than about the user (bug 3).
+	if strings.Contains(got, "160") {
+		t.Fatalf("the delta must not compare against thorough's budget:\n%s", got)
+	}
+}
+
+// (3) The budget clause is caller-relative in every case, including the two
+// edges where a plain "X -> 320" would be wrong.
+func TestDeltaBudgetLineIsCallerRelative(t *testing.T) {
+	cases := []struct {
+		name    string
+		current int
+		want    string
+		absent  string
+	}{
+		{"balanced default", 80, "turn budget: 80 → 320", "160"},
+		{"already at the posture budget", 320, "turn budget: unchanged (320)", "→"},
+		{"unknown current budget", 0, "turn budget: 320", "→"},
+		{"a pinned lower budget", 30, "turn budget: 30 → 320", "160"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Delta(DeltaState{CurrentMaxTurns: tc.current})
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("Delta(current=%d) must contain %q:\n%s", tc.current, tc.want, got)
+			}
+			clause := got[:strings.Index(got, ", and that budget")]
+			if tc.absent != "" && strings.Contains(clause, tc.absent) {
+				t.Fatalf("Delta(current=%d) budget clause must not contain %q: %q", tc.current, tc.absent, clause)
+			}
+		})
+	}
+}
+
+// (2) THE CONTRADICTION. The effort clause has exactly one arm, so "unchanged"
+// and "NOT raised" can never both appear. They did in real use, because the
+// fixed clause lived in Delta and the refusal lived in a separate line.
+func TestDeltaEffortClauseIsMutuallyExclusive(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition EffortTransition
+		want       string
+	}{
+		{"raised", EffortRaised, "reasoning effort: raised to high"},
+		{"kept explicit", EffortKeptExplicit, "reasoning effort: unchanged (your explicit choice stands)"},
+		{"not supported", EffortNotSupported, "reasoning effort: NOT raised to high"},
+	}
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Delta(DeltaState{CurrentMaxTurns: 80, Effort: tc.transition})
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("Delta(%v) must contain %q:\n%s", tc.transition, tc.want, got)
+			}
+			// The contradiction, stated directly: never both.
+			raised := strings.Contains(got, "NOT raised")
+			unchanged := strings.Contains(got, "reasoning effort: unchanged")
+			if raised && unchanged {
+				t.Fatalf("Delta(%v) claims BOTH that the effort is unchanged and that it was not raised:\n%s",
+					tc.transition, got)
+			}
+			if seen[got] {
+				t.Fatalf("two effort transitions render identically:\n%s", got)
+			}
+			seen[got] = true
+		})
 	}
 }
 
@@ -107,7 +177,7 @@ func TestDeltaSelfCorrectDescribesTheCallersTransition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Delta(tc.transition)
+			got := Delta(DeltaState{CurrentMaxTurns: 80, SelfCorrect: tc.transition})
 			if !strings.Contains(got, tc.want) {
 				t.Fatalf("Delta(%v) must contain %q, got:\n%s", tc.transition, tc.want, got)
 			}
@@ -118,8 +188,8 @@ func TestDeltaSelfCorrectDescribesTheCallersTransition(t *testing.T) {
 				t.Fatalf("Delta(%v) self-correct clause must NOT contain %q, got:\n%s", tc.transition, tc.absent, clause)
 			}
 			// Every rendering keeps the caller-independent clauses.
-			if !strings.Contains(got, DeltaBudgetLine) || !strings.Contains(got, DeltaEffortLine) {
-				t.Fatalf("Delta(%v) dropped a fixed clause:\n%s", tc.transition, got)
+			if !strings.Contains(got, "turn budget:") || !strings.Contains(got, "reasoning effort:") {
+				t.Fatalf("Delta(%v) dropped a clause:\n%s", tc.transition, got)
 			}
 		})
 	}
@@ -127,7 +197,7 @@ func TestDeltaSelfCorrectDescribesTheCallersTransition(t *testing.T) {
 	// to one arm would otherwise pass every containment check above.
 	seen := map[string]bool{}
 	for _, tr := range []SelfCorrectTransition{SelfCorrectRaised, SelfCorrectAlreadyOn, SelfCorrectOverridden} {
-		out := Delta(tr)
+		out := Delta(DeltaState{CurrentMaxTurns: 80, SelfCorrect: tr})
 		if seen[out] {
 			t.Fatalf("two transitions render identically:\n%s", out)
 		}
