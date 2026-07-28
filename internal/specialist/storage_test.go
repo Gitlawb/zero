@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 func TestStorageCreateWritesValidManifestAndDeleteRemovesIt(t *testing.T) {
@@ -128,6 +130,30 @@ func TestStorageCreateForceAtomicallyReplacesFile(t *testing.T) {
 	assertNoTemporarySpecialistFiles(t, userDir)
 }
 
+func TestStorageCreateReturnsManifestWarningAfterCommittedCleanupFailure(t *testing.T) {
+	userDir := t.TempDir()
+	backupPath := filepath.Join(userDir, ".zero-replace-old.backup")
+	cleanupErr := &os.PathError{Op: "remove", Path: backupPath, Err: syscall.Errno(32)}
+	storage := NewStorage(Paths{UserDir: userDir})
+	storage.writeAtomic = func(path, content string) error {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			return err
+		}
+		return &fsutil.CommittedReplacementCleanupError{BackupPath: backupPath, Cause: cleanupErr}
+	}
+
+	manifest, err := storage.Create(CreateInput{Name: "safe", Description: "Safe", Overwrite: true})
+	if err != nil {
+		t.Fatalf("Create returned error after committed replacement: %v", err)
+	}
+	if len(manifest.Warnings) != 1 || !strings.Contains(manifest.Warnings[0], backupPath) || !strings.Contains(manifest.Warnings[0], cleanupErr.Error()) {
+		t.Fatalf("warnings = %#v, want backup path and cleanup problem", manifest.Warnings)
+	}
+	if data, readErr := os.ReadFile(manifest.FilePath); readErr != nil || string(data) != FormatMarkdown(manifest) {
+		t.Fatalf("committed specialist content = %q, error = %v", data, readErr)
+	}
+}
+
 func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("rename retries are Windows-specific")
@@ -161,20 +187,38 @@ func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
 	assertNoTemporarySpecialistFiles(t, dir)
 }
 
-func TestWriteSpecialistAtomicPropagatesDirectorySyncError(t *testing.T) {
+func TestWriteSpecialistAtomicIgnoresDirectorySyncErrorAfterCommit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "safe.md")
 	syncErr := errors.New("sync failed")
+	called := false
 	err := writeSpecialistAtomicWith(path, "new content", nil, func(got string) error {
+		called = true
 		if got != dir {
 			t.Fatalf("sync directory = %q, want %q", got, dir)
 		}
 		return syncErr
 	})
-	if !errors.Is(err, syncErr) {
-		t.Fatalf("writeSpecialistAtomicWith error = %v, want %v", err, syncErr)
+	if err != nil {
+		t.Fatalf("committed replacement returned sync error: %v", err)
+	}
+	if !called {
+		t.Fatal("directory sync was not attempted")
+	}
+	if data, readErr := os.ReadFile(path); readErr != nil || string(data) != "new content" {
+		t.Fatalf("committed content = %q, error = %v", data, readErr)
 	}
 	assertNoTemporarySpecialistFiles(t, dir)
+}
+
+func TestSyncSpecialistDirIgnoresOpenFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory sync is not attempted on Windows")
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := syncSpecialistDir(missing); err != nil {
+		t.Fatalf("directory open failure should be best-effort, got: %v", err)
+	}
 }
 
 // TestWriteSpecialistAtomicKeepsTheOriginalAfterFailedReplace pins the caller

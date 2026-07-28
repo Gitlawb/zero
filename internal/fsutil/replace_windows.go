@@ -75,6 +75,10 @@ func replaceExisting(src, dst string) error {
 }
 
 func replaceExistingWith(src, dst string, replace func(string, string, string) error, restore func(string, string) error) error {
+	return replaceExistingWithCleanup(src, dst, replace, restore, removeReplaceBackup)
+}
+
+func replaceExistingWithCleanup(src, dst string, replace func(string, string, string) error, restore func(string, string) error, removeBackup func(string) error) error {
 	info, err := os.Lstat(dst)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -93,7 +97,10 @@ func replaceExistingWith(src, dst string, replace func(string, string, string) e
 	}
 	callErr := replace(dst, src, backup)
 	if callErr == nil {
-		return cleanupReplaceBackup(nil, backup)
+		if err := removeBackup(backup); err != nil {
+			return &CommittedReplacementCleanupError{BackupPath: backup, Cause: err}
+		}
+		return nil
 	}
 	if errors.Is(callErr, errorInvalidFunction) || errors.Is(callErr, errorNotSupported) {
 		callErr = fmt.Errorf("atomic replacement is not supported for %s: %w", dst, callErr)
@@ -170,11 +177,6 @@ func removeReplaceBackup(path string) error {
 
 func cleanupReplaceBackup(callErr error, backup string) error {
 	if err := removeReplaceBackup(backup); err != nil {
-		if callErr == nil {
-			// Do not wrap a transient cleanup error: the replacement already
-			// succeeded, so ReplaceWithRetry must not run the operation again.
-			return fmt.Errorf("replacement succeeded, but backup %s could not be removed: %v", backup, err)
-		}
 		return fmt.Errorf("%w (backup %s could not be removed: %v)", callErr, backup, err)
 	}
 	return callErr

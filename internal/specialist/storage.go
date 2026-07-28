@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,8 @@ import (
 )
 
 type Storage struct {
-	paths Paths
+	paths       Paths
+	writeAtomic func(string, string) error
 }
 
 type CreateInput struct {
@@ -71,7 +73,16 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("create specialist directory: %w", err)
 	}
 	if input.Overwrite {
-		if err := writeSpecialistAtomic(path, content); err != nil {
+		writeAtomic := storage.writeAtomic
+		if writeAtomic == nil {
+			writeAtomic = writeSpecialistAtomic
+		}
+		if err := writeAtomic(path, content); err != nil {
+			var cleanupErr *fsutil.CommittedReplacementCleanupError
+			if errors.As(err, &cleanupErr) {
+				manifest.Warnings = append(manifest.Warnings, fmt.Sprintf("specialist was updated, but replacement backup %s could not be removed: %v", cleanupErr.BackupPath, cleanupErr.Cause))
+				return manifest, nil
+			}
 			return Manifest{}, err
 		}
 		return manifest, nil
@@ -138,9 +149,10 @@ func writeSpecialistAtomicWith(path string, content string, rename func(string, 
 	if err := fsutil.ReplaceWithRetry(tempPath, path, rename); err != nil {
 		return fmt.Errorf("replace specialist file: %w", err)
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("sync specialist directory: %w", err)
-	}
+	// The replacement is committed at this point. As in the sessions store,
+	// opening/fsyncing the parent directory only improves crash durability and
+	// must not turn a successful overwrite into an API failure.
+	_ = syncDir(filepath.Dir(path))
 	return nil
 }
 
@@ -150,7 +162,7 @@ func syncSpecialistDir(path string) error {
 	}
 	dir, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil
 	}
 	if err := dir.Sync(); err != nil {
 		_ = dir.Close()

@@ -3,11 +3,29 @@ package fsutil
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"syscall"
 	"time"
 )
+
+// CommittedReplacementCleanupError reports that a replacement was committed,
+// but the old destination retained at BackupPath could not be removed. Callers
+// must treat the replacement itself as successful and surface the cleanup
+// problem separately.
+type CommittedReplacementCleanupError struct {
+	BackupPath string
+	Cause      error
+}
+
+func (err *CommittedReplacementCleanupError) Error() string {
+	return fmt.Sprintf("replacement committed, but backup %s could not be removed: %v", err.BackupPath, err.Cause)
+}
+
+func (err *CommittedReplacementCleanupError) Unwrap() error {
+	return err.Cause
+}
 
 // ReplaceWithRetry publishes src over dst using the platform's replacement
 // primitive, retrying on the same transient Windows lock errors RenameWithRetry
@@ -39,6 +57,12 @@ func RenameWithRetry(src, dst string, rename func(src, dst string) error) error 
 		err = rename(src, dst)
 		if err == nil {
 			return nil
+		}
+		var committed *CommittedReplacementCleanupError
+		if errors.As(err, &committed) {
+			// The source has already been consumed. In particular, never retry if
+			// the cleanup cause itself is a transient Windows sharing violation.
+			break
 		}
 		if runtime.GOOS == "windows" {
 			if os.IsPermission(err) || isWindowsSharingOrLockViolation(err) {

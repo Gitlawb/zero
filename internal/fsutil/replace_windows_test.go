@@ -250,6 +250,49 @@ func TestReplaceExistingCleansManagedBackup(t *testing.T) {
 	assertNoReplaceBackups(t, dir)
 }
 
+func TestReplaceWithRetryDoesNotRetryCommittedReplacementWhenBackupCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".manifest.tmp")
+	dst := filepath.Join(dir, "manifest.md")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := 0
+	cleanupErr := &os.PathError{Op: "remove", Path: "managed backup", Err: syscall.Errno(32)}
+	var backupPath string
+	err := ReplaceWithRetry(src, dst, func(src, dst string) error {
+		attempts++
+		return replaceExistingWithCleanup(src, dst, func(replaced, replacement, backup string) error {
+			backupPath = backup
+			if err := os.Rename(replaced, backup); err != nil {
+				return err
+			}
+			return os.Rename(replacement, replaced)
+		}, nil, func(got string) error {
+			if got != backupPath {
+				t.Fatalf("cleanup backup path = %q, want %q", got, backupPath)
+			}
+			return cleanupErr
+		})
+	})
+	var outcome *CommittedReplacementCleanupError
+	if !errors.As(err, &outcome) {
+		t.Fatalf("error = %v, want committed cleanup outcome", err)
+	}
+	if outcome.BackupPath != backupPath || !errors.Is(outcome, syscall.Errno(32)) {
+		t.Fatalf("outcome = %#v, want backup %q and sharing violation", outcome, backupPath)
+	}
+	if attempts != 1 {
+		t.Fatalf("replacement attempts = %d, want 1", attempts)
+	}
+	assertFileContent(t, dst, "new")
+	assertFileContent(t, backupPath, "old")
+}
+
 func TestReplaceExistingKeeps1176FilesAtOriginalNames(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, ".manifest.tmp")
