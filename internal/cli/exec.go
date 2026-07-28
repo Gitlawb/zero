@@ -189,6 +189,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// runs after it so the mode's fills count as "set" and win. MaxTurns is
 	// deferred to config resolution below, where the displaced resolved budget
 	// is known and becomes the escalation restore target.
+	// Captured BEFORE the profile expands: applyExecProfile arms self-correction
+	// as a side effect, so reading options.selfCorrect afterwards would always
+	// report "already on" and the delta would describe a change it just made.
+	selfCorrectBeforeProfile := options.selfCorrect
 	execProfile, execProfileFilledEffort, err := applyExecProfile(&options)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -309,7 +313,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// in a PR body is how a posture ends up documented as doing things it does
 	// not do.
 	if execProfile.IsZeromaxing() {
-		if _, err := fmt.Fprintln(stderr, execprofile.Delta); err != nil {
+		if _, err := fmt.Fprintln(stderr, execprofile.Delta(execSelfCorrectTransition(selfCorrectBeforeProfile))); err != nil {
 			return exitCrash
 		}
 	}
@@ -1255,6 +1259,17 @@ func normalizeZeromaxingEffort(options *execOptions) error {
 	// posture name here would carry it into forwardedReasoningEffort.
 	options.reasoningEffort = ""
 	return nil
+}
+
+// execSelfCorrectTransition reports what the posture did to post-edit
+// verification for THIS run. A headless run has no way to override the profile
+// after it applies (--self-correct is presence-only and read before), so the
+// Overridden state is unreachable here — it is a TUI-only condition.
+func execSelfCorrectTransition(selfCorrectBefore bool) execprofile.SelfCorrectTransition {
+	if selfCorrectBefore {
+		return execprofile.SelfCorrectAlreadyOn
+	}
+	return execprofile.SelfCorrectRaised
 }
 
 // execZeromaxing maps a selected profile onto the run's posture lifecycle. A

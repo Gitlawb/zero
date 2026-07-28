@@ -235,8 +235,8 @@ func TestZeromaxingTurnBudgetPropagatesToChildren(t *testing.T) {
 	}
 	// The delta text promises exactly this, so the promise and the number must
 	// not drift apart.
-	if !strings.Contains(execprofile.Delta, "sub-agents") {
-		t.Fatalf("Delta must tell the user the budget reaches sub-agents: %q", execprofile.Delta)
+	if !strings.Contains(execprofile.DeltaBudgetLine, "sub-agents") {
+		t.Fatalf("the budget line must tell the user it reaches sub-agents: %q", execprofile.DeltaBudgetLine)
 	}
 }
 
@@ -293,5 +293,91 @@ func TestReasoningEffortFlagAcceptsZeromaxingButNotMax(t *testing.T) {
 	// meaning for a draft, so it is NOT accepted there.
 	if err := accepted(t, "--spec-reasoning-effort", execprofile.Name); err == nil {
 		t.Fatalf("--spec-reasoning-effort %s must be rejected; it is a run posture, not a draft level", execprofile.Name)
+	}
+}
+
+// The headless delta must describe the transition from the state the run was
+// invoked in, captured BEFORE the profile arms self-correction as a side
+// effect. Reading options.selfCorrect afterwards would always say "already on".
+func TestExecSelfCorrectTransitionUsesPreProfileState(t *testing.T) {
+	if got := execSelfCorrectTransition(false); got != execprofile.SelfCorrectRaised {
+		t.Fatalf("an unflagged run = %v, want SelfCorrectRaised", got)
+	}
+	if got := execSelfCorrectTransition(true); got != execprofile.SelfCorrectAlreadyOn {
+		t.Fatalf("an explicit --self-correct run = %v, want SelfCorrectAlreadyOn", got)
+	}
+	// And the rendered text differs, so the distinction reaches the user.
+	raised := execprofile.Delta(execSelfCorrectTransition(false))
+	already := execprofile.Delta(execSelfCorrectTransition(true))
+	if raised == already {
+		t.Fatalf("both states render identically:\n%s", raised)
+	}
+	if !strings.Contains(raised, "lsp → tests") {
+		t.Fatalf("an unflagged run must be told what changes:\n%s", raised)
+	}
+}
+
+// --spec-reasoning-effort zeromaxing stays rejected, but the message must
+// explain WHY and name the way forward rather than reading like a bug.
+func TestSpecReasoningEffortZeromaxingExplainsItself(t *testing.T) {
+	_, _, err := parseExecArgs([]string{"--spec-reasoning-effort", execprofile.Name, "-p", "x"})
+	if err == nil {
+		t.Fatalf("--spec-reasoning-effort %s must still be rejected", execprofile.Name)
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"run posture",                            // why it does not apply
+		"spec drafting",                          // where the user is
+		"--spec-reasoning-effort high",           // the way forward for the draft
+		"--reasoning-effort " + execprofile.Name, // ...and for the run
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("the usage error must mention %q, got: %s", want, message)
+		}
+	}
+	// A genuinely unknown value keeps the plain message — the explanation is
+	// specific to the posture name, not a new blanket wording.
+	_, _, err = parseExecArgs([]string{"--spec-reasoning-effort", "turbo", "-p", "x"})
+	if err == nil || !strings.Contains(err.Error(), "Expected low, medium, or high.") {
+		t.Fatalf("an unknown value must keep the plain message, got: %v", err)
+	}
+}
+
+// The CAPTURE POINT, exercised through the real exec path.
+//
+// TestExecSelfCorrectTransitionUsesPreProfileState covers the helper; it cannot
+// catch the capture being read at the wrong moment, because it never runs the
+// code that does the capturing. applyExecProfile arms self-correction as a side
+// effect, so reading options.selfCorrect after it would make every run report
+// "unchanged (tests)" — the exact wording this change exists to remove.
+func TestExecPrintsTheRaisedTransitionForAnUnflaggedRun(t *testing.T) {
+	exitCode, _, stderr := runExecWithEcho(t, []string{
+		"exec", "--exec-profile", execprofile.Name, "hello",
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "self-correct: lsp → tests") {
+		t.Fatalf("an unflagged run starts LSP-only, so the delta must show the transition:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "self-correct: unchanged") {
+		t.Fatalf("the delta must not claim self-correction was already on:\n%s", stderr)
+	}
+}
+
+// ...and the other direction: an explicit --self-correct run genuinely was
+// already on, so it must say so.
+func TestExecPrintsUnchangedWhenSelfCorrectWasAlreadyOn(t *testing.T) {
+	exitCode, _, stderr := runExecWithEcho(t, []string{
+		"exec", "--exec-profile", execprofile.Name, "--self-correct", "hello",
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "self-correct: unchanged (tests)") {
+		t.Fatalf("an explicit --self-correct run must be told nothing changed:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "lsp → tests") {
+		t.Fatalf("must not claim a transition that did not happen:\n%s", stderr)
 	}
 }

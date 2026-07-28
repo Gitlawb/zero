@@ -375,7 +375,7 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 				t.Fatalf("%s must show %q in its resolved state line:\n%s", surface, want, text)
 			}
 		}
-		if !strings.Contains(text, execprofile.Delta) {
+		if !strings.Contains(text, execprofile.DeltaBudgetLine) {
 			t.Fatalf("%s must state the real delta:\n%s", surface, text)
 		}
 		for _, want := range []string{"320", "160", "sub-agents"} {
@@ -387,7 +387,7 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 	// Other profiles must NOT carry the posture's delta text.
 	other := zeromaxingTestModel(t, false)
 	_, otherText := other.handleProfileCommand("thorough")
-	if strings.Contains(otherText, execprofile.Delta) {
+	if strings.Contains(otherText, execprofile.DeltaBudgetLine) {
 		t.Fatalf("thorough must not claim the posture's delta:\n%s", otherText)
 	}
 }
@@ -416,5 +416,57 @@ func TestZeromaxingFooterChipVisibility(t *testing.T) {
 	}
 	if strings.Contains(m.statusLine(120), zeromaxingChipLabel) {
 		t.Fatalf("the footer must drop the chip once off:\n%s", m.statusLine(120))
+	}
+}
+
+// The self-correct clause must track the user's LIVE state, not the state at
+// selection time. A user who selects the posture and then turns self-correct
+// back off must not keep reading "lsp → tests".
+func TestSelfCorrectTransitionTracksLiveState(t *testing.T) {
+	// Default session: LSP-only, so the posture raises it.
+	m := zeromaxingTestModel(t, false)
+	if m.selfCorrectTests {
+		t.Skip("fixture no longer starts LSP-only")
+	}
+	m, text := m.handleEffortCommand(execprofile.Name)
+	if got := m.selfCorrectTransition(); got != execprofile.SelfCorrectRaised {
+		t.Fatalf("transition = %v, want SelfCorrectRaised for an LSP-only session", got)
+	}
+	if !strings.Contains(text, "self-correct: lsp → tests") {
+		t.Fatalf("an LSP-only user must be told what changes:\n%s", text)
+	}
+
+	// The user turns it back off: the posture no longer governs it, and the
+	// output must stop claiming a raise.
+	m, _ = m.handleSelfCorrectCommand("off")
+	if got := m.selfCorrectTransition(); got != execprofile.SelfCorrectOverridden {
+		t.Fatalf("transition = %v, want SelfCorrectOverridden after /selfcorrect off", got)
+	}
+	_, after := m.handleProfileCommand("status")
+	if strings.Contains(after, "lsp → tests") {
+		t.Fatalf("status must not claim a raise the session no longer has:\n%s", after)
+	}
+	if !strings.Contains(after, "overrides the posture") {
+		t.Fatalf("status must say the user's choice is what is in effect:\n%s", after)
+	}
+}
+
+// A user who ALREADY had the deeper verification on is told nothing changes —
+// the one case where the old wording happened to be right.
+func TestSelfCorrectTransitionAlreadyOn(t *testing.T) {
+	m := zeromaxingTestModel(t, false)
+	m, _ = m.handleSelfCorrectCommand("tests")
+	if !m.selfCorrectTests {
+		t.Fatal("setup: /selfcorrect tests did not arm it")
+	}
+	m, text := m.handleEffortCommand(execprofile.Name)
+	if got := m.selfCorrectTransition(); got != execprofile.SelfCorrectAlreadyOn {
+		t.Fatalf("transition = %v, want SelfCorrectAlreadyOn", got)
+	}
+	if !strings.Contains(text, "self-correct: unchanged (tests)") {
+		t.Fatalf("an already-on user must be told nothing changes:\n%s", text)
+	}
+	if strings.Contains(text, "lsp → tests") {
+		t.Fatalf("must not claim a transition that did not happen:\n%s", text)
 	}
 }

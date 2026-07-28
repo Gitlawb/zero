@@ -84,9 +84,54 @@ func TestZeromaxingKnobsMatchTheDeltaItAdvertises(t *testing.T) {
 		t.Fatalf("zeromaxing must arm no escalation policy, got %+v", policy)
 	}
 	for _, want := range []string{"320", "160", "sub-agents"} {
-		if !strings.Contains(Delta, want) {
-			t.Fatalf("Delta must state %q so the user sees the real delta: %q", want, Delta)
+		if !strings.Contains(DeltaBudgetLine, want) {
+			t.Fatalf("the budget line must state %q: %q", want, DeltaBudgetLine)
 		}
+	}
+}
+
+// The self-correct clause must describe the transition from the CALLER'S state,
+// not from thorough. Telling a user sitting on LSP-only that self-correction is
+// "already armed" while silently moving them to the project test plan is
+// documentation describing behaviour that is not happening.
+func TestDeltaSelfCorrectDescribesTheCallersTransition(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition SelfCorrectTransition
+		want       string
+		absent     string
+	}{
+		{"lsp-only user is told what changes", SelfCorrectRaised, "self-correct: lsp → tests", "unchanged"},
+		{"already-on user is told nothing changes", SelfCorrectAlreadyOn, "self-correct: unchanged (tests)", "→"},
+		{"overridden user is not promised a raise", SelfCorrectOverridden, "overrides the posture", "→"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Delta(tc.transition)
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("Delta(%v) must contain %q, got:\n%s", tc.transition, tc.want, got)
+			}
+			// Scoped to the self-correct CLAUSE: "unchanged" also appears in the
+			// effort clause, where it is correct and caller-independent.
+			clause := got[strings.Index(got, "self-correct:"):]
+			if tc.absent != "" && strings.Contains(clause, tc.absent) {
+				t.Fatalf("Delta(%v) self-correct clause must NOT contain %q, got:\n%s", tc.transition, tc.absent, clause)
+			}
+			// Every rendering keeps the caller-independent clauses.
+			if !strings.Contains(got, DeltaBudgetLine) || !strings.Contains(got, DeltaEffortLine) {
+				t.Fatalf("Delta(%v) dropped a fixed clause:\n%s", tc.transition, got)
+			}
+		})
+	}
+	// The three renderings must be distinguishable — a switch that fell through
+	// to one arm would otherwise pass every containment check above.
+	seen := map[string]bool{}
+	for _, tr := range []SelfCorrectTransition{SelfCorrectRaised, SelfCorrectAlreadyOn, SelfCorrectOverridden} {
+		out := Delta(tr)
+		if seen[out] {
+			t.Fatalf("two transitions render identically:\n%s", out)
+		}
+		seen[out] = true
 	}
 }
 
