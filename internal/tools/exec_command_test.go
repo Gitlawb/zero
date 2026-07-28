@@ -638,6 +638,12 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 		// safe to repeat, and it keeps the interrupt flag that an empty-chars poll
 		// would drop, which is what the interrupted assertion below needs.
 		var result Result
+		// Every poll's output is kept, not just the last one. Each Continue
+		// returns only what the session produced since the previous collection,
+		// so a marker printed just before the poll that observes the exit lands
+		// in the earlier result and would be invisible to a check against the
+		// final one alone.
+		var collected strings.Builder
 		deadline := time.Now().Add(30 * time.Second)
 		for {
 			result = writeTool.Run(context.Background(), map[string]any{
@@ -645,6 +651,7 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 				"chars":         chars,
 				"yield_time_ms": 500,
 			})
+			collected.WriteString(result.Output)
 			if result.Status != StatusOK {
 				t.Fatalf("stop input %q status = %s: %s", chars, result.Status, result.Output)
 			}
@@ -660,6 +667,17 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 		}
 		if result.Meta["interrupted"] != "true" {
 			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		// The session has to have been killed rather than allowed to finish.
+		// Without this the retry loop makes the test unfalsifiable: the helper
+		// sleeps 5s, well inside the deadline, so a terminate that did nothing at
+		// all would let the sleep end on its own and every assertion above would
+		// still hold. The interrupted flag does not close the hole either, since
+		// it echoes the request rather than the outcome. The helper prints this
+		// line only on the way out of a completed sleep, so its absence is what
+		// separates the two, and it says nothing about how long the loop took.
+		if strings.Contains(collected.String(), "long sleep finished") {
+			t.Fatalf("stop input %q let the session run to completion instead of terminating it, output=%q", chars, collected.String())
 		}
 	}
 }
