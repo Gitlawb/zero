@@ -554,3 +554,66 @@ func TestADeepChainStopsIndenting(t *testing.T) {
 		}
 	}
 }
+
+// FINISHED TASKS FADE OUT. The panel tracks live work rather than accumulating
+// a transcript of it.
+func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	start := m.now()
+
+	m.orchestrate.markStarted("a", "root", start)
+	m.orchestrate.markDone("a", "succeeded", start)
+	m.orchestrate.markStarted("b", "left", start)
+
+	// Immediately after finishing, a is still there — you have to be able to
+	// SEE it land.
+	if !strings.Contains(m.renderOrchestratePanel(90), " a ") {
+		t.Fatal("a task that just finished must linger long enough to be seen")
+	}
+
+	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
+	faded := m.renderOrchestratePanel(90)
+	if strings.Contains(faded, " a ") {
+		t.Fatalf("a long-finished task must drop out of the panel:\n%s", faded)
+	}
+	for _, id := range []string{" b ", " c ", " d "} {
+		if !strings.Contains(faded, id) {
+			t.Fatalf("task%q is not finished and must stay:\n%s", id, faded)
+		}
+	}
+}
+
+// A faded task is hidden, not forgotten: the header still counts it, and
+// /plans still lists the whole plan with its shape intact.
+func TestAFadedTaskIsStillCountedAndStillInPlans(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	start := m.now()
+	m.orchestrate.markStarted("a", "root", start)
+	m.orchestrate.markDone("a", "succeeded", start)
+	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
+
+	if done, _, _, _, _ := m.orchestrate.counts(); done != 1 {
+		t.Fatalf("done count = %d, want 1: a faded task is hidden, not forgotten", done)
+	}
+	if !strings.Contains(m.renderOrchestratePanel(90), "1/4 done") {
+		t.Fatal("the header must still report the faded task as done")
+	}
+	full := m.orchestratePlansText()
+	if !strings.Contains(full, "a [done]") {
+		t.Fatalf("/plans must still list every task, faded or not:\n%s", full)
+	}
+	if !strings.Contains(full, "← b, c") {
+		t.Fatalf("/plans is where the dependency shape survives the fade:\n%s", full)
+	}
+}
+
+// Pending tasks never fade — they have not finished, so there is nothing to
+// retire.
+func TestPendingTasksNeverFade(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	m.now = func() time.Time { return time.Unix(1000, 0).Add(time.Hour) }
+	live := m.orchestrate.liveTasks(m.now())
+	if len(live) != 4 {
+		t.Fatalf("no task has finished, so all four must still show, got %d", len(live))
+	}
+}

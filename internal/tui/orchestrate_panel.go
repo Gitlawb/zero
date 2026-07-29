@@ -234,6 +234,34 @@ const (
 	orchestrateMaxIndentDepth = 5
 )
 
+// orchestrateTaskLinger is how long a finished task stays on screen before it
+// drops out. Long enough to see it land, short enough that the panel tracks
+// what is actually happening rather than accumulating history.
+//
+// Matches the AGENTS sidebar's treatment of finished agents, which retires them
+// the same way and for the same reason.
+const orchestrateTaskLinger = 5 * time.Second
+
+// liveTasks returns the tasks the panel should draw: everything not yet
+// finished, plus anything that finished within the linger window.
+//
+// The header's counts still cover EVERY task — a faded task is hidden, not
+// forgotten — and /plans still lists the whole plan. This is the panel choosing
+// to show live work rather than accumulate a transcript.
+//
+// TRADE-OFF, stated because it cost something real: the dependency shape goes
+// with them. A diamond stops looking like a diamond once its first task fades.
+// /plans is where the shape stays readable for the whole run.
+func (s orchestratePanelState) liveTasks(now time.Time) []orchestrateTask {
+	live := make([]orchestrateTask, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		if task.endedAt.IsZero() || now.Sub(task.endedAt) < orchestrateTaskLinger {
+			live = append(live, task)
+		}
+	}
+	return live
+}
+
 // renderOrchestratePanel draws the plan: one row per task, indented by
 // dependency depth so the shape is legible.
 func (m model) renderOrchestratePanel(width int) string {
@@ -257,19 +285,22 @@ func (m model) renderOrchestratePanel(width int) string {
 		return b.String()
 	}
 
-	rows := state.tasks
-	hidden := 0
+	rows := state.liveTasks(now)
+	// Hidden by the ROW CAP is worth saying; hidden by the linger is not. A
+	// truncated list reads as a complete one, but a faded task is already
+	// accounted for in the header's done count.
+	capped := 0
 	if len(rows) > orchestrateMaxRows {
-		hidden = len(rows) - orchestrateMaxRows
+		capped = len(rows) - orchestrateMaxRows
 		rows = rows[:orchestrateMaxRows]
 	}
 	for _, task := range rows {
 		b.WriteString("\n")
 		b.WriteString(m.renderOrchestrateTaskLine(task, now, width))
 	}
-	if hidden > 0 {
+	if capped > 0 {
 		b.WriteString("\n")
-		b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("  … %d more task(s) not shown", hidden)))
+		b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("  … %d more task(s) not shown", capped)))
 	}
 	if footer := orchestrateFooterLine(state); footer != "" {
 		b.WriteString("\n")

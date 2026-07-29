@@ -282,7 +282,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|low|medium|high|auto]",
+		usage:       "/effort [list|low|medium|high|zeromaxing|auto]",
 		group:       commandGroupModel,
 		description: "Show or set reasoning effort for supported models.",
 		kind:        commandEffort,

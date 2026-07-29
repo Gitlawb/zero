@@ -47,7 +47,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"model:",
 		"  /provider [add|status] - Manage providers: activate, add, edit, delete.",
 		"  /model [list|id] - Show or switch the active model.",
-		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
+		"  /effort [list|low|medium|high|zeromaxing|auto] - Show or set reasoning effort for supported models.",
 		"session:",
 		"  /plan - Show planning mode status.",
 		"runtime:",
