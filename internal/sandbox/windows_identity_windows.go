@@ -411,6 +411,8 @@ var (
 	resolveWindowsSandboxSIDFn        = resolveWindowsSandboxSID
 	resetWindowsSandboxUserPasswordFn = resetWindowsSandboxUserPassword
 	windowsSandboxUserIsManagedFn     = windowsSandboxUserIsManaged
+	grantWindowsSandboxLogonRightsFn  = grantWindowsSandboxLogonRights
+	revokeWindowsSandboxLogonRightsFn = revokeWindowsSandboxLogonRights
 )
 
 // provisionWindowsSandboxIdentity ensures the managed group and one sandbox
