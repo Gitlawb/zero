@@ -2700,6 +2700,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.specialists.start(msg.taskID, msg.reason, cardKey, m.now())
 		}
 		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
+		m.specialists.setTokens(cardKey, msg.tokens)
 		if msg.sessionID != "" && msg.sessionID != cardKey {
 			m.specialists.reconcileSessionID(cardKey, msg.sessionID)
 			cardKey = msg.sessionID

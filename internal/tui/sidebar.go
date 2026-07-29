@@ -631,10 +631,20 @@ func (m model) renderContextSidebar(width, height int) []string {
 	add("")
 	add(m.sidebarPlanHeader(width))
 	planLines := m.sidebarPlanLines(width)
-	if len(planLines) == 0 {
-		add(sidebarPlaceholder("no active plan", width))
-	} else {
+	switch {
+	case len(planLines) > 0:
 		lines = append(lines, planLines...)
+	case !m.orchestrate.isEmpty():
+		// An ORCHESTRATE plan is running. Without this the sidebar said "no
+		// active plan" while the panel two lines below showed one mid-flight —
+		// the two surfaces contradicting each other about the same session.
+		//
+		// EXACTLY ONE line, like the placeholder it replaces: the FILES
+		// section's click offsets are computed from the lines above it, so a
+		// different count here would misdirect every file hit.
+		add(m.sidebarOrchestrateLine(width))
+	default:
+		add(sidebarPlaceholder("no active plan", width))
 	}
 
 	// FILES section: the files this session has touched (files_panel.go).

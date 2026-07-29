@@ -58,6 +58,9 @@ type planTaskDoneMsg struct {
 	status     specialistStatus
 	outcome    string
 	reason     string
+	// tokens is what the task actually spent. The card omits the segment when
+	// it is zero rather than reporting a total nobody measured.
+	tokens int
 }
 
 // planCompletedMsg carries the plan's terminal record.
