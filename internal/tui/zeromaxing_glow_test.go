@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -154,5 +155,106 @@ func TestTheMarkerDoesNotLeakIntoTheSelectedValue(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no marked row in the picker at all")
+	}
+}
+
+// HOVER ON THE CHIP. It opens /effort when pressed, so it has to say so under
+// the cursor — a clickable chip that looks identical to a label never teaches
+// anyone it can be pressed.
+func TestTheChipHighlightsUnderTheCursor(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.altScreen = true
+
+	plain := m.zeromaxingGlowChip()
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+	hovered := m.zeromaxingGlowChip()
+
+	if plain == hovered {
+		t.Fatal("the chip renders identically hovered and not, so hovering it says nothing")
+	}
+	if !strings.Contains(ansi.Strip(hovered), zeromaxingChipLabel) {
+		t.Fatalf("the hovered chip lost its label: %q", ansi.Strip(hovered))
+	}
+}
+
+// The chip's hit region is measured from the RENDERED footer, not assumed: the
+// chips before it vary in width with the session's permission mode and effort.
+func TestTheChipHitRegionTracksTheRenderedFooter(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.altScreen = true
+
+	start, end, ok := m.zeromaxingChipSpan()
+	if !ok {
+		t.Fatal("the chip span could not be resolved from the footer")
+	}
+	if end <= start {
+		t.Fatalf("empty chip span [%d,%d)", start, end)
+	}
+	row, ok := m.zeromaxingChipRow()
+	if !ok {
+		t.Fatal("the chip row could not be resolved")
+	}
+
+	inside := tea.MouseMotionMsg{X: start + 1, Y: row}
+	if !m.zeromaxingChipAtMouse(inside) {
+		t.Fatalf("a point inside the chip [%d,%d) on row %d did not hit", start, end, row)
+	}
+	for _, outside := range []tea.MouseMotionMsg{
+		{X: maxInt(0, start-2), Y: row},
+		{X: end + 2, Y: row},
+		{X: start + 1, Y: maxInt(0, row-2)},
+	} {
+		if m.zeromaxingChipAtMouse(outside) {
+			t.Fatalf("a point outside the chip (%d,%d) hit anyway", outside.X, outside.Y)
+		}
+	}
+}
+
+// With the posture off there is no chip, so nothing can hover or click it.
+func TestTheChipIsNotHittableWhenThePostureIsOff(t *testing.T) {
+	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
+	m.width, m.height = 100, 30
+	m.altScreen = true
+	if m.zeromaxingChipAtMouse(tea.MouseMotionMsg{X: 5, Y: 29}) {
+		t.Fatal("the chip is hittable with the posture off")
+	}
+}
+
+// Clicking it opens the effort picker — where the posture can be turned off or
+// changed.
+func TestClickingTheChipOpensTheEffortPicker(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.altScreen = true
+	m.modelName = "glm-5.2"
+
+	row, ok := m.zeromaxingChipRow()
+	if !ok {
+		t.Fatal("the chip row could not be resolved")
+	}
+	start, _, _ := m.zeromaxingChipSpan()
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: start + 1, Y: row, Button: tea.MouseLeft})
+	m = updated.(model)
+	if m.picker == nil || m.picker.kind != pickerEffort {
+		t.Fatalf("clicking the chip did not open the effort picker: %#v", m.picker)
+	}
+}
+
+// ...but not mid-turn: /effort refuses while a run is in flight, and a dialog
+// that cannot be acted on is worse than none.
+func TestClickingTheChipMidTurnOpensNothing(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.altScreen = true
+	m.pending = true
+
+	row, _ := m.zeromaxingChipRow()
+	start, _, _ := m.zeromaxingChipSpan()
+	updated, _ := m.Update(tea.MouseClickMsg{X: start + 1, Y: row, Button: tea.MouseLeft})
+	if updated.(model).picker != nil {
+		t.Fatal("a picker opened mid-turn, where it cannot be acted on")
 	}
 }

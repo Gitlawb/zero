@@ -157,6 +157,20 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Clicking the orchestrate plan's header line opens or closes it. Checked
 	// before the surface switch below because the panel lives in the FOOTER,
 	// outside every transcript/sidebar region those cases test.
+	// Clicking the posture chip opens /effort, where it can be turned off or
+	// changed. A chip that highlights under the cursor and then does nothing
+	// when pressed is worse than one that never highlighted.
+	if mouseLeftPress(msg) && m.zeromaxingChipAtMouse(msg) {
+		// Not while a turn is in flight: the effort picker refuses mid-run for
+		// the same reason /effort does, and opening one that cannot be acted on
+		// would be a dead dialog.
+		if !m.pending {
+			if picker := m.newEffortPicker(); picker != nil {
+				m.picker = picker
+			}
+		}
+		return m, nil
+	}
 	// The plan lives in the sidebar: clicking a task selects it (the TASK
 	// section below shows it), clicking the PLAN header collapses the section.
 	// Checked before the surface switch because the sidebar is not one of the

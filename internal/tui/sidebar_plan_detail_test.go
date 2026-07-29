@@ -241,3 +241,41 @@ func TestTheDetailShowsWhatATaskBlocks(t *testing.T) {
 		t.Fatalf("the detail does not show what the task blocks:\n%s", rendered)
 	}
 }
+
+// HOVER ON THE PLAN ROWS. They are clickable, so they must highlight under the
+// cursor like every other clickable sidebar row.
+func TestHoveringASidebarTaskHighlightsIt(t *testing.T) {
+	m := sidebarDetailModel(t)
+	width := sidebarWidth(m.width)
+	hits := m.sidebarOrchestrateSelectables(width)
+	if len(hits) == 0 {
+		t.Fatal("no clickable plan rows")
+	}
+	target := hits[0]
+
+	m = m.updateHoverTarget(tea.MouseMotionMsg{X: m.chatColumnWidth() + 4, Y: target.lineOffset})
+	if m.hover.kind != hoverOrchestrateTask {
+		t.Fatalf("hovering a plan row set hover kind %v, want the task kind", m.hover.kind)
+	}
+	if want := m.orchestrate.tasks[target.taskIndex].id; m.hover.taskID != want {
+		t.Fatalf("hover identified %q, want %q", m.hover.taskID, want)
+	}
+
+	offset, ok := m.hoveredSidebarLineOffset(width)
+	if !ok || offset != target.lineOffset {
+		t.Fatalf("the hover resolved to row %d (ok=%v), want %d", offset, ok, target.lineOffset)
+	}
+}
+
+// The hover is held by TASK ID, not by row index. A task that faded out of the
+// list since the hover was set must stop highlighting rather than light up
+// whatever row slid into its slot.
+func TestAFadedTasksHoverStopsResolving(t *testing.T) {
+	m := sidebarDetailModel(t)
+	width := sidebarWidth(m.width)
+
+	m.hover = hoverTarget{kind: hoverOrchestrateTask, taskID: "no-such-task"}
+	if _, ok := m.hoveredSidebarLineOffset(width); ok {
+		t.Fatal("a hover on a row that is gone still resolved to a line")
+	}
+}
