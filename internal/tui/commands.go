@@ -120,7 +120,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:  "/plans",
-		usage: "/plans [stop|pause|resume|save <name>|list|show <name>|run <name>]",
+		usage: "/plans [stop|pause|save <name>|list|show <name>|run <name>|resume <name>]",
 		group: commandGroupSession,
 		// Deliberately close to /plan, and they are different things: /plan is
 		// planning-mode status (the update_plan TODO list), /plans is the

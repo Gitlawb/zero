@@ -36,7 +36,21 @@ func (m model) handlePlansCommand(args string) (tea.Model, tea.Cmd) {
 	case "show":
 		return m.appendPlansNotice(m.showSavedPlanText(rest)), nil
 	case "run":
-		return m.runSavedPlan(rest)
+		return m.runSavedPlan(rest, false)
+	case "resume":
+		// TWO MEANINGS OF ONE WORD, split by arity, and they are the same
+		// intention at two scales: continue what was interrupted.
+		//
+		//   /plans resume         → un-pause the plan running right now
+		//   /plans resume <name>  → pick up a saved plan where its last run
+		//                           stopped
+		//
+		// Bare resume keeps the meaning it already had, so the pause control
+		// shipped before this does not change under anyone.
+		if strings.TrimSpace(rest) == "" {
+			return m.appendPlansNotice(m.orchestrateControlText(args)), nil
+		}
+		return m.runSavedPlan(rest, true)
 	default:
 		return m.appendPlansNotice(m.orchestrateControlText(args)), nil
 	}
@@ -207,22 +221,89 @@ func planTaskSummaryLine(prompt string) string {
 
 // runSavedPlan asks the MODEL to run it. See the note at the top of this file:
 // a command that called the tool directly would be a second execution path.
-func (m model) runSavedPlan(name string) (tea.Model, tea.Cmd) {
+//
+// resume narrows the plan to the work the session log says has not succeeded.
+func (m model) runSavedPlan(name string, resume bool) (tea.Model, tea.Cmd) {
+	verb := "run"
+	if resume {
+		verb = "resume"
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return m.appendPlansNotice(planControlNotice("warning", "Name it: /plans run <name>")), nil
+		return m.appendPlansNotice(planControlNotice("warning", "Name it: /plans "+verb+" <name>")), nil
 	}
 	// Resolved HERE so an unknown name is a plain refusal rather than a turn
 	// spent discovering the plan does not exist.
-	if _, err := specialist.FindSavedPlan(m.planPaths, name); err != nil {
+	stored, err := specialist.FindSavedPlan(m.planPaths, name)
+	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", err.Error())), nil
 	}
-	encoded, err := json.Marshal(name)
+
+	target := name
+	instruction := "Run the saved plan %s by calling the orchestrate tool with the `saved` argument set to that name. Do not restate its tasks."
+	if resume {
+		remaining, notice, ok := m.resumeSavedPlan(stored)
+		if !ok {
+			return m.appendPlansNotice(notice), nil
+		}
+		target = remaining
+		instruction = "Resume the plan by calling the orchestrate tool with the `saved` argument set to %s. " +
+			"That is the saved plan narrowed to the tasks that had not finished. Do not restate its tasks."
+		m = m.appendPlansNotice(notice)
+	}
+	encoded, err := json.Marshal(target)
 	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
 	}
 	return m.dispatchCommand(parsedCommand{
 		kind: commandPrompt,
-		text: "Run the saved plan " + string(encoded) + " by calling the orchestrate tool with the `saved` argument set to that name. Do not restate its tasks.",
+		text: fmt.Sprintf(instruction, string(encoded)),
 	})
+}
+
+// resumeSavedPlan narrows a stored plan by the CURRENT session's plan events and
+// saves the remainder under its own name.
+//
+// It writes a new saved plan rather than teaching the tool a second "skip these
+// ids" argument. The remainder is a plan — it validates, it runs, it can be
+// inspected with /plans show before anyone spends a token on it — and running it
+// travels the one path every other plan travels. A skip list would have been a
+// parallel notion of what a plan is, resolved somewhere other than ParsePlan.
+func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice string, ok bool) {
+	if m.sessionStore == nil || m.activeSession.SessionID == "" {
+		return "", planControlNotice("warning",
+			"This session has no event log, so there is no record of what already ran."), false
+	}
+	events, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		return "", planControlNotice("warning", "Could not read this session's events: "+err.Error()), false
+	}
+	progress, found := specialist.ReducePlanEvents(events)
+	if !found {
+		return "", planControlNotice("warning",
+			"No plan has run in this session, so there is nothing to resume. Use /plans run "+stored.Name+" to run it from the start."), false
+	}
+	plan, err := specialist.ParsePlan(stored.Args, m.savedPlanLimits())
+	if err != nil {
+		return "", planControlNotice("warning", fmt.Sprintf("%s does not validate: %v", stored.Path, err)), false
+	}
+	remaining, err := specialist.RemainingPlan(plan, progress, m.savedPlanLimits())
+	if err != nil {
+		return "", planControlNotice("info", err.Error()), false
+	}
+
+	dir := m.planPaths.ProjectDir
+	if dir == "" {
+		dir = m.planPaths.UserDir
+	}
+	// A FIXED name, overwritten each time. A resume that accumulated
+	// sweep-resume-1, -2, -3 would leave a directory of near-identical plans
+	// nobody can tell apart, and only the newest is ever the right one.
+	resumeName := stored.Name + "_resume"
+	if _, err := specialist.SavePlan(dir, resumeName, remaining); err != nil {
+		return "", planControlNotice("warning", "Could not stage the remaining plan: "+err.Error()), false
+	}
+	return resumeName, planControlNotice("info", fmt.Sprintf(
+		"Resuming %q: %d of %d tasks already succeeded, %d left.\nSaved the remainder as %q — /plans show %s to read it first.",
+		stored.Name, len(progress.Succeeded), len(progress.Order), remaining.TaskCount(), resumeName, resumeName)), true
 }

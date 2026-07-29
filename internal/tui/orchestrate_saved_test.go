@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 )
 
@@ -133,7 +135,7 @@ func TestShowAndRunRefuseAnUnknownName(t *testing.T) {
 	if text := m.showSavedPlanText("nope"); !strings.Contains(text, "no saved plan named") {
 		t.Fatalf("show must refuse by name: %s", text)
 	}
-	updated, cmd := m.runSavedPlan("nope")
+	updated, cmd := m.runSavedPlan("nope", false)
 	if cmd != nil {
 		t.Fatal("running an unknown plan started a turn")
 	}
@@ -166,5 +168,146 @@ func TestAHandEditedPlanIsRefusedOnTheWayBackIn(t *testing.T) {
 	}
 	if !strings.Contains(text, "ghost") {
 		t.Fatalf("the refusal must say what is wrong with it: %s", text)
+	}
+}
+
+// resumeModel is a model with a real session store, a real saved plan, and real
+// plan events — the whole chain from "a plan ran and died" to "resume it".
+func resumeModel(t *testing.T) (model, specialist.PlanPaths, specialist.Plan) {
+	t.Helper()
+	m, paths := savedPlanModel(t)
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(sessions.CreateInput{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.sessionStore = store
+	m.activeSession = session
+	m.planProgress.Attach(func(tea.Msg) {}, 1, store, session.SessionID)
+
+	plan := samplePlan(t)
+	if _, err := specialist.SavePlan(paths.ProjectDir, "sweep", plan); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	return m, paths, plan
+}
+
+// THE WHOLE CHAIN. A plan runs, one task finishes, the process dies mid-second
+// task, and resuming stages exactly the work that was not done — using only the
+// session log and the saved plan, with no third store between them.
+func TestResumeStagesOnlyTheWorkThatDidNotFinish(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	order := plan.Order()
+	if len(order) < 2 {
+		t.Skip("the sample plan is too small to interrupt")
+	}
+
+	// A real run, recorded through the real bridge: first task done, second
+	// dispatched and never finished.
+	m.planProgress.PlanAdmitted(plan)
+	m.planProgress.TaskDispatched(specialist.Task{ID: order[0]})
+	m.planProgress.TaskCompleted(specialist.TaskResult{ID: order[0], Attempts: 1})
+	m.planProgress.TaskDispatched(specialist.Task{ID: order[1]})
+	if err := m.planProgress.RecordingError(); err != nil {
+		t.Fatalf("recording: %v", err)
+	}
+
+	stored, err := specialist.FindSavedPlan(paths, "sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, notice, ok := m.resumeSavedPlan(stored)
+	if !ok {
+		t.Fatalf("resume refused: %s", notice)
+	}
+	if name != "sweep_resume" {
+		t.Fatalf("staged as %q", name)
+	}
+
+	remaining, err := specialist.FindSavedPlan(paths, name)
+	if err != nil {
+		t.Fatalf("the staged remainder is not findable: %v", err)
+	}
+	restored, err := specialist.ParsePlan(remaining.Args, m.savedPlanLimits())
+	if err != nil {
+		t.Fatalf("the staged remainder does not validate: %v", err)
+	}
+	for _, id := range restored.Order() {
+		if id == order[0] {
+			t.Fatalf("the remainder re-runs %q, which already succeeded", id)
+		}
+	}
+	// The INTERRUPTED task is in the remainder: dispatched with no terminal
+	// event means unfinished, never done.
+	var sawInterrupted bool
+	for _, id := range restored.Order() {
+		if id == order[1] {
+			sawInterrupted = true
+		}
+	}
+	if !sawInterrupted {
+		t.Fatalf("the interrupted task %q was dropped from the remainder", order[1])
+	}
+	if !strings.Contains(notice, "1 of") {
+		t.Fatalf("the notice must say how much was already done: %s", notice)
+	}
+}
+
+// Resuming a plan that finished is not an error to hide — it is the ordinary
+// end of a plan, said plainly, with nothing staged.
+func TestResumingAFinishedPlanSaysThereIsNothingLeft(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	for _, id := range plan.Order() {
+		m.planProgress.TaskDispatched(specialist.Task{ID: id})
+		m.planProgress.TaskCompleted(specialist.TaskResult{ID: id, Attempts: 1})
+	}
+
+	stored, _ := specialist.FindSavedPlan(paths, "sweep")
+	_, notice, ok := m.resumeSavedPlan(stored)
+	if ok {
+		t.Fatal("a finished plan was staged for resume")
+	}
+	if !strings.Contains(notice, "nothing left to run") {
+		t.Fatalf("notice = %s", notice)
+	}
+	if _, err := specialist.FindSavedPlan(paths, "sweep_resume"); err == nil {
+		t.Fatal("a remainder was written for a plan with no remainder")
+	}
+}
+
+// With no plan in the log, resume refuses and POINTS AT run — the user wants
+// this plan executed, and the difference is only where it starts.
+func TestResumingWithNoRecordedPlanPointsAtRun(t *testing.T) {
+	m, paths, _ := resumeModel(t)
+	stored, _ := specialist.FindSavedPlan(paths, "sweep")
+	_, notice, ok := m.resumeSavedPlan(stored)
+	if ok {
+		t.Fatal("resume staged a plan with nothing recorded")
+	}
+	if !strings.Contains(notice, "/plans run sweep") {
+		t.Fatalf("the refusal must offer the way forward: %s", notice)
+	}
+}
+
+// BARE `/plans resume` KEEPS ITS OLD MEANING. It un-pauses the running plan; the
+// saved-plan resume is the form that takes a name. Overloading by arity must not
+// break the control verb that shipped first.
+func TestBareResumeStillUnpausesTheRunningPlan(t *testing.T) {
+	m, _ := savedPlanModel(t)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.planProgress.PlanRunning(cancel)
+	m.planProgress.SetPlanPaused(true)
+
+	updated, cmd := m.handlePlansCommand("resume")
+	if cmd != nil {
+		t.Fatal("bare resume started a turn")
+	}
+	if m.planProgress.PlanPaused() {
+		t.Fatal("bare /plans resume did not un-pause the running plan")
+	}
+	if !strings.Contains(transcriptText(updated.(model).transcript), "Resuming the plan") {
+		t.Fatalf("bare resume said something else: %s", transcriptText(updated.(model).transcript))
 	}
 }
