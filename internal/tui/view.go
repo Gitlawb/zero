@@ -235,8 +235,8 @@ func (m model) statusLine(width int) string {
 	// A separate condition from the fast chip above, not a branch of it: that one
 	// says which service tier the request goes out on, this one how hard the
 	// session tries, and a session can be either, both or neither.
-	if m.zeromaxingActive() {
-		left += zeroTheme.muted.Render(" · ") + zeroTheme.amber.Render(zeromaxingChipLabel)
+	if chip := m.zeromaxingGlowChip(); chip != "" {
+		left += zeroTheme.muted.Render(" · ") + chip
 	}
 	if m.exitConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
