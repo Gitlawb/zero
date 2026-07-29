@@ -59,8 +59,11 @@ func TestSavingWithNoPlanRefuses(t *testing.T) {
 	if !strings.Contains(text, "status: warning") || !strings.Contains(text, "nothing to save") {
 		t.Fatalf("save must refuse with a reason: %s", text)
 	}
-	if plans, _ := specialist.LoadPlans(paths); len(plans) != 0 {
-		t.Fatalf("a file was written anyway: %+v", plans)
+	// The bundled plans are always present; nothing must have been WRITTEN.
+	for _, plan := range mustLoad(t, paths) {
+		if plan.Scope != specialist.PlanScopeBuiltin {
+			t.Fatalf("a file was written anyway: %+v", plan)
+		}
 	}
 }
 
@@ -104,9 +107,14 @@ func TestListingShowsScopeAndUnreadableFiles(t *testing.T) {
 
 func TestListingWithNothingSavedSaysHowToSave(t *testing.T) {
 	m, _ := savedPlanModel(t)
+	// The bundled example is listed, but it is not the user's — the listing must
+	// still say how to save one, or it reads as though they already have some.
 	text := m.savedPlansText()
-	if !strings.Contains(text, "No saved plans") || !strings.Contains(text, "/plans save") {
-		t.Fatalf("an empty listing must say how to fill it: %s", text)
+	if !strings.Contains(text, "Nothing saved yet") || !strings.Contains(text, "/plans save") {
+		t.Fatalf("a listing with only bundled plans must say how to fill it: %s", text)
+	}
+	if !strings.Contains(text, "builtin") {
+		t.Fatalf("the bundled plan must be listed and labelled: %s", text)
 	}
 }
 
@@ -310,4 +318,13 @@ func TestBareResumeStillUnpausesTheRunningPlan(t *testing.T) {
 	if !strings.Contains(transcriptText(updated.(model).transcript), "Resuming the plan") {
 		t.Fatalf("bare resume said something else: %s", transcriptText(updated.(model).transcript))
 	}
+}
+
+func mustLoad(t *testing.T, paths specialist.PlanPaths) []specialist.SavedPlan {
+	t.Helper()
+	plans, problems := specialist.LoadPlans(paths)
+	if len(problems) != 0 {
+		t.Fatalf("problems loading plans: %v", problems)
+	}
+	return plans
 }

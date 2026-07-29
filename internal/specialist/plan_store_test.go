@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -90,17 +91,18 @@ func TestSavedPlansAreWrittenAndListedByScope(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("unexpected problems: %v", problems)
 	}
+	plans = onlyOnDisk(plans)
 	if len(plans) != 2 {
-		t.Fatalf("loaded %d plans, want 2", len(plans))
+		t.Fatalf("loaded %d on-disk plans, want 2", len(plans))
 	}
 	byName := map[string]SavedPlan{}
 	for _, plan := range plans {
 		byName[plan.Name] = plan
 	}
-	if !byName["sweep"].Project {
+	if !byName["sweep"].Project() {
 		t.Fatal("the project plan is not marked as one")
 	}
-	if byName["personal"].Project {
+	if byName["personal"].Project() {
 		t.Fatal("the user plan is marked as a project plan")
 	}
 	if byName["sweep"].TaskCount != 3 {
@@ -129,8 +131,8 @@ func TestAProjectPlanShadowsAUserPlanOfTheSameName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindSavedPlan: %v", err)
 	}
-	if !found.Project || found.TaskCount != 2 {
-		t.Fatalf("the user plan won: project=%v tasks=%d", found.Project, found.TaskCount)
+	if !found.Project() || found.TaskCount != 2 {
+		t.Fatalf("the user plan won: project=%v tasks=%d", found.Project(), found.TaskCount)
 	}
 }
 
@@ -213,8 +215,8 @@ func TestLoadingRefusesASymlinkedPlanAndSaysSo(t *testing.T) {
 	}
 
 	plans, problems := LoadPlans(PlanPaths{ProjectDir: dir})
-	if len(plans) != 0 {
-		t.Fatalf("a symlinked plan was loaded: %+v", plans)
+	if got := onlyOnDisk(plans); len(got) != 0 {
+		t.Fatalf("a symlinked plan was loaded: %+v", got)
 	}
 	if len(problems) != 1 || !strings.Contains(problems[0], "symlink") {
 		t.Fatalf("the refusal must be reported, not silent: %v", problems)
@@ -232,8 +234,8 @@ func TestAMalformedPlanFileIsReportedByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	plans, problems := LoadPlans(PlanPaths{ProjectDir: dir})
-	if len(plans) != 0 {
-		t.Fatalf("a malformed file produced a plan: %+v", plans)
+	if got := onlyOnDisk(plans); len(got) != 0 {
+		t.Fatalf("a malformed file produced a plan: %+v", got)
 	}
 	if len(problems) != 1 || !strings.Contains(problems[0], "broken.json") {
 		t.Fatalf("the problem must name the file: %v", problems)
@@ -354,5 +356,96 @@ func TestASavedPlanCannotRunWithThePostureOff(t *testing.T) {
 	result := tool.Run(t.Context(), map[string]any{"saved": "sweep"})
 	if result.Status != tools.StatusError || !strings.Contains(result.Output, "zeromaxing") {
 		t.Fatalf("a saved plan ran with the posture off: %+v", result)
+	}
+}
+
+// onlyOnDisk drops the bundled plans, which every load now includes. Written as
+// a filter rather than by adjusting the expected counts so a test that means
+// "nothing was written" keeps saying that rather than "one thing was".
+func onlyOnDisk(plans []SavedPlan) []SavedPlan {
+	out := make([]SavedPlan, 0, len(plans))
+	for _, plan := range plans {
+		if plan.Scope != PlanScopeBuiltin {
+			out = append(out, plan)
+		}
+	}
+	return out
+}
+
+// THE BUNDLED PLAN MUST ACTUALLY ADMIT. A shipped example that does not parse is
+// worse than none: it is the first thing anyone tries, and it would teach that
+// the format does not work.
+func TestEveryBundledPlanAdmits(t *testing.T) {
+	bundled := builtinPlans()
+	if len(bundled) == 0 {
+		t.Fatal("no plans are bundled with the binary")
+	}
+	for _, plan := range bundled {
+		admitted, err := ParsePlan(plan.Args, Limits{
+			MaxTasks: 20, ParentTools: PlanReadOnlyToolNames()})
+		if err != nil {
+			t.Errorf("bundled plan %q does not admit: %v", plan.Name, err)
+			continue
+		}
+		if admitted.TaskCount() != plan.TaskCount {
+			t.Errorf("%q: listing says %d tasks, the plan has %d",
+				plan.Name, plan.TaskCount, admitted.TaskCount())
+		}
+		if strings.TrimSpace(plan.Description) == "" {
+			t.Errorf("bundled plan %q has no description; the listing is where it is discovered", plan.Name)
+		}
+		if plan.Scope != PlanScopeBuiltin {
+			t.Errorf("bundled plan %q is scoped %q", plan.Name, plan.Scope)
+		}
+	}
+}
+
+// It has to fit the SMALLEST tier, or the shipped example is unusable for
+// exactly the users who set the tightest ceiling.
+func TestTheBundledPlansFitTheSmallestTier(t *testing.T) {
+	for _, plan := range builtinPlans() {
+		if _, err := ParsePlan(plan.Args, Limits{
+			MaxTasks: config.PlanSizeSmall.MaxTasks(), ParentTools: PlanReadOnlyToolNames()}); err != nil {
+			t.Errorf("bundled plan %q does not fit the small tier: %v", plan.Name, err)
+		}
+	}
+}
+
+// A BUNDLED PLAN IS AN EXAMPLE, NEVER AN OVERRIDE. Anything on disk with the
+// same name wins, or shipping a new example could silently replace something
+// someone wrote.
+func TestABundledPlanIsShadowedByOneOnDisk(t *testing.T) {
+	bundled := builtinPlans()
+	if len(bundled) == 0 {
+		t.Skip("nothing bundled")
+	}
+	name := bundled[0].Name
+	dir := filepath.Join(t.TempDir(), "plans")
+	mine := mustPlan(t, []any{task("mine", "my own version")}, okBudget(), readOnlyLimits())
+	if _, err := SavePlan(dir, name, mine); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindSavedPlan(PlanPaths{UserDir: dir}, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.Scope != PlanScopeUser || found.TaskCount != 1 {
+		t.Fatalf("the bundled plan won: scope=%q tasks=%d", found.Scope, found.TaskCount)
+	}
+}
+
+// The bundled plan is reachable with NO directories configured at all — that is
+// the point of shipping it in the binary.
+func TestTheBundledPlanIsAvailableWithNoDirectories(t *testing.T) {
+	plans, problems := LoadPlans(PlanPaths{})
+	if len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	if len(plans) == 0 {
+		t.Fatal("no plans are available without configured directories")
+	}
+	if _, err := FindSavedPlan(PlanPaths{}, plans[0].Name); err != nil {
+		t.Fatalf("the bundled plan is not findable: %v", err)
 	}
 }
