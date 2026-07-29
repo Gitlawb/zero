@@ -44,7 +44,10 @@ type Options struct {
 	// The model re-attaches it to each run so plan lifecycle events become
 	// transcript cards. nil disables the live plan view without affecting
 	// execution — recording is best-effort everywhere on this path.
-	PlanProgress                *PlanProgressBridge
+	PlanProgress *PlanProgressBridge
+	// PlanPaths locates saved plans. Empty means saved plans are unavailable,
+	// which the commands report as such rather than as "you have none".
+	PlanPaths                   specialist.PlanPaths
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry

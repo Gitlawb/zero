@@ -55,6 +55,13 @@ type PlanProgressBridge struct {
 	// still proceeds instead of blocking forever on a send nobody makes.
 	paused bool
 	resume chan struct{}
+	// lastPlan is the ARGUMENTS of the most recent plan admitted this session —
+	// what /plans save writes. Kept here rather than in the panel because the
+	// panel holds a RENDERING of a plan (ids, statuses, depths) and saving that
+	// would produce something that merely resembles what ran. The bridge is
+	// handed the real Plan, so it keeps the one thing that can be run again.
+	lastPlan     map[string]any
+	lastPlanName string
 	// dispatched counts tasks so each gets a unique temporary card key. The
 	// child's real session id is not known until the child process creates it,
 	// so the card is keyed by this and reconciled on completion — exactly how
@@ -224,6 +231,21 @@ func (bridge *PlanProgressBridge) clearPauseLocked() {
 	}
 }
 
+// LastPlan returns the arguments of the most recent plan admitted this session,
+// and its name. Reports false when no plan has run — the caller says so rather
+// than saving an empty file.
+func (bridge *PlanProgressBridge) LastPlan() (map[string]any, string, bool) {
+	if bridge == nil {
+		return nil, "", false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.lastPlan) == 0 {
+		return nil, "", false
+	}
+	return bridge.lastPlan, bridge.lastPlanName, true
+}
+
 // RecordingError reports the first append failure, so a surface can say once
 // that the plan was not fully persisted rather than leaving it silent.
 func (bridge *PlanProgressBridge) RecordingError() error {
@@ -257,6 +279,15 @@ func planTaskKey(n int) string { return fmt.Sprintf("plantask_%d", n) }
 // about to run rather than going silent until the first one finishes.
 func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	bridge.record(specialist.PlanAdmittedEvent(plan))
+	if bridge != nil {
+		// Args, not the Plan: what gets saved has to be re-admitted through
+		// ParsePlan on the way back in, so it is stored in the shape ParsePlan
+		// accepts and never as an object that could reach execution unvalidated.
+		bridge.mu.Lock()
+		bridge.lastPlan = plan.Args()
+		bridge.lastPlanName = plan.Name()
+		bridge.mu.Unlock()
+	}
 	name := plan.Name()
 	count := plan.TaskCount()
 	limit := plan.Budget().MaxTokens

@@ -120,13 +120,13 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:  "/plans",
-		usage: "/plans [stop|pause|resume]",
+		usage: "/plans [stop|pause|resume|save <name>|list|show <name>|run <name>]",
 		group: commandGroupSession,
 		// Deliberately close to /plan, and they are different things: /plan is
 		// planning-mode status (the update_plan TODO list), /plans is the
 		// orchestrate plan's task graph. The description says so, because the
 		// names alone do not.
-		description: "Show the running orchestrate plan, or stop / pause / resume it without stopping the turn.",
+		description: "Show or control the orchestrate plan: stop/pause/resume the running one, or save, list and run a named plan.",
 		kind:        commandPlans,
 	},
 	{

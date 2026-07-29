@@ -204,6 +204,9 @@ type model struct {
 	transcript         []transcriptRow
 	transcriptDetailed bool
 	helpOverlay        bool // the `?` keyboard-shortcut overlay is open
+	// planPaths locates saved plans, project first. Set once at startup: the
+	// workspace does not move for the life of a session.
+	planPaths specialist.PlanPaths
 	// orchestrateSelected is the plan task the sidebar's TASK section details.
 	// Clicking a task row in the sidebar sets it; ctrl+g cycles it.
 	orchestrateSelected int
@@ -926,6 +929,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		planProgress:                options.PlanProgress,
+		planPaths:                   options.PlanPaths,
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
@@ -4619,11 +4623,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// commandPrompt is queued while a run is pending — a slash command runs
 		// immediately, which is exactly what "stop the plan that is running
 		// right now" needs.
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{
-			kind: actionAppendSystem,
-			text: m.orchestrateControlText(command.text),
-		})
-		return m, nil
+		return m.handlePlansCommand(command.text)
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil

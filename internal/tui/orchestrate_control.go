@@ -67,7 +67,9 @@ func (m model) orchestrateControlText(args string) string {
 		return planControlNotice("info", "Resuming the plan.")
 	default:
 		return planControlNotice("warning",
-			"Unknown: /plans "+verb+"\nUse /plans on its own for the task graph, or /plans stop | pause | resume.")
+			"Unknown: /plans "+verb+"\nUse /plans on its own for the task graph, "+
+				"/plans stop | pause | resume for the running plan, "+
+				"or /plans save <name> | list | show <name> | run <name> for saved ones.")
 	}
 }
 

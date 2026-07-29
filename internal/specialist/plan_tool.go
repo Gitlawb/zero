@@ -46,6 +46,11 @@ type OrchestrateTool struct {
 	// Size is the configured plan-size tier. The zero value is the default tier,
 	// so a caller that never wires it gets the same ceiling as before.
 	Size config.PlanSize
+	// Plans locates saved plans. Both directories empty means saved plans are
+	// simply unavailable — the tool refuses a `saved` reference with a reason
+	// rather than searching nothing and reporting "not found", which would read
+	// as "you never saved it".
+	Plans PlanPaths
 	// Limits overrides the default caps; nil uses them.
 	Limits *Limits
 }
@@ -109,12 +114,21 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 				Type:        "array",
 				Description: "The plan's tasks. Each has an id, a prompt, optional depends_on ids, an optional read-only tool subset, and an optional phase label.",
 			},
+			"saved": {
+				Type: "string",
+				Description: "Run a plan saved earlier, by name, instead of supplying tasks. " +
+					"Mutually exclusive with tasks/budget/name/description: a saved plan runs as it was saved.",
+			},
 			"budget": {
 				Type:        "object",
 				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried.",
 			},
 		},
-		Required:             []string{"tasks", "budget"},
+		// tasks and budget are no longer unconditionally required: a `saved`
+		// reference supplies both. ParsePlan still refuses a plan that has
+		// neither, so the rule is enforced where it can see the resolved
+		// arguments rather than by a schema that cannot.
+		Required:             []string{},
 		AdditionalProperties: false,
 	}
 }
@@ -205,6 +219,33 @@ func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner 
 	}
 }
 
+// resolveSavedPlan swaps a `saved` reference for the stored plan's arguments.
+//
+// Anything the caller supplied ALONGSIDE `saved` is refused rather than merged.
+// A half-overridden plan is not the plan that was saved, and silently letting
+// one field through would mean "run the sweep plan" ran something else — the
+// name would still be right in the transcript.
+func (tool *OrchestrateTool) resolveSavedPlan(args map[string]any) (map[string]any, error) {
+	name := planString(args, "saved")
+	if name == "" {
+		return args, nil
+	}
+	for _, field := range []string{"tasks", "budget", "name", "description"} {
+		if _, present := args[field]; present {
+			return nil, fmt.Errorf(
+				"a saved plan is run as it was saved: remove %q, or supply the plan inline instead of naming one", field)
+		}
+	}
+	if tool.Plans.ProjectDir == "" && tool.Plans.UserDir == "" {
+		return nil, fmt.Errorf("saved plans are not available in this run")
+	}
+	stored, err := FindSavedPlan(tool.Plans, name)
+	if err != nil {
+		return nil, err
+	}
+	return stored.Args, nil
+}
+
 // Limits supplies the hard caps a plan must fit inside. nil means the defaults.
 //
 // The task ceiling comes from the CONFIGURED TIER rather than a constant here.
@@ -240,6 +281,15 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 			Status: tools.StatusError,
 			Output: "Error: orchestrate is only available under the zeromaxing posture. Turn it on with /effort zeromaxing.",
 		}
+	}
+	// A SAVED plan is loaded into the same argument shape and then validated by
+	// the same constructor. It is not a second way to run a plan: by the time
+	// ParsePlan sees it, a stored plan and a model-supplied one are
+	// indistinguishable, so the tier, the depth check, the read-only rule and
+	// the parent-grant intersection all apply to it unchanged.
+	args, err := tool.resolveSavedPlan(args)
+	if err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
 	}
 	// ParsePlan validates as part of parsing; there is no other constructor, so
 	// this call cannot be bypassed by any argument shape.
