@@ -192,13 +192,24 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		if secretPath != "" && (created || rotated) {
 			_ = removeWindowsSandboxSecret(secretPath)
 		}
-		// Attempted rather than completed. grantWindowsSandboxLogonRights adds
-		// rights one at a time and returns on the first failure, so a partial
-		// grant is possible; gating revocation on success left those entries
-		// behind, keyed to a SID that deleting the account then made
-		// unresolvable. Revoking a right that was never granted is harmless.
-		if identity.SID != nil && rightsAttempted {
-			_ = revokeWindowsSandboxLogonRights(identity.SID)
+		// Only for an account this run created, and attempted rather than
+		// completed.
+		//
+		// Attempted, because grantWindowsSandboxLogonRights adds rights one at a
+		// time and returns on the first failure, so a partial grant is possible
+		// and gating on success left those entries behind, keyed to a SID that
+		// deleting the account then made unresolvable.
+		//
+		// Created, because revokeWindowsSandboxLogonRights passes AllRights, which
+		// drops every right the account holds and deletes its LSA object outright.
+		// On an adopted principal that is not a rollback, it is destruction: a
+		// transient failure anywhere below would strip the SeBatchLogonRight and
+		// deny-logon rights a previous setup established, leaving exactly the
+		// broken-but-present principal this whole function exists to avoid. The
+		// rights this run granted are the ones the account is supposed to have, so
+		// leaving them in place on an adopted account is the safe direction.
+		if identity.SID != nil && rightsAttempted && created {
+			_ = revokeWindowsSandboxLogonRightsFn(identity.SID)
 		}
 		if created {
 			_ = removeWindowsSandboxIdentity(identity.Username)
@@ -212,7 +223,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		return windowsSandboxIdentity{}, false, err
 	}
 	rightsAttempted = true
-	if err := grantWindowsSandboxLogonRights(identity.SID); err != nil {
+	if err := grantWindowsSandboxLogonRightsFn(identity.SID); err != nil {
 		undo()
 		return windowsSandboxIdentity{}, false, err
 	}
