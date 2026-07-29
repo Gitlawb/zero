@@ -717,9 +717,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	executionRunner.SetPreparer(sandboxEngine)
 	// One gate shared by the registered tool and the TUI that flips it.
 	zeromaxingGate := &specialist.PostureGate{}
+	// The plan recorder. Registered once with the tool and re-attached to each
+	// run by the model — without it the TUI recorded NONE of the five plan
+	// lifecycle events, so a plan ran completely invisibly (audit finding 9).
+	planProgress := tui.NewPlanProgressBridge()
 	// nil filters: the TUI has no --enabled-tools/--disabled-tools equivalent,
 	// so the run's grant is every read-only tool the registry holds.
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil,
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil, planProgress,
 		orchestrateWiring{
 			Gate: zeromaxingGate,
 			// Depth stays 0: the TUI is always a root session — it has no
@@ -881,6 +885,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		MCPConfig:          mcpConfig,
 		ZeromaxingDisabled: resolved.Profiles.DisableZeromaxing,
 		ZeromaxingGate:     zeromaxingGate,
+		PlanProgress:       planProgress,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
@@ -1107,8 +1112,6 @@ type orchestrateWiring struct {
 	// state: the TUI model is a value type copied on every update, so a closure
 	// would freeze the posture as it was at registration.
 	Gate *specialist.PostureGate
-	// Recorder receives plan lifecycle events; nil disables recording.
-	Recorder specialist.PlanRecorder
 	// PlanContext supplies the run-invariant state a plan task inherits.
 	PlanContext specialist.PlanTaskContext
 }
@@ -1139,12 +1142,13 @@ func planParentTools(registry *tools.Registry, enabledTools, disabledTools []str
 // The wiring argument carries what the orchestrate tool needs; a zero value
 // leaves it registered but permanently off, which is the posture-off behaviour.
 //
-// enabledTools/disabledTools are the run's operator filters, taken as explicit
-// PARAMETERS rather than wiring fields on purpose: the plan tool's parent grant
-// is computed from them here, so a call site cannot forget to supply them
-// without failing to compile. The nil-nil case (the TUI, which has no such
-// filters) is then a stated choice rather than an omission.
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, enabledTools, disabledTools []string, wiring orchestrateWiring) (*agentToolRuntime, error) {
+// enabledTools/disabledTools are the run's operator filters, and recorder is the
+// plan lifecycle sink. All three are explicit PARAMETERS rather than wiring
+// fields on purpose: a call site cannot forget them without failing to compile.
+// As a field, Recorder was simply never set by the TUI, so a plan there recorded
+// none of its five lifecycle events (finding 9) — the same omission the parent
+// grant suffered. An explicit nil is a stated choice; an absent field is not.
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, enabledTools, disabledTools []string, recorder specialist.PlanRecorder, wiring orchestrateWiring) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -1185,7 +1189,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	registry.Register(&specialist.OrchestrateTool{
 		PostureActive: wiring.Gate.Active,
 		RunTask:       specialist.NewPlanRunner(planContext),
-		Recorder:      wiring.Recorder,
+		Recorder:      recorder,
 		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
 		Depth:         planContext.Depth,
 	})

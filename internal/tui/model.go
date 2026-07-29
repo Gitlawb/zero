@@ -123,14 +123,24 @@ type model struct {
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
 	// Lazily initialized.
-	titledSessions              map[string]bool
-	renamePrompt                *sessionRenamePrompt
-	usageTracker                *usage.Tracker
-	sessionCompactor            SessionCompactor
-	prService                   *PrService
-	prState                     PrState
-	prWatcherStop               func()
-	runtimeMessageSink          func(tea.Msg)
+	titledSessions     map[string]bool
+	renamePrompt       *sessionRenamePrompt
+	usageTracker       *usage.Tracker
+	sessionCompactor   SessionCompactor
+	prService          *PrService
+	prState            PrState
+	prWatcherStop      func()
+	runtimeMessageSink func(tea.Msg)
+	// planRunningCardKey is the card key of the plan task currently in flight.
+	// A plan's child progress events arrive keyed by the ORCHESTRATE tool call
+	// (the loop's callback carries only the parent's tool-call id), so they are
+	// attributed to this. Sound only because MaxWorkers is validated to be 1 —
+	// exactly one task runs at a time. Stage 2d must revisit it.
+	planRunningCardKey string
+	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
+	// for the same reason PostureGate is one: the TUI model is a value type
+	// copied on every update, so a closure over it would freeze the first run.
+	planProgress                *PlanProgressBridge
 	prepareRunCompletionWarning func()
 	runCompletionWarning        func() string
 	agentOptions                agent.Options
@@ -990,6 +1000,7 @@ func newModel(ctx context.Context, options Options) model {
 		agentOptions:                options.AgentOptions,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
+		planProgress:                options.PlanProgress,
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
@@ -2834,8 +2845,77 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = appendTranscriptRow(m.transcript, cardRow)
 		}
 		return m, nil
+	case planAdmittedMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+			kind:  rowSystem,
+			runID: msg.runID,
+			id:    fmt.Sprintf("plan-admitted-%s", msg.name),
+			text:  planAdmittedLine(msg.name, msg.taskCount),
+		})
+		return m, nil
+	case planTaskStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
+		// Remember which task is in flight so the plan's progress events — which
+		// arrive keyed by the ORCHESTRATE tool call, not by task — can be
+		// attributed. Sound only because MaxWorkers is validated to be 1, so
+		// exactly one task runs at a time. Stage 2d must revisit this.
+		m.planRunningCardKey = msg.cardKey
+		return m, nil
+	case planTaskDoneMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		if m.planRunningCardKey == msg.cardKey {
+			m.planRunningCardKey = ""
+		}
+		cardKey := msg.cardKey
+		if !msg.dispatched {
+			// Never started, so it has no card. Give it its own key and open one
+			// now, so a skipped or cancelled task is still SHOWN rather than
+			// closing the previously dispatched task's card.
+			cardKey = "planskipped_" + msg.taskID
+			m.specialists.start(msg.taskID, msg.reason, cardKey, m.now())
+		}
+		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
+		if msg.sessionID != "" && msg.sessionID != cardKey {
+			m.specialists.reconcileSessionID(cardKey, msg.sessionID)
+			cardKey = msg.sessionID
+		}
+		if info, ok := m.specialists.getBySessionID(cardKey); ok {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind:           rowSpecialist,
+				runID:          msg.runID,
+				specialistInfo: &info,
+			})
+		}
+		return m, nil
+	case planCompletedMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.planRunningCardKey = ""
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+			kind:  rowSystem,
+			runID: msg.runID,
+			id:    fmt.Sprintf("plan-completed-%s", msg.name),
+			text:  planCompletedLine(msg),
+		})
+		return m, nil
 	case specialistProgressMsg:
 		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		// A plan's progress arrives keyed by the orchestrate tool call, which has
+		// no card of its own; attribute it to the task currently in flight.
+		if _, ok := m.specialists.getBySessionID(msg.toolCallID); !ok && m.planRunningCardKey != "" {
+			m.specialists.incrementToolCount(m.planRunningCardKey)
+			m.specialists.setCurrentTool(m.planRunningCardKey, msg.toolName, msg.detail)
 			return m, nil
 		}
 		// Each progress message is one specialist tool call (OnToolProgress fires only
@@ -5184,6 +5264,12 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
+	m.planRunningCardKey = ""
+	// Re-bind the plan recorder to THIS run. The orchestrate tool holds the
+	// bridge for the process's life (the registry is built once per session),
+	// so the run id has to be pushed in per run — the PostureGate problem, same
+	// solution.
+	m.planProgress.Attach(m.runtimeMessageSink, m.runID)
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil

@@ -57,6 +57,12 @@ func (tool *TaskTool) Parameters() tools.Schema {
 	}
 }
 
+// StreamsChildProgress declares that this tool spawns a child agent run whose
+// stream-json events should reach the parent's UI. Previously the agent loop
+// inferred this from the tool's NAME; the declaration moves the knowledge to
+// the tool that has it.
+func (tool *TaskTool) StreamsChildProgress() bool { return true }
+
 func (tool *TaskTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect:      tools.SideEffectShell,

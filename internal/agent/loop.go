@@ -1392,10 +1392,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
-	// Task tool: wire progress callback so the TUI sees live tool-call events
-	// from the specialist child process.
+	// Wire the progress callback so the TUI sees live tool-call events from a
+	// child agent process.
+	//
+	// Keyed on the TOOL'S OWN DECLARATION (tools.ChildProgressStreamer), not on
+	// its name. This was `call.Name == "Task"`, which made the second
+	// sub-agent-spawning tool run invisibly; `|| call.Name == "orchestrate"`
+	// would have been the same defect one name later. A tool that spawns
+	// children declares it, and every tool that does not keeps the nil callback
+	// it has today.
 	var progressCallback func(streamjson.Event)
-	if call.Name == "Task" && options.OnToolProgress != nil {
+	if options.OnToolProgress != nil && tools.StreamsChildProgress(tool) {
 		toolCallID := call.ID
 		onProgress := options.OnToolProgress
 		progressCallback = func(event streamjson.Event) {

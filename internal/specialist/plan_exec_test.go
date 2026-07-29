@@ -48,7 +48,8 @@ func TestDependencyFailureSkipsDependentsAndRecordsThem(t *testing.T) {
 
 	recorder := &recordingRecorder{}
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			if task.ID == "a" {
 				return TaskResult{Outcome: TaskFailed, Err: "boom"}, errors.New("boom")
 			}
@@ -100,7 +101,8 @@ func TestMostlyFailedPlanIsPartialNotSuccess(t *testing.T) {
 	}
 	plan := mustPlan(t, raw, okBudget(), readOnlyLimits())
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			if task.ID == "t00" {
 				return TaskResult{Outcome: TaskSucceeded, Output: "ok"}, nil
 			}
@@ -127,7 +129,7 @@ func TestMostlyFailedPlanIsPartialNotSuccess(t *testing.T) {
 func TestAllFailedPlanIsFailed(t *testing.T) {
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(context.Context, Task, []string) (TaskResult, error) {
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			return TaskResult{Outcome: TaskFailed}, errors.New("no")
 		}, nil)
 	if report.Status != PlanFailed {
@@ -143,7 +145,8 @@ func TestBudgetExhaustionMidPlanIsPartial(t *testing.T) {
 
 	dispatched := []string{}
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			dispatched = append(dispatched, task.ID)
 			return TaskResult{Outcome: TaskSucceeded, Tokens: 60, Output: "ok"}, nil
 		}, nil)
@@ -179,7 +182,8 @@ func TestToolGrantIsIntersectedAtDispatch(t *testing.T) {
 
 	var granted []string
 	ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, _ Task, tools []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			tools := req.Tools
 			granted = tools
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
@@ -202,7 +206,8 @@ func TestEmptyToolsInheritsOnlyReadOnlyParentTools(t *testing.T) {
 	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), Limits{MaxTasks: 5, MaxTokens: 1000})
 	var granted []string
 	ExecutePlan(context.Background(), plan, []string{"read_file", "grep", "write_file", "bash"},
-		func(_ context.Context, _ Task, tools []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			tools := req.Tools
 			granted = tools
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
@@ -232,7 +237,8 @@ func TestMaxSpeedupOnAKnownDAG(t *testing.T) {
 		"c": 30 * time.Millisecond, "d": 10 * time.Millisecond,
 	}
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			return TaskResult{Outcome: TaskSucceeded, Duration: durations[task.ID]}, nil
 		}, nil)
 
@@ -254,7 +260,7 @@ func TestMaxSpeedupOnAKnownDAG(t *testing.T) {
 // chain has speedup 1. Those are the bounds the kill criterion is read against,
 // so they must be exactly right.
 func TestMaxSpeedupBounds(t *testing.T) {
-	runner := func(_ context.Context, _ Task, _ []string) (TaskResult, error) {
+	runner := func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
 		return TaskResult{Outcome: TaskSucceeded, Duration: 10 * time.Millisecond}, nil
 	}
 	independent := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, okBudget(), readOnlyLimits())
@@ -275,7 +281,8 @@ func TestTaskResultsArriveVerbatim(t *testing.T) {
 	const body = "Summary\n-------\nline one\n\n    indented\n\ndiff --git a/x b/x\n+added\n-removed\n\nConclusion: done."
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y", "a")}, okBudget(), readOnlyLimits())
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			return TaskResult{Outcome: TaskSucceeded, Output: task.ID + ":" + body}, nil
 		}, nil)
 
@@ -303,7 +310,8 @@ func TestExecutionFollowsTheValidatedOrder(t *testing.T) {
 	}, okBudget(), readOnlyLimits())
 	seen := []string{}
 	ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			seen = append(seen, task.ID)
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
@@ -326,7 +334,7 @@ func TestExecutionFollowsTheValidatedOrder(t *testing.T) {
 func TestRecordingIsOptional(t *testing.T) {
 	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), readOnlyLimits())
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
-		func(context.Context, Task, []string) (TaskResult, error) {
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
 	if report.Status != PlanCompleted {
@@ -420,9 +428,98 @@ func TestRealRunnerHonoursThePerCallContext(t *testing.T) {
 	if launched != 0 {
 		t.Fatalf("a cancelled context must launch no children, launched %d", launched)
 	}
-	if report.Status != PlanFailed {
-		t.Fatalf("a cancelled plan must not report success, got %q", report.Status)
+	// CANCELLED, not failed. The guarantee this test was written for — a
+	// cancelled plan never reports success — still holds; the status is simply
+	// no longer conflated with a plan that broke. Marking a stopped run as
+	// failed is what made a cancelled twenty-task plan read as nineteen
+	// defects.
+	if report.Status == PlanCompleted {
+		t.Fatalf("a cancelled plan must never report success, got %q", report.Status)
+	}
+	if report.Status != PlanCancelled {
+		t.Fatalf("a plan cancelled before any task ran must report %q, got %q", PlanCancelled, report.Status)
+	}
+	if report.Cancelled != 2 {
+		t.Fatalf("both tasks must be recorded as cancelled, got %d", report.Cancelled)
+	}
+	for _, task := range report.Tasks {
+		if task.Outcome != TaskCancelled {
+			t.Fatalf("task %q outcome = %q, want %q", task.ID, task.Outcome, TaskCancelled)
+		}
 	}
 }
 
 func intPtrForTest(v int) *int { return &v }
+
+// A plan cancelled PART WAY through is partial, not failed: work that finished
+// still counts, and the tasks that never ran are cancelled rather than broken.
+// The whole point of the outcome is that a user who pressed Ctrl-C does not get
+// a wall of failures.
+func TestCancellationMidPlanIsPartialAndNamesTheCancelledTasks(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, okBudget(), readOnlyLimits())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ran := 0
+	report := ExecutePlan(ctx, plan, []string{"read_file"},
+		func(runCtx context.Context, req PlanTaskRequest) (TaskResult, error) {
+			ran++
+			if req.Task.ID == "a" {
+				return TaskResult{Outcome: TaskSucceeded, Output: "done"}, nil
+			}
+			// b is in flight when the user stops the run.
+			cancel()
+			return TaskResult{Outcome: TaskFailed, Err: "context canceled"}, runCtx.Err()
+		}, nil)
+
+	if ran != 2 {
+		t.Fatalf("only a and b should have been dispatched, ran %d", ran)
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("status = %q, want %q: one task succeeded, so this is not a wholesale cancellation", report.Status, PlanPartial)
+	}
+	if report.Succeeded != 1 {
+		t.Fatalf("succeeded = %d, want 1: finished work still counts", report.Succeeded)
+	}
+	if report.Failed != 0 {
+		t.Fatalf("failed = %d, want 0: nothing broke, the user stopped it", report.Failed)
+	}
+	if report.Cancelled != 2 {
+		t.Fatalf("cancelled = %d, want 2 (b in flight, c never dispatched)", report.Cancelled)
+	}
+	byID := map[string]TaskOutcome{}
+	for _, task := range report.Tasks {
+		byID[task.ID] = task.Outcome
+	}
+	if byID["a"] != TaskSucceeded || byID["b"] != TaskCancelled || byID["c"] != TaskCancelled {
+		t.Fatalf("outcomes = %v, want a succeeded, b and c cancelled", byID)
+	}
+}
+
+// The summary a user reads must name cancellation rather than burying it in the
+// failure count.
+func TestSummaryNamesCancelledTasks(t *testing.T) {
+	report := PlanReport{Status: PlanPartial, Succeeded: 1, Cancelled: 2}
+	summary := report.Summary()
+	if !strings.Contains(summary, "2 cancelled") {
+		t.Fatalf("the summary must state the cancelled count:\n%s", summary)
+	}
+	if strings.Contains(summary, "2 failed") {
+		t.Fatalf("cancelled tasks must not be reported as failures:\n%s", summary)
+	}
+}
+
+// A genuine failure is still a failure — the cancellation branch must not
+// swallow real errors just because the run finished afterwards.
+func TestARealFailureIsNotReclassifiedAsCancelled(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			return TaskResult{Outcome: TaskFailed, Err: "the child exited 3"}, nil
+		}, nil)
+	if report.Failed != 1 || report.Cancelled != 0 {
+		t.Fatalf("failed=%d cancelled=%d, want a real failure counted as one", report.Failed, report.Cancelled)
+	}
+	if report.Status != PlanFailed {
+		t.Fatalf("status = %q, want %q", report.Status, PlanFailed)
+	}
+}

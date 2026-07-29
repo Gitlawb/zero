@@ -18,7 +18,7 @@ func registeredOrchestrateTool(t *testing.T, enabled, disabled []string) *specia
 	t.Helper()
 	workspace := t.TempDir()
 	registry := newCoreRegistry(workspace)
-	runtime, err := registerSpecialistTools(registry, workspace, 0, enabled, disabled, orchestrateWiring{
+	runtime, err := registerSpecialistTools(registry, workspace, 0, enabled, disabled, nil, orchestrateWiring{
 		Gate: &specialist.PostureGate{},
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestPlanParentToolsNeverExceedsThePlanReadOnlySet(t *testing.T) {
 func TestRegisteredOrchestrateToolCarriesTheRunsDepth(t *testing.T) {
 	workspace := t.TempDir()
 	registry := newCoreRegistry(workspace)
-	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, orchestrateWiring{
+	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, nil, orchestrateWiring{
 		Gate:        &specialist.PostureGate{},
 		PlanContext: specialist.PlanTaskContext{Cwd: workspace, Depth: 3},
 	})
@@ -124,3 +124,36 @@ func TestRegisteredOrchestrateToolCarriesTheRunsDepth(t *testing.T) {
 		t.Fatalf("Depth = %d, want the run's depth 3: an always-zero depth makes the headroom check inert", tool.Depth)
 	}
 }
+
+// The plan recorder is a REQUIRED parameter, not a wiring field. As a field the
+// TUI simply never set it, so a plan run there recorded none of its five
+// lifecycle events — finding 9, and the same omission the parent grant
+// suffered. Making it positional turns forgetting it into a compile error;
+// this test pins that a supplied recorder actually reaches the tool.
+func TestRegisteredOrchestrateToolCarriesTheSuppliedRecorder(t *testing.T) {
+	workspace := t.TempDir()
+	registry := newCoreRegistry(workspace)
+	recorder := &countingPlanRecorder{}
+	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, recorder, orchestrateWiring{
+		Gate: &specialist.PostureGate{},
+	})
+	if err != nil {
+		t.Fatalf("registerSpecialistTools: %v", err)
+	}
+	t.Cleanup(func() { closeSpecialistRuntime(nil, runtime) })
+
+	registered, _ := registry.Get(specialist.OrchestrateToolName)
+	tool, ok := registered.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("orchestrate is %T", registered)
+	}
+	if tool.Recorder != recorder {
+		t.Fatal("the supplied recorder did not reach the tool, so plan events go nowhere")
+	}
+}
+
+type countingPlanRecorder struct{ dispatched int }
+
+func (r *countingPlanRecorder) TaskDispatched(specialist.Task)      { r.dispatched++ }
+func (r *countingPlanRecorder) TaskCompleted(specialist.TaskResult) {}
+func (r *countingPlanRecorder) TaskFailed(specialist.TaskResult)    {}

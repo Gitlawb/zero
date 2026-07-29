@@ -2,10 +2,13 @@ package specialist
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // PlanStatus is a plan's terminal state.
@@ -23,6 +26,9 @@ const (
 	PlanPartial PlanStatus = "partial"
 	// PlanFailed: no task succeeded.
 	PlanFailed PlanStatus = "failed"
+	// PlanCancelled: the run was stopped and nothing had succeeded yet. Its own
+	// status so a deliberate stop is never reported as a failure.
+	PlanCancelled PlanStatus = "cancelled"
 )
 
 // TaskOutcome is why a task ended the way it did.
@@ -38,6 +44,12 @@ const (
 	// TaskSkippedBudget: the plan's token budget was exhausted before this
 	// task could be dispatched.
 	TaskSkippedBudget TaskOutcome = "budget_exhausted"
+	// TaskCancelled: the run was cancelled before this task finished, or before
+	// it started. ITS OWN OUTCOME, not a failure — cancelling a twenty-task
+	// plan used to mark every remaining task "failed" with "context canceled",
+	// so a deliberate Ctrl-C read as nineteen defects. Nothing failed; the user
+	// stopped it.
+	TaskCancelled TaskOutcome = "cancelled"
 )
 
 // TaskResult is one task's record.
@@ -60,6 +72,9 @@ type PlanReport struct {
 	Succeeded int
 	Failed    int
 	Skipped   int
+	// Cancelled counts tasks stopped by the user rather than broken. Kept
+	// separate from Failed so the summary and the panel can say so.
+	Cancelled int
 	// SequentialTotal is the sum of task durations — what this run actually
 	// spent.
 	SequentialTotal time.Duration
@@ -81,10 +96,29 @@ type PlanReport struct {
 	TokensUsed int
 }
 
+// PlanTaskRequest is everything one task needs to run.
+//
+// A STRUCT, not a widening parameter list. The runner's inputs are the thing
+// that grows every stage — 2a adds Progress, 2b will add background wiring —
+// and each addition through a positional parameter is another chance for a
+// second construction path to omit a field the first one carried. That is
+// exactly the class that produced findings 1 and 7: a caller that forgets a
+// field compiles fine and fails silently.
+type PlanTaskRequest struct {
+	// Task is the validated task to run.
+	Task Task
+	// Tools is the already-intersected grant. Never widened downstream.
+	Tools []string
+	// Progress, when set, receives each stream-json event the task's child
+	// emits. nil is a no-op — the behaviour for every caller that does not wire
+	// live progress.
+	Progress func(streamjson.Event)
+}
+
 // PlanRunner runs one task. The executor depends on this seam rather than on
 // Executor directly so the budget, ordering and failure semantics are testable
 // without launching child processes.
-type PlanRunner func(ctx context.Context, task Task, tools []string) (TaskResult, error)
+type PlanRunner func(ctx context.Context, req PlanTaskRequest) (TaskResult, error)
 
 // PlanRecorder receives plan lifecycle events. Recording is BEST-EFFORT and
 // must never fail the run — it mirrors execSessionRecorder.append's contract,
@@ -121,8 +155,26 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 		deadline = time.Now().Add(wall)
 	}
 
+	cancelled := false
 	for _, id := range plan.Order() {
 		task := tasks[id]
+
+		// Cancellation is checked FIRST and recorded as its own outcome. Once
+		// the run is cancelled every remaining task is cancelled too — they are
+		// not blocked by a dependency and the budget did not run out.
+		if cancelled || ctx.Err() != nil {
+			cancelled = true
+			result := TaskResult{
+				ID:      id,
+				Outcome: TaskCancelled,
+				Err:     "cancelled: the run was stopped before this task ran",
+			}
+			results[id] = result
+			failed[id] = true
+			report.Cancelled++
+			recordFailed(recorder, result)
+			continue
+		}
 
 		if blocker, blocked := firstFailedDependency(task, failed); blocked {
 			result := TaskResult{
@@ -171,7 +223,7 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 
 		recordDispatched(recorder, task)
 		started := time.Now()
-		result, err := run(ctx, task, granted)
+		result, err := run(ctx, PlanTaskRequest{Task: task, Tools: granted})
 		result.ID = id
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
@@ -181,6 +233,21 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 		report.TokensUsed += result.Tokens
 
 		if err != nil || result.Outcome == TaskFailed {
+			// A task cut short by cancellation is CANCELLED, not failed. The
+			// distinction survives all the way to the terminal status, so a
+			// stopped plan never reports as a broken one.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				cancelled = true
+				result.Outcome = TaskCancelled
+				if result.Err == "" {
+					result.Err = "cancelled: the run was stopped while this task was running"
+				}
+				results[id] = result
+				failed[id] = true
+				report.Cancelled++
+				recordFailed(recorder, result)
+				continue
+			}
 			result.Outcome = TaskFailed
 			if result.Err == "" && err != nil {
 				result.Err = err.Error()
@@ -210,11 +277,17 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 // status precisely so a mostly-failed plan can never be reported as success.
 func terminalStatus(report PlanReport) PlanStatus {
 	switch {
+	case report.Succeeded == 0 && report.Cancelled > 0:
+		// Stopped before anything finished. Not a failure — nothing broke.
+		return PlanCancelled
 	case report.Succeeded == 0:
 		return PlanFailed
-	case report.Failed == 0 && report.Skipped == 0:
+	case report.Failed == 0 && report.Skipped == 0 && report.Cancelled == 0:
 		return PlanCompleted
 	default:
+		// Cancelled MUST be part of this condition. Without it a plan with two
+		// successes and two cancellations reported "completed" — work that
+		// never ran, reported as done, which is RC-F exactly.
 		return PlanPartial
 	}
 }
@@ -324,7 +397,11 @@ func speedup(sequential, critical time.Duration) float64 {
 // number the Phase 3 decision rests on, surfaced rather than buried in an event.
 func (report PlanReport) Summary() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Plan %s: %d succeeded, %d failed, %d skipped.\n", report.Status, report.Succeeded, report.Failed, report.Skipped)
+	fmt.Fprintf(&b, "Plan %s: %d succeeded, %d failed, %d skipped", report.Status, report.Succeeded, report.Failed, report.Skipped)
+	if report.Cancelled > 0 {
+		fmt.Fprintf(&b, ", %d cancelled", report.Cancelled)
+	}
+	b.WriteString(".\n")
 	fmt.Fprintf(&b, "sequential total: %s · critical path: %s · max_speedup: %.2fx\n",
 		report.SequentialTotal.Round(time.Millisecond), report.CriticalPath.Round(time.Millisecond), report.MaxSpeedup)
 	for _, task := range report.Tasks {

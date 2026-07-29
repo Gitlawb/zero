@@ -25,6 +25,12 @@ const (
 	specialistRunning specialistStatus = iota
 	specialistCompleted
 	specialistError
+	// specialistCancelled: ended without running to completion, but nothing
+	// broke — a plan task the user stopped, or one skipped because a dependency
+	// failed. Appended AFTER the existing values so their ordinals are
+	// unchanged; a Task sub-agent never produces this, so its rendering is
+	// untouched.
+	specialistCancelled
 )
 
 // specialistInfo is the rendered view of one specialist invocation.

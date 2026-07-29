@@ -1,0 +1,94 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Plan lifecycle messages, posted from the tool goroutine by
+// PlanProgressBridge and consumed on the Bubble Tea event loop. Each carries
+// runID so the stale-run guard can drop messages from a superseded run, exactly
+// like specialistStartMsg.
+
+// planAdmittedMsg announces a validated plan before its first task runs, so a
+// plan does not read as a frozen session until the first task finishes.
+type planAdmittedMsg struct {
+	runID     int
+	name      string
+	taskCount int
+}
+
+// planTaskStartMsg opens a card for a dispatched task. cardKey is a temporary
+// id (the child session does not exist yet) reconciled on completion.
+type planTaskStartMsg struct {
+	runID   int
+	taskID  string
+	summary string
+	cardKey string
+}
+
+// planTaskDoneMsg closes a task's card.
+//
+// dispatched distinguishes a task that ran from one that never started
+// (dependency-skipped, budget-skipped, cancelled before dispatch). A task that
+// never started has no card, and closing the last dispatched task's card for it
+// would mark the wrong task — the specialist-card collision defect in a new
+// costume.
+type planTaskDoneMsg struct {
+	runID      int
+	taskID     string
+	cardKey    string
+	dispatched bool
+	sessionID  string
+	status     specialistStatus
+	outcome    string
+	reason     string
+}
+
+// planCompletedMsg carries the plan's terminal record.
+type planCompletedMsg struct {
+	runID      int
+	name       string
+	status     string
+	succeeded  int
+	failed     int
+	skipped    int
+	cancelled  int
+	tokensUsed int
+	tokenLimit int
+	maxSpeedup float64
+}
+
+// planNoticeLine renders the one-line plan notices shown in the transcript.
+// Kept here beside the messages so the wording and the data stay together.
+func planAdmittedLine(name string, taskCount int) string {
+	label := "tasks"
+	if taskCount == 1 {
+		label = "task"
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Sprintf("plan: %d %s", taskCount, label)
+	}
+	return fmt.Sprintf("plan %q: %d %s", name, taskCount, label)
+}
+
+func planCompletedLine(msg planCompletedMsg) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "plan %s: %d succeeded", msg.status, msg.succeeded)
+	if msg.failed > 0 {
+		fmt.Fprintf(&b, ", %d failed", msg.failed)
+	}
+	if msg.skipped > 0 {
+		fmt.Fprintf(&b, ", %d skipped", msg.skipped)
+	}
+	if msg.cancelled > 0 {
+		fmt.Fprintf(&b, ", %d cancelled", msg.cancelled)
+	}
+	if msg.tokenLimit > 0 {
+		fmt.Fprintf(&b, " · %d/%d tokens", msg.tokensUsed, msg.tokenLimit)
+	}
+	if msg.maxSpeedup > 0 {
+		fmt.Fprintf(&b, " · max_speedup %.2fx", msg.maxSpeedup)
+	}
+	return b.String()
+}
