@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -90,6 +92,11 @@ type orchestratePanelState struct {
 	// event — an interrupt or a crash. Mirrors planPanelState.frozenAt.
 	frozenAt time.Time
 	expanded bool
+	// sidebarCollapsed hides the task list and detail in the right column,
+	// toggled by clicking the sidebar's PLAN header. Separate from `expanded`,
+	// which is the inline panel above the composer: they are two surfaces and
+	// collapsing one must not silently collapse the other.
+	sidebarCollapsed bool
 }
 
 func (s *orchestratePanelState) clear() { *s = orchestratePanelState{} }
@@ -558,7 +565,7 @@ const maxSidebarOrchestrateLines = 6
 // what is happening rather than what already happened. What it drops is stated.
 func (m model) sidebarOrchestrateLines(width int) []string {
 	state := m.orchestrate
-	if state.isEmpty() {
+	if state.isEmpty() || state.sidebarCollapsed {
 		return nil
 	}
 	room := maxInt(4, width-3)
@@ -587,6 +594,72 @@ func (m model) sidebarOrchestrateLines(width int) []string {
 		lines = append(lines, " "+zeroTheme.faint.Render(fmt.Sprintf("  +%d more", hidden)))
 	}
 	return lines
+}
+
+// dependents lists the tasks that depend on the given one — the reverse of the
+// declared edges, which the plan only stores forward.
+func (s orchestratePanelState) dependents(taskID string) []string {
+	var out []string
+	for _, task := range s.tasks {
+		for _, dep := range task.dependsOn {
+			if dep == taskID {
+				out = append(out, task.id)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// sidebarProgressBar draws the plan's progress across the column: done, failed
+// and skipped each keep their own colour inside one bar, so a glance says both
+// how far along it is AND whether it is going well.
+//
+// Proportional to the COLUMN, not to a fixed width — a 26-cell sidebar and a
+// 40-cell one both get a bar that fills their space.
+func sidebarProgressBar(state orchestratePanelState, width int) string {
+	total := len(state.tasks)
+	if total == 0 || width < 12 {
+		return ""
+	}
+	done, failed, skipped, cancelled, running := state.counts()
+
+	cells := maxInt(4, width-8)
+	fill := func(count int) int {
+		if count <= 0 {
+			return 0
+		}
+		// At least one cell for anything non-zero: a failure that rounds to
+		// zero cells is a failure the bar does not show.
+		return maxInt(1, count*cells/total)
+	}
+	segments := []struct {
+		count int
+		style lipgloss.Style
+	}{
+		{done, zeroTheme.green},
+		{failed, zeroTheme.red},
+		{skipped + cancelled, zeroTheme.muted},
+		{running, zeroTheme.accent},
+	}
+
+	var b strings.Builder
+	used := 0
+	for _, segment := range segments {
+		n := fill(segment.count)
+		if used+n > cells {
+			n = cells - used
+		}
+		if n <= 0 {
+			continue
+		}
+		b.WriteString(segment.style.Render(strings.Repeat("█", n)))
+		used += n
+	}
+	if used < cells {
+		b.WriteString(zeroTheme.faint.Render(strings.Repeat("░", cells-used)))
+	}
+	return " " + b.String() + zeroTheme.faint.Render(fmt.Sprintf(" %d/%d", done, total))
 }
 
 // sidebarOrchestrateStyle picks the glyph and text colour for one task. The

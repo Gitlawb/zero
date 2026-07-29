@@ -157,11 +157,24 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Clicking the orchestrate plan's header line opens or closes it. Checked
 	// before the surface switch below because the panel lives in the FOOTER,
 	// outside every transcript/sidebar region those cases test.
+	// The plan lives in the sidebar: clicking a task selects it (the TASK
+	// section below shows it), clicking the PLAN header collapses the section.
+	// Checked before the surface switch because the sidebar is not one of the
+	// regions those cases test.
+	if mouseLeftPress(msg) {
+		if index, ok := m.orchestrateTaskAtMouse(msg); ok {
+			m.orchestrateSelected = index
+			return m, nil
+		}
+		if m.orchestrateHeaderAtMouse(msg) {
+			m.orchestrate.sidebarCollapsed = !m.orchestrate.sidebarCollapsed
+			return m, nil
+		}
+	}
+	// Clicking the inline panel's header still expands it in place.
 	if mouseLeftPress(msg) && m.clickedOrchestrateHeader(msg) {
-		// Pressing PLAN opens the drill-in — phases left, the selected task's
-		// live agent detail right. The panel's own expand/collapse stays on
-		// ctrl+g for a quick look without leaving the conversation.
-		return m.openOrchestrateDetail(), nil
+		m.orchestrate.expanded = !m.orchestrate.expanded
+		return m, nil
 	}
 	if mouseLeftPress(msg) {
 		switch {
