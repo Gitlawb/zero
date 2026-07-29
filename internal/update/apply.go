@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,15 @@ import (
 
 	"github.com/Gitlawb/zero/internal/release"
 )
+
+// ErrTargetPossiblyTampered reports that an executable path may hold content
+// this updater could not verify, because a promotion failed and the original
+// could not be restored over it. Only the Windows promotion path produces it
+// today (see replace_windows.go for why that platform has the gap and the POSIX
+// descriptor-bound path does not), but it is declared here so callers on every
+// platform can test for it without build tags — the helper-refresh loop below
+// must fail the apply on it rather than downgrade it to a warning.
+var ErrTargetPossiblyTampered = errors.New("target executable path may hold unverified content after a failed update")
 
 // DefaultDownloadTimeout bounds the archive/checksum download phase of a
 // standalone Apply, separately from Options.Timeout (which only covers the
@@ -194,6 +204,19 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 			continue // only refresh helpers this install already has
 		}
 		if err := installBinary(source, destPath); err != nil {
+			// An optional helper that simply fails to refresh is a warning: the
+			// sandbox degrades gracefully without a newer one, and aborting the
+			// whole update over it would be worse than the stale helper.
+			//
+			// Possible tampering is not that. It means this helper's path may now
+			// hold content the updater could not verify, and helpers are resolved
+			// from the install directory and EXECUTED by the sandbox runner — so
+			// reporting Applied: true and exiting 0 would hand the operator a
+			// success while a sibling executable is suspect. Fail the apply and
+			// keep errors.Is intact, exactly as the main binary does.
+			if errors.Is(err, ErrTargetPossiblyTampered) {
+				return nil, fmt.Errorf("update helper %s: %w", name, err)
+			}
 			warnings = append(warnings, fmt.Sprintf("failed to update helper %s: %v", name, err))
 		}
 	}

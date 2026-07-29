@@ -165,6 +165,60 @@ func TestInstallBinaryPreservesPossibleTamperingError(t *testing.T) {
 	}
 }
 
+// TestPromoteRefusesWhileRecoveryCopyIsMarked covers jatmn's #751 P1: skipping
+// the pre-rename cleanup was not enough to protect a marked recovery copy.
+// os.Rename uses MOVEFILE_REPLACE_EXISTING on Windows, so renaming the running
+// binary aside overwrote the last verified copy with the unverified bytes the
+// earlier failure left at the target — and if this promotion then failed,
+// restoreOriginalBinary could only move those unverified bytes back.
+func TestPromoteRefusesWhileRecoveryCopyIsMarked(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	if err := markOldBinaryPreserved(oldPath); err != nil {
+		t.Fatalf("markOldBinaryPreserved: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want a refusal wrapping ErrTargetPossiblyTampered", err)
+	}
+	// The whole point: the known-good copy is still there afterwards.
+	got, readErr := os.ReadFile(oldPath)
+	if readErr != nil {
+		t.Fatalf("recovery copy was destroyed by the retry: %v", readErr)
+	}
+	if string(got) != "known-good" {
+		t.Fatalf("recovery copy = %q, want the last verified binary", got)
+	}
+	// And the error names both moves that end the state.
+	for _, want := range []string{oldPath, targetPath, oldPath + oldBinaryPreservedSuffix} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to name %q", err, want)
+		}
+	}
+
+	// Clearing the marker is the operator accepting the installed binary; the
+	// next promotion proceeds normally.
+	clearOldBinaryPreserved(oldPath)
+	if err := installBinary(sourcePath, targetPath); err != nil {
+		t.Fatalf("installBinary after the operator cleared the marker: %v", err)
+	}
+	if data, err := os.ReadFile(targetPath); err != nil || string(data) != "verified-binary" {
+		t.Fatalf("target = %q err=%v, want the verified bytes installed", data, err)
+	}
+}
+
 func TestVerifyPromotedTargetRejectsDifferentRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	stagedPath := filepath.Join(dir, "staged.exe")

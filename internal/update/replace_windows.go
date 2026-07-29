@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -27,18 +29,21 @@ func renameWithRetry(oldPath string, newPath string) error {
 	return lastErr
 }
 
-// ErrTargetPossiblyTampered is wrapped into the error promote returns when a
-// promotion attempt fails AND restoring the original binary to targetPath
-// also fails. That combination means a principal who can write in the
-// installation directory occupied targetPath in the gap the updater opened by
-// renaming the running binary aside, and Windows would not let anything —
-// including the restore — replace it: MOVEFILE_REPLACE_EXISTING cannot force
-// past another handle's share-mode lock. This is not an ordinary failed
-// update (the previous version simply staying in place); the executable path
-// may now hold attacker-controlled bytes, so a caller must surface it as a
-// security-relevant condition, not the same "try again later" failure as a
-// stalled download.
-var ErrTargetPossiblyTampered = errors.New("target executable path may hold unverified content after a failed update")
+// This file is where ErrTargetPossiblyTampered (declared in apply.go, so
+// cross-platform callers can test for it) is produced. It is wrapped into the
+// error promote returns when a promotion attempt fails AND restoring the
+// original binary to targetPath also fails. That combination means a principal
+// who can write in the installation directory occupied targetPath in the gap
+// the updater opened by renaming the running binary aside, and Windows would
+// not let anything — including the restore — replace it:
+// MOVEFILE_REPLACE_EXISTING cannot force past another handle's share-mode lock.
+// This is not an ordinary failed update (the previous version simply staying in
+// place); the executable path may now hold attacker-controlled bytes, so a
+// caller must surface it as a security-relevant condition, not the same "try
+// again later" failure as a stalled download.
+//
+// It is also returned by promote when a PREVIOUS run left that state behind and
+// nobody has resolved it yet — see the refusal there.
 
 // restoreOriginalBinary moves the preserved original at oldPath back onto
 // targetPath after a failed promotion. A failed immediate restore is surfaced;
@@ -53,7 +58,15 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 	// oldPath. Record that so the statement stays true: a later run finds
 	// targetPath occupied — by whatever won the gap — and would otherwise treat
 	// oldPath as an ordinary leftover and delete the only known-good copy.
-	markOldBinaryPreserved(oldPath)
+	if markErr := markOldBinaryPreserved(oldPath); markErr != nil {
+		// Do not let the promise go out unqualified. Without the marker, the next
+		// run's cleanup sees a present target and removes oldPath, so the operator
+		// has to act now rather than at their convenience.
+		return fmt.Errorf(
+			"%w: %v (the recovery marker could not be written: %v — copy %s somewhere safe now, a later update will otherwise remove it)",
+			ErrTargetPossiblyTampered, err, markErr, oldPath,
+		)
+	}
 	return fmt.Errorf("%w: %v", ErrTargetPossiblyTampered, err)
 }
 
@@ -61,18 +74,63 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 // a failed restore left as the last known-good binary.
 const oldBinaryPreservedSuffix = ".keep"
 
-// markOldBinaryPreserved records that oldPath must survive routine cleanup. It
-// is best-effort by nature: the marker lives in the same directory as the binary
-// and anyone who can write there can remove it, which only returns cleanup to
-// its previous behavior. It is a note to the next run, not a security control.
-func markOldBinaryPreserved(oldPath string) {
-	marker, err := os.OpenFile(oldPath+oldBinaryPreservedSuffix, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return
+// markOldBinaryPreserved records that oldPath must survive routine cleanup.
+//
+// The marker is created with the same exclusive, no-follow semantics as a
+// staging file, and never truncates. Its pathname is predictable, so under the
+// writable-install-directory threat model a lower-privileged writer can
+// pre-create it as a hard link or reparse point; opening that with O_TRUNC
+// would let the elevated updater write through it into a file of the attacker's
+// choosing. CREATE_NEW plus FILE_FLAG_OPEN_REPARSE_POINT plus the same
+// fresh-regular-file check refuses that object instead of writing to it.
+//
+// An existing marker is success, not a rewrite: its contents carry no state
+// beyond "this .old is the last verified binary", so there is nothing to update
+// and nothing worth opening a pre-existing object for.
+func markOldBinaryPreserved(oldPath string) error {
+	markerPath := oldPath + oldBinaryPreservedSuffix
+	if _, err := os.Lstat(markerPath); err == nil {
+		return nil
 	}
-	_, _ = marker.WriteString("The update at this path failed and could not restore the original binary.\n" +
+	pathPtr, err := windows.UTF16PtrFromString(markerPath)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_WRITE,
+		0,
+		nil,
+		windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			// Something already occupies the marker name. Whatever it is, this
+			// function's only job is to make the next run preserve oldPath, and a
+			// present name does that — without this process writing through an
+			// object it did not create.
+			return nil
+		}
+		return fmt.Errorf("create recovery marker %s: %w", markerPath, err)
+	}
+	if err := verifyFreshRegularFile(handle, markerPath); err != nil {
+		_ = windows.CloseHandle(handle)
+		_ = os.Remove(markerPath)
+		return err
+	}
+	marker := os.NewFile(uintptr(handle), markerPath)
+	_, writeErr := marker.WriteString("The update at this path failed and could not restore the original binary.\n" +
 		"The file without this marker's .keep suffix is the last binary this updater verified.\n")
-	_ = marker.Close()
+	closeErr := marker.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write recovery marker %s: %w", markerPath, writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close recovery marker %s: %w", markerPath, closeErr)
+	}
+	return nil
 }
 
 // clearOldBinaryPreserved drops the marker once a promotion has succeeded: the

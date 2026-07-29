@@ -99,14 +99,27 @@ func verifyFreshRegularFile(handle windows.Handle, path string) error {
 // there is no second lookup to win.
 func (staged *stagedBinary) promote(targetPath string) error {
 	oldPath := targetPath + ".old"
-	if !oldBinaryPreserved(oldPath) {
-		// Best-effort cleanup of a leftover from a previous upgrade. Skipped when a
-		// failed restore marked this copy as the last known-good binary: the rename
-		// below replaces it anyway if it succeeds, so removing it up front only
-		// creates a window where a failure to rename the running binary aside
-		// leaves neither a recovery copy nor a marker explaining its absence.
-		_ = os.Remove(oldPath)
+	// Refuse to promote while a previous failure left its recovery copy in place.
+	//
+	// Skipping the cleanup below is not enough to protect it: os.Rename uses
+	// MOVEFILE_REPLACE_EXISTING on Windows, so renaming the running binary aside
+	// would overwrite the last verified copy with whatever now occupies
+	// targetPath — the very bytes the earlier failure could not verify. If this
+	// promotion then failed, restoreOriginalBinary could only move those
+	// unverified bytes back, and the known-good binary would be gone.
+	//
+	// Automation cannot resolve this safely on the operator's behalf: only they
+	// can say whether the file at targetPath is theirs. So this fails closed and
+	// says exactly which two moves end the state.
+	if oldBinaryPreserved(oldPath) {
+		return fmt.Errorf(
+			"%w: a previous update could not restore the original binary. %s holds the last binary this updater verified and %s may hold unverified content. "+
+				"Move %s back over %s to restore it, or delete %s to accept the installed binary, then update again",
+			ErrTargetPossiblyTampered, oldPath, targetPath,
+			oldPath, targetPath, oldPath+oldBinaryPreservedSuffix,
+		)
 	}
+	_ = os.Remove(oldPath) // best-effort cleanup of a leftover from a previous upgrade
 	if err := os.Rename(targetPath, oldPath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}

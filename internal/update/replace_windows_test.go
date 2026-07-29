@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -190,6 +191,88 @@ func TestRestoreOriginalBinaryMarksPreservedCopy(t *testing.T) {
 	CleanupStaleBinary(targetPath)
 	if _, err := os.Stat(oldPath); err != nil {
 		t.Fatalf("recovery copy was removed after a failed restore: %v", err)
+	}
+}
+
+// TestMarkOldBinaryPreservedRefusesPreCreatedLink covers jatmn's #751 finding
+// that the marker was a predictable link-following truncate write: the path is
+// fixed, so a lower-privileged writer in the install directory can pre-create it
+// as a hard link (or reparse point) and have the elevated updater truncate and
+// write through it into a file of their choosing.
+func TestMarkOldBinaryPreservedRefusesPreCreatedLink(t *testing.T) {
+	for _, kind := range []string{"hardlink", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			oldPath := filepath.Join(dir, "zero.exe.old")
+			if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+				t.Fatalf("WriteFile old binary: %v", err)
+			}
+			victim := filepath.Join(t.TempDir(), "victim.txt")
+			const victimContent = "attacker-chosen target that must not be written"
+			if err := os.WriteFile(victim, []byte(victimContent), 0o600); err != nil {
+				t.Fatalf("WriteFile victim: %v", err)
+			}
+
+			markerPath := oldPath + oldBinaryPreservedSuffix
+			var linkErr error
+			switch kind {
+			case "hardlink":
+				linkErr = os.Link(victim, markerPath)
+			case "symlink":
+				linkErr = os.Symlink(victim, markerPath)
+			}
+			if linkErr != nil {
+				t.Skipf("%s unsupported here: %v", kind, linkErr)
+			}
+
+			// Whatever this returns, the one thing it must not do is write through
+			// the planted object. Reporting the marker as present is the safe
+			// answer: it makes the next run PRESERVE the recovery copy.
+			_ = markOldBinaryPreserved(oldPath)
+
+			got, err := os.ReadFile(victim)
+			if err != nil {
+				t.Fatalf("ReadFile victim: %v", err)
+			}
+			if string(got) != victimContent {
+				t.Fatalf("marker write followed the planted %s and wrote into %q: %q", kind, victim, got)
+			}
+			// The recovery copy is still preserved, which is the marker's purpose.
+			targetPath := filepath.Join(dir, "zero.exe")
+			if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+				t.Fatalf("WriteFile target: %v", err)
+			}
+			CleanupStaleBinary(targetPath)
+			if _, err := os.Stat(oldPath); err != nil {
+				t.Fatalf("recovery copy was removed despite a marker being present: %v", err)
+			}
+		})
+	}
+}
+
+// TestRestoreOriginalBinarySurfacesMarkerWriteFailure covers the #751 P3: the
+// error promises the original is preserved at <target>.old, but if the marker
+// cannot be written the next run's cleanup deletes exactly that file. The
+// operator has to be told to act now rather than at their convenience.
+func TestRestoreOriginalBinarySurfacesMarkerWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	// An oldPath under a directory that does not exist: the restore rename fails
+	// (nothing to move) and so does the marker creation beside it.
+	oldPath := filepath.Join(dir, "missing-dir", "zero.exe.old")
+
+	err := restoreOriginalBinary(oldPath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if !strings.Contains(err.Error(), "recovery marker could not be written") {
+		t.Fatalf("error = %v, want it to disclose the failed marker", err)
+	}
+	if !strings.Contains(err.Error(), oldPath) {
+		t.Fatalf("error = %v, want the path the operator must copy", err)
 	}
 }
 

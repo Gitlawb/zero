@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -239,6 +240,91 @@ func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
 	}
 	if string(data) != wantBinary {
 		t.Fatalf("main binary should still be updated despite helper failure: got %q, want %q", data, wantBinary)
+	}
+}
+
+// TestApplyStandaloneUpdateFailsWhenHelperRefreshReportsTampering covers
+// jatmn's #751 P2. An optional helper that merely fails to refresh stays a
+// warning — the sandbox degrades fine on a stale helper. Possible tampering is
+// different in kind: the helper's path may now hold content the updater could
+// not verify, and helpers are resolved from the install directory and executed
+// by the sandbox runner, so reporting Applied: true and exiting 0 would hand
+// the operator a success while a sibling executable is suspect.
+func TestApplyStandaloneUpdateFailsWhenHelperRefreshReportsTampering(t *testing.T) {
+	binaryName := "zero"
+	optionalName := "zero-seccomp"
+	switch runtime.GOOS {
+	case "windows":
+		binaryName = "zero.exe"
+		optionalName = "zero-windows-command-runner.exe"
+	case "darwin":
+		t.Skip("macOS ships no optional helper binaries to refresh")
+	}
+
+	installDir := t.TempDir()
+	executablePath := filepath.Join(installDir, binaryName)
+	if err := os.WriteFile(executablePath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile executable: %v", err)
+	}
+	existingHelperPath := filepath.Join(installDir, optionalName)
+	if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper: %v", err)
+	}
+	stubStageBinaryFailure(t, existingHelperPath, fmt.Errorf("promote: %w", ErrTargetPossiblyTampered))
+
+	archiveName := "zero-v0.2.0-linux-x64.tar.gz"
+	archiveDir := t.TempDir()
+	archivePath := filepath.Join(archiveDir, archiveName)
+	writeTestTarGz(t, archivePath, map[string]string{
+		"zero":                            "new-binary",
+		"zero.exe":                        "new-binary-exe",
+		"zero-seccomp":                    "new-helper",
+		"zero-windows-command-runner.exe": "new-helper-exe",
+	})
+	checksum, err := release.SHA256File(archivePath)
+	if err != nil {
+		t.Fatalf("SHA256File: %v", err)
+	}
+	checksumText, err := release.FormatSHA256Checksum(checksum, archiveName)
+	if err != nil {
+		t.Fatalf("FormatSHA256Checksum: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + archiveName:
+			http.ServeFile(w, r, archivePath)
+		case "/" + archiveName + ".sha256":
+			_, _ = w.Write([]byte(checksumText))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result := Result{
+		LatestVersion: "0.2.0",
+		ReleaseAsset: AssetCheck{
+			Platform:      "linux",
+			Arch:          "x64",
+			ArchiveName:   archiveName,
+			ArchiveURL:    server.URL + "/" + archiveName,
+			ChecksumName:  archiveName + ".sha256",
+			ChecksumURL:   server.URL + "/" + archiveName + ".sha256",
+			ArchiveFound:  true,
+			ChecksumFound: true,
+			Verified:      true,
+		},
+	}
+
+	warnings, err := applyStandaloneUpdate(context.Background(), result, executablePath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("applyStandaloneUpdate error = %v, want it to wrap ErrTargetPossiblyTampered", err)
+	}
+	if !strings.Contains(err.Error(), optionalName) {
+		t.Fatalf("error = %v, want it to name the helper %q", err, optionalName)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("tampering must not be reported as a warning: %v", warnings)
 	}
 }
 
