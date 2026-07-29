@@ -721,6 +721,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// run by the model — without it the TUI recorded NONE of the five plan
 	// lifecycle events, so a plan ran completely invisibly (audit finding 9).
 	planProgress := tui.NewPlanProgressBridge()
+	// Saved plans, resolved ONCE and handed to both consumers: the orchestrate
+	// tool (which loads a plan named with `saved`) and the TUI (which saves,
+	// lists and shows them). Two computations of the same pair of directories
+	// would eventually disagree about where a plan lives, and the symptom would
+	// be "I saved it" followed by "no saved plan named that".
+	tuiUserConfigDir, _ := config.UserConfigDir()
+	planPaths := specialist.DefaultPlanPaths(workspaceRoot, tuiUserConfigDir)
 	// nil filters: the TUI has no --enabled-tools/--disabled-tools equivalent,
 	// so the run's grant is every read-only tool the registry holds.
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil, planProgress,
@@ -732,7 +739,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot, Depth: 0},
 			// The plan-size tier, from the SAME resolved config the rest of this
 			// wiring reads. Project config may only have tightened it.
-			Size: resolved.Profiles.PlanSizeTier(),
+			Size:  resolved.Profiles.PlanSizeTier(),
+			Plans: planPaths,
 		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -889,6 +897,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ZeromaxingDisabled: resolved.Profiles.DisableZeromaxing,
 		ZeromaxingGate:     zeromaxingGate,
 		PlanProgress:       planProgress,
+		PlanPaths:          planPaths,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
@@ -1121,6 +1130,9 @@ type orchestrateWiring struct {
 	// so a call site that has no resolved config yet still gets a real ceiling
 	// rather than none.
 	Size config.PlanSize
+	// Plans locates saved plans. Empty means a `saved` reference is refused with
+	// a reason rather than searched for in nowhere.
+	Plans specialist.PlanPaths
 }
 
 // planParentTools is the run's grant: the tools a plan task may inherit.
@@ -1200,6 +1212,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
 		Depth:         planContext.Depth,
 		Size:          wiring.Size,
+		Plans:         wiring.Plans,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }

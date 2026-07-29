@@ -306,6 +306,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 					Depth: options.depth,
 				},
 				Size: planSize,
+				// The SAME pair of directories the TUI uses, so a plan saved in
+				// one surface is found by the other.
+				Plans: execPlanPaths(workspaceRoot),
 			})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
@@ -1642,4 +1645,13 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 	}
 	defer file.Close()
 	return trace.WriteNDJSON(file, snapshot)
+}
+
+// execPlanPaths locates saved plans for a headless run, from the same pair of
+// directories the TUI uses. A resolve failure yields the project directory
+// alone rather than nothing: a plan checked into the repo must still run when
+// the user config directory is unavailable.
+func execPlanPaths(workspaceRoot string) specialist.PlanPaths {
+	userConfigDir, _ := config.UserConfigDir()
+	return specialist.DefaultPlanPaths(workspaceRoot, userConfigDir)
 }

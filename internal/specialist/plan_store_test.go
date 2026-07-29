@@ -1,0 +1,358 @@
+package specialist
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+func savedPlanFixture(t *testing.T) Plan {
+	t.Helper()
+	return mustPlan(t, []any{
+		task("root", "look at the tree"),
+		map[string]any{"id": "left", "prompt": "read a\nsecond line", "depends_on": []any{"root"},
+			"tools": []any{"grep"}, "phase": "analysis"},
+		task("right", "read b", "root"),
+	}, map[string]any{
+		"max_workers": float64(1), "max_tokens": float64(5000),
+		"max_wall_seconds": float64(600), "max_stall_seconds": float64(45), "max_retries": float64(2),
+	}, readOnlyLimits())
+}
+
+// THE ROUND TRIP IS THE FEATURE. A saved plan is stored as ARGS and re-admitted
+// through ParsePlan, so a plan that comes back has to be the plan that went in —
+// including through JSON, which is the form it is actually stored in.
+func TestASavedPlanRoundTripsThroughArgsAndJSON(t *testing.T) {
+	original := savedPlanFixture(t)
+
+	encoded, err := json.Marshal(original.Args())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	restored, err := ParsePlan(decoded, readOnlyLimits())
+	if err != nil {
+		t.Fatalf("a saved plan did not re-admit: %v", err)
+	}
+
+	if !reflect.DeepEqual(original.Tasks(), restored.Tasks()) {
+		t.Fatalf("tasks changed:\n%+v\nvs\n%+v", original.Tasks(), restored.Tasks())
+	}
+	if !reflect.DeepEqual(original.Order(), restored.Order()) {
+		t.Fatalf("execution order changed: %v vs %v", original.Order(), restored.Order())
+	}
+	if original.Budget() != restored.Budget() {
+		t.Fatalf("budget changed:\n%+v\nvs\n%+v", original.Budget(), restored.Budget())
+	}
+	if original.Name() != restored.Name() || original.Description() != restored.Description() {
+		t.Fatalf("identity changed: %q/%q vs %q/%q",
+			original.Name(), original.Description(), restored.Name(), restored.Description())
+	}
+}
+
+// RESOLVED DEFAULTS ARE WRITTEN OUT. A plan saved today must run the same way
+// after a default moves — otherwise "run it again" quietly means something else.
+func TestASavedPlanPinsTheDefaultsThatWereInForce(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, map[string]any{"max_workers": float64(1)}, readOnlyLimits())
+	args := plan.Args()
+	budget, _ := args["budget"].(map[string]any)
+	if budget["max_retries"] != defaultPlanRetries {
+		t.Fatalf("max_retries = %v; the resolved default must be written out", budget["max_retries"])
+	}
+	// An unbounded budget stays unbounded rather than acquiring a zero that a
+	// later reader might treat as a bound.
+	if _, present := budget["max_tokens"]; present {
+		t.Fatalf("an unbounded plan gained a max_tokens: %v", budget["max_tokens"])
+	}
+}
+
+func TestSavedPlansAreWrittenAndListedByScope(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(t.TempDir(), "zero", "plans")
+	paths := PlanPaths{ProjectDir: filepath.Join(root, ".zero", "plans"), UserDir: userDir}
+
+	if _, err := SavePlan(paths.ProjectDir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatalf("SavePlan project: %v", err)
+	}
+	if _, err := SavePlan(paths.UserDir, "personal", savedPlanFixture(t)); err != nil {
+		t.Fatalf("SavePlan user: %v", err)
+	}
+
+	plans, problems := LoadPlans(paths)
+	if len(problems) != 0 {
+		t.Fatalf("unexpected problems: %v", problems)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("loaded %d plans, want 2", len(plans))
+	}
+	byName := map[string]SavedPlan{}
+	for _, plan := range plans {
+		byName[plan.Name] = plan
+	}
+	if !byName["sweep"].Project {
+		t.Fatal("the project plan is not marked as one")
+	}
+	if byName["personal"].Project {
+		t.Fatal("the user plan is marked as a project plan")
+	}
+	if byName["sweep"].TaskCount != 3 {
+		t.Fatalf("task count = %d, want 3", byName["sweep"].TaskCount)
+	}
+}
+
+// Project shadows user, mirroring usercommands and the specialist loader: a
+// repo's own plan is the one its contributors get.
+func TestAProjectPlanShadowsAUserPlanOfTheSameName(t *testing.T) {
+	root := t.TempDir()
+	paths := PlanPaths{
+		ProjectDir: filepath.Join(root, ".zero", "plans"),
+		UserDir:    filepath.Join(t.TempDir(), "zero", "plans"),
+	}
+	if _, err := SavePlan(paths.UserDir, "sweep", mustPlan(t,
+		[]any{task("u", "user version")}, okBudget(), readOnlyLimits())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SavePlan(paths.ProjectDir, "sweep", mustPlan(t,
+		[]any{task("p1", "project"), task("p2", "project")}, okBudget(), readOnlyLimits())); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindSavedPlan(paths, "sweep")
+	if err != nil {
+		t.Fatalf("FindSavedPlan: %v", err)
+	}
+	if !found.Project || found.TaskCount != 2 {
+		t.Fatalf("the user plan won: project=%v tasks=%d", found.Project, found.TaskCount)
+	}
+}
+
+// THE NAME IS THE PATH GUARD. It is an allow-list, so no traversal component
+// can be spelled at all — the pattern this repo has watched leak three times
+// when written as a deny-list.
+func TestPlanNamesAreAnAllowListAndCannotTraverse(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	for _, name := range []string{
+		"../escape", "..", ".", "a/b", `a\b`, "a b", "a.json", "", strings.Repeat("x", 65),
+		"~/evil", "a;b", "a\x00b",
+	} {
+		if _, err := SavePlan(dir, name, savedPlanFixture(t)); err == nil {
+			t.Errorf("SavePlan accepted %q", name)
+		}
+		if _, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, name); err == nil {
+			t.Errorf("FindSavedPlan accepted %q", name)
+		}
+	}
+	// ...and the ordinary shapes still work.
+	for _, name := range []string{"sweep", "pre-release", "audit_2", "A1"} {
+		if _, err := SavePlan(dir, name, savedPlanFixture(t)); err != nil {
+			t.Errorf("SavePlan rejected %q: %v", name, err)
+		}
+	}
+}
+
+// A SYMLINK IS REFUSED, on the file and on the directory. Without this, "save my
+// plan" is a file-overwrite primitive pointed at whatever the link targets.
+func TestSavingRefusesToWriteThroughASymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "precious")
+	if err := os.WriteFile(target, []byte("do not clobber"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "plans")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "sweep.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err == nil {
+		t.Fatal("SavePlan wrote through a symlink")
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "do not clobber" {
+		t.Fatalf("the symlink target was overwritten: %q", body)
+	}
+
+	// A linked DIRECTORY is refused too, or the file check is bypassed by
+	// pointing one level up.
+	linkedDir := filepath.Join(base, "linked")
+	if err := os.Symlink(dir, linkedDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := SavePlan(linkedDir, "other", savedPlanFixture(t)); err == nil {
+		t.Fatal("SavePlan wrote into a symlinked directory")
+	}
+}
+
+// ...and a symlinked plan file is not LOADED either, or a repo could point one
+// at a file outside the workspace and have its contents parsed as a plan.
+func TestLoadingRefusesASymlinkedPlanAndSaysSo(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"tasks":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "plans")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "linked.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	plans, problems := LoadPlans(PlanPaths{ProjectDir: dir})
+	if len(plans) != 0 {
+		t.Fatalf("a symlinked plan was loaded: %+v", plans)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "symlink") {
+		t.Fatalf("the refusal must be reported, not silent: %v", problems)
+	}
+}
+
+// MALFORMED IS AN ERROR, NEVER A SILENT SKIP. A plan file that does not parse is
+// named, or a user believes they ran something they did not.
+func TestAMalformedPlanFileIsReportedByName(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plans, problems := LoadPlans(PlanPaths{ProjectDir: dir})
+	if len(plans) != 0 {
+		t.Fatalf("a malformed file produced a plan: %+v", plans)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "broken.json") {
+		t.Fatalf("the problem must name the file: %v", problems)
+	}
+	// And looking it up says so, rather than "you have no plan by that name"
+	// while it sits on disk.
+	_, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, "broken")
+	if err == nil || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("a lookup past an unreadable file must say so: %v", err)
+	}
+}
+
+// A saved plan is re-admitted against the CURRENT run's limits, so nothing that
+// was legal when it was saved is grandfathered in.
+func TestASavedPlanIsRevalidatedAgainstTheRunningLimits(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	plan := mustPlan(t, []any{
+		task("a", "x"), task("b", "y"), task("c", "z"), task("d", "w"), task("e", "v"), task("f", "u"),
+	}, okBudget(), readOnlyLimits())
+	if _, err := SavePlan(dir, "big", plan); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, "big")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The tier has since been tightened: the stored plan is refused.
+	if _, err := ParsePlan(stored.Args, Limits{MaxTasks: 5, ParentTools: []string{"read_file"}}); err == nil {
+		t.Fatal("a stored plan bypassed the current run's task ceiling")
+	}
+	// And a grant it no longer holds is refused too.
+	narrow := mustPlan(t, []any{map[string]any{"id": "a", "prompt": "x", "tools": []any{"grep"}}},
+		okBudget(), readOnlyLimits())
+	if _, err := SavePlan(dir, "narrow", narrow); err != nil {
+		t.Fatal(err)
+	}
+	storedNarrow, err := FindSavedPlan(PlanPaths{ProjectDir: dir}, "narrow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePlan(storedNarrow.Args, Limits{MaxTasks: 20, ParentTools: []string{"read_file"}}); err == nil {
+		t.Fatal("a stored plan kept a tool grant this run does not hold")
+	}
+}
+
+// The tool's `saved` argument is ONE path into the same constructor, not a
+// second way to run a plan.
+func TestTheToolRunsASavedPlanThroughTheSameValidation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
+
+	resolved, err := tool.resolveSavedPlan(map[string]any{"saved": "sweep"})
+	if err != nil {
+		t.Fatalf("resolveSavedPlan: %v", err)
+	}
+	plan, err := ParsePlan(resolved, readOnlyLimits())
+	if err != nil {
+		t.Fatalf("the resolved plan did not admit: %v", err)
+	}
+	if plan.TaskCount() != 3 {
+		t.Fatalf("task count = %d, want 3", plan.TaskCount())
+	}
+}
+
+// A SAVED PLAN RUNS AS IT WAS SAVED. Merging a caller's field into it would mean
+// "run the sweep plan" ran something else while the transcript still said sweep.
+func TestASavedReferenceRefusesInlineOverrides(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
+
+	for _, field := range []string{"tasks", "budget", "name", "description"} {
+		args := map[string]any{"saved": "sweep", field: "anything"}
+		if _, err := tool.resolveSavedPlan(args); err == nil {
+			t.Errorf("a saved reference accepted an inline %q", field)
+		}
+	}
+}
+
+// With no plan directories the refusal SAYS saved plans are unavailable, rather
+// than "not found", which reads as "you never saved it".
+func TestASavedReferenceWithoutStorageSaysSo(t *testing.T) {
+	tool := &OrchestrateTool{}
+	_, err := tool.resolveSavedPlan(map[string]any{"saved": "sweep"})
+	if err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("err = %v; it must say saved plans are unavailable", err)
+	}
+}
+
+// A plan with no `saved` reference is untouched — the ordinary path must not
+// change shape because a new one exists.
+func TestAnInlinePlanIsUnaffectedBySavedPlans(t *testing.T) {
+	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: t.TempDir()}}
+	args := planArgs([]any{task("a", "x")}, okBudget())
+	resolved, err := tool.resolveSavedPlan(args)
+	if err != nil {
+		t.Fatalf("resolveSavedPlan: %v", err)
+	}
+	if !reflect.DeepEqual(resolved, args) {
+		t.Fatalf("an inline plan was rewritten:\n%+v\nvs\n%+v", resolved, args)
+	}
+}
+
+// The tool still refuses everything when the posture is off, saved plan or not:
+// a stored plan must not become a way round the gate.
+func TestASavedPlanCannotRunWithThePostureOff(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "plans")
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	tool := &OrchestrateTool{Plans: PlanPaths{ProjectDir: dir}}
+	result := tool.Run(t.Context(), map[string]any{"saved": "sweep"})
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "zeromaxing") {
+		t.Fatalf("a saved plan ran with the posture off: %+v", result)
+	}
+}

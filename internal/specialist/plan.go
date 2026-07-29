@@ -150,6 +150,64 @@ func (p Plan) Order() []string {
 // parsed structure removes the class rather than fixing the regex.
 func (p Plan) TaskCount() int { return len(p.tasks) }
 
+// Args renders a validated plan back into the argument shape ParsePlan accepts.
+//
+// THE ROUND TRIP IS THE POINT. Saving a plan means saving something that can be
+// run again, and the only thing that can be run is what ParsePlan admits — so a
+// saved plan is stored as ARGS and re-admitted on load, rather than as a
+// serialised Plan that would enter execution having skipped the one constructor
+// that validates. The prototype's validator was reachable, correct and never
+// called on the production path; a stored object that deserialises straight into
+// an executable is the same hole with a filesystem in front of it.
+//
+// Budget fields that were resolved to defaults are written as the values in
+// force, so a plan saved today runs the same way after a default changes.
+func (p Plan) Args() map[string]any {
+	tasks := make([]any, 0, len(p.tasks))
+	for _, task := range p.tasks {
+		entry := map[string]any{"id": task.ID, "prompt": task.Prompt}
+		if len(task.DependsOn) > 0 {
+			entry["depends_on"] = stringsToAny(task.DependsOn)
+		}
+		if len(task.Tools) > 0 {
+			entry["tools"] = stringsToAny(task.Tools)
+		}
+		if task.Phase != "" {
+			entry["phase"] = task.Phase
+		}
+		tasks = append(tasks, entry)
+	}
+	budget := map[string]any{
+		"max_workers": p.budget.MaxWorkers,
+		"max_retries": p.budget.MaxRetries,
+	}
+	if p.budget.MaxTokens > 0 {
+		budget["max_tokens"] = p.budget.MaxTokens
+	}
+	if p.budget.MaxWall > 0 {
+		budget["max_wall_seconds"] = int(p.budget.MaxWall.Seconds())
+	}
+	if p.budget.MaxStall > 0 {
+		budget["max_stall_seconds"] = int(p.budget.MaxStall.Seconds())
+	}
+	args := map[string]any{"tasks": tasks, "budget": budget}
+	if p.name != "" {
+		args["name"] = p.name
+	}
+	if p.description != "" {
+		args["description"] = p.description
+	}
+	return args
+}
+
+func stringsToAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // ParsePlan is the ONLY way to obtain a Plan. It parses and validates in one
 // step; there is no path from tool arguments to an executable plan that skips
 // it. Every check rejects by default.
