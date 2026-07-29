@@ -87,6 +87,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if mouseRightPress(msg) {
 		return m, pasteFromClipboardCmd()
 	}
+	// Clicking the orchestrate plan's header line opens or closes it. Checked
+	// before the surface switch below because the panel lives in the FOOTER,
+	// outside every transcript/sidebar region those cases test.
+	if mouseLeftPress(msg) && m.clickedOrchestrateHeader(msg) {
+		m.orchestrate.expanded = !m.orchestrate.expanded
+		return m, nil
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:

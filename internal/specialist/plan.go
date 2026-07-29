@@ -307,7 +307,7 @@ func PlanReadOnlyToolNames() []string { return sortedReadOnlyTools() }
 func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	raw, ok := args["budget"].(map[string]any)
 	if !ok {
-		return Budget{}, fmt.Errorf("plan requires a budget object with max_tokens and max_workers")
+		return Budget{}, fmt.Errorf("plan requires a budget object with max_workers")
 	}
 	budget := Budget{
 		MaxWorkers: planInt(raw, "max_workers"),
@@ -324,8 +324,22 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 			"budget.max_workers must be 1: this phase executes plan tasks sequentially, and a plan asking for %d is rejected rather than quietly run with one worker",
 			budget.MaxWorkers)
 	}
-	if budget.MaxTokens <= 0 {
-		return Budget{}, fmt.Errorf("budget.max_tokens is required and must be positive")
+	// max_tokens is OPTIONAL and unbounded by default.
+	//
+	// It was required, and capped at 200k. Both went, because the bound did not
+	// work and got in the way of real work. It was checked only BETWEEN tasks:
+	// a task was dispatched whenever any budget remained and then spent
+	// whatever it spent, so a six-task chain asking for the 200k maximum
+	// actually spent 469,555 — 2.3x over — and the last task was cut anyway.
+	// A number that neither bounds spend nor lets a heavy plan finish is worse
+	// than no number, because it reads like a guarantee.
+	//
+	// Spend is still METERED and reported (PlanReport.TokensUsed, the
+	// plan_completed event, the panel), so what a plan cost is always visible.
+	// A caller that wants a bound sets max_tokens and gets the same
+	// dispatch-time behaviour as before.
+	if budget.MaxTokens < 0 {
+		return Budget{}, fmt.Errorf("budget.max_tokens must not be negative")
 	}
 	if limits.MaxTokens > 0 && budget.MaxTokens > limits.MaxTokens {
 		return Budget{}, fmt.Errorf("budget.max_tokens %d exceeds the limit of %d for this run", budget.MaxTokens, limits.MaxTokens)

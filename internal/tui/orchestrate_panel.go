@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // orchestrateTaskStatus is a plan task's state in the panel.
@@ -227,6 +230,8 @@ const (
 	orchestrateSummaryWidth = 48
 	// orchestrateMinWidth is the narrowest sensible render.
 	orchestrateMinWidth = 24
+	// orchestrateMaxIndentDepth bounds the dependency indent.
+	orchestrateMaxIndentDepth = 5
 )
 
 // renderOrchestratePanel draws the plan: one row per task, indented by
@@ -243,6 +248,14 @@ func (m model) renderOrchestratePanel(width int) string {
 
 	var b strings.Builder
 	b.WriteString(zeroTheme.ink.Render(orchestrateHeaderLine(state, now)))
+
+	// COLLAPSED BY DEFAULT. A plan's tasks are detail; the header is the state.
+	// A six-task chain otherwise takes seven lines of the footer for the whole
+	// run, pushing the conversation up for information that is one keypress
+	// away. Ctrl+O expands.
+	if !state.expanded {
+		return b.String()
+	}
 
 	rows := state.tasks
 	hidden := 0
@@ -268,6 +281,13 @@ func (m model) renderOrchestratePanel(width int) string {
 func orchestrateHeaderLine(state orchestratePanelState, now time.Time) string {
 	done, failed, skipped, cancelled, running := state.counts()
 	var b strings.Builder
+	// The affordance says which way the keypress goes, so the collapsed state
+	// does not look like the whole panel.
+	if state.expanded {
+		b.WriteString("▾ ")
+	} else {
+		b.WriteString("▸ ")
+	}
 	b.WriteString("PLAN")
 	if name := strings.TrimSpace(state.name); name != "" {
 		fmt.Fprintf(&b, " %s", truncateRunes(name, 24))
@@ -288,13 +308,23 @@ func orchestrateHeaderLine(state orchestratePanelState, now time.Time) string {
 	if !state.startedAt.IsZero() {
 		fmt.Fprintf(&b, " · %s", formatElapsedSeconds(now.Sub(state.startedAt)))
 	}
+	if !state.expanded {
+		b.WriteString("  ")
+		b.WriteString("click or ctrl+g to expand")
+	}
 	return b.String()
 }
 
 func orchestrateFooterLine(state orchestratePanelState) string {
 	var parts []string
-	if state.tokenLimit > 0 {
+	switch {
+	case state.tokenLimit > 0:
 		parts = append(parts, fmt.Sprintf("budget %d/%d tokens", state.tokensUsed, state.tokenLimit))
+	case state.tokensUsed > 0:
+		// No bound was asked for, so there is no denominator to show. The spend
+		// is still reported — an unbounded plan must not also be an unmeasured
+		// one.
+		parts = append(parts, fmt.Sprintf("%d tokens", state.tokensUsed))
 	}
 	if state.isComplete() {
 		parts = append(parts, "status "+state.status)
@@ -311,7 +341,12 @@ func orchestrateFooterLine(state orchestratePanelState) string {
 func (m model) renderOrchestrateTaskLine(task orchestrateTask, now time.Time, width int) string {
 	// Indent by dependency depth: tasks that fan out from the same parent share
 	// a rung, so a diamond reads as one node, two beside each other, one node.
-	indent := strings.Repeat("  ", task.depth+1)
+	//
+	// CAPPED. A strict chain adds a rung per link, so a twenty-task chain would
+	// indent forty columns and run off a narrow terminal — the shape stops being
+	// legible long before that. Past the cap every task sits at the same depth,
+	// which is honest for a chain: they are all one-after-another anyway.
+	indent := strings.Repeat("  ", minInt(task.depth, orchestrateMaxIndentDepth)+1)
 
 	glyph := orchestrateGlyph(task.status)
 	if task.status == orchestrateRunning {
@@ -423,4 +458,30 @@ func orchestratePlainGlyph(status orchestrateTaskStatus) string {
 	default:
 		return "·"
 	}
+}
+
+// orchestrateHeaderMarker identifies the panel's header line inside the footer.
+// Both affordance glyphs are checked so the line is findable in either state.
+const orchestrateHeaderMarker = "PLAN"
+
+// clickedOrchestrateHeader reports whether a left-click landed on the plan
+// panel's header line.
+//
+// Located by CONTENT rather than by a remembered row index: the footer's height
+// varies with the composer, the pinned update_plan panel and the status line, so
+// an index captured at render time is stale by the time a click arrives. The
+// arrow glyph is what distinguishes this header from update_plan's.
+func (m model) clickedOrchestrateHeader(msg tea.MouseMsg) bool {
+	if m.orchestrate.isEmpty() || !m.altScreen || m.subchat.active {
+		return false
+	}
+	width := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	_, row, ok := frame.footerRect.local(mouseX(msg), mouseY(msg))
+	if !ok || row < 0 || row >= len(frame.footerLines) {
+		return false
+	}
+	line := ansi.Strip(frame.footerLines[row])
+	return strings.HasPrefix(strings.TrimSpace(line), "▸ "+orchestrateHeaderMarker) ||
+		strings.HasPrefix(strings.TrimSpace(line), "▾ "+orchestrateHeaderMarker)
 }
