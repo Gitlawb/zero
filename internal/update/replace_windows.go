@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -59,9 +60,17 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 	// targetPath occupied — by whatever won the gap — and would otherwise treat
 	// oldPath as an ordinary leftover and delete the only known-good copy.
 	if markErr := markOldBinaryPreserved(oldPath); markErr != nil {
-		// Do not let the promise go out unqualified. Without the marker, the next
-		// run's cleanup sees a present target and removes oldPath, so the operator
-		// has to act now rather than at their convenience.
+		// The marker could not be established, so nothing on disk will tell the
+		// next run to keep oldPath and its cleanup would delete it. Telling the
+		// operator to hurry is not a fix — move the copy somewhere routine cleanup
+		// cannot reach instead. CleanupStaleBinary only ever removes the exact
+		// "<target>.old" name, so any other name survives by construction.
+		if kept, keepErr := keepUnmarkedRecoveryCopy(oldPath); keepErr == nil {
+			return fmt.Errorf(
+				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to %s to keep it out of routine cleanup)",
+				ErrTargetPossiblyTampered, err, markErr, kept,
+			)
+		}
 		return fmt.Errorf(
 			"%w: %v (the recovery marker could not be written: %v — copy %s somewhere safe now, a later update will otherwise remove it)",
 			ErrTargetPossiblyTampered, err, markErr, oldPath,
@@ -86,8 +95,14 @@ const oldBinaryPreservedSuffix = ".keep"
 //
 // An existing marker is success, not a rewrite: its contents carry no state
 // beyond "this .old is the last verified binary", so there is nothing to update
-// and nothing worth opening a pre-existing object for.
-func markOldBinaryPreserved(oldPath string) error {
+// and nothing worth opening a pre-existing object for. That also means an entry
+// planted at the name by someone else reads as marked, which is the fail-safe
+// direction: it makes the next run PRESERVE the recovery copy.
+//
+// A var so a test can force the failure branch. Every way to make the real
+// CreateFile fail here (an unwritable directory, an over-length name) either
+// takes the recovery copy down with it or is too platform-fragile to assert on.
+var markOldBinaryPreserved = func(oldPath string) error {
 	markerPath := oldPath + oldBinaryPreservedSuffix
 	if _, err := os.Lstat(markerPath); err == nil {
 		return nil
@@ -133,6 +148,29 @@ func markOldBinaryPreserved(oldPath string) error {
 	return nil
 }
 
+// keepUnmarkedRecoveryCopy moves oldPath out from under routine cleanup when its
+// marker could not be established, returning the path it now lives at.
+//
+// The name is unpredictable for the same reason the staging name is: this runs
+// in a directory a lower-privileged principal may be able to write, and a fixed
+// recovery name could be pre-created there to make this rename fail or land
+// somewhere chosen by someone else. Being unpredictable also means being opaque,
+// which is why the caller's error names the path.
+func keepUnmarkedRecoveryCopy(oldPath string) (string, error) {
+	suffix, err := randomStagingSuffix()
+	if err != nil {
+		return "", err
+	}
+	kept := filepath.Join(filepath.Dir(oldPath), filepath.Base(oldPath)+"."+suffix+".recovery")
+	if _, statErr := os.Lstat(kept); statErr == nil {
+		return "", fmt.Errorf("recovery path %s already exists", kept)
+	}
+	if err := os.Rename(oldPath, kept); err != nil {
+		return "", err
+	}
+	return kept, nil
+}
+
 // clearOldBinaryPreserved drops the marker once a promotion has succeeded: the
 // installed binary is verified again, so the preserved copy is an ordinary
 // leftover and normal cleanup should reclaim it.
@@ -142,9 +180,14 @@ func clearOldBinaryPreserved(oldPath string) {
 
 // oldBinaryPreserved reports whether a failed restore marked oldPath as the last
 // known-good binary.
+//
+// Only a definite "the marker is not there" answers false. An Lstat that fails
+// for any other reason (permissions, a transient sharing error) leaves the
+// question open, and the conservative answer to an open question here is to keep
+// the copy: deleting it is irreversible, while keeping it costs one stale file.
 func oldBinaryPreserved(oldPath string) bool {
 	_, err := os.Lstat(oldPath + oldBinaryPreservedSuffix)
-	return err == nil
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 // CleanupStaleBinary best-effort removes the known "<path>.old" copy, but only

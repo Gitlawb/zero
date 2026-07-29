@@ -250,6 +250,76 @@ func TestMarkOldBinaryPreservedRefusesPreCreatedLink(t *testing.T) {
 	}
 }
 
+// TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails covers the half of
+// CodeRabbit's marker finding that surfacing the failure alone does not: when no
+// marker can be established, nothing on disk tells the next run to keep the
+// copy, so it is moved out from under routine cleanup instead of being left at
+// the one name CleanupStaleBinary deletes.
+func TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	// Hold the target with no sharing so the restore rename fails.
+	blocker, err := openWithoutSharing(targetPath)
+	if err != nil {
+		t.Skipf("cannot hold the target exclusively on this filesystem: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
+	// Force the marker to be unestablishable. Doing it through the seam rather
+	// than by breaking the filesystem keeps oldPath itself intact, which is the
+	// state this behavior is about.
+	originalMark := markOldBinaryPreserved
+	markOldBinaryPreserved = func(string) error { return errors.New("injected marker failure") }
+	t.Cleanup(func() { markOldBinaryPreserved = originalMark })
+	stubRandomStagingSuffix(t, "deadbeef")
+
+	err = restoreOriginalBinary(oldPath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	kept := oldPath + ".deadbeef.recovery"
+	if !strings.Contains(err.Error(), kept) {
+		t.Fatalf("error = %v, want it to name the path the copy was moved to", err)
+	}
+	got, readErr := os.ReadFile(kept)
+	if readErr != nil {
+		t.Fatalf("recovery copy was not kept: %v", readErr)
+	}
+	if string(got) != "known-good" {
+		t.Fatalf("kept copy = %q, want the last verified binary", got)
+	}
+	// And routine cleanup cannot reach it: it only ever removes "<target>.old".
+	CleanupStaleBinary(targetPath)
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("cleanup removed the kept recovery copy: %v", err)
+	}
+}
+
+// TestOldBinaryPreservedTreatsAnUnreadableMarkerAsPresent pins the conservative
+// side of the marker check: only a definite "not there" allows the copy to be
+// deleted, because deleting it is irreversible and keeping it costs a file.
+func TestOldBinaryPreservedTreatsAnUnreadableMarkerAsPresent(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "zero.exe.old")
+	if oldBinaryPreserved(oldPath) {
+		t.Fatal("a genuinely absent marker must report not-preserved")
+	}
+	// A directory at the marker name is an entry Lstat can see; anything other
+	// than a clean not-exist keeps the copy.
+	if err := os.Mkdir(oldPath+oldBinaryPreservedSuffix, 0o700); err != nil {
+		t.Fatalf("Mkdir marker: %v", err)
+	}
+	if !oldBinaryPreserved(oldPath) {
+		t.Fatal("an entry at the marker name must count as preserved")
+	}
+}
+
 // TestRestoreOriginalBinarySurfacesMarkerWriteFailure covers the #751 P3: the
 // error promises the original is preserved at <target>.old, but if the marker
 // cannot be written the next run's cleanup deletes exactly that file. The
