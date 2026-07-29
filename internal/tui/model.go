@@ -3036,9 +3036,18 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar", sidebarKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.sidebarAvailable() {
+			parts = append(parts, sidebarKey+" sidebar")
+		}
+		hint = strings.Join(parts, " · ")
 	default:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.sidebarAvailable() {
+			parts = append(parts, sidebarKey+" sidebar")
+		}
+		parts = append(parts, detailKey+" detail", mouseKey+" copy", "Shift+Tab mode")
+		hint = strings.Join(parts, " · ")
 	}
 	return zeroTheme.faint.Render(hint)
 }

@@ -2502,8 +2502,21 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "hi", final: true})
 
 	// Idle, empty composer, managed mode -> the discoverability hint shows.
-	if h := plainRender(t, m.composerIdleHint()); !strings.Contains(h, "shortcuts") {
-		t.Fatalf("expected idle hint, got %q", h)
+	hint := plainRender(t, m.composerIdleHint())
+	if !strings.Contains(hint, "shortcuts") {
+		t.Fatalf("expected idle hint, got %q", hint)
+	}
+	if strings.Contains(hint, "sidebar") {
+		t.Fatalf("empty sidebar should not be advertised, got %q", hint)
+	}
+	withSidebar := m
+	withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+	if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+		t.Fatalf("available sidebar should be advertised, got %q", hint)
+	}
+	withSidebar.sidebarHidden = true
+	if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+		t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
 	}
 	// Hidden during a run.
 	busy := m
