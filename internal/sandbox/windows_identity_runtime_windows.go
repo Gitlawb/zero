@@ -195,6 +195,24 @@ var warnWindowsSandboxPrincipalNotUsed = func(reason string) {
 
 var windowsSandboxPrincipalNotUsedWarnOnce sync.Once
 
+// Seamed so the dual-role setup rollback can be exercised without an elevated
+// machine. The contract under test is which principals the outer rollback is
+// willing to delete, which is a data-loss decision and the one thing here worth
+// proving rather than reasoning about.
+var (
+	provisionWindowsSandboxPrincipalForSetupFn = provisionWindowsSandboxPrincipalForSetup
+	removeWindowsSandboxPrincipalForSetupFn    = removeWindowsSandboxPrincipalForSetup
+	// The both-roles retirement setup runs when the opt-in is off. It belongs
+	// beside its single-role sibling for the reason recorded below: one seam
+	// declared in two places lets a test stub one while production uses the
+	// other.
+	removeWindowsSandboxPrincipalsForSetupFn = removeWindowsSandboxPrincipalsForSetup
+	// applyWindowsACLPlanFn lives with the other identity seams in
+	// windows_identity_windows.go — the ACL-ordering guarantee it exists for
+	// predates the dual-role split, and two declarations of the same seam would
+	// let a test stub one while production used the other.
+)
+
 // provisionWindowsSandboxPrincipalForSetup does the elevated half: create the
 // account, grant it the batch logon right, and store its password locked to the
 // invoking user. Called from `zero sandbox setup`.
@@ -384,7 +402,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 				return nil, err
 			}
 		}
-		identity, created, err := provisionWindowsSandboxPrincipalForSetup(config, role)
+		identity, created, err := provisionWindowsSandboxPrincipalForSetupFn(config, role)
 		if err != nil {
 			_ = rollback()
 			return nil, err
@@ -399,7 +417,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 		// always something for a later failure to destroy. This mirrors the
 		// contract provisioning already applies to its own inner rollback.
 		if created {
-			undo = append(undo, func() error { return removeWindowsSandboxPrincipalForSetup(config, role) })
+			undo = append(undo, func() error { return removeWindowsSandboxPrincipalForSetupFn(config, role) })
 		}
 
 		// Both principals get the same filesystem access. They differ only in
@@ -816,15 +834,16 @@ var (
 	writeWindowsSandboxSecretFn       = writeWindowsSandboxSecret
 )
 
-// Seams for the two elevated calls the unrecorded-principal retirement depends
-// on, so the decision to retire is observable in a test without a provisioned
-// machine — on which the lookup declines for its own reasons and would report
-// success whether or not the guard existed.
-var (
-	lookupWindowsSandboxIdentityFn           = lookupWindowsSandboxIdentity
-	removeWindowsSandboxPrincipalForSetupFn  = removeWindowsSandboxPrincipalForSetup
-	removeWindowsSandboxPrincipalsForSetupFn = removeWindowsSandboxPrincipalsForSetup
-)
+// Seam for the lookup the unrecorded-principal retirement decides on, so that
+// decision is observable in a test without a provisioned machine — on which the
+// lookup declines for its own reasons and would report success whether or not
+// the guard existed.
+//
+// The retirement's other elevated call, removeWindowsSandboxPrincipalForSetup,
+// is seamed with the dual-role rollback seams above rather than here, for the
+// reason recorded there: two declarations of one seam let a test stub one while
+// production uses the other.
+var lookupWindowsSandboxIdentityFn = lookupWindowsSandboxIdentity
 
 // windowsACLPlanPaths returns each distinct path a plan touches, in plan order.
 //
