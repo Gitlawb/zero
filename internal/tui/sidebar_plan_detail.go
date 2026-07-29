@@ -68,16 +68,11 @@ func (m model) sidebarOrchestrateRows() []int {
 	if state.isEmpty() || state.sidebarCollapsed {
 		return nil
 	}
-	live := state.liveTasks(m.orchestrateNow())
-	if len(live) == 0 {
-		live = state.tasks
-		if len(live) > maxSidebarOrchestrateLines {
-			live = live[len(live)-maxSidebarOrchestrateLines:]
-		}
-	}
-	if len(live) > maxSidebarOrchestrateLines {
-		live = live[:maxSidebarOrchestrateLines]
-	}
+	// THE SAME WINDOW the renderer draws. These two disagreeing means a click
+	// lands on a different task than the one under the cursor, so they read one
+	// function rather than each re-deriving the slice — which is exactly how
+	// they had already drifted, one taking the head and one the tail.
+	live, _, _ := m.orchestrateVisibleRows(maxSidebarOrchestrateLines)
 	rows := make([]int, 0, len(live))
 	for _, task := range live {
 		if index, ok := state.byID[task.id]; ok {

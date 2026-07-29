@@ -214,7 +214,7 @@ func TestALargePlanIsBoundedAndSaysWhatItHid(t *testing.T) {
 	if lines > orchestrateMaxRows+3 {
 		t.Fatalf("the panel drew %d lines for a 20-task plan; it must stay bounded", lines)
 	}
-	if !strings.Contains(rendered, "more task(s) not shown") {
+	if !strings.Contains(rendered, "more below") {
 		t.Fatalf("a truncated panel must say so:\n%s", rendered)
 	}
 	// /plans is where the whole plan can still be read.

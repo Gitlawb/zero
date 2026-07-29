@@ -324,22 +324,22 @@ func (m model) renderOrchestratePanel(width int) string {
 		return b.String()
 	}
 
-	rows := state.liveTasks(now)
 	// Hidden by the ROW CAP is worth saying; hidden by the linger is not. A
 	// truncated list reads as a complete one, but a faded task is already
 	// accounted for in the header's done count.
-	capped := 0
-	if len(rows) > orchestrateMaxRows {
-		capped = len(rows) - orchestrateMaxRows
-		rows = rows[:orchestrateMaxRows]
-	}
+	//
+	// The window FOLLOWS the running task rather than always starting at the
+	// first — see orchestrate_window.go. With the large plan-size tier a plan can
+	// hold fifty tasks, and a list pinned to tasks 1-12 while task 40 runs shows
+	// everything except the thing in progress.
+	rows, above, below := m.orchestrateVisibleRows(orchestrateMaxRows)
 	for _, task := range rows {
 		b.WriteString("\n")
 		b.WriteString(m.renderOrchestrateTaskLine(task, now, width))
 	}
-	if capped > 0 {
+	if note := orchestrateHiddenNote(above, below); note != "" {
 		b.WriteString("\n")
-		b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("  … %d more task(s) not shown", capped)))
+		b.WriteString(zeroTheme.faint.Render("  … " + note))
 	}
 	if footer := orchestrateFooterLine(state); footer != "" {
 		b.WriteString("\n")
@@ -575,28 +575,14 @@ func (m model) sidebarOrchestrateLines(width int) []string {
 	}
 	room := maxInt(4, width-3)
 
-	rows := state.liveTasks(m.orchestrateNow())
-	if len(rows) == 0 {
-		// Everything has finished and faded: show the tail of the plan rather
-		// than an empty section.
-		rows = state.tasks
-		if len(rows) > maxSidebarOrchestrateLines {
-			rows = rows[len(rows)-maxSidebarOrchestrateLines:]
-		}
-	}
-	hidden := 0
-	if len(rows) > maxSidebarOrchestrateLines {
-		hidden = len(rows) - maxSidebarOrchestrateLines
-		rows = rows[:maxSidebarOrchestrateLines]
-	}
-
+	rows, above, below := m.orchestrateVisibleRows(maxSidebarOrchestrateLines)
 	lines := make([]string, 0, len(rows)+1)
 	for _, task := range rows {
 		icon, body := sidebarOrchestrateStyle(task, room)
 		lines = append(lines, " "+icon+" "+body)
 	}
-	if hidden > 0 {
-		lines = append(lines, " "+zeroTheme.faint.Render(fmt.Sprintf("  +%d more", hidden)))
+	if note := orchestrateHiddenNote(above, below); note != "" {
+		lines = append(lines, " "+zeroTheme.faint.Render("  "+note))
 	}
 	return lines
 }
