@@ -295,6 +295,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 					// executor applies its own fail-safe mapping from an empty mode
 					// (never unsafe), so a plan task can never exceed the parent.
 					PermissionMode: "",
+					// This run's nesting depth. Left unset, the admission
+					// headroom check and the executor's own depth check both
+					// measured a depth that was always zero, so neither could
+					// ever fire — an inert guard someone would later trust.
+					Depth: options.depth,
 				},
 			})
 		if err != nil {

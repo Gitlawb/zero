@@ -721,8 +721,11 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// so the run's grant is every read-only tool the registry holds.
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil,
 		orchestrateWiring{
-			Gate:        zeromaxingGate,
-			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot},
+			Gate: zeromaxingGate,
+			// Depth stays 0: the TUI is always a root session — it has no
+			// --depth and is never launched as a child — so zero is the
+			// measured value here, not an unset one.
+			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot, Depth: 0},
 		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)

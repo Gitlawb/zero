@@ -98,3 +98,29 @@ func TestPlanParentToolsNeverExceedsThePlanReadOnlySet(t *testing.T) {
 		}
 	}
 }
+
+// The depth the plan tool measures must be the RUN's depth, not a constant.
+// Left unset it was always 0, so the admission headroom check and the
+// executor's own nesting check could never fire — an inert guard that reads
+// like a live one.
+func TestRegisteredOrchestrateToolCarriesTheRunsDepth(t *testing.T) {
+	workspace := t.TempDir()
+	registry := newCoreRegistry(workspace)
+	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, orchestrateWiring{
+		Gate:        &specialist.PostureGate{},
+		PlanContext: specialist.PlanTaskContext{Cwd: workspace, Depth: 3},
+	})
+	if err != nil {
+		t.Fatalf("registerSpecialistTools: %v", err)
+	}
+	t.Cleanup(func() { closeSpecialistRuntime(nil, runtime) })
+
+	registered, _ := registry.Get(specialist.OrchestrateToolName)
+	tool, ok := registered.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("orchestrate is %T", registered)
+	}
+	if tool.Depth != 3 {
+		t.Fatalf("Depth = %d, want the run's depth 3: an always-zero depth makes the headroom check inert", tool.Depth)
+	}
+}
