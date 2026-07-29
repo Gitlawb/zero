@@ -258,7 +258,7 @@ func (m model) reconcileEffortForModelSwitch(efforts []modelregistry.ReasoningEf
 			m = m.setProfileEffortRestore(false)
 		}
 	}
-	m = m.reconcileProfileAfterModelSwitch(efforts)
+	m = m.reconcileProfileAfterModelSwitch(efforts, ringKnown)
 	return m, dropped && m.reasoningEffort == ""
 }
 
@@ -271,7 +271,7 @@ func (m model) reconcileEffortForModelSwitch(efforts []modelregistry.ReasoningEf
 // explicitly touched effort is the user's choice and is never reconciled; the
 // escalation's RestoreDefaultEffort tracks whether the profile currently
 // governs the effort.
-func (m model) reconcileProfileAfterModelSwitch(efforts []modelregistry.ReasoningEffort) model {
+func (m model) reconcileProfileAfterModelSwitch(efforts []modelregistry.ReasoningEffort, ringKnown bool) model {
 	if m.execProfileName == "" || m.execProfileEffortTouched {
 		return m
 	}
@@ -280,7 +280,11 @@ func (m model) reconcileProfileAfterModelSwitch(efforts []modelregistry.Reasonin
 		return m
 	}
 	want := modelregistry.ReasoningEffort(profile.ReasoningEffort)
-	supported := reasoningEffortAllowed(efforts, want)
+	// The SAME rule the selection door uses. Calling reasoningEffortAllowed
+	// directly here treated an uncatalogued model's empty ring as a refusal, so
+	// switching to a model that selection would have filled silently dropped
+	// the posture's effort and reported it as unraised.
+	supported := profileEffortAppliesOn(m.modelName, efforts, ringKnown, want)
 	filled := m.execProfileAppliedEffort != ""
 	switch {
 	case supported && !filled && m.reasoningEffort == "":
@@ -341,20 +345,26 @@ func (m model) availableReasoningEffortsKnown() ([]modelregistry.ReasoningEffort
 	return registry.ReasoningEfforts(name), known
 }
 
-// profileEffortApplies reports whether a profile may fill `want` on the active
+// profileEffortAppliesOn is THE rule for whether a profile may fill `want` on a
 // model. It fills when the model is KNOWN to support the level, and also when
 // the ring is not authoritative: an unknown endpoint may well support it, and
 // declining would be a false negative that silently drops the posture's effort.
 // Only a model the catalog vouches for as lacking the level blocks the fill.
-func (m model) profileEffortApplies(want modelregistry.ReasoningEffort) bool {
+//
+// ONE function, called by BOTH doors — selecting a profile on a model, and
+// switching to a model with a profile already active. They previously used
+// different predicates and disagreed on exactly the uncatalogued case, so the
+// same user on the same model got a different effort depending on which door
+// they came through. Two copies of a rule drift (invariant 5);
+// TestProfileEffortDoorsAgree pins that these cannot.
+func profileEffortAppliesOn(modelName string, efforts []modelregistry.ReasoningEffort, ringKnown bool, want modelregistry.ReasoningEffort) bool {
 	// No model selected: there is nothing to make a support claim about, so the
 	// profile does not fill. Distinct from an UNKNOWN model, which is a real
 	// endpoint that may well accept the level — conflating the two was the
 	// over-reach the pre-existing fast-posture test caught.
-	if strings.TrimSpace(m.modelName) == "" {
+	if strings.TrimSpace(modelName) == "" {
 		return false
 	}
-	efforts, known := m.availableReasoningEffortsKnown()
 	if reasoningEffortAllowed(efforts, want) {
 		return true
 	}
@@ -363,7 +373,14 @@ func (m model) profileEffortApplies(want modelregistry.ReasoningEffort) bool {
 	// catalog cannot vouch either way, and declining would be a false negative
 	// that silently drops the posture's effort — the headless path forwards it
 	// in exactly this case ("no support claim can be made for it").
-	return !known
+	return !ringKnown
+}
+
+// profileEffortApplies is the selection door: it resolves the active model's
+// ring and applies the shared rule.
+func (m model) profileEffortApplies(want modelregistry.ReasoningEffort) bool {
+	efforts, known := m.availableReasoningEffortsKnown()
+	return profileEffortAppliesOn(m.modelName, efforts, known, want)
 }
 
 func (m model) effortDisplay() string {

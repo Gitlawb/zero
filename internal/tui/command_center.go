@@ -563,9 +563,17 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// destination, exactly like handleModelCommand does. No generic
 	// unsupported-drop here: cross-provider targets are often custom models
 	// the catalog cannot vouch for either way, so an explicit preference is
-	// carried (pre-existing behavior) while the profile's own fill stays
-	// conservative — it only ever applies where support is known.
-	m = m.reconcileProfileAfterModelSwitch(m.availableReasoningEfforts())
+	// carried (pre-existing behavior).
+	//
+	// The fill itself follows the SAME rule selecting the profile would apply
+	// on the destination — which is why the ring's authority is passed through
+	// rather than inferred from its emptiness. It is not "conservative, only
+	// where support is known": an uncatalogued model is filled, because the
+	// catalog cannot vouch either way and the headless path forwards it too.
+	// The earlier wording described the behaviour this call had before that
+	// rule was unified, and following it would restore the disagreement.
+	efforts, ringKnown := m.availableReasoningEffortsKnown()
+	m = m.reconcileProfileAfterModelSwitch(efforts, ringKnown)
 	// Record the outgoing pair too — see the matching comment in
 	// handleModelCommand for why (keeps the session's starting model from
 	// silently dropping out of "Recent" on the first switch away from it).

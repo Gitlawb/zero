@@ -338,9 +338,12 @@ func TestZeromaxingUnraisedEffortIsRecordedOnModelSwitch(t *testing.T) {
 		t.Fatalf("nothing was skipped, so nothing should be recorded: %q", m.execProfileEffortUnraised)
 	}
 
-	m, text, ok, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	// A destination the CATALOG VOUCHES has no reasoning controls. An
+	// uncatalogued destination keeps the fill instead — see
+	// TestProfileEffortDoorsAgree.
+	m, text, ok, _ := m.switchProviderModel("openai", "gpt-4o")
 	if !ok {
-		t.Fatalf("switch to ollama failed: %q", text)
+		t.Fatalf("switch to openai failed: %q", text)
 	}
 	if m.reasoningEffort != "" {
 		t.Fatalf("the unsupported level must be dropped, got %q", m.reasoningEffort)
