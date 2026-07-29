@@ -608,7 +608,7 @@ func TestCatchUpNotificationsFollowsPublishesAcceptedWhileWaiting(t *testing.T) 
 			// already queued behind it.
 			publish("second")
 			deadline := time.Now().Add(time.Second)
-			for client.ReceiptSeq() < 3 {
+			for client.acceptedNotificationSeq() < 3 {
 				if time.Now().After(deadline) {
 					t.Error("follow-up publish was not accepted while the worker was busy")
 					break

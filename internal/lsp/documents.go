@@ -29,7 +29,7 @@ type session struct {
 	versions    map[string]int             // uri -> current (committed) version
 	diagnostics map[string][]Diagnostic    // uri -> latest published diagnostics
 	lastPublish map[string]time.Time       // uri -> time of last publish
-	publishSeq  map[string]int64           // uri -> receipt seq of latest publish (see Client.NotificationSeq)
+	publishSeq  map[string]int64           // uri -> receipt seq of latest publish (see Client.ReceiptSeq)
 	waiters     map[string][]chan struct{} // uri -> goroutines awaiting the next publish
 	fileLocks   map[string]*sync.Mutex     // uri -> per-document sync serializer
 }
