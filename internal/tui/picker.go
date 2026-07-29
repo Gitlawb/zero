@@ -989,7 +989,14 @@ func (m model) newEffortPicker() *commandPicker {
 	items := []pickerItem{{Label: "auto", Value: "auto"}}
 	selected := 0
 	for _, value := range m.settableEfforts() {
-		items = append(items, pickerItem{Label: value, Value: value})
+		label := value
+		if isZeromaxingOption(value) {
+			// The posture is not another effort level — it is a run posture
+			// that raises a cost multiplier. It is marked here so it looks in
+			// the picker like it looks once it is on.
+			label = "◉ " + value
+		}
+		items = append(items, pickerItem{Label: label, Value: value})
 		if m.reasoningEffort != "" && value == string(m.reasoningEffort) {
 			selected = len(items) - 1
 		}
