@@ -3,9 +3,13 @@
 package sandbox
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // Policy deny-write has to reach the principal plan.
@@ -145,5 +149,75 @@ func TestWindowsSandboxUserCommentDistinguishesWorkspaces(t *testing.T) {
 	// the key. If this stops being true the test is no longer covering anything.
 	if windowsSandboxUserName("aaaaaaaaaaaabbbbbbbb") != windowsSandboxUserName("aaaaaaaaaaaacccccccc") {
 		t.Skip("account names no longer collide for these keys; revisit what this test is for")
+	}
+}
+
+// Rollback must not strip an adopted principal's logon rights.
+//
+// revokeWindowsSandboxLogonRights passes AllRights, which drops every right the
+// account holds and deletes its LSA object. On an account this run created that
+// is a rollback; on one it adopted it destroys the SeBatchLogonRight and
+// deny-logon rights an earlier setup established, which is the working
+// principal this path exists to preserve.
+func TestSetupRollbackRevokesRightsOnlyForCreatedPrincipals(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		existed     bool
+		wantRevoked bool
+	}{
+		"adopted principal": {existed: true, wantRevoked: false},
+		"created principal": {existed: false, wantRevoked: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubWindowsProvisioning(t, testCase.existed, nil, nil)
+
+			revoked := false
+			prevGrant, prevRevoke := grantWindowsSandboxLogonRightsFn, revokeWindowsSandboxLogonRightsFn
+			t.Cleanup(func() {
+				grantWindowsSandboxLogonRightsFn, revokeWindowsSandboxLogonRightsFn = prevGrant, prevRevoke
+			})
+			// Fail the grant so the undo path runs with rights already attempted,
+			// which is the state that used to revoke unconditionally.
+			grantWindowsSandboxLogonRightsFn = func(*windows.SID) error {
+				return errors.New("LSA grant refused by policy")
+			}
+			revokeWindowsSandboxLogonRightsFn = func(*windows.SID) error {
+				revoked = true
+				return nil
+			}
+
+			config := WindowsSandboxCommandConfig{
+				SandboxHome:    t.TempDir(),
+				WorkspaceRoots: []string{`C:\ws`},
+			}
+			if _, _, err := provisionWindowsSandboxPrincipalForSetup(config); err == nil {
+				t.Fatal("provisioning reported success despite an injected grant failure")
+			}
+			if revoked != testCase.wantRevoked {
+				if testCase.wantRevoked {
+					t.Fatal("rights were not revoked for an account this run created, leaving LSA entries keyed to a SID about to be deleted")
+				}
+				t.Fatal("rights were revoked for an adopted account; AllRights drops its pre-existing rights and deletes the LSA object")
+			}
+		})
+	}
+}
+
+// A secret the current user cannot read is unavailability, not breakage.
+//
+// The secret's DACL names whoever ran setup. An operator who elevated with a
+// separate administrative account, via runas or an over-the-shoulder UAC
+// prompt, leaves a secret their ordinary account cannot open. Treating that as a
+// hard error made every sandboxed command fail on a machine that was merely set
+// up by a different admin; it belongs in the same fail-soft path as a missing
+// secret, so the warning fires and the restricted token takes over.
+func TestReadWindowsSandboxSecretTreatsPermissionDeniedAsUnavailable(t *testing.T) {
+	previous := readWindowsSandboxSecretFile
+	t.Cleanup(func() { readWindowsSandboxSecretFile = previous })
+	readWindowsSandboxSecretFile = func(string) ([]byte, error) {
+		return nil, &os.PathError{Op: "open", Path: "secret", Err: windows.ERROR_ACCESS_DENIED}
+	}
+
+	if _, err := readWindowsSandboxSecret(`C:\anything.secret`); err != errWindowsSandboxIdentityUnavailable {
+		t.Fatalf("permission-denied read returned %v, want errWindowsSandboxIdentityUnavailable so the command falls back", err)
 	}
 }
