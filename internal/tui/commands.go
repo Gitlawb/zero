@@ -25,6 +25,7 @@ const (
 	commandDebug
 	commandDoctor
 	commandPlan
+	commandPlans
 	commandSearch
 	commandResume
 	commandRetitle
@@ -116,6 +117,17 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show planning mode status.",
 		kind:        commandPlan,
+	},
+	{
+		name:  "/plans",
+		usage: "/plans",
+		group: commandGroupSession,
+		// Deliberately close to /plan, and they are different things: /plan is
+		// planning-mode status (the update_plan TODO list), /plans is the
+		// orchestrate plan's task graph. The description says so, because the
+		// names alone do not.
+		description: "Show the running orchestrate plan: tasks, dependency shape, budget.",
+		kind:        commandPlans,
 	},
 	{
 		name:        "/permissions",

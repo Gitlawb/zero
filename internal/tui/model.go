@@ -136,7 +136,11 @@ type model struct {
 	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
 	// for the same reason PostureGate is one: the TUI model is a value type
 	// copied on every update, so a closure over it would freeze the first run.
-	planProgress                *PlanProgressBridge
+	planProgress *PlanProgressBridge
+	// orchestrate is the live view of the running orchestrate plan. Distinct
+	// from m.plan, which is the update_plan tool's TODO list — two different
+	// things called "plan", kept apart by name everywhere but the command.
+	orchestrate                 orchestratePanelState
 	prepareRunCompletionWarning func()
 	runCompletionWarning        func() string
 	agentOptions                agent.Options
@@ -2402,6 +2406,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
+		// Same for the orchestrate panel: a plan left mid-flight when the run
+		// ends (interrupt, crash, a turn that yielded) must stop counting rather
+		// than tick forever against a turn that is gone.
+		m.orchestrate.frozenAt = m.now()
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
 		// reconcile it to complete here. Read pendingAskUser/pendingPermission
@@ -2643,6 +2651,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		m.orchestrate.admit(msg, m.now())
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 			kind:  rowSystem,
 			runID: msg.runID,
@@ -2654,6 +2663,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		m.orchestrate.markStarted(msg.taskID, msg.summary, m.now())
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
 		// Remember which task is in flight so the plan's progress events — which
 		// arrive keyed by the ORCHESTRATE tool call, not by task — can be
@@ -2665,6 +2675,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		m.orchestrate.markDone(msg.taskID, msg.outcome, m.now())
 		if m.planRunningCardKey == msg.cardKey {
 			m.planRunningCardKey = ""
 		}
@@ -2694,6 +2705,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.planRunningCardKey = ""
+		m.orchestrate.complete(msg, m.now())
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 			kind:  rowSystem,
 			runID: msg.runID,
@@ -3075,6 +3087,15 @@ func (m model) footerView(width int) string {
 	// run, not the subagent/swarm child session being viewed there, so pinning it
 	// above that composer would show unrelated state.
 	if !m.subchat.active {
+		// The ORCHESTRATE plan panel sits above the update_plan panel: it
+		// describes work currently running, so it is the more urgent of the
+		// two. It renders nothing at all when no plan has been admitted (see
+		// orchestratePanelState.visible), which is what keeps a posture-off
+		// session byte-identical rather than merely visually unchanged.
+		if orchestrate := m.renderOrchestratePanel(width); orchestrate != "" {
+			footer.WriteString(orchestrate)
+			footer.WriteString("\n")
+		}
 		if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
 			footer.WriteString(plan)
 			footer.WriteString("\n")
@@ -4568,6 +4589,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.openSTTModelPicker()
 	case commandVoice:
 		return m.toggleVoiceMode()
+	case commandPlans:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.orchestratePlansText()})
+		return m, nil
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
@@ -4950,6 +4974,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.planRunningCardKey = ""
+	m.orchestrate.clear()
 	// Re-bind the plan recorder to THIS run. The orchestrate tool holds the
 	// bridge for the process's life (the registry is built once per session),
 	// so the run id has to be pushed in per run — the PostureGate problem, same
@@ -5110,8 +5135,9 @@ func (m *model) cancelRun() {
 	*m = m.advanceZeromaxing() // a cancelled run spends the one-shot notices too
 	m.runCancel = nil
 	m.activeRunID = 0
-	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
-	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
+	m.cancelConfirmActive = false    // whatever path got here, there's nothing left to confirm cancelling
+	m.plan.frozenAt = m.now()        // freeze the plan clock while idle (no run in flight)
+	m.orchestrate.frozenAt = m.now() // and the orchestrate panel's, for the same reason
 	m.pendingPermission = nil
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial

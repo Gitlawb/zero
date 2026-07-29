@@ -1,0 +1,426 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// orchestrateTaskStatus is a plan task's state in the panel.
+type orchestrateTaskStatus int
+
+const (
+	orchestratePending orchestrateTaskStatus = iota
+	orchestrateRunning
+	orchestrateDone
+	orchestrateFailed
+	orchestrateSkipped
+	orchestrateCancelled
+)
+
+func (s orchestrateTaskStatus) label() string {
+	switch s {
+	case orchestrateRunning:
+		return "running"
+	case orchestrateDone:
+		return "done"
+	case orchestrateFailed:
+		return "failed"
+	case orchestrateSkipped:
+		return "skipped"
+	case orchestrateCancelled:
+		return "cancelled"
+	default:
+		return "pending"
+	}
+}
+
+// orchestrateTask is one row of the panel.
+type orchestrateTask struct {
+	id        string
+	dependsOn []string
+	phase     string
+	status    orchestrateTaskStatus
+	summary   string
+	startedAt time.Time
+	endedAt   time.Time
+	// depth is the task's rank in the dependency graph: 0 for a task with no
+	// dependencies, otherwise one more than its deepest dependency. This is what
+	// makes a diamond LOOK like a diamond — tasks at the same depth ran from the
+	// same fan-out and are drawn on the same rung.
+	depth int
+}
+
+// elapsed is the task's duration: live while running, frozen once ended.
+func (t orchestrateTask) elapsed(now time.Time) time.Duration {
+	if t.startedAt.IsZero() {
+		return 0
+	}
+	if t.endedAt.IsZero() {
+		return now.Sub(t.startedAt)
+	}
+	return t.endedAt.Sub(t.startedAt)
+}
+
+// orchestratePanelState is the live view of one orchestrate plan.
+//
+// Distinct from planPanelState, which belongs to the update_plan tool (the
+// model's own TODO list). Two different things called "plan" is a real
+// collision risk, so this type, its command and its state are named
+// ORCHESTRATE throughout, and only the user-facing command says "plans".
+type orchestratePanelState struct {
+	name        string
+	tasks       []orchestrateTask
+	byID        map[string]int
+	status      string
+	tokensUsed  int
+	tokenLimit  int
+	maxSpeedup  float64
+	startedAt   time.Time
+	completedAt time.Time
+	// frozenAt stops the header clock when the run ends without a terminal plan
+	// event — an interrupt or a crash. Mirrors planPanelState.frozenAt.
+	frozenAt time.Time
+	expanded bool
+}
+
+func (s *orchestratePanelState) clear() { *s = orchestratePanelState{} }
+
+func (s orchestratePanelState) isEmpty() bool { return len(s.tasks) == 0 }
+
+func (s orchestratePanelState) isComplete() bool { return s.status != "" }
+
+// admit installs the shape. Called once per plan, before any task runs.
+func (s *orchestratePanelState) admit(msg planAdmittedMsg, now time.Time) {
+	s.clear()
+	s.name = msg.name
+	s.tokenLimit = msg.tokenLimit
+	s.startedAt = now
+	s.byID = make(map[string]int, len(msg.tasks))
+	s.tasks = make([]orchestrateTask, 0, len(msg.tasks))
+	for _, task := range msg.tasks {
+		s.byID[task.id] = len(s.tasks)
+		s.tasks = append(s.tasks, orchestrateTask{
+			id:        task.id,
+			dependsOn: task.dependsOn,
+			phase:     task.phase,
+			status:    orchestratePending,
+		})
+	}
+	s.computeDepths()
+}
+
+// computeDepths ranks tasks by dependency depth. The message carries them in
+// the validated topological order, so every dependency is already ranked when a
+// task is reached — the same property criticalPath relies on.
+func (s *orchestratePanelState) computeDepths() {
+	for index := range s.tasks {
+		depth := 0
+		for _, dep := range s.tasks[index].dependsOn {
+			position, ok := s.byID[dep]
+			if !ok || position >= index {
+				continue
+			}
+			if next := s.tasks[position].depth + 1; next > depth {
+				depth = next
+			}
+		}
+		s.tasks[index].depth = depth
+	}
+}
+
+func (s *orchestratePanelState) markStarted(taskID, summary string, now time.Time) {
+	index, ok := s.byID[taskID]
+	if !ok {
+		return
+	}
+	s.tasks[index].status = orchestrateRunning
+	s.tasks[index].summary = summary
+	s.tasks[index].startedAt = now
+}
+
+func (s *orchestratePanelState) markDone(taskID, outcome string, now time.Time) {
+	index, ok := s.byID[taskID]
+	if !ok {
+		return
+	}
+	task := &s.tasks[index]
+	task.status = orchestrateStatusFromOutcome(outcome)
+	task.endedAt = now
+	if task.startedAt.IsZero() {
+		// Never dispatched: it has no duration, and pretending otherwise would
+		// put time against work that did not happen.
+		task.startedAt = now
+	}
+}
+
+// orchestrateStatusFromOutcome maps the executor's terminal outcomes onto panel
+// statuses. The string values are specialist's TaskOutcome constants; matching
+// on them here rather than importing keeps the panel free of the executor.
+func orchestrateStatusFromOutcome(outcome string) orchestrateTaskStatus {
+	switch outcome {
+	case "succeeded":
+		return orchestrateDone
+	case "failed":
+		return orchestrateFailed
+	case "cancelled":
+		return orchestrateCancelled
+	case "dependency_failed", "budget_exhausted":
+		return orchestrateSkipped
+	default:
+		return orchestrateFailed
+	}
+}
+
+func (s *orchestratePanelState) complete(msg planCompletedMsg, now time.Time) {
+	s.status = msg.status
+	s.tokensUsed = msg.tokensUsed
+	if msg.tokenLimit > 0 {
+		s.tokenLimit = msg.tokenLimit
+	}
+	s.maxSpeedup = msg.maxSpeedup
+	s.completedAt = now
+}
+
+// visible mirrors planPanelState.visible: nothing to show when empty, and a
+// finished plan stops pinning itself after a grace period unless expanded.
+//
+// THIS IS THE MOUNT-POINT ANSWER. With no plan admitted the state is empty and
+// this returns false, so the panel contributes nothing to the view — the
+// posture-off, no-plan TUI is unchanged because the panel never renders, not
+// because it renders something empty.
+func (s orchestratePanelState) visible(now time.Time) bool {
+	if s.isEmpty() {
+		return false
+	}
+	if s.isComplete() && !s.expanded && !s.completedAt.IsZero() && now.Sub(s.completedAt) > completedHideAfter {
+		return false
+	}
+	return true
+}
+
+func (s orchestratePanelState) counts() (done, failed, skipped, cancelled, running int) {
+	for _, task := range s.tasks {
+		switch task.status {
+		case orchestrateDone:
+			done++
+		case orchestrateFailed:
+			failed++
+		case orchestrateSkipped:
+			skipped++
+		case orchestrateCancelled:
+			cancelled++
+		case orchestrateRunning:
+			running++
+		}
+	}
+	return
+}
+
+const (
+	// orchestrateMaxRows bounds what the pinned panel draws. A plan may hold up
+	// to defaultPlanMaxTasks tasks and the panel must never push the composer
+	// off screen; beyond this the panel says how many it is not showing rather
+	// than silently dropping them.
+	orchestrateMaxRows = 12
+	// orchestrateSummaryWidth bounds a task's one-line summary.
+	orchestrateSummaryWidth = 48
+	// orchestrateMinWidth is the narrowest sensible render.
+	orchestrateMinWidth = 24
+)
+
+// renderOrchestratePanel draws the plan: one row per task, indented by
+// dependency depth so the shape is legible.
+func (m model) renderOrchestratePanel(width int) string {
+	state := m.orchestrate
+	now := m.orchestrateNow()
+	if !state.visible(now) {
+		return ""
+	}
+	if width < orchestrateMinWidth {
+		width = orchestrateMinWidth
+	}
+
+	var b strings.Builder
+	b.WriteString(zeroTheme.ink.Render(orchestrateHeaderLine(state, now)))
+
+	rows := state.tasks
+	hidden := 0
+	if len(rows) > orchestrateMaxRows {
+		hidden = len(rows) - orchestrateMaxRows
+		rows = rows[:orchestrateMaxRows]
+	}
+	for _, task := range rows {
+		b.WriteString("\n")
+		b.WriteString(m.renderOrchestrateTaskLine(task, now, width))
+	}
+	if hidden > 0 {
+		b.WriteString("\n")
+		b.WriteString(zeroTheme.faint.Render(fmt.Sprintf("  … %d more task(s) not shown", hidden)))
+	}
+	if footer := orchestrateFooterLine(state); footer != "" {
+		b.WriteString("\n")
+		b.WriteString(zeroTheme.faint.Render(footer))
+	}
+	return b.String()
+}
+
+func orchestrateHeaderLine(state orchestratePanelState, now time.Time) string {
+	done, failed, skipped, cancelled, running := state.counts()
+	var b strings.Builder
+	b.WriteString("PLAN")
+	if name := strings.TrimSpace(state.name); name != "" {
+		fmt.Fprintf(&b, " %s", truncateRunes(name, 24))
+	}
+	fmt.Fprintf(&b, "  %d/%d done", done, len(state.tasks))
+	if running > 0 {
+		fmt.Fprintf(&b, " · %d running", running)
+	}
+	if failed > 0 {
+		fmt.Fprintf(&b, " · %d failed", failed)
+	}
+	if skipped > 0 {
+		fmt.Fprintf(&b, " · %d skipped", skipped)
+	}
+	if cancelled > 0 {
+		fmt.Fprintf(&b, " · %d cancelled", cancelled)
+	}
+	if !state.startedAt.IsZero() {
+		fmt.Fprintf(&b, " · %s", formatElapsedSeconds(now.Sub(state.startedAt)))
+	}
+	return b.String()
+}
+
+func orchestrateFooterLine(state orchestratePanelState) string {
+	var parts []string
+	if state.tokenLimit > 0 {
+		parts = append(parts, fmt.Sprintf("budget %d/%d tokens", state.tokensUsed, state.tokenLimit))
+	}
+	if state.isComplete() {
+		parts = append(parts, "status "+state.status)
+		if state.maxSpeedup > 0 {
+			parts = append(parts, fmt.Sprintf("max_speedup %.2fx", state.maxSpeedup))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  " + strings.Join(parts, " · ")
+}
+
+func (m model) renderOrchestrateTaskLine(task orchestrateTask, now time.Time, width int) string {
+	// Indent by dependency depth: tasks that fan out from the same parent share
+	// a rung, so a diamond reads as one node, two beside each other, one node.
+	indent := strings.Repeat("  ", task.depth+1)
+
+	glyph := orchestrateGlyph(task.status)
+	if task.status == orchestrateRunning {
+		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
+	}
+
+	head := fmt.Sprintf("%s%s %s", indent, glyph, truncateRunes(task.id, 24))
+	meta := task.status.label()
+	if elapsed := task.elapsed(now); elapsed > 0 {
+		meta += " " + formatElapsedSeconds(elapsed)
+	}
+
+	// The summary is what is left after the fixed parts, and it is a SUMMARY:
+	// the task's full result stays in the tool output. A display formatter on
+	// the data path is how a 583-rune work product became 200 mangled runes.
+	remaining := width - len([]rune(head)) - len([]rune(meta)) - 3
+	line := head + " " + zeroTheme.faint.Render(meta)
+	if remaining > 8 && strings.TrimSpace(task.summary) != "" {
+		limit := remaining
+		if limit > orchestrateSummaryWidth {
+			limit = orchestrateSummaryWidth
+		}
+		line += " " + zeroTheme.faint.Render(truncateRunes(task.summary, limit))
+	}
+	return line
+}
+
+func orchestrateGlyph(status orchestrateTaskStatus) string {
+	switch status {
+	case orchestrateDone:
+		return zeroTheme.green.Render("✓")
+	case orchestrateFailed:
+		return zeroTheme.red.Render("✗")
+	case orchestrateSkipped, orchestrateCancelled:
+		// Neutral: a skipped or stopped task is not a defect.
+		return zeroTheme.faint.Render("⊘")
+	default:
+		return zeroTheme.faint.Render("·")
+	}
+}
+
+// orchestrateNow freezes the plan clock while no run is in flight, mirroring
+// planNow — a task left mid-flight when the agent yields must stop ticking up
+// against a turn that is no longer running.
+func (m model) orchestrateNow() time.Time {
+	// The plan's own completion stops its clock, whatever the run is doing: a
+	// finished plan inside a turn that continues must not keep counting.
+	if !m.orchestrate.completedAt.IsZero() {
+		return m.orchestrate.completedAt
+	}
+	// Otherwise the run ending stops it — a plan left mid-flight by an
+	// interrupt would tick forever against a turn that is no longer running.
+	if m.activeRunID == 0 && !m.orchestrate.frozenAt.IsZero() {
+		return m.orchestrate.frozenAt
+	}
+	return m.now()
+}
+
+// orchestratePlansText answers /plans. It reports the plan whether or not the
+// pinned panel is currently showing it — a finished plan stops pinning itself
+// after a grace period, and asking for it explicitly should still work.
+func (m model) orchestratePlansText() string {
+	state := m.orchestrate
+	if state.isEmpty() {
+		return "No plan has run this session. Under the zeromaxing posture, ask for one and " +
+			"the orchestrate tool will run it; tasks appear here as they go."
+	}
+
+	now := m.orchestrateNow()
+	var b strings.Builder
+	b.WriteString(orchestrateHeaderLine(state, now))
+	for _, task := range state.tasks {
+		b.WriteString("\n")
+		b.WriteString(orchestratePlainTaskLine(task, now))
+	}
+	if footer := orchestrateFooterLine(state); footer != "" {
+		b.WriteString("\n")
+		b.WriteString(footer)
+	}
+	return b.String()
+}
+
+// orchestratePlainTaskLine is the /plans row: no spinner and no colour, since
+// this is a static transcript entry rather than a live panel. Every task is
+// listed — the command is where a plan larger than the panel's row budget can
+// be read in full.
+func orchestratePlainTaskLine(task orchestrateTask, now time.Time) string {
+	indent := strings.Repeat("  ", task.depth+1)
+	line := fmt.Sprintf("%s%s %s [%s]", indent, orchestratePlainGlyph(task.status), task.id, task.status.label())
+	if elapsed := task.elapsed(now); elapsed > 0 {
+		line += " " + formatElapsedSeconds(elapsed)
+	}
+	if len(task.dependsOn) > 0 {
+		line += " ← " + strings.Join(task.dependsOn, ", ")
+	}
+	return line
+}
+
+func orchestratePlainGlyph(status orchestrateTaskStatus) string {
+	switch status {
+	case orchestrateDone:
+		return "✓"
+	case orchestrateFailed:
+		return "✗"
+	case orchestrateSkipped, orchestrateCancelled:
+		return "⊘"
+	case orchestrateRunning:
+		return "▸"
+	default:
+		return "·"
+	}
+}
