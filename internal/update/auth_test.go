@@ -40,7 +40,7 @@ func TestFetchReleaseSendsAuthToHttpsGithub(t *testing.T) {
 	http.DefaultClient = &http.Client{Transport: at}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
-	t.Setenv("ZERO_GITHUB_TOKEN", "zero_token")
+	t.Setenv(EnvUpdateToken, "zero_token")
 	t.Setenv("GITHUB_TOKEN", "github_fallback")
 
 	_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
@@ -60,7 +60,7 @@ func TestFetchReleaseFallsBackToGithubToken(t *testing.T) {
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
 	t.Setenv("GITHUB_TOKEN", "fallback_token")
-	t.Setenv("ZERO_GITHUB_TOKEN", "") // clear ambient precedence var
+	t.Setenv(EnvUpdateToken, "") // clear ambient precedence var
 
 	_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
 	if err != nil {
@@ -78,7 +78,7 @@ func TestFetchReleaseNoAuthToCustomEndpoint(t *testing.T) {
 	http.DefaultClient = &http.Client{Transport: at}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
-	t.Setenv("ZERO_GITHUB_TOKEN", "secret")
+	t.Setenv(EnvUpdateToken, "secret")
 	t.Setenv("GITHUB_TOKEN", "fallback")
 
 	_, err := fetchRelease(context.Background(), "https://internal.mirror.example.com/releases/latest")
@@ -97,7 +97,7 @@ func TestFetchReleaseNoAuthToHttpGithub(t *testing.T) {
 	http.DefaultClient = &http.Client{Transport: at}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
-	t.Setenv("ZERO_GITHUB_TOKEN", "secret")
+	t.Setenv(EnvUpdateToken, "secret")
 
 	_, err := fetchRelease(context.Background(), "http://api.github.com/repos/Gitlawb/zero/releases/latest")
 	if err != nil {
@@ -115,7 +115,7 @@ func TestFetchReleaseNoAuthWhenTokensNotSet(t *testing.T) {
 	http.DefaultClient = &http.Client{Transport: at}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
 
-	t.Setenv("ZERO_GITHUB_TOKEN", "")
+	t.Setenv(EnvUpdateToken, "")
 	t.Setenv("GITHUB_TOKEN", "")
 
 	_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
