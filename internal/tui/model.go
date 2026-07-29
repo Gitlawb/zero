@@ -255,6 +255,10 @@ type model struct {
 	transcript         []transcriptRow
 	transcriptDetailed bool
 	helpOverlay        bool // the `?` keyboard-shortcut overlay is open
+	// orchestrateDetail is the plan drill-in: phases left, the selected task's
+	// live agent detail right. Opened by pressing the PLAN header.
+	orchestrateDetail   bool
+	orchestrateSelected int
 	// leaderHelpOverlay is the Ctrl+X ? modal listing every leader slash chord.
 	leaderHelpOverlay bool
 	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
@@ -1567,6 +1571,31 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The `?` help overlay is modal: `?`, Esc, q, or Enter close it; every
 		// other key is swallowed so nothing types into the hidden composer.
+		// The plan detail view owns esc and the arrows while it is open, so a
+		// keypress meant for it never falls through to the transcript.
+		if m.orchestrateDetailOpen() {
+			switch {
+			case keyIs(msg, tea.KeyEscape):
+				m.orchestrateDetail = false
+				return m, nil
+			case keyIs(msg, tea.KeyUp):
+				return m.moveOrchestrateSelection(-1), nil
+			case keyIs(msg, tea.KeyDown):
+				return m.moveOrchestrateSelection(1), nil
+			case keyIs(msg, tea.KeyEnter):
+				// Drill into the task's child session, reusing the same subchat
+				// the specialist cards open. Only when there IS one — a running
+				// task is still keyed by a temporary id.
+				if session := m.selectedTaskSession(); session != "" {
+					m.orchestrateDetail = false
+					if errMsg := m.subchat.enter(m.sessionStore, session, m.orchestrate.tasks[m.orchestrateSelected].id, m.chatScrollOffset); errMsg != "" {
+						m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: errMsg})
+					}
+					return m, nil
+				}
+				return m, nil
+			}
+		}
 		if m.helpOverlay {
 			if keyText(msg) == "?" || keyText(msg) == "q" || keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyEnter) || keyCtrl(msg, 'c') {
 				m.helpOverlay = false
@@ -2881,7 +2910,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.orchestrate.markStarted(msg.taskID, msg.summary, m.now())
+		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, m.now())
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
 		// Remember which task is in flight so the plan's progress events — which
 		// arrive keyed by the ORCHESTRATE tool call, not by task — can be
@@ -2911,6 +2940,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.specialists.reconcileSessionID(cardKey, msg.sessionID)
 			cardKey = msg.sessionID
 		}
+		m.orchestrate.linkCard(msg.taskID, cardKey)
 		if info, ok := m.specialists.getBySessionID(cardKey); ok {
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 				kind:           rowSpecialist,
@@ -3213,6 +3243,7 @@ func (m model) transcriptView() string {
 		leaderHelpOverlayContent = m.renderLeaderHelpOverlay(width)
 	}
 
+	orchestrateOverlay := m.renderOrchestrateDetailOverlay(width)
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
@@ -3223,6 +3254,8 @@ func (m model) transcriptView() string {
 	switch {
 	case sttKeyOverlay != "":
 		viewportOverlay = sttKeyOverlay
+	case orchestrateOverlay != "":
+		viewportOverlay = orchestrateOverlay
 	case helpOverlayContent != "":
 		viewportOverlay = helpOverlayContent
 	case leaderHelpOverlayContent != "":
@@ -3281,10 +3314,16 @@ func (m model) twoColumnTranscriptView() string {
 
 	width := chatW
 
+	orchestrateOverlay := m.renderOrchestrateDetailOverlay(width)
 	suggestionOverlay := m.suggestionOverlay(width)
 	bodyItems := m.transcriptBodyItems(width, "", false)
 	footer := m.footerView(width)
+	// The plan detail view wins over the suggestion popup: it is a deliberate
+	// drill-in, and the composer is not what the user is looking at.
 	overlayForViewport := suggestionOverlay
+	if orchestrateOverlay != "" {
+		overlayForViewport = orchestrateOverlay
+	}
 	if m.transcriptEmpty() && !m.pending {
 		overlayForViewport = ""
 	}

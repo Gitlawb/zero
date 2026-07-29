@@ -94,7 +94,7 @@ func TestAPlanTasksSpendReachesItsCard(t *testing.T) {
 func TestTheSidebarDoesNotDenyARunningPlan(t *testing.T) {
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(diamondAdmitted(), m.now())
-	m.orchestrate.markStarted("a", "root", m.now())
+	m.orchestrate.markStarted("a", "root", "", m.now())
 
 	// Drives the REAL sidebar assembly, not the line helper: the helper
 	// returning the right string proves nothing if the PLAN section never calls
