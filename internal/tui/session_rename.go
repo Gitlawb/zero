@@ -44,7 +44,7 @@ func (m model) handleSessionRenameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) renameActiveSession(title string) model {
-	title = strings.TrimSpace(title)
+	title = cutRunes(strings.TrimSpace(title), tuiSessionTitleLimit)
 	if title == "" {
 		return m.appendSessionRenameError("session name cannot be empty")
 	}
@@ -98,10 +98,9 @@ func (m model) sessionRenamePromptView(width int) string {
 		m.composerCursorVisible,
 		composerSelectionState{},
 	)
-	lines := []string{
-		line,
+	lines := append(strings.Split(line, "\n"),
 		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
 		zeroTheme.faint.Render("Enter save   Esc cancel"),
-	}
+	)
 	return styledBlockFillTitle(width, "Rename session", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 }

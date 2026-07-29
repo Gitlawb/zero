@@ -49,6 +49,44 @@ func TestRenameCommandRenamesCurrentSessionWithoutAgentRun(t *testing.T) {
 	}
 }
 
+func TestRenameCommandCapsSessionTitle(t *testing.T) {
+	m, store, session := renameTestModel(t)
+	longTitle := strings.Repeat("界", tuiSessionTitleLimit+20)
+	m.input.SetValue("/rename " + longTitle)
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("/rename must not start an agent or background command")
+	}
+	want := cutRunes(longTitle, tuiSessionTitleLimit)
+	if next.activeSession.Title != want {
+		t.Fatalf("active title has %d runes, want %d", len([]rune(next.activeSession.Title)), tuiSessionTitleLimit)
+	}
+	stored, err := store.Get(session.SessionID)
+	if err != nil || stored == nil || stored.Title != want {
+		t.Fatalf("stored capped title = %#v, err=%v", stored, err)
+	}
+}
+
+func TestRenameEditorBordersWrappedTitleLines(t *testing.T) {
+	m, _, _ := renameTestModel(t)
+	m.input.SetValue(strings.Repeat("x", tuiSessionTitleLimit))
+	m.input.CursorEnd()
+	m.renamePrompt = &sessionRenamePrompt{}
+
+	view := plainRender(t, m.sessionRenamePromptView(80))
+	lines := strings.Split(view, "\n")
+	if len(lines) < 6 {
+		t.Fatalf("expected wrapped rename editor, got:\n%s", view)
+	}
+	for _, line := range lines[1 : len(lines)-1] {
+		if !strings.HasPrefix(line, "│ ") || !strings.HasSuffix(line, " │") {
+			t.Fatalf("wrapped editor row lost its border: %q\n%s", line, view)
+		}
+	}
+}
+
 func TestBareRenameOpensPrefilledEditorAndSaves(t *testing.T) {
 	m, store, session := renameTestModel(t)
 	m.input.SetValue("/rename")

@@ -945,6 +945,9 @@ func TestSessionPickerLabelAlignsTitles(t *testing.T) {
 
 	todayColumn := strings.Index(today, "Today title")
 	olderColumn := strings.Index(older, "Older title")
+	if todayColumn < 0 || olderColumn < 0 {
+		t.Fatalf("sessionPickerLabel omitted a title: today=%q older=%q", today, older)
+	}
 	if todayColumn != olderColumn {
 		t.Fatalf("title columns differ: today=%d (%q), older=%d (%q)", todayColumn, today, olderColumn, older)
 	}

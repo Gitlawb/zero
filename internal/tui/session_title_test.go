@@ -287,7 +287,7 @@ func TestManualRenameWinsOverInFlightAutoTitle(t *testing.T) {
 	}
 	m.sessionEvents = events
 
-	_, cmd := m.maybeAutoTitleActiveSession()
+	m, cmd := m.maybeAutoTitleActiveSession()
 	if cmd == nil {
 		t.Fatal("expected an automatic title command")
 	}
@@ -308,5 +308,10 @@ func TestManualRenameWinsOverInFlightAutoTitle(t *testing.T) {
 	}
 	if got.Title != "Manual Name" {
 		t.Fatalf("late automatic title overwrote manual name: %q", got.Title)
+	}
+
+	next, _ := m.handleSessionTitleGenerated(result)
+	if !next.titledSessions[session.SessionID] {
+		t.Fatal("a stale automatic title result must keep the retry gate set")
 	}
 }
