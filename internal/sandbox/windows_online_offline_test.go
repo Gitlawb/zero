@@ -99,8 +99,13 @@ func TestBuildWindowsNetworkInfraPlanIsModeIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allow infra plan with the group present: %v", err)
 	}
-	if len(withGroupDeny.IdentitySIDs) != 2 {
-		t.Fatalf("group present should add its SID, got %v", withGroupDeny.IdentitySIDs)
+	// Assert the SIDs themselves, not the count. A duplicate offline marker or an
+	// unrelated SID would satisfy a length check while meaning something quite
+	// different.
+	if len(withGroupDeny.IdentitySIDs) != 2 ||
+		withGroupDeny.IdentitySIDs[0] != offline ||
+		withGroupDeny.IdentitySIDs[1] != "S-1-5-32-9999" {
+		t.Fatalf("group present should add its SID after the offline marker, got %v (offline marker %q)", withGroupDeny.IdentitySIDs, offline)
 	}
 	groupDenyHash, _ := WindowsNetworkInfraHash(withGroupDeny)
 	groupAllowHash, _ := WindowsNetworkInfraHash(withGroupAllow)

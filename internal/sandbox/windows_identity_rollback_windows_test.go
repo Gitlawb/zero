@@ -20,12 +20,14 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, offline
 	prevAdd, prevSID := addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn
 	prevManaged := windowsSandboxUserIsManagedFn
 	prevOffline := addWindowsSandboxUserToOfflineGroupFn
+	prevReset := resetWindowsSandboxUserPasswordFn
 	t.Cleanup(func() {
 		ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn = prevGroup, prevUser
 		ensureWindowsSandboxOfflineGroupFn = prevOfflineGroup
 		addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn = prevAdd, prevSID
 		windowsSandboxUserIsManagedFn = prevManaged
 		addWindowsSandboxUserToOfflineGroupFn = prevOffline
+		resetWindowsSandboxUserPasswordFn = prevReset
 	})
 
 	ensureWindowsSandboxGroupFn = func() error { return nil }
@@ -33,8 +35,15 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, offline
 	// Adopted accounts are ours in these tests; the ownership check is a real
 	// syscall and would otherwise refuse before the code under test runs.
 	windowsSandboxUserIsManagedFn = func(string, string) (bool, error) { return true, nil }
+	// Stubbed even though provisioning no longer rotates: rotation moved to the
+	// caller, so nothing under test reaches this today. Left in so that if it
+	// ever moves back, these tests fail rather than resetting the password of a
+	// real managed account that happens to exist on the machine running them.
+	resetWindowsSandboxUserPasswordFn = func(string, string) error {
+		t.Fatal("provisioning must not rotate an account password; rotation belongs to the caller, immediately before the secret is written")
+		return nil
+	}
 	ensureWindowsSandboxUserFn = func(string, string, string) (bool, error) { return existed, nil }
-	addWindowsSandboxUserToOfflineGroupFn = func(string) error { return offlineErr }
 	addWindowsSandboxUserToGroupFn = func(string) error { return groupErr }
 	addWindowsSandboxUserToOfflineGroupFn = func(string) error { return offlineErr }
 	resolveWindowsSandboxSIDFn = func(username string) (*windows.SID, error) {
