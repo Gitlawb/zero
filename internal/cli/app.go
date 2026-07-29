@@ -892,13 +892,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
 			PermissionMode: permissionMode,
-			Autonomy:       "low",
-			Sandbox:        sandboxEngine,
-			FileTracker:    fileTracker,
-			Hooks:          hookDispatcher,
-			DeferThreshold: resolved.Tools.DeferThreshold,
-			Specialists:    specialistRuntime.specialists,
-			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
+			// Set ONCE, here, rather than beside each of the three places the
+			// TUI assigns Zeromaxing: the registry is built per session and does
+			// not change per run, and three assignments of one fact is three
+			// chances for the next one to be forgotten — which is precisely how
+			// this field came to be set nowhere at all.
+			OrchestrateAvailable: orchestrateAvailable(registry),
+			Autonomy:             "low",
+			Sandbox:              sandboxEngine,
+			FileTracker:          fileTracker,
+			Hooks:                hookDispatcher,
+			DeferThreshold:       resolved.Tools.DeferThreshold,
+			Specialists:          specialistRuntime.specialists,
+			Skills:               pluginActivation.skillInfos(deps.skillsDir()),
 		},
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
 		// It resolves against the same merged set (default dir + plugin skill
@@ -1522,4 +1528,22 @@ func cachedSkillsLoader(load func() []skills.Skill) func() []skills.Skill {
 		at = time.Now()
 		return cached
 	}
+}
+
+// orchestrateAvailable reports whether this run actually holds the orchestrate
+// tool, for the reminder that names it.
+//
+// DERIVED FROM THE REGISTRY, never hand-set. The field it feeds was declared,
+// documented and consumed by the reminder selector — and set by NEITHER
+// production call site, so the notice that tells the model the tool exists
+// could not fire. The model was handed an advertised tool it was never told
+// about, and did not use it. That is invariant 1 for the second time in this
+// feature, and a bool a caller has to remember to pass is how it happened; the
+// registry is the thing that actually knows.
+func orchestrateAvailable(registry *tools.Registry) bool {
+	if registry == nil {
+		return false
+	}
+	_, found := registry.Get(specialist.OrchestrateToolName)
+	return found
 }
