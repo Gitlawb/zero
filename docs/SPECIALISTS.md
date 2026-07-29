@@ -141,15 +141,23 @@ manager marks that task `error` and clears its PID. This avoids sending
 
 ## Recovering an Interrupted Overwrite
 
-Overwriting a specialist (`--force`) publishes the new file atomically, so an
-interrupted write leaves either the old manifest or the new one — never a
-half-written file. Windows has one rare exception worth knowing about.
+Zero writes and flushes a complete temporary file before publishing an overwrite,
+so a write failure before publication leaves the existing manifest unchanged
+instead of truncating it. On Unix, publication uses a same-directory rename and
+preserves the existing file's permission bits.
 
-There, the swap goes through `ReplaceFileW`, which preserves the destination's
-security descriptor instead of silently replacing it with the directory's
-inherited one. If it fails with `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2` (1177),
-Zero has already moved your original aside and tries to move it back. That
-rollback almost always succeeds, and the failed write changes nothing.
+On Windows, Zero uses `ReplaceFileW` to preserve the destination DACL instead of
+silently replacing it with the temporary file's inherited DACL. `ReplaceFileW`
+is not observer-atomic: another process can briefly observe the destination path
+as absent during replacement. Zero serializes specialist loads and managed
+mutations within one process, but cannot synchronize external processes or
+editors.
+
+Windows errors 1176 (`ERROR_UNABLE_TO_MOVE_REPLACEMENT`) and 1177
+(`ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`) are partial replacement failures. With
+Zero's managed backup, 1176 leaves the original names intact and needs no manual
+recovery. For 1177, Zero has moved the original aside and tries to move it back.
+That rollback almost always succeeds, and the failed write changes nothing.
 
 If the rollback itself fails — typically because another process is holding a
 lock on the file — the original is not lost, but it is left under a name Zero
@@ -160,9 +168,9 @@ does not read:
 ```
 
 Only `*.md` files are loaded as specialists, so until that file is renamed the
-specialist will not appear in `zero specialist list` or resolve by name. The
-error Zero prints names both paths; recover by closing whatever holds the lock
-and renaming the backup back:
+specialist will not appear in `zero specialist list` or resolve by name. Zero's
+error message includes both the backup path and destination path. Recover by
+closing whatever holds the lock and renaming the backup back:
 
 ```powershell
 Move-Item .zero-replace-<random>.backup <name>.md

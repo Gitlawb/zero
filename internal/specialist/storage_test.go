@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/fsutil"
 )
@@ -96,7 +97,7 @@ func TestStorageCreateForceRejectsSymlink(t *testing.T) {
 	assertNoTemporarySpecialistFiles(t, userDir)
 }
 
-func TestStorageCreateForceAtomicallyReplacesFile(t *testing.T) {
+func TestStorageCreateForceReplacesFileAndPreservesMode(t *testing.T) {
 	userDir := t.TempDir()
 	path := filepath.Join(userDir, "safe.md")
 	if err := os.WriteFile(path, []byte("old content"), 0o644); err != nil {
@@ -124,10 +125,84 @@ func TestStorageCreateForceAtomicallyReplacesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
-		t.Fatalf("file permissions = %o, want 600", got)
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o644 {
+		t.Fatalf("file permissions = %o, want the existing mode 644", got)
 	}
 	assertNoTemporarySpecialistFiles(t, userDir)
+}
+
+func TestStorageCreateForceSerializesConcurrentLoad(t *testing.T) {
+	userDir := t.TempDir()
+	storage := NewStorage(Paths{UserDir: userDir})
+	if _, err := storage.Create(CreateInput{Name: "safe", Description: "old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	gapOpen := make(chan struct{})
+	finishReplacement := make(chan struct{})
+	storage.writeReplacement = func(path, content string) error {
+		backup := path + ".test-backup"
+		if err := os.Rename(path, backup); err != nil {
+			return err
+		}
+		close(gapOpen)
+		<-finishReplacement
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			return err
+		}
+		return os.Remove(backup)
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := storage.Create(CreateInput{Name: "safe", Description: "new", Overwrite: true})
+		writeDone <- err
+	}()
+	<-gapOpen
+	defer func() {
+		select {
+		case <-finishReplacement:
+		default:
+			close(finishReplacement)
+		}
+	}()
+
+	loadDone := make(chan LoadResult, 1)
+	loadErr := make(chan error, 1)
+	loadStarted := make(chan struct{})
+	go func() {
+		close(loadStarted)
+		result, err := Load(LoadOptions{Paths: Paths{UserDir: userDir}})
+		if err != nil {
+			loadErr <- err
+			return
+		}
+		loadDone <- result
+	}()
+	<-loadStarted
+	select {
+	case err := <-loadErr:
+		t.Fatalf("Load returned during replacement: %v", err)
+	case result := <-loadDone:
+		t.Fatalf("Load returned during replacement gap: %#v", result.Specialists)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(finishReplacement)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	select {
+	case err := <-loadErr:
+		t.Fatal(err)
+	case result := <-loadDone:
+		manifest, ok := Find(result, "safe")
+		if !ok || manifest.Metadata.Description != "new" {
+			t.Fatalf("loaded specialist = %#v, want replacement", manifest)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Load did not resume after replacement")
+	}
 }
 
 func TestStorageCreateReturnsManifestWarningAfterCommittedCleanupFailure(t *testing.T) {
@@ -135,7 +210,7 @@ func TestStorageCreateReturnsManifestWarningAfterCommittedCleanupFailure(t *test
 	backupPath := filepath.Join(userDir, ".zero-replace-old.backup")
 	cleanupErr := &os.PathError{Op: "remove", Path: backupPath, Err: syscall.Errno(32)}
 	storage := NewStorage(Paths{UserDir: userDir})
-	storage.writeAtomic = func(path, content string) error {
+	storage.writeReplacement = func(path, content string) error {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return err
 		}
@@ -154,7 +229,7 @@ func TestStorageCreateReturnsManifestWarningAfterCommittedCleanupFailure(t *test
 	}
 }
 
-func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
+func TestWriteSpecialistReplacementRetriesTransientWindowsRename(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("rename retries are Windows-specific")
 	}
@@ -164,7 +239,7 @@ func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempts := 0
-	err := writeSpecialistAtomicWith(path, "new content", func(src, dst string) error {
+	err := writeSpecialistReplacementWith(path, "new content", func(src, dst string) error {
 		attempts++
 		if attempts == 1 {
 			return syscall.Errno(32) // ERROR_SHARING_VIOLATION
@@ -172,7 +247,7 @@ func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
 		return os.Rename(src, dst)
 	}, func(string) error { return nil })
 	if err != nil {
-		t.Fatalf("writeSpecialistAtomicWith returned error: %v", err)
+		t.Fatalf("writeSpecialistReplacementWith returned error: %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("rename attempts = %d, want 2", attempts)
@@ -187,12 +262,12 @@ func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
 	assertNoTemporarySpecialistFiles(t, dir)
 }
 
-func TestWriteSpecialistAtomicIgnoresDirectorySyncErrorAfterCommit(t *testing.T) {
+func TestWriteSpecialistReplacementIgnoresDirectorySyncErrorAfterCommit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "safe.md")
 	syncErr := errors.New("sync failed")
 	called := false
-	err := writeSpecialistAtomicWith(path, "new content", nil, func(got string) error {
+	err := writeSpecialistReplacementWith(path, "new content", nil, func(got string) error {
 		called = true
 		if got != dir {
 			t.Fatalf("sync directory = %q, want %q", got, dir)
@@ -221,23 +296,23 @@ func TestSyncSpecialistDirIgnoresOpenFailure(t *testing.T) {
 	}
 }
 
-// TestWriteSpecialistAtomicKeepsTheOriginalAfterFailedReplace pins the caller
+// TestWriteSpecialistReplacementKeepsTheOriginalAfterFailedReplace pins the caller
 // side of Windows partial-failure rollback: fsutil restores the original at dst,
 // reports the ReplaceFileW error, and leaves src for this function's deferred
 // temporary-file cleanup.
-func TestWriteSpecialistAtomicKeepsTheOriginalAfterFailedReplace(t *testing.T) {
+func TestWriteSpecialistReplacementKeepsTheOriginalAfterFailedReplace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "safe.md")
 	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	replaceErr := errors.New("ReplaceFileW could not rename the replacement")
-	err := writeSpecialistAtomicWith(path, "new content", func(_, _ string) error {
+	err := writeSpecialistReplacementWith(path, "new content", func(_, _ string) error {
 		return replaceErr
 	}, func(string) error { return nil })
 
 	if !errors.Is(err, replaceErr) {
-		t.Fatalf("writeSpecialistAtomicWith error = %v, want it to report %v", err, replaceErr)
+		t.Fatalf("writeSpecialistReplacementWith error = %v, want it to report %v", err, replaceErr)
 	}
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {

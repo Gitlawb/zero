@@ -12,7 +12,7 @@ import (
 )
 
 // TestStorageCreateForceKeepsWindowsDACL is the regression test for the Windows
-// half of the atomic-overwrite change: the replacement is a freshly created
+// DACL-preservation change: the replacement is a freshly created
 // temporary file, so publishing it with a plain rename would hand the destination
 // the directory's inherited DACL and drop the restrictive one an explicitly
 // locked-down specialist had — exposing its system prompt to anyone the directory

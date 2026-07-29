@@ -25,15 +25,14 @@ import (
 //     destination untouched. Passing 0x2 while omitting only 0x4 buys nothing:
 //     ACL merging is part of the metadata merge 0x2 covers.
 //   - REPLACEFILE_WRITE_THROUGH (0x1) is documented as "This value is not
-//     supported", so it cannot be relied on to flush anything. The single-
-//     operation swap is ReplaceFileW's own documented behavior, not this flag's.
+//     supported", so it cannot be relied on to flush anything.
 const replaceFileFlags = 0
 
 const replaceBackupPattern = ".zero-replace-*.backup"
 
 const (
-	// Returned when the volume or redirector cannot provide ReplaceFileW's atomic,
-	// descriptor-preserving semantics. Existing destinations must fail closed.
+	// Returned when the volume or redirector cannot provide ReplaceFileW's
+	// DACL-preserving semantics. Existing destinations must fail closed.
 	errorInvalidFunction = syscall.Errno(1)
 	errorNotSupported    = syscall.Errno(50)
 
@@ -51,19 +50,17 @@ var (
 )
 
 // replaceExisting publishes src over dst with ReplaceFileW rather than
-// MoveFileEx (what os.Rename uses). Two reasons, both of which os.Rename fails
-// to provide on Windows:
+// MoveFileEx (what os.Rename uses) to preserve destination metadata. The
+// replacement is a freshly created temporary file, so it carries the directory's
+// inherited DACL. Renaming it over the destination would therefore replace the
+// destination's ACL - silently widening access to a file that had been restricted
+// explicitly (os.File.Chmod cannot express that on Windows; Go only maps the
+// owner-write bit). ReplaceFileW carries the replaced file's DACL and selected
+// metadata over to the replacement instead.
 //
-//   - Atomicity. Go documents os.Rename as NOT atomic outside Unix, so an
-//     interrupted or concurrently observed overwrite can expose a missing or
-//     intermediate file. ReplaceFileW performs the swap as one operation.
-//   - Security descriptor. The replacement is a freshly created temporary file,
-//     so it carries the directory's inherited DACL. Renaming it over the
-//     destination therefore REPLACES the destination's ACL — silently widening
-//     access to a file that had been restricted explicitly (os.File.Chmod cannot
-//     express that on Windows; Go only maps the owner-write bit). ReplaceFileW
-//     carries the replaced file's security descriptor, attributes, and streams
-//     over to the replacement instead.
+// ReplaceFileW combines multiple filesystem steps and is not observer-atomic: an
+// external reader can briefly see dst absent even when replacement succeeds.
+// Callers that cannot tolerate that window must synchronize their own readers.
 //
 // No REPLACEFILE_* flag is passed at all — see replaceFileFlags for why each one
 // would either silently lose the descriptor this function exists to preserve or
@@ -103,7 +100,7 @@ func replaceExistingWithCleanup(src, dst string, replace func(string, string, st
 		return nil
 	}
 	if errors.Is(callErr, errorInvalidFunction) || errors.Is(callErr, errorNotSupported) {
-		callErr = fmt.Errorf("atomic replacement is not supported for %s: %w", dst, callErr)
+		callErr = fmt.Errorf("DACL-preserving replacement is not supported for %s: %w", dst, callErr)
 	}
 	return recoverPartialReplace(callErr, dst, backup, restore)
 }

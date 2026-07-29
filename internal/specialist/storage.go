@@ -13,8 +13,8 @@ import (
 )
 
 type Storage struct {
-	paths       Paths
-	writeAtomic func(string, string) error
+	paths            Paths
+	writeReplacement func(string, string) error
 }
 
 type CreateInput struct {
@@ -69,15 +69,17 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 	}
 	content := FormatMarkdown(manifest)
 	dir := filepath.Dir(path)
+	specialistFilesMu.Lock()
+	defer specialistFilesMu.Unlock()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Manifest{}, fmt.Errorf("create specialist directory: %w", err)
 	}
 	if input.Overwrite {
-		writeAtomic := storage.writeAtomic
-		if writeAtomic == nil {
-			writeAtomic = writeSpecialistAtomic
+		writeReplacement := storage.writeReplacement
+		if writeReplacement == nil {
+			writeReplacement = writeSpecialistReplacement
 		}
-		if err := writeAtomic(path, content); err != nil {
+		if err := writeReplacement(path, content); err != nil {
 			var cleanupErr *fsutil.CommittedReplacementCleanupError
 			if errors.As(err, &cleanupErr) {
 				manifest.Warnings = append(manifest.Warnings, fmt.Sprintf("specialist was updated, but replacement backup %s could not be removed: %v", cleanupErr.BackupPath, cleanupErr.Cause))
@@ -104,11 +106,11 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 	return manifest, nil
 }
 
-func writeSpecialistAtomic(path string, content string) error {
-	return writeSpecialistAtomicWith(path, content, nil, syncSpecialistDir)
+func writeSpecialistReplacement(path string, content string) error {
+	return writeSpecialistReplacementWith(path, content, nil, syncSpecialistDir)
 }
 
-func writeSpecialistAtomicWith(path string, content string, rename func(string, string) error, syncDir func(string) error) (err error) {
+func writeSpecialistReplacementWith(path string, content string, rename func(string, string) error, syncDir func(string) error) (err error) {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".specialist-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary specialist file: %w", err)
@@ -128,6 +130,22 @@ func writeSpecialistAtomicWith(path string, content string, rename func(string, 
 	if err := temp.Chmod(0o600); err != nil {
 		return fmt.Errorf("set temporary specialist file permissions: %w", err)
 	}
+	info, err := os.Lstat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect specialist file: %w", err)
+	}
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
+		}
+		if runtime.GOOS != "windows" {
+			// The old in-place overwrite retained manually configured Unix modes.
+			// Preserve that behavior when publishing a replacement inode.
+			if err := temp.Chmod(info.Mode().Perm()); err != nil {
+				return fmt.Errorf("preserve specialist file permissions: %w", err)
+			}
+		}
+	}
 	if _, err := temp.WriteString(content); err != nil {
 		return fmt.Errorf("write temporary specialist file: %w", err)
 	}
@@ -138,20 +156,12 @@ func writeSpecialistAtomicWith(path string, content string, rename func(string, 
 		return fmt.Errorf("close temporary specialist file: %w", err)
 	}
 
-	info, err := os.Lstat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("inspect specialist file: %w", err)
-	}
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
-	}
-	// ReplaceWithRetry, not RenameWithRetry: os.Rename is documented non-atomic
-	// outside Unix, and renaming the freshly created temporary file over the
-	// destination would also publish the directory's inherited DACL in place of
-	// whatever the destination had — silently widening access to a specialist that
-	// had been restricted explicitly. On Windows this replaces through
-	// ReplaceFileW, which is one operation and preserves the destination's
-	// security descriptor; on Unix it is the same atomic rename as before.
+	// On Unix, the same-directory rename publishes the complete file atomically.
+	// On Windows, ReplaceFileW is used to preserve the destination DACL rather
+	// than publishing the temporary file's inherited DACL. ReplaceFileW can
+	// briefly leave the destination name absent; specialistFilesMu prevents
+	// Zero-managed loads in this process from observing that window, but external
+	// processes and editors are not synchronized.
 	if err := fsutil.ReplaceWithRetry(tempPath, path, rename); err != nil {
 		return fmt.Errorf("replace specialist file: %w", err)
 	}
@@ -183,6 +193,8 @@ func (storage *Storage) Delete(input DeleteInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	specialistFilesMu.Lock()
+	defer specialistFilesMu.Unlock()
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("specialist not found: %s", strings.TrimSpace(input.Name))

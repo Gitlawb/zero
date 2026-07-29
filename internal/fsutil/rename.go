@@ -29,11 +29,11 @@ func (err *CommittedReplacementCleanupError) Unwrap() error {
 
 // ReplaceWithRetry publishes src over dst using the platform's replacement
 // primitive, retrying on the same transient Windows lock errors RenameWithRetry
-// handles. Prefer it over RenameWithRetry when dst may already exist and is
-// expected to keep its identity: on Windows it replaces through ReplaceFileW,
-// which is a single operation (os.Rename is documented non-atomic there) and
-// carries the destination's security descriptor over to the replacement instead
-// of publishing the temporary file's inherited ACL. On Unix it is os.Rename.
+// handles. On Windows it uses ReplaceFileW so an existing destination keeps its
+// DACL and selected metadata instead of receiving the temporary file's inherited
+// DACL. ReplaceFileW is not observer-atomic and may briefly leave dst absent;
+// callers that cannot tolerate that must synchronize their own readers. On Unix
+// replacement uses os.Rename.
 //
 // replace overrides the platform primitive so tests can exercise the retry path;
 // pass nil for the default.

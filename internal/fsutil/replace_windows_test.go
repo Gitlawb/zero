@@ -13,12 +13,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestReplaceWithRetryKeepsTheDestinationIdentity proves the publish goes through
-// ReplaceFileW and not os.Rename: ReplaceFileW gives the replacement the replaced
-// file's identity, so the destination's creation time survives. A rename would
-// carry the temporary file's creation time over instead, and os.Rename is also
-// documented non-atomic on Windows.
-func TestReplaceWithRetryKeepsTheDestinationIdentity(t *testing.T) {
+// TestReplaceWithRetryPreservesDestinationCreationTime proves the publish goes
+// through ReplaceFileW and not os.Rename: ReplaceFileW carries selected metadata,
+// including creation time, from the destination to the replacement. A rename
+// would carry the temporary file's creation time over instead.
+func TestReplaceWithRetryPreservesDestinationCreationTime(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "manifest.md")
 	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
@@ -166,7 +165,7 @@ func TestReplaceFileFlagsDoNotIgnoreMergeErrors(t *testing.T) {
 	}
 }
 
-func TestReplaceExistingRejectsUnsupportedAtomicReplacement(t *testing.T) {
+func TestReplaceExistingRejectsUnsupportedDACLReplacement(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		code syscall.Errno
@@ -197,8 +196,8 @@ func TestReplaceExistingRejectsUnsupportedAtomicReplacement(t *testing.T) {
 			if !errors.Is(err, tc.code) {
 				t.Fatalf("error = %v, want unsupported error %v", err, tc.code)
 			}
-			if !strings.Contains(err.Error(), "atomic replacement is not supported") {
-				t.Fatalf("error = %v, want an atomic-replacement explanation", err)
+			if !strings.Contains(err.Error(), "DACL-preserving replacement is not supported") {
+				t.Fatalf("error = %v, want a DACL-preserving-replacement explanation", err)
 			}
 			assertFileContent(t, dst, "old")
 			assertFileContent(t, src, "new")
