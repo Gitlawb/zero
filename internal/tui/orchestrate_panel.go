@@ -516,3 +516,37 @@ func (m model) clickedOrchestrateHeader(msg tea.MouseMsg) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "▸ "+orchestrateHeaderMarker) ||
 		strings.HasPrefix(strings.TrimSpace(line), "▾ "+orchestrateHeaderMarker)
 }
+
+// sidebarOrchestrateLine is the one-line orchestrate summary the sidebar shows
+// in place of "no active plan" while a plan is running. Kept to a single line
+// because the FILES section below computes its click offsets from the lines
+// above it.
+func (m model) sidebarOrchestrateLine(width int) string {
+	state := m.orchestrate
+	done, failed, _, _, _ := state.counts()
+
+	label := strings.TrimSpace(state.name)
+	if label == "" {
+		label = "plan"
+	}
+	summary := fmt.Sprintf("%s %d/%d", label, done, len(state.tasks))
+	if failed > 0 {
+		summary += fmt.Sprintf(" · %d failed", failed)
+	}
+	if running := state.runningTask(); running != "" {
+		summary += " · " + running
+	}
+	// Room for the two-space indent the placeholder also carries.
+	return "  " + zeroTheme.muted.Render(truncateRunes(summary, maxInt(1, width-2)))
+}
+
+// runningTask names the task currently in flight, or "" when none is. Sound
+// because MaxWorkers is validated to be 1 — Stage 2d must revisit it.
+func (s orchestratePanelState) runningTask() string {
+	for _, task := range s.tasks {
+		if task.status == orchestrateRunning {
+			return task.id
+		}
+	}
+	return ""
+}

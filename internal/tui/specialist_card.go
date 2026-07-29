@@ -96,6 +96,21 @@ func (t *specialistTracker) complete(childSessionID string, status specialistSta
 
 // incrementToolCount bumps the tool-call counter for the specialist with
 // childSessionID. Unknown specialists are ignored.
+// setTokens records a child's token spend against its card. Plan tasks know
+// theirs (TaskResult.Tokens); the Task tool does not bridge usage yet, so its
+// cards stay at zero and the display omits the segment rather than showing one.
+func (t *specialistTracker) setTokens(childSessionID string, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].tokenCount = tokens
+			return
+		}
+	}
+}
+
 func (t *specialistTracker) incrementToolCount(childSessionID string) {
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
@@ -165,7 +180,14 @@ func specialistStatusString(s specialistStatus) string {
 		return "completed"
 	case specialistError:
 		return "error"
+	case specialistCancelled:
+		// Cancelled and dependency/budget-skipped tasks landed in the default
+		// arm and rendered as "error", so a plan the user stopped, and every
+		// task skipped because something upstream failed, read as a defect.
+		return "cancelled"
 	default:
+		// Fail closed: an unmapped status is reported as an error rather than
+		// quietly as something benign.
 		return "error"
 	}
 }
@@ -292,7 +314,11 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	// Body line: "  status · N tool calls · M,NNN tokens".
 	toolLabel := "tool calls"
 	statusLabel := specialistStatusString(info.status)
-	if info.status == specialistError {
+	// Only claim an exit code when there IS one. A plan task's failure arrives
+	// without one, and rendering the zero value produced "error (exit code 0)"
+	// directly above a body saying "Subagent failed (exit 4)" — the card
+	// contradicting its own detail.
+	if info.status == specialistError && info.exitCode != 0 {
 		statusLabel = fmt.Sprintf("error (exit code %d)", info.exitCode)
 	}
 	// The token total is only populated when usage was bridged from the child; omit
@@ -478,7 +504,12 @@ func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) s
 			summary += "s"
 		}
 	}
-	summary += " · " + formatTokenCount(totalTokens) + " tokens"
+	// Omitted at zero, matching the per-card rule (M18): nothing populated
+	// tokenCount for a Task sub-agent, so the rollup always read "0 tokens" —
+	// a number that looks measured and is not.
+	if totalTokens > 0 {
+		summary += " · " + formatTokenCount(totalTokens) + " tokens"
+	}
 	// summary is "  " + spinnerView + " N specialists ...". The spinner sits
 	// at byte offset 2 (after the 2-space indent), so the muted tail must skip
 	// both the indent and the spinner's bytes to avoid splitting a multi-byte
