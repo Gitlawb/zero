@@ -149,11 +149,11 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 	now := m.now()
 
 	m.orchestrate.markStarted("a", "root", now)
-	m.orchestrate.markDone("a", "succeeded", now.Add(time.Second))
+	m.orchestrate.markDone("a", "succeeded", 0, now.Add(time.Second))
 	m.orchestrate.markStarted("b", "left", now.Add(time.Second))
-	m.orchestrate.markDone("b", "failed", now.Add(2*time.Second))
-	m.orchestrate.markDone("c", "cancelled", now.Add(2*time.Second))
-	m.orchestrate.markDone("d", "dependency_failed", now.Add(2*time.Second))
+	m.orchestrate.markDone("b", "failed", 0, now.Add(2*time.Second))
+	m.orchestrate.markDone("c", "cancelled", 0, now.Add(2*time.Second))
+	m.orchestrate.markDone("d", "dependency_failed", 0, now.Add(2*time.Second))
 
 	want := map[string]orchestrateTaskStatus{
 		"a": orchestrateDone, "b": orchestrateFailed,
@@ -176,9 +176,9 @@ func TestCancelledPlanIsNotShownAsFailures(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 	m.orchestrate.markStarted("a", "root", now)
-	m.orchestrate.markDone("a", "succeeded", now)
+	m.orchestrate.markDone("a", "succeeded", 0, now)
 	for _, id := range []string{"b", "c", "d"} {
-		m.orchestrate.markDone(id, "cancelled", now)
+		m.orchestrate.markDone(id, "cancelled", 0, now)
 	}
 	m.orchestrate.complete(planCompletedMsg{status: "partial", succeeded: 1, cancelled: 3}, now)
 
@@ -562,7 +562,7 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 	start := m.now()
 
 	m.orchestrate.markStarted("a", "root", start)
-	m.orchestrate.markDone("a", "succeeded", start)
+	m.orchestrate.markDone("a", "succeeded", 0, start)
 	m.orchestrate.markStarted("b", "left", start)
 
 	// Immediately after finishing, a is still there — you have to be able to
@@ -589,7 +589,7 @@ func TestAFadedTaskIsStillCountedAndStillInPlans(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
 	m.orchestrate.markStarted("a", "root", start)
-	m.orchestrate.markDone("a", "succeeded", start)
+	m.orchestrate.markDone("a", "succeeded", 0, start)
 	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
 
 	if done, _, _, _, _ := m.orchestrate.counts(); done != 1 {
@@ -615,5 +615,57 @@ func TestPendingTasksNeverFade(t *testing.T) {
 	live := m.orchestrate.liveTasks(m.now())
 	if len(live) != 4 {
 		t.Fatalf("no task has finished, so all four must still show, got %d", len(live))
+	}
+}
+
+// THE BUDGET LINE MUST COUNT WHILE THE PLAN RUNS.
+//
+// tokensUsed was assigned only from plan_completed, which arrives when the
+// whole plan ends — so the footer read "budget 0/200000" for the entire run
+// while the cards above it showed tens of thousands of tokens spent. Live spend
+// is the one number a user watches that line for.
+func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	now := m.now()
+
+	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markDone("a", "succeeded", 16470, now)
+	if m.orchestrate.tokensUsed != 16470 {
+		t.Fatalf("tokensUsed = %d after one task, want it counted as it finishes", m.orchestrate.tokensUsed)
+	}
+	m.orchestrate.markStarted("b", "left", now)
+	m.orchestrate.markDone("b", "succeeded", 68483, now)
+
+	rendered := m.renderOrchestratePanel(100)
+	if !strings.Contains(rendered, "budget 84953/100000 tokens") {
+		t.Fatalf("the footer must report live spend mid-run:\n%s", rendered)
+	}
+}
+
+// The executor's total is authoritative and replaces what the panel
+// accumulated: it counts every task, including any whose message the panel
+// dropped as stale.
+func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	now := m.now()
+	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markDone("a", "succeeded", 100, now)
+
+	m.orchestrate.complete(planCompletedMsg{status: "partial", tokensUsed: 379773}, now)
+	if m.orchestrate.tokensUsed != 379773 {
+		t.Fatalf("tokensUsed = %d, want the executor's authoritative total", m.orchestrate.tokensUsed)
+	}
+}
+
+// ...but a plan that reports no total does not erase what was counted.
+func TestAMissingFinalTotalDoesNotZeroTheCount(t *testing.T) {
+	m := admittedModel(t, diamondAdmitted())
+	now := m.now()
+	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markDone("a", "succeeded", 4242, now)
+
+	m.orchestrate.complete(planCompletedMsg{status: "completed"}, now)
+	if m.orchestrate.tokensUsed != 4242 {
+		t.Fatalf("tokensUsed = %d, want the accumulated count kept when no total arrives", m.orchestrate.tokensUsed)
 	}
 }

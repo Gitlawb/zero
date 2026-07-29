@@ -2893,7 +2893,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.orchestrate.markDone(msg.taskID, msg.outcome, m.now())
+		m.orchestrate.markDone(msg.taskID, msg.outcome, msg.tokens, m.now())
 		if m.planRunningCardKey == msg.cardKey {
 			m.planRunningCardKey = ""
 		}
