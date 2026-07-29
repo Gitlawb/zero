@@ -180,6 +180,98 @@ func TestProbeResolvedKindConnectivityAuthErrorRedactsSecret(t *testing.T) {
 	}
 }
 
+func TestProbeConnectivityUsesOAuthCredential(t *testing.T) {
+	var gotAuth string
+	resolverCalled := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotAuth = r.Header.Get("Authorization")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "xai",
+			CatalogID:    "xai",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			Model:        "grok-4",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
+		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
+			resolverCalled = true
+			return "Authorization", "Bearer oauth-test-token", true, nil
+		},
+	})
+
+	if result.Status != StatusPass {
+		t.Fatalf("Status = %q, want pass: %#v", result.Status, result.Checks)
+	}
+	if !resolverCalled {
+		t.Fatal("OAuth resolver was not called")
+	}
+	if gotAuth != "Bearer oauth-test-token" {
+		t.Fatalf("Authorization = %q, want OAuth bearer", gotAuth)
+	}
+}
+
+func TestProbeConnectivityRefreshesOAuthCredentialAfterUnauthorized(t *testing.T) {
+	var authHeaders []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		status := http.StatusOK
+		body := `{"data":[]}`
+		if len(authHeaders) == 1 {
+			status = http.StatusUnauthorized
+			body = `{"error":{"message":"expired"}}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Status:     http.StatusText(status),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	var refreshFlags []bool
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "xai",
+			CatalogID:    "xai",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			Model:        "grok-4",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
+		OAuthResolver: func(_ context.Context, forceRefresh bool) (string, string, bool, error) {
+			refreshFlags = append(refreshFlags, forceRefresh)
+			token := "stale-token"
+			if forceRefresh {
+				token = "fresh-token"
+			}
+			return "Authorization", "Bearer " + token, true, nil
+		},
+	})
+
+	if result.Status != StatusPass {
+		t.Fatalf("Status = %q, want pass after refresh: %#v", result.Status, result.Checks)
+	}
+	if len(refreshFlags) != 2 || refreshFlags[0] || !refreshFlags[1] {
+		t.Fatalf("OAuth refresh flags = %#v, want [false true]", refreshFlags)
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer stale-token" || authHeaders[1] != "Bearer fresh-token" {
+		t.Fatalf("Authorization headers = %#v, want stale then fresh bearer", authHeaders)
+	}
+}
+
 func TestProbeConnectivityClassifiesTimeout(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, context.DeadlineExceeded

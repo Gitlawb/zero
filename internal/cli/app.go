@@ -585,6 +585,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	baseProbeProviderHealth := deps.probeProviderHealth
 	deps.probeProviderHealth = func(ctx context.Context, options providerhealth.Options) providerhealth.Result {
 		options.Profile = applyStoredProviderKeyAt(options.Profile, userConfigPath)
+		if options.OAuthResolver == nil {
+			options.OAuthResolver, _ = oauthLoginForProfile(options.Profile)
+		}
 		return baseProbeProviderHealth(ctx, options)
 	}
 	return deps
