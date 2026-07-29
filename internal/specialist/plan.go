@@ -67,6 +67,13 @@ type Budget struct {
 	// sit inside its wall budget while one task is wedged and the rest never
 	// run. Zero means the default.
 	MaxStall time.Duration
+	// MaxRetries is how many EXTRA attempts a STALLED task gets. Resolved to its
+	// effective value at parse time — 0 here means no retries, and an unset
+	// max_retries has already become the default by the time anything reads it,
+	// so nothing downstream re-derives it and 0 can never be mistaken for unset.
+	//
+	// Only stalls are retried. See runTaskWithRetries.
+	MaxRetries int
 }
 
 // Limits are the caller-supplied hard caps a plan must fit inside.
@@ -354,6 +361,20 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		}
 		budget.MaxStall = stall
 	}
+	// max_retries needs PRESENCE, not a value: an explicit 0 means "do not retry
+	// this plan" and an absent key means "use the default", and planInt cannot
+	// tell them apart — it returns 0 for both. An unset value that reads as an
+	// explicit one is invariant 2, the defect that made an empty tool grant
+	// expand to the full read-only category.
+	budget.MaxRetries = defaultPlanRetries
+	if retries, set := planIntSet(raw, "max_retries"); set {
+		if retries < 0 || retries > maxPlanRetries {
+			return Budget{}, fmt.Errorf(
+				"budget.max_retries must be between 0 and %d; a task that stalls repeatedly is a provider or network condition, not something more attempts will fix",
+				maxPlanRetries)
+		}
+		budget.MaxRetries = retries
+	}
 	// MaxWorkers must be exactly 1. Rejecting rather than coercing keeps the
 	// field meaningful: a caller that asked for 8 and silently got 1 would have
 	// been told nothing, and Phase 3 would inherit a field nobody trusts.
@@ -447,12 +468,20 @@ func planStrings(args map[string]any, key string) []string {
 
 // planInt accepts the float64 a JSON number decodes to, as well as an int.
 func planInt(args map[string]any, key string) int {
+	value, _ := planIntSet(args, key)
+	return value
+}
+
+// planIntSet also reports whether the key was PRESENT, for the settings where
+// an explicit 0 and an absent key mean different things. planInt is this
+// function with the answer discarded, so the two can never decode differently.
+func planIntSet(args map[string]any, key string) (int, bool) {
 	switch value := args[key].(type) {
 	case float64:
-		return int(value)
+		return int(value), true
 	case int:
-		return value
+		return value, true
 	default:
-		return 0
+		return 0, false
 	}
 }

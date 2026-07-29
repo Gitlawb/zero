@@ -51,6 +51,10 @@ func TaskCompletedEvent(result TaskResult) (sessions.EventType, map[string]any) 
 		"duration_ms": result.Duration.Milliseconds(),
 		"session_id":  result.SessionID,
 		"tokens":      result.Tokens,
+		// attempts is what makes duration_ms and tokens readable: a retried task
+		// carries the TOTAL across its attempts, and without the count those
+		// totals look like one very expensive attempt.
+		"attempts": result.Attempts,
 	}
 }
 
@@ -67,6 +71,10 @@ func TaskFailedEvent(result TaskResult) (sessions.EventType, map[string]any) {
 		"duration_ms": result.Duration.Milliseconds(),
 		"session_id":  result.SessionID,
 		"tokens":      result.Tokens,
+		// attempts is what makes duration_ms and tokens readable: a retried task
+		// carries the TOTAL across its attempts, and without the count those
+		// totals look like one very expensive attempt.
+		"attempts": result.Attempts,
 	}
 }
 

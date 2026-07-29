@@ -162,6 +162,11 @@ func (m model) sidebarPlanDetailLines(width, budget int) []string {
 	if elapsed := task.elapsed(now); elapsed > 0 {
 		head += " · " + formatElapsedSeconds(elapsed)
 	}
+	// A retried task ran more than once for one row's worth of elapsed time.
+	// Said only when it happened, so the ordinary case is unchanged.
+	if task.attempts > 1 {
+		head += fmt.Sprintf(" · %d attempts", task.attempts)
+	}
 	lines = append(lines, " "+zeroTheme.muted.Render(truncateStep(head, room)))
 
 	info, hasCard := m.specialists.getBySessionID(task.cardKey)

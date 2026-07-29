@@ -61,6 +61,10 @@ type planTaskDoneMsg struct {
 	// tokens is what the task actually spent. The card omits the segment when
 	// it is zero rather than reporting a total nobody measured.
 	tokens int
+	// attempts is how many times the task ran — more than one when the stall
+	// watchdog fired and the executor retried it. Carried so the detail can say
+	// why an apparently single run took twice as long as its siblings.
+	attempts int
 }
 
 // planCompletedMsg carries the plan's terminal record.

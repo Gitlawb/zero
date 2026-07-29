@@ -183,3 +183,48 @@ func TestPlanTaskSummaryIsShortAndCutsOnRuneBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// A retried task ran more than once behind ONE dispatch — the retry lives in the
+// executor, so the panel sees a single card that took twice as long. The count
+// has to reach the detail, or that time looks like one very slow attempt.
+func TestARetriedTaskShowsItsAttemptCount(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 7, nil, "")
+	bridge.TaskDispatched(specialist.Task{ID: "a", Prompt: "look"})
+	bridge.TaskFailed(specialist.TaskResult{ID: "a", Outcome: specialist.TaskFailed, Attempts: 3, Err: "stalled"})
+
+	var done planTaskDoneMsg
+	found := false
+	for _, msg := range got {
+		if typed, ok := msg.(planTaskDoneMsg); ok {
+			done, found = typed, true
+		}
+	}
+	if !found {
+		t.Fatal("no planTaskDoneMsg was posted")
+	}
+	if done.attempts != 3 {
+		t.Fatalf("attempts = %d; want 3 — the bridge dropped the count", done.attempts)
+	}
+
+	state := &orchestratePanelState{}
+	state.admit(planAdmittedMsg{name: "p", taskCount: 1, tasks: []planGraphTask{{id: "a"}}}, time.Now())
+	state.markStarted("a", "look", "k", time.Now())
+	state.markDone("a", done.outcome, done.tokens, done.attempts, time.Now())
+	if got := state.tasks[0].attempts; got != 3 {
+		t.Fatalf("panel attempts = %d; want 3", got)
+	}
+}
+
+// A task that ran once says nothing about attempts: the ordinary case must be
+// untouched by the retry machinery.
+func TestASingleAttemptAddsNoAttemptCount(t *testing.T) {
+	state := &orchestratePanelState{}
+	state.admit(planAdmittedMsg{name: "p", taskCount: 1, tasks: []planGraphTask{{id: "a"}}}, time.Now())
+	state.markStarted("a", "look", "k", time.Now())
+	state.markDone("a", string(specialist.TaskSucceeded), 0, 1, time.Now())
+	if got := state.tasks[0].attempts; got != 1 {
+		t.Fatalf("attempts = %d; want 1", got)
+	}
+}

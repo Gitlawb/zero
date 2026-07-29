@@ -108,8 +108,14 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		if watchdog.didFire() {
 			// A stall and a user cancellation both surface as a context error;
 			// they are not the same event and must not read the same.
+			//
+			// Stalled is what makes the task RETRYABLE, and it is set here rather
+			// than inferred by the executor from the message: matching on error
+			// text to decide whether to spend another child is exactly the shape
+			// invariant 9 warns about, one layer up from errors.Is.
 			result.Outcome = TaskFailed
-			result.Err = stallError(task.ID, watchdog.timeout).Error()
+			result.Stalled = true
+			result.Err = stallError(task.ID, watchdog.timeout, 1).Error()
 			return result, nil
 		}
 		if err != nil {

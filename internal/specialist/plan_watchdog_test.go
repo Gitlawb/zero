@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -196,6 +197,45 @@ func TestAStalledTaskReportsAStallNotACancellation(t *testing.T) {
 	if !strings.Contains(result.Err, "max_stall_seconds") {
 		t.Fatalf("the message must name the knob that changes it: %q", result.Err)
 	}
+	// AND IT MUST BE FLAGGED RETRYABLE. Stalled is what the executor reads to
+	// decide on another attempt, and every retry test supplies it from a fake
+	// runner — so nothing else in the suite can catch the real runner failing to
+	// set it. That is the shape of the defect where the budget meter was fed by
+	// a counter NewPlanRunner never populated: a fake that fabricates its own
+	// inputs cannot test the producer.
+	if !result.Stalled {
+		t.Fatal("the runner did not flag the stall, so the executor would never retry it")
+	}
+}
+
+// A task that FAILED rather than stalled must not be flagged retryable — the
+// child ran and reported, and the flag is what would spend another one.
+func TestAFailedTaskIsNotFlaggedAsStalled(t *testing.T) {
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000b", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(_ context.Context, _ string, _ []string, emit func(streamjson.Event)) (ChildRunResult, error) {
+			// Emits, then fails. The watchdog never fires.
+			emit(streamjson.Event{Type: "assistant"})
+			return ChildRunResult{Started: true, ExitCode: 1}, errors.New("the child died")
+		},
+	}
+	runner := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, _ := runner(ctx, PlanTaskRequest{
+		Task:         Task{ID: "broken", Prompt: "x"},
+		Tools:        []string{"read_file"},
+		StallTimeout: time.Minute,
+	})
+	if result.Outcome != TaskFailed {
+		t.Fatalf("outcome = %q, want a failure", result.Outcome)
+	}
+	if result.Stalled {
+		t.Fatal("an ordinary failure was flagged as a stall, so the executor would retry it")
+	}
 }
 
 // A wedged task must not take the PLAN with it: the watchdog cancels that
@@ -204,18 +244,22 @@ func TestAStalledTaskDoesNotCancelTheWholePlan(t *testing.T) {
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
 	parent := context.Background()
 
-	ran := 0
+	ran := map[string]int{}
 	report := ExecutePlan(parent, plan, []string{"read_file"},
 		func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
-			ran++
+			ran[req.Task.ID]++
 			if req.Task.ID == "a" {
-				return TaskResult{ID: "a", Outcome: TaskFailed, Err: "produced no output for 3m0s"}, nil
+				// Stalled is what MAKES this a stall. Without the flag the result
+				// is an ordinary failure, and this test would have gone on
+				// passing while asserting nothing about stalls at all.
+				return TaskResult{ID: "a", Outcome: TaskFailed, Stalled: true, Err: "produced no output for 3m0s"}, nil
 			}
 			return TaskResult{ID: req.Task.ID, Outcome: TaskSucceeded}, nil
 		}, nil)
 
-	if ran != 2 {
-		t.Fatalf("the plan dispatched %d tasks; a stalled task must not stop independent work", ran)
+	// a stalls on both its attempts (one plus the default retry); b still runs.
+	if ran["a"] != 2 || ran["b"] != 1 {
+		t.Fatalf("attempts = %v; a stalled task must exhaust its retries and must not stop independent work", ran)
 	}
 	if parent.Err() != nil {
 		t.Fatal("the parent context was cancelled by a task-level stall")

@@ -14,9 +14,9 @@ func sidebarPlanModel(t *testing.T) model {
 	m.orchestrate.admit(diamondAdmitted(), m.now())
 	now := m.now()
 	m.orchestrate.markStarted("a", "root", "k1", now)
-	m.orchestrate.markDone("a", "succeeded", 100, now)
+	m.orchestrate.markDone("a", "succeeded", 100, 1, now)
 	m.orchestrate.markStarted("b", "left", "k2", now)
-	m.orchestrate.markDone("b", "failed", 200, now)
+	m.orchestrate.markDone("b", "failed", 200, 1, now)
 	m.orchestrate.markStarted("c", "right", "k3", now)
 	return m
 }
@@ -132,7 +132,7 @@ func TestALongPlanIsBoundedInTheSidebar(t *testing.T) {
 func TestTheSidebarDoesNotPaintSkippedTasksRed(t *testing.T) {
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(diamondAdmitted(), m.now())
-	m.orchestrate.markDone("a", "dependency_failed", 0, m.now())
+	m.orchestrate.markDone("a", "dependency_failed", 0, 1, m.now())
 
 	icon, _ := sidebarOrchestrateStyle(m.orchestrate.tasks[0], 30)
 	if strings.Contains(icon, "✗") {
