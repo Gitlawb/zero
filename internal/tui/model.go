@@ -102,6 +102,7 @@ type model struct {
 	doctorInFlight       bool
 	doctorFrame          int
 	activeSession        sessions.Metadata
+	pendingSessionTitle  string
 	sessionEvents        []sessions.Event
 	btw                  btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
@@ -112,14 +113,8 @@ type model struct {
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
 	// Lazily initialized.
-	titledSessions map[string]bool
-	// retitle* drive the sequential /retitle backfill: queued session ids still
-	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue                []string
-	retitleActive               bool
-	retitleTotal                int
-	retitleDone                 int
-	retitleOK                   int
+	titledSessions              map[string]bool
+	renamePrompt                *sessionRenamePrompt
 	usageTracker                *usage.Tracker
 	sessionCompactor            SessionCompactor
 	prService                   *PrService
@@ -1069,7 +1064,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil
+		m.sttKeyPrompt == nil && m.renamePrompt == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1351,6 +1346,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		if m.renamePrompt != nil {
+			return m.handleSessionRenameKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
@@ -2948,6 +2946,12 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	if m.renamePrompt != nil {
+		footer.WriteString(m.sessionRenamePromptView(width))
+		footer.WriteString("\n")
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
 	// While an ask-user questionnaire is active it REPLACES the composer box (the
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
@@ -4520,21 +4524,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
-	case commandRetitle:
-		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendError,
-				text: "Cannot retitle sessions while a run is active.",
-			})
-			return m, nil
+	case commandRename:
+		if title := strings.TrimSpace(command.text); title != "" {
+			return m.renameActiveSession(title), nil
 		}
-		text := ""
-		var retitleCmd tea.Cmd
-		m, retitleCmd, text = m.startSessionRetitle()
-		if text != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		}
-		return m, retitleCmd
+		return m.openSessionRenamePrompt(), nil
 	case commandSpec:
 		return m.handleSpecCommand(command.text)
 	case commandInit:

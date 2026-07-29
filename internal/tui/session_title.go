@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -42,12 +41,11 @@ const sessionTitleSystemPrompt = "You write a short, specific title for a coding
 var errSessionTitleNoContent = errors.New("session has no content to title")
 
 // sessionTitleGeneratedMsg carries the outcome of a background title generation
-// back to the Update loop. backfill distinguishes a /retitle queue step (which
-// advances the queue and updates a status row) from a silent auto-title.
+// back to the Update loop.
 type sessionTitleGeneratedMsg struct {
 	sessionID string
 	title     string
-	backfill  bool
+	applied   bool
 	err       error
 }
 
@@ -168,32 +166,25 @@ func generateSessionTitle(ctx context.Context, provider zeroruntime.Provider, di
 }
 
 // generateSessionTitleCmd builds the background command that generates and
-// persists a title for sessionID. When precomputedDigest is empty the command
-// reads the session's events itself (the backfill path), keeping that I/O off the
-// Update goroutine; the auto-title path passes the in-memory digest directly.
-func (m model) generateSessionTitleCmd(sessionID string, precomputedDigest string, backfill bool) tea.Cmd {
+// persists a title for sessionID if its original automatic title is still
+// current. The compare-and-update keeps a manual /rename authoritative when it
+// races a slow provider response.
+func (m model) generateSessionTitleCmd(sessionID string, digest string) tea.Cmd {
 	provider := m.provider
 	store := m.sessionStore
+	originalTitle := m.activeSession.Title
 	return func() tea.Msg {
-		digest := precomputedDigest
-		if strings.TrimSpace(digest) == "" {
-			events, err := store.ReadEvents(sessionID)
-			if err != nil {
-				return sessionTitleGeneratedMsg{sessionID: sessionID, backfill: backfill, err: err}
-			}
-			digest = sessionTitleDigest(events)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), sessionTitleTimeout)
 		defer cancel()
 		title, err := generateSessionTitle(ctx, provider, digest)
 		if err != nil {
-			return sessionTitleGeneratedMsg{sessionID: sessionID, backfill: backfill, err: err}
+			return sessionTitleGeneratedMsg{sessionID: sessionID, err: err}
 		}
-		updated, err := store.UpdateTitle(sessionID, title)
+		updated, applied, err := store.UpdateTitleIfCurrent(sessionID, originalTitle, title)
 		if err != nil {
-			return sessionTitleGeneratedMsg{sessionID: sessionID, title: title, backfill: backfill, err: err}
+			return sessionTitleGeneratedMsg{sessionID: sessionID, title: title, err: err}
 		}
-		return sessionTitleGeneratedMsg{sessionID: sessionID, title: updated.Title, backfill: backfill}
+		return sessionTitleGeneratedMsg{sessionID: sessionID, title: updated.Title, applied: applied}
 	}
 }
 
@@ -256,87 +247,24 @@ func (m model) maybeAutoTitleActiveSession() (model, tea.Cmd) {
 		m.titledSessions = map[string]bool{}
 	}
 	m.titledSessions[sessionID] = true
-	return m, m.generateSessionTitleCmd(sessionID, digest, false)
+	return m, m.generateSessionTitleCmd(sessionID, digest)
 }
 
-// startSessionRetitle scans resumable sessions for ones still carrying their
-// default first-message title and queues a model-generated title for each,
-// firing them one at a time. It returns a status line for the transcript.
-func (m model) startSessionRetitle() (model, tea.Cmd, string) {
-	if m.provider == nil {
-		return m, nil, "Cannot retitle sessions: no active provider is configured."
-	}
-	if m.retitleActive {
-		return m, nil, fmt.Sprintf("Already generating titles (%d/%d). Let it finish first.", m.retitleDone, m.retitleTotal)
-	}
-	list, err := m.sessionStore.ListResumable()
-	if err != nil {
-		return m, nil, "Sessions\nFailed to list sessions: " + err.Error()
-	}
-	candidates := make([]string, 0, len(list))
-	for _, session := range list {
-		events, err := m.sessionStore.ReadEvents(session.SessionID)
-		if err != nil {
-			continue
-		}
-		if !eventsHaveResumableContent(events) {
-			continue // empty/failed run — nothing worth titling
-		}
-		if !sessionTitleIsAuto(session.Title, events) {
-			continue // already has a model-generated title
-		}
-		candidates = append(candidates, session.SessionID)
-	}
-	if len(candidates) == 0 {
-		return m, nil, "All resumable sessions already have a generated title."
-	}
-	if m.titledSessions == nil {
-		m.titledSessions = map[string]bool{}
-	}
-	for _, id := range candidates {
-		m.titledSessions[id] = true
-	}
-	m.retitleQueue = append([]string(nil), candidates[1:]...)
-	m.retitleActive = true
-	m.retitleTotal = len(candidates)
-	m.retitleDone = 0
-	m.retitleOK = 0
-	cmd := m.generateSessionTitleCmd(candidates[0], "", true)
-	return m, cmd, fmt.Sprintf("Generating titles for %d session(s)… this runs in the background.", len(candidates))
-}
-
-// handleSessionTitleGenerated applies a finished title and, for the /retitle
-// backfill, advances the sequential queue and reports completion.
+// handleSessionTitleGenerated applies a finished automatic title to the active
+// model. The store update has already been skipped when a manual rename won.
 func (m model) handleSessionTitleGenerated(msg sessionTitleGeneratedMsg) (model, tea.Cmd) {
-	titleOK := msg.err == nil && msg.title != ""
+	titleOK := msg.err == nil && msg.title != "" && msg.applied
 	if titleOK {
 		if msg.sessionID == m.activeSession.SessionID {
 			m.activeSession.Title = msg.title
 		}
-	} else {
+	} else if msg.err != nil || msg.title == "" {
 		// titledSessions is marked optimistically when the cmd is scheduled (so a
 		// second turn can't double-fire a title for the same session while the
 		// first is in flight). A FAILED generation — provider error, empty title,
 		// or store write error — must not leave that gate set forever, so release
-		// it here; a later turn or /retitle can then retry. Success keeps the gate.
+		// it here so a later turn can retry. Success keeps the gate.
 		delete(m.titledSessions, msg.sessionID)
 	}
-	if !msg.backfill {
-		// Auto-title is silent: on failure the first-message title simply stays
-		// (and the retry gate above was released).
-		return m, nil
-	}
-	m.retitleDone++
-	if titleOK {
-		m.retitleOK++
-	}
-	if len(m.retitleQueue) > 0 {
-		next := m.retitleQueue[0]
-		m.retitleQueue = m.retitleQueue[1:]
-		return m, m.generateSessionTitleCmd(next, "", true)
-	}
-	m.retitleActive = false
-	summary := fmt.Sprintf("Generated titles for %d of %d session(s). Open /resume to see them.", m.retitleOK, m.retitleTotal)
-	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "sessions", text: summary})
 	return m, nil
 }
