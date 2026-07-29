@@ -109,7 +109,7 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			},
 			"budget": {
 				Type:        "object",
-				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way.",
+				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped.",
 			},
 		},
 		Required:             []string{"tasks", "budget"},

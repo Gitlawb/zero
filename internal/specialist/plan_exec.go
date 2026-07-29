@@ -124,6 +124,10 @@ type PlanTaskRequest struct {
 	ParentSessionID       string
 	ParentModel           string
 	ParentReasoningEffort string
+	// StallTimeout bounds how long this task may emit nothing. Resolved by
+	// ExecutePlan from the plan's budget so every task in a plan shares one
+	// answer, rather than each runner re-deriving it.
+	StallTimeout time.Duration
 }
 
 // PlanRunner runs one task. The executor depends on this seam rather than on
@@ -168,6 +172,8 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 	if wall := plan.Budget().MaxWall; wall > 0 {
 		deadline = time.Now().Add(wall)
 	}
+	// One stall timeout for the whole plan, resolved once.
+	stallTimeout := stallTimeoutFor(plan.Budget())
 
 	cancelled := false
 	for _, id := range plan.Order() {
@@ -237,7 +243,7 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 
 		recordDispatched(recorder, task)
 		started := time.Now()
-		result, err := run(ctx, PlanTaskRequest{Task: task, Tools: granted})
+		result, err := run(ctx, PlanTaskRequest{Task: task, Tools: granted, StallTimeout: stallTimeout})
 		result.ID = id
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
