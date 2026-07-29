@@ -70,6 +70,14 @@ type Limits struct {
 	MaxTokens int
 	// ParentTools is the grant the parent run holds. A task's Tools must be a
 	// subset; anything outside it is rejected.
+	//
+	// EMPTY MEANS EMPTY, not "unset". The intersection below is unconditional:
+	// a caller that does not supply this grants nothing, and every task is
+	// rejected. That is deliberate — the previous "skip the check when the
+	// list is empty" escape hatch made the rule inert at both production call
+	// sites, which supplied no grant at all, and a narrower parent produced a
+	// wider child. Fail closed (invariant 3): an unsupplied grant is a wiring
+	// bug, and the run must stop rather than assume authority.
 	ParentTools []string
 	// CurrentDepth is the depth of the run issuing the plan. Its tasks run one
 	// level deeper, so the check is against maxSpecialistDepth.
@@ -267,7 +275,11 @@ func validateTaskTools(task Task, limits Limits) error {
 			return fmt.Errorf("task %q requests tool %q; plan tasks are read-only in this phase and may only use: %s",
 				task.ID, name, strings.Join(sortedReadOnlyTools(), ", "))
 		}
-		if len(limits.ParentTools) > 0 && !parent[name] {
+		// UNCONDITIONAL. Guarding this on len(limits.ParentTools) > 0 is what
+		// made the rule inert: neither production call site supplied a grant,
+		// so the check never ran and a task could name any read-only tool the
+		// parent did not hold.
+		if !parent[name] {
 			return fmt.Errorf("task %q requests tool %q, which this run does not hold; a task may narrow the parent's grant, never widen it",
 				task.ID, name)
 		}
@@ -283,6 +295,14 @@ func sortedReadOnlyTools() []string {
 	sort.Strings(names)
 	return names
 }
+
+// PlanReadOnlyToolNames is the sorted set of tools a plan task may ever hold.
+//
+// Exported so a caller building Limits.ParentTools intersects against the SAME
+// list this package validates against, rather than maintaining its own copy —
+// two duplicated lists drift (invariant 5). Nothing outside this set can be
+// granted, so a caller need only consider these names.
+func PlanReadOnlyToolNames() []string { return sortedReadOnlyTools() }
 
 func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	raw, ok := args["budget"].(map[string]any)

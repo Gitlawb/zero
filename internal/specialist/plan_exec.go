@@ -154,12 +154,24 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 			continue
 		}
 
-		recordDispatched(recorder, task)
-		started := time.Now()
 		// BELT AND BRACES with the validator: the grant is intersected again
 		// here, so a validation bug cannot widen a task's authority. Same shape
-		// as Phase 1's forwardedReasoningEffort guard.
-		result, err := run(ctx, task, planToolGrant(task, parentTools))
+		// as Phase 1's forwardedReasoningEffort guard. Computed BEFORE dispatch
+		// is recorded: a task that cannot be granted anything was never
+		// dispatched, and the event log must not say it was.
+		granted, grantErr := planToolGrant(task, parentTools)
+		if grantErr != nil {
+			result := TaskResult{ID: id, Outcome: TaskFailed, Err: grantErr.Error()}
+			results[id] = result
+			failed[id] = true
+			report.Failed++
+			recordFailed(recorder, result)
+			continue
+		}
+
+		recordDispatched(recorder, task)
+		started := time.Now()
+		result, err := run(ctx, task, granted)
 		result.ID = id
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
@@ -222,33 +234,55 @@ func firstFailedDependency(task Task, failed map[string]bool) (string, bool) {
 
 // planToolGrant intersects a task's requested tools with the parent's grant.
 // An empty request inherits the parent's read-only grant; it never widens it.
-func planToolGrant(task Task, parentTools []string) []string {
+//
+// It REFUSES an empty result rather than returning one. An empty grant used to
+// be handed on to the manifest, where an empty tool list read as "unspecified"
+// and expanded to the default read-only category — so the narrower the parent,
+// the wider the child. Returning an error keeps the empty case from ever
+// reaching a place that has to guess what it meant. See Manifest.ToolsResolved
+// for the other half of that fix.
+func planToolGrant(task Task, parentTools []string) ([]string, error) {
 	parent := map[string]bool{}
 	for _, name := range parentTools {
 		parent[name] = true
 	}
+	out := []string{}
 	if len(task.Tools) == 0 {
-		out := []string{}
 		for _, name := range parentTools {
 			if planReadOnlyTools[name] {
 				out = append(out, name)
 			}
 		}
-		sort.Strings(out)
-		return out
+	} else {
+		for _, name := range task.Tools {
+			// UNCONDITIONAL on both sides: read-only AND held by the parent.
+			// The old "only check the parent when it supplied a list" form was
+			// what let a task widen its authority whenever the grant was
+			// unwired.
+			if !planReadOnlyTools[name] || !parent[name] {
+				continue
+			}
+			out = append(out, name)
+		}
 	}
-	out := []string{}
-	for _, name := range task.Tools {
-		if !planReadOnlyTools[name] {
-			continue
-		}
-		if len(parentTools) > 0 && !parent[name] {
-			continue
-		}
-		out = append(out, name)
+	if len(out) == 0 {
+		return nil, fmt.Errorf(
+			"task %q resolved no tools it may use: this run holds no read-only tools a plan task can inherit (parent grant: %s)",
+			task.ID, describeGrant(parentTools))
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
+}
+
+// describeGrant renders a parent grant for an error message, naming the empty
+// case explicitly so the reason is never a blank space.
+func describeGrant(parentTools []string) string {
+	if len(parentTools) == 0 {
+		return "none"
+	}
+	sorted := append([]string(nil), parentTools...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, ", ")
 }
 
 // criticalPath is the longest dependency-weighted path through the DAG: for
