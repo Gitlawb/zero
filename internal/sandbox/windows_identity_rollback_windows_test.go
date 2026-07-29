@@ -17,13 +17,18 @@ func stubWindowsProvisioning(t *testing.T, existed bool, groupErr error, sidErr 
 	t.Helper()
 	prevGroup, prevUser := ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn
 	prevAdd, prevSID := addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn
+	prevManaged := windowsSandboxUserIsManagedFn
 	t.Cleanup(func() {
 		ensureWindowsSandboxGroupFn, ensureWindowsSandboxUserFn = prevGroup, prevUser
 		addWindowsSandboxUserToGroupFn, resolveWindowsSandboxSIDFn = prevAdd, prevSID
+		windowsSandboxUserIsManagedFn = prevManaged
 	})
 
 	ensureWindowsSandboxGroupFn = func() error { return nil }
-	ensureWindowsSandboxUserFn = func(string, string) (bool, error) { return existed, nil }
+	// Adopted accounts are ours in these tests; the ownership check is a real
+	// syscall and would otherwise refuse before the code under test runs.
+	windowsSandboxUserIsManagedFn = func(string, string) (bool, error) { return true, nil }
+	ensureWindowsSandboxUserFn = func(string, string, string) (bool, error) { return existed, nil }
 	addWindowsSandboxUserToGroupFn = func(string) error { return groupErr }
 	resolveWindowsSandboxSIDFn = func(username string) (*windows.SID, error) {
 		if sidErr != nil {
