@@ -77,8 +77,28 @@ func planTaskKey(n int) string { return fmt.Sprintf("plantask_%d", n) }
 func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	name := plan.Name()
 	count := plan.TaskCount()
+	limit := plan.Budget().MaxTokens
+
+	// Copied into the message in EXECUTION ORDER, with the dependency edges, so
+	// the panel can draw the graph without reaching back into the plan — which
+	// it could not do anyway: Plan's fields are unexported and it lives in
+	// another package on the tool's goroutine.
+	byID := map[string]specialist.Task{}
+	for _, task := range plan.Tasks() {
+		byID[task.ID] = task
+	}
+	graph := make([]planGraphTask, 0, count)
+	for _, id := range plan.Order() {
+		task := byID[id]
+		graph = append(graph, planGraphTask{
+			id:        id,
+			dependsOn: append([]string(nil), task.DependsOn...),
+			phase:     task.Phase,
+		})
+	}
+
 	bridge.send(func(runID int) tea.Msg {
-		return planAdmittedMsg{runID: runID, name: name, taskCount: count}
+		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit}
 	})
 }
 

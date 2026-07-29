@@ -12,10 +12,25 @@ import (
 
 // planAdmittedMsg announces a validated plan before its first task runs, so a
 // plan does not read as a frozen session until the first task finishes.
+//
+// It carries the SHAPE, not just the count: the panel's whole reason to exist
+// beyond a stream of cards is showing that a diamond is a diamond. The shape is
+// known at admission — ParsePlan already proved the graph acyclic and computed
+// the order — so sending it here means the panel is complete before the first
+// task starts rather than assembling itself as tasks finish.
 type planAdmittedMsg struct {
-	runID     int
-	name      string
-	taskCount int
+	runID      int
+	name       string
+	taskCount  int
+	tasks      []planGraphTask
+	tokenLimit int
+}
+
+// planGraphTask is one node of the admitted graph, in execution order.
+type planGraphTask struct {
+	id        string
+	dependsOn []string
+	phase     string
 }
 
 // planTaskStartMsg opens a card for a dispatched task. cardKey is a temporary
