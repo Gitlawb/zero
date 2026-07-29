@@ -51,8 +51,6 @@ type OrchestrateTool struct {
 	// rather than searching nothing and reporting "not found", which would read
 	// as "you never saved it".
 	Plans PlanPaths
-	// Limits overrides the default caps; nil uses them.
-	Limits *Limits
 }
 
 const (
@@ -258,7 +256,15 @@ func (tool *OrchestrateTool) resolveSavedPlan(args map[string]any) (map[string]a
 	return stored.Args, nil
 }
 
-// Limits supplies the hard caps a plan must fit inside. nil means the defaults.
+// limits supplies the hard caps a plan must fit inside, DERIVED — there is no
+// override field.
+//
+// There was one: a `Limits *Limits` that nothing ever set, in production or in
+// a test, so `if tool.Limits != nil` could not be true. It was found sweeping
+// for siblings of the OrchestrateAvailable defect and it is the same family —
+// a knob a reader would trust, sitting next to Size, which is the knob that
+// actually works. Deleted rather than wired: nothing needs it, because every
+// value it could have overridden is already derived from something real.
 //
 // The task ceiling comes from the CONFIGURED TIER rather than a constant here.
 // It was a hard-coded 20 with no way to move it: too many for a metered
@@ -276,9 +282,6 @@ func (tool *OrchestrateTool) limits(options tools.RunOptions) Limits {
 		MaxTokens:      defaultPlanMaxTokens,
 		CurrentDepth:   tool.Depth,
 		ParentTools:    tool.ParentTools,
-	}
-	if tool.Limits != nil {
-		limits = *tool.Limits
 	}
 	return limits
 }
