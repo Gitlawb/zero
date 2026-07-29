@@ -37,6 +37,8 @@ func (m model) handlePlansCommand(args string) (tea.Model, tea.Cmd) {
 		return m.appendPlansNotice(m.showSavedPlanText(rest)), nil
 	case "run":
 		return m.runSavedPlan(rest, false)
+	case "restart":
+		return m.restartLastPlan()
 	case "resume":
 		// TWO MEANINGS OF ONE WORD, split by arity, and they are the same
 		// intention at two scales: continue what was interrupted.
@@ -268,6 +270,69 @@ func (m model) runSavedPlan(name string, resume bool) (tea.Model, tea.Cmd) {
 		text: fmt.Sprintf(instruction, string(encoded)),
 	})
 }
+
+// restartLastPlan runs the plan that last ran, from the beginning.
+//
+// It stages the plan the BRIDGE holds, not the panel's rendering of it — the
+// panel has ids, statuses and depths, which would restart something that merely
+// resembled what ran. Staging it as a saved plan rather than replaying the
+// original tool call is what makes restart inspectable: /plans show last_run
+// reads exactly what is about to happen, and it travels the one execution path
+// every other plan travels.
+//
+// A FIXED name, overwritten each time, for the same reason the resume staging
+// uses one: a directory of last_run_1, _2, _3 is a directory nobody can tell
+// apart, and only the newest is ever the right one.
+func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
+	args, planName, ok := m.planProgress.LastPlan()
+	if !ok {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"No plan has run this session, so there is nothing to restart. "+
+				"/plans list shows what is saved, and /plans run <name> starts one.")), nil
+	}
+	if m.planProgress.PlanRunningNow() {
+		// Restarting under a running plan would leave two plans reporting into
+		// one panel, and the panel is keyed by task id — the second would
+		// overwrite the first's rows. Stop it first, deliberately, rather than
+		// having the UI silently pick one.
+		return m.appendPlansNotice(planControlNotice("warning",
+			"A plan is still running. Stop it with /plans stop first, then restart.")), nil
+	}
+	plan, err := specialist.ParsePlan(args, m.savedPlanLimits())
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"That plan no longer validates, so it was not restarted: "+err.Error())), nil
+	}
+	dir := m.planPaths.ProjectDir
+	if dir == "" {
+		dir = m.planPaths.UserDir
+	}
+	if dir == "" {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"There is nowhere to stage the plan in this run.")), nil
+	}
+	if _, err := specialist.SavePlan(dir, restartPlanName, plan); err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the plan: "+err.Error())), nil
+	}
+	label := planName
+	if label == "" {
+		label = "the last plan"
+	}
+	m = m.appendPlansNotice(planControlNotice("info", fmt.Sprintf(
+		"Restarting %s from the beginning (%d tasks). Staged as %q — /plans show %s to read it first.",
+		label, plan.TaskCount(), restartPlanName, restartPlanName)))
+	encoded, err := json.Marshal(restartPlanName)
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
+	}
+	return m.dispatchCommand(parsedCommand{
+		kind: commandPrompt,
+		text: "Run the saved plan " + string(encoded) + " by calling the orchestrate tool with the `saved` argument set to that name. Do not restate its tasks.",
+	})
+}
+
+// restartPlanName is where a restart stages the last plan.
+const restartPlanName = "last_run"
 
 // resumeSavedPlan narrows a stored plan by the CURRENT session's plan events and
 // saves the remainder under its own name.
