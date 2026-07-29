@@ -111,8 +111,13 @@ func planTaskManifest(name string, grantedTools []string) Manifest {
 		},
 		SystemPrompt: "You are executing one task of a larger plan. You have read-only tools. " +
 			"Complete exactly the task described and report what you found; do not attempt to modify anything.",
-		Location:      LocationBuiltin,
-		FilePath:      "(plan)",
+		Location: LocationBuiltin,
+		FilePath: "(plan)",
+		// AUTHORITATIVE, not a hint: this is the already-intersected grant, and
+		// an empty one must refuse the child rather than expand to the default
+		// read-only category. ExecutePlan refuses before reaching here, so this
+		// is the second layer.
 		ResolvedTools: grantedTools,
+		ToolsResolved: true,
 	}
 }

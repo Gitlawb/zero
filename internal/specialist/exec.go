@@ -717,7 +717,17 @@ func appendModelArgs(args []string, manifest Manifest, parentModel string, paren
 	return args
 }
 
+// resolvedToolAllowlist returns the tools a child may hold.
+//
+// ToolsResolved is checked FIRST and on its own: when the producer says the
+// list is authoritative, an empty list means the child gets nothing and the
+// caller's "resolved no enabled tools" check refuses the run. Testing only
+// len(ResolvedTools) > 0 conflated "deliberately nothing" with "unspecified"
+// and expanded the empty case to the default read-only category.
 func resolvedToolAllowlist(manifest Manifest) ([]string, error) {
+	if manifest.ToolsResolved {
+		return append([]string(nil), manifest.ResolvedTools...), nil
+	}
 	if len(manifest.ResolvedTools) > 0 {
 		return append([]string(nil), manifest.ResolvedTools...), nil
 	}

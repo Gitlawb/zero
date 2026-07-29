@@ -252,17 +252,21 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// TUI needs one: the tool holds it for the process's life.
 		planGate = &specialist.PostureGate{}
 		planGate.Set(execProfile.IsZeromaxing())
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize, orchestrateWiring{
-			Gate:     planGate,
-			Recorder: planRecorder,
-			PlanContext: specialist.PlanTaskContext{
-				Cwd: workspaceRoot,
-				// Resolved permission mode is not available this early; the
-				// executor applies its own fail-safe mapping from an empty mode
-				// (never unsafe), so a plan task can never exceed the parent.
-				PermissionMode: "",
-			},
-		})
+		// The run's operator filters are final here: applyExecMode has already
+		// expanded any --mode preset onto them. They bound the plan tool's
+		// parent grant, so a task can never hold a tool this run was denied.
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize,
+			options.enabledTools, options.disabledTools, orchestrateWiring{
+				Gate:     planGate,
+				Recorder: planRecorder,
+				PlanContext: specialist.PlanTaskContext{
+					Cwd: workspaceRoot,
+					// Resolved permission mode is not available this early; the
+					// executor applies its own fail-safe mapping from an empty mode
+					// (never unsafe), so a plan task can never exceed the parent.
+					PermissionMode: "",
+				},
+			})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}

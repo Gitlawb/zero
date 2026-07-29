@@ -708,7 +708,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	executionRunner.SetPreparer(sandboxEngine)
 	// One gate shared by the registered tool and the TUI that flips it.
 	zeromaxingGate := &specialist.PostureGate{}
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize,
+	// nil filters: the TUI has no --enabled-tools/--disabled-tools equivalent,
+	// so the run's grant is every read-only tool the registry holds.
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil,
 		orchestrateWiring{
 			Gate:        zeromaxingGate,
 			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot},
@@ -1073,16 +1075,42 @@ type orchestrateWiring struct {
 	Gate *specialist.PostureGate
 	// Recorder receives plan lifecycle events; nil disables recording.
 	Recorder specialist.PlanRecorder
-	// ParentTools is the run's grant. A plan task may narrow it, never widen.
-	ParentTools []string
 	// PlanContext supplies the run-invariant state a plan task inherits.
 	PlanContext specialist.PlanTaskContext
+}
+
+// planParentTools is the run's grant: the tools a plan task may inherit.
+//
+// Derived, never hand-written. The candidate set is specialist's own exported
+// list — nothing outside it can ever be granted — narrowed to what this
+// registry actually holds and what the run's operator filters allow. Keeping
+// one authoritative list rather than a second copy here is invariant 5; the
+// previous field was a hand-supplied []string that BOTH production call sites
+// left nil, which silently disabled the narrowing rule entirely.
+func planParentTools(registry *tools.Registry, enabledTools, disabledTools []string) []string {
+	grant := []string{}
+	for _, name := range specialist.PlanReadOnlyToolNames() {
+		if _, found := registry.Get(name); !found {
+			continue
+		}
+		if !agent.ToolAllowedByFilters(name, enabledTools, disabledTools) {
+			continue
+		}
+		grant = append(grant, name)
+	}
+	return grant
 }
 
 // registerSpecialistTools registers the specialist, swarm and orchestrate tools.
 // The wiring argument carries what the orchestrate tool needs; a zero value
 // leaves it registered but permanently off, which is the posture-off behaviour.
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, wiring orchestrateWiring) (*agentToolRuntime, error) {
+//
+// enabledTools/disabledTools are the run's operator filters, taken as explicit
+// PARAMETERS rather than wiring fields on purpose: the plan tool's parent grant
+// is computed from them here, so a call site cannot forget to supply them
+// without failing to compile. The nil-nil case (the TUI, which has no such
+// filters) is then a stated choice rather than an omission.
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, enabledTools, disabledTools []string, wiring orchestrateWiring) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -1124,7 +1152,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		PostureActive: wiring.Gate.Active,
 		RunTask:       specialist.NewPlanRunner(planContext),
 		Recorder:      wiring.Recorder,
-		ParentTools:   wiring.ParentTools,
+		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
 		Depth:         planContext.Depth,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
