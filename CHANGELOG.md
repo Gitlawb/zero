@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.6.0](https://github.com/Gitlawb/zero/compare/v0.5.0...v0.6.0) (2026-07-29)
+
+
+### Features
+
+* add persistent session goals ([#803](https://github.com/Gitlawb/zero/issues/803)) ([5d1869e](https://github.com/Gitlawb/zero/commit/5d1869e7bc193c97e07418b57b823905c1151d5d))
+* **providers:** add Fireworks AI provider preset ([#772](https://github.com/Gitlawb/zero/issues/772)) ([58daea7](https://github.com/Gitlawb/zero/commit/58daea7a482927e5ab35afaf97761c60bb35e113))
+* **skills:** report hash drift in skill info ([#795](https://github.com/Gitlawb/zero/issues/795)) ([9fbdc34](https://github.com/Gitlawb/zero/commit/9fbdc341551601c13434cf7b9b6f5e4ea4c483b1))
+
+
+### Bug Fixes
+
+* **acp:** interrupt idle reads on cancellation ([#782](https://github.com/Gitlawb/zero/issues/782)) ([15b7a54](https://github.com/Gitlawb/zero/commit/15b7a5475cfeefddbc59634551451a8872b996b7))
+* **cli:** include plugins info in shell completions ([#794](https://github.com/Gitlawb/zero/issues/794)) ([fa8734f](https://github.com/Gitlawb/zero/commit/fa8734f17927de8832dfe041e043cfb86f93d12a))
+* **config:** kill provider-command process tree via job object on Windows ([#690](https://github.com/Gitlawb/zero/issues/690)) ([5c58256](https://github.com/Gitlawb/zero/commit/5c58256abc29c185b449f8ce79647eb3fae61882))
+* **config:** make the provider-command timeout an upper bound ([#811](https://github.com/Gitlawb/zero/issues/811)) ([#813](https://github.com/Gitlawb/zero/issues/813)) ([1c38e8c](https://github.com/Gitlawb/zero/commit/1c38e8cba50db255f3cda8b7cf4298712b2933e1))
+* **config:** stop billing provider-command fixtures to the 5s timeout ([#810](https://github.com/Gitlawb/zero/issues/810)) ([f5fa4ff](https://github.com/Gitlawb/zero/commit/f5fa4ffc64537897aa78a56edca36d8f1dacd021))
+* **cron:** reserve job IDs atomically ([#686](https://github.com/Gitlawb/zero/issues/686)) ([d9b882e](https://github.com/Gitlawb/zero/commit/d9b882eb0a94f38de8447cb54b57860ccd8ed053))
+* **lint:** resolve static analysis baseline ([#769](https://github.com/Gitlawb/zero/issues/769)) ([583e653](https://github.com/Gitlawb/zero/commit/583e6530bd849a8efcb2b88bbe8c297e8592e62c))
+* **providers:** retry provably pre-send transport failures ([#447](https://github.com/Gitlawb/zero/issues/447)) ([#750](https://github.com/Gitlawb/zero/issues/750)) ([8acd42a](https://github.com/Gitlawb/zero/commit/8acd42a3bd743a35807d762f23a33fb61c171839))
+* **sandbox:** add platform-specific write lock around grant state file ([#752](https://github.com/Gitlawb/zero/issues/752)) ([#755](https://github.com/Gitlawb/zero/issues/755)) ([88fb7b6](https://github.com/Gitlawb/zero/commit/88fb7b6192c1ac8173089967d5e9119f92d7a101))
+* **sandbox:** clarify scoped permission prompts ([#798](https://github.com/Gitlawb/zero/issues/798)) ([9fe02ae](https://github.com/Gitlawb/zero/commit/9fe02ae52e3234cb9dae76e0c5594a287ccbb52a))
+* **sandbox:** deny reads of git's credential stores ([#815](https://github.com/Gitlawb/zero/issues/815)) ([#816](https://github.com/Gitlawb/zero/issues/816)) ([33c94ec](https://github.com/Gitlawb/zero/commit/33c94ec7a3e7987e6e36b5fd5e037ff4e6e84c26))
+* **sandbox:** preserve user config and retry denied writes ([#801](https://github.com/Gitlawb/zero/issues/801)) ([81a5e6c](https://github.com/Gitlawb/zero/commit/81a5e6cb716ba4b7ecf7ff3ff261dfa51fd01098))
+* **sandbox:** scrub the daemon token file pointer ([#677](https://github.com/Gitlawb/zero/issues/677)) ([#818](https://github.com/Gitlawb/zero/issues/818)) ([3e7692d](https://github.com/Gitlawb/zero/commit/3e7692d8f0885d346809869935c81a9cf055d89e))
+* **swarm:** close lifecycle admission on shutdown ([#776](https://github.com/Gitlawb/zero/issues/776)) ([bdbda89](https://github.com/Gitlawb/zero/commit/bdbda89f3e42d93e8058ab3e1e9ef402659530cd))
+* **tui:** fix rendering corruption over multipass + Windows Terminal ([#709](https://github.com/Gitlawb/zero/issues/709)) ([5bb1bc1](https://github.com/Gitlawb/zero/commit/5bb1bc11c3188dcea7709ff07c8b25dda3541de8))
+* **tui:** paste clipboard images with Ctrl+V ([#534](https://github.com/Gitlawb/zero/issues/534)) ([#807](https://github.com/Gitlawb/zero/issues/807)) ([ec3b822](https://github.com/Gitlawb/zero/commit/ec3b8225050eb62f0f41a9582ed2881d2f9dcc8e))
+* **tui:** reset quiet clock for new runs ([#799](https://github.com/Gitlawb/zero/issues/799)) ([a4a805a](https://github.com/Gitlawb/zero/commit/a4a805a6c82c51cb255e909bd87ca183c8805cf2))
+* **windows:** use PowerShell for command execution ([#804](https://github.com/Gitlawb/zero/issues/804)) ([518d2e5](https://github.com/Gitlawb/zero/commit/518d2e53ba3fa073090a9b41c278face85b59b64))
+
 ## [0.5.0](https://github.com/Gitlawb/zero/compare/v0.4.0...v0.5.0) (2026-07-22)
 
 
