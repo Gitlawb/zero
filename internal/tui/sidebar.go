@@ -423,6 +423,9 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 			icon = zeroTheme.accent.Render(m.spinnerGlyph())
 		case specialistError:
 			icon = zeroTheme.red.Render("✗")
+		case specialistCancelled:
+			// Neutral, not red: a stopped or skipped task is not a defect.
+			icon = zeroTheme.faint.Render("⊘")
 		default: // completed
 			icon = zeroTheme.green.Render("✓")
 		}

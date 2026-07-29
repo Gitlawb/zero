@@ -64,6 +64,32 @@ type deferredTool interface {
 	Deferred() bool
 }
 
+// ChildProgressStreamer is an optional interface a tool implements to declare
+// that it spawns child agent runs whose stream-json events should surface to
+// the parent's UI. The agent loop supplies RunOptions.Progress only to tools
+// that declare it.
+//
+// A DECLARATION, NOT A NAME. The loop previously gated this on
+// `call.Name == "Task"`, so a second sub-agent-spawning tool (orchestrate) got
+// a nil callback and ran invisibly. Adding `|| call.Name == "orchestrate"`
+// would be the same defect one name later — this codebase's most repeated
+// shape. A tool that spawns children says so itself, and the loop asks.
+//
+// Tools that do not implement this keep receiving a nil Progress, which is
+// exactly their behaviour today: swarm tools included, deliberately, since the
+// swarm launcher does not forward a progress callback either.
+type ChildProgressStreamer interface {
+	StreamsChildProgress() bool
+}
+
+// StreamsChildProgress reports whether a tool opts into receiving
+// RunOptions.Progress. Tools that do not implement ChildProgressStreamer are
+// silent, which is the default.
+func StreamsChildProgress(t Tool) bool {
+	streamer, ok := t.(ChildProgressStreamer)
+	return ok && streamer.StreamsChildProgress()
+}
+
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
 }

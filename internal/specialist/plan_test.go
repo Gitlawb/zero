@@ -42,7 +42,7 @@ func TestParsePlanIsTheOnlyConstructor(t *testing.T) {
 		t.Fatal("a zero Plan must carry no tasks and no order")
 	}
 	// Executing one runs nothing and reports failed — never success.
-	report := ExecutePlan(context.Background(), zero, nil, func(context.Context, Task, []string) (TaskResult, error) {
+	report := ExecutePlan(context.Background(), zero, nil, func(context.Context, PlanTaskRequest) (TaskResult, error) {
 		t.Fatal("a zero Plan must not dispatch anything")
 		return TaskResult{}, nil
 	}, nil)
@@ -214,7 +214,7 @@ func TestTaskCountAgreesBetweenAdmissionAndExecution(t *testing.T) {
 			t.Fatalf("TaskCount = %d, want %d", plan.TaskCount(), size)
 		}
 		dispatched := 0
-		ExecutePlan(context.Background(), plan, []string{"read_file"}, func(context.Context, Task, []string) (TaskResult, error) {
+		ExecutePlan(context.Background(), plan, []string{"read_file"}, func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			dispatched++
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
@@ -363,7 +363,7 @@ func TestOrchestrateRunRejectsAnInvalidPlan(t *testing.T) {
 	tool := &OrchestrateTool{
 		PostureActive: func() bool { return true },
 		ParentTools:   []string{"read_file"},
-		RunTask: func(context.Context, Task, []string) (TaskResult, error) {
+		RunTask: func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			ran = true
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		},
@@ -393,16 +393,17 @@ func TestOrchestrateToolStatusFollowsThePlanStatus(t *testing.T) {
 		want    tools.Status
 		wantSub string
 	}{
-		{"all succeed", func(context.Context, Task, []string) (TaskResult, error) {
+		{"all succeed", func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			return TaskResult{Outcome: TaskSucceeded, Output: "ok"}, nil
 		}, tools.StatusOK, "completed"},
-		{"one fails -> partial", func(_ context.Context, task Task, _ []string) (TaskResult, error) {
+		{"one fails -> partial", func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			task := req.Task
 			if task.ID == "b" {
 				return TaskResult{Outcome: TaskFailed, Err: "no"}, errors.New("no")
 			}
 			return TaskResult{Outcome: TaskSucceeded, Output: "ok"}, nil
 		}, tools.StatusError, "partial"},
-		{"all fail -> failed", func(context.Context, Task, []string) (TaskResult, error) {
+		{"all fail -> failed", func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			return TaskResult{Outcome: TaskFailed, Err: "no"}, errors.New("no")
 		}, tools.StatusError, "failed"},
 	}

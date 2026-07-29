@@ -85,6 +85,12 @@ func (tool *OrchestrateTool) postureActive() bool {
 	return tool != nil && tool.PostureActive != nil && tool.PostureActive()
 }
 
+// StreamsChildProgress declares that a plan's tasks are child agent runs whose
+// stream-json events should reach the parent's UI, exactly as a Task
+// sub-agent's do. Declaring it is what un-gates the progress path — the loop
+// used to key on the tool name, so this tool ran invisibly.
+func (tool *OrchestrateTool) StreamsChildProgress() bool { return true }
+
 func (tool *OrchestrateTool) Parameters() tools.Schema {
 	return tools.Schema{
 		Type: "object",
@@ -158,6 +164,31 @@ func (tool *OrchestrateTool) Run(ctx context.Context, args map[string]any) tools
 	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
 }
 
+// runnerWithProgress attaches the caller's progress callback to every task
+// request.
+//
+// PER CALL, not captured at construction: RunTask is built once at
+// registration and holds only run-invariant state, while the progress callback
+// belongs to one tool call. Capturing it in NewPlanRunner is precisely the
+// mistake the runner's own doc comment warns about.
+//
+// The callback is shared by every task rather than keyed per task, because the
+// loop's callback carries only the parent's tool-call id and has no room for a
+// sub-key. That is sound HERE and only here: MaxWorkers is validated to be 1,
+// so exactly one task is in flight at any moment and the consumer can attribute
+// events to the task it last saw dispatched. Stage 2d must revisit this the
+// moment two tasks can run at once — see the note on the TUI plan recorder.
+func (tool *OrchestrateTool) runnerWithProgress(options tools.RunOptions) PlanRunner {
+	run := tool.RunTask
+	if run == nil || options.Progress == nil {
+		return run
+	}
+	return func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
+		req.Progress = options.Progress
+		return run(ctx, req)
+	}
+}
+
 // Limits supplies the hard caps a plan must fit inside. nil means the defaults.
 func (tool *OrchestrateTool) limits(options tools.RunOptions) Limits {
 	limits := Limits{
@@ -194,7 +225,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	}
 
 	recordPlanAdmitted(tool.Recorder, plan)
-	report := ExecutePlan(ctx, plan, tool.ParentTools, tool.RunTask, tool.Recorder)
+	report := ExecutePlan(ctx, plan, tool.ParentTools, tool.runnerWithProgress(options), tool.Recorder)
 	recordPlanCompleted(tool.Recorder, plan, report)
 
 	result := tools.Result{

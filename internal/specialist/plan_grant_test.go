@@ -168,7 +168,7 @@ func TestExecutePlanFailsAnUngrantableTaskWithoutDispatchingIt(t *testing.T) {
 	)
 	dispatched := 0
 	report := ExecutePlan(context.Background(), plan, nil,
-		func(context.Context, Task, []string) (TaskResult, error) {
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
 			dispatched++
 			return TaskResult{Outcome: TaskSucceeded}, nil
 		}, nil)
@@ -276,4 +276,16 @@ func containsGrant(grant []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// The real tools must actually declare what the loop now keys on. The agent
+// package proves the MECHANISM with probes; this proves the two production
+// tools opt in, which is what makes their children visible.
+func TestSubagentToolsDeclareChildProgress(t *testing.T) {
+	if !(&TaskTool{}).StreamsChildProgress() {
+		t.Error("the Task tool must declare child progress; its sub-agents streamed before this change")
+	}
+	if !(&OrchestrateTool{}).StreamsChildProgress() {
+		t.Error("orchestrate must declare child progress; without it a plan runs invisibly")
+	}
 }

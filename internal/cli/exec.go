@@ -256,9 +256,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// expanded any --mode preset onto them. They bound the plan tool's
 		// parent grant, so a task can never hold a tool this run was denied.
 		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize,
-			options.enabledTools, options.disabledTools, orchestrateWiring{
-				Gate:     planGate,
-				Recorder: planRecorder,
+			options.enabledTools, options.disabledTools, planRecorder, orchestrateWiring{
+				Gate: planGate,
 				PlanContext: specialist.PlanTaskContext{
 					Cwd: workspaceRoot,
 					// Resolved permission mode is not available this early; the

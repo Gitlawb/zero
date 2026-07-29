@@ -40,6 +40,11 @@ type Options struct {
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	RuntimeMessageSink          func(tea.Msg)
+	// PlanProgress is the recorder the orchestrate tool was registered with.
+	// The model re-attaches it to each run so plan lifecycle events become
+	// transcript cards. nil disables the live plan view without affecting
+	// execution — recording is best-effort everywhere on this path.
+	PlanProgress                *PlanProgressBridge
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry

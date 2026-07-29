@@ -41,7 +41,8 @@ type PlanTaskContext struct {
 // synchronous, returns before ExecutePlan moves to the next task, and holds no
 // goroutine of its own.
 func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
-	return func(ctx context.Context, task Task, grantedTools []string) (TaskResult, error) {
+	return func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
+		task, grantedTools := req.Task, req.Tools
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -64,6 +65,13 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			CurrentDepth:    planCtx.Depth,
 			Cwd:             planCtx.Cwd,
 			PermissionMode:  planCtx.PermissionMode,
+			// THE SECOND HALF of the same defect. The Task tool forwards its
+			// caller's progress callback here (task_tool.go); this path built
+			// the same struct and omitted the field, so a plan task's child
+			// streamed to nobody. Same class as finding 7 (ParentModel): a
+			// second construction path that does not carry what the first one
+			// did. Fixed with the tool-side half, not separately.
+			Progress: req.Progress,
 			// Explicitly NOT MemberAutonomy: Phase 2 tasks are read-only, and
 			// granting it here would be the authority widening that was ruled
 			// out as needing its own decision.
