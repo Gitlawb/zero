@@ -71,7 +71,13 @@ func (tool *OrchestrateTool) Name() string { return OrchestrateToolName }
 
 func (tool *OrchestrateTool) Description() string {
 	return "Execute a structured plan of read-only sub-agent tasks in dependency order. " +
-		"Tasks run sequentially; declare dependencies with depends_on so the plan records which work was independent."
+		"Tasks run sequentially; declare dependencies with depends_on so the plan records which work was independent. " +
+		// The either/or the schema cannot express, and the shape worth
+		// encouraging: a plan is only worth more than reading the code yourself
+		// when its tasks are genuinely independent.
+		"Supply EITHER tasks and budget, OR saved with the name of a stored plan — never neither. " +
+		"Use it when a question splits into parts that can be answered independently and then combined; " +
+		"a single lookup is faster done directly."
 }
 
 // Deferred hides the tool unless the posture is active — as a SECOND layer.
@@ -124,10 +130,16 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried.",
 			},
 		},
-		// tasks and budget are no longer unconditionally required: a `saved`
-		// reference supplies both. ParsePlan still refuses a plan that has
-		// neither, so the rule is enforced where it can see the resolved
-		// arguments rather than by a schema that cannot.
+		// EMPTY, and the either/or lives in the DESCRIPTION instead.
+		//
+		// `saved` supplies tasks and budget, so neither is unconditionally
+		// required any more — but dropping them from Required emits no
+		// "required" key at all, and the model is then handed a tool whose every
+		// argument looks optional. tools.Schema has no oneOf, so the constraint
+		// that is actually true — "tasks and budget, or saved, never neither" —
+		// cannot be spelled here. It is spelled in Description, which is the
+		// thing a model reads for intent, and enforced in ParsePlan, which is
+		// the only place that can see the resolved arguments.
 		Required:             []string{},
 		AdditionalProperties: false,
 	}

@@ -773,6 +773,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// the process starts, runs once, exits, so there is no earlier turn for
 		// it to have been active across.
 		Zeromaxing: execZeromaxing(execProfile),
+		// Whether the enter notice may NAME the orchestrate tool. Derived from
+		// the registry rather than passed as a flag — see orchestrateAvailable.
+		OrchestrateAvailable: orchestrateAvailable(registry),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
