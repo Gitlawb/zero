@@ -180,13 +180,31 @@ func windowsSandboxSecretEntropy(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), ".secret")
 }
 
+// Seamed so the permission-denied mapping in readWindowsSandboxSecret is
+// testable. Producing a real ERROR_ACCESS_DENIED needs DACL surgery on Windows,
+// since a 0000 file is still readable and reading a directory reports
+// "Incorrect function", so a test built that way would exercise the platform
+// rather than the mapping.
+var readWindowsSandboxSecretFile = os.ReadFile
+
 // readWindowsSandboxSecret loads a principal's password. A missing file means
 // setup has not run for this workspace, which the caller turns into a fallback
 // rather than a hard failure.
 func readWindowsSandboxSecret(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	data, err := readWindowsSandboxSecretFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			return "", errWindowsSandboxIdentityUnavailable
+		}
+		// Permission denied is unavailability, not breakage. The secret's DACL
+		// names whoever ran setup, so an operator who elevated with a separate
+		// administrative account, through runas or an over-the-shoulder UAC
+		// prompt, ends up with a secret their ordinary account cannot open. That
+		// is the documented fail-soft case: fall back to the restricted token and
+		// let the warning say so. Treating it as a hard error instead made every
+		// sandboxed command fail on a machine that was merely set up by a
+		// different admin, which is a common way to run an elevated setup.
+		if os.IsPermission(err) {
 			return "", errWindowsSandboxIdentityUnavailable
 		}
 		return "", fmt.Errorf("read sandbox secret: %w", err)
