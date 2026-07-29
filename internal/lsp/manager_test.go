@@ -560,6 +560,170 @@ func TestWaitForDiagnosticsDrainsAcceptedPublishAfterTransportEOF(t *testing.T) 
 // worker therefore read as "never arrived", and Manager.Check returned (nil,
 // nil) for text the server had in fact answered. Cancellation now settles like
 // closure does — let the worker finish what it accepted, then re-read.
+// TestCatchUpNotificationsFollowsPublishesAcceptedWhileWaiting covers jatmn's
+// #759 finding: catch-up snapshotted the accepted sequence once, so a publish
+// the reader accepted DURING the wait was not waited for. The worker finishing
+// the stale target satisfied the check, and the caller then read diagnosticsFor
+// while a newer publish for the same URI was still queued — the same
+// "newest received, not the one that woke the wait" failure the closed-client
+// drain regression was written for, on the live path.
+func TestCatchUpNotificationsFollowsPublishesAcceptedWhileWaiting(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer serverWriter.Close()
+	client := NewClient(clientReader, io.Discard)
+	uri := PathToURI("/repo/main.go")
+	sess := &session{
+		client:       client,
+		catchUpGrace: 5 * time.Second,
+		diagnostics:  map[string][]Diagnostic{},
+		lastPublish:  map[string]time.Time{},
+		publishSeq:   map[string]int64{},
+		waiters:      map[string][]chan struct{}{},
+	}
+
+	publish := func(message string) {
+		t.Helper()
+		params := PublishDiagnosticsParams{URI: uri, Diagnostics: []Diagnostic{{Message: message}}}
+		if err := writeMessage(serverWriter, map[string]any{
+			"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params,
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	client.SetNotificationHandler(func(method string, params json.RawMessage, seq int64) {
+		switch {
+		case method == "test/block":
+			close(blocked)
+			<-release
+			return
+		case strings.Contains(string(params), `"first"`):
+			// Handling "first" is what makes "second" arrive mid-catch-up: it goes
+			// on the wire and is confirmed accepted before this handler returns, so
+			// the worker's handled count only reaches "first" once a newer item is
+			// already queued behind it.
+			publish("second")
+			deadline := time.Now().Add(time.Second)
+			for client.ReceiptSeq() < 3 {
+				if time.Now().After(deadline) {
+					t.Error("follow-up publish was not accepted while the worker was busy")
+					break
+				}
+				runtime.Gosched()
+			}
+		case strings.Contains(string(params), `"second"`):
+			// Hold the worker inside this handler so the assertion below observes
+			// the state the bug produced: caught up by the stale target, with the
+			// newer publish still unrecorded.
+			close(secondEntered)
+			<-releaseSecond
+		}
+		sess.handleNotification(method, params, seq)
+	})
+
+	if err := writeMessage(serverWriter, map[string]any{"jsonrpc": "2.0", "method": "test/block"}); err != nil {
+		t.Fatal(err)
+	}
+	<-blocked
+	publish("first")
+	deadline := time.Now().Add(time.Second)
+	for client.ReceiptSeq() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("first publish was not accepted")
+		}
+		runtime.Gosched()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		sess.catchUpNotifications()
+		close(done)
+	}()
+	// Catch-up must be parked in its wait before the worker is released, so the
+	// sequence it started from is the one that goes stale.
+	select {
+	case <-done:
+		t.Fatal("catch-up returned while the worker was still behind")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+
+	// The worker is now inside the handler for "second", which means "first" is
+	// recorded and its sequence — the one catch-up started from — is satisfied.
+	// A snapshot-based catch-up returns here, with the newer publish unrecorded.
+	select {
+	case <-secondEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker never reached the follow-up publish")
+	}
+	select {
+	case <-done:
+		t.Fatalf("catch-up returned on a stale target; diagnostics = %#v", sess.diagnosticsFor(uri))
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseSecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("catch-up did not finish")
+	}
+	if got := sess.diagnosticsFor(uri); len(got) != 1 || got[0].Message != "second" {
+		t.Fatalf("diagnostics = %#v, want the publish accepted during catch-up", got)
+	}
+}
+
+// TestCatchUpNotificationsGivesUpAfterTheLiveGrace spells out the tradeoff the
+// live-client timeout represents: an unbounded wait would hang Check past a
+// deadline the caller has already blown, so a worker that never catches up
+// costs the grace and no more. Production sessions use a 50ms grace; this uses
+// the same order of magnitude rather than the generous one the other tests pin.
+func TestCatchUpNotificationsGivesUpAfterTheLiveGrace(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer serverWriter.Close()
+	client := NewClient(clientReader, io.Discard)
+	sess := &session{
+		client:       client,
+		catchUpGrace: 25 * time.Millisecond,
+		diagnostics:  map[string][]Diagnostic{},
+		lastPublish:  map[string]time.Time{},
+		publishSeq:   map[string]int64{},
+		waiters:      map[string][]chan struct{}{},
+	}
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	client.SetNotificationHandler(func(method string, _ json.RawMessage, _ int64) {
+		if method == "test/block" {
+			close(blocked)
+			<-release
+		}
+	})
+	if err := writeMessage(serverWriter, map[string]any{"jsonrpc": "2.0", "method": "test/block"}); err != nil {
+		t.Fatal(err)
+	}
+	<-blocked
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		sess.catchUpNotifications()
+		close(done)
+	}()
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed < sess.catchUpGrace {
+			t.Fatalf("catch-up returned after %v, before its %v grace", elapsed, sess.catchUpGrace)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("catch-up on a permanently-behind worker must give up after the grace, not hang")
+	}
+}
+
 func TestWaitForDiagnosticsCatchesUpOnContextCancellation(t *testing.T) {
 	clientReader, serverWriter := io.Pipe()
 	defer serverWriter.Close()

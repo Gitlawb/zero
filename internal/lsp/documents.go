@@ -265,12 +265,19 @@ func (s *session) catchUpNotifications() {
 		<-drained
 		return
 	}
-	target := s.client.acceptedNotificationSeq()
 	timer := time.NewTimer(s.catchUpGrace)
 	defer timer.Stop()
 	for {
+		// Re-read the target every pass rather than snapshotting it once. The
+		// reader keeps running while this waits, so a snapshot goes stale: the
+		// worker finishing the item that was last when we started satisfies
+		// `handled >= target` while a newer publish for the same URI sits queued,
+		// and the caller then answers from diagnosticsFor with the older one —
+		// the exact failure the closed-client drain exists to prevent, on the
+		// live path. Growth is not unbounded: the grace below caps the wait no
+		// matter how fast the server publishes.
 		handled, advanced := s.client.handledThrough()
-		if handled >= target {
+		if handled >= s.client.acceptedNotificationSeq() {
 			return
 		}
 		select {
