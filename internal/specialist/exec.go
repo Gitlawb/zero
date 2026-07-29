@@ -395,7 +395,7 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 }
 
 func (executor Executor) runFresh(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
-	manifest, err := executor.freshManifest(params)
+	manifest, err := executor.resolveManifest(params)
 	if err != nil {
 		return ExecResult{}, err
 	}
@@ -421,11 +421,22 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 	return executor.runBuiltArgs(ctx, built, manifest, params, options, "foreground", options.Progress)
 }
 
-// freshManifest resolves the manifest for a fresh run. A caller-supplied inline
+// resolveManifest resolves the manifest for a run. A caller-supplied inline
 // manifest (validated here) takes precedence over a registry lookup by name, so a
 // caller with its own definition — the swarm launcher running a member whose
-// agent type is not a registered specialist — can run without a registry entry.
-func (executor Executor) freshManifest(params TaskParameters) (Manifest, error) {
+// agent type is not a registered specialist, or a plan task running under a
+// narrowed grant — can run without a registry entry.
+//
+// USED BY BOTH the fresh and resume paths. It used to serve only the fresh one:
+// runResume looked the manifest up by session.AgentName and ignored
+// params.Manifest entirely, so the two paths answered "what may this child do?"
+// differently. For an inline-manifest child that is not merely a lost
+// definition — it is a WIDENING. A plan task launched under a parent holding
+// only grep carries the inline grant [grep]; resuming it reloaded the
+// registered explorer manifest and handed it back
+// [glob grep list_directory read_file read_minified_file]. Resuming a task
+// must never grant it more than launching it did.
+func (executor Executor) resolveManifest(params TaskParameters) (Manifest, error) {
 	if params.Manifest != nil {
 		manifest := *params.Manifest
 		if err := Validate(&manifest); err != nil {
@@ -448,7 +459,15 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 	if requestedName := strings.TrimSpace(params.Name); requestedName != "" && requestedName != specialistName {
 		return ExecResult{}, fmt.Errorf("resume session %q belongs to specialist %q, not %q", session.SessionID, specialistName, requestedName)
 	}
-	manifest, err := executor.loadManifest(specialistName)
+	// The SAME resolver the fresh path uses: an inline manifest wins, and only
+	// a caller that supplied none falls back to the registry. params.Name is
+	// already reconciled against the session's agent name above, so the
+	// fallback still looks up the specialist the session actually belongs to.
+	resumeParams := params
+	if strings.TrimSpace(resumeParams.Name) == "" {
+		resumeParams.Name = specialistName
+	}
+	manifest, err := executor.resolveManifest(resumeParams)
 	if err != nil {
 		return ExecResult{}, err
 	}
