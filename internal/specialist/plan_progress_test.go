@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -107,5 +108,96 @@ func TestPlanRunnerWithoutProgressPassesNil(t *testing.T) {
 	}
 	if sawCallback {
 		t.Fatal("an unwired plan must hand the executor a nil progress callback, as it always did")
+	}
+}
+
+// Q9: a plan task inherits the parent's model.
+//
+// The struct comment always claimed it did; the code did not. Both production
+// call sites left PlanTaskContext.ParentModel empty, so appendModelArgs got no
+// parent model and passed no --model — a plan task ran on whatever the CHILD's
+// config resolved, which after a /model switch is a different model entirely.
+//
+// The fix is not "populate the field at registration": the TUI's registry is
+// built once per session while /model changes the model between runs, so a
+// value captured there would be stale by design. The three values arrive per
+// call, from the same tools.RunOptions the Task tool reads.
+func TestPlanTaskInheritsTheParentsModel(t *testing.T) {
+	var childArgs []string
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			childArgs = args
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	gate := &PostureGate{}
+	gate.Set(true)
+	tool := &OrchestrateTool{
+		PostureActive: gate.Active,
+		ParentTools:   []string{"read_file"},
+		RunTask:       NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"}),
+	}
+
+	tool.RunWithOptions(context.Background(), map[string]any{
+		"name":   "p",
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "x"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100000)},
+	}, tools.RunOptions{
+		Model:           "parent-chose-this",
+		SessionID:       "zero_parent_session",
+		ReasoningEffort: "high",
+	})
+
+	joined := strings.Join(childArgs, " ")
+	if !strings.Contains(joined, "--model parent-chose-this") {
+		t.Fatalf("the plan task did not inherit the parent's model:\n%s", joined)
+	}
+	// The parent SESSION travels with the model: it is what links the child
+	// back to the run that spawned it, so a plan task stays drillable from its
+	// parent rather than looking like an orphan.
+	if !strings.Contains(joined, "zero_parent_session") {
+		t.Fatalf("the plan task did not inherit the parent's session id:\n%s", joined)
+	}
+}
+
+// The parent identity is read per CALL. A second call with a different model
+// must launch its task on that model — the whole reason these values do not
+// live on the registration-time context.
+func TestASecondCallUsesTheNewParentModel(t *testing.T) {
+	var models []string
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			for index, arg := range args {
+				if arg == "--model" && index+1 < len(args) {
+					models = append(models, args[index+1])
+				}
+			}
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	gate := &PostureGate{}
+	gate.Set(true)
+	tool := &OrchestrateTool{
+		PostureActive: gate.Active,
+		ParentTools:   []string{"read_file"},
+		RunTask:       NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"}),
+	}
+	args := map[string]any{
+		"name":   "p",
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "x"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100000)},
+	}
+
+	tool.RunWithOptions(context.Background(), args, tools.RunOptions{Model: "first-model"})
+	tool.RunWithOptions(context.Background(), args, tools.RunOptions{Model: "second-model"})
+
+	if len(models) != 2 || models[0] != "first-model" || models[1] != "second-model" {
+		t.Fatalf("models = %v; the parent model must be read per call, not captured at registration", models)
 	}
 }

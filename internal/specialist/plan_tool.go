@@ -164,8 +164,8 @@ func (tool *OrchestrateTool) Run(ctx context.Context, args map[string]any) tools
 	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
 }
 
-// runnerWithProgress attaches the caller's progress callback to every task
-// request.
+// runnerForCall attaches everything that belongs to THIS tool call — the
+// progress callback and the parent's identity — to every task request.
 //
 // PER CALL, not captured at construction: RunTask is built once at
 // registration and holds only run-invariant state, while the progress callback
@@ -178,13 +178,21 @@ func (tool *OrchestrateTool) Run(ctx context.Context, args map[string]any) tools
 // so exactly one task is in flight at any moment and the consumer can attribute
 // events to the task it last saw dispatched. Stage 2d must revisit this the
 // moment two tasks can run at once — see the note on the TUI plan recorder.
-func (tool *OrchestrateTool) runnerWithProgress(options tools.RunOptions) PlanRunner {
+func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner {
 	run := tool.RunTask
-	if run == nil || options.Progress == nil {
-		return run
+	if run == nil {
+		return nil
 	}
 	return func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
 		req.Progress = options.Progress
+		// The parent's identity, read from the same RunOptions fields the Task
+		// tool reads (task_tool.go). A plan task inherits the model its parent
+		// is running on; without this it fell back to the child's own config,
+		// so switching model with /model or --model left plan tasks running
+		// somewhere else entirely.
+		req.ParentSessionID = options.SessionID
+		req.ParentModel = options.Model
+		req.ParentReasoningEffort = options.ReasoningEffort
 		return run(ctx, req)
 	}
 }
@@ -225,7 +233,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	}
 
 	recordPlanAdmitted(tool.Recorder, plan)
-	report := ExecutePlan(ctx, plan, tool.ParentTools, tool.runnerWithProgress(options), tool.Recorder)
+	report := ExecutePlan(ctx, plan, tool.ParentTools, tool.runnerForCall(options), tool.Recorder)
 	recordPlanCompleted(tool.Recorder, plan, report)
 
 	result := tools.Result{
