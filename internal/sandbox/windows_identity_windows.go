@@ -44,9 +44,16 @@ const (
 	// windowsSandboxUserPrefix keeps the accounts recognisable in `net user` and
 	// lets cleanup identify what belongs to Zero. Windows caps a local account
 	// name at 20 characters, which windowsSandboxUserName respects.
-	windowsSandboxUserPrefix  = "zero-sbx-"
-	windowsSandboxUserComment = "Zero sandbox principal (managed)"
-	windowsSandboxUserNameMax = 20
+	windowsSandboxUserPrefix = "zero-sbx-"
+	// The comment doubles as the ownership marker AND records which workspace
+	// the account belongs to. The account NAME can only carry 11 characters of
+	// the workspace digest because of the 20-character local-account limit, so
+	// two workspaces whose digests share that prefix derive the same name. The
+	// full key here turns that from a silent share of one account, one secret
+	// and one ACL identity into a refusal.
+	windowsSandboxUserComment    = "Zero sandbox principal (managed)"
+	windowsSandboxUserCommentKey = windowsSandboxUserComment + " key="
+	windowsSandboxUserNameMax    = 20
 )
 
 // Win32 status codes that mean "already there". Treated as success so
@@ -154,6 +161,12 @@ func windowsSandboxUserName(workspaceKey string) string {
 	return name
 }
 
+// windowsSandboxUserCommentFor returns the ownership comment for a workspace,
+// carrying the full key the account name could only hold 11 characters of.
+func windowsSandboxUserCommentFor(workspaceKey string) string {
+	return windowsSandboxUserCommentKey + workspaceKey
+}
+
 // newWindowsSandboxPassword returns a random password for a sandbox principal.
 // The account is never signed into interactively: the password exists only so
 // LogonUser can mint a token for it, so it is generated per provisioning run,
@@ -225,7 +238,7 @@ func ensureWindowsSandboxGroup() error {
 // It reports whether the account already existed, because NetUserAdd leaves such
 // an account completely untouched, password included. The caller has to reset it
 // or the secret it goes on to store would not be the account's password at all.
-func ensureWindowsSandboxUser(username string, password string) (bool, error) {
+func ensureWindowsSandboxUser(username string, password string, workspaceKey string) (bool, error) {
 	name, err := windows.UTF16PtrFromString(username)
 	if err != nil {
 		return false, err
@@ -234,7 +247,7 @@ func ensureWindowsSandboxUser(username string, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	comment, err := windows.UTF16PtrFromString(windowsSandboxUserComment)
+	comment, err := windows.UTF16PtrFromString(windowsSandboxUserCommentFor(workspaceKey))
 	if err != nil {
 		return false, err
 	}
@@ -332,7 +345,7 @@ var errWindowsSandboxNameCollision = errors.New("a local account with Zero's der
 //
 // A missing account is not managed rather than an error, so callers can use this
 // as a plain question without special-casing absence.
-func windowsSandboxUserIsManaged(username string) (bool, error) {
+func windowsSandboxUserIsManaged(username string, workspaceKey string) (bool, error) {
 	name, err := windows.UTF16PtrFromString(username)
 	if err != nil {
 		return false, err
@@ -359,7 +372,14 @@ func windowsSandboxUserIsManaged(username string) (bool, error) {
 	if info.Comment == nil {
 		return false, nil
 	}
-	return windows.UTF16PtrToString(info.Comment) == windowsSandboxUserComment, nil
+	comment := windows.UTF16PtrToString(info.Comment)
+	// An account provisioned before the key was recorded is still ours; it
+	// predates this check and cannot be attributed to a workspace, so it is
+	// adopted and its comment rewritten on the way through.
+	if comment == windowsSandboxUserComment {
+		return true, nil
+	}
+	return comment == windowsSandboxUserCommentFor(workspaceKey), nil
 }
 
 // resolveWindowsSandboxSID looks up the SID for a provisioned principal. The SID
@@ -385,10 +405,12 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // post-creation pair would never get past ensureWindowsSandboxGroup on an
 // ordinary machine and would pass without reaching the code it names.
 var (
-	ensureWindowsSandboxGroupFn    = ensureWindowsSandboxGroup
-	ensureWindowsSandboxUserFn     = ensureWindowsSandboxUser
-	addWindowsSandboxUserToGroupFn = addWindowsSandboxUserToGroup
-	resolveWindowsSandboxSIDFn     = resolveWindowsSandboxSID
+	ensureWindowsSandboxGroupFn       = ensureWindowsSandboxGroup
+	ensureWindowsSandboxUserFn        = ensureWindowsSandboxUser
+	addWindowsSandboxUserToGroupFn    = addWindowsSandboxUserToGroup
+	resolveWindowsSandboxSIDFn        = resolveWindowsSandboxSID
+	resetWindowsSandboxUserPasswordFn = resetWindowsSandboxUserPassword
+	windowsSandboxUserIsManagedFn     = windowsSandboxUserIsManaged
 )
 
 // provisionWindowsSandboxIdentity ensures the managed group and one sandbox
@@ -410,7 +432,7 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 	if err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
-	existed, err := ensureWindowsSandboxUserFn(username, password)
+	existed, err := ensureWindowsSandboxUserFn(username, password, workspaceKey)
 	if err != nil {
 		return windowsSandboxIdentity{}, "", false, err
 	}
@@ -421,20 +443,29 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 		// because somebody created it deliberately. Adopting one means resetting
 		// its password, which is not something to do on the strength of a name
 		// matching a pattern we generate ourselves.
-		managed, err := windowsSandboxUserIsManaged(username)
+		managed, err := windowsSandboxUserIsManagedFn(username, workspaceKey)
 		if err != nil {
 			return windowsSandboxIdentity{}, "", false, err
 		}
 		if !managed {
 			return windowsSandboxIdentity{}, "", false, fmt.Errorf("%w: %q", errWindowsSandboxNameCollision, username)
 		}
-		// Ours, and NetUserAdd left it untouched, so the password above is not yet
-		// its password. Set it, or the secret stored by the caller would never
-		// authenticate and every command would fail to log on with a principal
-		// that looks perfectly provisioned.
-		if err := resetWindowsSandboxUserPassword(username, password); err != nil {
-			return windowsSandboxIdentity{}, "", false, err
-		}
+		// Deliberately NOT resetting the password here.
+		//
+		// NetUserAdd left an existing account untouched, so the password above is
+		// not yet its password and something has to set it. Doing that here, at
+		// the top of provisioning, opened a window that lasted until the secret
+		// was written several steps later: a failure anywhere in between left a
+		// live account whose password nothing on disk knew, and because the
+		// account already existed the rollback correctly declined to delete it.
+		// The command path then read the absent secret as "not provisioned" and
+		// quietly fell back to the weaker backend, so the sandbox was downgraded
+		// for good with nothing to show for it.
+		//
+		// The caller rotates instead, immediately before committing the secret,
+		// which narrows that window to a single operation. Until it does, the
+		// account keeps its old password and the old secret on disk still
+		// authenticates, so a failure before that point costs nothing.
 	}
 	// Both failures below can happen AFTER NetUserAdd created the account, so the
 	// name has to come back with them. The caller's rollback deletes by
