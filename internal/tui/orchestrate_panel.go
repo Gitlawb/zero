@@ -54,6 +54,10 @@ type orchestrateTask struct {
 	// makes a diamond LOOK like a diamond — tasks at the same depth ran from the
 	// same fan-out and are drawn on the same rung.
 	depth int
+	// attempts is how many times the task ran. A stalled task is retried, and
+	// the retry happens INSIDE the executor — one dispatch, one card — so
+	// without this the panel shows a task that silently took twice as long.
+	attempts int
 	// cardKey links this task to its live agent state in the specialist
 	// tracker: the temporary key while it runs, the child's real session id
 	// once it finishes. The detail pane reads tool counts, the current tool and
@@ -165,7 +169,7 @@ func (s *orchestratePanelState) linkCard(taskID, cardKey string) {
 	}
 }
 
-func (s *orchestratePanelState) markDone(taskID, outcome string, tokens int, now time.Time) {
+func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempts int, now time.Time) {
 	index, ok := s.byID[taskID]
 	if !ok {
 		return
@@ -178,6 +182,7 @@ func (s *orchestratePanelState) markDone(taskID, outcome string, tokens int, now
 	s.tokensUsed += tokens
 	task := &s.tasks[index]
 	task.status = orchestrateStatusFromOutcome(outcome)
+	task.attempts = attempts
 	task.endedAt = now
 	if task.startedAt.IsZero() {
 		// Never dispatched: it has no duration, and pretending otherwise would

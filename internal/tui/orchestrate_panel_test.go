@@ -149,11 +149,11 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 	now := m.now()
 
 	m.orchestrate.markStarted("a", "root", "", now)
-	m.orchestrate.markDone("a", "succeeded", 0, now.Add(time.Second))
+	m.orchestrate.markDone("a", "succeeded", 0, 1, now.Add(time.Second))
 	m.orchestrate.markStarted("b", "left", "", now.Add(time.Second))
-	m.orchestrate.markDone("b", "failed", 0, now.Add(2*time.Second))
-	m.orchestrate.markDone("c", "cancelled", 0, now.Add(2*time.Second))
-	m.orchestrate.markDone("d", "dependency_failed", 0, now.Add(2*time.Second))
+	m.orchestrate.markDone("b", "failed", 0, 1, now.Add(2*time.Second))
+	m.orchestrate.markDone("c", "cancelled", 0, 1, now.Add(2*time.Second))
+	m.orchestrate.markDone("d", "dependency_failed", 0, 1, now.Add(2*time.Second))
 
 	want := map[string]orchestrateTaskStatus{
 		"a": orchestrateDone, "b": orchestrateFailed,
@@ -176,9 +176,9 @@ func TestCancelledPlanIsNotShownAsFailures(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 	m.orchestrate.markStarted("a", "root", "", now)
-	m.orchestrate.markDone("a", "succeeded", 0, now)
+	m.orchestrate.markDone("a", "succeeded", 0, 1, now)
 	for _, id := range []string{"b", "c", "d"} {
-		m.orchestrate.markDone(id, "cancelled", 0, now)
+		m.orchestrate.markDone(id, "cancelled", 0, 1, now)
 	}
 	m.orchestrate.complete(planCompletedMsg{status: "partial", succeeded: 1, cancelled: 3}, now)
 
@@ -562,7 +562,7 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 	start := m.now()
 
 	m.orchestrate.markStarted("a", "root", "", start)
-	m.orchestrate.markDone("a", "succeeded", 0, start)
+	m.orchestrate.markDone("a", "succeeded", 0, 1, start)
 	m.orchestrate.markStarted("b", "left", "", start)
 
 	// Immediately after finishing, a is still there — you have to be able to
@@ -589,7 +589,7 @@ func TestAFadedTaskIsStillCountedAndStillInPlans(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
 	m.orchestrate.markStarted("a", "root", "", start)
-	m.orchestrate.markDone("a", "succeeded", 0, start)
+	m.orchestrate.markDone("a", "succeeded", 0, 1, start)
 	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
 
 	if done, _, _, _, _ := m.orchestrate.counts(); done != 1 {
@@ -629,12 +629,12 @@ func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
 	now := m.now()
 
 	m.orchestrate.markStarted("a", "root", "", now)
-	m.orchestrate.markDone("a", "succeeded", 16470, now)
+	m.orchestrate.markDone("a", "succeeded", 16470, 1, now)
 	if m.orchestrate.tokensUsed != 16470 {
 		t.Fatalf("tokensUsed = %d after one task, want it counted as it finishes", m.orchestrate.tokensUsed)
 	}
 	m.orchestrate.markStarted("b", "left", "", now)
-	m.orchestrate.markDone("b", "succeeded", 68483, now)
+	m.orchestrate.markDone("b", "succeeded", 68483, 1, now)
 
 	rendered := m.renderOrchestratePanel(100)
 	if !strings.Contains(rendered, "budget 84953/100000 tokens") {
@@ -649,7 +649,7 @@ func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 	m.orchestrate.markStarted("a", "root", "", now)
-	m.orchestrate.markDone("a", "succeeded", 100, now)
+	m.orchestrate.markDone("a", "succeeded", 100, 1, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "partial", tokensUsed: 379773}, now)
 	if m.orchestrate.tokensUsed != 379773 {
@@ -662,7 +662,7 @@ func TestAMissingFinalTotalDoesNotZeroTheCount(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 	m.orchestrate.markStarted("a", "root", "", now)
-	m.orchestrate.markDone("a", "succeeded", 4242, now)
+	m.orchestrate.markDone("a", "succeeded", 4242, 1, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "completed"}, now)
 	if m.orchestrate.tokensUsed != 4242 {

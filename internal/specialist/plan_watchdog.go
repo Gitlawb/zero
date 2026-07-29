@@ -24,12 +24,28 @@ import (
 // fires on healthy work teaches users to raise it until it never fires. So the
 // clock resets on every stream event the child emits, and only silence counts.
 //
-// It is a BOUND, not a retry policy. A stalled task is reported as stalled and
-// the plan carries on with its dependents skipped, exactly as for any other
-// failure. Retrying is a separate decision: a stall is usually a provider or
-// network condition that a second identical attempt will hit again, and
-// spending another task's worth of budget to find that out needs its own
-// argument.
+// THE RETRY POLICY, which this file previously said needed its own argument.
+// Here it is.
+//
+// ONLY A STALL IS RETRIED. Every other failure is left exactly as it was: a
+// task whose child ran and reported an error produced a real answer, and running
+// it again spends another task's budget to receive the same one. A stall is the
+// opposite — it is the ABSENCE of an answer, so there is no result to disbelieve
+// and nothing partial to lose. That asymmetry is the whole justification, and it
+// is why the retry is keyed on the watchdog's own verdict rather than on "the
+// task failed".
+//
+// THE DEFAULT IS ONE EXTRA ATTEMPT, and that is a judgment, not a measurement.
+// It costs a wedged task twice the stall timeout before the plan moves on — six
+// minutes at the default — in exchange for surviving a transient provider or
+// network condition without losing the task's dependents too. Under a posture
+// whose entire premise is spending more for a better answer, six minutes of
+// patience is the cheaper mistake. A caller who disagrees sets max_retries to 0,
+// which is why an explicit 0 has to be distinguishable from an absent key.
+//
+// A CANCELLED TASK IS NEVER RETRIED. The user stopping a plan and a provider
+// going quiet both surface as a context error; retrying the first would mean
+// Ctrl-C launching another child.
 
 // defaultStallTimeout is how long a task may emit nothing before it is
 // considered wedged. Deliberately generous: a slow model on a large file can be
@@ -39,6 +55,16 @@ const defaultStallTimeout = 3 * time.Minute
 // minStallTimeout floors a caller-supplied value. Below this the watchdog would
 // fire on ordinary think-time and become a random task-killer.
 const minStallTimeout = 30 * time.Second
+
+const (
+	// defaultPlanRetries is how many EXTRA attempts a stalled task gets when a
+	// plan does not say. See the retry policy above for why it is 1.
+	defaultPlanRetries = 1
+	// maxPlanRetries caps what a plan may ask for. Three attempts at the default
+	// stall timeout is already nine minutes on one task; past that the answer is
+	// not "try again", it is "the provider is down".
+	maxPlanRetries = 3
+)
 
 // stallWatchdog cancels a task's context when its child goes quiet.
 //
@@ -175,7 +201,13 @@ func watchedProgress(watchdog *stallWatchdog, forward func(streamjson.Event)) fu
 // stallError is the failure a wedged task reports. Distinct wording from a
 // cancellation, because a user who stopped a plan and a plan that hung are
 // looking at very different problems.
-func stallError(taskID string, timeout time.Duration) error {
+// It names the ATTEMPT COUNT when there was more than one, because "stalled" and
+// "stalled three times running" call for different responses from the user.
+func stallError(taskID string, timeout time.Duration, attempts int) error {
+	if attempts > 1 {
+		return fmt.Errorf("task %q produced no output for %s on each of %d attempts and was stopped; "+
+			"raise budget.max_stall_seconds if this task is legitimately slow", taskID, timeout, attempts)
+	}
 	return fmt.Errorf("task %q produced no output for %s and was stopped; "+
 		"raise budget.max_stall_seconds if this task is legitimately slow", taskID, timeout)
 }

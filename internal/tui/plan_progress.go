@@ -201,7 +201,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 	// own key and the handler creates the card on demand.
 	dispatched := result.Outcome == specialist.TaskSucceeded || result.Outcome == specialist.TaskFailed
 	taskID, sessionID, reason := result.ID, result.SessionID, result.Err
-	outcome, tokens := result.Outcome, result.Tokens
+	outcome, tokens, attempts := result.Outcome, result.Tokens, result.Attempts
 	bridge.send(func(runID int) tea.Msg {
 		return planTaskDoneMsg{
 			runID:      runID,
@@ -213,6 +213,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 			outcome:    string(outcome),
 			reason:     reason,
 			tokens:     tokens,
+			attempts:   attempts,
 		}
 	})
 }

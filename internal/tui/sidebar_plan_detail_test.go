@@ -15,7 +15,7 @@ func sidebarDetailModel(t *testing.T) model {
 	m.orchestrate.admit(diamondAdmitted(), m.now())
 	now := m.now()
 	m.orchestrate.markStarted("a", "survey the packages", "k1", now)
-	m.orchestrate.markDone("a", "succeeded", 9000, now)
+	m.orchestrate.markDone("a", "succeeded", 9000, 1, now)
 	m.orchestrate.markStarted("b", "read the left branch", "k2", now)
 	m.specialists.start("b", "read the left branch", "k2", now)
 	m.specialists.incrementToolCount("k2")
@@ -200,7 +200,7 @@ func TestCtrlGCyclesTheSidebarSelection(t *testing.T) {
 // away to nothing.
 func TestTheProgressBarShowsFailuresSeparately(t *testing.T) {
 	m := sidebarDetailModel(t)
-	m.orchestrate.markDone("b", "failed", 0, m.now())
+	m.orchestrate.markDone("b", "failed", 0, 1, m.now())
 
 	bar := m.orchestratePlanBar(34)
 	if bar == "" {

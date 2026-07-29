@@ -63,6 +63,19 @@ type TaskResult struct {
 	Err       string
 	SessionID string
 	Tokens    int
+	// Stalled reports that the stall watchdog stopped this task — the child
+	// emitted nothing for the whole timeout. Set by the runner, read by the
+	// executor to decide whether the task is worth another attempt.
+	//
+	// A FLAG, not a message match: deciding to spend another child by looking
+	// for a phrase in Err is the same class as comparing errors with == instead
+	// of errors.Is, which is what silently disabled every stall retry in the
+	// prototype.
+	Stalled bool
+	// Attempts is how many times the task ran, always at least 1 for a task that
+	// was dispatched. Duration and Tokens are the TOTALS across those attempts,
+	// because what the plan spent is what the plan spent.
+	Attempts int
 }
 
 // PlanReport is the plan's terminal record, carried in plan_completed.
@@ -242,12 +255,14 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 		}
 
 		recordDispatched(recorder, task)
-		started := time.Now()
-		result, err := run(ctx, PlanTaskRequest{Task: task, Tools: granted, StallTimeout: stallTimeout})
+		result, err := runTaskWithRetries(ctx, retryPolicy{
+			task:         task,
+			tools:        granted,
+			stallTimeout: stallTimeout,
+			maxRetries:   plan.Budget().MaxRetries,
+			deadline:     deadline,
+		}, run)
 		result.ID = id
-		if result.Duration == 0 {
-			result.Duration = time.Since(started)
-		}
 		report.SequentialTotal += result.Duration
 		budgetLeft -= result.Tokens
 		report.TokensUsed += result.Tokens
@@ -291,6 +306,75 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 	report.MaxSpeedup = speedup(report.SequentialTotal, report.CriticalPath)
 	report.Status = terminalStatus(report)
 	return report
+}
+
+// retryPolicy is one task's retry inputs. A struct for the same reason
+// PlanTaskRequest is one: this parameter list is the thing that grows, and a
+// positional list is where a second call site quietly omits a field.
+type retryPolicy struct {
+	task         Task
+	tools        []string
+	stallTimeout time.Duration
+	maxRetries   int
+	deadline     time.Time
+}
+
+// runTaskWithRetries runs one task, retrying it ONLY when it stalled.
+//
+// The retry lives HERE, in the executor, and not in the runner — the executor
+// owns the budget, the wall deadline, cancellation and the record, and a retry
+// hidden inside the runner would spend a second child's tokens without any of
+// them counting. Duration and Tokens come back as the TOTAL across attempts,
+// so a plan's reported spend is its real spend.
+//
+// Every reason to stop is checked BEFORE launching another child: a cancelled
+// run, an expired wall deadline, or an attempt budget that is used up. The
+// prototype's equivalent loop retried a cancelled task, which turned Ctrl-C into
+// another spawn.
+func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner) (TaskResult, error) {
+	var result TaskResult
+	var err error
+	var totalDuration time.Duration
+	var totalTokens int
+
+	for attempt := 1; ; attempt++ {
+		started := time.Now()
+		result, err = run(ctx, PlanTaskRequest{
+			Task:         policy.task,
+			Tools:        policy.tools,
+			StallTimeout: policy.stallTimeout,
+		})
+		if result.Duration == 0 {
+			result.Duration = time.Since(started)
+		}
+		totalDuration += result.Duration
+		totalTokens += result.Tokens
+		result.Attempts = attempt
+		result.Duration = totalDuration
+		result.Tokens = totalTokens
+
+		switch {
+		case !result.Stalled:
+			// Anything other than a stall is an ANSWER, including a failure. The
+			// child ran and reported; running it again buys the same report.
+			return result, err
+		case attempt > policy.maxRetries:
+			// Out of attempts. Restate the failure with the count, because
+			// "stalled" and "stalled on every one of three attempts" call for
+			// different responses.
+			result.Err = stallError(policy.task.ID, policy.stallTimeout, attempt).Error()
+			return result, err
+		case ctx.Err() != nil:
+			// The run was stopped. NOT retried, and not relabelled either — the
+			// executor's own cancellation handling turns this into TaskCancelled.
+			return result, err
+		case !policy.deadline.IsZero() && time.Now().After(policy.deadline):
+			// The plan's wall budget is gone. Another attempt would overrun it
+			// on behalf of the task that already exhausted it.
+			result.Err = stallError(policy.task.ID, policy.stallTimeout, attempt).Error()
+			return result, err
+		}
+	}
 }
 
 // terminalStatus maps counts onto the three terminal states. Partial is its own
@@ -426,6 +510,11 @@ func (report PlanReport) Summary() string {
 		report.SequentialTotal.Round(time.Millisecond), report.CriticalPath.Round(time.Millisecond), report.MaxSpeedup)
 	for _, task := range report.Tasks {
 		fmt.Fprintf(&b, "\n  - %s [%s] %s", task.ID, task.Outcome, task.Duration.Round(time.Millisecond))
+		// A retried task cost more than its one line suggests. Stated only when
+		// it happened, so the common case stays unchanged.
+		if task.Attempts > 1 {
+			fmt.Fprintf(&b, " (%d attempts)", task.Attempts)
+		}
 		if task.Output != "" {
 			b.WriteString("\n      result:\n" + task.Output)
 		}
