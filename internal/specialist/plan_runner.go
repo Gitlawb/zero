@@ -17,12 +17,18 @@ import (
 type PlanTaskContext struct {
 	Executor Executor
 	Cwd      string
-	// ParentSessionID / ParentModel / PermissionMode / Depth describe the run
-	// issuing the plan, so a task inherits exactly the parent's policy.
-	ParentSessionID string
-	ParentModel     string
-	PermissionMode  string
-	Depth           int
+	// PermissionMode / Depth describe the run issuing the plan, so a task
+	// inherits exactly the parent's policy.
+	//
+	// ParentSessionID and ParentModel are DELIBERATELY NOT HERE. They looked
+	// run-invariant and are not: the TUI builds this once per session while the
+	// user can change model with /model between runs, so a value captured here
+	// would be whatever was active at startup — and in practice both call sites
+	// left them empty, so a plan task inherited no model at all. They arrive
+	// per call on PlanTaskRequest instead, from the same tools.RunOptions the
+	// Task tool reads.
+	PermissionMode string
+	Depth          int
 	// SpecialistName is the read-only specialist each plan task runs as.
 	SpecialistName string
 }
@@ -60,11 +66,13 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			Description: "plan task " + task.ID,
 			Manifest:    &manifest,
 		}, TaskRunOptions{
-			ParentSessionID: planCtx.ParentSessionID,
-			ParentModel:     planCtx.ParentModel,
-			CurrentDepth:    planCtx.Depth,
-			Cwd:             planCtx.Cwd,
-			PermissionMode:  planCtx.PermissionMode,
+			// Per-call, from the tool's RunOptions — see PlanTaskRequest.
+			ParentSessionID:       req.ParentSessionID,
+			ParentModel:           req.ParentModel,
+			ParentReasoningEffort: req.ParentReasoningEffort,
+			CurrentDepth:          planCtx.Depth,
+			Cwd:                   planCtx.Cwd,
+			PermissionMode:        planCtx.PermissionMode,
 			// THE SECOND HALF of the same defect. The Task tool forwards its
 			// caller's progress callback here (task_tool.go); this path built
 			// the same struct and omitted the field, so a plan task's child

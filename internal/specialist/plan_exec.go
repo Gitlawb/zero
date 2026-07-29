@@ -113,6 +113,17 @@ type PlanTaskRequest struct {
 	// emits. nil is a no-op — the behaviour for every caller that does not wire
 	// live progress.
 	Progress func(streamjson.Event)
+	// ParentSessionID / ParentModel / ParentReasoningEffort identify the run
+	// issuing the plan, so a task runs on the SAME model its parent is running
+	// on rather than whatever the child's own config resolves to.
+	//
+	// Per call, not per registration: the TUI's registry is built once while
+	// /model can change the model between runs. Attached by the orchestrate
+	// tool from tools.RunOptions, which is where the Task tool reads the same
+	// three values.
+	ParentSessionID       string
+	ParentModel           string
+	ParentReasoningEffort string
 }
 
 // PlanRunner runs one task. The executor depends on this seam rather than on
