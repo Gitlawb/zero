@@ -247,3 +247,108 @@ func TestTheAttemptCountReachesTheEvents(t *testing.T) {
 		t.Fatalf("task_failed attempts = %v; want 3", failed["attempts"])
 	}
 }
+
+// controllingRecorder is a recorder that also CONTROLS: it holds the plan's
+// cancel and can park the executor at a task boundary.
+type controllingRecorder struct {
+	recordingRecorder
+	cancel  context.CancelFunc
+	release chan struct{}
+	waits   int
+}
+
+func (r *controllingRecorder) PlanRunning(cancel context.CancelFunc) { r.cancel = cancel }
+func (r *controllingRecorder) WaitWhilePaused(ctx context.Context) {
+	r.waits++
+	if r.release == nil {
+		return
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+	}
+}
+
+// The gate has to be REACHED, once per task, before anything is dispatched.
+// A pause the executor never consults is a flag, not a pause.
+func TestTheExecutorConsultsThePauseGateBeforeEveryTask(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, okBudget(), readOnlyLimits())
+	recorder := &controllingRecorder{}
+	ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, recorder)
+
+	if recorder.waits != 3 {
+		t.Fatalf("the pause gate was consulted %d times for 3 tasks", recorder.waits)
+	}
+}
+
+// A PAUSED PLAN DISPATCHES NOTHING. Asserting only that the gate was called
+// would pass against an executor that called it and ran the task anyway.
+func TestAPausedPlanDispatchesNothingUntilReleased(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
+	recorder := &controllingRecorder{release: make(chan struct{})}
+
+	dispatched := make(chan string, 4)
+	done := make(chan PlanReport, 1)
+	go func() {
+		done <- ExecutePlan(context.Background(), plan, []string{"read_file"},
+			func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+				dispatched <- req.Task.ID
+				return TaskResult{Outcome: TaskSucceeded}, nil
+			}, recorder)
+	}()
+
+	select {
+	case id := <-dispatched:
+		t.Fatalf("task %q was dispatched while the plan was paused", id)
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	close(recorder.release)
+	select {
+	case report := <-done:
+		if report.Succeeded != 2 {
+			t.Fatalf("report = %+v; both tasks must run once released", report)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the plan never resumed")
+	}
+}
+
+// The cancel handed to the surface must be the one that STOPS THE PLAN, and the
+// remainder must be recorded as CANCELLED — not failed. A user who stopped a
+// plan did not break it.
+func TestTheHandedCancelStopsThePlanAndRecordsCancellations(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, okBudget(), readOnlyLimits())
+	recorder := &controllingRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runs := 0
+	report := ExecutePlan(ctx, plan, []string{"read_file"},
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			runs++
+			if runs == 1 {
+				if recorder.cancel == nil {
+					t.Fatal("the executor's caller never handed the surface a cancel")
+				}
+				recorder.cancel()
+			}
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, recorder)
+
+	if runs != 1 {
+		t.Fatalf("%d tasks ran; a stopped plan must not dispatch more", runs)
+	}
+	if report.Cancelled != 2 {
+		t.Fatalf("report = %+v; the remainder must be cancelled, never failed", report)
+	}
+	if report.Failed != 0 {
+		t.Fatalf("a stopped plan reported %d failures; nothing broke", report.Failed)
+	}
+	if report.Status != PlanPartial {
+		t.Fatalf("status = %q; one success and two cancellations is partial", report.Status)
+	}
+}

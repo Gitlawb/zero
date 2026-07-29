@@ -162,6 +162,18 @@ type PlanRecorder interface {
 // The order comes from the same Kahn pass that proved the graph acyclic, so
 // admission and execution cannot disagree about it.
 func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder) PlanReport {
+	// THE PLAN'S OWN CONTEXT, derived here rather than by the caller.
+	//
+	// Cancelling it abandons the PLAN and leaves the TURN alive; cancelling the
+	// run still cancels this too, because it is a child. Deriving it here rather
+	// than in the orchestrate tool is the difference between one call path
+	// having per-plan cancellation and every call path having it — this is the
+	// function that owns a plan's lifetime, and the seam belongs where the
+	// lifetime is.
+	ctx, cancelPlan := context.WithCancel(ctx)
+	defer cancelPlan()
+	planRunning(recorder, cancelPlan)
+
 	tasks := map[string]Task{}
 	for _, task := range plan.Tasks() {
 		tasks[task.ID] = task
@@ -191,6 +203,12 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 	cancelled := false
 	for _, id := range plan.Order() {
 		task := tasks[id]
+
+		// PAUSE, at the task boundary, BEFORE the cancellation check — so a user
+		// who stops a paused plan is not left waiting for a resume that will
+		// never come. WaitWhilePaused returns on ctx, and the check below then
+		// turns it into a cancellation exactly as if the plan had been running.
+		waitWhilePaused(recorder, ctx)
 
 		// Cancellation is checked FIRST and recorded as its own outcome. Once
 		// the run is cancelled every remaining task is cancelled too — they are
@@ -540,6 +558,44 @@ func recordCompleted(recorder PlanRecorder, result TaskResult) {
 func recordFailed(recorder PlanRecorder, result TaskResult) {
 	if recorder != nil {
 		recorder.TaskFailed(result)
+	}
+}
+
+// PlanController is the optional CONTROL half of a recorder.
+//
+// Stopping a plan meant stopping the whole turn: Ctrl-C cancels the run, and
+// there was no way to abandon a twenty-task plan while keeping the conversation.
+// The surface that displays a plan is the one a user asks to stop it, so control
+// arrives through the same seam the display does — type-asserted exactly like
+// PlanLifecycleRecorder, so a recorder that only records is unaffected and no
+// existing signature changes.
+type PlanController interface {
+	// PlanRunning hands the surface a cancel scoped to THIS PLAN, not to the
+	// run that issued it. Called once before the first task; the surface drops
+	// it when the plan ends, so a later stop cannot cancel a context that has
+	// already been reused.
+	PlanRunning(cancel context.CancelFunc)
+	// WaitWhilePaused blocks at a TASK BOUNDARY while the user has paused.
+	//
+	// A boundary, not mid-task, and that is the honest limit: a child process
+	// already talking to a provider cannot be suspended, and pretending
+	// otherwise would mean "paused" while tokens kept being spent. It must
+	// return when ctx is done, or stopping a paused plan would deadlock.
+	WaitWhilePaused(ctx context.Context)
+}
+
+// planRunning and waitWhilePaused are best-effort and nil-safe, mirroring
+// recordPlanAdmitted: a recorder that does not implement control simply cannot
+// be asked to control anything.
+func planRunning(recorder PlanRecorder, cancel context.CancelFunc) {
+	if controller, ok := recorder.(PlanController); ok && controller != nil {
+		controller.PlanRunning(cancel)
+	}
+}
+
+func waitWhilePaused(recorder PlanRecorder, ctx context.Context) {
+	if controller, ok := recorder.(PlanController); ok && controller != nil {
+		controller.WaitWhilePaused(ctx)
 	}
 }
 
