@@ -257,7 +257,12 @@ func (m model) effortText() string {
 		{Key: "model", Value: displayValue(m.modelName, "none")},
 	}
 	_, ringKnown := m.availableReasoningEffortsKnown()
-	actions := []string{"use /effort <value> to switch", "/effort " + execprofile.Name + " for the maximal posture", "/effort auto to clear"}
+	actions := []string{"use /effort <value> to switch", "/effort auto to clear"}
+	if !m.zeromaxingDisabled {
+		// Not offered when the workspace disabled it: an action line that
+		// suggests a command the run will refuse is worse than no line.
+		actions = append(actions, "/effort "+execprofile.Name+" for the maximal posture")
+	}
 	// The SAME resolved-state line /profile status renders, so the two surfaces
 	// cannot disagree about what actually reaches the provider.
 	stateLines := append([]string{m.resolvedPostureLine()}, m.zeromaxingNotes()...)
@@ -272,6 +277,9 @@ func (m model) effortText() string {
 			summary = "levels are not listed for this model; they can still be set and are forwarded, but the provider may reject them"
 		}
 		fields = append(fields, commandField{Key: "available", Value: available})
+		if settable := m.settableEfforts(); len(settable) > 0 {
+			fields = append(fields, commandField{Key: "you can set", Value: strings.Join(settable, ", ")})
+		}
 		return renderCommandCardTranscript(commandCard{
 			Title:    "Effort",
 			Summary:  []string{"active effort: " + m.effortDisplay(), summary},
@@ -280,6 +288,9 @@ func (m model) effortText() string {
 		})
 	}
 	fields = append(fields, commandField{Key: "available", Value: joinReasoningEfforts(efforts)})
+	if settable := m.settableEfforts(); len(settable) > 0 {
+		fields = append(fields, commandField{Key: "you can set", Value: strings.Join(settable, ", ")})
+	}
 	return renderCommandCardTranscript(commandCard{
 		Title:    "Effort",
 		Summary:  []string{"active effort: " + m.effortDisplay(), fmt.Sprintf("%d supported level(s)", len(efforts))},
@@ -556,6 +567,50 @@ func reasoningEffortIndex(efforts []modelregistry.ReasoningEffort, want modelreg
 		}
 	}
 	return -1
+}
+
+// settableEfforts lists what /effort will actually accept right now.
+//
+// DISTINCT from "available", which reports what the CATALOG vouches for. The
+// two answer different questions and used to be conflated into one line, so a
+// user on a model Zero has no entry for was told "not listed" and shown nothing
+// they could type — even though low/medium/high are settable there and ARE
+// forwarded, which is the whole point of the catalog-authority rule.
+//
+// zeromaxing belongs here because it is selected through this namespace, and it
+// was missing from every model's list even though the actions line offered it.
+// It is omitted when the workspace disabled the posture, so the card never
+// advertises something that will be refused.
+func (m model) settableEfforts() []string {
+	efforts, known := m.availableReasoningEffortsKnown()
+	var values []string
+	switch {
+	case known:
+		// The catalog is AUTHORITATIVE, including when its ring is empty:
+		// gpt-4o genuinely has no reasoning controls, and handleEffortCommand
+		// refuses every level there. Offering low/medium/high would advertise
+		// something the command rejects — the card and the command answering
+		// the same question differently, which is the shape this codebase keeps
+		// producing.
+		values = append(values, splitReasoningEfforts(efforts)...)
+	case strings.TrimSpace(m.modelName) != "":
+		// No catalog entry: Zero cannot vouch either way, and the headless path
+		// forwards these in exactly this case. Offering them is honest; the
+		// summary line already says the provider may reject them.
+		values = append(values, "low", "medium", "high")
+	}
+	if !m.zeromaxingDisabled {
+		values = append(values, execprofile.Name)
+	}
+	return values
+}
+
+func splitReasoningEfforts(efforts []modelregistry.ReasoningEffort) []string {
+	values := make([]string, 0, len(efforts))
+	for _, effort := range efforts {
+		values = append(values, string(effort))
+	}
+	return values
 }
 
 func joinReasoningEfforts(efforts []modelregistry.ReasoningEffort) string {
