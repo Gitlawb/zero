@@ -89,9 +89,16 @@ func TestPlanRunnerForwardsProgress(t *testing.T) {
 	}
 }
 
-// A caller that wires no progress is unaffected: nil stays nil rather than
-// becoming a non-nil no-op, so the executor's own behaviour is unchanged.
-func TestPlanRunnerWithoutProgressPassesNil(t *testing.T) {
+// A caller that wires no progress still gets a callback into the executor —
+// the WATCHDOG needs the liveness signal whether or not a UI wants the events.
+// What must not happen is the caller's own callback being invented.
+//
+// This test used to assert the opposite (nil stays nil). That was right until
+// the stall watchdog existed: with no feed, a task whose child is talking
+// happily would be judged silent and killed. The executor is unaffected either
+// way — `progress != nil` gates only the call, and the event is parsed and
+// stored regardless — so the cost is one function call per event.
+func TestPlanRunnerAlwaysFeedsTheWatchdogEvenWithNoCallerCallback(t *testing.T) {
 	var sawCallback bool
 	executor := Executor{
 		BinaryPath:   "/bin/true",
@@ -99,6 +106,11 @@ func TestPlanRunnerWithoutProgressPassesNil(t *testing.T) {
 		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
 		RunChild: func(_ context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			sawCallback = progress != nil
+			// Emitting is safe: an unwired caller must not be invoked, and the
+			// watchdog must be.
+			if progress != nil {
+				progress(streamjson.Event{Type: streamjson.EventToolCall})
+			}
 			return ChildRunResult{Started: true}, nil
 		},
 	}
@@ -106,8 +118,8 @@ func TestPlanRunnerWithoutProgressPassesNil(t *testing.T) {
 	if _, err := runner(context.Background(), PlanTaskRequest{Task: Task{ID: "a", Prompt: "x"}, Tools: []string{"read_file"}}); err != nil {
 		t.Fatalf("runner: %v", err)
 	}
-	if sawCallback {
-		t.Fatal("an unwired plan must hand the executor a nil progress callback, as it always did")
+	if !sawCallback {
+		t.Fatal("the executor got no callback, so the watchdog cannot see the child is alive")
 	}
 }
 

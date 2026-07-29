@@ -58,9 +58,19 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			return TaskResult{Outcome: TaskFailed, Err: err.Error()}, err
 		}
 
+		// THE STALL WATCHDOG. Its clock resets on every event the child emits,
+		// so a task that is working — however slowly — is never stopped; only
+		// silence counts. The context it cancels is this task's alone, so a
+		// wedged task does not take the plan with it.
+		watchdog := newStallWatchdog(req.StallTimeout, nil)
+		taskCtx, cancelTask := context.WithCancel(ctx)
+		defer cancelTask()
+		stopWatchdog := watchdog.watch(taskCtx, cancelTask)
+		defer stopWatchdog()
+
 		started := time.Now()
 		manifest := planTaskManifest(planCtx.SpecialistName, grantedTools)
-		res, err := planCtx.Executor.Run(ctx, TaskParameters{
+		res, err := planCtx.Executor.Run(taskCtx, TaskParameters{
 			Name:        planCtx.SpecialistName,
 			Prompt:      task.Prompt,
 			Description: "plan task " + task.ID,
@@ -79,7 +89,7 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// streamed to nobody. Same class as finding 7 (ParentModel): a
 			// second construction path that does not carry what the first one
 			// did. Fixed with the tool-side half, not separately.
-			Progress: req.Progress,
+			Progress: watchedProgress(watchdog, req.Progress),
 			// Explicitly NOT MemberAutonomy: Phase 2 tasks are read-only, and
 			// granting it here would be the authority widening that was ruled
 			// out as needing its own decision.
@@ -94,6 +104,13 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// provider that never reports usage cannot be budget-bounded by
 			// token count; MaxWall is the backstop in that case.
 			Tokens: res.TotalTokens,
+		}
+		if watchdog.didFire() {
+			// A stall and a user cancellation both surface as a context error;
+			// they are not the same event and must not read the same.
+			result.Outcome = TaskFailed
+			result.Err = stallError(task.ID, watchdog.timeout).Error()
+			return result, nil
 		}
 		if err != nil {
 			result.Outcome = TaskFailed

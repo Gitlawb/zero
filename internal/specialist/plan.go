@@ -60,6 +60,11 @@ type Budget struct {
 	MaxWorkers int
 	MaxTokens  int
 	MaxWall    time.Duration
+	// MaxStall bounds how long a single task may emit NOTHING before it is
+	// stopped. Distinct from MaxWall, which bounds the whole plan: a plan can
+	// sit inside its wall budget while one task is wedged and the rest never
+	// run. Zero means the default.
+	MaxStall time.Duration
 }
 
 // Limits are the caller-supplied hard caps a plan must fit inside.
@@ -315,6 +320,15 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	}
 	if seconds := planInt(raw, "max_wall_seconds"); seconds > 0 {
 		budget.MaxWall = time.Duration(seconds) * time.Second
+	}
+	if seconds := planInt(raw, "max_stall_seconds"); seconds > 0 {
+		stall := time.Duration(seconds) * time.Second
+		if stall < minStallTimeout {
+			return Budget{}, fmt.Errorf(
+				"budget.max_stall_seconds must be at least %d: below that the watchdog fires on ordinary think-time and becomes a random task-killer",
+				int(minStallTimeout.Seconds()))
+		}
+		budget.MaxStall = stall
 	}
 	// MaxWorkers must be exactly 1. Rejecting rather than coercing keeps the
 	// field meaningful: a caller that asked for 8 and silently got 1 would have
