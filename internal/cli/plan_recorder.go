@@ -93,6 +93,17 @@ func (bridge *planSessionRecorder) TaskFailed(result specialist.TaskResult) {
 		"outcome":     string(result.Outcome),
 		"reason":      result.Err,
 		"duration_ms": result.Duration.Milliseconds(),
+		// THE SAME FIELDS AS TaskCompleted, and for the failure they matter
+		// more. Executor.Run carries the child session id even on a post-start
+		// failure specifically so a failed child stays drillable; recording it
+		// only on success made the one task a user needs to open the one task
+		// they could not find. Empty for a dependency or budget skip, which
+		// never started a child — that is the honest value, not a gap.
+		"session_id": result.SessionID,
+		// Tokens the failed task spent. They are already counted in the plan's
+		// aggregate, so omitting them here made the per-task records fail to
+		// add up to the total.
+		"tokens": result.Tokens,
 	})
 }
 
