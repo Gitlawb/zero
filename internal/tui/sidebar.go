@@ -734,6 +734,16 @@ func (m model) hoveredSidebarLineOffset(width int) (int, bool) {
 				return hit.lineOffset, true
 			}
 		}
+	case hoverOrchestrateTask:
+		// Re-resolved by task ID every render: a task that faded out of the
+		// list since the hover was set simply stops highlighting, rather than
+		// lighting up whatever row slid into its slot.
+		for _, hit := range m.sidebarOrchestrateSelectables(width) {
+			if hit.taskIndex < len(m.orchestrate.tasks) &&
+				m.orchestrate.tasks[hit.taskIndex].id == m.hover.taskID {
+				return hit.lineOffset, true
+			}
+		}
 	}
 	return 0, false
 }
