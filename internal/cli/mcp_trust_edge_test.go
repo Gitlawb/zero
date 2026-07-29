@@ -219,3 +219,34 @@ func TestRunMCPCheckNormalizeError(t *testing.T) {
 		t.Fatalf("want normalize error, got %q", got)
 	}
 }
+
+// TestRunMCPCheckReportsUnreachableServer covers the case the command exists
+// for: a server that fails to start.
+//
+// RegisterTools is best-effort by design, so a connect failure is recorded on
+// the runtime and registration returns nil. runMCPCheck used to inspect only
+// that nil error and then print "is reachable", which told the user their
+// broken server was fine. The command is spawned for real here rather than
+// stubbed, because the whole failure mode was a mismatch between what
+// registration returns and what it records.
+func TestRunMCPCheckReportsUnreachableServer(t *testing.T) {
+	setTrustConfigRoot(t)
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveMCPConfig: func(_ string, _ bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"broken": {Type: "stdio", Command: "zero-definitely-not-a-real-binary-xyz"},
+			}}, nil
+		},
+	}
+	var out, errBuf bytes.Buffer
+	if code := runWithDeps([]string{"mcp", "check", "broken"}, &out, &errBuf, deps); code == exitSuccess {
+		t.Fatalf("mcp check must fail for a server that did not start; stdout=%q stderr=%q", out.String(), errBuf.String())
+	}
+	if got := out.String(); strings.Contains(got, "is reachable") {
+		t.Fatalf("mcp check reported a failed server as reachable: %q", got)
+	}
+	if got := errBuf.String(); !strings.Contains(got, "not reachable") {
+		t.Fatalf("want an unreachable error naming the server, got %q", got)
+	}
+}
