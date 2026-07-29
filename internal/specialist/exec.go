@@ -82,6 +82,16 @@ type BuildResumeArgsInput struct {
 	Manifest       Manifest
 	Cwd            string
 	PermissionMode string
+	// ParentModel / ParentReasoningEffort are the run's model and effort, and
+	// they belong here for exactly the reason they belong on BuildArgsInput: a
+	// resumed child is still a child of THIS run.
+	//
+	// They were absent, and BuildResumeArgs never called appendModelArgs, so a
+	// resumed specialist was launched with no --model at all and fell back to
+	// whatever its own config resolved. A fresh launch and a resume of the same
+	// specialist could therefore run on different models.
+	ParentModel           string
+	ParentReasoningEffort string
 }
 
 type BuildArgsResult struct {
@@ -366,6 +376,10 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	}
 	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
+	// The SAME model resolution the fresh-launch path uses. Calling the shared
+	// helper rather than repeating its rules is what keeps the two paths from
+	// disagreeing about which model a specialist runs on.
+	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}
@@ -431,12 +445,14 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	built, err := executor.BuildResumeArgs(BuildResumeArgsInput{
-		SessionID:      params.Resume,
-		Prompt:         params.Prompt,
-		CurrentDepth:   options.CurrentDepth,
-		Manifest:       manifest,
-		Cwd:            options.Cwd,
-		PermissionMode: options.PermissionMode,
+		SessionID:             params.Resume,
+		Prompt:                params.Prompt,
+		CurrentDepth:          options.CurrentDepth,
+		Manifest:              manifest,
+		Cwd:                   options.Cwd,
+		PermissionMode:        options.PermissionMode,
+		ParentModel:           options.ParentModel,
+		ParentReasoningEffort: options.ParentReasoningEffort,
 	})
 	if err != nil {
 		return ExecResult{}, err
