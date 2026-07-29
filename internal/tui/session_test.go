@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -355,6 +356,71 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}
 	if countTranscriptRows(next.transcript, rowPermission) != 2 {
 		t.Fatalf("expected request and decision permission rows, got %#v", next.transcript)
+	}
+}
+
+func TestPermissionWaitDoesNotCountTowardTurnElapsed(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "hello"),
+		textScript("write blocked"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+
+	base := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	var clockNanos atomic.Int64
+	clockNanos.Store(base.UnixNano())
+	m.now = func() time.Time {
+		return time.Unix(0, clockNanos.Load()).UTC()
+	}
+	m.input.SetValue("write notes")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- execCmd(cmd)
+	}()
+
+	for received := 0; received < 4; {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		switch runtimeMsg.(type) {
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+			continue
+		case permissionRequestMsg:
+			clockNanos.Store(base.Add(90 * time.Second).UnixNano())
+			if status := plainRender(t, next.workingStatusLine()); !strings.Contains(status, "·  0s  ·") || strings.Contains(status, "still generating") {
+				t.Fatalf("live elapsed advanced during permission wait: %q", status)
+			}
+			updated, _ = next.Update(testKeyText("d"))
+			next = updated.(model)
+			if hint := next.quietGenerationHint(); hint != "" {
+				t.Fatalf("permission wait leaked into quiet-generation age: %q", hint)
+			}
+		}
+		received++
+	}
+
+	finalMsg := receiveFinalMessage(t, finalCh)
+	updated, _ = next.Update(finalMsg)
+	next = updated.(model)
+
+	answer, ok := findTranscriptRow(next.transcript, rowAssistant)
+	if !ok {
+		t.Fatalf("expected final assistant row, got %#v", next.transcript)
+	}
+	if answer.turnElapsed != 0 {
+		t.Fatalf("turn elapsed = %s, want permission wait excluded", answer.turnElapsed)
 	}
 }
 
