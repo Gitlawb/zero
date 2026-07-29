@@ -51,8 +51,8 @@ Useful flags:
 
 | Flag | Purpose |
 |---|---|
-| `--repo <owner/repo>` | Use another GitHub repository for `--check` and `--apply`/`upgrade`. |
-| `--endpoint <url\|owner/repo>` | Use a specific release API URL or repository slug for `--check` and `--apply`/`upgrade`. |
+| `--repo <owner/repo>` | Use another GitHub repository for `--check` and `--apply`/`upgrade`. Ignored by an npm-managed apply. |
+| `--endpoint <url\|owner/repo>` | Use a specific release API URL or repository slug for `--check` and `--apply`/`upgrade`. Ignored by an npm-managed apply. |
 | `--timeout <duration>` | Override the default release check timeout. |
 | `--target <platform-arch>` | Validate release metadata for another supported target (`--check` only). |
 

@@ -37,6 +37,13 @@ type Result struct {
 	TagName         string     `json:"tagName"`
 	ReleaseAsset    AssetCheck `json:"releaseAsset"`
 	UpdateAvailable bool       `json:"updateAvailable"`
+	// SourceFlag is the `--repo`/`--endpoint` argument this check was given, in
+	// the form a caller would repeat on `zero upgrade`. Empty when the check used
+	// the default release source. Format needs it because `zero upgrade` is a
+	// fresh invocation: it does not inherit the flags of the check that suggested
+	// it, so recommending it bare after a custom-source check would send the user
+	// to install from somewhere they did not ask about.
+	SourceFlag string `json:"sourceFlag,omitempty"`
 }
 
 type AssetCheck struct {
@@ -172,7 +179,26 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		TagName:         release.TagName,
 		ReleaseAsset:    assetCheck,
 		UpdateAvailable: compareSemverParts(latestParts, currentParts) > 0,
+		SourceFlag:      upgradeSourceFlag(options),
 	}, nil
+}
+
+// upgradeSourceFlag returns the flag a caller must repeat on `zero upgrade` to
+// install from the same place this check read, or "" when the default source
+// was used.
+//
+// Only the per-invocation FLAGS need repeating. ZERO_UPDATE_RELEASE_URL is read
+// from the environment by every Check, including the one inside Apply, so a bare
+// `zero upgrade` already follows it — naming it here would tell the user to
+// repeat something that is not theirs to drop.
+func upgradeSourceFlag(options Options) string {
+	if endpoint := strings.TrimSpace(options.Endpoint); endpoint != "" {
+		return "--endpoint " + endpoint
+	}
+	if repository := strings.TrimSpace(options.Repository); repository != "" && repository != DefaultRepository {
+		return "--repo " + repository
+	}
+	return ""
 }
 
 func Format(result Result) string {
@@ -182,7 +208,7 @@ func Format(result Result) string {
 			"Release: " + result.ReleaseURL,
 		}
 		lines = appendAssetLines(lines, result.ReleaseAsset)
-		lines = append(lines, upgradeGuidance(result.ReleaseAsset))
+		lines = append(lines, upgradeGuidance(result.ReleaseAsset, result.SourceFlag))
 		return strings.Join(lines, "\n")
 	}
 	lines := []string{
@@ -228,26 +254,35 @@ func localReleaseTarget() string {
 	return platform + "-" + arch
 }
 
-// upgradeGuidance returns the next step for an available update. `zero upgrade`
-// only ever installs onto THIS machine, so recommending it after a `--check
-// --target <other>` would answer a question about one machine with an action
-// that changes another. A cross-target check gets the manual instruction
-// instead, and says plainly which machine `zero upgrade` would have touched.
+// upgradeGuidance returns the next step for an available update.
+//
+// `zero upgrade` is a fresh invocation that installs onto THIS machine from the
+// DEFAULT release source, so it is only the right next step when the check
+// matched both. A cross-target check would otherwise answer a question about one
+// machine with an action that changes another; a custom-source check would send
+// the user to install from a repository they did not ask about, because the
+// flags do not carry over.
 //
 // An asset with no target recorded is the ordinary current-platform check (the
-// target fields are only populated when a target was resolved), so it keeps the
-// upgrade recommendation.
-func upgradeGuidance(asset AssetCheck) string {
+// target fields are only populated when a target was resolved).
+func upgradeGuidance(asset AssetCheck, sourceFlag string) string {
 	target := releaseAssetTarget(asset)
 	local := localReleaseTarget()
-	if target == "" || target == local {
-		return "Run `zero upgrade` to download, verify, and install the latest release."
+	if target != "" && target != local {
+		guidance := "Download the verified " + target + " release asset and replace the zero binary on that machine."
+		if local == "" {
+			// No published release target for this host (a source build on an OS
+			// with no release archive, e.g. Termux). Saying what `zero upgrade`
+			// would do here would be worse than saying nothing: it does not work on
+			// this machine at all.
+			return guidance
+		}
+		return guidance + " `zero upgrade` installs onto this machine (" + local + ") instead."
 	}
-	guidance := "Download the verified " + target + " release asset and replace the zero binary on that machine."
-	if local == "" {
-		return guidance + " `zero upgrade` installs onto this machine only."
+	if sourceFlag != "" {
+		return "Run `zero upgrade " + sourceFlag + "` to install from the source this check used; a bare `zero upgrade` installs from " + DefaultRepository + "."
 	}
-	return guidance + " `zero upgrade` installs onto this machine (" + local + ") instead."
+	return "Run `zero upgrade` to download, verify, and install the latest release."
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {

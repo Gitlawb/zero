@@ -476,6 +476,98 @@ func TestFormatResult(t *testing.T) {
 	}
 }
 
+// TestFormatCustomSourceCheckRepeatsTheSourceFlag covers jatmn's #489 finding:
+// `zero upgrade` is a fresh invocation that reads from the DEFAULT source, so
+// recommending it bare after `--check --repo <fork>` sends the user to install
+// from a repository they never asked about. The pre-PR text pointed at the
+// printed asset URLs instead; this keeps a runnable command by naming the flag
+// to repeat.
+func TestFormatCustomSourceCheckRepeatsTheSourceFlag(t *testing.T) {
+	local := assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH)
+	for _, tc := range []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "repo flag", options: Options{Repository: "someone/fork"}, want: "zero upgrade --repo someone/fork"},
+		{name: "endpoint flag", options: Options{Endpoint: "https://example.test/releases/latest"}, want: "zero upgrade --endpoint https://example.test/releases/latest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := Format(Result{
+				CurrentVersion:  "0.1.0",
+				LatestVersion:   "0.2.0",
+				ReleaseURL:      "https://example.test/release",
+				TagName:         "v0.2.0",
+				ReleaseAsset:    local,
+				UpdateAvailable: true,
+				SourceFlag:      upgradeSourceFlag(tc.options),
+			})
+			if !strings.Contains(output, tc.want) {
+				t.Fatalf("output = %q, want it to repeat %q", output, tc.want)
+			}
+			if !strings.Contains(output, DefaultRepository) {
+				t.Fatalf("output = %q, want it to say where a bare upgrade installs from", output)
+			}
+		})
+	}
+
+	// The default source keeps the plain call to action, including when --repo
+	// names the default repository explicitly.
+	for _, options := range []Options{{}, {Repository: DefaultRepository}} {
+		output := Format(Result{
+			CurrentVersion:  "0.1.0",
+			LatestVersion:   "0.2.0",
+			ReleaseURL:      "https://example.test/release",
+			TagName:         "v0.2.0",
+			ReleaseAsset:    local,
+			UpdateAvailable: true,
+			SourceFlag:      upgradeSourceFlag(options),
+		})
+		if !strings.Contains(output, "Run `zero upgrade` to download") {
+			t.Fatalf("default-source output = %q, want the plain upgrade recommendation", output)
+		}
+	}
+}
+
+// TestCheckRecordsTheSourceFlagItWasGiven pins where SourceFlag comes from: the
+// per-invocation flags, and not ZERO_UPDATE_RELEASE_URL — the env var is read by
+// every Check including the one inside Apply, so a bare `zero upgrade` already
+// follows it and telling the user to repeat it would be wrong.
+func TestCheckRecordsTheSourceFlagItWasGiven(t *testing.T) {
+	t.Setenv("ZERO_UPDATE_RELEASE_URL", "")
+	fetch := func(context.Context, string) (Release, error) {
+		return releaseForTarget(t, "v0.2.0", "linux", "amd64"), nil
+	}
+	base := Options{CurrentVersion: "0.1.0", GOOS: "linux", GOARCH: "amd64", Fetch: fetch}
+
+	withRepo := base
+	withRepo.Repository = "someone/fork"
+	result, err := Check(context.Background(), withRepo)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "--repo someone/fork" {
+		t.Fatalf("SourceFlag = %q, want the repo flag recorded", result.SourceFlag)
+	}
+
+	result, err = Check(context.Background(), base)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "" {
+		t.Fatalf("SourceFlag = %q, want empty for the default source", result.SourceFlag)
+	}
+
+	t.Setenv("ZERO_UPDATE_RELEASE_URL", "https://example.test/releases/latest")
+	result, err = Check(context.Background(), base)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if result.SourceFlag != "" {
+		t.Fatalf("SourceFlag = %q, want empty: the env var carries over on its own", result.SourceFlag)
+	}
+}
+
 // TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade is the regression test
 // for jatmn's #489 finding: `zero update --check --target <other>` answers a
 // question about a different machine, but the output recommended `zero upgrade`,
