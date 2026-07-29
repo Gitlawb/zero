@@ -148,9 +148,9 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 
-	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markStarted("a", "root", "", now)
 	m.orchestrate.markDone("a", "succeeded", 0, now.Add(time.Second))
-	m.orchestrate.markStarted("b", "left", now.Add(time.Second))
+	m.orchestrate.markStarted("b", "left", "", now.Add(time.Second))
 	m.orchestrate.markDone("b", "failed", 0, now.Add(2*time.Second))
 	m.orchestrate.markDone("c", "cancelled", 0, now.Add(2*time.Second))
 	m.orchestrate.markDone("d", "dependency_failed", 0, now.Add(2*time.Second))
@@ -175,7 +175,7 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 func TestCancelledPlanIsNotShownAsFailures(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markStarted("a", "root", "", now)
 	m.orchestrate.markDone("a", "succeeded", 0, now)
 	for _, id := range []string{"b", "c", "d"} {
 		m.orchestrate.markDone(id, "cancelled", 0, now)
@@ -229,7 +229,7 @@ func TestALargePlanIsBoundedAndSaysWhatItHid(t *testing.T) {
 // Narrow terminals must not panic or produce garbage.
 func TestPanelSurvivesNarrowWidths(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", strings.Repeat("verbose ", 40), m.now())
+	m.orchestrate.markStarted("a", strings.Repeat("verbose ", 40), "", m.now())
 	for _, width := range []int{0, 1, 10, 24, 40, 200} {
 		rendered := m.renderOrchestratePanel(width)
 		if rendered == "" {
@@ -246,7 +246,7 @@ func TestPanelSurvivesNarrowWidths(t *testing.T) {
 // A task with no output must still render — the panel shows status, not results.
 func TestATaskWithNoSummaryStillRenders(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", "", m.now())
+	m.orchestrate.markStarted("a", "", "", m.now())
 	rendered := m.renderOrchestratePanel(100)
 	if !strings.Contains(rendered, " a ") {
 		t.Fatalf("a task with no summary vanished from the panel:\n%s", rendered)
@@ -258,7 +258,7 @@ func TestATaskWithNoSummaryStillRenders(t *testing.T) {
 // runes.
 func TestPanelTruncatesSummariesOnRuneBoundaries(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", strings.Repeat("日", 300), m.now())
+	m.orchestrate.markStarted("a", strings.Repeat("日", 300), "", m.now())
 	rendered := m.renderOrchestratePanel(100)
 	for _, line := range strings.Split(rendered, "\n") {
 		if len([]rune(line)) > 140 {
@@ -308,7 +308,7 @@ func TestTheHeaderClockStopsWhenThePlanEnds(t *testing.T) {
 func TestAnInterruptedPlansClockFreezesWithTheRun(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
-	m.orchestrate.markStarted("a", "root", start)
+	m.orchestrate.markStarted("a", "root", "", start)
 	m.orchestrate.frozenAt = start.Add(5 * time.Second)
 	m.activeRunID = 0
 
@@ -402,7 +402,7 @@ func TestOrchestratePanelMountsInTheFooter(t *testing.T) {
 	if !strings.Contains(collapsed, "PLAN diamond") {
 		t.Fatalf("the collapsed panel must still show the plan header:\n%s", collapsed)
 	}
-	if strings.Contains(collapsed, "ctrl+g") == false {
+	if strings.Contains(collapsed, "click to open") == false {
 		t.Fatalf("the collapsed panel must say how to open it:\n%s", collapsed)
 	}
 	m.orchestrate.expanded = true
@@ -450,7 +450,7 @@ func TestThePanelIsCollapsedUntilAsked(t *testing.T) {
 	if !strings.Contains(collapsed, "PLAN diamond") {
 		t.Fatalf("the collapsed panel must still name the plan:\n%s", collapsed)
 	}
-	if !strings.Contains(collapsed, "ctrl+g") {
+	if !strings.Contains(collapsed, "click to open") {
 		t.Fatalf("a collapsed panel that does not say how to open it reads as the whole panel:\n%s", collapsed)
 	}
 	for _, id := range []string{" b ", " c ", " d "} {
@@ -561,9 +561,9 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
 
-	m.orchestrate.markStarted("a", "root", start)
+	m.orchestrate.markStarted("a", "root", "", start)
 	m.orchestrate.markDone("a", "succeeded", 0, start)
-	m.orchestrate.markStarted("b", "left", start)
+	m.orchestrate.markStarted("b", "left", "", start)
 
 	// Immediately after finishing, a is still there — you have to be able to
 	// SEE it land.
@@ -588,7 +588,7 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 func TestAFadedTaskIsStillCountedAndStillInPlans(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
-	m.orchestrate.markStarted("a", "root", start)
+	m.orchestrate.markStarted("a", "root", "", start)
 	m.orchestrate.markDone("a", "succeeded", 0, start)
 	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
 
@@ -628,12 +628,12 @@ func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 
-	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markStarted("a", "root", "", now)
 	m.orchestrate.markDone("a", "succeeded", 16470, now)
 	if m.orchestrate.tokensUsed != 16470 {
 		t.Fatalf("tokensUsed = %d after one task, want it counted as it finishes", m.orchestrate.tokensUsed)
 	}
-	m.orchestrate.markStarted("b", "left", now)
+	m.orchestrate.markStarted("b", "left", "", now)
 	m.orchestrate.markDone("b", "succeeded", 68483, now)
 
 	rendered := m.renderOrchestratePanel(100)
@@ -648,7 +648,7 @@ func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
 func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markStarted("a", "root", "", now)
 	m.orchestrate.markDone("a", "succeeded", 100, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "partial", tokensUsed: 379773}, now)
@@ -661,7 +661,7 @@ func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
 func TestAMissingFinalTotalDoesNotZeroTheCount(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", now)
+	m.orchestrate.markStarted("a", "root", "", now)
 	m.orchestrate.markDone("a", "succeeded", 4242, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "completed"}, now)

@@ -52,6 +52,11 @@ type orchestrateTask struct {
 	// makes a diamond LOOK like a diamond — tasks at the same depth ran from the
 	// same fan-out and are drawn on the same rung.
 	depth int
+	// cardKey links this task to its live agent state in the specialist
+	// tracker: the temporary key while it runs, the child's real session id
+	// once it finishes. The detail pane reads tool counts, the current tool and
+	// spend through it rather than duplicating that state here.
+	cardKey string
 }
 
 // elapsed is the task's duration: live while running, frozen once ended.
@@ -132,7 +137,7 @@ func (s *orchestratePanelState) computeDepths() {
 	}
 }
 
-func (s *orchestratePanelState) markStarted(taskID, summary string, now time.Time) {
+func (s *orchestratePanelState) markStarted(taskID, summary, cardKey string, now time.Time) {
 	index, ok := s.byID[taskID]
 	if !ok {
 		return
@@ -140,6 +145,17 @@ func (s *orchestratePanelState) markStarted(taskID, summary string, now time.Tim
 	s.tasks[index].status = orchestrateRunning
 	s.tasks[index].summary = summary
 	s.tasks[index].startedAt = now
+	if cardKey != "" {
+		s.tasks[index].cardKey = cardKey
+	}
+}
+
+// linkCard repoints a task at its child's real session id, so the detail pane
+// keeps finding it after the tracker reconciles the temporary key.
+func (s *orchestratePanelState) linkCard(taskID, cardKey string) {
+	if index, ok := s.byID[taskID]; ok && cardKey != "" {
+		s.tasks[index].cardKey = cardKey
+	}
 }
 
 func (s *orchestratePanelState) markDone(taskID, outcome string, tokens int, now time.Time) {
@@ -352,7 +368,7 @@ func orchestrateHeaderLine(state orchestratePanelState, now time.Time) string {
 	}
 	if !state.expanded {
 		b.WriteString("  ")
-		b.WriteString("click or ctrl+g to expand")
+		b.WriteString("click to open · ctrl+g to expand")
 	}
 	return b.String()
 }

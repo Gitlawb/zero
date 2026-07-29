@@ -91,8 +91,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// before the surface switch below because the panel lives in the FOOTER,
 	// outside every transcript/sidebar region those cases test.
 	if mouseLeftPress(msg) && m.clickedOrchestrateHeader(msg) {
-		m.orchestrate.expanded = !m.orchestrate.expanded
-		return m, nil
+		// Pressing PLAN opens the drill-in — phases left, the selected task's
+		// live agent detail right. The panel's own expand/collapse stays on
+		// ctrl+g for a quick look without leaving the conversation.
+		return m.openOrchestrateDetail(), nil
 	}
 	if mouseLeftPress(msg) {
 		switch {
