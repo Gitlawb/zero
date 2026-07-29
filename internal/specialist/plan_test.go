@@ -158,21 +158,70 @@ func TestParsePlanRejectsMoreThanOneWorker(t *testing.T) {
 	}
 }
 
-// (j) A budget is required, and max_tokens with it.
-func TestParsePlanRequiresABudget(t *testing.T) {
+// (j) A budget object is required — max_workers must be stated — but
+// max_tokens is OPTIONAL and unbounded when omitted.
+//
+// It used to be required and capped at 200k. Both went: the check ran only
+// BETWEEN tasks, so a six-task chain asking for exactly 200k spent 469,555 and
+// was cut short anyway. A number that neither bounds spend nor lets heavy work
+// finish is worse than none, because it reads like a guarantee. Spend is still
+// metered and reported; a caller that wants a bound still sets one.
+func TestParsePlanRequiresABudgetButNotATokenCap(t *testing.T) {
 	if _, err := ParsePlan(map[string]any{"tasks": []any{task("a", "x")}}, readOnlyLimits()); err == nil {
-		t.Fatal("a plan with no budget must be rejected")
+		t.Fatal("a plan with no budget object must be rejected")
 	}
+
+	unbounded := okBudget()
+	delete(unbounded, "max_tokens")
+	plan, err := ParsePlan(planArgs([]any{task("a", "x")}, unbounded), readOnlyLimits())
+	if err != nil {
+		t.Fatalf("an omitted max_tokens must be accepted as unbounded, got %v", err)
+	}
+	if plan.Budget().MaxTokens != 0 {
+		t.Fatalf("an omitted max_tokens must read as 0 (unbounded), got %d", plan.Budget().MaxTokens)
+	}
+
+	negative := okBudget()
+	negative["max_tokens"] = float64(-1)
+	if _, err := ParsePlan(planArgs([]any{task("a", "x")}, negative), readOnlyLimits()); err == nil {
+		t.Fatal("a negative max_tokens is meaningless and must be rejected")
+	}
+}
+
+// A caller that DOES want a bound still gets one, enforced exactly as before.
+func TestAnExplicitTokenBoundStillStopsThePlan(t *testing.T) {
+	budget := okBudget()
+	budget["max_tokens"] = float64(1)
+	plan, err := ParsePlan(planArgs([]any{task("a", "x"), task("b", "y")}, budget), readOnlyLimits())
+	if err != nil {
+		t.Fatalf("ParsePlan: %v", err)
+	}
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			return TaskResult{ID: req.Task.ID, Outcome: TaskSucceeded, Tokens: 100}, nil
+		}, nil)
+	if report.Skipped != 1 {
+		t.Fatalf("an explicit bound must still cut the plan short: %+v", report)
+	}
+}
+
+// ...and an unbounded plan runs every task, however much it spends.
+func TestAnUnboundedPlanRunsEveryTask(t *testing.T) {
 	budget := okBudget()
 	delete(budget, "max_tokens")
-	_, err := ParsePlan(planArgs([]any{task("a", "x")}, budget), readOnlyLimits())
-	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
-		t.Fatalf("a missing max_tokens must be rejected, got %v", err)
+	plan, err := ParsePlan(planArgs([]any{task("a", "x"), task("b", "y"), task("c", "z")}, budget), readOnlyLimits())
+	if err != nil {
+		t.Fatalf("ParsePlan: %v", err)
 	}
-	over := okBudget()
-	over["max_tokens"] = float64(999_999_999)
-	if _, err := ParsePlan(planArgs([]any{task("a", "x")}, over), readOnlyLimits()); err == nil {
-		t.Fatal("a budget above the run's limit must be rejected")
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			return TaskResult{ID: req.Task.ID, Outcome: TaskSucceeded, Tokens: 1_000_000}, nil
+		}, nil)
+	if report.Succeeded != 3 || report.Skipped != 0 {
+		t.Fatalf("an unbounded plan must run every task: %+v", report)
+	}
+	if report.TokensUsed != 3_000_000 {
+		t.Fatalf("spend must still be METERED when it is not bounded, got %d", report.TokensUsed)
 	}
 }
 

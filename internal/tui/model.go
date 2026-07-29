@@ -1890,6 +1890,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
+		case keyCtrl(msg, 'g'):
+			// Ctrl+G expands/collapses the ORCHESTRATE plan panel — the
+			// keyboard equivalent of clicking its header line.
+			//
+			// NOT Ctrl+O, which already toggles the detailed transcript view,
+			// and not Ctrl+P, which belongs to the update_plan panel: /plan and
+			// /plans are already two different things, and one key toggling
+			// whichever happened to be present would make that worse.
+			if m.noBlockingModal() && !m.orchestrate.isEmpty() {
+				m.orchestrate.expanded = !m.orchestrate.expanded
+				return m, nil
+			}
 		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
 			// Ctrl+B collapses / restores the right context sidebar. The composer-empty
 			// requirement only applies when the binding resolves to the conflicting

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // diamondAdmitted is the plan the whole feature is measured against: a -> (b,c)
@@ -26,10 +27,14 @@ func diamondAdmitted() planAdmittedMsg {
 	}
 }
 
+// admittedModel returns a model with the plan admitted AND EXPANDED. The panel
+// collapses by default (the header is the state; the tasks are detail), so a
+// test about task rows has to open it — the collapsed default has its own test.
 func admittedModel(t *testing.T, msg planAdmittedMsg) model {
 	t.Helper()
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(msg, m.now())
+	m.orchestrate.expanded = true
 	return m
 }
 
@@ -126,9 +131,11 @@ func TestCompletedPlanStopsPinningItself(t *testing.T) {
 		t.Fatal("a just-completed plan should still be visible")
 	}
 	later := m.now().Add(completedHideAfter + time.Second)
+	m.orchestrate.expanded = false
 	if m.orchestrate.visible(later) {
 		t.Fatal("a long-finished plan must stop pinning itself")
 	}
+	// An expanded plan is one the user deliberately opened, so it stays.
 	m.orchestrate.expanded = true
 	if !m.orchestrate.visible(later) {
 		t.Fatal("an expanded plan stays visible however long ago it finished")
@@ -389,6 +396,16 @@ func TestOrchestratePanelMountsInTheFooter(t *testing.T) {
 	updated, _ := m.Update(diamondAdmitted())
 	m = updated.(model)
 	m.width, m.height = 96, 30
+
+	// Collapsed by default: the header is there, the tasks are not.
+	collapsed := plainRender(t, m.View())
+	if !strings.Contains(collapsed, "PLAN diamond") {
+		t.Fatalf("the collapsed panel must still show the plan header:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "ctrl+g") == false {
+		t.Fatalf("the collapsed panel must say how to open it:\n%s", collapsed)
+	}
+	m.orchestrate.expanded = true
 	after := plainRender(t, m.View())
 
 	if !strings.Contains(after, "PLAN diamond") {
@@ -416,5 +433,124 @@ func TestPlansCommandIsWired(t *testing.T) {
 	}
 	if !transcriptContains(m.transcript, "← b, c") {
 		t.Fatal("/plans did not report the dependency shape")
+	}
+}
+
+// COLLAPSED BY DEFAULT, and the header says how to open it. A six-task chain
+// otherwise takes seven footer lines for the whole run, pushing the
+// conversation up for detail that is one keypress away.
+func TestThePanelIsCollapsedUntilAsked(t *testing.T) {
+	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
+	m.orchestrate.admit(diamondAdmitted(), m.now())
+
+	collapsed := m.renderOrchestratePanel(100)
+	if strings.Count(collapsed, "\n") != 0 {
+		t.Fatalf("the collapsed panel must be exactly one line:\n%s", collapsed)
+	}
+	if !strings.Contains(collapsed, "PLAN diamond") {
+		t.Fatalf("the collapsed panel must still name the plan:\n%s", collapsed)
+	}
+	if !strings.Contains(collapsed, "ctrl+g") {
+		t.Fatalf("a collapsed panel that does not say how to open it reads as the whole panel:\n%s", collapsed)
+	}
+	for _, id := range []string{" b ", " c ", " d "} {
+		if strings.Contains(collapsed, id) {
+			t.Fatalf("task%q leaked into the collapsed panel:\n%s", id, collapsed)
+		}
+	}
+
+	m.orchestrate.expanded = true
+	expanded := m.renderOrchestratePanel(100)
+	if strings.Count(expanded, "\n") < 4 {
+		t.Fatalf("the expanded panel must show every task:\n%s", expanded)
+	}
+	if strings.Contains(expanded, "to expand") {
+		t.Fatal("an already-open panel must not still offer to open")
+	}
+}
+
+// Ctrl+O toggles it through the real key handler, and does nothing when there
+// is no plan — a keypress that silently mutates hidden state is worse than one
+// that does nothing.
+func TestCtrlGTogglesTheOrchestratePanel(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+
+	press := func(m model) model {
+		t.Helper()
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+		return updated.(model)
+	}
+
+	m = press(m)
+	if m.orchestrate.expanded {
+		t.Fatal("with no plan admitted the toggle must do nothing")
+	}
+
+	m.activeRunID = 1
+	updated, _ := m.Update(diamondAdmitted())
+	m = updated.(model)
+	if m.orchestrate.expanded {
+		t.Fatal("a freshly admitted plan starts collapsed")
+	}
+	m = press(m)
+	if !m.orchestrate.expanded {
+		t.Fatal("ctrl+g did not expand the panel")
+	}
+	m = press(m)
+	if m.orchestrate.expanded {
+		t.Fatal("ctrl+g did not collapse the panel again")
+	}
+}
+
+// An unbounded plan still reports what it spent. Removing the cap must not also
+// remove the measurement.
+func TestAnUnboundedPlanStillReportsItsSpend(t *testing.T) {
+	m := admittedModel(t, planAdmittedMsg{runID: 1, name: "p", taskCount: 1,
+		tasks: []planGraphTask{{id: "a"}}})
+	m.orchestrate.complete(planCompletedMsg{status: "completed", tokensUsed: 469555}, m.now())
+
+	rendered := m.renderOrchestratePanel(100)
+	if !strings.Contains(rendered, "469555 tokens") {
+		t.Fatalf("an unbounded plan must still report its spend:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "/0 tokens") {
+		t.Fatalf("no bound was asked for, so there is no denominator to show:\n%s", rendered)
+	}
+}
+
+// A long chain must not indent itself off the screen. A twenty-task chain adds
+// a rung per link, which would be forty columns of indent — the shape stops
+// being legible long before that.
+func TestADeepChainStopsIndenting(t *testing.T) {
+	msg := planAdmittedMsg{runID: 1, name: "chain"}
+	for index := 0; index < 20; index++ {
+		task := planGraphTask{id: string(rune('a' + index))}
+		if index > 0 {
+			task.dependsOn = []string{string(rune('a' + index - 1))}
+		}
+		msg.tasks = append(msg.tasks, task)
+	}
+	msg.taskCount = len(msg.tasks)
+	m := admittedModel(t, msg)
+
+	// The DEPTHS still reflect the real graph — only the drawing is capped.
+	last := m.orchestrate.tasks[len(m.orchestrate.tasks)-1]
+	if last.depth != 19 {
+		t.Fatalf("the last link of a 20-task chain is at depth %d, want 19", last.depth)
+	}
+
+	rendered := m.renderOrchestratePanel(60)
+	for _, styled := range strings.Split(rendered, "\n") {
+		// VISIBLE width: the rendered line carries colour escapes, and counting
+		// those would measure the wrong thing entirely.
+		line := ansi.Strip(styled)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent > 2*(orchestrateMaxIndentDepth+1) {
+			t.Fatalf("indent ran to %d columns:\n%s", indent, rendered)
+		}
+		if len([]rune(line)) > 60 {
+			t.Fatalf("a line ran to %d visible columns past a 60-wide panel:\n%s", len([]rune(line)), line)
+		}
 	}
 }

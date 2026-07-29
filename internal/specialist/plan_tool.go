@@ -49,9 +49,15 @@ const (
 	// defaultPlanMaxTasks bounds plan size. Deliberately small: Phase 2 exists
 	// to measure whether fan-out would pay, not to run large plans.
 	defaultPlanMaxTasks = 20
-	// defaultPlanMaxTokens caps what one orchestrate call may spend across every
-	// child it launches.
-	defaultPlanMaxTokens = 200_000
+	// defaultPlanMaxTokens is 0: NO ceiling on what a plan may request.
+	//
+	// It was 200_000, and a six-task chain asking for exactly that spent
+	// 469,555 — the check ran only between tasks, so the last task dispatched
+	// overshot without limit and the plan was cut short anyway. Capping the
+	// REQUEST while not bounding the SPEND is the worst of both: heavy work
+	// cannot finish and the number means nothing. Spend is metered and
+	// reported either way; a caller that wants a bound still sets max_tokens.
+	defaultPlanMaxTokens = 0
 )
 
 func (tool *OrchestrateTool) Name() string { return OrchestrateToolName }
@@ -103,7 +109,7 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			},
 			"budget": {
 				Type:        "object",
-				Description: "Required. max_tokens is required; max_workers must be 1 (this phase executes sequentially); max_wall_seconds is optional.",
+				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way.",
 			},
 		},
 		Required:             []string{"tasks", "budget"},

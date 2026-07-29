@@ -158,7 +158,10 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 	// posture every child inherits a 320-turn ceiling, so a twenty-task plan
 	// authorises 6,400 child turns from a single tool call; this is what stands
 	// between that number and the user's bill.
+	// budgetLeft is only a bound when the plan asked for one. Zero means
+	// unbounded: spend is metered and reported, not gated.
 	budgetLeft := plan.Budget().MaxTokens
+	bounded := budgetLeft > 0
 	budgetExhausted := false
 
 	deadline := time.Time{}
@@ -203,7 +206,7 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 		// A budget-exhausted or timed-out plan SKIPS the rest rather than
 		// aborting: independent work already done still counts, and the record
 		// must show what was not attempted.
-		if budgetExhausted || budgetLeft <= 0 || (!deadline.IsZero() && time.Now().After(deadline)) {
+		if budgetExhausted || (bounded && budgetLeft <= 0) || (!deadline.IsZero() && time.Now().After(deadline)) {
 			budgetExhausted = true
 			result := TaskResult{
 				ID:      id,
