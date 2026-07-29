@@ -634,15 +634,6 @@ func (m model) renderContextSidebar(width, height int) []string {
 	switch {
 	case len(planLines) > 0:
 		lines = append(lines, planLines...)
-	case !m.orchestrate.isEmpty():
-		// An ORCHESTRATE plan is running. Without this the sidebar said "no
-		// active plan" while the panel two lines below showed one mid-flight —
-		// the two surfaces contradicting each other about the same session.
-		//
-		// EXACTLY ONE line, like the placeholder it replaces: the FILES
-		// section's click offsets are computed from the lines above it, so a
-		// different count here would misdirect every file hit.
-		add(m.sidebarOrchestrateLine(width))
 	default:
 		add(sidebarPlaceholder("no active plan", width))
 	}
@@ -764,6 +755,17 @@ func sidebarPlaceholder(text string, width int) string {
 func (m model) sidebarPlanHeader(width int) string {
 	state := m.plan
 	if state.isEmpty() {
+		if orchestrate := m.orchestrate; !orchestrate.isEmpty() {
+			done, failed, _, _, _ := orchestrate.counts()
+			style := zeroTheme.accent
+			if failed > 0 {
+				style = zeroTheme.red
+			} else if done == len(orchestrate.tasks) {
+				style = zeroTheme.green
+			}
+			return sidebarHeaderWithCount("PLAN",
+				fmt.Sprintf("%d/%d", done, len(orchestrate.tasks)), style, width)
+		}
 		return sidebarHeader("PLAN", width)
 	}
 	total := len(state.steps)
@@ -788,7 +790,12 @@ func (m model) sidebarPlanHeader(width int) string {
 func (m model) sidebarPlanLines(width int) []string {
 	state := m.plan
 	if state.isEmpty() {
-		return nil
+		// No update_plan steps, but an ORCHESTRATE plan may be running. Its
+		// lines belong in THIS function rather than beside the placeholder,
+		// because sidebarFileSelectables derives the FILES section's click
+		// offsets from len(sidebarPlanLines) — anything rendered outside it
+		// would silently misdirect every file hit by the number of lines added.
+		return m.sidebarOrchestrateLines(width)
 	}
 	room := maxInt(4, width-3)
 	lines := make([]string, 0, len(state.steps))
