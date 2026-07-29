@@ -186,3 +186,94 @@ func TestExecutePlanFailsAnUngrantableTaskWithoutDispatchingIt(t *testing.T) {
 		t.Fatalf("the failure must say why, got %q", report.Tasks[0].Err)
 	}
 }
+
+// THE SIBLING COMPARISON for the tool grant.
+//
+// The authority rule has two enforcement points: validateTaskTools at admission
+// and planToolGrant at dispatch, the second commented "BELT AND BRACES … so a
+// validation bug cannot widen a task's authority". Both were fixed together —
+// and two sites fixed together is exactly the shape that drifts apart later,
+// because each ends up with its own test asserting its own expectation.
+//
+// This asserts them AGAINST EACH OTHER on the same inputs: whatever validation
+// admits, dispatch must grant, and dispatch must never grant a tool validation
+// would have rejected.
+func TestBothGrantEnforcementPointsAgree(t *testing.T) {
+	cases := []struct {
+		name   string
+		tools  []any
+		parent []string
+	}{
+		{"no request, parent holds reads", nil, []string{"read_file", "grep"}},
+		{"no request, parent holds one read", nil, []string{"grep"}},
+		{"no request, parent holds only mutators", nil, []string{"write_file", "bash"}},
+		{"no request, parent holds nothing", nil, nil},
+		{"request inside the grant", []any{"grep"}, []string{"read_file", "grep"}},
+		{"request outside the grant", []any{"read_file"}, []string{"grep"}},
+		{"request partly outside the grant", []any{"read_file", "grep"}, []string{"grep"}},
+		{"request a mutator", []any{"write_file"}, []string{"read_file", "write_file"}},
+		{"request with no grant at all", []any{"read_file"}, nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := map[string]any{"id": "a", "prompt": "p"}
+			if tc.tools != nil {
+				fields["tools"] = tc.tools
+			}
+			limits := Limits{MaxTasks: 20, MaxTokens: 200000, ParentTools: tc.parent}
+
+			_, parseErr := ParsePlan(singleTaskPlanArgs(fields), limits)
+
+			task := Task{ID: "a", Prompt: "p"}
+			for _, name := range tc.tools {
+				task.Tools = append(task.Tools, name.(string))
+			}
+			granted, grantErr := planToolGrant(task, tc.parent)
+
+			// THE RELATIONSHIP IS SUBSET, NOT EQUALITY, and the direction is
+			// what matters. Admission is the stricter layer: it REJECTS a task
+			// naming anything outside the grant. Dispatch is the narrowing
+			// layer: it DROPS such a tool and grants the rest. Those differ,
+			// and they should — dispatch only ever runs on an already-admitted
+			// task, so its job when it disagrees is to hand over less, never
+			// more. Requiring the two to refuse identically would be asserting
+			// a symmetry the design does not want.
+			//
+			// So the invariant tested here is one-directional: whatever
+			// dispatch grants must be something admission would also have
+			// allowed. A violation means the second layer widened authority,
+			// which is the defect the "belt and braces" comment promises
+			// cannot happen.
+			if grantErr != nil {
+				if len(granted) != 0 {
+					t.Fatalf("a refused grant must hand over nothing, got %v", granted)
+				}
+				return
+			}
+			for _, name := range granted {
+				if !planReadOnlyTools[name] {
+					t.Fatalf("dispatch granted %q, which is not read-only; admission would have rejected it", name)
+				}
+				if !containsGrant(tc.parent, name) {
+					t.Fatalf("dispatch granted %q, which the parent does not hold %v; "+
+						"the second layer widened authority", name, tc.parent)
+				}
+			}
+			// And the converse direction: when admission ACCEPTS, dispatch must
+			// have something to hand over, or an admitted task could never run.
+			if parseErr == nil && len(granted) == 0 {
+				t.Fatal("admission accepted the task but dispatch granted nothing")
+			}
+		})
+	}
+}
+
+func containsGrant(grant []string, name string) bool {
+	for _, held := range grant {
+		if held == name {
+			return true
+		}
+	}
+	return false
+}
