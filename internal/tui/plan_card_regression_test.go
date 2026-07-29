@@ -103,9 +103,15 @@ func TestTheSidebarDoesNotDenyARunningPlan(t *testing.T) {
 	if strings.Contains(rendered, "no active plan") {
 		t.Fatalf("the sidebar denies a plan that is running:\n%s", rendered)
 	}
-	for _, want := range []string{"diamond", "0/4", "a"} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf("the sidebar does not carry %q:\n%s", want, rendered)
+	// The section carries the progress count and the tasks themselves. The
+	// plan's NAME lives on the panel and in the detail view — the column is 26
+	// to 40 cells wide and a name would cost a task row.
+	if !strings.Contains(rendered, "PLAN") || !strings.Contains(rendered, "0/4") {
+		t.Errorf("the PLAN header does not show progress:\n%s", rendered)
+	}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		if !strings.Contains(rendered, id) {
+			t.Errorf("the sidebar does not list task %q:\n%s", id, rendered)
 		}
 	}
 }

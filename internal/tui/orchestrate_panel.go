@@ -544,36 +544,70 @@ func (m model) clickedOrchestrateHeader(msg tea.MouseMsg) bool {
 		strings.HasPrefix(strings.TrimSpace(line), "▾ "+orchestrateHeaderMarker)
 }
 
-// sidebarOrchestrateLine is the one-line orchestrate summary the sidebar shows
-// in place of "no active plan" while a plan is running. Kept to a single line
-// because the FILES section below computes its click offsets from the lines
-// above it.
-func (m model) sidebarOrchestrateLine(width int) string {
+// maxSidebarOrchestrateLines caps the sidebar's plan list. The column is 26-40
+// wide and shares its height with AGENTS, FILES and ACTIVITY, so a twenty-task
+// plan must not push those off — the panel and the detail view are where a
+// whole plan is read.
+const maxSidebarOrchestrateLines = 6
+
+// sidebarOrchestrateLines renders the running plan for the right-hand column:
+// one line per task, coloured by status, in the same shape the update_plan
+// steps use so the section reads consistently whichever plan is in it.
+//
+// Live tasks first — the ones that have not finished — so a long plan shows
+// what is happening rather than what already happened. What it drops is stated.
+func (m model) sidebarOrchestrateLines(width int) []string {
 	state := m.orchestrate
-	done, failed, _, _, _ := state.counts()
+	if state.isEmpty() {
+		return nil
+	}
+	room := maxInt(4, width-3)
 
-	label := strings.TrimSpace(state.name)
-	if label == "" {
-		label = "plan"
-	}
-	summary := fmt.Sprintf("%s %d/%d", label, done, len(state.tasks))
-	if failed > 0 {
-		summary += fmt.Sprintf(" · %d failed", failed)
-	}
-	if running := state.runningTask(); running != "" {
-		summary += " · " + running
-	}
-	// Room for the two-space indent the placeholder also carries.
-	return "  " + zeroTheme.muted.Render(truncateRunes(summary, maxInt(1, width-2)))
-}
-
-// runningTask names the task currently in flight, or "" when none is. Sound
-// because MaxWorkers is validated to be 1 — Stage 2d must revisit it.
-func (s orchestratePanelState) runningTask() string {
-	for _, task := range s.tasks {
-		if task.status == orchestrateRunning {
-			return task.id
+	rows := state.liveTasks(m.orchestrateNow())
+	if len(rows) == 0 {
+		// Everything has finished and faded: show the tail of the plan rather
+		// than an empty section.
+		rows = state.tasks
+		if len(rows) > maxSidebarOrchestrateLines {
+			rows = rows[len(rows)-maxSidebarOrchestrateLines:]
 		}
 	}
-	return ""
+	hidden := 0
+	if len(rows) > maxSidebarOrchestrateLines {
+		hidden = len(rows) - maxSidebarOrchestrateLines
+		rows = rows[:maxSidebarOrchestrateLines]
+	}
+
+	lines := make([]string, 0, len(rows)+1)
+	for _, task := range rows {
+		icon, body := sidebarOrchestrateStyle(task, room)
+		lines = append(lines, " "+icon+" "+body)
+	}
+	if hidden > 0 {
+		lines = append(lines, " "+zeroTheme.faint.Render(fmt.Sprintf("  +%d more", hidden)))
+	}
+	return lines
+}
+
+// sidebarOrchestrateStyle picks the glyph and text colour for one task. The
+// palette matches the update_plan steps above it: green done, red failed, accent
+// in flight, faint everything else — and cancelled/skipped are deliberately NOT
+// red, since neither is a defect.
+func sidebarOrchestrateStyle(task orchestrateTask, room int) (string, string) {
+	label := task.id
+	if summary := strings.TrimSpace(task.summary); summary != "" && len(label)+3 < room {
+		label += " " + summary
+	}
+	switch task.status {
+	case orchestrateDone:
+		return zeroTheme.green.Render("✓"), zeroTheme.muted.Render(truncateStep(label, room))
+	case orchestrateRunning:
+		return zeroTheme.accent.Render("•"), zeroTheme.ink.Render(truncateStep(label, room))
+	case orchestrateFailed:
+		return zeroTheme.red.Render("✗"), zeroTheme.muted.Render(truncateStep(label, room))
+	case orchestrateSkipped, orchestrateCancelled:
+		return zeroTheme.faint.Render("⊘"), zeroTheme.faint.Render(truncateStep(label, room))
+	default:
+		return zeroTheme.faint.Render("○"), zeroTheme.faint.Render(truncateStep(label, room))
+	}
 }
