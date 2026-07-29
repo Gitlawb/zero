@@ -625,7 +625,14 @@ func TestBashToolRequireEscalatedMsysGuard(t *testing.T) {
 
 	t.Run("approved require_escalated still blocks an unrelated syntax issue", func(t *testing.T) {
 		result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
-			"command":             `cd /d/tmp/zero-pr-158 && dir`,
+			// No `&&` here on purpose. The POSIX-style path is what this case is
+			// about, and on Windows PowerShell 5.1 a chained command trips the
+			// separate windows_powershell_version preflight first, which shadows
+			// the block being asserted. That only shows up on 5.1: the runners
+			// have PowerShell 7, where && is valid and the version check does not
+			// fire, so the substitution kept this green in CI while failing on the
+			// shell a stock Windows box actually gets.
+			"command":             `cd /d/tmp/zero-pr-158`,
 			"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
 		}, RunOptions{
 			PermissionGranted: true,

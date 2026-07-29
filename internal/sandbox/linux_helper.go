@@ -224,6 +224,17 @@ func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
 		return fmt.Errorf("bubblewrap cannot securely deny process-trusted credential file across atomic replacement: %s", strings.Join(files, ", "))
 	}
+	// The same limitation, for a token store named by the command's own
+	// environment. A /dev/null bind over the pathname is detached by the store's
+	// next atomic rename, and an absent one is skipped entirely — so plaintext
+	// published during the run stays readable. Refusing the command is the only
+	// honest answer bubblewrap can give; a pathname-policy backend enforces
+	// these without help. The path is not created or mutated to make the mask
+	// work: doing that for a command-supplied value would let a command steer
+	// Zero into creating host directories.
+	if files := profile.FileSystem.CommandDenyReadFinalFiles; len(files) > 0 {
+		return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential file across atomic replacement: %s", strings.Join(files, ", "))
+	}
 	return nil
 }
 

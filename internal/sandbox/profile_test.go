@@ -74,6 +74,11 @@ func TestCredentialDeniesMatchRelativeTokenOverridesFromStoreResolution(t *testi
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chdir(originalDir) }()
+	// Model a process whose stores resolved while it was here. The profile pins
+	// this directory once instead of re-reading it per plan, precisely so it
+	// keeps naming the file oauth.ResolveStorePath below computed — the two
+	// resolutions are asserted equal at the end.
+	sandbox.PinProcessCredentialBaseDir(t, workspace)
 
 	envMap := map[string]string{
 		"HOME":                       filepath.Join(workspace, "home"),

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -687,6 +688,9 @@ func TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(originalDir) })
+	// The process base dir is pinned at startup rather than re-read per plan, so
+	// a test that moves the process has to move the pin with it.
+	PinProcessCredentialBaseDir(t, processDir)
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "tokens.json")
 
 	engine := NewEngine(EngineOptions{
@@ -865,6 +869,106 @@ func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingC
 		if _, err := os.Stat(unwanted); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("failed bwrap planning created credential path %q on the host: %v", unwanted, err)
 		}
+	}
+}
+
+// TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap covers jatmn's #681
+// P1 finding on command-controlled overrides. A token store named only by the
+// command's environment used to get the weakest possible treatment on Linux: an
+// absent path was skipped outright, and an existing one got a /dev/null bind
+// that the store's next atomic rename detaches. Neither is a deny. The path
+// still earns none of the process-trusted privileges — no EnsureDenyReadDir, so
+// a command cannot steer Zero into creating host directories — but bubblewrap
+// now refuses the command instead of running it behind a mask that does not
+// hold.
+func TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	config := filepath.Join(home, "config")
+	// Deliberately no process-level override: without one the process-trusted
+	// list is empty and bubblewrap planning succeeds, so a failure below can only
+	// come from the command-supplied path.
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+
+	baseline := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+	if len(baseline.FileSystem.ProcessTrustedDenyReadFiles) != 0 || len(baseline.FileSystem.CommandDenyReadFinalFiles) != 0 {
+		t.Fatalf("baseline profile should have no replaceable final files: %#v", baseline.FileSystem)
+	}
+	if _, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: workspace, CommandCWD: workspace,
+			PermissionProfile: baseline, Command: []string{"true"},
+		},
+		HelperPath: "/usr/bin/zero-linux-sandbox",
+	}); err != nil {
+		t.Fatalf("baseline bwrap planning must succeed, got %v", err)
+	}
+
+	commandToken := filepath.Join(t.TempDir(), "command-store", "tokens.json")
+	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace,
+		[]string{"ZERO_OAUTH_TOKENS_PATH=" + commandToken})
+	fs := profile.FileSystem
+	if !stringSliceContains(fs.CommandDenyReadFinalFiles, normalizeProfilePath(commandToken)) {
+		t.Fatalf("CommandDenyReadFinalFiles = %#v, want command override %q", fs.CommandDenyReadFinalFiles, commandToken)
+	}
+	if stringSliceContains(fs.ProcessTrustedDenyReadFiles, normalizeProfilePath(commandToken)) {
+		t.Fatalf("ProcessTrustedDenyReadFiles = %#v, must not trust a command override", fs.ProcessTrustedDenyReadFiles)
+	}
+	if stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(filepath.Dir(commandToken))) {
+		t.Fatalf("EnsureDenyReadDirs = %#v, must not include a command-controlled dir", fs.EnsureDenyReadDirs)
+	}
+
+	_, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: workspace, CommandCWD: workspace,
+			PermissionProfile: profile, Command: []string{"true"},
+		},
+		HelperPath: "/usr/bin/zero-linux-sandbox",
+	})
+	if err == nil || !strings.Contains(err.Error(), "atomic replacement") {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs error = %v, want fail-closed atomic replacement error", err)
+	}
+	// Refusing must not have touched the host on the command's behalf.
+	for _, unwanted := range []string{commandToken, filepath.Dir(commandToken), commandToken + credentialPublicationDirSuffix} {
+		if _, statErr := os.Stat(unwanted); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed bwrap planning created command-controlled path %q: %v", unwanted, statErr)
+		}
+	}
+}
+
+// TestProcessCredentialBaseDirDoesNotFollowWorkingDirectoryChanges covers
+// jatmn's #681 finding on rolling Getwd: the token stores resolve a relative
+// override once, when the store is opened, and write to that fixed path
+// thereafter. Re-resolving it against the CURRENT working directory on every
+// BuildCommandPlan would deny a path nothing writes while the real store stayed
+// readable.
+func TestProcessCredentialBaseDirDoesNotFollowWorkingDirectoryChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "relative-tokens.json")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+
+	before := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, "", nil).FileSystem.ProcessTrustedDenyReadFiles
+	if len(before) == 0 {
+		t.Fatal("a relative token override must produce a process-trusted deny")
+	}
+	t.Chdir(t.TempDir())
+	after := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, "", nil).FileSystem.ProcessTrustedDenyReadFiles
+	if !slices.Equal(before, after) {
+		t.Fatalf("process-trusted denies followed the working directory: before %#v, after %#v", before, after)
 	}
 }
 

@@ -91,16 +91,26 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return runSandboxPolicyEffective(options, workspaceRoot, policy, backend, plan, store.FilePath(), writeRoots, writeRootsErr, stdout)
 	}
 	if options.json {
+		// The profile here is built from Zero's own environment and working
+		// directory, because that is all this command has: no command has been
+		// chosen yet. A nested command carries its own cwd and env, and the
+		// credential baseline resolves relative token overrides against those, so
+		// an executed command can carry MORE denyReadIfExists entries than this
+		// view lists. Say so in the payload rather than leaving a consumer to
+		// assume it is the whole picture (see PermissionProfileFromPolicy).
 		payload := struct {
-			Policy     zeroSandbox.Policy      `json:"policy"`
-			Backend    zeroSandbox.Backend     `json:"backend"`
-			Plan       zeroSandbox.BackendPlan `json:"plan"`
-			GrantsPath string                  `json:"grantsPath"`
+			Policy                zeroSandbox.Policy      `json:"policy"`
+			Backend               zeroSandbox.Backend     `json:"backend"`
+			Plan                  zeroSandbox.BackendPlan `json:"plan"`
+			GrantsPath            string                  `json:"grantsPath"`
+			PermissionProfileNote string                  `json:"permissionProfileNote"`
 		}{
 			Policy:     policy,
 			Backend:    backend,
 			Plan:       plan,
 			GrantsPath: store.FilePath(),
+			PermissionProfileNote: "permissionProfile is derived from this process's environment and working directory; " +
+				"a command run with its own environment can add further credential deny-read entries.",
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash

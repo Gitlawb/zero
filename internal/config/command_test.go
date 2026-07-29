@@ -414,3 +414,133 @@ func itoa(value int) string {
 	}
 	return string(digits[index:])
 }
+
+// The whole point of #811: providerCommandTimeout has to be an upper bound on
+// how long the call takes, not a floor. Process creation used to run before the
+// clock started and the post-termination drain was unbounded, so a slow or
+// contended machine could block startup for far longer than the error text
+// promised.
+//
+// This one guards the end-to-end contract against gross regressions. It is NOT
+// the assertion that pins the drain bound: Terminate kills the tree, so Wait
+// returns promptly and this passes even with the drain unbounded. That property
+// is pinned by TestAwaitWithGraceGivesUp, and the start-phase bound by
+// TestRunProviderCommandCountsProcessStartAgainstTheDeadline.
+func TestRunProviderCommandBoundsTotalDuration(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bound.pid")
+	command := writeCommand(t, commandScript{SleepSeconds: 60, PidFile: pidFile})
+
+	const budget = 2 * time.Second
+	start := time.Now()
+	_, _, err := runProviderCommand(command, budget)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, errProviderCommandTimeout) {
+		t.Fatalf("error = %v, want the timeout sentinel", err)
+	}
+	// Budget, plus the bounded drain, plus room for a loaded runner. A failure
+	// here means some phase is outside the deadline again, which is the bug.
+	ceiling := budget + providerCommandDrainGrace + 8*time.Second
+	if elapsed > ceiling {
+		t.Fatalf("returned after %s with a %s budget; the timeout is not bounding the call (ceiling %s)", elapsed, budget, ceiling)
+	}
+	assertProcessTerminatedIfStarted(t, pidFile)
+}
+
+// The timeout error has to carry something an operator can act on. It used to be
+// a bare string with the underlying error and the command's stderr both dropped,
+// so a user whose provider command was slow got no clue which phase ran out or
+// what the command had said.
+func TestLoadProviderCommandTimeoutReportsDiagnostics(t *testing.T) {
+	command := writeCommand(t, commandScript{
+		Stderr:       "provider is warming up",
+		SleepSeconds: 30,
+		PidFile:      filepath.Join(t.TempDir(), "diag.pid"),
+	})
+
+	_, err := LoadProviderCommand(command)
+	if err == nil {
+		t.Fatal("LoadProviderCommand() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %q, want a timeout message", err.Error())
+	}
+	// Wrapped, so callers can still classify it.
+	if !errors.Is(err, errProviderCommandTimeout) {
+		t.Fatalf("error = %v, want errors.Is against the timeout sentinel", err)
+	}
+	// And it must say which phase, rather than only that time ran out.
+	if !strings.Contains(err.Error(), "did not finish") && !strings.Contains(err.Error(), "starting the command") {
+		t.Fatalf("error = %q, want it to name the phase that exceeded the deadline", err.Error())
+	}
+}
+
+// The output buffers are written by cmd.Wait's I/O pump, which keeps running
+// after the timeout path has returned them to the caller, so a plain
+// bytes.Buffer would be read and written concurrently. Asserted on the buffer
+// directly: driving it end to end does not reliably produce the overlap, because
+// a terminated command usually stops writing before the snapshot is taken, so
+// such a test passes with the locking removed and proves nothing.
+//
+// Only meaningful under -race, which CI runs.
+func TestSyncBufferAllowsConcurrentWriteAndSnapshot(t *testing.T) {
+	buffer := &syncBuffer{}
+	writing := make(chan struct{})
+	go func() {
+		defer close(writing)
+		for i := 0; i < 2000; i++ {
+			_, _ = buffer.Write([]byte("x"))
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		_ = buffer.snapshot()
+	}
+	<-writing
+	if len(buffer.snapshot()) != 2000 {
+		t.Fatalf("buffer holds %d bytes, want 2000", len(buffer.snapshot()))
+	}
+}
+
+// The drain after termination must be bounded. Asserted directly on the helper,
+// because in place it is untestable without a tree that refuses to die: Wait
+// normally returns at once, which is precisely why an unbounded receive sat
+// there unnoticed. A channel that never fires is the pathological case made
+// cheap.
+func TestAwaitWithGraceGivesUp(t *testing.T) {
+	never := make(chan error)
+	start := time.Now()
+	if awaitWithGrace(never, 50*time.Millisecond) {
+		t.Fatal("reported completion for a wait that never finished")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("gave up after %s, want roughly the grace period", elapsed)
+	}
+	// Still reports completion when the wait does finish, or the timeout path
+	// would always claim the tree hung.
+	done := make(chan error, 1)
+	done <- nil
+	if !awaitWithGrace(done, time.Second) {
+		t.Fatal("reported expiry for a wait that had already finished")
+	}
+}
+
+// Process creation has to be inside the budget. It used to run before the clock
+// started, and on Windows that phase is CREATE_SUSPENDED plus job-object setup
+// plus a system-wide thread snapshot, none of it fast on a contended machine.
+//
+// A budget that is already spent when the call begins can only be exceeded
+// during the start, so the phase named in the error is what distinguishes the
+// two orderings: with the clock started afterwards, the start would always
+// complete first and the failure would come from the wait instead.
+func TestRunProviderCommandCountsProcessStartAgainstTheDeadline(t *testing.T) {
+	command := writeCommand(t, commandScript{Stdout: `{"name":"cmd","provider":"openai","apiKey":"sk-x","model":"m"}`})
+
+	_, _, err := runProviderCommand(command, time.Nanosecond)
+	if !errors.Is(err, errProviderCommandTimeout) {
+		t.Fatalf("error = %v, want the timeout sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "starting the command") {
+		t.Fatalf("error = %q, want the start phase to be the one that exceeded the deadline; "+
+			"anything else means process creation is outside the budget again", err.Error())
+	}
+}

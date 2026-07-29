@@ -569,6 +569,12 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 		wantDenyRead = []string{
 			filepath.Join(credentialHome, ".aws"),
 			filepath.Join(credentialHome, ".azure"),
+			// git's cleartext credential stores, in both the home and XDG
+			// layouts (#816). Listed here so the exported policy JSON is what
+			// catches a regression: this baseline is the contract a user reads
+			// with `zero sandbox policy --json`.
+			filepath.Join(credentialHome, ".git-credentials"),
+			filepath.Join(credentialHome, ".config", "git", "credentials"),
 			filepath.Join(credentialHome, ".npmrc"),
 			filepath.Join(credentialHome, ".netrc"),
 			filepath.Join(credentialHome, ".kube", "config"),

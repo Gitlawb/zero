@@ -138,6 +138,7 @@ var descriptors = []Descriptor{
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
+	openAICompat("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/kimi-k2p7-code", []string{"FIREWORKS_API_KEY"}, "fireworks-ai"),
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
 	openAICompat("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "qwen/qwen3.5-flash", []string{"ATLASCLOUD_API_KEY"}, "atlas cloud", "atlas"),

@@ -804,8 +804,12 @@ func denyReadRules(fs FileSystemPolicy) []string {
 	rules := denySeatbeltPathRules("file-read*", denied)
 	// Process-trusted final names have already had only their parent
 	// canonicalized. Preserve that terminal pathname here: normalizing it again
-	// would follow a terminal symlink and lose the atomic-replacement deny.
-	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", fs.ProcessTrustedDenyReadFiles)...))
+	// would follow a terminal symlink and lose the atomic-replacement deny. The
+	// command-supplied finals get the same treatment: seatbelt denies a pathname
+	// whether or not it exists, so unlike bubblewrap it has no reason to refuse
+	// the command over them.
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", finals)...))
 }
 
 // denyReadCarveoutRules re-allows reads for the non-secret subtrees of a denied
@@ -1078,6 +1082,13 @@ func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 		"GH_TOKEN",
 		"ZERO_WEBSEARCH_API_KEY",
 		"ZERO_DAEMON_REMOTE_TOKEN",
+		// The file form of the same bridge token. TokenFromEnv accepts either,
+		// so scrubbing only the inline variable left the pointer readable, and
+		// the default sandbox posture is read-all. There is no fallback
+		// location to guess at, the path comes from this variable alone, so
+		// removing it closes the leak rather than half of it. Same reasoning as
+		// GOOGLE_APPLICATION_CREDENTIALS below.
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE",
 	}
 	for _, descriptor := range providercatalog.All() {
 		for _, key := range descriptor.AuthEnvVars {

@@ -34,6 +34,14 @@ func keyCtrl(msg tea.KeyMsg, code rune) bool {
 	return keyCode(msg) == code && keyHasMod(msg, tea.ModCtrl)
 }
 
+// keySuper matches the Command key on macOS, which the rest of the TUI models as
+// ModSuper (see keybindings.go). Kept separate from keyCtrl because a binding
+// that means Ctrl on Linux and Windows usually means Command on macOS, and the
+// two arrive as different modifiers.
+func keySuper(msg tea.KeyMsg, code rune) bool {
+	return keyCode(msg) == code && keyHasMod(msg, tea.ModSuper)
+}
+
 func keyCtrlArrow(msg tea.KeyMsg, code rune) bool {
 	return keyIs(msg, code) && keyHasMod(msg, tea.ModCtrl)
 }

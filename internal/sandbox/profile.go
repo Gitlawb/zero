@@ -48,9 +48,20 @@ type FileSystemPolicy struct {
 	// and detach the mount; its planner must fail closed while any remain after
 	// profile finalization. Pathname-policy backends enforce these normally.
 	ProcessTrustedDenyReadFiles []string `json:"processTrustedDenyReadFiles,omitempty"`
-	DenyWrite                   []string `json:"denyWrite,omitempty"`
-	IncludePlatformRoots        bool     `json:"includePlatformRoots,omitempty"`
-	AllowTemp                   bool     `json:"allowTemp,omitempty"`
+	// CommandDenyReadFinalFiles are the same kind of final credential-store
+	// pathname, derived instead from a command-supplied environment (including
+	// MCP-injected env). They stay separate from the process-trusted list
+	// because they earn none of its host-side privileges: no carveouts, and
+	// never an EnsureDenyReadDir, since a command must not be able to make Zero
+	// create directories on the host. What they DO share is durability. A
+	// bubblewrap mask over one of these is bypassable by the same atomic rename,
+	// and an absent one is skipped entirely, so a backend that cannot deny them
+	// durably must refuse the command rather than run it behind a mask that does
+	// not hold. Pathname-policy backends enforce them normally, absent or not.
+	CommandDenyReadFinalFiles []string `json:"commandDenyReadFinalFiles,omitempty"`
+	DenyWrite                 []string `json:"denyWrite,omitempty"`
+	IncludePlatformRoots      bool     `json:"includePlatformRoots,omitempty"`
+	AllowTemp                 bool     `json:"allowTemp,omitempty"`
 }
 
 type WritableRoot struct {
@@ -132,6 +143,7 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			DenyReadCarveouts:           credentials.Carveouts,
 			EnsureDenyReadDirs:          credentials.EnsureDirs,
 			ProcessTrustedDenyReadFiles: credentials.ProcessTrustedFinalFiles,
+			CommandDenyReadFinalFiles:   credentials.CommandFinalFiles,
 			DenyWrite:                   normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots:        true,
 			AllowTemp:                   true,
@@ -187,6 +199,11 @@ type credentialDenyPaths struct {
 	EnsureDirs               []string
 	Dirs                     []string
 	ProcessTrustedFinalFiles []string
+	// CommandFinalFiles are final token pathnames derived from a
+	// command-supplied environment. Kept apart from the trusted list so they
+	// never gain its host-side privileges, but tracked so a backend that cannot
+	// deny a replaceable pathname can fail closed on them too.
+	CommandFinalFiles []string
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
@@ -255,6 +272,22 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 		paths := credentialDenyReadPathsIn(options, policy.AllowRead)
 		trusted.Paths = append(trusted.Paths, paths.Paths...)
 		trusted.Dirs = append(trusted.Dirs, paths.Dirs...)
+		// Carry the final token pathnames too. They are still untrusted — no
+		// carveouts, no EnsureDirs, no host mutation — but a deny that a rename
+		// can detach is not a deny, and skipping an absent one leaves whatever
+		// the run publishes there readable. Recording them lets a backend that
+		// cannot hold them durably fail closed instead, exactly as it already
+		// does for the process-trusted stores.
+		for _, file := range append(append([]string{}, options.OAuthTokens...), options.MCPOAuthTokens...) {
+			for _, final := range []string{file, file + ".secret"} {
+				candidate := normalizeCredentialFinalPath(final)
+				if candidate == "" || credentialPathReincluded(allowRoots, candidate) {
+					continue
+				}
+				trusted.Paths = append(trusted.Paths, candidate)
+				trusted.CommandFinalFiles = append(trusted.CommandFinalFiles, candidate)
+			}
+		}
 	}
 	commandBaseDirs := credentialCommandBaseDirs(commandDir)
 	if len(commandBaseDirs) > 0 {
@@ -283,13 +316,32 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 // files directly under <configDir>/zero, not in these subtrees.
 var zeroConfigReadCarveoutNames = []string{"plugins", "specialists", "commands"}
 
+// processCredentialBaseDir is the working directory this process started in,
+// captured once during package initialization.
+//
+// It must not be re-read per call. The token stores resolve a relative override
+// such as ZERO_OAUTH_TOKENS_PATH with filepath.Abs when the store is opened and
+// then write to that fixed path for the rest of the run, so a deny rule computed
+// from a later os.Getwd() would name a different file than the one being
+// written — denying a path nothing uses while the real store stayed readable.
+// Nothing in Zero calls os.Chdir today, which is what keeps this equal to the
+// writers' resolution; pinning it means that stays true if one is ever added,
+// instead of the two drifting apart per BuildCommandPlan.
+var processCredentialBaseDir = func() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}()
+
 // credentialProcessBaseDirs returns the directory the running Zero process uses
 // to resolve relative credential overrides.
 func credentialProcessBaseDirs() []string {
-	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		return []string{filepath.Clean(cwd)}
+	if strings.TrimSpace(processCredentialBaseDir) == "" {
+		return nil
 	}
-	return nil
+	return []string{processCredentialBaseDir}
 }
 
 // credentialCommandBaseDirs returns the directory a sandboxed child (including
@@ -424,6 +476,15 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		}
 		candidates = append(candidates, homeDirs...)
 		dirs = append(dirs, homeDirs...)
+		// git's credential store backend, which holds host passwords and
+		// personal access tokens in cleartext. Denied rather than the whole
+		// of ~/.ssh, because these cost nothing functionally: git reads them
+		// through a credential helper for authentication, not for identity,
+		// so a sandboxed git still works and simply cannot authenticate as
+		// the user. SSH key material is a harder trade and is tracked
+		// separately (#815). A file, so it joins candidates only — dirs
+		// drives directory-shaped handling (bwrap binds, carveouts).
+		candidates = append(candidates, filepath.Join(home, ".git-credentials"))
 	}
 	candidates = append(candidates, options.GoogleCredentials...)
 	candidates = append(candidates, options.NPMUserConfigs...)
@@ -450,6 +511,13 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		if strings.TrimSpace(configDir) == "" {
 			continue
 		}
+		// The XDG location of the same git credential store. Denying the file
+		// rather than the directory is deliberate: ~/.config/git also holds
+		// the global git config, which userGitConfigReadPaths grants on
+		// purpose so a sandboxed git can read user.name and aliases instead
+		// of failing outright. Added before the zero-directory handling below
+		// so a normalization failure there cannot drop this deny with it.
+		candidates = append(candidates, filepath.Join(configDir, "git", "credentials"))
 		// Deny the whole directory rather than an itemized file list: Zero's
 		// credential, token, and config stores publish through temporary siblings
 		// before an atomic rename, the legacy MCP store leaves a
@@ -692,7 +760,39 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 		userDenyRead,
 		credentials.EnsureDirs,
 	)
+	// Same retention for the command-derived finals: a file already inside a
+	// user deny or a directory Zero will actually mask is durably covered, so it
+	// is not a fail-closed reason. What survives is an override pointing OUTSIDE
+	// every masked directory — the case a bubblewrap bind cannot hold.
+	credentials.CommandFinalFiles = credentialRetainedFiles(
+		credentials.CommandFinalFiles,
+		userDenyRead,
+		credentials.EnsureDirs,
+	)
+	// A command environment is also resolved against the process base dir, so an
+	// absolute override in Zero's own environment lands in both lists. Report it
+	// once, as the process-trusted store it is.
+	credentials.CommandFinalFiles = pathsExcluding(credentials.CommandFinalFiles, credentials.ProcessTrustedFinalFiles)
 	return credentials
+}
+
+// pathsExcluding returns paths with every exact member of excluded removed.
+func pathsExcluding(paths, excluded []string) []string {
+	if len(paths) == 0 || len(excluded) == 0 {
+		return paths
+	}
+	skip := make(map[string]struct{}, len(excluded))
+	for _, path := range excluded {
+		skip[path] = struct{}{}
+	}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, dup := skip[path]; dup {
+			continue
+		}
+		out = append(out, path)
+	}
+	return out
 }
 
 // credentialRetainedFiles drops fail-closed file markers only when a durable

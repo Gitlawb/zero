@@ -122,6 +122,14 @@ var curatedModels = map[string][]Model{
 		{ID: "deepseek-ai/DeepSeek-R1", Description: "reasoning model"},
 		{ID: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", Description: "multimodal model"},
 	},
+	"fireworks": {
+		// Serverless-only curated set: ordinary API-key setups hit /inference/v1
+		// and cannot use on-demand deployment IDs.
+		{ID: "accounts/fireworks/models/kimi-k2p7-code", Description: "catalog default"},
+		{ID: "accounts/fireworks/models/deepseek-v4-flash", Description: "fast coding model"},
+		{ID: "accounts/fireworks/models/gpt-oss-120b", Description: "general model"},
+		{ID: "accounts/fireworks/models/deepseek-v4-pro", Description: "reasoning model"},
+	},
 	"dashscope": {
 		{ID: "qwen-plus", Description: "catalog default"},
 		{ID: "qwen-max", Description: "strong general model"},

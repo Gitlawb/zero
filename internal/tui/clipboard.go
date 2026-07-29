@@ -23,12 +23,16 @@ type clipboardImageMsg struct {
 	err       error
 }
 
+// readClipboardImage is the OS clipboard image reader. A var so tests can
+// substitute a stub instead of depending on the developer's real clipboard.
+var readClipboardImage = imageinput.ReadClipboardImage
+
 // readClipboardImageCmd reads the OS clipboard for image content off the
 // Update goroutine. Returns a clipboardImageMsg with the bytes, or nil (no
 // command) if there is no image — the caller treats nil as a silent no-op.
 func readClipboardImageCmd() tea.Cmd {
 	return func() tea.Msg {
-		data, mediaType, err := imageinput.ReadClipboardImage()
+		data, mediaType, err := readClipboardImage()
 		if err != nil {
 			return clipboardImageMsg{err: err}
 		}

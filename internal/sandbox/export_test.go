@@ -11,6 +11,20 @@ func FormatGrantList(grants []Grant) string {
 	return FormatGrantListWithCommandPrefixes(grants, nil)
 }
 
+// PinProcessCredentialBaseDir re-pins the directory relative credential
+// overrides resolve against, and restores it when the test ends.
+//
+// Production pins this once during package initialization, which is what makes
+// it equal the directory the token stores resolved against when they opened. A
+// test that chdirs to simulate a process running elsewhere has to move the pin
+// with it — re-reading the working directory per call is exactly the drift this
+// seam exists to keep out of the production path.
+func PinProcessCredentialBaseDir(t interface{ Cleanup(func()) }, dir string) {
+	previous := processCredentialBaseDir
+	processCredentialBaseDir = filepath.Clean(dir)
+	t.Cleanup(func() { processCredentialBaseDir = previous })
+}
+
 func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
 	return PermissionProfileFromPolicy(workspaceRoot, DefaultPolicy(), nil)
 }
