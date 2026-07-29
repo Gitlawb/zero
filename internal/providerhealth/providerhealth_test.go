@@ -221,6 +221,34 @@ func TestProbeConnectivityUsesOAuthCredential(t *testing.T) {
 	}
 }
 
+func TestProbeWithoutConnectivityRejectsUnavailableOAuthCredential(t *testing.T) {
+	resolverCalled := false
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "xai",
+			CatalogID:    "xai",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			Model:        "grok-4",
+		},
+		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
+			resolverCalled = true
+			return "", "", false, nil
+		},
+	})
+
+	if !resolverCalled {
+		t.Fatal("OAuth resolver was not called")
+	}
+	if result.Status != StatusFail {
+		t.Fatalf("Status = %q, want fail: %#v", result.Status, result.Checks)
+	}
+	check := result.Check("provider.auth")
+	if check == nil || check.Status != StatusFail || check.Category != CategoryAuth {
+		t.Fatalf("provider.auth = %#v, want auth failure", check)
+	}
+}
+
 func TestProbeConnectivityRefreshesOAuthCredentialAfterUnauthorized(t *testing.T) {
 	var authHeaders []string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

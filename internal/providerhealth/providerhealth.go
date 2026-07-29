@@ -209,7 +209,7 @@ func Probe(ctx context.Context, options Options) Result {
 	}, profile))
 
 	oauthConfigured := options.OAuthResolver != nil
-	if options.Connectivity && oauthConfigured {
+	if oauthConfigured {
 		var resolveErr error
 		profile, oauthConfigured, resolveErr = profileWithOAuthCredential(ctx, profile, options.OAuthResolver, false)
 		if resolveErr != nil {
