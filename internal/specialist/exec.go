@@ -202,6 +202,14 @@ var readOnlySpecialistTools = map[string]bool{
 	"grep":           true,
 	"glob":           true,
 	"update_plan":    true,
+	// lsp_navigate declares EffectReadOnly with the safety reason "reads files,
+	// modifies nothing", and resolves its path through the same scoped
+	// confinement its read-only siblings use. Its absence was chronology, not a
+	// decision: this list was written in #243 (2026-06-18) and the tool arrived
+	// in #276 two days later. planReadOnlyTools already listed it, so the two
+	// sets disagreed about what "read-only" means —
+	// TestReadOnlyToolSetsAgree now makes that fail rather than ship.
+	"lsp_navigate": true,
 }
 
 // IsReadOnlySpecialist reports whether the named specialist resolves to a

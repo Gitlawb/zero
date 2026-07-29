@@ -289,3 +289,34 @@ func TestSubagentToolsDeclareChildProgress(t *testing.T) {
 		t.Error("orchestrate must declare child progress; without it a plan runs invisibly")
 	}
 }
+
+// TWO LISTS THAT MUST NOT DRIFT (invariant 5).
+//
+// planReadOnlyTools bounds what a plan task may hold; readOnlySpecialistTools
+// decides whether a specialist counts as read-only for the Task tool's
+// permission gate. They are different questions with the same answer, and they
+// drifted: lsp_navigate was in the first and not the second, so a plan task
+// could hold a tool that made its own manifest fail the read-only check.
+//
+// The relationship is SUBSET, not equality, and the direction matters: anything
+// a plan task may hold must be something the wider gate also calls read-only.
+// The reverse is not required — update_plan is read-only for a specialist and
+// deliberately not a plan tool.
+func TestReadOnlyToolSetsAgree(t *testing.T) {
+	for name := range planReadOnlyTools {
+		if !readOnlySpecialistTools[name] {
+			t.Errorf("planReadOnlyTools allows %q but readOnlySpecialistTools does not call it read-only; "+
+				"a plan task holding it would fail the specialist read-only check", name)
+		}
+	}
+}
+
+// A manifest holding the full plan grant must pass the read-only check. This is
+// the consequence the drift produced, asserted at the behaviour rather than at
+// the two maps.
+func TestAFullPlanGrantIsAReadOnlyManifest(t *testing.T) {
+	manifest := planTaskManifest("explorer", PlanReadOnlyToolNames())
+	if !manifestIsReadOnly(manifest) {
+		t.Fatalf("a manifest holding exactly the plan grant %v is not considered read-only", PlanReadOnlyToolNames())
+	}
+}
