@@ -142,11 +142,17 @@ func (s *orchestratePanelState) markStarted(taskID, summary string, now time.Tim
 	s.tasks[index].startedAt = now
 }
 
-func (s *orchestratePanelState) markDone(taskID, outcome string, now time.Time) {
+func (s *orchestratePanelState) markDone(taskID, outcome string, tokens int, now time.Time) {
 	index, ok := s.byID[taskID]
 	if !ok {
 		return
 	}
+	// ACCUMULATE AS TASKS FINISH. tokensUsed was only ever assigned from the
+	// plan_completed event, which arrives when the whole plan ends — so the
+	// footer read "budget 0/200000" for the entire run while the cards above it
+	// showed tens of thousands of tokens spent. A budget line that reports zero
+	// while spending is the one number a user is watching it for.
+	s.tokensUsed += tokens
 	task := &s.tasks[index]
 	task.status = orchestrateStatusFromOutcome(outcome)
 	task.endedAt = now
@@ -177,7 +183,12 @@ func orchestrateStatusFromOutcome(outcome string) orchestrateTaskStatus {
 
 func (s *orchestratePanelState) complete(msg planCompletedMsg, now time.Time) {
 	s.status = msg.status
-	s.tokensUsed = msg.tokensUsed
+	// The executor's total is AUTHORITATIVE and replaces what the panel
+	// accumulated: it counts every task, including any whose message the panel
+	// dropped as stale.
+	if msg.tokensUsed > 0 {
+		s.tokensUsed = msg.tokensUsed
+	}
 	if msg.tokenLimit > 0 {
 		s.tokenLimit = msg.tokenLimit
 	}
