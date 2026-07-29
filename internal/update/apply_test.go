@@ -326,6 +326,13 @@ func TestApplyStandaloneUpdateFailsWhenHelperRefreshReportsTampering(t *testing.
 	if len(warnings) != 0 {
 		t.Fatalf("tampering must not be reported as a warning: %v", warnings)
 	}
+	mainData, readErr := os.ReadFile(executablePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile main binary: %v", readErr)
+	}
+	if string(mainData) != "old-binary" {
+		t.Fatalf("main binary = %q, want old-binary so a retry still sees the update", mainData)
+	}
 }
 
 func TestApplyStandaloneUpdateRejectsChecksumMismatch(t *testing.T) {

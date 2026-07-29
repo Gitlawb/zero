@@ -158,10 +158,20 @@ func TestInstallBinaryPreservesPossibleTamperingError(t *testing.T) {
 			_ = windows.CloseHandle(conflicting)
 		}
 	})
+	originalMark := markOldBinaryPreserved
+	markOldBinaryPreserved = func(string) error { return errors.New("injected marker failure") }
+	t.Cleanup(func() { markOldBinaryPreserved = originalMark })
+	stubRandomStagingSuffix(t, "deadbeef")
 
 	err := installBinary(sourcePath, targetPath)
 	if !errors.Is(err, ErrTargetPossiblyTampered) {
 		t.Fatalf("installBinary error = %v, want it to wrap ErrTargetPossiblyTampered", err)
+	}
+	if strings.Contains(err.Error(), "original preserved at "+targetPath+".old") {
+		t.Fatalf("installBinary error falsely claims the relocated copy remains at .old: %v", err)
+	}
+	if !strings.Contains(err.Error(), targetPath+".old.deadbeef.recovery") {
+		t.Fatalf("installBinary error = %v, want the authoritative relocated recovery path", err)
 	}
 }
 
@@ -209,13 +219,42 @@ func TestPromoteRefusesWhileRecoveryCopyIsMarked(t *testing.T) {
 	}
 
 	// Clearing the marker is the operator accepting the installed binary; the
-	// next promotion proceeds normally.
+	// next promotion proceeds normally without destroying the recovery copy.
 	clearOldBinaryPreserved(oldPath)
+	CleanupStaleBinary(targetPath)
+	stubRandomStagingSuffix(t, "deadbeef")
 	if err := installBinary(sourcePath, targetPath); err != nil {
 		t.Fatalf("installBinary after the operator cleared the marker: %v", err)
 	}
 	if data, err := os.ReadFile(targetPath); err != nil || string(data) != "verified-binary" {
 		t.Fatalf("target = %q err=%v, want the verified bytes installed", data, err)
+	}
+	if data, err := os.ReadFile(oldPath); err != nil || string(data) != "known-good" {
+		t.Fatalf("recovery copy = %q err=%v, want known-good after retry", data, err)
+	}
+}
+
+func TestPromoteRefusesRetryAfterInterruptedAside(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile recovery copy: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if _, err := os.Lstat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing target was unexpectedly created: %v", err)
+	}
+	if data, err := os.ReadFile(oldPath); err != nil || string(data) != "known-good" {
+		t.Fatalf("recovery copy = %q err=%v, want known-good", data, err)
 	}
 }
 

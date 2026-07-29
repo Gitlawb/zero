@@ -56,18 +56,15 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 		return nil
 	}
 	// The error this produces tells the operator their original is preserved at
-	// oldPath. Record that so the statement stays true: a later run finds
-	// targetPath occupied — by whatever won the gap — and would otherwise treat
-	// oldPath as an ordinary leftover and delete the only known-good copy.
+	// oldPath. Record that so a later promotion refuses to treat the recovery
+	// copy as the ordinary destination for another aside rename.
 	if markErr := markOldBinaryPreserved(oldPath); markErr != nil {
-		// The marker could not be established, so nothing on disk will tell the
-		// next run to keep oldPath and its cleanup would delete it. Telling the
-		// operator to hurry is not a fix — move the copy somewhere routine cleanup
-		// cannot reach instead. CleanupStaleBinary only ever removes the exact
-		// "<target>.old" name, so any other name survives by construction.
+		// The marker could not be established, so nothing on disk identifies
+		// oldPath as the recovery copy. Move it to a distinct name and report that
+		// authoritative location to the operator.
 		if kept, keepErr := keepUnmarkedRecoveryCopy(oldPath); keepErr == nil {
 			return fmt.Errorf(
-				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to %s to keep it out of routine cleanup)",
+				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)",
 				ErrTargetPossiblyTampered, err, markErr, kept,
 			)
 		}
@@ -171,9 +168,8 @@ func keepUnmarkedRecoveryCopy(oldPath string) (string, error) {
 	return kept, nil
 }
 
-// clearOldBinaryPreserved drops the marker once a promotion has succeeded: the
-// installed binary is verified again, so the preserved copy is an ordinary
-// leftover and normal cleanup should reclaim it.
+// clearOldBinaryPreserved models the operator accepting the installed binary
+// by deleting the recovery marker. The recovery copy itself remains preserved.
 func clearOldBinaryPreserved(oldPath string) {
 	_ = os.Remove(oldPath + oldBinaryPreservedSuffix)
 }
@@ -190,24 +186,9 @@ func oldBinaryPreserved(oldPath string) bool {
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-// CleanupStaleBinary best-effort removes the known "<path>.old" copy, but only
-// after confirming targetPath exists. If targetPath is absent or cannot be
-// inspected, .old may be the only known-good binary left by an interrupted
-// promotion and is preserved. Random staging files are also preserved because
-// their public name is not proof that this updater created them.
-//
-// A present targetPath is not by itself proof the .old copy is disposable. When
-// a promotion failed AND the restore failed, what occupies targetPath is exactly
-// what the updater could not verify, and .old holds the binary it could — so a
-// marker left by that path keeps both until an update succeeds. Deleting .old
-// there would destroy the recovery copy the failure told the operator to use.
-func CleanupStaleBinary(targetPath string) {
-	if _, err := os.Lstat(targetPath); err != nil {
-		return
-	}
-	oldPath := targetPath + ".old"
-	if oldBinaryPreserved(oldPath) {
-		return
-	}
-	_ = os.Remove(oldPath)
-}
+// CleanupStaleBinary intentionally preserves Windows recovery copies. A public
+// pathname cannot prove that an .old file is obsolete under the writable-install-
+// directory threat model: a deleted .keep marker, an interrupted promotion, or
+// an operator-approved retry can all leave .old as the last verified binary.
+// Safe bounded cleanup would require trusted state outside that directory.
+func CleanupStaleBinary(string) {}

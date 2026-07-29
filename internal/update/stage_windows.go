@@ -4,6 +4,7 @@ package update
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"unsafe"
@@ -119,8 +120,26 @@ func (staged *stagedBinary) promote(targetPath string) error {
 			oldPath, targetPath, oldPath+oldBinaryPreservedSuffix,
 		)
 	}
-	_ = os.Remove(oldPath) // best-effort cleanup of a leftover from a previous upgrade
-	if err := os.Rename(targetPath, oldPath); err != nil {
+	if _, targetErr := os.Lstat(targetPath); errors.Is(targetErr, os.ErrNotExist) {
+		if _, oldErr := os.Lstat(oldPath); oldErr == nil {
+			return fmt.Errorf(
+				"%w: %s is missing and %s may be the only recoverable binary; move it back before updating again",
+				ErrTargetPossiblyTampered, targetPath, oldPath,
+			)
+		}
+	}
+	// Never overwrite an existing .old recovery copy. It may be the last binary
+	// this updater verified even when its deletable .keep marker is gone. In that
+	// state, preserve .old and move the current target under a fresh name instead.
+	asidePath := oldPath
+	if _, err := os.Lstat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		suffix, suffixErr := randomStagingSuffix()
+		if suffixErr != nil {
+			return fmt.Errorf("choose recovery path: %w", suffixErr)
+		}
+		asidePath = targetPath + "." + suffix + ".old"
+	}
+	if err := os.Rename(targetPath, asidePath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
 	renameErr := renameFileByHandle(staged.file, targetPath)
@@ -137,15 +156,11 @@ func (staged *stagedBinary) promote(targetPath string) error {
 		}
 	}
 	if renameErr != nil {
-		if restoreErr := restoreOriginalBinary(oldPath, targetPath); restoreErr != nil {
-			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %w (original preserved at %s)", renameErr, restoreErr, oldPath)
+		if restoreErr := restoreOriginalBinary(asidePath, targetPath); restoreErr != nil {
+			return fmt.Errorf("install new binary: %v; additionally failed to restore the original binary: %w", renameErr, restoreErr)
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)
 	}
-	// The installed binary is verified again, so any earlier "this .old is the
-	// last known-good copy" marker no longer describes reality — and oldPath now
-	// holds what this promotion replaced, not what that marker was written about.
-	clearOldBinaryPreserved(oldPath)
 	staged.path = targetPath
 	staged.promoted = true
 	return nil

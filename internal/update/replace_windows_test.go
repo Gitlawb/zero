@@ -151,12 +151,12 @@ func TestCleanupStaleBinaryPreservesMarkedOldWhenTargetExists(t *testing.T) {
 		t.Fatalf("marker must survive alongside the copy it protects: %v", err)
 	}
 
-	// Once the marker is cleared — which a successful promotion does — the copy
-	// is an ordinary leftover again.
+	// Marker deletion is not proof that the recovery copy is obsolete: a writer
+	// in the installation directory can delete the marker between invocations.
 	clearOldBinaryPreserved(oldPath)
 	CleanupStaleBinary(targetPath)
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("unmarked old binary was not removed: %v", err)
+	if got, err := os.ReadFile(oldPath); err != nil || string(got) != "known-good" {
+		t.Fatalf("unmarked recovery copy = %q err=%v, want known-good", got, err)
 	}
 }
 
@@ -294,6 +294,9 @@ func TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails(t *testing.T) {
 	if string(got) != "known-good" {
 		t.Fatalf("kept copy = %q, want the last verified binary", got)
 	}
+	if _, err := os.Lstat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old recovery path still exists after move: %v", err)
+	}
 	// And routine cleanup cannot reach it: it only ever removes "<target>.old".
 	CleanupStaleBinary(targetPath)
 	if _, err := os.Stat(kept); err != nil {
@@ -368,7 +371,7 @@ func openWithoutSharing(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil
 }
 
-func TestCleanupStaleBinaryRemovesOldWhenTargetExists(t *testing.T) {
+func TestCleanupStaleBinaryPreservesOldWhenTargetExists(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")
 	oldPath := targetPath + ".old"
@@ -381,8 +384,12 @@ func TestCleanupStaleBinaryRemovesOldWhenTargetExists(t *testing.T) {
 
 	CleanupStaleBinary(targetPath)
 
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("stale old binary was not removed: %v", err)
+	old, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatalf("ReadFile preserved old binary: %v", err)
+	}
+	if string(old) != "stale" {
+		t.Fatalf("old binary = %q, want stale", old)
 	}
 	got, err := os.ReadFile(targetPath)
 	if err != nil {

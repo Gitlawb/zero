@@ -64,13 +64,6 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 	if resolved, err := filepath.EvalSymlinks(executablePath); err == nil {
 		executablePath = resolved
 	}
-	// Best-effort: remove a "<binary>.old" left behind by a previous Windows
-	// replaceBinary call now that enough time (a whole separate invocation)
-	// has passed for the old process to have released the file. Runs
-	// regardless of whether an update is available, so it isn't stuck waiting
-	// on a future upgrade that may never come.
-	CleanupStaleBinary(executablePath)
-
 	if !checkResult.UpdateAvailable {
 		return ApplyResult{Result: checkResult, Message: "already up to date"}, nil
 	}
@@ -189,10 +182,6 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	}
 
 	targetDir := filepath.Dir(executablePath)
-	if err := installBinary(newBinaryPath, executablePath); err != nil {
-		return nil, err
-	}
-
 	var warnings []string
 	for _, name := range optionalBinaries {
 		source, err := findByBasename(extractDir, name)
@@ -219,6 +208,13 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 			}
 			warnings = append(warnings, fmt.Sprintf("failed to update helper %s: %v", name, err))
 		}
+	}
+	// Refresh helpers before the main executable. If a helper path may have
+	// been tampered with, the running main binary must remain on the old version
+	// so the next invocation still sees this release as available and retries
+	// the helper instead of returning "already up to date".
+	if err := installBinary(newBinaryPath, executablePath); err != nil {
+		return nil, err
 	}
 
 	return warnings, nil
