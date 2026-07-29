@@ -141,17 +141,22 @@ func (m model) savedPlansText() string {
 		return planControlNotice("info",
 			"No saved plans.\nRun a plan, then keep it with /plans save <name>.")
 	}
+	// The BUNDLED plans do not count as "yours". A listing showing only the
+	// shipped example while saying nothing about saving would read as though
+	// the user already had plans of their own.
+	saved := 0
+	for _, plan := range plans {
+		if plan.Scope != specialist.PlanScopeBuiltin {
+			saved++
+		}
+	}
 	var b strings.Builder
 	b.WriteString("Plans\nstatus: info\n")
 	if len(plans) == 0 {
 		b.WriteString("No readable saved plans.")
 	}
 	for _, plan := range plans {
-		scope := "user"
-		if plan.Project {
-			scope = "project"
-		}
-		fmt.Fprintf(&b, "  %-20s %2d tasks  %s", plan.Name, plan.TaskCount, scope)
+		fmt.Fprintf(&b, "  %-20s %2d tasks  %-8s", plan.Name, plan.TaskCount, plan.Scope)
 		if plan.Description != "" {
 			b.WriteString("  · " + plan.Description)
 		}
@@ -165,6 +170,9 @@ func (m model) savedPlansText() string {
 		for _, problem := range problems {
 			b.WriteString("  " + problem + "\n")
 		}
+	}
+	if saved == 0 {
+		b.WriteString("\nNothing saved yet — run a plan, then keep it with /plans save <name>.")
 	}
 	b.WriteString("\n/plans show <name> to read one · /plans run <name> to run it")
 	return strings.TrimRight(b.String(), "\n")

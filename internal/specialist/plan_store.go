@@ -56,6 +56,21 @@ func DefaultPlanPaths(workspaceRoot, userConfigDir string) PlanPaths {
 	return paths
 }
 
+// PlanScope says where a saved plan came from. An ENUM rather than the bool it
+// started as: there are three origins now, and "not project" would have meant
+// both "the user's" and "shipped with the binary" — two things a listing has to
+// tell apart.
+type PlanScope string
+
+const (
+	// PlanScopeBuiltin is bundled with the binary. Always shadowed.
+	PlanScopeBuiltin PlanScope = "builtin"
+	// PlanScopeUser is the user config directory.
+	PlanScopeUser PlanScope = "user"
+	// PlanScopeProject is .zero/plans in the workspace, checked in and shared.
+	PlanScopeProject PlanScope = "project"
+)
+
 // SavedPlan is a stored plan as found on disk. Args is the raw argument map,
 // not a Plan: it becomes a Plan only by going through ParsePlan.
 type SavedPlan struct {
@@ -63,9 +78,12 @@ type SavedPlan struct {
 	Description string
 	TaskCount   int
 	Path        string
-	Project     bool
+	Scope       PlanScope
 	Args        map[string]any
 }
+
+// Project reports whether this plan came from the workspace.
+func (plan SavedPlan) Project() bool { return plan.Scope == PlanScopeProject }
 
 // validPlanName is an ALLOW-LIST, and it is the path guard as well as the name
 // guard: no separator, no dot, no traversal component can be spelled with these
@@ -143,7 +161,12 @@ func refuseSymlink(path string) error {
 // not read — malformed data is reported, never silently skipped.
 func LoadPlans(paths PlanPaths) (plans []SavedPlan, problems []string) {
 	byName := map[string]SavedPlan{}
-	// User first so a project plan of the same name overwrites it.
+	// BUILTIN FIRST, so anything on disk shadows it: a bundled plan is an
+	// example, never an override of something a user wrote.
+	for _, plan := range builtinPlans() {
+		byName[plan.Name] = plan
+	}
+	// Then user, then project, so a project plan of the same name wins.
 	for _, dir := range []string{paths.UserDir, paths.ProjectDir} {
 		if strings.TrimSpace(dir) == "" {
 			continue
@@ -192,12 +215,16 @@ func loadPlanDir(dir string, project bool) (plans []SavedPlan, problems []string
 			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
+		scope := PlanScopeUser
+		if project {
+			scope = PlanScopeProject
+		}
 		plans = append(plans, SavedPlan{
 			Name:        name,
 			Description: planString(args, "description"),
 			TaskCount:   savedTaskCount(args),
 			Path:        path,
-			Project:     project,
+			Scope:       scope,
 			Args:        args,
 		})
 	}
