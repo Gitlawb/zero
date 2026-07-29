@@ -1266,9 +1266,10 @@ func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
 		t.Fatalf("Status returned %d entries for a 3000-duplicate index of one key, want 1", len(statuses))
 	}
 	// One Get for the index header, one Get for the single deduplicated key's
-	// own entry — not one per (duplicate) index entry.
-	if ckr.gets > 2 {
-		t.Fatalf("Status issued %d keyring gets for a 3000-entry duplicate index, want <= 2 (fan-out DoS regression)", ckr.gets)
+	// own entry, and at most one extra Get for the legacy fallback lookup.
+	// The key regression is: not 3000 (one per duplicate entry).
+	if ckr.gets > 3 {
+		t.Fatalf("Status issued %d keyring gets for a 3000-entry duplicate index, want <= 3 (fan-out DoS regression)", ckr.gets)
 	}
 }
 

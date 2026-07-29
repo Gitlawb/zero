@@ -280,7 +280,13 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 // by uid so two different users never collide on one path.
 func keyringLockPath(env map[string]string, service, account string) string {
 	name := keyringLockFileName(service, account)
-	if home, err := resolveHomeDir(env); err == nil && strings.TrimSpace(home) != "" {
+	// Use OS.UserHomeDir (not resolveHomeDir) for a stable per-OS-user
+	// identity. resolveHomeDir honors ZERO_OAUTH_TOKENS_PATH and
+	// XDG_CONFIG_HOME overrides; using those for the lock path means
+	// two processes for the same keychain user with different HOME
+	// values take different locks, both read-modify-write the shared
+	// keyring index, and one saved token can be left unindexed.
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return filepath.Join(home, ".cache", "zero", name)
 	}
 	return filepath.Join(os.TempDir(), keyringTempLockName(service, account))
@@ -298,11 +304,14 @@ func keyringLockPath(env map[string]string, service, account string) string {
 // when the file-backend location can't be resolved at all, matching the
 // legacy code's own best-effort fallback (no cross-process lock at all).
 func legacyKeyringLockPath(env map[string]string) string {
-	home, err := resolveHomeDir(nil)
+	// Use ResolveStorePath so the legacy lock lives beside whatever the
+	// legacy binary actually stores to (honoring ZERO_OAUTH_TOKENS_PATH
+	// and XDG_CONFIG_HOME), matching the old binary's own lock path.
+	storePath, err := ResolveStorePath(env)
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "zero", "oauth-keyring.lockfile")
+	return filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 }
 
 // keyringLockFileName names the lock file after the keyring identity it
@@ -958,14 +967,15 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(trimmed, "[") {
-		var keys []string
-		if err := json.Unmarshal(raw, &keys); err != nil {
+		var rawKeys []string
+		if err := json.Unmarshal(raw, &rawKeys); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
+		keys := dedupeValidKeys(rawKeys)
 		if len(keys) > maxKeyringIndexKeys {
 			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
 		}
-		return dedupeValidKeys(keys), true, 1, nil
+		return keys, true, 1, nil
 	}
 	var header keyIndexHeader
 	if err := json.Unmarshal(raw, &header); err != nil {
@@ -981,10 +991,7 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
 		return nil, false, 0, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
 	}
-	if len(header.Keys) > maxKeyringIndexKeys {
-		return nil, false, 0, errKeyringIndexTooManyKeys(len(header.Keys))
-	}
-	keys := header.Keys
+	rawKeys := header.Keys
 	for i := 1; i < header.Chunks; i++ {
 		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
 		if err != nil {
@@ -1001,12 +1008,13 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
 		}
-		if len(keys)+len(more) > maxKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys) + len(more))
-		}
-		keys = append(keys, more...)
+		rawKeys = append(rawKeys, more...)
 	}
-	return dedupeValidKeys(keys), true, header.Chunks, nil
+	keys := dedupeValidKeys(rawKeys)
+	if len(keys) > maxKeyringIndexKeys {
+		return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
+	}
+	return keys, true, header.Chunks, nil
 }
 
 // dedupeValidKeys drops duplicates and malformed entries from a decoded
