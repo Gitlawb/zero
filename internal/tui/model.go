@@ -5050,9 +5050,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if m.turnTimer != nil {
 			m.turnTimer.start(started)
 		}
-		// firstTokenAt is stamped when the first token (reasoning or text) streams,
-		// so the turn can report time-to-first-token alongside total wall time.
-		var firstTokenAt time.Time
+		// firstTokenElapsed is stamped from the pause-aware turn timer when the
+		// first reasoning or text token streams, so TTFT and total elapsed use
+		// the same clock.
+		var firstTokenElapsed time.Duration
+		firstTokenSeen := false
+		stampFirstToken := func(at time.Time) {
+			if firstTokenSeen {
+				return
+			}
+			firstTokenSeen = true
+			firstTokenElapsed = m.activeTurnElapsedAt(started, at)
+		}
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -5168,11 +5177,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
-			if firstTokenAt.IsZero() {
-				firstTokenAt = m.now()
-			}
+			now := m.now()
+			stampFirstToken(now)
 			if strings.TrimSpace(reasoningText) != "" {
-				flushReasoning(m.now())
+				flushReasoning(now)
 			}
 			m.sendAgentText(runID, delta)
 			if onText != nil {
@@ -5272,8 +5280,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
-			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
-				firstTokenAt = now
+			if strings.TrimSpace(delta) != "" {
+				stampFirstToken(now)
 			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
@@ -5515,10 +5523,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		flushReasoning(m.now())
 		elapsed := m.activeTurnElapsed(started)
-		ttft := time.Duration(0)
-		if !firstTokenAt.IsZero() {
-			ttft = firstTokenAt.Sub(started)
-		}
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -5536,7 +5540,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 

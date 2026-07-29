@@ -78,11 +78,14 @@ func (timer *activeTurnTimer) elapsed(at time.Time) time.Duration {
 }
 
 func (m model) activeTurnElapsed(fallbackStartedAt time.Time) time.Duration {
-	now := m.now()
+	return m.activeTurnElapsedAt(fallbackStartedAt, m.now())
+}
+
+func (m model) activeTurnElapsedAt(fallbackStartedAt, at time.Time) time.Duration {
 	if m.turnTimer != nil {
-		return m.turnTimer.elapsed(now)
+		return m.turnTimer.elapsed(at)
 	}
-	elapsed := now.Sub(fallbackStartedAt)
+	elapsed := at.Sub(fallbackStartedAt)
 	if elapsed < 0 {
 		return 0
 	}
