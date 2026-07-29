@@ -41,6 +41,13 @@ type windowsPrincipalACLInput struct {
 	// DenyRead covers objects a principal could otherwise reach because they are
 	// world-readable; per-user secrets need no entry.
 	DenyRead []string
+	// DenyWrite carries the policy's own deny-write paths. The capability plan
+	// has always emitted these; the principal plan denied write only on
+	// protected metadata and read-only subpaths inside write roots, so a policy
+	// deny sitting anywhere else was simply not enforced once the runner used a
+	// principal token, and a shell child could write where the restricted-token
+	// backend would have blocked it.
+	DenyWrite []string
 }
 
 // buildWindowsPrincipalACLPlan turns a principal's access into ACL entries.
@@ -60,11 +67,24 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 
 	// Deny first. A deny ACE inside a write root (protected metadata, git
 	// internals) has to win over the grant that follows it.
+	// Materialized, matching the capability plan. applyWindowsACLPlan skips a
+	// target that does not exist, so without this a deny-read path created after
+	// setup ran never got an ACE at all and the principal could read it. The
+	// deny has to be in place before the object is.
 	for _, path := range normalizeProfilePaths(input.DenyRead) {
 		entries = append(entries, WindowsACLEntry{
-			Action:     WindowsACLDenyRead,
-			Path:       path,
-			Capability: input.PrincipalSID,
+			Action:      WindowsACLDenyRead,
+			Path:        path,
+			Capability:  input.PrincipalSID,
+			Materialize: true,
+		})
+	}
+	for _, path := range normalizeProfilePaths(input.DenyWrite) {
+		entries = append(entries, WindowsACLEntry{
+			Action:      WindowsACLDenyWrite,
+			Path:        path,
+			Capability:  input.PrincipalSID,
+			Materialize: true,
 		})
 	}
 	for _, root := range input.WriteRoots {

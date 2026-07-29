@@ -401,7 +401,7 @@ func TestLookupWindowsSandboxIdentityRejectsNonUserAccount(t *testing.T) {
 func TestWindowsSandboxUserIsManagedRefusesForeignAccounts(t *testing.T) {
 	checked := 0
 	for _, name := range []string{"Administrator", "Guest", "DefaultAccount"} {
-		managed, err := windowsSandboxUserIsManaged(name)
+		managed, err := windowsSandboxUserIsManaged(name, "workspacekey")
 		if err != nil {
 			// Localized or disabled installs may not carry every one of these.
 			continue
@@ -416,7 +416,7 @@ func TestWindowsSandboxUserIsManagedRefusesForeignAccounts(t *testing.T) {
 	}
 	// An absent account must answer false rather than error, since provisioning
 	// asks this question about names that usually do not exist yet.
-	managed, err := windowsSandboxUserIsManaged("zero-sbx-nosuchacct")
+	managed, err := windowsSandboxUserIsManaged("zero-sbx-nosuchacct", "workspacekey")
 	if err != nil {
 		t.Fatalf("querying a missing account: %v", err)
 	}
