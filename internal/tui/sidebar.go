@@ -632,7 +632,13 @@ func (m model) renderContextSidebar(width, height int) []string {
 	add(m.sidebarPlanHeader(width))
 	planLines := m.sidebarPlanLines(width)
 	switch {
+	case m.plan.isEmpty() && m.orchestrate.sidebarCollapsed && !m.orchestrate.isEmpty():
+		// Collapsed by a click on the header: the count stays, the body goes.
+		add(sidebarPlaceholder("collapsed — click PLAN to open", width))
 	case len(planLines) > 0:
+		if bar := m.orchestratePlanBar(width); bar != "" {
+			add(bar)
+		}
 		lines = append(lines, planLines...)
 	default:
 		add(sidebarPlaceholder("no active plan", width))
@@ -659,6 +665,13 @@ func (m model) renderContextSidebar(width, height int) []string {
 		add("")
 		add(sidebarHeader("ACTIVITY", width))
 		lines = append(lines, activityLines...)
+	}
+
+	// PLAN DETAIL: the selected task, drawn into the space that was otherwise
+	// padded with blank lines down to the token floor. Last, so it only ever
+	// consumes what the sections above did not want.
+	if detail := m.sidebarPlanDetailLines(width, maxInt(0, height-1-len(lines))); len(detail) > 0 {
+		lines = append(lines, detail...)
 	}
 
 	// Token readout pinned to the bottom.
