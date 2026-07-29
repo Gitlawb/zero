@@ -202,8 +202,8 @@ Flags:
       --check                 Check the latest GitHub release without installing
       --apply                 Download, verify, and install the latest release
       --json                  Print the update result as JSON
-      --repo <owner/repo>     Repository to use when no endpoint is provided (--check and --apply; ignored by an npm-managed apply)
-      --endpoint <url|repo>   Release API URL or owner/repo slug to use (--check and --apply; ignored by an npm-managed apply)
+      --repo <owner/repo>     Repository to use when no endpoint is provided (--check and --apply; ignored for the install source by an npm-managed apply)
+      --endpoint <url|repo>   Release API URL or owner/repo slug to use (--check and --apply; ignored for the install source by an npm-managed apply)
       --timeout <duration>    Release check timeout (default 5s)
       --target <platform>     Release target to verify with --check (for example windows-x64); not valid with --apply
   -h, --help                  Show this help

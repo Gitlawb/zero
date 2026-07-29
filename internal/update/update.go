@@ -44,6 +44,10 @@ type Result struct {
 	// it, so recommending it bare after a custom-source check would send the user
 	// to install from somewhere they did not ask about.
 	SourceFlag string `json:"sourceFlag,omitempty"`
+	// installMethod is local process state used only to keep human guidance
+	// accurate. ApplyResult exposes the method after an install; adding it to
+	// check JSON would unnecessarily change that API.
+	installMethod InstallMethod
 }
 
 type AssetCheck struct {
@@ -172,7 +176,7 @@ func Check(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{
+	result := Result{
 		CurrentVersion:  currentVersion,
 		LatestVersion:   latestVersion,
 		ReleaseURL:      releaseURL,
@@ -180,7 +184,11 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		ReleaseAsset:    assetCheck,
 		UpdateAvailable: compareSemverParts(latestParts, currentParts) > 0,
 		SourceFlag:      upgradeSourceFlag(options),
-	}, nil
+	}
+	if executablePath, executableErr := os.Executable(); executableErr == nil {
+		result.installMethod = DetectInstallMethod(executablePath)
+	}
+	return result, nil
 }
 
 // upgradeSourceFlag returns the flag a caller must repeat on `zero upgrade` to
@@ -193,12 +201,21 @@ func Check(ctx context.Context, options Options) (Result, error) {
 // repeat something that is not theirs to drop.
 func upgradeSourceFlag(options Options) string {
 	if endpoint := strings.TrimSpace(options.Endpoint); endpoint != "" {
-		return "--endpoint " + endpoint
+		return "--endpoint " + shellQuote(endpoint)
+	}
+	if strings.TrimSpace(os.Getenv("ZERO_UPDATE_RELEASE_URL")) != "" {
+		return ""
 	}
 	if repository := strings.TrimSpace(options.Repository); repository != "" && repository != DefaultRepository {
 		return "--repo " + repository
 	}
 	return ""
+}
+
+// shellQuote returns one POSIX-shell argument suitable for the copy/paste
+// commands in human-readable guidance.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func Format(result Result) string {
@@ -208,7 +225,7 @@ func Format(result Result) string {
 			"Release: " + result.ReleaseURL,
 		}
 		lines = appendAssetLines(lines, result.ReleaseAsset)
-		lines = append(lines, upgradeGuidance(result.ReleaseAsset, result.SourceFlag))
+		lines = append(lines, upgradeGuidance(result.ReleaseAsset, result.SourceFlag, result.installMethod))
 		return strings.Join(lines, "\n")
 	}
 	lines := []string{
@@ -243,15 +260,23 @@ func releaseAssetTarget(asset AssetCheck) string {
 // localReleaseTarget is the release target of the machine running this process,
 // or "" when no release archive is published for it (Termux, for example).
 func localReleaseTarget() string {
-	platform, err := releasePlatform(runtime.GOOS)
+	return publishedReleaseTarget(runtime.GOOS, runtime.GOARCH)
+}
+
+func publishedReleaseTarget(goos, goarch string) string {
+	platform, err := releasePlatform(goos)
 	if err != nil {
 		return ""
 	}
-	arch, err := releaseArch(runtime.GOARCH)
+	arch, err := releaseArch(goarch)
 	if err != nil {
 		return ""
 	}
-	return platform + "-" + arch
+	target := platform + "-" + arch
+	if target == "windows-arm64" {
+		return ""
+	}
+	return target
 }
 
 // upgradeGuidance returns the next step for an available update.
@@ -265,11 +290,18 @@ func localReleaseTarget() string {
 //
 // An asset with no target recorded is the ordinary current-platform check (the
 // target fields are only populated when a target was resolved).
-func upgradeGuidance(asset AssetCheck, sourceFlag string) string {
+func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallMethod) string {
 	target := releaseAssetTarget(asset)
 	local := localReleaseTarget()
 	if target != "" && target != local {
 		guidance := "Download the verified " + target + " release asset and replace the zero binary on that machine."
+		if sourceFlag != "" {
+			guidance += " The download URLs above are from the custom source selected by `" + sourceFlag + "`; a bare `zero upgrade` does not repeat that source."
+			if local != "" {
+				guidance += " It installs onto this machine (" + local + ") instead."
+			}
+			return guidance
+		}
 		if local == "" {
 			// No published release target for this host (a source build on an OS
 			// with no release archive, e.g. Termux). Saying what `zero upgrade`
@@ -280,7 +312,10 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string) string {
 		return guidance + " `zero upgrade` installs onto this machine (" + local + ") instead."
 	}
 	if sourceFlag != "" {
-		return "Run `zero upgrade " + sourceFlag + "` to install from the source this check used; a bare `zero upgrade` installs from " + DefaultRepository + "."
+		if installMethod == InstallMethodNpm {
+			return "This npm-managed installation can be updated with `npm install -g " + npmPackageName + "@latest`, which installs the official npm package. The custom `" + sourceFlag + "` source only affects the release check and update gating, not the npm install source."
+		}
+		return "Run `zero upgrade " + sourceFlag + "` to install from the source this check used; a bare `zero upgrade` does not repeat that explicit source flag."
 	}
 	return "Run `zero upgrade` to download, verify, and install the latest release."
 }

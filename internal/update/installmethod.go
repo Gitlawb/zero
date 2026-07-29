@@ -33,12 +33,19 @@ func DetectInstallMethod(executablePath string) InstallMethod {
 		return InstallMethodStandalone
 	}
 	var pkg struct {
-		Name string `json:"name"`
+		Name string          `json:"name"`
+		OS   []string        `json:"os"`
+		CPU  []string        `json:"cpu"`
+		Bin  json.RawMessage `json:"bin"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
 		return InstallMethodStandalone
 	}
-	if pkg.Name == npmPackageName {
+	// The native platform package is inert and constrained to one OS/CPU. The
+	// repository's wrapper package has the same name but carries a bin entry and
+	// broad platform lists, so name alone would misclassify `go build -o zero`
+	// from the repository root as an npm-managed install.
+	if pkg.Name == npmPackageName && len(pkg.OS) == 1 && len(pkg.CPU) == 1 && len(pkg.Bin) == 0 {
 		return InstallMethodNpm
 	}
 	return InstallMethodStandalone
