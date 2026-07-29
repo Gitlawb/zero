@@ -328,3 +328,108 @@ func mustLoad(t *testing.T, paths specialist.PlanPaths) []specialist.SavedPlan {
 	}
 	return plans
 }
+
+// RESTART runs the last plan from the beginning, staged from the BRIDGE's copy
+// — the panel holds a rendering, and restarting that would run something that
+// merely resembles what ran.
+func TestRestartStagesTheLastPlanFromTheBeginning(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	// A partly-finished run: restart must ignore the progress entirely, which is
+	// exactly what distinguishes it from resume.
+	m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
+	m.planProgress.TaskCompleted(specialist.TaskResult{ID: plan.Order()[0], Attempts: 1})
+
+	// The turn itself needs a provider this harness has none of, so what is
+	// asserted is what restart is responsible for: the staged plan and what the
+	// user is told. Whether dispatchCommand can start a run is the composer's
+	// business and is covered where a provider exists.
+	updated, _ := m.restartLastPlan()
+	staged, err := specialist.FindSavedPlan(paths, restartPlanName)
+	if err != nil {
+		t.Fatalf("nothing was staged: %v", err)
+	}
+	restored, err := specialist.ParsePlan(staged.Args, m.savedPlanLimits())
+	if err != nil {
+		t.Fatalf("the staged plan does not validate: %v", err)
+	}
+	if restored.TaskCount() != plan.TaskCount() {
+		t.Fatalf("staged %d tasks, the plan had %d — restart must not narrow",
+			restored.TaskCount(), plan.TaskCount())
+	}
+	if !strings.Contains(transcriptText(updated.(model).transcript), "from the beginning") {
+		t.Fatalf("restart must say it starts over: %s", transcriptText(updated.(model).transcript))
+	}
+}
+
+// Restart with nothing to restart refuses and points at what does exist.
+func TestRestartWithNoPlanRefuses(t *testing.T) {
+	m, _ := savedPlanModel(t)
+	updated, cmd := m.restartLastPlan()
+	if cmd != nil {
+		t.Fatal("restart started a turn with no plan")
+	}
+	text := transcriptText(updated.(model).transcript)
+	if !strings.Contains(text, "nothing to restart") || !strings.Contains(text, "/plans run") {
+		t.Fatalf("the refusal must point somewhere: %s", text)
+	}
+}
+
+// RESTARTING UNDER A RUNNING PLAN IS REFUSED. Two plans reporting into one
+// panel keyed by task id means the second overwrites the first's rows, and the
+// UI would silently pick one.
+func TestRestartRefusesWhileAPlanIsRunning(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.planProgress.PlanRunning(cancel)
+
+	updated, cmd := m.restartLastPlan()
+	if cmd != nil {
+		t.Fatal("restart started a second plan over a running one")
+	}
+	if !strings.Contains(transcriptText(updated.(model).transcript), "/plans stop") {
+		t.Fatalf("the refusal must say how to proceed: %s", transcriptText(updated.(model).transcript))
+	}
+	if _, err := specialist.FindSavedPlan(paths, restartPlanName); err == nil {
+		t.Fatal("a refused restart staged a plan anyway")
+	}
+}
+
+// Restart and resume are DIFFERENT: one ignores progress, the other honours it.
+// Asserted together because the whole risk is that one silently becomes the
+// other.
+func TestRestartIgnoresProgressWhereResumeHonoursIt(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	if _, err := specialist.SavePlan(paths.ProjectDir, "sweep", plan); err != nil {
+		t.Fatal(err)
+	}
+	m.planProgress.PlanAdmitted(plan)
+	for _, id := range plan.Order()[:len(plan.Order())-1] {
+		m.planProgress.TaskDispatched(specialist.Task{ID: id})
+		m.planProgress.TaskCompleted(specialist.TaskResult{ID: id, Attempts: 1})
+	}
+
+	m.restartLastPlan()
+	restarted, err := specialist.FindSavedPlan(paths, restartPlanName)
+	if err != nil {
+		t.Fatalf("restart staged nothing: %v", err)
+	}
+	full, _ := specialist.ParsePlan(restarted.Args, m.savedPlanLimits())
+
+	stored, _ := specialist.FindSavedPlan(paths, "sweep")
+	resumeName, _, ok := m.resumeSavedPlan(stored)
+	if !ok {
+		t.Fatal("resume refused")
+	}
+	resumed, _ := specialist.FindSavedPlan(paths, resumeName)
+	narrowed, _ := specialist.ParsePlan(resumed.Args, m.savedPlanLimits())
+
+	if full.TaskCount() != plan.TaskCount() {
+		t.Fatalf("restart narrowed the plan: %d of %d", full.TaskCount(), plan.TaskCount())
+	}
+	if narrowed.TaskCount() >= full.TaskCount() {
+		t.Fatalf("resume did not narrow: %d vs restart's %d", narrowed.TaskCount(), full.TaskCount())
+	}
+}
