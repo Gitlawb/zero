@@ -4896,7 +4896,15 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 	case commandVoice:
 		return m.toggleVoiceMode()
 	case commandPlans:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.orchestratePlansText()})
+		// The control verbs are a SLASH COMMAND rather than a key chord, and
+		// deliberately: almost every ctrl letter is already bound, and only
+		// commandPrompt is queued while a run is pending — a slash command runs
+		// immediately, which is exactly what "stop the plan that is running
+		// right now" needs.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: m.orchestrateControlText(command.text),
+		})
 		return m, nil
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})

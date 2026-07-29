@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -45,6 +46,15 @@ type PlanProgressBridge struct {
 	// must never fail a plan, but a silent drop would let a user believe a plan
 	// was persisted when it was not.
 	recordErr error
+	// cancelPlan stops THIS PLAN without stopping the turn. Held only while a
+	// plan is running and dropped in PlanCompleted, so a stop arriving after the
+	// plan ended cannot cancel a context that has since been reused.
+	cancelPlan context.CancelFunc
+	// paused / resume implement the task-boundary pause. resume is closed on
+	// resume rather than signalled, so a waiter that arrives after the resume
+	// still proceeds instead of blocking forever on a send nobody makes.
+	paused bool
+	resume chan struct{}
 	// dispatched counts tasks so each gets a unique temporary card key. The
 	// child's real session id is not known until the child process creates it,
 	// so the card is keyed by this and reconciled on completion — exactly how
@@ -93,6 +103,124 @@ func (bridge *PlanProgressBridge) record(eventType sessions.EventType, payload m
 		bridge.mu.Lock()
 		bridge.recordErr = err
 		bridge.mu.Unlock()
+	}
+}
+
+// PlanRunning takes the cancel scoped to the plan that is starting. Any pause
+// left over from a previous plan is cleared here: a new plan must never begin
+// life suspended by a key the user pressed during the last one.
+func (bridge *PlanProgressBridge) PlanRunning(cancel context.CancelFunc) {
+	if bridge == nil {
+		return
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	bridge.cancelPlan = cancel
+	bridge.clearPauseLocked()
+}
+
+// WaitWhilePaused blocks the TOOL's goroutine — never the event loop — until
+// the user resumes or the plan is cancelled.
+func (bridge *PlanProgressBridge) WaitWhilePaused(ctx context.Context) {
+	if bridge == nil {
+		return
+	}
+	for {
+		bridge.mu.Lock()
+		paused, resume := bridge.paused, bridge.resume
+		bridge.mu.Unlock()
+		if !paused || resume == nil {
+			return
+		}
+		select {
+		case <-resume:
+			// Loop rather than return: a resume followed immediately by another
+			// pause must be honoured, and re-reading the state is what makes
+			// the two orderings equivalent.
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// StopPlan cancels the running plan and reports whether there was one.
+//
+// Called from the Bubble Tea event loop, so it does exactly two cheap things:
+// it reads a pointer and calls a cancel func.
+//
+// It also clears the pause, and it is worth being precise about WHY, because
+// the first version of this comment claimed the wrong mechanism. Releasing the
+// parked executor is NOT what the clear does — WaitWhilePaused selects on ctx,
+// so the cancel below frees it on its own. What the clear does is fix the
+// reported STATE: without it the bridge still says "paused" between the stop
+// and the plan's terminal event, so the surface would offer "/plans resume" for
+// a plan that is being abandoned.
+func (bridge *PlanProgressBridge) StopPlan() bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	cancel := bridge.cancelPlan
+	bridge.clearPauseLocked()
+	bridge.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// SetPlanPaused pauses or resumes at the next task boundary. Reports whether
+// there was a running plan to act on, so the caller can say "no plan is
+// running" rather than silently doing nothing.
+func (bridge *PlanProgressBridge) SetPlanPaused(paused bool) bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if bridge.cancelPlan == nil {
+		return false
+	}
+	if !paused {
+		bridge.clearPauseLocked()
+		return true
+	}
+	if !bridge.paused {
+		bridge.paused = true
+		bridge.resume = make(chan struct{})
+	}
+	return true
+}
+
+// PlanPaused reports the pause state, for the status line.
+func (bridge *PlanProgressBridge) PlanPaused() bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.paused
+}
+
+// PlanRunningNow reports whether a plan is in flight, so a control command can
+// refuse with a reason instead of appearing to work.
+func (bridge *PlanProgressBridge) PlanRunningNow() bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.cancelPlan != nil
+}
+
+// clearPauseLocked releases any waiter. Closing the channel rather than sending
+// on it means every waiter wakes and a late waiter never blocks.
+func (bridge *PlanProgressBridge) clearPauseLocked() {
+	bridge.paused = false
+	if bridge.resume != nil {
+		close(bridge.resume)
+		bridge.resume = nil
 	}
 }
 
@@ -221,6 +349,15 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 // PlanCompleted reports the plan's terminal state.
 func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report specialist.PlanReport) {
 	bridge.record(specialist.PlanCompletedEvent(plan, report))
+	// The plan is over: drop the cancel and release any pause. Keeping a stale
+	// cancel would let a later "stop the plan" cancel a context that has since
+	// been reused, which is the PostureGate lifetime mistake in another costume.
+	if bridge != nil {
+		bridge.mu.Lock()
+		bridge.cancelPlan = nil
+		bridge.clearPauseLocked()
+		bridge.mu.Unlock()
+	}
 	name := plan.Name()
 	status := string(report.Status)
 	succeeded, failed := report.Succeeded, report.Failed
