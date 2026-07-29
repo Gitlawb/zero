@@ -52,59 +52,23 @@ func (bridge *planSessionRecorder) append(eventType sessions.EventType, payload 
 	bridge.recorder.append(eventType, payload)
 }
 
+// The payloads come from specialist's own builders, shared with the TUI's
+// recorder: resume is a reduction over these events and cannot be written
+// against two shapes.
 func (bridge *planSessionRecorder) PlanAdmitted(plan specialist.Plan) {
-	tasks := make([]map[string]any, 0, plan.TaskCount())
-	for _, task := range plan.Tasks() {
-		tasks = append(tasks, map[string]any{
-			"id": task.ID, "depends_on": task.DependsOn, "phase": task.Phase,
-		})
-	}
-	bridge.append(sessions.EventPlanAdmitted, map[string]any{
-		"name":       plan.Name(),
-		"task_count": plan.TaskCount(),
-		"order":      plan.Order(),
-		"tasks":      tasks,
-		"max_tokens": plan.Budget().MaxTokens,
-	})
+	bridge.append(specialist.PlanAdmittedEvent(plan))
 }
 
 func (bridge *planSessionRecorder) TaskDispatched(task specialist.Task) {
-	bridge.append(sessions.EventTaskDispatched, map[string]any{
-		"id": task.ID, "depends_on": task.DependsOn,
-	})
+	bridge.append(specialist.TaskDispatchedEvent(task))
 }
 
 func (bridge *planSessionRecorder) TaskCompleted(result specialist.TaskResult) {
-	bridge.append(sessions.EventTaskCompleted, map[string]any{
-		"id": result.ID,
-		// Duration is what the metric is computed from, so it is recorded per
-		// task rather than only in the aggregate.
-		"duration_ms": result.Duration.Milliseconds(),
-		"session_id":  result.SessionID,
-		"tokens":      result.Tokens,
-	})
+	bridge.append(specialist.TaskCompletedEvent(result))
 }
 
 func (bridge *planSessionRecorder) TaskFailed(result specialist.TaskResult) {
-	bridge.append(sessions.EventTaskFailed, map[string]any{
-		"id": result.ID,
-		// The outcome distinguishes a real failure from a dependency or budget
-		// skip. A skipped task is RECORDED, never dropped.
-		"outcome":     string(result.Outcome),
-		"reason":      result.Err,
-		"duration_ms": result.Duration.Milliseconds(),
-		// THE SAME FIELDS AS TaskCompleted, and for the failure they matter
-		// more. Executor.Run carries the child session id even on a post-start
-		// failure specifically so a failed child stays drillable; recording it
-		// only on success made the one task a user needs to open the one task
-		// they could not find. Empty for a dependency or budget skip, which
-		// never started a child — that is the honest value, not a gap.
-		"session_id": result.SessionID,
-		// Tokens the failed task spent. They are already counted in the plan's
-		// aggregate, so omitting them here made the per-task records fail to
-		// add up to the total.
-		"tokens": result.Tokens,
-	})
+	bridge.append(specialist.TaskFailedEvent(result))
 }
 
 func (bridge *planSessionRecorder) PlanCompleted(plan specialist.Plan, report specialist.PlanReport) {
@@ -117,17 +81,5 @@ func (bridge *planSessionRecorder) PlanCompleted(plan specialist.Plan, report sp
 				plan.Name(), report.Status, report.Succeeded, report.Failed, report.Skipped)
 		}
 	}
-	bridge.append(sessions.EventPlanCompleted, map[string]any{
-		"name":      plan.Name(),
-		"status":    string(report.Status),
-		"succeeded": report.Succeeded,
-		"failed":    report.Failed,
-		"skipped":   report.Skipped,
-		// THE METRIC. Recorded so the kill criterion can be evaluated across
-		// many sessions without re-running anything.
-		"sequential_total_ms": report.SequentialTotal.Milliseconds(),
-		"critical_path_ms":    report.CriticalPath.Milliseconds(),
-		"max_speedup":         report.MaxSpeedup,
-		"tokens_used":         report.TokensUsed,
-	})
+	bridge.append(specialist.PlanCompletedEvent(plan, report))
 }

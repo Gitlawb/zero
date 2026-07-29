@@ -88,13 +88,13 @@ func TestPlanProgressBridgeIsInertUntilAttached(t *testing.T) {
 
 	var nilBridge *PlanProgressBridge
 	nilBridge.TaskDispatched(specialist.Task{ID: "a"})
-	nilBridge.Attach(nil, 1)
+	nilBridge.Attach(nil, 1, nil, "")
 }
 
 func TestPlanProgressBridgeEmitsACardPerTask(t *testing.T) {
 	var got []tea.Msg
 	bridge := NewPlanProgressBridge()
-	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 42)
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 42, nil, "")
 
 	bridge.TaskDispatched(specialist.Task{ID: "a", Prompt: "first"})
 	bridge.TaskCompleted(specialist.TaskResult{ID: "a", Outcome: specialist.TaskSucceeded, SessionID: "specialist_aaa"})
@@ -123,7 +123,7 @@ func TestPlanProgressBridgeEmitsACardPerTask(t *testing.T) {
 func TestSkippedTaskDoesNotCloseTheDispatchedTasksCard(t *testing.T) {
 	var got []tea.Msg
 	bridge := NewPlanProgressBridge()
-	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1)
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1, nil, "")
 
 	bridge.TaskDispatched(specialist.Task{ID: "b", Prompt: "runs"})
 	bridge.TaskFailed(specialist.TaskResult{ID: "b", Outcome: specialist.TaskFailed, Err: "boom"})

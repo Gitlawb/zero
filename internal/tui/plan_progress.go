@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 )
 
@@ -30,6 +31,20 @@ type PlanProgressBridge struct {
 	mu    sync.Mutex
 	sink  func(tea.Msg)
 	runID int
+	// store/sessionID make the plan DURABLE. The TUI drove the panel and wrote
+	// nothing: a plan that ran here left no record at all, while the same plan
+	// under `zero exec` wrote five events per task. Resume is a reduction over
+	// those events, so a plan recorded by only one of the two surfaces is a
+	// plan only one of them can ever resume.
+	//
+	// Written from THIS goroutine — the tool's — never the event loop. Appending
+	// is file I/O, and the Bubble Tea loop must not block on it.
+	store     *sessions.Store
+	sessionID string
+	// recordErr latches the first append failure. Recording is best-effort and
+	// must never fail a plan, but a silent drop would let a user believe a plan
+	// was persisted when it was not.
+	recordErr error
 	// dispatched counts tasks so each gets a unique temporary card key. The
 	// child's real session id is not known until the child process creates it,
 	// so the card is keyed by this and reconciled on completion — exactly how
@@ -43,7 +58,7 @@ func NewPlanProgressBridge() *PlanProgressBridge { return &PlanProgressBridge{} 
 // Attach binds the bridge to the run that is about to start. Called on every
 // run so a plan's cards belong to the run that produced them; the stale-run
 // guard in the message handlers does the rest.
-func (bridge *PlanProgressBridge) Attach(sink func(tea.Msg), runID int) {
+func (bridge *PlanProgressBridge) Attach(sink func(tea.Msg), runID int, store *sessions.Store, sessionID string) {
 	if bridge == nil {
 		return
 	}
@@ -52,6 +67,44 @@ func (bridge *PlanProgressBridge) Attach(sink func(tea.Msg), runID int) {
 	bridge.sink = sink
 	bridge.runID = runID
 	bridge.dispatched = 0
+	bridge.store = store
+	bridge.sessionID = sessionID
+	bridge.recordErr = nil
+}
+
+// record appends one plan event to the session log.
+//
+// BEST EFFORT at every level: no store, no session, or a latched earlier
+// failure and it does nothing. It mirrors execSessionRecorder.append's
+// contract exactly, because the two are the same record written from two
+// surfaces.
+func (bridge *PlanProgressBridge) record(eventType sessions.EventType, payload map[string]any) {
+	if bridge == nil {
+		return
+	}
+	bridge.mu.Lock()
+	store, sessionID, failed := bridge.store, bridge.sessionID, bridge.recordErr != nil
+	bridge.mu.Unlock()
+	if store == nil || sessionID == "" || failed {
+		return
+	}
+	_, err := store.AppendEvent(sessionID, sessions.AppendEventInput{Type: eventType, Payload: payload})
+	if err != nil {
+		bridge.mu.Lock()
+		bridge.recordErr = err
+		bridge.mu.Unlock()
+	}
+}
+
+// RecordingError reports the first append failure, so a surface can say once
+// that the plan was not fully persisted rather than leaving it silent.
+func (bridge *PlanProgressBridge) RecordingError() error {
+	if bridge == nil {
+		return nil
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.recordErr
 }
 
 // send posts a message if the bridge is attached. Nil-safe at every level.
@@ -75,6 +128,7 @@ func planTaskKey(n int) string { return fmt.Sprintf("plantask_%d", n) }
 // PlanAdmitted announces the plan so the transcript can show that N tasks are
 // about to run rather than going silent until the first one finishes.
 func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
+	bridge.record(specialist.PlanAdmittedEvent(plan))
 	name := plan.Name()
 	count := plan.TaskCount()
 	limit := plan.Budget().MaxTokens
@@ -107,6 +161,7 @@ func (bridge *PlanProgressBridge) TaskDispatched(task specialist.Task) {
 	if bridge == nil {
 		return
 	}
+	bridge.record(specialist.TaskDispatchedEvent(task))
 	bridge.mu.Lock()
 	bridge.dispatched++
 	key := planTaskKey(bridge.dispatched)
@@ -121,12 +176,14 @@ func (bridge *PlanProgressBridge) TaskDispatched(task specialist.Task) {
 // TaskCompleted closes the card and reconciles it to the child's real session
 // id so the user can drill into it.
 func (bridge *PlanProgressBridge) TaskCompleted(result specialist.TaskResult) {
+	bridge.record(specialist.TaskCompletedEvent(result))
 	bridge.finish(result, specialistCompleted)
 }
 
 // TaskFailed closes the card with the outcome's own status. A cancelled or
 // skipped task is NOT rendered as an error: nothing broke.
 func (bridge *PlanProgressBridge) TaskFailed(result specialist.TaskResult) {
+	bridge.record(specialist.TaskFailedEvent(result))
 	bridge.finish(result, planOutcomeStatus(result.Outcome))
 }
 
@@ -162,6 +219,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 
 // PlanCompleted reports the plan's terminal state.
 func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report specialist.PlanReport) {
+	bridge.record(specialist.PlanCompletedEvent(plan, report))
 	name := plan.Name()
 	status := string(report.Status)
 	succeeded, failed := report.Succeeded, report.Failed

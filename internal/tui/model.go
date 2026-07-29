@@ -5003,7 +5003,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// bridge for the process's life (the registry is built once per session),
 	// so the run id has to be pushed in per run — the PostureGate problem, same
 	// solution.
-	m.planProgress.Attach(m.runtimeMessageSink, m.runID)
+	m.planProgress.Attach(m.runtimeMessageSink, m.runID, m.sessionStore, m.activeSession.SessionID)
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
