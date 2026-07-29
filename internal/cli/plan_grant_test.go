@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/specialist"
 )
 
@@ -157,3 +158,29 @@ type countingPlanRecorder struct{ dispatched int }
 func (r *countingPlanRecorder) TaskDispatched(specialist.Task)      { r.dispatched++ }
 func (r *countingPlanRecorder) TaskCompleted(specialist.TaskResult) {}
 func (r *countingPlanRecorder) TaskFailed(specialist.TaskResult)    {}
+
+// The plan-size tier must survive registerSpecialistTools. Both call sites pass
+// it through this function, and a tier read from config but dropped here would
+// leave every run on the default ceiling while the config file said otherwise —
+// the same shape as the grant defect above, one layer along.
+func TestRegisteredOrchestrateToolCarriesTheConfiguredTier(t *testing.T) {
+	workspace := t.TempDir()
+	registry := newCoreRegistry(workspace)
+	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, nil, orchestrateWiring{
+		Gate: &specialist.PostureGate{},
+		Size: config.PlanSizeSmall,
+	})
+	if err != nil {
+		t.Fatalf("registerSpecialistTools: %v", err)
+	}
+	t.Cleanup(func() { closeSpecialistRuntime(nil, runtime) })
+
+	registered, _ := registry.Get(specialist.OrchestrateToolName)
+	tool, ok := registered.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("orchestrate is %T", registered)
+	}
+	if tool.Size != config.PlanSizeSmall {
+		t.Fatalf("registered tier = %q; want %q — the wiring dropped it", tool.Size, config.PlanSizeSmall)
+	}
+}

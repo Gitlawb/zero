@@ -273,8 +273,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// overrides, so an empty-overrides resolve yields the same value; a resolve
 		// error falls back to the swarm's built-in default (0 => 8).
 		maxTeamSize := 0
-		if swarmCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
-			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
+		// planSize resolves to the DEFAULT tier when this early resolve fails —
+		// the same ceiling an unset value gets, never "no ceiling". A config
+		// error must not be the thing that removes a bound.
+		planSize := config.DefaultPlanSize
+		if earlyCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
+			maxTeamSize = earlyCfg.Swarm.MaxTeamSize
+			planSize = earlyCfg.Profiles.PlanSizeTier()
 		}
 		var err error
 		// The posture is fixed for a headless run, so the gate is set once here
@@ -300,6 +305,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 					// ever fire — an inert guard someone would later trust.
 					Depth: options.depth,
 				},
+				Size: planSize,
 			})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())

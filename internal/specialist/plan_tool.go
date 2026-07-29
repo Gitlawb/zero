@@ -2,8 +2,10 @@ package specialist
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -41,14 +43,14 @@ type OrchestrateTool struct {
 	// Depth is the nesting depth of the run holding this tool, used for the
 	// admission-time headroom check.
 	Depth int
+	// Size is the configured plan-size tier. The zero value is the default tier,
+	// so a caller that never wires it gets the same ceiling as before.
+	Size config.PlanSize
 	// Limits overrides the default caps; nil uses them.
 	Limits *Limits
 }
 
 const (
-	// defaultPlanMaxTasks bounds plan size. Deliberately small: Phase 2 exists
-	// to measure whether fan-out would pay, not to run large plans.
-	defaultPlanMaxTasks = 20
 	// defaultPlanMaxTokens is 0: NO ceiling on what a plan may request.
 	//
 	// It was 200_000, and a six-task chain asking for exactly that spent
@@ -204,12 +206,23 @@ func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner 
 }
 
 // Limits supplies the hard caps a plan must fit inside. nil means the defaults.
+//
+// The task ceiling comes from the CONFIGURED TIER rather than a constant here.
+// It was a hard-coded 20 with no way to move it: too many for a metered
+// provider, too few for a real sweep, and discoverable only by reading this
+// file. PlanSize.MaxTasks resolves an unset or unrecognised tier to the default,
+// so the zero value is exactly the old ceiling.
 func (tool *OrchestrateTool) limits(options tools.RunOptions) Limits {
+	size := tool.Size
+	if !size.Valid() {
+		size = config.DefaultPlanSize
+	}
 	limits := Limits{
-		MaxTasks:     defaultPlanMaxTasks,
-		MaxTokens:    defaultPlanMaxTokens,
-		CurrentDepth: tool.Depth,
-		ParentTools:  tool.ParentTools,
+		MaxTasks:       size.MaxTasks(),
+		MaxTasksSource: fmt.Sprintf("the %q plan size", size),
+		MaxTokens:      defaultPlanMaxTokens,
+		CurrentDepth:   tool.Depth,
+		ParentTools:    tool.ParentTools,
 	}
 	if tool.Limits != nil {
 		limits = *tool.Limits
