@@ -721,6 +721,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// --depth and is never launched as a child — so zero is the
 			// measured value here, not an unset one.
 			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot, Depth: 0},
+			// The plan-size tier, from the SAME resolved config the rest of this
+			// wiring reads. Project config may only have tightened it.
+			Size: resolved.Profiles.PlanSizeTier(),
 		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -1083,6 +1086,10 @@ type orchestrateWiring struct {
 	Gate *specialist.PostureGate
 	// PlanContext supplies the run-invariant state a plan task inherits.
 	PlanContext specialist.PlanTaskContext
+	// Size is the configured plan-size tier. The zero value is the default tier,
+	// so a call site that has no resolved config yet still gets a real ceiling
+	// rather than none.
+	Size config.PlanSize
 }
 
 // planParentTools is the run's grant: the tools a plan task may inherit.
@@ -1161,6 +1168,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		Recorder:      recorder,
 		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
 		Depth:         planContext.Depth,
+		Size:          wiring.Size,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }

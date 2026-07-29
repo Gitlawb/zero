@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 // ZeroMaxing Phase 2: plan capture, executed SEQUENTIALLY.
@@ -69,8 +71,14 @@ type Budget struct {
 
 // Limits are the caller-supplied hard caps a plan must fit inside.
 type Limits struct {
-	// MaxTasks bounds plan size.
+	// MaxTasks bounds plan size. 0 means no bound.
 	MaxTasks int
+	// MaxTasksSource LABELS where MaxTasks came from, for the rejection message
+	// only — "the \"medium\" plan size". Deliberately a phrase and not a second
+	// number: a label cannot contradict the bound it describes, whereas a second
+	// copy of the count would eventually disagree with the one being enforced
+	// (invariant 5). Empty renders a generic message.
+	MaxTasksSource string
 	// MaxTokens is the ceiling a plan's own budget may not exceed.
 	MaxTokens int
 	// ParentTools is the grant the parent run holds. A task's Tools must be a
@@ -152,7 +160,7 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 		return Plan{}, fmt.Errorf("plan requires at least one task")
 	}
 	if limits.MaxTasks > 0 && len(rawTasks) > limits.MaxTasks {
-		return Plan{}, fmt.Errorf("plan has %d tasks, which exceeds the limit of %d", len(rawTasks), limits.MaxTasks)
+		return Plan{}, planTooLargeError(len(rawTasks), limits)
 	}
 
 	// DEPTH, at admission. A plan runs inside a child at limits.CurrentDepth, so
@@ -290,6 +298,22 @@ func validateTaskTools(task Task, limits Limits) error {
 		}
 	}
 	return nil
+}
+
+// planTooLargeError names the ceiling AND how to move it.
+//
+// The old message was "plan has 24 tasks, which exceeds the limit of 20" — a
+// number with no origin and no remedy, so the only way to act on it was to read
+// the source. The ceiling is configurable now, and a bound the user cannot
+// discover is a bound they will work around by splitting the plan instead.
+func planTooLargeError(count int, limits Limits) error {
+	source := strings.TrimSpace(limits.MaxTasksSource)
+	if source == "" {
+		return fmt.Errorf("plan has %d tasks, which exceeds the limit of %d", count, limits.MaxTasks)
+	}
+	return fmt.Errorf(
+		"plan has %d tasks, which exceeds the limit of %d set by %s; raise it with \"profiles\": {\"planSize\": \"%s\"} in .zero/config.json, or split the plan",
+		count, limits.MaxTasks, source, config.PlanSizeLarge)
 }
 
 func sortedReadOnlyTools() []string {

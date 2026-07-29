@@ -259,6 +259,13 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Profiles.DisableZeromaxing {
 		dst.Profiles.DisableZeromaxing = true
 	}
+	// User config is higher-trust and may set ANY tier, tighter or looser. An
+	// unrecognised value is ignored rather than stored, so a typo falls back to
+	// the default instead of being carried around as a value every reader has to
+	// re-validate.
+	if size, err := ParsePlanSize(src.Profiles.PlanSize); err == nil && strings.TrimSpace(src.Profiles.PlanSize) != "" {
+		dst.Profiles.PlanSize = string(size)
+	}
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
@@ -341,6 +348,22 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	// ignores — silently, like an ignored network "allow", not as an error.
 	if src.Profiles.DisableZeromaxing {
 		dst.Profiles.DisableZeromaxing = true
+	}
+	// Profiles.PlanSize from project config may only TIGHTEN. A cloned repo can
+	// ask for a smaller ceiling; it cannot raise one, because raising it is
+	// raising a spend ceiling for whoever opens the repo — the same privilege
+	// boundary as Sandbox.Network's allow/deny rule and DisableZeromaxing's
+	// disable-only rule. A looser tier is ignored SILENTLY, matching the ignored
+	// network "allow" rather than erroring: the project simply does not hold that
+	// privilege, which is not a malformed config.
+	//
+	// An unknown tier ranks tightest (rank -1) and so can never win here either.
+	if strings.TrimSpace(src.Profiles.PlanSize) != "" {
+		if size, err := ParsePlanSize(src.Profiles.PlanSize); err == nil {
+			if size.rank() < dst.Profiles.PlanSizeTier().rank() {
+				dst.Profiles.PlanSize = string(size)
+			}
+		}
 	}
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project

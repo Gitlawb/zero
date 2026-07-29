@@ -334,6 +334,15 @@ type ProfilesConfig struct {
 	// switch a cost multiplier ON for whoever opens it. Only global user config
 	// may leave it off. See mergeProjectConfig.
 	DisableZeromaxing bool `json:"disableZeromaxing,omitempty"`
+	// PlanSize is the zeromaxing plan-size tier: how many tasks one plan may
+	// contain. One of small, medium (the default), large, unrestricted — see
+	// plan_size.go for the numbers and for why this stays a hard cap rather than
+	// an advisory warning.
+	//
+	// Project config may only TIGHTEN it, for the same reason DisableZeromaxing
+	// is disable-only: a cloned repo must not be able to raise a cost ceiling for
+	// whoever opens it. See mergeProjectConfig.
+	PlanSize string `json:"planSize,omitempty"`
 }
 
 func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
