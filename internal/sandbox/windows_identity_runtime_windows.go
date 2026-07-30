@@ -324,9 +324,10 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	}, nil
 }
 
-// removeWindowsSandboxPrincipalForSetup retires a workspace's principal: secret
-// first, then the account. ACE revocation is the caller's job and must happen
-// before this, or ACEs naming a deleted SID are left behind.
+// removeWindowsSandboxPrincipalForSetup retires a workspace's principal in the
+// order that leaves nothing behind: secret, then ACEs, then LSA logon rights,
+// then the account itself. Everything keyed to the SID has to go while the SID
+// still resolves.
 func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) error {
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
 	username := windowsSandboxUserName(key)
@@ -343,6 +344,19 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	// to avoid. A principal that was never provisioned has no SID to resolve and
 	// nothing to revoke, so that case is not an error.
 	if identity, err := lookupWindowsSandboxIdentity(windowsSandboxWorkspaceKey(config.WorkspaceRoots)); err == nil {
+		// ACEs first, for the same reason: once the account is gone its SID stops
+		// resolving and every ACE naming it becomes an orphaned raw-SID entry on
+		// the user's own tree, which is precisely the residue the capability-SID
+		// model left behind and this one exists to avoid. Revocation is by
+		// trustee, so it clears grants written by older versions too.
+		//
+		// Failing to revoke is not fatal. A path the user has since deleted or
+		// renamed cannot be cleaned, and refusing to remove the account over it
+		// would strand the principal and its logon rights permanently — a worse
+		// outcome than a leftover ACE on a path that may not exist any more.
+		if paths, pathsErr := windowsPrincipalTeardownPaths(config, identity.SID.String()); pathsErr == nil {
+			_ = revokeWindowsPrincipalACEs(identity.SID.String(), paths)
+		}
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			return err
 		}
@@ -364,11 +378,11 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 //
 // An empty return means there is no runtime root to grant (no workspace root
 // configured), which is not an error: the caller simply grants nothing extra.
-func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string, error) {
+func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
 	workspaceRoot := ""
 	for _, candidate := range config.WorkspaceRoots {
 		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			workspaceRoot = filepath.Clean(trimmed)
+			workspaceRoot = canonicalWindowsSandboxWorkspaceRoot(trimmed)
 			break
 		}
 	}
@@ -383,8 +397,15 @@ func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string,
 	if cacheRoot == "" || cacheRoot == "." {
 		return "", errors.New("user cache directory is unavailable for sandbox runtime")
 	}
-	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
-	if err != nil {
+	return sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+}
+
+// setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
+// Teardown wants the name without the side effect, so the derivation lives in
+// windowsSandboxRuntimeRootPath above and this only adds the mkdir.
+func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string, error) {
+	root, err := windowsSandboxRuntimeRootPath(config)
+	if err != nil || root == "" {
 		return "", err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -442,4 +463,66 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 		return nil, err
 	}
 	return applyWindowsACLPlanFn(plan)
+}
+
+// windowsPrincipalTeardownPaths names every path this principal could hold an
+// ACE on, derived the same way setup derived them: the policy's roots plus the
+// per-workspace runtime tree. The runtime root is resolved without creating it,
+// since teardown has no business making directories on its way out.
+func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
+	filesystem := config.PermissionProfile.FileSystem
+	writeRoots := filesystem.WriteRoots
+	runtimeRoot, err := windowsSandboxRuntimeRootPath(config)
+	if err != nil {
+		return nil, err
+	}
+	if runtimeRoot != "" {
+		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
+	}
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: principalSID,
+		WriteRoots:   writeRoots,
+		ReadRoots:    filesystem.ReadRoots,
+		DenyRead:     filesystem.DenyRead,
+		DenyWrite:    filesystem.DenyWrite,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return windowsACLPlanPaths(plan), nil
+}
+
+// canonicalWindowsSandboxWorkspaceRoot normalizes a workspace root the way the
+// COMMAND path already does, so setup and commands agree on what they are keyed
+// to.
+//
+// Engine.resolveCommandDir cleans, absolutizes and then EvalSymlinks the root
+// (internal/sandbox/runner.go). Setup only cleaned it, and the runtime root is a
+// hash of that string, so the two disagreed whenever resolution changed
+// anything. That does not take a symlink: Windows opens a path in any case and
+// EvalSymlinks canonicalizes it, so a workspace entered with different casing
+// hashes one way at setup and another at command time.
+//
+// Setup then granted the principal one runtime tree while every command used a
+// different one, so the grant that exists to make npm/go/pip caches writable
+// landed somewhere nothing reads and the failure surfaced as a bare
+// ACCESS_DENIED on a cache write.
+//
+// EvalSymlinks failing is not an error: an unresolvable root still needs a
+// stable key, and falling back to the cleaned absolute path is what the command
+// path does too.
+func canonicalWindowsSandboxWorkspaceRoot(root string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(root))
+	if cleaned == "" || cleaned == "." {
+		return ""
+	}
+	if !filepath.IsAbs(cleaned) {
+		if absolute, err := filepath.Abs(cleaned); err == nil {
+			cleaned = absolute
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return resolved
+	}
+	return cleaned
 }
