@@ -41,7 +41,7 @@ func TestSetupRuntimeRootMatchesTheCommandPathForADifferentlyCasedRoot(t *testin
 	}
 
 	// Drive the PRODUCTION derivation, not the helper. A test that called
-	// canonicalWindowsSandboxWorkspaceRoot directly would pass just as happily
+	// canonicalSandboxWorkspaceRoot directly would pass just as happily
 	// with setup still doing filepath.Clean, which is exactly the bug.
 	fromSetup, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
 		WorkspaceRoots: []string{lowered},
@@ -66,10 +66,86 @@ func TestSetupRuntimeRootMatchesTheCommandPathForADifferentlyCasedRoot(t *testin
 // An unresolvable root still needs a stable key rather than an empty one.
 func TestCanonicalWorkspaceRootFallsBackWhenResolutionFails(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "never-created", "deeper")
-	if got := canonicalWindowsSandboxWorkspaceRoot(missing); got != filepath.Clean(missing) {
+	if got := canonicalSandboxWorkspaceRoot(missing); got != filepath.Clean(missing) {
 		t.Errorf("canonical(%q) = %q, want the cleaned path", missing, got)
 	}
-	if canonicalWindowsSandboxWorkspaceRoot("   ") != "" {
+	if canonicalSandboxWorkspaceRoot("   ") != "" {
 		t.Error("a blank root should stay blank, not become the process directory")
+	}
+}
+
+// The pair has to agree, not just each side individually. CI caught this the
+// hard way: canonicalizing only the setup side made setup and
+// prepareSandboxRuntime disagree on a Windows runner, whose TEMP is an 8.3
+// short path that resolution expands. Lowercasing reproduces the same class of
+// non-canonical spelling without needing a short name or any privilege.
+func TestSetupAndPrepareRuntimeAgreeOnANonCanonicalRoot(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "MyWs")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	lowered := strings.ToLower(workspace)
+	if _, err := os.Stat(lowered); err != nil {
+		t.Skipf("filesystem is case-sensitive here: %v", err)
+	}
+
+	granted, err := setupWindowsSandboxRuntimeRoot(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{lowered},
+		CommandCWD:     lowered,
+	})
+	if err != nil {
+		t.Fatalf("setupWindowsSandboxRuntimeRoot: %v", err)
+	}
+	state, release, err := prepareSandboxRuntime(lowered)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	if release != nil {
+		defer release()
+	}
+	if filepath.Clean(granted) != filepath.Clean(state.Root) {
+		t.Errorf("setup granted %q but commands write to %q", granted, state.Root)
+	}
+}
+
+// The carveout shape has to survive a non-canonical root too. The first fix
+// rebuilt the spec paths from the RESOLVED write root and compared them against
+// subpaths that could not resolve (.git/config does not exist yet), so on a
+// short-name or differently-cased path the match missed and .git/config went
+// back to being created as a directory.
+func TestGitConfigCarveoutShapeSurvivesANonCanonicalRoot(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "MyWs")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	lowered := strings.ToLower(workspace)
+	if _, err := os.Stat(lowered); err != nil {
+		t.Skipf("filesystem is case-sensitive here: %v", err)
+	}
+
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: "S-1-5-32-546",
+		WriteRoots: []WritableRoot{{
+			Root:             lowered,
+			ReadOnlySubpaths: gitMetadataWriteCarveouts(lowered),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildWindowsPrincipalACLPlan: %v", err)
+	}
+	found := false
+	for _, entry := range plan.Entries {
+		if !strings.EqualFold(filepath.Base(entry.Path), "config") {
+			continue
+		}
+		found = true
+		if !entry.MaterializeFile {
+			t.Errorf(".git/config entry %q lost its file shape on a non-canonical root", entry.Path)
+		}
+	}
+	if !found {
+		t.Fatal("no .git/config entry in the plan")
 	}
 }
