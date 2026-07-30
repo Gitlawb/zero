@@ -144,6 +144,16 @@ func (m model) sidebarHasContent() bool {
 		// FILES pulse for the session's first mutation isn't hidden.
 		return true
 	}
+	if m.orchestrate.visible(m.orchestrateNow()) {
+		// An admitted plan counts from the moment it is admitted, before its
+		// first task has spawned an agent row. Without this the column arrives a
+		// beat late, and the inline panel — which stands down as soon as the
+		// sidebar takes the plan — flashes on screen for exactly that beat.
+		// visible(), not isEmpty(): a finished plan's tasks are kept for the
+		// record, and holding the column open for them would mean the sidebar
+		// never auto-hides again once a session has run one.
+		return true
+	}
 	return !m.plan.isEmpty()
 }
 
