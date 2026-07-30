@@ -222,6 +222,22 @@ type ArgsPermissioner interface {
 	PermissionForArgs(args map[string]any) Permission
 }
 
+// PermanentDenier lets a tool state that NO arguments can make it callable in
+// this run.
+//
+// It exists because ArgsPermissioner cannot say this. A tool that varies its
+// permission by argument is never treated as permanently denied — the question
+// is whether any call could succeed, and only a tool with no per-argument
+// override can be ruled out from its static permission alone. But a tool can be
+// gated on something that is not an argument at all: the zeromaxing posture is
+// a session state, not a parameter, and with it off no arguments make
+// orchestrate callable. Without this, implementing ArgsPermissioner would make
+// such a tool count as HELD in a run where it can never fire, which changes the
+// assembled prompt of runs that do not have the feature turned on.
+type PermanentDenier interface {
+	PermanentlyDenied() bool
+}
+
 // PrePermissionRejecter lets a tool reject a call that cannot safely or validly
 // run before any permission prompt is shown. Implementations must be purely
 // local and deterministic: no filesystem, process, DNS, or network access.

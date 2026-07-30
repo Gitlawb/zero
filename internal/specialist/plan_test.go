@@ -287,18 +287,57 @@ func TestTaskCountAgreesBetweenAdmissionAndExecution(t *testing.T) {
 }
 
 // (n) A write tool is rejected — Phase 2 tasks are read-only.
-func TestParsePlanRejectsWriteTools(t *testing.T) {
+func TestAWriteToolIsPermittedOnlyWhenTheParentHoldsIt(t *testing.T) {
+	// THE RULE CHANGED, and this test changed with it rather than around it.
+	//
+	// It used to assert that a write tool is rejected "even if the PARENT holds
+	// it", because plan tasks were read-only by construction. Write-capable
+	// tasks are now permitted — gated on an approval that can show the plan and
+	// on an isolated worktree — so the remaining bound is the parent's grant,
+	// and that is what this now pins.
 	for _, tool := range []string{"write_file", "edit_file", "apply_patch", "bash", "exec_command"} {
 		raw := task("a", "x")
 		raw["tools"] = []any{tool}
-		limits := readOnlyLimits()
-		limits.ParentTools = append(limits.ParentTools, tool) // even if the PARENT holds it
-		_, err := ParsePlan(planArgs([]any{raw}, okBudget()), limits)
-		if err == nil {
-			t.Fatalf("tool %q must be rejected: plan tasks are read-only", tool)
+
+		held := readOnlyLimits()
+		held.ParentTools = append(held.ParentTools, tool)
+		plan, err := ParsePlan(planArgs([]any{raw}, okBudget()), held)
+		if err != nil {
+			t.Fatalf("tool %q is held by the parent and must be permitted: %v", tool, err)
 		}
-		if !strings.Contains(err.Error(), "read-only") {
-			t.Fatalf("the error must say why: %v", err)
+		// ...and naming it is what makes the plan require isolation, which is
+		// the precondition that let this rule relax at all.
+		if !plan.RequiresIsolation() {
+			t.Fatalf("a plan naming %q does not require isolation", tool)
+		}
+
+		withheld := readOnlyLimits()
+		if _, err := ParsePlan(planArgs([]any{raw}, okBudget()), withheld); err == nil {
+			t.Fatalf("tool %q is NOT held by the parent and must be refused", tool)
+		}
+	}
+}
+
+// A task that names NOTHING stays read-only. Writing is opted into per task, by
+// name — otherwise every unqualified task in every plan becomes write-capable
+// the day the parent grant widens.
+func TestAnUnqualifiedTaskNeverInheritsWriteTools(t *testing.T) {
+	limits := readOnlyLimits()
+	limits.ParentTools = append(limits.ParentTools, "write_file")
+	plan, err := ParsePlan(planArgs([]any{task("a", "x")}, okBudget()), limits)
+	if err != nil {
+		t.Fatalf("ParsePlan: %v", err)
+	}
+	if plan.RequiresIsolation() {
+		t.Fatal("a task that named no tools was treated as write-capable")
+	}
+	granted, err := planToolGrant(plan.Tasks()[0], limits.ParentTools)
+	if err != nil {
+		t.Fatalf("planToolGrant: %v", err)
+	}
+	for _, name := range granted {
+		if name == "write_file" {
+			t.Fatal("an unqualified task inherited write_file from the parent grant")
 		}
 	}
 }

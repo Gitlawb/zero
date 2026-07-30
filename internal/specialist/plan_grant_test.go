@@ -252,8 +252,16 @@ func TestBothGrantEnforcementPointsAgree(t *testing.T) {
 				return
 			}
 			for _, name := range granted {
-				if !planReadOnlyTools[name] {
-					t.Fatalf("dispatch granted %q, which is not read-only; admission would have rejected it", name)
+				// ADMISSION IS ASKED, not re-described. This used to assert
+				// "granted implies read-only", which was a restatement of the
+				// rule as it stood — so when the rule changed to permit a named
+				// write tool, the test failed against correct code and would
+				// have been "fixed" by loosening the very thing it guards.
+				// Calling validateTaskTools makes the assertion the invariant
+				// itself: whatever dispatch hands over, admission would have
+				// allowed, whatever admission currently means.
+				if err := validateTaskTools(Task{ID: "a", Prompt: "p", Tools: []string{name}}, limits); err != nil {
+					t.Fatalf("dispatch granted %q, which admission would have rejected: %v", name, err)
 				}
 				if !containsGrant(tc.parent, name) {
 					t.Fatalf("dispatch granted %q, which the parent does not hold %v; "+

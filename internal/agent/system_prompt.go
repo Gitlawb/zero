@@ -117,6 +117,15 @@ func runCanMutate(options Options) bool {
 // succeed, and only a tool with no per-argument override can be ruled out from
 // its static permission alone. Fail closed.
 func permanentlyDenied(tool tools.Tool) bool {
+	// A tool that KNOWS it cannot fire is believed first, before the
+	// argument-varying escape below. Otherwise a tool gated on something that is
+	// not an argument — the zeromaxing posture is a session state, not a
+	// parameter — would count as held in every run merely for implementing
+	// ArgsPermissioner, and the confirmation policy would appear in read-only
+	// runs that do not have the feature turned on at all.
+	if denier, ok := tool.(tools.PermanentDenier); ok && denier.PermanentlyDenied() {
+		return true
+	}
 	if _, varies := tool.(tools.ArgsPermissioner); varies {
 		return false
 	}

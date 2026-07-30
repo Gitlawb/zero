@@ -368,12 +368,23 @@ func validateTaskTools(task Task, limits Limits) error {
 		parent[name] = true
 	}
 	for _, name := range task.Tools {
-		// READ-ONLY, by allow-list. Phase 2 tasks cannot write, edit or run
-		// shell: granting that is an authority widening that needs its own
-		// decision, not a side effect of shipping plan capture.
-		if !planReadOnlyTools[name] {
-			return fmt.Errorf("task %q requests tool %q; plan tasks are read-only in this phase and may only use: %s",
-				task.ID, name, strings.Join(sortedReadOnlyTools(), ", "))
+		// A TASK MAY NOW NAME A WRITE TOOL, and only by naming it.
+		//
+		// The read-only allow-list used to be the whole rule. It is now the
+		// DEFAULT — a task that names nothing still inherits read-only tools and
+		// nothing else (planToolGrant) — and a task that wants to change
+		// something has to say which tool, by name. Writing is opted into per
+		// task, never inherited.
+		//
+		// What still bounds it: the tool must be on the GRANTABLE allow-list —
+		// read-only, or one of the few write tools a plan may name — and it must
+		// be one the PARENT holds (below). A plan containing any such task
+		// cannot run outside an isolated worktree (Plan.RequiresIsolation) or
+		// without an approval that shows it (PermissionForArgs). Those two are
+		// why this line could be relaxed at all.
+		if !planReadOnlyTools[name] && !planWriteTools[name] {
+			return fmt.Errorf("task %q requests tool %q, which a plan task may never hold; it may use %s, or name one of %s to write",
+				task.ID, name, strings.Join(sortedReadOnlyTools(), ", "), strings.Join(PlanWriteToolNames(), ", "))
 		}
 		// UNCONDITIONAL. Guarding this on len(limits.ParentTools) > 0 is what
 		// made the rule inert: neither production call site supplied a grant,
@@ -408,6 +419,44 @@ func sortedReadOnlyTools() []string {
 	for name := range planReadOnlyTools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
+	return names
+}
+
+// PlanWriteToolNames is the sorted set of MUTATING tools a plan task may hold,
+// and only ever by naming one explicitly.
+//
+// An ALLOW-LIST, deliberately, and a short one. The alternative — "anything the
+// parent holds that is not read-only" — would hand a plan task every future
+// tool the moment it is registered, including ones nobody considered when this
+// was written. Every deny-list in this repository has leaked.
+//
+// Kept narrow on purpose: editing files and running commands is what a
+// write-capable plan is for. Network, browser and process-retention tools are
+// not on it, and adding one is a decision, not a configuration.
+func PlanWriteToolNames() []string {
+	names := make([]string, 0, len(planWriteTools))
+	for name := range planWriteTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+var planWriteTools = map[string]bool{
+	"write_file":   true,
+	"edit_file":    true,
+	"apply_patch":  true,
+	"bash":         true,
+	"exec_command": true,
+}
+
+// PlanGrantableToolNames is every tool a plan task may hold by any route: the
+// read-only default plus the write tools that must be named. ONE list for the
+// caller building a parent grant, so the grant and the validator cannot come to
+// disagree about what is grantable.
+func PlanGrantableToolNames() []string {
+	names := append(PlanReadOnlyToolNames(), PlanWriteToolNames()...)
 	sort.Strings(names)
 	return names
 }
