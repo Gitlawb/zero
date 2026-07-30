@@ -5,20 +5,25 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The zeromaxing posture gets a LIT chip rather than coloured text.
+// The zeromaxing posture is a LIVE WORD, not a filled box.
 //
 // It raises a cost multiplier — 320 turns per run, inherited by every sub-agent
-// — so "is it on?" must be answerable from across the room, not by reading a
-// word in the same weight as everything beside it. A filled badge reads as lit
-// where coloured text reads as a label.
+// — so "is it on?" must be answerable from across the room. A badge did that by
+// being a solid slab; this does it by MOVING, which the eye catches at least as
+// well and which costs the footer none of its calm. There is no background
+// fill: the letters carry the whole signal.
 //
-// IT IS NOT AMBER, and that is a meaning fix rather than a taste one. Amber
-// fills the PERMISSION badge, so it is this UI's colour for "something needs
-// your attention". The posture is a standing MODE, not a caution, and sharing
-// the fill made it read as the wrong sentence. It sits on the brand accent now.
+// It is also no longer amber, and that part was a meaning fix rather than a
+// taste one — amber fills the PERMISSION badge, so it is this UI's colour for
+// "something needs your attention", and a standing mode is not a caution.
+//
+// EVERY COLOUR COMES FROM THE PALETTE. The ramp is built in buildTheme from
+// accent/green/blue/amber/red, so the word stays coherent on dracula, on a
+// light theme, and on whatever is added next.
 //
 // THE PULSE IS FREE. It advances on the spinner tick that is already running
 // while a turn is in flight, and holds a steady lit state when nothing is
@@ -47,23 +52,12 @@ func (m model) zeromaxingGlowChip() string {
 		return ""
 	}
 	marker := m.zeromaxingPulseGlyph()
-	body := " " + marker + " " + zeromaxingChipLabel + " "
-	// HOVER: the chip is clickable — it opens /effort — so it has to say so
-	// under the cursor. Without a hover state a clickable chip is
-	// indistinguishable from a label, and the user never learns it can be
-	// pressed.
-	//
-	// The hover is a SPECTRUM across the label rather than another flat fill.
-	// A flat hover on an already-filled chip is nearly invisible: two solid
-	// blocks differing by a shade. Letters that each take their own hue cannot
-	// be mistaken for the resting state, and it says "this does something"
-	// louder than any single colour can.
-	if m.hover.kind == hoverZeromaxingChip {
-		return m.zeromaxingSpectrumLabel(marker)
-	}
-	// A filled badge: the label sits ON the accent rather than in it, which is
-	// what makes it read as lit rather than as another word in the row.
-	return zeroTheme.postureBadge.Render(body)
+	// HOVER is an UNDERLINE, not a box. The chip is clickable — it opens
+	// /effort — so it has to say so under the cursor, and a background fill is
+	// the one thing this deliberately does not have. An underline reads as
+	// "pressable" without reintroducing the slab.
+	underline := m.hover.kind == hoverZeromaxingChip
+	return m.zeromaxingSpectrumLabel(marker, underline)
 }
 
 // zeromaxingSpectrumLabel paints each character its own hue.
@@ -72,25 +66,33 @@ func (m model) zeromaxingGlowChip() string {
 // bytes and no cells, and zeromaxingChipSpan strips ANSI before locating the
 // label, so the hit test sees the same plain string either way.
 //
-// The ramp ROTATES on the same tick the glyph breathes on, so the chip shimmers
-// while a turn is in flight and holds a static rainbow when idle. That costs
-// nothing: it reads the clock the spinner already schedules and adds no timer
-// of its own — an idle session still schedules none, which is the rule the
-// pulse was built around.
-func (m model) zeromaxingSpectrumLabel(marker string) string {
+// The ramp ROTATES on the same tick the glyph breathes on, so the word walks
+// its colours while a turn is in flight and holds a static rainbow when idle.
+// That costs nothing: it reads the clock the spinner already schedules and adds
+// no timer of its own — an idle session still schedules none, which is the rule
+// the pulse was built around, and a footer that animated forever would be a
+// timer nobody asked for.
+func (m model) zeromaxingSpectrumLabel(marker string, underline bool) string {
 	ramp := zeroTheme.spectrum
+	paint := func(style lipgloss.Style, text string) string {
+		style = style.Bold(true)
+		if underline {
+			style = style.Underline(true)
+		}
+		return style.Render(text)
+	}
 	if len(ramp) == 0 {
-		return zeroTheme.hover.Render(" " + marker + " " + zeromaxingChipLabel + " ")
+		return paint(zeroTheme.accent, " "+marker+" "+zeromaxingChipLabel+" ")
 	}
+	offset := m.zeromaxingSpectrumOffset()
 	var out strings.Builder
-	out.WriteString(zeroTheme.faint.Render(" "))
-	out.WriteString(ramp[m.zeromaxingSpectrumOffset()%len(ramp)].Bold(true).Render(marker))
-	out.WriteString(zeroTheme.faint.Render(" "))
+	out.WriteString(paint(zeroTheme.faint, " "))
+	out.WriteString(paint(ramp[offset%len(ramp)], marker))
+	out.WriteString(paint(zeroTheme.faint, " "))
 	for index, letter := range zeromaxingChipLabel {
-		style := ramp[(index+m.zeromaxingSpectrumOffset())%len(ramp)]
-		out.WriteString(style.Bold(true).Render(string(letter)))
+		out.WriteString(paint(ramp[(index+offset)%len(ramp)], string(letter)))
 	}
-	out.WriteString(zeroTheme.faint.Render(" "))
+	out.WriteString(paint(zeroTheme.faint, " "))
 	return out.String()
 }
 
