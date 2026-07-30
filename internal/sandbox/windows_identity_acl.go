@@ -107,19 +107,13 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		// Which carveouts are files rather than directories comes from the same
 		// spec list the profile built ReadOnlySubpaths from, so a new carveout
 		// cannot be added without its shape coming along.
-		fileCarveouts := map[string]bool{}
-		for _, spec := range gitMetadataWriteCarveoutSpecs(cleaned) {
-			if spec.IsFile {
-				fileCarveouts[normalizeProfilePath(spec.Path)] = true
-			}
-		}
 		for _, subpath := range normalizeProfilePaths(root.ReadOnlySubpaths) {
 			entries = append(entries, WindowsACLEntry{
 				Action:          WindowsACLDenyWrite,
 				Path:            subpath,
 				Capability:      input.PrincipalSID,
 				Materialize:     true,
-				MaterializeFile: fileCarveouts[subpath],
+				MaterializeFile: gitMetadataCarveoutIsFile(subpath),
 			})
 		}
 		for _, name := range root.ProtectedMetadataNames {
