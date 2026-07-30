@@ -33,6 +33,24 @@ type SandboxRuntime struct {
 	Temp  string `json:"temp,omitempty"`
 }
 
+// sandboxRuntimeRootFor derives the per-workspace runtime root. It is separated
+// from prepareSandboxRuntime because the elevated Windows setup path needs the
+// same answer WITHOUT taking a lease or creating anything: a sandbox principal
+// is a separate account with no inherited rights under the user cache, so setup
+// has to grant it write access to this tree before any command runs.
+//
+// Both callers must agree exactly. If they ever drift, setup grants the ACE on
+// one directory while commands write to another, and the failure is a bare
+// ACCESS_DENIED from npm or go build with nothing pointing at the sandbox.
+func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, error) {
+	digest := sha256.Sum256([]byte(workspaceRoot))
+	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	if !pathWithinRoot(workspaceRoot, root) {
+		return root, nil
+	}
+	return fallbackSandboxRuntimeRoot(workspaceRoot)
+}
+
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
 	workspaceRoot = filepath.Clean(strings.TrimSpace(workspaceRoot))
 	if workspaceRoot == "" || workspaceRoot == "." {
@@ -46,13 +64,9 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 	if cacheRoot == "" || cacheRoot == "." {
 		return SandboxRuntime{}, nil, errors.New("user cache directory is unavailable")
 	}
-	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
-	if pathWithinRoot(workspaceRoot, root) {
-		root, err = fallbackSandboxRuntimeRoot(workspaceRoot)
-		if err != nil {
-			return SandboxRuntime{}, nil, err
-		}
+	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	if err != nil {
+		return SandboxRuntime{}, nil, err
 	}
 	lease, err := prepareSandboxRuntimeLease(root)
 	if err != nil {

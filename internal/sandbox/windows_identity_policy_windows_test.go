@@ -221,3 +221,135 @@ func TestReadWindowsSandboxSecretTreatsPermissionDeniedAsUnavailable(t *testing.
 		t.Fatalf("permission-denied read returned %v, want errWindowsSandboxIdentityUnavailable so the command falls back", err)
 	}
 }
+
+// A workspace must not bind to another workspace's principal.
+//
+// The account name carries only 11 characters of the workspace digest, so two
+// workspaces can derive the same name. Provisioning refuses that case by
+// checking the full key in the account comment, but the command path resolved
+// the name straight to a SID. The workspace that lost the race would have failed
+// setup and then quietly run as the other one's principal, using its secret and
+// its ACL identity.
+func TestLookupWindowsSandboxIdentityRejectsForeignWorkspace(t *testing.T) {
+	previous := windowsSandboxUserIsManagedFn
+	t.Cleanup(func() { windowsSandboxUserIsManagedFn = previous })
+
+	prevSID := resolveWindowsSandboxSIDFn
+	t.Cleanup(func() { resolveWindowsSandboxSIDFn = prevSID })
+	// The account resolves; whether it BELONGS to this workspace is the question.
+	resolveWindowsSandboxSIDFn = func(string) (*windows.SID, error) {
+		return windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	}
+
+	var askedKey string
+	windowsSandboxUserIsManagedFn = func(_ string, workspaceKey string) (bool, error) {
+		askedKey = workspaceKey
+		return false, nil
+	}
+	_, err := lookupWindowsSandboxIdentity("workspacekey")
+	if err == nil {
+		t.Fatal("lookup accepted an account belonging to another workspace")
+	}
+	if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+		t.Fatal("a foreign account must not read as unprovisioned; that would silently fall back instead of reporting the conflict")
+	}
+	if askedKey != "" && askedKey != "workspacekey" {
+		t.Fatalf("ownership was checked against %q, want the caller's workspace key", askedKey)
+	}
+}
+
+// An account that does not exist must stay the unavailable sentinel rather than
+// becoming a collision error, since that is the ordinary not-set-up state.
+func TestLookupWindowsSandboxIdentityAbsentAccountIsUnavailable(t *testing.T) {
+	previous := windowsSandboxUserIsManagedFn
+	t.Cleanup(func() { windowsSandboxUserIsManagedFn = previous })
+	windowsSandboxUserIsManagedFn = func(string, string) (bool, error) {
+		t.Fatal("ownership must not be consulted for an account that does not resolve")
+		return false, nil
+	}
+	if _, err := lookupWindowsSandboxIdentity("nosuchworkspacekey"); !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+		t.Fatalf("absent account returned %v, want errWindowsSandboxIdentityUnavailable", err)
+	}
+}
+
+// The git control-plane carveouts must be materialized.
+//
+// gitMetadataWriteCarveouts supplies .git/config and .git/hooks as
+// ReadOnlySubpaths of the workspace. On a workspace where git has not run yet
+// they do not exist when setup applies the plan, and applyWindowsACLPlan skips
+// an absent target, so the deny ACEs were never written. Once git created those
+// paths the principal still held inherited write access and could install a
+// hook or rewrite credential.helper.
+func TestPrincipalACLPlanMaterializesReadOnlySubpaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	carveout := filepath.Join(root, ".git", "config")
+
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: "S-1-5-21-0-0-0-1001",
+		WriteRoots:   []WritableRoot{{Root: root, ReadOnlySubpaths: []string{carveout}}},
+	})
+	if err != nil {
+		t.Fatalf("buildWindowsPrincipalACLPlan: %v", err)
+	}
+	entry, ok := findPrincipalACLEntry(plan, WindowsACLDenyWrite, carveout)
+	if !ok {
+		t.Fatalf("no deny-write ACE for the git carveout; plan = %+v", plan.Entries)
+	}
+	if !entry.Materialize {
+		t.Fatal("git carveout deny-write is not materialized, so it is skipped on a workspace where .git does not exist yet")
+	}
+}
+
+// Setup must grant the principal the same runtime root that commands write to.
+//
+// permissionProfileWithRuntime appends this root to WriteRoots on every command
+// and redirects HOME, GOCACHE and npm_config_cache into it, but it lives under
+// the user cache rather than the workspace, so the profile setup sees never
+// contains it. A principal is a separate account with no rights there, so
+// without a grant every npm install or go build fails on a cache write.
+//
+// The assertion that matters is that the two derivations agree. If they drift,
+// setup writes the ACE on one directory while commands use another, and the
+// symptom is a bare ACCESS_DENIED with nothing pointing at the sandbox.
+func TestSetupGrantsTheRuntimeRootCommandsActuallyUse(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	granted, err := setupWindowsSandboxRuntimeRoot(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{workspace},
+	})
+	if err != nil {
+		t.Fatalf("setupWindowsSandboxRuntimeRoot: %v", err)
+	}
+	if granted == "" {
+		t.Fatal("no runtime root resolved for a configured workspace")
+	}
+	if info, err := os.Stat(granted); err != nil || !info.IsDir() {
+		t.Fatalf("runtime root %q was not created; applyWindowsACLPlan skips absent targets so the grant would no-op (stat err %v)", granted, err)
+	}
+
+	// What a command would actually use.
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	if release != nil {
+		defer release()
+	}
+	if filepath.Clean(runtimeState.Root) != filepath.Clean(granted) {
+		t.Fatalf("setup granted %q but commands write to %q", granted, runtimeState.Root)
+	}
+}
+
+// No workspace root means nothing to grant, which is not an error.
+func TestSetupRuntimeRootWithoutWorkspaceIsNotAnError(t *testing.T) {
+	granted, err := setupWindowsSandboxRuntimeRoot(WindowsSandboxCommandConfig{})
+	if err != nil {
+		t.Fatalf("no workspace root should not error: %v", err)
+	}
+	if granted != "" {
+		t.Fatalf("granted %q with no workspace configured", granted)
+	}
+}
