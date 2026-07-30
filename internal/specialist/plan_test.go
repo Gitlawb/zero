@@ -144,16 +144,33 @@ func TestParsePlanRejectsIDsOutsideTheAllowList(t *testing.T) {
 
 // (i) MaxWorkers > 1 is REJECTED, not coerced. Coercion would let a caller
 // believe it got concurrency and would make the field meaningless for Phase 3.
-func TestParsePlanRejectsMoreThanOneWorker(t *testing.T) {
-	for _, workers := range []float64{0, 2, 8} {
+func TestMaxWorkersIsARangeAndIsRejectedOutsideIt(t *testing.T) {
+	// THE RULE MOVED, IT DID NOT DISSOLVE. It used to be "must be exactly 1",
+	// because the executor was sequential and a caller who asked for 8 and
+	// silently got 1 would have been told nothing. The executor changed; that
+	// reasoning did not, so the bound became a range and is still REJECTED
+	// outside it rather than trimmed into it — a trimmed number is one nobody
+	// can reason about afterwards.
+	for _, workers := range []float64{0, -1, maxPlanWorkers + 1, 100} {
 		budget := okBudget()
 		budget["max_workers"] = workers
 		_, err := ParsePlan(planArgs([]any{task("a", "x")}, budget), readOnlyLimits())
 		if err == nil {
 			t.Fatalf("max_workers %v must be rejected", workers)
 		}
-		if !strings.Contains(err.Error(), "sequentially") {
-			t.Fatalf("the error must say why: %v", err)
+		if !strings.Contains(err.Error(), "between 1 and") {
+			t.Fatalf("the error must state the range: %v", err)
+		}
+	}
+	for _, workers := range []float64{1, 2, 8, maxPlanWorkers} {
+		budget := okBudget()
+		budget["max_workers"] = workers
+		plan, err := ParsePlan(planArgs([]any{task("a", "x")}, budget), readOnlyLimits())
+		if err != nil {
+			t.Fatalf("max_workers %v must be accepted: %v", workers, err)
+		}
+		if plan.Budget().MaxWorkers != int(workers) {
+			t.Fatalf("max_workers parsed as %d, want %v", plan.Budget().MaxWorkers, workers)
 		}
 	}
 }

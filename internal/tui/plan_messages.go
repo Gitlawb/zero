@@ -19,9 +19,12 @@ import (
 // the order — so sending it here means the panel is complete before the first
 // task starts rather than assembling itself as tasks finish.
 type planAdmittedMsg struct {
-	runID      int
-	name       string
-	taskCount  int
+	runID     int
+	name      string
+	taskCount int
+	// workers is how many tasks this plan may run at once. More than one means
+	// child progress CANNOT be attributed to a task — see planRunningCardKey.
+	workers    int
 	tasks      []planGraphTask
 	tokenLimit int
 	// background marks a plan that outlives the run that launched it, so the

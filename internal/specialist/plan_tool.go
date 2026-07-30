@@ -88,7 +88,7 @@ func (tool *OrchestrateTool) Name() string { return OrchestrateToolName }
 
 func (tool *OrchestrateTool) Description() string {
 	return "Execute a structured plan of read-only sub-agent tasks in dependency order. " +
-		"Tasks run sequentially; declare dependencies with depends_on so the plan records which work was independent. " +
+		"Independent tasks run in parallel up to budget.max_workers; declare dependencies with depends_on and a task never starts before what it waits on has finished. " +
 		// The either/or the schema cannot express, and the shape worth
 		// encouraging: a plan is only worth more than reading the code yourself
 		// when its tasks are genuinely independent.
@@ -149,7 +149,7 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			},
 			"budget": {
 				Type:        "object",
-				Description: "Required. max_workers must be 1 (this phase executes sequentially). max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried.",
+				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried.",
 			},
 		},
 		// EMPTY, and the either/or lives in the DESCRIPTION instead.
@@ -290,9 +290,13 @@ func (tool *OrchestrateTool) Run(ctx context.Context, args map[string]any) tools
 //
 // The callback is shared by every task rather than keyed per task, because the
 // loop's callback carries only the parent's tool-call id and has no room for a
-// sub-key. That is sound HERE and only here: MaxWorkers is validated to be 1,
+// sub-key. THE CONSEQUENCE, now that plans can be concurrent: with more than one
+// worker a consumer CANNOT attribute an event to a task, and the TUI stops
+// trying rather than attributing every child to whichever task started last.
+// Threading the child's identity through the loop's callback is what would fix
+// it properly. Previously this read: MaxWorkers is validated to be 1,
 // so exactly one task is in flight at any moment and the consumer can attribute
-// events to the task it last saw dispatched. Stage 2d must revisit this the
+// events to the task it last saw dispatched — which is no longer true.
 // moment two tasks can run at once — see the note on the TUI plan recorder.
 func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner {
 	run := tool.RunTask
