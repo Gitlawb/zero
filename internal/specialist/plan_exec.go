@@ -107,6 +107,14 @@ type PlanReport struct {
 	// 0 regardless and would decide nothing.
 	MaxSpeedup float64
 	TokensUsed int
+	// Workers is how many tasks this plan ACTUALLY ran at once, and
+	// WorkersRequested is what it asked for. Both, because the machine's
+	// capacity may be lower than the request and a plan that asked for sixteen
+	// and ran six has not been given sixteen — reporting only the request would
+	// make the number a fiction, which is the same reason max_workers is
+	// rejected outside its range rather than trimmed into it.
+	Workers          int
+	WorkersRequested int
 }
 
 // PlanTaskRequest is everything one task needs to run.
@@ -214,8 +222,87 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	stallTimeout := stallTimeoutFor(plan.Budget())
 
 	cancelled := false
+
+	// THE WORKER POOL. One worker is the sequential path: every wait below
+	// becomes "until the previous task finished", and the walk applies the same
+	// checks in the same order it always has.
+	workers := effectivePlanWorkers(plan.Budget().MaxWorkers)
+	report.Workers = workers
+	report.WorkersRequested = plan.Budget().MaxWorkers
+	slots := newPlanSlots(workers)
+
+	// harvest applies one completed dispatch: its spend, its outcome, its
+	// record. Called only from THIS goroutine, so results, failed, report and
+	// budgetLeft are never touched concurrently and need no lock — the
+	// concurrency is in the dispatches, not in the bookkeeping.
+	harvest := func(completion taskCompletion) {
+		slots.release()
+		id, result, err := completion.id, completion.result, completion.err
+		result.ID = id
+		if result.Duration == 0 {
+			result.Duration = time.Since(completion.started)
+		}
+		report.SequentialTotal += result.Duration
+		budgetLeft -= result.Tokens
+		report.TokensUsed += result.Tokens
+
+		if err != nil || result.Outcome == TaskFailed {
+			// A task cut short by cancellation is CANCELLED, not failed. The
+			// distinction survives all the way to the terminal status, so a
+			// stopped plan never reports as a broken one.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				cancelled = true
+				result.Outcome = TaskCancelled
+				if result.Err == "" {
+					result.Err = "cancelled: the run was stopped while this task was running"
+				}
+				results[id] = result
+				failed[id] = true
+				report.Cancelled++
+				recordFailed(recorder, result)
+				return
+			}
+			result.Outcome = TaskFailed
+			if result.Err == "" && err != nil {
+				result.Err = err.Error()
+			}
+			results[id] = result
+			failed[id] = true
+			report.Failed++
+			recordFailed(recorder, result)
+			return
+		}
+		result.Outcome = TaskSucceeded
+		results[id] = result
+		report.Succeeded++
+		recordCompleted(recorder, result)
+	}
+
+	// resolved reports whether every dependency of a task has finished, one way
+	// or another. A task waits for its dependencies to RESOLVE, not to succeed:
+	// a failed dependency resolves it too, and the skip check below turns that
+	// into the recorded dependency_failed.
+	resolved := func(task Task) bool {
+		for _, dep := range task.DependsOn {
+			if _, done := results[dep]; !done {
+				return false
+			}
+		}
+		return true
+	}
+
 	for _, id := range plan.Order() {
 		task := tasks[id]
+
+		// WAIT FOR THIS TASK'S TURN: until its dependencies have resolved and a
+		// worker is free. Waiting on the task the WALK reached — rather than
+		// picking whichever ready task appeared first — is what keeps dispatch
+		// in the plan's validated order, so one worker reproduces the sequential
+		// executor exactly and more workers only overlap what was already
+		// adjacent.
+		for slots.busy() && (!resolved(task) || slots.full()) {
+			harvest(<-slots.done)
+		}
 
 		// PAUSE, at the task boundary, BEFORE the cancellation check — so a user
 		// who stops a paused plan is not left waiting for a resume that will
@@ -286,49 +373,37 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		}
 
 		recordDispatched(recorder, task)
-		result, err := runTaskWithRetries(ctx, retryPolicy{
+		policy := retryPolicy{
 			task:         task,
 			tools:        granted,
 			cwd:          workspace.Path,
 			stallTimeout: stallTimeout,
 			maxRetries:   plan.Budget().MaxRetries,
 			deadline:     deadline,
-		}, run)
-		result.ID = id
-		report.SequentialTotal += result.Duration
-		budgetLeft -= result.Tokens
-		report.TokensUsed += result.Tokens
-
-		if err != nil || result.Outcome == TaskFailed {
-			// A task cut short by cancellation is CANCELLED, not failed. The
-			// distinction survives all the way to the terminal status, so a
-			// stopped plan never reports as a broken one.
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				cancelled = true
-				result.Outcome = TaskCancelled
-				if result.Err == "" {
-					result.Err = "cancelled: the run was stopped while this task was running"
-				}
-				results[id] = result
-				failed[id] = true
-				report.Cancelled++
-				recordFailed(recorder, result)
-				continue
-			}
-			result.Outcome = TaskFailed
-			if result.Err == "" && err != nil {
-				result.Err = err.Error()
-			}
-			results[id] = result
-			failed[id] = true
-			report.Failed++
-			recordFailed(recorder, result)
-			continue
 		}
-		result.Outcome = TaskSucceeded
-		results[id] = result
-		report.Succeeded++
-		recordCompleted(recorder, result)
+		slots.take()
+		started := time.Now()
+		go func(id string) {
+			// Every goroutine gets recover(): a panic in one task must not take
+			// the plan with it, and the slot must be returned either way or the
+			// scheduler waits forever on a worker that will never report.
+			defer func() {
+				if panicked := recover(); panicked != nil {
+					slots.done <- taskCompletion{
+						id: id, started: started,
+						result: TaskResult{Outcome: TaskFailed, Err: fmt.Sprintf("task panicked: %v", panicked)},
+					}
+				}
+			}()
+			result, err := runTaskWithRetries(ctx, policy, run)
+			slots.done <- taskCompletion{id: id, result: result, err: err, started: started}
+		}(id)
+	}
+
+	// DRAIN. Everything still in flight is harvested before the report is
+	// assembled, or a plan would report on tasks that had not finished.
+	for slots.busy() {
+		harvest(<-slots.done)
 	}
 
 	for _, id := range plan.Order() {

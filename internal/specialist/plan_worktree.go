@@ -17,7 +17,7 @@ import (
 // remembering to set a flag.
 //
 // PER PLAN, NOT PER TASK, and the choice matters. Per-task isolation is more
-// isolation and less use: this phase executes sequentially and a later task
+// isolation and less use: a later task
 // routinely needs an earlier one's output, so per-task worktrees would either
 // hide that or need a merge step nobody wrote. A plan is the unit of work a
 // user reviews, so a plan is the unit that gets a tree — one branch, one diff.

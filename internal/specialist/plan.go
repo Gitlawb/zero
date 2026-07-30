@@ -56,9 +56,11 @@ type Task struct {
 // Budget bounds a plan. Every field is required to be sane at admission and
 // MaxTokens is enforced again at dispatch.
 type Budget struct {
-	// MaxWorkers must be 1. Phase 2 is sequential, and a plan asking for more is
-	// REJECTED rather than coerced — coercion would let a caller believe it got
-	// concurrency, and would make the field meaningless for Phase 3.
+	// MaxWorkers is how many tasks the plan may run at once, 1 to maxPlanWorkers.
+	//
+	// It is what the PLAN asked for, not what it will get: the machine's own
+	// capacity may be lower, and the report says which number actually applied
+	// rather than letting the request stand as if it were honoured.
 	MaxWorkers int
 	MaxTokens  int
 	MaxWall    time.Duration
@@ -504,13 +506,22 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		}
 		budget.MaxRetries = retries
 	}
-	// MaxWorkers must be exactly 1. Rejecting rather than coercing keeps the
-	// field meaningful: a caller that asked for 8 and silently got 1 would have
-	// been told nothing, and Phase 3 would inherit a field nobody trusts.
-	if budget.MaxWorkers != 1 {
+	// MaxWorkers is a RANGE now, and still rejected rather than coerced outside
+	// it. The rule it replaces — "must be exactly 1" — existed because the
+	// executor was sequential and a caller that asked for 8 and silently got 1
+	// would have been told nothing. That reasoning is unchanged; only the
+	// executor changed, so the bound moved rather than dissolved.
+	//
+	// The ceiling is absolute and small. A plan is one tool call, and every task
+	// it runs is a child process inheriting a 320-turn budget under this
+	// posture; sixteen of those at once is already a great deal of machine and
+	// a great deal of money. A plan asking for more is refused, not trimmed,
+	// because a trimmed number is a number nobody can reason about afterwards.
+	if budget.MaxWorkers < 1 || budget.MaxWorkers > maxPlanWorkers {
 		return Budget{}, fmt.Errorf(
-			"budget.max_workers must be 1: this phase executes plan tasks sequentially, and a plan asking for %d is rejected rather than quietly run with one worker",
-			budget.MaxWorkers)
+			"budget.max_workers must be between 1 and %d; %d was requested. "+
+				"1 runs the plan sequentially, which is the right answer unless its tasks are genuinely independent",
+			maxPlanWorkers, budget.MaxWorkers)
 	}
 	// max_tokens is OPTIONAL and unbounded by default.
 	//

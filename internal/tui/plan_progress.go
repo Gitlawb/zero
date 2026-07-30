@@ -338,6 +338,7 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	name := plan.Name()
 	count := plan.TaskCount()
 	limit := plan.Budget().MaxTokens
+	workers := plan.Budget().MaxWorkers
 
 	// Copied into the message in EXECUTION ORDER, with the dependency edges, so
 	// the panel can draw the graph without reaching back into the plan — which
@@ -358,7 +359,8 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	}
 
 	bridge.send(func(runID int) tea.Msg {
-		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit, background: bridge.isBackground()}
+		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit,
+			workers: workers, background: bridge.isBackground()}
 	})
 }
 

@@ -130,9 +130,21 @@ type model struct {
 	// planRunningCardKey is the card key of the plan task currently in flight.
 	// A plan's child progress events arrive keyed by the ORCHESTRATE tool call
 	// (the loop's callback carries only the parent's tool-call id), so they are
-	// attributed to this. Sound only because MaxWorkers is validated to be 1 —
-	// exactly one task runs at a time. Stage 2d must revisit it.
+	// attributed to this.
+	//
+	// EMPTY WHEN THE PLAN IS CONCURRENT. With one worker exactly one task runs
+	// at a time and the attribution is sound. With more, the events carry no
+	// task identity at all, so attributing them to whichever task was dispatched
+	// last would show one task's tool calls under another's name. No attribution
+	// is worse than none only if you have never seen the wrong one: a card that
+	// says nothing is honest, a card that says something false is not. Per-task
+	// progress needs the child's identity threaded through the loop's callback,
+	// which is its own change.
 	planRunningCardKey string
+	// planConcurrent records that the running plan has more than one worker, so
+	// the attribution above stays off for its whole life rather than being
+	// re-enabled by the next task that starts.
+	planConcurrent bool
 	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
 	// for the same reason PostureGate is one: the TUI model is a value type
 	// copied on every update, so a closure over it would freeze the first run.
@@ -2682,6 +2694,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.orchestrate.admit(msg, m.now())
+		// More than one worker means child progress cannot be attributed to a
+		// task; see planRunningCardKey.
+		m.planConcurrent = msg.workers > 1
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 			kind:  rowSystem,
 			runID: msg.runID,
@@ -2701,9 +2716,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
 		// Remember which task is in flight so the plan's progress events — which
 		// arrive keyed by the ORCHESTRATE tool call, not by task — can be
-		// attributed. Sound only because MaxWorkers is validated to be 1, so
-		// exactly one task runs at a time. Stage 2d must revisit this.
-		m.planRunningCardKey = msg.cardKey
+		// attributed. Sound ONLY when one task runs at a time; a concurrent plan
+		// leaves this empty rather than pointing every child's output at
+		// whichever task started last.
+		if m.planConcurrent {
+			m.planRunningCardKey = ""
+		} else {
+			m.planRunningCardKey = msg.cardKey
+		}
 		return m, nil
 	case planTaskDoneMsg:
 		// A BACKGROUND plan outlives the run that launched it, so the
