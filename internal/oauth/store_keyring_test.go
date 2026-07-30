@@ -225,6 +225,71 @@ func TestStoreKeyringSkipsIndexedKeyMissingItsEntry(t *testing.T) {
 	}
 }
 
+// TestStoreKeyringSkipsMissingChunkEntry covers the chunked index format:
+// a continuation chunk listed by the header is missing (torn write by a
+// killed process), and one of the keys that survives in the remaining chunk
+// has no corresponding entry in the keyring. read() must skip the missing
+// key without failing the whole read, and the missing chunk must be ignored
+// by readKeyIndex rather than causing an error.
+func TestStoreKeyringSkipsMissingChunkEntry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+
+	// Seed one valid token entry that will be reachable via chunk 0.
+	valid := Token{AccessToken: "valid-a", RefreshToken: "valid-r"}
+	raw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+ProviderKey("valid")] = base64.StdEncoding.EncodeToString(raw)
+
+	// Build a chunked header (2 chunks). Chunk 0 references "valid" and
+	// "orphan" (missing its entry). Chunk 1 exists and carries "extra".
+	// But we deliberately omit chunk 1 from the keyring to simulate a torn write.
+	header := keyIndexHeader{Version: 1, Chunks: 2, Keys: []string{ProviderKey("valid"), ProviderKey("orphan")}}
+	headerData, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerData)
+
+	// Chunk 1 is intentionally absent — simulating a process killed mid-write.
+
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "valid" must still be loadable (chunk 0 had it, and its entry exists).
+	got, ok, err := s.Load(ProviderKey("valid"))
+	if err != nil || !ok {
+		t.Fatalf("Load(valid): ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != valid.AccessToken {
+		t.Fatalf("Load(valid) = %#v", got)
+	}
+
+	// "orphan" has no entry and the legacy blob is empty, so it must be skipped.
+	if _, ok, err := s.Load(ProviderKey("orphan")); err != nil || ok {
+		t.Fatalf("Load(orphan): ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+
+	// "extra" lives in the missing chunk 1, so it must also be skipped.
+	if _, ok, err := s.Load(ProviderKey("extra")); err != nil || ok {
+		t.Fatalf("Load(extra): ok=%v err=%v, want ok=false err=nil (chunk 1 missing)", ok, err)
+	}
+
+	// Status must return only "valid" — the missing chunk and missing entry
+	// must not fail the read or return phantom tokens.
+	statuses, err := s.Status("")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].Key != ProviderKey("valid") {
+		t.Fatalf("Status = %#v, want only the valid key", statuses)
+	}
+}
+
 // failingKR wraps fakeKR and fails the Nth mutating operation (Set/Delete),
 // for exercising every interruption boundary of the multi-step write.
 type failingKR struct {
