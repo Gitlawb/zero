@@ -216,6 +216,66 @@ func (tool *OrchestrateTool) Safety() tools.Safety {
 	}
 }
 
+// PermanentlyDenied reports that no arguments can make this tool callable while
+// the posture is off. The posture is a session state, not a parameter, and
+// ArgsPermissioner cannot express that — see tools.PermanentDenier.
+func (tool *OrchestrateTool) PermanentlyDenied() bool { return !tool.postureActive() }
+
+// PermissionForArgs is what makes a WRITE-CAPABLE plan ask, and a read-only one
+// not.
+//
+// Safety() cannot decide this: it sees no arguments, so it can only describe the
+// tool, and "orchestrate may write" is a property of the PLAN. A read-only plan
+// keeps PermissionAllow — prompting for it would add friction with no safety to
+// show for it, which is the click-through argument Safety() records. A plan that
+// can write is a different decision and gets a different answer.
+//
+// The card that answers it can now show the plan (the permission detail
+// renderer) and the work lands in a worktree of the plan's own (the isolator).
+// Prompting before either existed would have been asking a user to approve
+// something the screen could not describe.
+func (tool *OrchestrateTool) PermissionForArgs(args map[string]any) tools.Permission {
+	if !tool.postureActive() {
+		return tools.PermissionDeny
+	}
+	if tool.argsCanWrite(args) {
+		return tools.PermissionPrompt
+	}
+	return tools.PermissionAllow
+}
+
+// argsCanWrite reports whether the arguments describe a plan that could change
+// something.
+//
+// It reads the ARGUMENTS rather than a parsed Plan because the permission
+// decision happens before parsing, and it errs toward PROMPTING: a saved plan
+// whose tasks live on disk, or arguments this cannot read, are treated as
+// possibly-writing. A wrong guess in that direction costs one prompt; the other
+// direction runs write tasks without asking.
+func (tool *OrchestrateTool) argsCanWrite(args map[string]any) bool {
+	if planString(args, "saved") != "" {
+		// The tasks are in a file this has not opened. Ask.
+		return true
+	}
+	rawTasks, ok := args["tasks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range rawTasks {
+		task, ok := raw.(map[string]any)
+		if !ok {
+			// Unreadable entry: ask rather than assume it is harmless.
+			return true
+		}
+		for _, name := range planStrings(task, "tools") {
+			if !planReadOnlyTools[name] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (tool *OrchestrateTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
 }

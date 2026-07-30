@@ -1145,7 +1145,12 @@ type orchestrateWiring struct {
 // left nil, which silently disabled the narrowing rule entirely.
 func planParentTools(registry *tools.Registry, enabledTools, disabledTools []string) []string {
 	grant := []string{}
-	for _, name := range specialist.PlanReadOnlyToolNames() {
+	// EVERY GRANTABLE NAME, read-only and write alike. The write tools are not
+	// thereby granted to anything: a task inherits only the read-only ones
+	// (planToolGrant) and must NAME a write tool to hold it. Narrowing this list
+	// to read-only would instead make a named write tool undeliverable — the
+	// task would validate and then run with less than it asked for.
+	for _, name := range specialist.PlanGrantableToolNames() {
 		if _, found := registry.Get(name); !found {
 			continue
 		}

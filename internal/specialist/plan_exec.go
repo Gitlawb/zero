@@ -459,6 +459,11 @@ func planToolGrant(task Task, parentTools []string) ([]string, error) {
 	}
 	out := []string{}
 	if len(task.Tools) == 0 {
+		// THE DEFAULT STAYS READ-ONLY even though a named write tool is now
+		// permitted. A task that asked for nothing must not inherit the ability
+		// to change things — writing is opted into per task, by name, or every
+		// unqualified task in every plan silently becomes write-capable the day
+		// the parent grant widens.
 		for _, name := range parentTools {
 			if planReadOnlyTools[name] {
 				out = append(out, name)
@@ -466,11 +471,22 @@ func planToolGrant(task Task, parentTools []string) ([]string, error) {
 		}
 	} else {
 		for _, name := range task.Tools {
-			// UNCONDITIONAL on both sides: read-only AND held by the parent.
+			// THE PARENT'S GRANT, unconditionally. The read-only half of this
+			// check moved out with its sibling in validateTaskTools — a named
+			// write tool is now permitted — and the two had to move TOGETHER:
+			// admission permitting what dispatch drops would produce a task that
+			// validated and then ran with less than it asked for, silently.
+			//
 			// The old "only check the parent when it supplied a list" form was
-			// what let a task widen its authority whenever the grant was
-			// unwired.
-			if !planReadOnlyTools[name] || !parent[name] {
+			// what let a task widen its authority whenever the grant was unwired,
+			// and that half is untouched.
+			// The same two bounds as admission, in the same order: grantable at
+			// all, then held by the parent. Dropping rather than refusing is
+			// what makes this the narrowing layer.
+			if !planReadOnlyTools[name] && !planWriteTools[name] {
+				continue
+			}
+			if !parent[name] {
 				continue
 			}
 			out = append(out, name)

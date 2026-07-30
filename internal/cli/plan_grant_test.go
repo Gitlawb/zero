@@ -47,9 +47,27 @@ func TestRegisteredOrchestrateToolCarriesTheRunsGrant(t *testing.T) {
 	if len(tool.ParentTools) == 0 {
 		t.Fatal("the registered orchestrate tool holds no parent grant, so the narrowing rule cannot fire")
 	}
-	want := specialist.PlanReadOnlyToolNames()
-	if strings.Join(tool.ParentTools, ",") != strings.Join(want, ",") {
-		t.Fatalf("unfiltered grant = %v, want the full read-only set %v", tool.ParentTools, want)
+	// The grant is every GRANTABLE name this registry holds — read-only plus the
+	// write tools a task may name — intersected with what the registry actually
+	// has. Comparing against the full list would fail for a registry missing one
+	// of them, so it is asserted as a subset with the read-only half required.
+	grantable := map[string]bool{}
+	for _, name := range specialist.PlanGrantableToolNames() {
+		grantable[name] = true
+	}
+	for _, name := range tool.ParentTools {
+		if !grantable[name] {
+			t.Fatalf("grant contains %q, which a plan task may never hold", name)
+		}
+	}
+	held := map[string]bool{}
+	for _, name := range tool.ParentTools {
+		held[name] = true
+	}
+	for _, name := range specialist.PlanReadOnlyToolNames() {
+		if _, found := newCoreRegistry(t.TempDir()).Get(name); found && !held[name] {
+			t.Fatalf("the unfiltered grant is missing read-only tool %q", name)
+		}
 	}
 }
 
@@ -89,9 +107,14 @@ func TestRegisteredOrchestrateGrantIsEmptyWhenTheRunHoldsNoReadTools(t *testing.
 
 // The candidate set comes from specialist's exported list, not a second copy
 // maintained here. Two duplicated lists drift (invariant 5).
-func TestPlanParentToolsNeverExceedsThePlanReadOnlySet(t *testing.T) {
+func TestPlanParentToolsNeverExceedsWhatAPlanMayHold(t *testing.T) {
+	// The bound is PlanGrantableToolNames, not PlanReadOnlyToolNames, and the
+	// difference is the point of the write-task arc: a plan task inherits only
+	// read-only tools, and may NAME one of a short write allow-list. The grant
+	// has to be able to deliver a named write tool or the task would validate
+	// and then run with less than it asked for.
 	allowed := map[string]bool{}
-	for _, name := range specialist.PlanReadOnlyToolNames() {
+	for _, name := range specialist.PlanGrantableToolNames() {
 		allowed[name] = true
 	}
 	for _, name := range planParentTools(newCoreRegistry(t.TempDir()), nil, nil) {
