@@ -63,11 +63,25 @@ func TestSetupRuntimeRootMatchesTheCommandPathForADifferentlyCasedRoot(t *testin
 	}
 }
 
-// An unresolvable root still needs a stable key rather than an empty one.
-func TestCanonicalWorkspaceRootFallsBackWhenResolutionFails(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "never-created", "deeper")
-	if got := canonicalSandboxWorkspaceRoot(missing); got != filepath.Clean(missing) {
-		t.Errorf("canonical(%q) = %q, want the cleaned path", missing, got)
+// A root whose final segments do not exist still normalizes: the existing
+// ancestor resolves and the missing remainder is re-appended.
+//
+// This asserted the whole cleaned path unchanged at first, which was the
+// all-or-nothing behaviour the ancestor walk replaced. Windows CI failed it —
+// correctly — because RUNNER~1 resolved to runneradmin while never-created
+// stayed put, which is exactly the behaviour the walk exists to produce.
+func TestCanonicalWorkspaceRootResolvesTheExistingAncestor(t *testing.T) {
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "never-created", "deeper")
+
+	got := canonicalSandboxWorkspaceRoot(missing)
+	want := filepath.Join(canonicalSandboxWorkspaceRoot(parent), "never-created", "deeper")
+	if got != want {
+		t.Errorf("canonical(%q) = %q, want %q", missing, got, want)
+	}
+	// The missing segments must survive rather than be dropped to the ancestor.
+	if !strings.HasSuffix(got, filepath.Join("never-created", "deeper")) {
+		t.Errorf("canonical(%q) = %q, lost the segments that do not exist yet", missing, got)
 	}
 	if canonicalSandboxWorkspaceRoot("   ") != "" {
 		t.Error("a blank root should stay blank, not become the process directory")
