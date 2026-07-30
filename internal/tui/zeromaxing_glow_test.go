@@ -258,3 +258,120 @@ func TestClickingTheChipMidTurnOpensNothing(t *testing.T) {
 		t.Fatal("a picker opened mid-turn, where it cannot be acted on")
 	}
 }
+
+// NOT AMBER, and the reason is meaning rather than taste: amber fills the
+// PERMISSION badge, so it is this UI's colour for "something needs your
+// attention". The posture is a standing mode, not a caution.
+func TestThePostureChipDoesNotWearThePermissionColour(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+
+	chip := m.zeromaxingGlowChip()
+	permission := zeroTheme.permBadge.Render(" PERMISSION ")
+	amberFill := backgroundSequence(permission)
+	if amberFill == "" {
+		t.Skip("this theme renders no background fill, so the colours cannot be compared")
+	}
+	if strings.Contains(chip, amberFill) {
+		t.Fatal("the posture chip is filled with the permission badge's colour; a mode must not read as a caution")
+	}
+	// ...and it is still FILLED, so dropping amber did not turn it back into text.
+	if backgroundSequence(chip) == "" {
+		t.Fatalf("the posture chip lost its fill and is now text: %q", chip)
+	}
+}
+
+// backgroundSequence extracts the first background-colour escape from a
+// rendered string, so two styles can be compared without hard-coding either.
+func backgroundSequence(rendered string) string {
+	index := strings.Index(rendered, "48;2;")
+	if index < 0 {
+		return ""
+	}
+	end := strings.IndexByte(rendered[index:], 'm')
+	if end < 0 {
+		return ""
+	}
+	return rendered[index : index+end]
+}
+
+// THE HOVER IS A SPECTRUM, not another flat fill. A flat hover on an
+// already-filled chip is two solid blocks differing by a shade; letters that
+// each take their own hue cannot be mistaken for the resting state.
+func TestTheHoveredChipPaintsEachLetterItsOwnHue(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+
+	hovered := m.zeromaxingGlowChip()
+	if !strings.Contains(ansi.Strip(hovered), zeromaxingChipLabel) {
+		t.Fatalf("the hovered chip lost its label: %q", ansi.Strip(hovered))
+	}
+	distinct := map[string]bool{}
+	for _, field := range strings.Split(hovered, "38;2;") {
+		if end := strings.IndexByte(field, 'm'); end > 0 {
+			distinct[field[:end]] = true
+		}
+	}
+	if len(distinct) < 3 {
+		t.Fatalf("the hovered chip uses %d foreground colours; a spectrum needs several: %q", len(distinct), hovered)
+	}
+}
+
+// THE WIDTH IS UNCHANGED, which is what keeps the chip clickable. Colour adds
+// ANSI bytes and no cells, and the span finder strips ANSI before locating the
+// label — so a hovered chip must still be hit-testable at the same span.
+func TestTheSpectrumDoesNotMoveTheChipsHitRegion(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.altScreen = true
+
+	plainStart, plainEnd, ok := m.zeromaxingChipSpan()
+	if !ok {
+		t.Fatal("the chip span could not be located while resting")
+	}
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+	hoverStart, hoverEnd, ok := m.zeromaxingChipSpan()
+	if !ok {
+		t.Fatal("the chip span could not be located while hovered; the spectrum broke the hit test")
+	}
+	if plainStart != hoverStart || plainEnd != hoverEnd {
+		t.Fatalf("the hit region moved on hover: resting [%d,%d) hovered [%d,%d)",
+			plainStart, plainEnd, hoverStart, hoverEnd)
+	}
+	if ansi.StringWidth(m.zeromaxingGlowChip()) != zeromaxingChipWidth() {
+		t.Fatalf("the hovered chip is %d cells wide, want %d",
+			ansi.StringWidth(m.zeromaxingGlowChip()), zeromaxingChipWidth())
+	}
+}
+
+// The shimmer rides the pulse the chip already has, so it costs no timer — and
+// it holds STILL when nothing is running or motion is reduced, like every other
+// animation here.
+func TestTheSpectrumHoldsStillWhenNothingIsRunning(t *testing.T) {
+	m := glowModel(t)
+	if got := m.zeromaxingSpectrumOffset(); got != 0 {
+		t.Fatalf("offset = %d on an idle session; the shimmer must hold still", got)
+	}
+	m.pending = true
+	m.reducedMotion = true
+	if got := m.zeromaxingSpectrumOffset(); got != 0 {
+		t.Fatalf("offset = %d under reduced motion; it must hold still", got)
+	}
+
+	m.reducedMotion = false
+	seen := map[int]bool{}
+	for step := 0; step < int(zeromaxingPulsePeriod.Milliseconds()); step += 50 {
+		at := time.Unix(0, 0).Add(time.Duration(step) * time.Millisecond)
+		moving := m
+		moving.now = func() time.Time { return at }
+		offset := moving.zeromaxingSpectrumOffset()
+		if offset < 0 || offset >= len(zeroTheme.spectrum) {
+			t.Fatalf("offset %d is outside the ramp of %d", offset, len(zeroTheme.spectrum))
+		}
+		seen[offset] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("the shimmer never advanced across a full period: %v", seen)
+	}
+}

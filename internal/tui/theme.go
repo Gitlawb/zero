@@ -67,7 +67,12 @@ type tuiTheme struct {
 	delText     lipgloss.Style // delInk as bare foreground (stderr-ish output)
 
 	// Permission surfaces.
-	permBadge  lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	permBadge    lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	postureBadge lipgloss.Style // ZEROMAXING chip: onAccent on accent, bold
+	// spectrum is a hue ramp drawn from THIS palette, for the posture chip's
+	// hover shimmer. Palette colours rather than fixed hex, so the effect stays
+	// coherent on dracula, on a light theme, and on anything added later.
+	spectrum   []lipgloss.Style
 	permBg     lipgloss.Style // permission card body tint
 	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
@@ -180,7 +185,15 @@ func buildTheme(p palette) tuiTheme {
 		delSign:     lipgloss.NewStyle().Foreground(col(p.red)).Background(col(p.delBg)),
 		delText:     fg(p.delInk),
 
-		permBadge:  lipgloss.NewStyle().Background(col(p.amber)).Foreground(col(p.onAccent)).Bold(true),
+		permBadge: lipgloss.NewStyle().Background(col(p.amber)).Foreground(col(p.onAccent)).Bold(true),
+		// NOT amber. Amber is this UI's caution colour — it fills the PERMISSION
+		// badge — and the posture is not a caution, it is a mode. Sharing the
+		// fill made "zeromaxing is on" read as "something needs your attention",
+		// which is the wrong sentence for a standing state.
+		postureBadge: lipgloss.NewStyle().Background(col(p.accent)).Foreground(col(p.onAccent)).Bold(true),
+		spectrum: []lipgloss.Style{
+			fg(p.accent), fg(p.green), fg(p.blue), fg(p.amber), fg(p.red), fg(p.gitAdd),
+		},
 		permBg:     lipgloss.NewStyle().Background(col(p.permBg)),
 		permBorder: fg(p.cardPerm),
 

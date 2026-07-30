@@ -13,7 +13,12 @@ import (
 // It raises a cost multiplier — 320 turns per run, inherited by every sub-agent
 // — so "is it on?" must be answerable from across the room, not by reading a
 // word in the same weight as everything beside it. A filled badge reads as lit
-// where amber text reads as a label.
+// where coloured text reads as a label.
+//
+// IT IS NOT AMBER, and that is a meaning fix rather than a taste one. Amber
+// fills the PERMISSION badge, so it is this UI's colour for "something needs
+// your attention". The posture is a standing MODE, not a caution, and sharing
+// the fill made it read as the wrong sentence. It sits on the brand accent now.
 //
 // THE PULSE IS FREE. It advances on the spinner tick that is already running
 // while a turn is in flight, and holds a steady lit state when nothing is
@@ -47,12 +52,60 @@ func (m model) zeromaxingGlowChip() string {
 	// under the cursor. Without a hover state a clickable chip is
 	// indistinguishable from a label, and the user never learns it can be
 	// pressed.
+	//
+	// The hover is a SPECTRUM across the label rather than another flat fill.
+	// A flat hover on an already-filled chip is nearly invisible: two solid
+	// blocks differing by a shade. Letters that each take their own hue cannot
+	// be mistaken for the resting state, and it says "this does something"
+	// louder than any single colour can.
 	if m.hover.kind == hoverZeromaxingChip {
-		return zeroTheme.hover.Render(body)
+		return m.zeromaxingSpectrumLabel(marker)
 	}
-	// A filled badge: the label sits ON the amber rather than in it, which is
+	// A filled badge: the label sits ON the accent rather than in it, which is
 	// what makes it read as lit rather than as another word in the row.
-	return zeroTheme.permBadge.Render(body)
+	return zeroTheme.postureBadge.Render(body)
+}
+
+// zeromaxingSpectrumLabel paints each character its own hue.
+//
+// WIDTH IS UNCHANGED, which is what keeps the chip clickable: colour adds ANSI
+// bytes and no cells, and zeromaxingChipSpan strips ANSI before locating the
+// label, so the hit test sees the same plain string either way.
+//
+// The ramp ROTATES on the same tick the glyph breathes on, so the chip shimmers
+// while a turn is in flight and holds a static rainbow when idle. That costs
+// nothing: it reads the clock the spinner already schedules and adds no timer
+// of its own — an idle session still schedules none, which is the rule the
+// pulse was built around.
+func (m model) zeromaxingSpectrumLabel(marker string) string {
+	ramp := zeroTheme.spectrum
+	if len(ramp) == 0 {
+		return zeroTheme.hover.Render(" " + marker + " " + zeromaxingChipLabel + " ")
+	}
+	var out strings.Builder
+	out.WriteString(zeroTheme.faint.Render(" "))
+	out.WriteString(ramp[m.zeromaxingSpectrumOffset()%len(ramp)].Bold(true).Render(marker))
+	out.WriteString(zeroTheme.faint.Render(" "))
+	for index, letter := range zeromaxingChipLabel {
+		style := ramp[(index+m.zeromaxingSpectrumOffset())%len(ramp)]
+		out.WriteString(style.Bold(true).Render(string(letter)))
+	}
+	out.WriteString(zeroTheme.faint.Render(" "))
+	return out.String()
+}
+
+// zeromaxingSpectrumOffset rotates the ramp with the pulse. Pinned to 0 under
+// reduced motion and when nothing is running, like every other animation here.
+func (m model) zeromaxingSpectrumOffset() int {
+	if m.reducedMotion || !m.pending {
+		return 0
+	}
+	period := zeromaxingPulsePeriod.Milliseconds()
+	if period <= 0 {
+		return 0
+	}
+	step := m.now().UnixMilli() % period
+	return int(step * int64(len(zeroTheme.spectrum)) / period)
 }
 
 // zeromaxingChipWidth is the chip's rendered cell width, used to hit-test it.
