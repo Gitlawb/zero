@@ -84,28 +84,44 @@ func TestOneWorkerDispatchesInPlanOrder(t *testing.T) {
 
 // TASKS ACTUALLY RUN AT ONCE. Asserting only that a plan with 4 workers
 // completes would pass against a scheduler that ignored the setting entirely.
+//
+// MEASURED AGAINST WHAT THIS MACHINE WILL RUN, not against what the plan asked
+// for. effectivePlanWorkers caps the request at runtime.NumCPU()-2, so a plan
+// asking for four gets two on a four-core CI runner — and the literal 4 this
+// once asserted passed on a ten-core laptop while failing on every CI platform,
+// deterministically. It was measuring the host, not the scheduler.
+//
+// The floor is what keeps it honest: minPlanWorkers is 2, so want is never
+// below 2 and this still fails against a scheduler that runs tasks one at a
+// time, which is the only thing it exists to catch.
 func TestIndependentTasksRunConcurrently(t *testing.T) {
 	probe := &concurrencyProbe{release: make(chan struct{})}
-	plan := fanOutPlan(t, 4, 4)
+	const requested = 4
+	want := effectivePlanWorkers(requested)
+	if want < 2 {
+		t.Fatalf("effectivePlanWorkers(%d) = %d; the floor guarantees at least 2", requested, want)
+	}
+	plan := fanOutPlan(t, requested, 4)
 
 	done := make(chan PlanReport, 1)
 	go func() {
 		done <- ExecutePlan(context.Background(), plan, []string{"read_file"}, probe.runner(), nil)
 	}()
 
-	// Wait for all four to be in flight together, which can only happen if they
-	// genuinely overlap.
+	// Wait until as many are in flight together as this host allows, which can
+	// only happen if they genuinely overlap.
 	deadline := time.After(5 * time.Second)
 	for {
 		probe.mu.Lock()
 		peak := probe.peak
 		probe.mu.Unlock()
-		if peak >= 4 {
+		if peak >= want {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("peak concurrency reached only %d of 4", peak)
+			t.Fatalf("peak concurrency reached only %d of %d (plan asked for %d, this host allows %d)",
+				peak, want, requested, machinePlanWorkers())
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
