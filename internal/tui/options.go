@@ -51,10 +51,15 @@ type Options struct {
 	// AwaitToolReadiness gives prompt-critical integration startup a bounded
 	// chance to publish its tools before this turn snapshots the registry. The
 	// wait runs inside the asynchronous agent command, so the TUI stays usable.
-	AwaitToolReadiness  func(context.Context)
-	SessionStore        *sessions.Store
-	SandboxStore        *sandbox.GrantStore
-	MCPConfig           config.MCPConfig
+	AwaitToolReadiness func(context.Context)
+	SessionStore       *sessions.Store
+	SandboxStore       *sandbox.GrantStore
+	MCPConfig          config.MCPConfig
+	// MCPSkipped carries the servers that failed to start, so /mcp can report
+	// what is actually running rather than what is configured. Startup already
+	// records these; without them the panel derives state from config alone and
+	// shows a server that never connected as "enabled" with no explanation.
+	MCPSkipped          []mcp.SkippedServer
 	MCPPermissionStore  *mcp.PermissionStore
 	MCPTokenStore       *mcp.TokenStore
 	MCPCommand          func(context.Context, []string) MCPCommandResult

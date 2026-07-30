@@ -1000,6 +1000,11 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
+		// The panel needs the failures too. A startup warning on stderr scrolls
+		// away behind the first screen of output, so /mcp is where a user goes
+		// to ask what is actually running — it should not answer from config
+		// alone and report a server that never connected as enabled.
+		MCPSkipped:         mcpRuntime.Skipped(),
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {

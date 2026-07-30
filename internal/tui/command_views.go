@@ -76,6 +76,7 @@ func (m *model) refreshMCPViewState() {
 		PermissionStore: m.mcpPermissionStore,
 		PermissionMode:  string(m.permissionMode),
 		TokenStore:      m.mcpTokenStore,
+		Skipped:         m.mcpSkipped,
 	})
 	m.mcpViewStateReady = true
 }

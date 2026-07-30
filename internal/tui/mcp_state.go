@@ -8,6 +8,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -19,6 +20,11 @@ type MCPStateOptions struct {
 	PermissionMode  string
 	PromptCount     int
 	DeniedCount     int
+	// Skipped are the servers registration could not start. Registration is
+	// best-effort so one unreachable server cannot stop Zero launching, which
+	// means a failure is recorded here rather than returned. Without it this
+	// panel reports configuration instead of reality.
+	Skipped []mcp.SkippedServer
 }
 
 type mcpServerNamedTool interface {
@@ -38,21 +44,37 @@ func BuildMCPViewState(options MCPStateOptions) MCPViewState {
 	}
 
 	return MCPViewState{
-		Servers:     buildMCPServerViews(options.Config, toolCounts),
+		Servers:     buildMCPServerViews(options.Config, toolCounts, options.Skipped),
 		Tools:       toolViews,
 		Permissions: buildMCPPermissionSummary(options),
 		OAuth:       buildMCPOAuthSummary(options.Config, options.TokenStore),
 	}
 }
 
-func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int) []MCPServerView {
+func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skipped []mcp.SkippedServer) []MCPServerView {
+	failures := make(map[string]error, len(skipped))
+	for _, entry := range skipped {
+		failures[entry.Name] = entry.Err
+	}
 	names := sortedMCPServerNames(cfg)
 	servers := make([]MCPServerView, 0, len(names))
 	for _, name := range names {
 		raw := cfg.Servers[name]
 		state := "enabled"
-		if raw.Disabled {
+		message := ""
+		switch {
+		case raw.Disabled:
+			// Disabled wins: the user turned it off, so it was never expected to
+			// connect and reporting it as failed would be misleading.
 			state = "disabled"
+		default:
+			if err, ok := failures[name]; ok {
+				state = "failed"
+				message = redaction.ErrorMessage(err, redaction.Options{})
+				if strings.TrimSpace(message) == "" {
+					message = "server did not start"
+				}
+			}
 		}
 		servers = append(servers, MCPServerView{
 			Name:      name,
@@ -61,6 +83,7 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int) []MCPS
 			Target:    mcpServerTarget(raw),
 			Auth:      strings.TrimSpace(raw.Auth),
 			ToolCount: toolCounts[name],
+			Error:     message,
 		})
 	}
 	return servers
