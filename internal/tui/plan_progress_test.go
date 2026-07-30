@@ -228,3 +228,115 @@ func TestASingleAttemptAddsNoAttemptCount(t *testing.T) {
 		t.Fatalf("attempts = %d; want 1", got)
 	}
 }
+
+// FAN-OUT ORDER. With one worker a task could only finish after it was
+// dispatched and before the next one was, so "the last dispatched card" was
+// always the finishing task's card. With max_workers > 1 six tasks are open at
+// once and they finish in whatever order they finish — so a completion must be
+// matched to the card its OWN task opened, by id.
+//
+// Closing the last dispatched card instead leaves the earlier tasks' cards open
+// forever: the sidebar spins on tasks that finished minutes ago, and a task
+// still running is shown as done.
+func TestACompletionClosesItsOwnCardNotTheLastDispatchedOne(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1, nil, "")
+
+	// Three tasks in flight together, finishing in reverse order.
+	bridge.TaskDispatched(specialist.Task{ID: "a", Prompt: "first"})
+	bridge.TaskDispatched(specialist.Task{ID: "b", Prompt: "second"})
+	bridge.TaskDispatched(specialist.Task{ID: "c", Prompt: "third"})
+
+	cards := map[string]string{}
+	for _, msg := range got {
+		if start, ok := msg.(planTaskStartMsg); ok {
+			cards[start.taskID] = start.cardKey
+		}
+	}
+	if len(cards) != 3 {
+		t.Fatalf("expected three open cards, got %v", cards)
+	}
+
+	got = nil
+	bridge.TaskCompleted(specialist.TaskResult{ID: "c", Outcome: specialist.TaskSucceeded})
+	bridge.TaskFailed(specialist.TaskResult{ID: "a", Outcome: specialist.TaskCancelled})
+	bridge.TaskCompleted(specialist.TaskResult{ID: "b", Outcome: specialist.TaskSucceeded})
+
+	if len(got) != 3 {
+		t.Fatalf("expected three completions, got %d", len(got))
+	}
+	for _, msg := range got {
+		done, ok := msg.(planTaskDoneMsg)
+		if !ok {
+			t.Fatalf("expected a done message, got %#v", msg)
+		}
+		if want := cards[done.taskID]; done.cardKey != want {
+			t.Errorf("task %s closed card %q, but it opened card %q — the wrong card is marked done and its own spins forever",
+				done.taskID, done.cardKey, want)
+		}
+	}
+}
+
+// STOPPING A PLAN. The executor emits TaskCancelled for two different things: a
+// task stopped while it was running, and a task cancelled before it ever
+// started. Only the second has no card. Reading "cancelled" as "never
+// dispatched" made the handler open a SECOND card for a task that already had
+// one and close that, leaving the real card spinning after the plan was stopped.
+func TestCancellingARunningTaskClosesTheCardItAlreadyHas(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1, nil, "")
+
+	bridge.TaskDispatched(specialist.Task{ID: "running", Prompt: "in flight when the user stopped the plan"})
+	start := got[0].(planTaskStartMsg)
+
+	got = nil
+	bridge.TaskFailed(specialist.TaskResult{ID: "running", Outcome: specialist.TaskCancelled, Err: "cancelled"})
+	bridge.TaskFailed(specialist.TaskResult{ID: "queued", Outcome: specialist.TaskCancelled, Err: "cancelled"})
+
+	stopped, ok := got[0].(planTaskDoneMsg)
+	if !ok {
+		t.Fatalf("expected a done message, got %#v", got[0])
+	}
+	if !stopped.dispatched {
+		t.Error("a task cancelled MID-FLIGHT was dispatched; reporting otherwise opens a second card and leaves the first spinning")
+	}
+	if stopped.cardKey != start.cardKey {
+		t.Errorf("cancelled card %q, opened card %q", stopped.cardKey, start.cardKey)
+	}
+
+	queued, ok := got[1].(planTaskDoneMsg)
+	if !ok {
+		t.Fatalf("expected a done message, got %#v", got[1])
+	}
+	if queued.dispatched {
+		t.Error("a task cancelled BEFORE it ran has no card; claiming it was dispatched closes a card that does not exist")
+	}
+}
+
+// The map entry is deleted as the task finishes, so it exists exactly while the
+// task is in flight. Without that, a task id reused by a LATER plan resolves
+// against the earlier plan's card: a skipped task is reported as dispatched and
+// closes a card that belongs to a plan that ended long ago.
+func TestAFinishedTasksCardIsNotResolvableByALaterPlan(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1, nil, "")
+
+	// Plan one runs a task called "cfg" to completion.
+	bridge.TaskDispatched(specialist.Task{ID: "cfg", Prompt: "first plan"})
+	bridge.TaskCompleted(specialist.TaskResult{ID: "cfg", Outcome: specialist.TaskSucceeded})
+
+	// Plan two has a task with the same id, skipped because a dependency failed.
+	got = nil
+	bridge.TaskFailed(specialist.TaskResult{ID: "cfg", Outcome: specialist.TaskSkippedDependency, Err: "skipped"})
+
+	done, ok := got[0].(planTaskDoneMsg)
+	if !ok {
+		t.Fatalf("expected a done message, got %#v", got[0])
+	}
+	if done.dispatched {
+		t.Error("a skipped task resolved against the previous plan's card for the same id")
+	}
+}

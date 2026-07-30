@@ -441,15 +441,32 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 	if bridge == nil {
 		return
 	}
+	// BY TASK ID, never by the dispatch counter. With one worker the last
+	// dispatched card was always the finishing task's card, so a counter was
+	// indistinguishable from a lookup — and wrong the moment max_workers > 1
+	// opened six cards at once. Under fan-out a completion arrives in whatever
+	// order the task finished, so closing planTaskKey(dispatched) marked a task
+	// that was still running as done and left the finished one spinning for the
+	// rest of the session.
+	//
+	// The map is also the AUTHORITY on whether the task was dispatched. The
+	// outcome cannot answer that: TaskCancelled is emitted both for a task
+	// stopped mid-flight (it has a card) and for one cancelled before it ever
+	// ran (it does not), and treating the first as undispatched opened a second
+	// card and left the real one running forever — the same bug wearing the
+	// cancel path's clothes.
+	//
+	// Read-and-delete: an entry exists exactly while its task is in flight, so a
+	// later plan reusing a task id can never resolve against a stale card.
 	bridge.mu.Lock()
-	key := planTaskKey(bridge.dispatched)
+	key, dispatched := bridge.cardByTask[result.ID]
+	delete(bridge.cardByTask, result.ID)
 	bridge.mu.Unlock()
 
 	// A task that was never dispatched (dependency-skipped, budget-skipped,
-	// cancelled before it ran) has no card. Reporting it against the LAST
-	// dispatched task's key would close the wrong card, so those carry their
-	// own key and the handler creates the card on demand.
-	dispatched := result.Outcome == specialist.TaskSucceeded || result.Outcome == specialist.TaskFailed
+	// cancelled before it ran) has no card. Reporting it against another task's
+	// key would close the wrong card, so those carry their own key and the
+	// handler creates the card on demand.
 	taskID, sessionID, reason := result.ID, result.SessionID, result.Err
 	outcome, tokens, attempts := result.Outcome, result.Tokens, result.Attempts
 	bridge.send(func(runID int) tea.Msg {
