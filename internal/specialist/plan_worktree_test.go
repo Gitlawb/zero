@@ -239,3 +239,32 @@ func TestTheRealRunnerLaunchesTheChildInThePlansWorkspace(t *testing.T) {
 		t.Fatalf("a read-only task ran in %q, not the parent's workspace", got)
 	}
 }
+
+// THE PLAN TASK'S PROMPT MUST DEMAND TOOL USE, not merely mention tools.
+//
+// The first version said "You have read-only tools" and asked for nothing. A
+// real fifteen-task run then spent 260 seconds on its first task with ZERO tool
+// calls — the model answered a "find every definition and quote the file:line"
+// task from its own weights. The stall watchdog cannot catch that: it keys on
+// silence, and a model writing prose is not silent.
+func TestThePlanTaskPromptDemandsToolUse(t *testing.T) {
+	manifest := planTaskManifest("explorer", []string{"read_file", "grep"})
+	prompt := manifest.SystemPrompt
+
+	// The obligation, not just the offer.
+	for _, want := range []string{"USE THEM", "before you answer", "file:line"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the plan task prompt must contain %q:\n%s", want, prompt)
+		}
+	}
+	// And the honest-failure clause, which is what stops a task that cannot find
+	// something from inventing it — a guess is indistinguishable from a finding
+	// once it reaches the plan's report.
+	if !strings.Contains(prompt, "not found") {
+		t.Errorf("the prompt must license an honest failure:\n%s", prompt)
+	}
+	// The read-only obligation is unchanged: this task may look, never modify.
+	if !strings.Contains(prompt, "do not attempt to modify anything") {
+		t.Errorf("the prompt lost its read-only instruction:\n%s", prompt)
+	}
+}
