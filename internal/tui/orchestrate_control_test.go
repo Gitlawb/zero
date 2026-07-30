@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // runningBridge is a bridge with a plan in flight, holding a cancel whose
@@ -396,5 +397,109 @@ func TestTheTerminalMessageOfAForegroundPlanIsNotMarked(t *testing.T) {
 		if typed, ok := msg.(planCompletedMsg); ok && typed.background {
 			t.Fatal("a foreground plan's terminal message was marked background")
 		}
+	}
+}
+
+// PER-TASK PROGRESS, which is the whole point: two tasks in flight, and each
+// child's tool calls land on ITS OWN card.
+//
+// The display used to attribute an unrecognised event to "whichever task was
+// dispatched last" — sound while one task ran at a time, a lie the moment two
+// could. This asserts the identity travels with the event.
+func TestEachTasksProgressLandsOnItsOwnCard(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 3, nil, "")
+
+	bridge.TaskDispatched(specialist.Task{ID: "alpha", Prompt: "one"})
+	bridge.TaskDispatched(specialist.Task{ID: "beta", Prompt: "two"})
+
+	// Interleaved, which is what concurrency actually produces.
+	bridge.TaskProgress("beta", streamjson.Event{Type: streamjson.EventToolCall, Name: "grep"})
+	bridge.TaskProgress("alpha", streamjson.Event{Type: streamjson.EventToolCall, Name: "read_file"})
+	bridge.TaskProgress("beta", streamjson.Event{Type: streamjson.EventToolCall, Name: "glob"})
+
+	cardOf := map[string]string{}
+	for _, msg := range got {
+		if start, ok := msg.(planTaskStartMsg); ok {
+			cardOf[start.taskID] = start.cardKey
+		}
+	}
+	if cardOf["alpha"] == "" || cardOf["beta"] == "" || cardOf["alpha"] == cardOf["beta"] {
+		t.Fatalf("the two tasks must have distinct cards: %v", cardOf)
+	}
+
+	byCard := map[string][]string{}
+	for _, msg := range got {
+		if progress, ok := msg.(planTaskProgressMsg); ok {
+			byCard[progress.cardKey] = append(byCard[progress.cardKey], progress.toolName)
+		}
+	}
+	if want := []string{"read_file"}; len(byCard[cardOf["alpha"]]) != 1 || byCard[cardOf["alpha"]][0] != want[0] {
+		t.Fatalf("alpha's card got %v, want %v", byCard[cardOf["alpha"]], want)
+	}
+	if got := byCard[cardOf["beta"]]; len(got) != 2 || got[0] != "grep" || got[1] != "glob" {
+		t.Fatalf("beta's card got %v, want [grep glob]", got)
+	}
+}
+
+// A task the bridge never dispatched has no card, and inventing one would put a
+// row on screen for work the panel never admitted.
+func TestProgressForAnUnknownTaskIsDropped(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 3, nil, "")
+	bridge.TaskProgress("ghost", streamjson.Event{Type: streamjson.EventToolCall, Name: "grep"})
+	for _, msg := range got {
+		if _, ok := msg.(planTaskProgressMsg); ok {
+			t.Fatal("progress for an undispatched task produced a message")
+		}
+	}
+}
+
+// Only TOOL CALLS are forwarded. A message per streamed token would put the
+// event loop under a load the card cannot even display.
+func TestOnlyToolCallsReachTheCard(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 3, nil, "")
+	bridge.TaskDispatched(specialist.Task{ID: "a", Prompt: "x"})
+	for _, kind := range []string{"assistant", "reasoning", "usage", ""} {
+		bridge.TaskProgress("a", streamjson.Event{Type: streamjson.EventType(kind), Name: "noise"})
+	}
+	for _, msg := range got {
+		if _, ok := msg.(planTaskProgressMsg); ok {
+			t.Fatal("a non-tool-call event reached the card")
+		}
+	}
+	bridge.TaskProgress("a", streamjson.Event{Type: streamjson.EventToolCall, Name: "grep"})
+	found := false
+	for _, msg := range got {
+		if _, ok := msg.(planTaskProgressMsg); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a tool call did not reach the card")
+	}
+}
+
+// The MODEL routes by the card the recorder resolved, with no guessing left.
+func TestTheModelRoutesTaskProgressByCard(t *testing.T) {
+	m := model{now: func() time.Time { return time.Unix(1000, 0) }, activeRunID: 5}
+	m.specialists.start("alpha", "one", "card_a", m.now())
+	m.specialists.start("beta", "two", "card_b", m.now())
+
+	updated, _ := m.Update(planTaskProgressMsg{runID: 5, taskID: "beta", cardKey: "card_b",
+		toolName: "grep", detail: "pattern"})
+	after := updated.(model)
+
+	alpha, _ := after.specialists.getBySessionID("card_a")
+	beta, _ := after.specialists.getBySessionID("card_b")
+	if beta.toolCount != 1 || beta.currentTool != "grep" {
+		t.Fatalf("beta's card = %d calls / %q; the event must land there", beta.toolCount, beta.currentTool)
+	}
+	if alpha.toolCount != 0 || alpha.currentTool != "" {
+		t.Fatalf("alpha's card was touched: %d calls / %q", alpha.toolCount, alpha.currentTool)
 	}
 }

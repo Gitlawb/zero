@@ -668,6 +668,30 @@ func recordFailed(recorder PlanRecorder, result TaskResult) {
 	}
 }
 
+// PlanTaskProgressRecorder is the optional PER-TASK streaming half of a
+// recorder.
+//
+// It exists because a child's stream events carry no task identity. The agent
+// loop's progress callback holds the parent's TOOL-CALL id, which is the same
+// for every task in a plan, so a display attributing those events could only
+// guess — and the guess it made was "whichever task was dispatched last". That
+// was sound while exactly one task ran at a time and became a lie the moment
+// two could.
+//
+// The recorder already knows which card belongs to which task, because it
+// opened them. So the identity travels with the event from the one place that
+// has it, instead of being reconstructed at the other end from a guess.
+type PlanTaskProgressRecorder interface {
+	TaskProgress(taskID string, event streamjson.Event)
+}
+
+// planTaskProgress is best-effort and nil-safe, like every other recorder call.
+func planTaskProgress(recorder PlanRecorder, taskID string, event streamjson.Event) {
+	if progress, ok := recorder.(PlanTaskProgressRecorder); ok && progress != nil {
+		progress.TaskProgress(taskID, event)
+	}
+}
+
 // PlanController is the optional CONTROL half of a recorder.
 //
 // Stopping a plan meant stopping the whole turn: Ctrl-C cancels the run, and

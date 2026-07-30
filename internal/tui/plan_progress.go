@@ -10,6 +10,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // PlanProgressBridge turns plan lifecycle events into TUI messages.
@@ -71,6 +72,11 @@ type PlanProgressBridge struct {
 	// handed the real Plan, so it keeps the one thing that can be run again.
 	lastPlan     map[string]any
 	lastPlanName string
+	// cardByTask maps a task id to the card it opened, so a child's stream event
+	// can be routed to the right row. The recorder is the only thing that knows
+	// this pairing — it created it — which is why per-task progress travels
+	// through here rather than being guessed at the display end.
+	cardByTask map[string]string
 	// dispatched counts tasks so each gets a unique temporary card key. The
 	// child's real session id is not known until the child process creates it,
 	// so the card is keyed by this and reconciled on completion — exactly how
@@ -293,6 +299,38 @@ func (bridge *PlanProgressBridge) LastPlan() (map[string]any, string, bool) {
 	return bridge.lastPlan, bridge.lastPlanName, true
 }
 
+// TaskProgress routes one of a task's child events to that task's card.
+//
+// Called from the TASK's goroutine — several at once when a plan runs
+// concurrently — so it takes the lock, resolves the card, and hands a message
+// to the sink. Nothing here renders or blocks, which is the same contract every
+// other method on this bridge keeps.
+func (bridge *PlanProgressBridge) TaskProgress(taskID string, event streamjson.Event) {
+	if bridge == nil || event.Type != streamjson.EventToolCall {
+		// Only tool calls: the card counts tool calls and names the current one,
+		// and forwarding every token would be a message per token on the event
+		// loop for a display that shows neither.
+		return
+	}
+	bridge.mu.Lock()
+	card := bridge.cardByTask[taskID]
+	background := bridge.background
+	bridge.mu.Unlock()
+	if card == "" {
+		// No card: the task was never dispatched through this bridge. Silently
+		// dropping is right — inventing one would put a row on screen for work
+		// the panel never admitted.
+		return
+	}
+	name, detail := event.Name, toolCallSummary(event)
+	bridge.send(func(runID int) tea.Msg {
+		return planTaskProgressMsg{
+			runID: runID, taskID: taskID, cardKey: card,
+			toolName: name, detail: detail, background: background,
+		}
+	})
+}
+
 // RecordingError reports the first append failure, so a surface can say once
 // that the plan was not fully persisted rather than leaving it silent.
 func (bridge *PlanProgressBridge) RecordingError() error {
@@ -373,6 +411,10 @@ func (bridge *PlanProgressBridge) TaskDispatched(task specialist.Task) {
 	bridge.mu.Lock()
 	bridge.dispatched++
 	key := planTaskKey(bridge.dispatched)
+	if bridge.cardByTask == nil {
+		bridge.cardByTask = map[string]string{}
+	}
+	bridge.cardByTask[task.ID] = key
 	bridge.mu.Unlock()
 
 	id, summary := task.ID, planTaskSummary(task)

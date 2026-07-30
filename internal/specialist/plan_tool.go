@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -303,8 +304,29 @@ func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner 
 	if run == nil {
 		return nil
 	}
+	recorder := tool.Recorder
 	return func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
-		req.Progress = options.Progress
+		// PER TASK, not per call. The loop's own callback carries the parent's
+		// tool-call id and nothing else, so every task's events look alike to a
+		// consumer; routing them through the recorder with the task id attached
+		// is what lets a display tell them apart. The recorder falls back to
+		// doing nothing when a surface has no live UI, which is the headless
+		// case.
+		taskID := req.Task.ID
+		callerProgress := options.Progress
+		req.Progress = func(event streamjson.Event) {
+			// BOTH, and they are not alternatives. The recorder gets the event
+			// WITH the task id so a display can route it; the caller's own
+			// callback still fires because that is the contract a plan task's
+			// child streams under — the same one a Task sub-agent's child does,
+			// and restoring it was a fix in its own right. Sending only to the
+			// recorder would have quietly undone that for every caller without
+			// one, which is the headless case.
+			planTaskProgress(recorder, taskID, event)
+			if callerProgress != nil {
+				callerProgress(event)
+			}
+		}
 		// The parent's identity, read from the same RunOptions fields the Task
 		// tool reads (task_tool.go). A plan task inherits the model its parent
 		// is running on; without this it fell back to the child's own config,
