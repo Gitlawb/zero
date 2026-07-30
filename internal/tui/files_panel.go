@@ -305,9 +305,6 @@ func (m model) sidebarFileSelectables(width int) []fileHit {
 	if planBody == 0 {
 		planBody = 1 // the "no active plan" placeholder occupies one line
 	}
-	if m.orchestratePlanBar(width) != "" {
-		planBody++ // the orchestrate progress bar sits inside the PLAN section
-	}
 	base := 1 + agentBody + 2 + planBody + 2 // sections above + (blank + FILES header)
 	for i := range hits {
 		hits[i].lineOffset += base

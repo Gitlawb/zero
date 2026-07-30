@@ -759,9 +759,6 @@ func (m model) renderContextSidebar(width, height int) []string {
 		// Collapsed by a click on the header: the count stays, the body goes.
 		add(sidebarPlaceholder("collapsed — click PLAN to open", width))
 	case len(planLines) > 0:
-		if bar := m.orchestratePlanBar(width); bar != "" {
-			add(bar)
-		}
 		lines = append(lines, planLines...)
 	default:
 		add(sidebarPlaceholder("no active plan", width))
@@ -933,15 +930,27 @@ func (m model) sidebarPlanHeader(width int) string {
 // status glyphs as the pinned panel (✓ done, • in-progress, ○ pending, ✗
 // failed), reading m.plan directly so it stays in sync. Returns nil for an
 // empty plan (the caller then shows a placeholder).
+// BOTH PLANS, NOT WHICHEVER CAME FIRST. update_plan and orchestrate are not
+// alternatives — a zeromaxing turn routinely runs an update_plan checklist whose
+// middle step IS "run this orchestrate plan", so both are live at once. The
+// section used to hand itself entirely to update_plan whenever it had steps,
+// which left the running plan with no sidebar surface at all and pushed it back
+// into the footer panel it was supposed to have replaced.
+//
+// Everything the PLAN section draws is assembled HERE, including the progress
+// bar. sidebarFileSelectables derives the FILES section's click offsets from
+// len(sidebarPlanLines); anything drawn beside it needs its own correction term,
+// and the one that used to exist for the bar was a standing invitation to drift.
 func (m model) sidebarPlanLines(width int) []string {
+	return append(m.updatePlanStepLines(width), m.sidebarOrchestrateBlock(width)...)
+}
+
+// updatePlanStepLines renders the update_plan checklist, or nil when it has no
+// steps.
+func (m model) updatePlanStepLines(width int) []string {
 	state := m.plan
 	if state.isEmpty() {
-		// No update_plan steps, but an ORCHESTRATE plan may be running. Its
-		// lines belong in THIS function rather than beside the placeholder,
-		// because sidebarFileSelectables derives the FILES section's click
-		// offsets from len(sidebarPlanLines) — anything rendered outside it
-		// would silently misdirect every file hit by the number of lines added.
-		return m.sidebarOrchestrateLines(width)
+		return nil
 	}
 	room := maxInt(4, width-3)
 	lines := make([]string, 0, len(state.steps))
@@ -964,6 +973,46 @@ func (m model) sidebarPlanLines(width int) []string {
 		lines = append(lines, " "+icon+" "+body)
 	}
 	return lines
+}
+
+// sidebarOrchestrateBlock is the running plan's place in the PLAN section: its
+// progress bar and task list, and — only when update_plan steps sit above it —
+// a naming line, so two stacked lists never read as one.
+func (m model) sidebarOrchestrateBlock(width int) []string {
+	tasks := m.sidebarOrchestrateLines(width)
+	if len(tasks) == 0 {
+		return nil
+	}
+	var lines []string
+	if !m.plan.isEmpty() {
+		// The section header is already spent on update_plan's count, so the
+		// running plan carries its own name and tally here. Without it the two
+		// lists abut and "1/3" appears to describe nine tasks.
+		done, failed, _, _, _ := m.orchestrate.counts()
+		style := zeroTheme.accent
+		if failed > 0 {
+			style = zeroTheme.red
+		} else if done == len(m.orchestrate.tasks) {
+			style = zeroTheme.green
+		}
+		name := strings.TrimSpace(m.orchestrate.name)
+		if name == "" {
+			name = "plan"
+		}
+		count := style.Render(fmt.Sprintf("%d/%d", done, len(m.orchestrate.tasks)))
+		// Count flush right, the way the section headers above it sit, so the two
+		// tallies line up in a column instead of floating mid-row.
+		label := zeroTheme.faint.Render(truncateStep(name, maxInt(4, width-2-lipgloss.Width(count))))
+		gap := width - 1 - lipgloss.Width(label) - lipgloss.Width(count)
+		if gap < 1 {
+			gap = 1
+		}
+		lines = append(lines, " "+label+strings.Repeat(" ", gap)+count)
+	}
+	if bar := m.orchestratePlanBar(width); bar != "" {
+		lines = append(lines, bar)
+	}
+	return append(lines, tasks...)
 }
 
 // maxSidebarActivityLines caps the ACTIVITY feed so it stays a glanceable tail,

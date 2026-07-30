@@ -271,7 +271,7 @@ func (m model) cycleOrchestrateSelection() model {
 // It occupies ONE line, and sidebarOrchestrateSelectables accounts for it, so
 // the click offsets below stay correct.
 func (m model) orchestratePlanBar(width int) string {
-	if !m.plan.isEmpty() || m.orchestrate.isEmpty() || m.orchestrate.sidebarCollapsed {
+	if m.orchestrate.isEmpty() || m.orchestrate.sidebarCollapsed {
 		return ""
 	}
 	return sidebarProgressBar(m.orchestrate, width)

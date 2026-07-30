@@ -320,10 +320,10 @@ func (m model) sidebarOwnsOrchestrate() bool {
 	if m.orchestrate.isEmpty() || !m.sidebarActive() {
 		return false
 	}
-	// sidebarPlanLines renders update_plan's steps whenever it has any and falls
-	// through to the orchestrate task list only when it does not. With both live
-	// the plan has no sidebar surface, so the inline panel is still the one.
-	return m.plan.isEmpty()
+	// A section collapsed by a click on its header is not a surface: it shows a
+	// count and a hint to reopen. The plan goes back to the inline panel until
+	// it is opened again, rather than existing nowhere.
+	return !m.orchestrate.sidebarCollapsed
 }
 
 // renderOrchestratePanel draws the plan: one row per task, indented by

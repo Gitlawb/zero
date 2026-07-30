@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -714,8 +715,8 @@ func TestTheInlinePanelIsStillTheSurfaceWithoutASidebar(t *testing.T) {
 			m.width = 60
 			return m
 		},
-		"update_plan owns the sidebar's PLAN section": func(m model) model {
-			m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
+		"the sidebar's PLAN section was collapsed by a click": func(m model) model {
+			m.orchestrate.sidebarCollapsed = true
 			return m
 		},
 	} {
@@ -772,16 +773,76 @@ func TestCtrlGActsOnWhicheverPlanSurfaceIsOnScreen(t *testing.T) {
 
 	// THE CASE THAT SEPARATES THE TWO PREDICATES, and the reason the key was
 	// moved off sidebarActive. The sidebar is up, so sidebarActive() is true —
-	// but update_plan has claimed its PLAN section, so the orchestrate plan is
-	// drawing inline. Keying off "is the sidebar up" cycles a selection in a
-	// list that is not on screen while the panel the user is looking at ignores
-	// the key.
+	// but its PLAN section is collapsed, so the plan is drawing inline instead.
+	// Keying off "is the sidebar up" cycles a selection in a list that is not on
+	// screen while the panel the user is looking at ignores the key.
 	contended := planOwnedByTheSidebar(t)
-	contended.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
+	contended.orchestrate.sidebarCollapsed = true
 	if !contended.sidebarActive() {
 		t.Fatal("sanity check failed: this case needs the sidebar UP and not owning the plan")
 	}
 	if got := press(contended); !got.orchestrate.expanded {
-		t.Error("the sidebar is up but update_plan has its PLAN section: ctrl+g must expand the panel that is actually drawing")
+		t.Error("the sidebar is up but its PLAN section is collapsed: ctrl+g must expand the panel that is actually drawing")
+	}
+}
+
+// THE REPORTED CASE. A zeromaxing turn runs an update_plan checklist whose
+// middle step is "run this orchestrate plan", so both are live at once. The
+// section used to hand itself entirely to update_plan, so the running plan had
+// no sidebar surface, sidebarOwnsOrchestrate() was false, and the footer line
+// the user asked to be rid of stayed on screen for the whole run.
+func TestTheFooterStandsDownWithBothPlansLive(t *testing.T) {
+	m := planOwnedByTheSidebar(t)
+	m.plan.steps = []planStep{
+		{content: "Create the lab and copy packages in", status: "completed"},
+		{content: "Run the orchestrate plan", status: "in_progress"},
+		{content: "Write the docs", status: "pending"},
+	}
+	// A touched file, so the FILES section below the plan block actually has
+	// click targets to check. Without one the offset assertions below iterate
+	// over an empty list and prove nothing.
+	m.transcript = append(m.transcript, transcriptRow{
+		kind: rowToolResult, tool: "write_file",
+		changedFiles: []string{"internal/tui/sidebar.go"},
+		detail:       "Created internal/tui/sidebar.go",
+	})
+
+	if !m.sidebarOwnsOrchestrate() {
+		t.Fatal("the sidebar shows both plans, so it owns the running one")
+	}
+	if got := m.renderOrchestratePanel(100); got != "" {
+		t.Errorf("the sidebar is showing this plan; the footer must not repeat it:\n%s", got)
+	}
+
+	// And the sidebar really is showing it — not merely claiming to.
+	width := sidebarWidth(m.width)
+	rendered := plainRender(t, strings.Join(m.renderContextSidebar(width, m.height), "\n"))
+	if !strings.Contains(rendered, "Run the orchestrate plan") {
+		t.Errorf("update_plan's checklist is missing:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "diamond") {
+		t.Errorf("the running plan is missing from the column that claims to own it:\n%s", rendered)
+	}
+	bar := m.orchestratePlanBar(width)
+	if bar == "" {
+		t.Error("the running plan's progress bar was suppressed by update_plan's presence")
+	} else if !strings.Contains(rendered, plainRender(t, bar)) {
+		t.Errorf("the bar exists but the column does not draw it:\n%s", rendered)
+	}
+
+	// The click targets below the PLAN section still land where they point —
+	// the block added rows, and FILES derives its base from len(sidebarPlanLines).
+	lines := m.renderContextSidebar(width, m.height)
+	hits := m.sidebarFileSelectables(width)
+	if len(hits) == 0 {
+		t.Fatal("sanity check failed: no file hits to verify, so the offset check proves nothing")
+	}
+	for _, hit := range hits {
+		if hit.lineOffset >= len(lines) {
+			t.Fatalf("file hit %q points past the end of the column", hit.path)
+		}
+		if line := plainRender(t, lines[hit.lineOffset]); !strings.Contains(line, path.Base(hit.path)) {
+			t.Errorf("file hit %q points at %q", hit.path, line)
+		}
 	}
 }
