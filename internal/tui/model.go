@@ -214,6 +214,10 @@ type model struct {
 	// orchestrateSelected is the plan task the sidebar's TASK section details.
 	// Clicking a task row in the sidebar sets it; ctrl+g cycles it.
 	orchestrateSelected int
+	// showDoneAgents keeps finished agents in the AGENTS section instead of
+	// dropping them after their linger. Off by default: during a run the live
+	// agents are the news. Toggled by clicking the header's "N done".
+	showDoneAgents bool
 	// expandedAgent is the AGENTS row showing its brief and spend, keyed by the
 	// specialist's card id. One at a time: the section shares its column with
 	// PLAN, FILES and ACTIVITY, and every row expanded at once would be a
@@ -2729,6 +2733,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
 		m.specialists.setTokens(cardKey, msg.tokens)
+		m.specialists.setResult(cardKey, msg.output)
 		if msg.sessionID != "" && msg.sessionID != cardKey {
 			// The expansion follows the rename. It is keyed by the card id, and
 			// finishing swaps that for the child's real session id — so a row

@@ -1321,6 +1321,10 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// session, reusing the specialist-card subchat path. Checked before the
 		// transcript hit-test since the sidebar is outside the chat column.
 		if hit, ok := m.sidebarLineAtMouse(msg); ok {
+			if hit.toggleDone {
+				m.showDoneAgents = !m.showDoneAgents
+				return m, nil, true
+			}
 			if hit.expands {
 				// Toggles in place. A specialist row is keyed by its CARD, and a
 				// running plan task's card key is not a session id yet — there

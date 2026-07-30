@@ -285,7 +285,7 @@ func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
 		return sidebarAgentHit{}, false
 	}
 	for _, hit := range m.sidebarAgentSelectables(sidebarW) {
-		if hit.lineOffset == y && hit.sessionID != "" {
+		if hit.lineOffset == y && (hit.sessionID != "" || hit.toggleDone) {
 			return hit, true
 		}
 	}
