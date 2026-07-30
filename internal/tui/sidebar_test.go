@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -719,5 +720,173 @@ func TestSidebarSurvivesCommandPalette(t *testing.T) {
 	full.picker = &commandPicker{}
 	if full.sidebarActive() {
 		t.Error("a full-screen picker must still collapse the sidebar")
+	}
+}
+
+// specialistSidebarModel is a sidebar-active model with one running plan task in
+// AGENTS, an update_plan step list in PLAN, and a touched file in FILES — so the
+// sections BELOW the agent rows are present and their click offsets are real.
+func specialistSidebarModel(t *testing.T, now time.Time) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.specialists.start("cfg", "read the config resolver and report how the profile tier merges", "plantask_1", now.Add(-70*time.Second))
+	m.specialists.incrementToolCount("plantask_1")
+	m.specialists.setTokens("plantask_1", 3400)
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "write_file", detail: "internal/tui/sidebar.go"})
+	if !m.sidebarActive() {
+		t.Fatal("sanity check failed: the sidebar must be up for this test")
+	}
+	return m
+}
+
+// A RUNNING agent row is clickable. It is keyed by its card, and a plan task's
+// card key is not a session id until the task finishes — so the drill-in has
+// nothing to open at the one moment the detail is most wanted.
+func TestClickingARunningAgentRowExpandsItInPlace(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+
+	hits := m.sidebarAgentSelectables(sidebarWidth(m.width))
+	if len(hits) != 1 {
+		t.Fatalf("expected the specialist row to be clickable, got %d hits", len(hits))
+	}
+	if !hits[0].expands || hits[0].sessionID != "plantask_1" {
+		t.Fatalf("specialist hit = %+v, want an in-place expansion keyed by its card", hits[0])
+	}
+
+	collapsed := plainRender(t, strings.Join(m.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
+	if strings.Contains(collapsed, "config resolver") {
+		t.Errorf("the collapsed row must not already show the brief:\n%s", collapsed)
+	}
+
+	x0 := m.chatColumnWidth() + 3
+	click := tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: hits[0].lineOffset}
+	updated, _, handled := m.handleTranscriptSelectionMouse(click)
+	if !handled {
+		t.Fatal("the click was not handled")
+	}
+	if updated.expandedAgent != "plantask_1" {
+		t.Fatalf("expandedAgent = %q, want the clicked row's card", updated.expandedAgent)
+	}
+	// IN PLACE, NOT A DRILL-IN. The swarm path on the other side of this branch
+	// swaps the whole view for the member's subchat; a card key that is not yet
+	// a session would take it there with nothing to open.
+	if updated.subchat.active {
+		t.Error("expanding a specialist row must not enter the swarm subchat")
+	}
+
+	expanded := plainRender(t, strings.Join(updated.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
+	// The column is 26 cells at its minimum, so the brief wraps and the spend
+	// line truncates — checked against what actually renders, not against a
+	// wider terminal's version of it.
+	for _, want := range []string{"read the config", "1m10s", "3.4K tok"} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expansion is missing %q:\n%s", want, expanded)
+		}
+	}
+
+	// Clicking the open row closes it again.
+	reclicked, _, _ := updated.handleTranscriptSelectionMouse(click)
+	if reclicked.expandedAgent != "" {
+		t.Errorf("a second click must close the row, got %q", reclicked.expandedAgent)
+	}
+}
+
+// THE OFFSET CONSTRAINT. sidebarPlanSelectables and sidebarFileSelectables both
+// derive their base from len(sidebarAgentLines), so an expansion that adds rows
+// must move every click target below it. Getting this wrong sends a click to a
+// different file than the one under the cursor, with nothing to indicate it.
+func TestExpandingAnAgentMovesTheClickTargetsBelowIt(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	width := sidebarWidth(m.width)
+
+	// The rendered sidebar is the oracle: whatever a hit points at must be the
+	// row it claims, in both states.
+	check := func(t *testing.T, m model, label string) {
+		t.Helper()
+		lines := m.renderContextSidebar(width, m.height)
+		for _, hit := range m.sidebarPlanSelectables(width) {
+			line := plainRender(t, lines[hit.lineOffset])
+			if !strings.Contains(line, m.plan.steps[hit.stepIndex].content) {
+				t.Errorf("%s: plan step %d points at %q", label, hit.stepIndex, line)
+			}
+		}
+		for _, hit := range m.sidebarFileSelectables(width) {
+			line := plainRender(t, lines[hit.lineOffset])
+			if !strings.Contains(line, path.Base(hit.path)) {
+				t.Errorf("%s: file hit %q points at %q", label, hit.path, line)
+			}
+		}
+	}
+
+	check(t, m, "collapsed")
+	m.expandedAgent = "plantask_1"
+	check(t, m, "expanded")
+}
+
+// Finishing a task swaps its card id for the child's real session id. A row the
+// user had open must not collapse at the exact moment it gains a result.
+func TestAnOpenAgentRowSurvivesTheSessionRename(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	m.activeRunID = 1
+	m.expandedAgent = "plantask_1"
+
+	updated, _ := m.Update(planTaskDoneMsg{
+		runID: 1, taskID: "cfg", cardKey: "plantask_1", dispatched: true,
+		sessionID: "specialist_real", status: specialistCompleted, outcome: "succeeded",
+	})
+	got := updated.(model)
+	if got.expandedAgent != "specialist_real" {
+		t.Errorf("expandedAgent = %q, want it to follow the rename to the real session", got.expandedAgent)
+	}
+}
+
+// A cancelled task explains itself, and NOT in red: the user stopped it, and
+// colouring their own decision as a fault is what the ⊘ glyph already avoids.
+func TestACancelledAgentShowsItsReason(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	m.specialists.complete("plantask_1", specialistCancelled, 0, "cancelled: the run was stopped while this task was running", now)
+	m.expandedAgent = "plantask_1"
+
+	rendered := strings.Join(m.sidebarAgentExpansion(m.sidebarSpecialists()[0], 30), "\n")
+	if !strings.Contains(plainRender(t, rendered), "cancelled") {
+		t.Errorf("a cancelled task must say why:\n%s", rendered)
+	}
+	if strings.Contains(rendered, zeroTheme.red.Render("cancelled")) {
+		t.Error("a cancelled task is not an error and must not be red")
+	}
+}
+
+// A FIGURE THAT DOES NOT FIT IS DROPPED, NOT TRUNCATED. Prose ending in an
+// ellipsis still reads as prose; a number ending in one reads as a different
+// number, and this line exists to report a spend.
+func TestSpendSegmentsDropRatherThanTruncate(t *testing.T) {
+	segments := []string{"1m10s", "3.4K tok", "12 tools"}
+	for name, tc := range map[string]struct {
+		width int
+		want  string
+	}{
+		"everything fits":       {40, "1m10s · 3.4K tok · 12 tools"},
+		"the last one does not": {23, "1m10s · 3.4K tok"},
+		"only the first does":   {10, "1m10s"},
+		"not even the first":    {3, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := fitSegments(segments, tc.width)
+			if got != tc.want {
+				t.Errorf("fitSegments(%d) = %q, want %q", tc.width, got, tc.want)
+			}
+			if lipgloss.Width(got) > tc.width {
+				t.Errorf("%q overflows %d cells", got, tc.width)
+			}
+			if strings.Contains(got, "…") {
+				t.Errorf("%q truncated a figure instead of dropping it", got)
+			}
+		})
 	}
 }

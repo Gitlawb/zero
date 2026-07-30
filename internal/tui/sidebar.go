@@ -399,6 +399,12 @@ type sidebarAgentHit struct {
 	lineOffset int
 	sessionID  string
 	title      string
+	// expands marks a row whose click TOGGLES ITS DETAIL in place rather than
+	// drilling into a child session. Specialist rows are keyed by their card,
+	// and a plan task's card key is not a session id until the task finishes and
+	// reconciles one — so the drill-in has nothing to open while the task is
+	// running, which is exactly when its detail is worth reading.
+	expands bool
 }
 
 // sidebarAgentLines renders one line per active agent. Specialist delegations
@@ -454,25 +460,31 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 			icon = zeroTheme.faint.Render(glyph)
 			nameStyle = zeroTheme.faint
 		}
-		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
-		if a.status != specialistRunning {
-			continue
+		// Recorded before the line is appended, so the offset is the row's own.
+		if a.childSessionID != "" {
+			hits = append(hits, sidebarAgentHit{lineOffset: len(lines), sessionID: a.childSessionID, title: name, expands: true})
 		}
-		// Live working detail for a running subagent: current tool + arg hint,
-		// falling back to the running tool count.
-		detail := strings.TrimSpace(a.currentTool)
-		if d := strings.TrimSpace(a.currentDetail); d != "" {
+		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
+		if a.status == specialistRunning {
+			// Live working detail for a running subagent: current tool + arg hint,
+			// falling back to the running tool count.
+			detail := strings.TrimSpace(a.currentTool)
+			if d := strings.TrimSpace(a.currentDetail); d != "" {
+				if detail != "" {
+					detail += " " + d
+				} else {
+					detail = d
+				}
+			}
+			if detail == "" && a.toolCount > 0 {
+				detail = fmt.Sprintf("%d tools", a.toolCount)
+			}
 			if detail != "" {
-				detail += " " + d
-			} else {
-				detail = d
+				lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
 			}
 		}
-		if detail == "" && a.toolCount > 0 {
-			detail = fmt.Sprintf("%d tools", a.toolCount)
-		}
-		if detail != "" {
-			lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
+		if a.childSessionID == m.expandedAgent {
+			lines = append(lines, m.sidebarAgentExpansion(a, room)...)
 		}
 	}
 	// Swarm/team members: a live member's whole task-name carries a mild, slow cool
@@ -507,6 +519,100 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, nameRoom))+suffix)
 	}
 	return lines, hits
+}
+
+// sidebarAgentExpansionBriefLines caps how much of the brief the expansion
+// shows. Two lines is enough to say what a task was asked to do; the whole
+// prompt belongs in the task's card, not in a 26-cell column.
+const sidebarAgentExpansionBriefLines = 2
+
+// fitSegments joins as many " · "-separated segments as fit in width and DROPS
+// the rest, rather than joining them all and truncating the result.
+//
+// The difference matters because these segments are figures. Prose that runs
+// out of room ends in an ellipsis and is still read as prose; a number that does
+// reads as a different number — "3,4…" is three thousand or three million with
+// equal authority, and the whole point of the line is to report a spend. Losing
+// the last segment says less; truncating it says something false.
+func fitSegments(segments []string, width int) string {
+	line := ""
+	for _, segment := range segments {
+		candidate := segment
+		if line != "" {
+			candidate = line + " · " + segment
+		}
+		if lipgloss.Width(candidate) > width {
+			break
+		}
+		line = candidate
+	}
+	return line
+}
+
+// sidebarAgentExpansion is what a clicked agent row opens: the brief it was
+// given, what it has spent, and — when it did not simply finish — why.
+//
+// A LITTLE MORE, not a drawer. The collapsed row says which agent and which
+// tool; the three questions it cannot answer are what the agent was actually
+// asked to do, how much it has cost, and what happened to it. Those fit in four
+// lines, and four lines is the cap: this section shares its height with PLAN,
+// FILES and ACTIVITY, and an expansion that pushes them off the column has
+// traded three sections for one.
+func (m model) sidebarAgentExpansion(info specialistInfo, room int) []string {
+	body := maxInt(4, room-4)
+	indent := "     "
+	var out []string
+
+	if brief := strings.TrimSpace(info.description); brief != "" {
+		for i, line := range wrapPlainText(brief, body) {
+			if i >= sidebarAgentExpansionBriefLines {
+				break
+			}
+			out = append(out, indent+zeroTheme.muted.Render(line))
+		}
+	}
+
+	// Spend, most-wanted first: how long, what it cost, how much it did. Each
+	// segment is omitted when it has nothing to report rather than shown as a
+	// zero — "0 tools" on a task that has not called one yet reads as a stuck
+	// agent, which is the thing this panel is meant to disambiguate.
+	var spent []string
+	if !info.startedAt.IsZero() {
+		until := m.now()
+		if !info.completedAt.IsZero() {
+			until = info.completedAt
+		}
+		if elapsed := until.Sub(info.startedAt); elapsed > 0 {
+			// The footer's format (1m10s), not 70.0s: same clock, same reading,
+			// and a character shorter in a column that has 19 of them at its
+			// minimum width.
+			spent = append(spent, formatWorkingElapsed(elapsed))
+		}
+	}
+	if info.tokenCount > 0 {
+		// humanCount, the column floor's own format (3.4K), not the card's
+		// grouped digits — "3,400" does not fit beside the other segments here.
+		spent = append(spent, humanCount(info.tokenCount)+" tok")
+	}
+	if info.toolCount > 0 {
+		spent = append(spent, fmt.Sprintf("%d tools", info.toolCount))
+	}
+	if line := fitSegments(spent, body); line != "" {
+		out = append(out, indent+zeroTheme.faint.Render(line))
+	}
+
+	// The reason, for the two statuses that have one. A cancelled task is NOT
+	// red: the user stopped it, and colouring their own decision as a fault is
+	// the same mistake the ⊘ glyph exists to avoid.
+	if reason := strings.TrimSpace(info.errorMsg); reason != "" {
+		switch info.status {
+		case specialistError:
+			out = append(out, indent+zeroTheme.red.Render(truncateStep(reason, body)))
+		case specialistCancelled:
+			out = append(out, indent+zeroTheme.faint.Render(truncateStep(reason, body)))
+		}
+	}
+	return out
 }
 
 // sidebarAgentSelectables returns the clickable swarm-member lines with their
