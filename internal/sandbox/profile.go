@@ -96,28 +96,37 @@ var protectedMetadataNames = []string{".git", ".zero", ".agents"}
 // gitMetadataWriteCarveouts below.
 var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
-// gitMetadataWriteCarveouts returns the .git paths that stay write-denied under
-// the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Worktrees and submodules store .git as a regular pointer file,
-// so they protect that file itself: constructing .git/hooks below it makes
-// bwrap fail before the command starts. All other entry and error states retain
-// the legacy child paths. The pointer is deliberately not parsed here;
-// repository-controlled metadata must not redirect sandbox rules elsewhere.
+// gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
+// under the OS-level sandbox even though the rest of .git is writable to git
+// subprocesses. Nonexistent paths are harmless no-ops in every backend's
+// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
-	return gitMetadataWriteCarveoutsWithLstat(root, os.Lstat)
+	specs := gitMetadataWriteCarveoutSpecs(root)
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		out = append(out, spec.Path)
+	}
+	return out
 }
 
-func gitMetadataWriteCarveoutsWithLstat(root string, lstat func(string) (os.FileInfo, error)) []string {
-	gitPath := filepath.Join(root, ".git")
-	children := []string{
-		filepath.Join(gitPath, "hooks"),
-		filepath.Join(gitPath, "config"),
+// gitMetadataCarveout is a write-denied .git path together with the shape git
+// expects it to have. The shape matters to exactly one backend: the Windows ACL
+// plan creates a missing carveout so the deny ACE is in place before git first
+// runs, and creating .git/config as a directory makes `git init` fail outright.
+// Every other backend only ever names the path, so it can ignore IsFile.
+type gitMetadataCarveout struct {
+	Path   string
+	IsFile bool
+}
+
+// gitMetadataWriteCarveoutSpecs is the single source of truth for the carveout
+// set. gitMetadataWriteCarveouts derives its list from this so a path can never
+// be added in one place and have its shape forgotten in the other.
+func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
+	return []gitMetadataCarveout{
+		{Path: filepath.Join(root, ".git", "hooks")},
+		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
 	}
-	info, err := lstat(gitPath)
-	if err != nil || !info.Mode().IsRegular() {
-		return children
-	}
-	return []string{gitPath}
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {

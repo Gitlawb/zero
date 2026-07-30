@@ -19,6 +19,11 @@ type WindowsACLEntry struct {
 	Path        string           `json:"path"`
 	Capability  string           `json:"capability"`
 	Materialize bool             `json:"materialize,omitempty"`
+	// MaterializeFile makes Materialize create an empty FILE instead of a
+	// directory. Only meaningful with Materialize. .git/config is the case that
+	// forces the distinction: created as a directory it does not merely carry
+	// the wrong ACL, it makes `git init` fail outright.
+	MaterializeFile bool `json:"materializeFile,omitempty"`
 }
 
 type WindowsACLPlan struct {
