@@ -115,7 +115,9 @@ func (m model) sidebarPlanSelectables(width int) []planStepHit {
 	base := 1 + agentBody + 2 // AGENTS header + body + (blank line + PLAN header)
 	hits := make([]planStepHit, 0, len(m.plan.steps))
 	for i := range m.plan.steps {
-		hits = append(hits, planStepHit{lineOffset: base + i, stepIndex: i})
+		if offset := base + i; m.sidebarRowOnScreen(offset) {
+			hits = append(hits, planStepHit{lineOffset: offset, stepIndex: i})
+		}
 	}
 	return hits
 }

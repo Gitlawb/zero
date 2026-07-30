@@ -35,27 +35,29 @@ type orchestrateTaskHit struct {
 // (the live-task filter, the six-line cap) is never clickable — an offset table
 // built from the full task list would map clicks onto rows that are not there.
 func (m model) sidebarOrchestrateSelectables(width int) []orchestrateTaskHit {
-	if m.orchestrate.isEmpty() || !m.plan.isEmpty() {
-		// update_plan's steps own the section when it has any, and they have
-		// their own hit table.
+	if m.orchestrate.isEmpty() {
 		return nil
 	}
 	agentBody := len(m.sidebarAgentLines(width))
 	if agentBody == 0 {
 		agentBody = 1
 	}
-	base := 1 + agentBody + 2
-	if m.orchestratePlanBar(width) != "" {
-		// The progress bar sits between the header and the first task, so every
-		// row below it moves down one. An offset table that ignored it would
-		// select the task ABOVE the one clicked.
-		base++
-	}
+	// Everything the PLAN section draws ABOVE the first task row: update_plan's
+	// checklist when it has one, then the running plan's naming line and its
+	// progress bar. MEASURED off the renderers rather than re-derived from the
+	// conditions that produce them — the bar already had its own hand-written
+	// correction term here, and a second one for the naming line would be a
+	// second chance to disagree with what was actually drawn.
+	steps := len(m.updatePlanStepLines(width))
+	prefix := len(m.sidebarOrchestrateBlock(width)) - len(m.sidebarOrchestrateLines(width))
+	base := 1 + agentBody + 2 + steps + prefix
 
 	rows := m.sidebarOrchestrateRows()
 	hits := make([]orchestrateTaskHit, 0, len(rows))
 	for offset, index := range rows {
-		hits = append(hits, orchestrateTaskHit{lineOffset: base + offset, taskIndex: index})
+		if lineOffset := base + offset; m.sidebarRowOnScreen(lineOffset) {
+			hits = append(hits, orchestrateTaskHit{lineOffset: lineOffset, taskIndex: index})
+		}
 	}
 	return hits
 }
@@ -112,7 +114,7 @@ func (m model) orchestrateTaskAtMouse(msg tea.MouseMsg) (int, bool) {
 // orchestrateHeaderAtMouse reports a click on the sidebar's PLAN header, which
 // collapses and expands the whole section.
 func (m model) orchestrateHeaderAtMouse(msg tea.MouseMsg) bool {
-	if !m.sidebarActive() || m.orchestrate.isEmpty() || !m.plan.isEmpty() {
+	if !m.sidebarActive() || m.orchestrate.isEmpty() {
 		return false
 	}
 	sidebarW := sidebarWidth(m.width)
