@@ -4,6 +4,7 @@ package update
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,6 +251,46 @@ func TestMarkOldBinaryPreservedRefusesPreCreatedLink(t *testing.T) {
 	}
 }
 
+func TestMarkOldBinaryPreservedRemovesPartialMarkerBeforeRelocation(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	blocker, err := openWithoutSharing(targetPath)
+	if err != nil {
+		t.Skipf("cannot hold the target exclusively on this filesystem: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
+
+	originalWrite := writeRecoveryMarker
+	writeRecoveryMarker = func(marker *os.File) error {
+		_, _ = marker.WriteString("partial")
+		return errors.New("injected marker write failure")
+	}
+	t.Cleanup(func() { writeRecoveryMarker = originalWrite })
+	stubRandomStagingSuffix(t, "deadbeef")
+
+	err = restoreOriginalBinary(oldPath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	kept := oldPath + ".deadbeef.recovery"
+	if !strings.Contains(err.Error(), kept) {
+		t.Fatalf("error = %v, want relocated recovery path %s", err, kept)
+	}
+	if _, err := os.Lstat(oldPath + oldBinaryPreservedSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial marker survived relocation: %v", err)
+	}
+	if got, err := os.ReadFile(kept); err != nil || string(got) != "known-good" {
+		t.Fatalf("relocated recovery = %q err=%v, want known-good", got, err)
+	}
+}
+
 // TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails covers the half of
 // CodeRabbit's marker finding that surfacing the failure alone does not: when no
 // marker can be established, nothing on disk tells the next run to keep the
@@ -346,6 +387,42 @@ func TestRestoreOriginalBinarySurfacesMarkerWriteFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), oldPath) {
 		t.Fatalf("error = %v, want the path the operator must copy", err)
+	}
+	if strings.Contains(err.Error(), "later update") {
+		t.Fatalf("error = %v, must not promise cleanup that no longer exists", err)
+	}
+}
+
+func TestKeepUnmarkedRecoveryCopyMovesTheOpenedObject(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "zero.exe.old")
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile recovery copy: %v", err)
+	}
+	stubRandomStagingSuffix(t, "deadbeef")
+
+	originalRename := renameRecoveryFileByHandle
+	renameRecoveryFileByHandle = func(file *os.File, kept string) error {
+		// Try to substitute oldPath after keepUnmarkedRecoveryCopy has opened and
+		// verified it. The exclusive delete sharing normally blocks this. Even
+		// on a filesystem that permits it, the handle-bound rename must still
+		// move the verified object rather than the replacement pathname entry.
+		displaced := oldPath + ".attacker-moved"
+		if err := os.Rename(oldPath, displaced); err == nil {
+			if err := os.WriteFile(oldPath, []byte("attacker"), 0o755); err != nil {
+				return fmt.Errorf("plant substituted recovery: %w", err)
+			}
+		}
+		return renameOpenFile(file, kept)
+	}
+	t.Cleanup(func() { renameRecoveryFileByHandle = originalRename })
+
+	kept, err := keepUnmarkedRecoveryCopy(oldPath)
+	if err != nil {
+		t.Fatalf("keepUnmarkedRecoveryCopy: %v", err)
+	}
+	if got, err := os.ReadFile(kept); err != nil || string(got) != "known-good" {
+		t.Fatalf("kept recovery = %q err=%v, want the verified object", got, err)
 	}
 }
 

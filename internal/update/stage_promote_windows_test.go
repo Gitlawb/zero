@@ -258,6 +258,75 @@ func TestPromoteRefusesRetryAfterInterruptedAside(t *testing.T) {
 	}
 }
 
+func TestPromoteRefusesMarkedRandomAsideRecovery(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	canonicalOld := targetPath + ".old"
+	randomOld := targetPath + ".deadbeef.old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(canonicalOld, []byte("stale-older-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile canonical recovery: %v", err)
+	}
+	if err := os.WriteFile(randomOld, []byte("last-known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile random recovery: %v", err)
+	}
+	if err := markOldBinaryPreserved(randomOld); err != nil {
+		t.Fatalf("mark random recovery: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	for _, want := range []string{randomOld, randomOld + oldBinaryPreservedSuffix} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want marked random recovery path %s", err, want)
+		}
+	}
+	if got, err := os.ReadFile(randomOld); err != nil || string(got) != "last-known-good" {
+		t.Fatalf("random recovery = %q err=%v, want last-known-good", got, err)
+	}
+	if got, err := os.ReadFile(targetPath); err != nil || string(got) != "unverified" {
+		t.Fatalf("target = %q err=%v, want refusal before promotion", got, err)
+	}
+}
+
+func TestPromoteRefusesAmbiguousRecoveryWhenTargetIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	canonicalOld := targetPath + ".old"
+	randomOld := targetPath + ".deadbeef.old"
+	if err := os.WriteFile(canonicalOld, []byte("older-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile canonical recovery: %v", err)
+	}
+	if err := os.WriteFile(randomOld, []byte("last-running-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile random recovery: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	for _, want := range []string{"ambiguous", canonicalOld, randomOld} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	}
+	if _, err := os.Lstat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing target was unexpectedly created: %v", err)
+	}
+}
+
 func TestVerifyPromotedTargetRejectsDifferentRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	stagedPath := filepath.Join(dir, "staged.exe")

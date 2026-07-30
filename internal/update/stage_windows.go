@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -112,19 +114,41 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	// Automation cannot resolve this safely on the operator's behalf: only they
 	// can say whether the file at targetPath is theirs. So this fails closed and
 	// says exactly which two moves end the state.
-	if oldBinaryPreserved(oldPath) {
+	markedRecoveries, recoveryErr := markedRecoveryPaths(targetPath)
+	if recoveryErr != nil {
+		return fmt.Errorf("%w: inspect previous recovery state for %s: %v", ErrTargetPossiblyTampered, targetPath, recoveryErr)
+	}
+	if len(markedRecoveries) != 0 {
+		recoveryPaths := make([]string, 0, len(markedRecoveries))
+		markerPaths := make([]string, 0, len(markedRecoveries))
+		for _, recoveryPath := range markedRecoveries {
+			recoveryPaths = append(recoveryPaths, recoveryPath)
+			markerPaths = append(markerPaths, recoveryPath+oldBinaryPreservedSuffix)
+		}
 		return fmt.Errorf(
-			"%w: a previous update could not restore the original binary. %s holds the last binary this updater verified and %s may hold unverified content. "+
-				"Move %s back over %s to restore it, or delete %s to accept the installed binary, then update again",
-			ErrTargetPossiblyTampered, oldPath, targetPath,
-			oldPath, targetPath, oldPath+oldBinaryPreservedSuffix,
+			"%w: a previous update could not restore the original binary. Recovery path(s) %s may hold the last binary this updater verified and %s may hold unverified content. "+
+				"Move the correct recovery binary back over %s to restore it, or delete its marker (%s) to accept the installed binary, then update again",
+			ErrTargetPossiblyTampered, strings.Join(recoveryPaths, ", "), targetPath,
+			targetPath, strings.Join(markerPaths, ", "),
 		)
 	}
 	if _, targetErr := os.Lstat(targetPath); errors.Is(targetErr, os.ErrNotExist) {
-		if _, oldErr := os.Lstat(oldPath); oldErr == nil {
+		recoveryPaths, err := existingRecoveryPaths(targetPath)
+		if err != nil {
+			return fmt.Errorf("%w: inspect recovery copies for missing %s: %v", ErrTargetPossiblyTampered, targetPath, err)
+		}
+		switch len(recoveryPaths) {
+		case 1:
 			return fmt.Errorf(
 				"%w: %s is missing and %s may be the only recoverable binary; move it back before updating again",
-				ErrTargetPossiblyTampered, targetPath, oldPath,
+				ErrTargetPossiblyTampered, targetPath, recoveryPaths[0],
+			)
+		case 0:
+			// Let the ordinary aside rename below report the missing target.
+		default:
+			return fmt.Errorf(
+				"%w: %s is missing and multiple recovery binaries exist (%s); resolve the ambiguous recovery state before updating again",
+				ErrTargetPossiblyTampered, targetPath, strings.Join(recoveryPaths, ", "),
 			)
 		}
 	}
@@ -164,6 +188,47 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	staged.path = targetPath
 	staged.promoted = true
 	return nil
+}
+
+// existingRecoveryPaths returns every canonical or randomized aside path that
+// could hold a binary moved away from targetPath by a previous promotion. The
+// directory is attacker-writable under the threat model, so these names are
+// only reasons to fail closed; their presence is never proof of file contents.
+func existingRecoveryPaths(targetPath string) ([]string, error) {
+	dir := filepath.Dir(targetPath)
+	base := filepath.Base(targetPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == base+".old" ||
+			(strings.HasPrefix(name, base+".") &&
+				strings.HasSuffix(name, ".old") &&
+				len(name) > len(base)+len("..old")) {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	return paths, nil
+}
+
+// markedRecoveryPaths finds recovery copies protected by either the canonical
+// marker or a marker beside a randomized aside path. A failed second-or-later
+// update commonly uses the latter because the canonical .old already exists.
+func markedRecoveryPaths(targetPath string) ([]string, error) {
+	recoveryPaths, err := existingRecoveryPaths(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	var marked []string
+	for _, recoveryPath := range recoveryPaths {
+		if oldBinaryPreserved(recoveryPath) {
+			marked = append(marked, recoveryPath)
+		}
+	}
+	return marked, nil
 }
 
 // verifyPromotedTarget reports whether targetPath names the same object as the
@@ -257,7 +322,7 @@ var fileRenameInfoHeaderSize = func() uintptr {
 // taking effect — the exact failure mode verifyPromotedTarget defends
 // against — without needing to reproduce whatever Windows-version-specific
 // condition triggers it for real.
-var renameFileByHandle = func(file *os.File, targetPath string) error {
+func renameOpenFile(file *os.File, targetPath string) error {
 	name, err := windows.UTF16FromString(targetPath)
 	if err != nil {
 		return err
@@ -282,3 +347,5 @@ var renameFileByHandle = func(file *os.File, targetPath string) error {
 	}
 	return nil
 }
+
+var renameFileByHandle = renameOpenFile

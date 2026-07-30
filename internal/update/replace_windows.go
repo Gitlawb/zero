@@ -69,7 +69,7 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 			)
 		}
 		return fmt.Errorf(
-			"%w: %v (the recovery marker could not be written: %v — copy %s somewhere safe now, a later update will otherwise remove it)",
+			"%w: %v (the recovery marker could not be written: %v — manually copy %s somewhere safe now)",
 			ErrTargetPossiblyTampered, err, markErr, oldPath,
 		)
 	}
@@ -110,7 +110,7 @@ var markOldBinaryPreserved = func(oldPath string) error {
 	}
 	handle, err := windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_WRITE,
+		windows.GENERIC_WRITE|windows.DELETE,
 		0,
 		nil,
 		windows.CREATE_NEW,
@@ -133,16 +133,32 @@ var markOldBinaryPreserved = func(oldPath string) error {
 		return err
 	}
 	marker := os.NewFile(uintptr(handle), markerPath)
-	_, writeErr := marker.WriteString("The update at this path failed and could not restore the original binary.\n" +
-		"The file without this marker's .keep suffix is the last binary this updater verified.\n")
+	writeErr := writeRecoveryMarker(marker)
 	closeErr := marker.Close()
-	if writeErr != nil {
-		return fmt.Errorf("write recovery marker %s: %w", markerPath, writeErr)
-	}
-	if closeErr != nil {
+	if writeErr != nil || closeErr != nil {
+		// A partial marker must not be left beside a recovery copy that the
+		// caller then relocates. Remove the entry we created before returning an
+		// error. If it cannot be removed (or its state cannot be established),
+		// conservatively treat marker creation as successful so oldPath remains
+		// the authoritative recovery location.
+		removeErr := os.Remove(markerPath)
+		_, statErr := os.Lstat(markerPath)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) ||
+			statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		if writeErr != nil {
+			return fmt.Errorf("write recovery marker %s: %w", markerPath, writeErr)
+		}
 		return fmt.Errorf("close recovery marker %s: %w", markerPath, closeErr)
 	}
 	return nil
+}
+
+var writeRecoveryMarker = func(marker *os.File) error {
+	_, err := marker.WriteString("The update at this path failed and could not restore the original binary.\n" +
+		"The file without this marker's .keep suffix is the last binary this updater verified.\n")
+	return err
 }
 
 // keepUnmarkedRecoveryCopy moves oldPath out from under routine cleanup when its
@@ -154,19 +170,56 @@ var markOldBinaryPreserved = func(oldPath string) error {
 // somewhere chosen by someone else. Being unpredictable also means being opaque,
 // which is why the caller's error names the path.
 func keepUnmarkedRecoveryCopy(oldPath string) (string, error) {
+	file, err := openRecoveryCopy(oldPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: open recovery copy %s: %v", ErrTargetPossiblyTampered, oldPath, err)
+	}
+	defer func() { _ = file.Close() }()
+
 	suffix, err := randomStagingSuffix()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: choose recovery path: %v", ErrTargetPossiblyTampered, err)
 	}
 	kept := filepath.Join(filepath.Dir(oldPath), filepath.Base(oldPath)+"."+suffix+".recovery")
 	if _, statErr := os.Lstat(kept); statErr == nil {
-		return "", fmt.Errorf("recovery path %s already exists", kept)
+		return "", fmt.Errorf("%w: recovery path %s already exists", ErrTargetPossiblyTampered, kept)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return "", fmt.Errorf("%w: inspect recovery path %s: %v", ErrTargetPossiblyTampered, kept, statErr)
 	}
-	if err := os.Rename(oldPath, kept); err != nil {
-		return "", err
+	if err := renameRecoveryFileByHandle(file, kept); err != nil {
+		return "", fmt.Errorf("%w: move verified recovery copy to %s: %v", ErrTargetPossiblyTampered, kept, err)
+	}
+	if err := verifyPromotedTarget(file, kept); err != nil {
+		return "", fmt.Errorf("%w: verify recovery copy at %s: %v", ErrTargetPossiblyTampered, kept, err)
 	}
 	return kept, nil
 }
+
+func openRecoveryCopy(path string) (*os.File, error) {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyFreshRegularFile(handle, path); err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+var renameRecoveryFileByHandle = renameOpenFile
 
 // clearOldBinaryPreserved models the operator accepting the installed binary
 // by deleting the recovery marker. The recovery copy itself remains preserved.
