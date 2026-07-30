@@ -329,3 +329,50 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 	}
 	cleanupLease.release()
 }
+
+// sandboxRuntimeRootFor compares the workspace root against the derived runtime
+// root to decide whether to fall back to a private temp tree. Both sides
+// therefore have to be the same spelling of the same path.
+//
+// Canonicalizing only the workspace root broke this on CI: the workspace
+// resolved (/var to /private/var on macOS, an 8.3 short name to its long form
+// on Windows) while the cache root kept its original spelling, so the
+// containment check compared two different strings, the fallback never fired,
+// and the runtime tree was placed inside the workspace it exists to stay out of.
+//
+// A symlink is the portable way to produce a spelling that only resolution
+// reconciles — Clean cannot see through one. Windows refuses to create symlinks
+// without privilege, so this skips there; the platforms that CI caught the bug
+// on are the ones that run it.
+func TestPrepareSandboxRuntimeNormalizesTheCacheRootBeforeComparingIt(t *testing.T) {
+	workspace := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	// The cache root reaches us spelled through the symlink; the workspace does
+	// not. Resolved, it is plainly inside the workspace and the fallback must
+	// fire. Unresolved, the two strings share no prefix and it does not.
+	original := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return filepath.Join(link, ".cache"), nil }
+	t.Cleanup(func() { sandboxUserCacheDir = original })
+
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	if release != nil {
+		defer release()
+	}
+	// Resolve before comparing. Spelled through the link the runtime root shares
+	// no textual prefix with the workspace, so an unresolved comparison would
+	// call it "outside" while it sits physically inside — the test would pass
+	// against the very bug it exists for.
+	resolved := runtimeState.Root
+	if actual, err := filepath.EvalSymlinks(runtimeState.Root); err == nil {
+		resolved = actual
+	}
+	if pathWithinRoot(workspace, resolved) {
+		t.Fatalf("runtime root %q resolves to %q, inside workspace %q; the containment check did not see through the cache root's spelling", runtimeState.Root, resolved, workspace)
+	}
+}
