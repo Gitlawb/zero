@@ -353,3 +353,39 @@ func TestSetupRuntimeRootWithoutWorkspaceIsNotAnError(t *testing.T) {
 		t.Fatalf("granted %q with no workspace configured", granted)
 	}
 }
+
+// An account in a privileged group must not be adopted, even when name and
+// ownership comment say it is ours.
+//
+// Adoption resets the password and hands the account to the sandbox. If that
+// account is also in Administrators, the sandbox gains the rights the sandbox
+// exists to withhold: rewriting the ACLs confining it, reading the secret locked
+// to the invoking user, and stopping Zero.
+func TestProvisionWindowsSandboxIdentityRefusesPrivilegedAccount(t *testing.T) {
+	stubWindowsProvisioning(t, true, nil, nil)
+
+	previous := windowsSandboxUserIsPrivilegedFn
+	t.Cleanup(func() { windowsSandboxUserIsPrivilegedFn = previous })
+	windowsSandboxUserIsPrivilegedFn = func(string) (bool, error) { return true, nil }
+
+	_, _, created, err := provisionWindowsSandboxIdentity("workspacekey")
+	if !errors.Is(err, errWindowsSandboxPrivilegedAccount) {
+		t.Fatalf("provisioning adopted a privileged account, err = %v", err)
+	}
+	if created {
+		t.Fatal("created must stay false for an account this run refused to adopt")
+	}
+}
+
+// The ordinary adopted account is unaffected.
+func TestProvisionWindowsSandboxIdentityAdoptsUnprivilegedAccount(t *testing.T) {
+	stubWindowsProvisioning(t, true, nil, nil)
+
+	previous := windowsSandboxUserIsPrivilegedFn
+	t.Cleanup(func() { windowsSandboxUserIsPrivilegedFn = previous })
+	windowsSandboxUserIsPrivilegedFn = func(string) (bool, error) { return false, nil }
+
+	if _, _, _, err := provisionWindowsSandboxIdentity("workspacekey"); err != nil {
+		t.Fatalf("an unprivileged managed account must still be adopted: %v", err)
+	}
+}
