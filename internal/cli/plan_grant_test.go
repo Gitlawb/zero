@@ -6,6 +6,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // The plan tool's parent grant was declared, documented and validated against —
@@ -182,5 +183,39 @@ func TestRegisteredOrchestrateToolCarriesTheConfiguredTier(t *testing.T) {
 	}
 	if tool.Size != config.PlanSizeSmall {
 		t.Fatalf("registered tier = %q; want %q — the wiring dropped it", tool.Size, config.PlanSizeSmall)
+	}
+}
+
+// EVERY TOOL A PLAN TASK MAY HOLD MUST BE CLASSIFIED READ-ONLY BY CAPABILITY,
+// not merely by its safety string.
+//
+// This is the invariant that broke, and it broke silently. update_plan declared
+// readOnlySafety and set no capabilities, so CapabilitiesOf reported
+// EffectUnknown — the fail-closed default — while its safety said read-only.
+// runCanMutate reads the CAPABILITY, so one unclassified tool in an otherwise
+// read-only grant made the whole child look mutating, and ~6,500 characters of
+// confirmation policy it can never need rode along on every task of every plan.
+//
+// Asserted against the REAL registry, because the defect was that two
+// descriptions of one tool disagreed — checking the list against itself would
+// have found nothing.
+func TestEveryPlanGrantToolIsReadOnlyByCapability(t *testing.T) {
+	registry := newCoreRegistry(t.TempDir())
+	checked := 0
+	for _, name := range specialist.PlanReadOnlyToolNames() {
+		tool, found := registry.Get(name)
+		if !found {
+			// Not every read-only name is registered in a bare core registry;
+			// what matters is that the ones that are, classify correctly.
+			continue
+		}
+		checked++
+		if effect := tools.CapabilitiesOf(tool).Effect; effect != tools.EffectReadOnly {
+			t.Errorf("plan grant holds %q whose capability is %v, not EffectReadOnly; "+
+				"a plan child would carry the confirmation policy it can never need", name, effect)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no plan-grant tool was found in the registry; this test checked nothing")
 	}
 }

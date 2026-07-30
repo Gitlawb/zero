@@ -118,8 +118,30 @@ var planReadOnlyTools = map[string]bool{
 	"list_directory":     true,
 	"grep":               true,
 	"glob":               true,
-	"update_plan":        true,
 	"lsp_navigate":       true,
+	// update_plan is DELIBERATELY ABSENT, and it was here.
+	//
+	// TWO REASONS, and the second was measured rather than reasoned.
+	//
+	// It is not read-only. It REPLACES the parent's whole plan list on every
+	// call, so N tasks each calling it race and the last one wins — and a plan
+	// task is an investigator that reports to the parent, which owns the list.
+	// Nothing about the job needs it.
+	//
+	// And it was the single reason a plan child carried the confirmation
+	// policy. update_plan declares readOnlySafety but sets no capabilities, so
+	// CapabilitiesOf reports EffectUnknown — the fail-closed default — while its
+	// safety says read-only. runCanMutate reads the CAPABILITY, so one
+	// unclassified tool in an otherwise read-only grant made the whole child
+	// look mutating, and ~2,500 tokens of policy it can never need rode along on
+	// every task of every plan.
+	//
+	// That mismatch is a PRE-EXISTING MAIN DEFECT and is filed as one rather
+	// than fixed here: the same capability drives concurrency eligibility, and
+	// promoting update_plan to EffectReadOnly would make it eligible for
+	// parallel execution it is not safe for. Removing it from this grant fixes
+	// the plan path without touching a classification that means something else
+	// somewhere else.
 }
 
 // Name, Description, Tasks and Budget expose a validated plan for execution and
