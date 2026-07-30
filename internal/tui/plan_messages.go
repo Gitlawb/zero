@@ -24,6 +24,9 @@ type planAdmittedMsg struct {
 	taskCount  int
 	tasks      []planGraphTask
 	tokenLimit int
+	// background marks a plan that outlives the run that launched it, so the
+	// stale-run guard must not drop its progress.
+	background bool
 }
 
 // planGraphTask is one node of the admitted graph, in execution order.
@@ -40,6 +43,9 @@ type planTaskStartMsg struct {
 	taskID  string
 	summary string
 	cardKey string
+	// background marks a plan that outlives the run that launched it, so the
+	// stale-run guard must not drop its progress.
+	background bool
 }
 
 // planTaskDoneMsg closes a task's card.
@@ -65,6 +71,9 @@ type planTaskDoneMsg struct {
 	// watchdog fired and the executor retried it. Carried so the detail can say
 	// why an apparently single run took twice as long as its siblings.
 	attempts int
+	// background marks a plan that outlives the run that launched it, so the
+	// stale-run guard must not drop its progress.
+	background bool
 }
 
 // planCompletedMsg carries the plan's terminal record.
@@ -79,6 +88,9 @@ type planCompletedMsg struct {
 	tokensUsed int
 	tokenLimit int
 	maxSpeedup float64
+	// background marks a plan that outlives the run that launched it, so the
+	// stale-run guard must not drop its progress.
+	background bool
 }
 
 // planNoticeLine renders the one-line plan notices shown in the transcript.

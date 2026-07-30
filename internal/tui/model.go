@@ -2880,7 +2880,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case planAdmittedMsg:
-		if msg.runID != m.activeRunID {
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
 		m.orchestrate.admit(msg, m.now())
@@ -2892,7 +2896,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	case planTaskStartMsg:
-		if msg.runID != m.activeRunID {
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
 		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, m.now())
@@ -2904,7 +2912,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.planRunningCardKey = msg.cardKey
 		return m, nil
 	case planTaskDoneMsg:
-		if msg.runID != m.activeRunID {
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
 		m.orchestrate.markDone(msg.taskID, msg.outcome, msg.tokens, msg.attempts, m.now())
@@ -2935,7 +2947,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case planCompletedMsg:
-		if msg.runID != m.activeRunID {
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
 		m.planRunningCardKey = ""

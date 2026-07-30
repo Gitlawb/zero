@@ -721,6 +721,18 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// run by the model — without it the TUI recorded NONE of the five plan
 	// lifecycle events, so a plan ran completely invisibly (audit finding 9).
 	planProgress := tui.NewPlanProgressBridge()
+	// A CANCELLABLE session root, replacing the context.Background() this used
+	// to hand the TUI.
+	//
+	// Never cancelling it was harmless while nothing outlived a run. A
+	// background plan does, and under an uncancellable root it would keep
+	// running — and keep spending — after the session ended. Close() cancels
+	// AND WAITS, so a plan is stopped and its terminal event written rather
+	// than the process exiting out from under it.
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
+	defer cancelSession()
+	planLaunch := newPlanLauncher(sessionCtx, planProgress)
+	defer planLaunch.Close()
 	// Saved plans, resolved ONCE and handed to both consumers: the orchestrate
 	// tool (which loads a plan named with `saved`) and the TUI (which saves,
 	// lists and shows them). Two computations of the same pair of directories
@@ -741,6 +753,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// wiring reads. Project config may only have tightened it.
 			Size:  resolved.Profiles.PlanSizeTier(),
 			Plans: planPaths,
+			// The TUI can carry a background plan: it has a session that
+			// outlives a turn. Headless exec supplies no launcher.
+			Launch: planLaunch.Launch,
 		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -863,7 +878,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
-	return deps.runTUI(context.Background(), tui.Options{
+	return deps.runTUI(sessionCtx, tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
@@ -929,13 +944,16 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// chances for the next one to be forgotten — which is precisely how
 			// this field came to be set nowhere at all.
 			OrchestrateAvailable: orchestrateAvailable(registry),
-			Autonomy:             "low",
-			Sandbox:              sandboxEngine,
-			FileTracker:          fileTracker,
-			Hooks:                hookDispatcher,
-			DeferThreshold:       resolved.Tools.DeferThreshold,
-			Specialists:          specialistRuntime.specialists,
-			Skills:               pluginActivation.skillInfos(deps.skillsDir()),
+			// Background plans report into a later turn through this drain, on
+			// the same channel as the post-edit diagnostics nudge.
+			PlanCompletions: planProgress.DrainCompletedPlans,
+			Autonomy:        "low",
+			Sandbox:         sandboxEngine,
+			FileTracker:     fileTracker,
+			Hooks:           hookDispatcher,
+			DeferThreshold:  resolved.Tools.DeferThreshold,
+			Specialists:     specialistRuntime.specialists,
+			Skills:          pluginActivation.skillInfos(deps.skillsDir()),
 		},
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
 		// It resolves against the same merged set (default dir + plugin skill
@@ -1139,6 +1157,9 @@ type orchestrateWiring struct {
 	// Plans locates saved plans. Empty means a `saved` reference is refused with
 	// a reason rather than searched for in nowhere.
 	Plans specialist.PlanPaths
+	// Launch runs a plan in the background. nil — the headless default — makes
+	// a background plan refuse rather than start one nothing can report.
+	Launch func(run func(ctx context.Context)) bool
 }
 
 // planParentTools is the run's grant: the tools a plan task may inherit.
@@ -1219,6 +1240,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		Depth:         planContext.Depth,
 		Size:          wiring.Size,
 		Plans:         wiring.Plans,
+		Launch:        wiring.Launch,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }

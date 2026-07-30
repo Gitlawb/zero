@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -447,5 +448,134 @@ func TestTheBundledPlanIsAvailableWithNoDirectories(t *testing.T) {
 	}
 	if _, err := FindSavedPlan(PlanPaths{}, plans[0].Name); err != nil {
 		t.Fatalf("the bundled plan is not findable: %v", err)
+	}
+}
+
+// A BACKGROUND PLAN RETURNS IMMEDIATELY AND SAYS IT IS NOT DONE. Returning a
+// summary would be reporting work that has not happened — this repo's oldest
+// defect class, at the point where it would be least visible.
+func TestABackgroundPlanReturnsWithoutRunningAndSaysSo(t *testing.T) {
+	var launched func(context.Context)
+	tool := &OrchestrateTool{
+		PostureActive: func() bool { return true },
+		RunTask: func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			t.Fatal("a background plan ran on the tool-call goroutine")
+			return TaskResult{}, nil
+		},
+		ParentTools: []string{"read_file"},
+		Launch:      func(run func(context.Context)) bool { launched = run; return true },
+	}
+	result := tool.Run(t.Context(), map[string]any{
+		"name":       "sweep",
+		"tasks":      []any{task("a", "x")},
+		"budget":     map[string]any{"max_workers": float64(1)},
+		"background": true,
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("status = %q: %s", result.Status, result.Output)
+	}
+	if launched == nil {
+		t.Fatal("nothing was handed to the launcher")
+	}
+	for _, want := range []string{"background", "NOT finished", "later turn"} {
+		if !strings.Contains(result.Output, want) {
+			t.Errorf("the result must say %q: %q", want, result.Output)
+		}
+	}
+	if strings.Contains(result.Output, "succeeded") {
+		t.Fatalf("a background plan reported a result it does not have: %q", result.Output)
+	}
+	if result.Meta["plan_status"] != "background" {
+		t.Fatalf("plan_status = %q", result.Meta["plan_status"])
+	}
+}
+
+// NO LAUNCHER MEANS REFUSED, with the reason. A plan started where nothing can
+// report it is the background failure mode itself.
+func TestABackgroundPlanWithoutALauncherIsRefused(t *testing.T) {
+	tool := &OrchestrateTool{
+		PostureActive: func() bool { return true },
+		RunTask:       func(context.Context, PlanTaskRequest) (TaskResult, error) { return TaskResult{}, nil },
+		ParentTools:   []string{"read_file"},
+	}
+	result := tool.Run(t.Context(), map[string]any{
+		"tasks":      []any{task("a", "x")},
+		"budget":     map[string]any{"max_workers": float64(1)},
+		"background": true,
+	})
+	if result.Status != tools.StatusError {
+		t.Fatalf("status = %q; a background plan with no launcher must be refused", result.Status)
+	}
+	if !strings.Contains(result.Output, "not available in this run") {
+		t.Fatalf("the refusal must say why: %q", result.Output)
+	}
+}
+
+// A REFUSED LAUNCH IS REPORTED, not turned into a run id for a plan nobody
+// started.
+func TestARefusedLaunchIsReportedAsAnError(t *testing.T) {
+	tool := &OrchestrateTool{
+		PostureActive: func() bool { return true },
+		RunTask:       func(context.Context, PlanTaskRequest) (TaskResult, error) { return TaskResult{}, nil },
+		ParentTools:   []string{"read_file"},
+		Launch:        func(func(context.Context)) bool { return false },
+	}
+	result := tool.Run(t.Context(), map[string]any{
+		"tasks":      []any{task("a", "x")},
+		"budget":     map[string]any{"max_workers": float64(1)},
+		"background": true,
+	})
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "not started") {
+		t.Fatalf("a refused launch must be an error saying so: %+v", result)
+	}
+}
+
+// The launched closure runs the SAME plan through the SAME executor. Asserted by
+// running it, because a launcher handed a closure that does nothing would
+// satisfy every check above.
+func TestTheLaunchedClosureActuallyRunsThePlan(t *testing.T) {
+	var launched func(context.Context)
+	ran := map[string]int{}
+	tool := &OrchestrateTool{
+		PostureActive: func() bool { return true },
+		RunTask: func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			ran[req.Task.ID]++
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		},
+		ParentTools: []string{"read_file"},
+		Launch:      func(run func(context.Context)) bool { launched = run; return true },
+	}
+	recorder := &recordingRecorder{}
+	tool.Recorder = recorder
+	tool.Run(t.Context(), map[string]any{
+		"tasks":      []any{task("a", "x"), task("b", "y", "a")},
+		"budget":     map[string]any{"max_workers": float64(1)},
+		"background": true,
+	})
+	launched(context.Background())
+
+	if ran["a"] != 1 || ran["b"] != 1 {
+		t.Fatalf("the launched closure ran %v; both tasks must run", ran)
+	}
+	if recorder.admitted != 1 || len(recorder.finished) != 1 {
+		t.Fatalf("a background plan must record its own admission and completion: %+v", recorder)
+	}
+}
+
+// background is OPT-IN. Any value that is not a true boolean leaves the plan in
+// the foreground, so a flag that changes where a plan runs can never be
+// inferred from something that happened to be there.
+func TestBackgroundIsOptInOnly(t *testing.T) {
+	for _, value := range []any{nil, "true", float64(1), "yes", false} {
+		args := map[string]any{"background": value}
+		if value == nil {
+			delete(args, "background")
+		}
+		if planBool(args, "background") {
+			t.Errorf("background was inferred from %#v", value)
+		}
+	}
+	if !planBool(map[string]any{"background": true}, "background") {
+		t.Fatal("an explicit true must be honoured")
 	}
 }

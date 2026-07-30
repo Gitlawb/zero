@@ -46,6 +46,21 @@ type OrchestrateTool struct {
 	// Size is the configured plan-size tier. The zero value is the default tier,
 	// so a caller that never wires it gets the same ceiling as before.
 	Size config.PlanSize
+	// Launch runs a plan in the BACKGROUND, and nil means background plans are
+	// unavailable in this run — which is the honest default.
+	//
+	// THE SEAM IS A LAUNCHER, not a context, and that is deliberate. A tool that
+	// held a context would have to hold one that outlives the tool call, and the
+	// only thing that legitimately knows how long a background plan may live is
+	// the surface that owns the session. So the surface supplies the launcher,
+	// keeps the context, and can drain or cancel on exit; the tool only asks to
+	// be run. It also makes headless exec's refusal fall out for free: that
+	// process exits when the turn ends, so it supplies no launcher and a
+	// background plan there is refused rather than silently orphaned.
+	//
+	// It reports false when it will not run the work, so the tool can say so
+	// instead of returning a run id for a plan nobody started.
+	Launch func(run func(ctx context.Context)) bool
 	// Plans locates saved plans. Both directories empty means saved plans are
 	// simply unavailable — the tool refuses a `saved` reference with a reason
 	// rather than searching nothing and reporting "not found", which would read
@@ -122,6 +137,11 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 				Type: "string",
 				Description: "Run a plan saved earlier, by name, instead of supplying tasks. " +
 					"Mutually exclusive with tasks/budget/name/description: a saved plan runs as it was saved.",
+			},
+			"background": {
+				Type: "boolean",
+				Description: "Run the plan in the background and report when it finishes, instead of holding this turn. " +
+					"Only available in the interactive TUI; a headless run exits when the turn ends, so it refuses this.",
 			},
 			"budget": {
 				Type:        "object",
@@ -314,6 +334,47 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	}
 	if tool.RunTask == nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: orchestrate has no task runner wired."}
+	}
+
+	// BACKGROUND, when asked for and when this surface can carry one.
+	//
+	// The runner is built HERE, on the tool-call goroutine, because it captures
+	// the call's RunOptions — the parent's model, effort and session id. Only
+	// the CONTEXT comes from the launcher; capturing a per-call context in a
+	// goroutine is the prototype's defect, and capturing per-call VALUES is
+	// exactly what must happen.
+	if planBool(args, "background") {
+		if tool.Launch == nil {
+			return tools.Result{
+				Status: tools.StatusError,
+				Output: "Error: background plans are not available in this run — a headless run exits when the turn ends, " +
+					"so a plan launched into the background could never report. Run it in the foreground, or use the interactive TUI.",
+			}
+		}
+		run := tool.runnerForCall(options)
+		parentTools := tool.ParentTools
+		recorder := tool.Recorder
+		launched := tool.Launch(func(backgroundCtx context.Context) {
+			recordPlanAdmitted(recorder, plan)
+			report := ExecutePlan(backgroundCtx, plan, parentTools, run, recorder)
+			recordPlanCompleted(recorder, plan, report)
+		})
+		if !launched {
+			return tools.Result{
+				Status: tools.StatusError,
+				Output: "Error: the plan was not started — this session is shutting down, or a background plan is already running.",
+			}
+		}
+		// NOT StatusOK-with-a-summary: there is no result yet, and reporting one
+		// would be reporting work that has not happened.
+		return tools.Result{
+			Status: tools.StatusOK,
+			Output: fmt.Sprintf(
+				"Plan %q started in the background with %d tasks. It is NOT finished — its result will arrive on a later turn. "+
+					"Carry on with other work; do not wait for it and do not report it as done.",
+				plan.Name(), plan.TaskCount()),
+			Meta: map[string]string{"plan_status": "background"},
+		}
 	}
 
 	recordPlanAdmitted(tool.Recorder, plan)

@@ -422,6 +422,13 @@ type Options struct {
 	// separate from Profile: zeromaxing arms no escalation triggers, so
 	// Profile.Policy() returns nil for it and could not carry this.
 	Zeromaxing Zeromaxing
+	// PlanCompletions, when set, is drained once per turn for background plans
+	// that finished since the last turn. Its text is appended to the
+	// conversation TAIL as a user-role message, on the same channel as the
+	// post-edit diagnostics nudge — background work reporting into a later turn
+	// already has a channel here, and a second one would be a second ordering
+	// and a second thing to budget. nil is a no-op.
+	PlanCompletions func() string
 	// OrchestrateAvailable reports whether the orchestrate tool is actually
 	// advertised this run, so the enter notice names it only when it exists.
 	// Zero value false keeps every existing caller's prompt unchanged.

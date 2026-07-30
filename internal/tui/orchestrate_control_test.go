@@ -222,3 +222,179 @@ func TestPlansKeepsItsGraphAndRefusesUnknownVerbs(t *testing.T) {
 		t.Fatalf("an unknown verb must be refused by name: %q", unknown)
 	}
 }
+
+// PROBLEM 1: card keys collided. `dispatched` reset on every Attach, so a
+// background plan still dispatching when the next run attached would restart the
+// counter and hand the new run's tasks the same keys — one card overwriting
+// another, which is the specialist-card collision defect in a new costume.
+func TestCardKeysDoNotRestartWhenANewRunAttaches(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "")
+
+	seen := map[string]bool{}
+	collect := func(runID int) {
+		var got []tea.Msg
+		bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, runID, nil, "")
+		for i := 0; i < 3; i++ {
+			bridge.TaskDispatched(specialist.Task{ID: "t", Prompt: "x"})
+		}
+		for _, msg := range got {
+			if start, ok := msg.(planTaskStartMsg); ok {
+				if seen[start.cardKey] {
+					t.Fatalf("card key %q was handed out twice", start.cardKey)
+				}
+				seen[start.cardKey] = true
+			}
+		}
+	}
+	collect(2)
+	collect(3)
+	if len(seen) != 6 {
+		t.Fatalf("got %d distinct card keys for 6 dispatches", len(seen))
+	}
+}
+
+// PROBLEM 2: a background plan's progress was dropped. The stale-run guard
+// discards anything whose runID is not the active one, which is right for a
+// finished run's leftovers and wrong for a plan that is still working — the
+// panel would simply freeze with no error and no card.
+func TestABackgroundPlansProgressSurvivesALaterRun(t *testing.T) {
+	m := model{now: func() time.Time { return time.Unix(1000, 0) }, activeRunID: 9,
+		planProgress: NewPlanProgressBridge()}
+
+	// A plan admitted under an EARLIER run, marked background.
+	admitted := planAdmittedMsg{runID: 4, name: "bg", taskCount: 1,
+		tasks: []planGraphTask{{id: "a"}}, background: true}
+	updated, _ := m.Update(admitted)
+	after := updated.(model)
+	if after.orchestrate.isEmpty() {
+		t.Fatal("a background plan's admission was dropped by the stale-run guard; the panel would never show it")
+	}
+
+	// ...and a FOREGROUND message from a stale run is still dropped, which is
+	// what makes the guard worth keeping at all.
+	stale := planAdmittedMsg{runID: 4, name: "old", taskCount: 1, tasks: []planGraphTask{{id: "z"}}}
+	fresh := model{now: func() time.Time { return time.Unix(1000, 0) }, activeRunID: 9,
+		planProgress: NewPlanProgressBridge()}
+	staleUpdated, _ := fresh.Update(stale)
+	if !staleUpdated.(model).orchestrate.isEmpty() {
+		t.Fatal("a stale foreground plan was accepted; the guard no longer guards")
+	}
+}
+
+// The completion the MODEL is told about: drained once, never twice, and it
+// names the plan — by the time it arrives the conversation has moved on.
+func TestABackgroundCompletionIsDeliveredOnceAndNamesThePlan(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bridge.PlanRunning(cancel)
+	bridge.SetBackground(true)
+
+	plan := samplePlan(t)
+	bridge.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanPartial, Succeeded: 1, Failed: 1})
+
+	first := bridge.DrainCompletedPlans()
+	if !strings.Contains(first, plan.Name()) {
+		t.Fatalf("the completion must name the plan: %q", first)
+	}
+	if !strings.Contains(first, "partial") {
+		t.Fatalf("the completion must carry the result: %q", first)
+	}
+	if second := bridge.DrainCompletedPlans(); second != "" {
+		t.Fatalf("a completion was delivered twice: %q", second)
+	}
+}
+
+// A FOREGROUND plan queues nothing: it already returned its result as the tool
+// output, and telling the model again would be reporting the same work twice.
+func TestAForegroundPlanQueuesNoCompletion(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bridge.PlanRunning(cancel)
+
+	bridge.PlanCompleted(samplePlan(t), specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 2})
+	if got := bridge.DrainCompletedPlans(); got != "" {
+		t.Fatalf("a foreground plan queued a completion: %q", got)
+	}
+}
+
+// The background flag CLEARS when the plan ends, so the next foreground plan is
+// not silently treated as one that outlives its run.
+func TestTheBackgroundFlagClearsWhenThePlanEnds(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bridge.PlanRunning(cancel)
+	bridge.SetBackground(true)
+	if !bridge.PlanIsBackground() {
+		t.Fatal("SetBackground did not take")
+	}
+	bridge.PlanCompleted(samplePlan(t), specialist.PlanReport{Status: specialist.PlanCompleted})
+	if bridge.PlanIsBackground() {
+		t.Fatal("the background flag survived the plan")
+	}
+}
+
+// THE TERMINAL MESSAGE MUST CARRY THE MARK TOO, and it is the easiest one to
+// lose: by the time PlanCompleted builds it, the flag has already been cleared,
+// so it has to be captured BEFORE the clear and carried down. Unmarked, the
+// panel of a background plan freezes one row from the end — every task done, the
+// plan never closing.
+func TestTheTerminalMessageOfABackgroundPlanIsMarked(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 4, nil, "")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bridge.PlanRunning(cancel)
+	bridge.SetBackground(true)
+
+	bridge.PlanCompleted(samplePlan(t), specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 1})
+
+	var done planCompletedMsg
+	found := false
+	for _, msg := range got {
+		if typed, ok := msg.(planCompletedMsg); ok {
+			done, found = typed, true
+		}
+	}
+	if !found {
+		t.Fatal("no planCompletedMsg was posted")
+	}
+	if !done.background {
+		t.Fatal("the terminal message is not marked background; a later run's guard would drop it and the panel would never close")
+	}
+
+	// ...and it really survives the guard, which is the behaviour that matters.
+	m := model{now: func() time.Time { return time.Unix(1000, 0) }, activeRunID: 99,
+		planProgress: NewPlanProgressBridge()}
+	m.orchestrate.admit(planAdmittedMsg{runID: 4, name: "bg", taskCount: 1,
+		tasks: []planGraphTask{{id: "a"}}, background: true}, m.now())
+	updated, _ := m.Update(done)
+	if updated.(model).orchestrate.frozenAt.IsZero() && updated.(model).orchestrate.isEmpty() {
+		t.Fatal("the terminal message was dropped by the stale-run guard")
+	}
+}
+
+// A FOREGROUND plan's terminal message is NOT marked, so the guard still drops a
+// finished run's leftovers — which is the whole reason the guard exists.
+func TestTheTerminalMessageOfAForegroundPlanIsNotMarked(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 4, nil, "")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bridge.PlanRunning(cancel)
+
+	bridge.PlanCompleted(samplePlan(t), specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 1})
+	for _, msg := range got {
+		if typed, ok := msg.(planCompletedMsg); ok && typed.background {
+			t.Fatal("a foreground plan's terminal message was marked background")
+		}
+	}
+}
