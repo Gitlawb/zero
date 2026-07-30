@@ -221,6 +221,9 @@ type model struct {
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
 	turnStartedAt time.Time
+	// turnTimer is shared with the agent command so both the live status and the
+	// settled "worked for" duration exclude time blocked on a user permission.
+	turnTimer *activeTurnTimer
 	// lastCharTime tracks when the last non-Enter key was received, for paste detection.
 	lastCharTime time.Time
 	// lastKeyTime tracks every keypress timestamp for burst calculation.
@@ -3502,7 +3505,7 @@ func (m model) workingStatusLine() string {
 	// (reasoning, waiting on the model, or running a tool).
 	line += zeroTheme.faint.Render("  ·  " + m.workingActivity())
 	if !m.turnStartedAt.IsZero() {
-		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
+		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.activeTurnElapsed(m.turnStartedAt)))
 	}
 	// Live token estimate so the working line visibly climbs as the model reasons
 	// and writes, instead of a static figure. Shown from the start of the turn (at
@@ -3587,7 +3590,7 @@ const quietWorkingHint = 8 * time.Second
 // the ticking number was the only signal, and it looks identical whether real
 // (if slow) content is coming or nothing ever will.
 func (m model) quietGenerationHint() string {
-	if m.activeRunID == 0 {
+	if m.activeRunID == 0 || m.pendingPermission != nil {
 		return ""
 	}
 	last := m.lastStreamActivity
@@ -4136,6 +4139,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		})
 	}
 	m.pendingPermission = nil
+	// Time spent at the prompt is user wait, not provider silence. Restart the
+	// quiet-generation clock so resuming a long-blocked run does not immediately
+	// claim the model has been inactive for the entire approval interval.
+	m.lastStreamActivity = m.now()
 	return m, nil
 }
 
@@ -4859,6 +4866,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
+	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
 	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
@@ -5039,9 +5047,21 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
-		// firstTokenAt is stamped when the first token (reasoning or text) streams,
-		// so the turn can report time-to-first-token alongside total wall time.
-		var firstTokenAt time.Time
+		if m.turnTimer != nil {
+			m.turnTimer.start(started)
+		}
+		// firstTokenElapsed is stamped from the pause-aware turn timer when the
+		// first reasoning or text token streams, so TTFT and total elapsed use
+		// the same clock.
+		var firstTokenElapsed time.Duration
+		firstTokenSeen := false
+		stampFirstToken := func(at time.Time) {
+			if firstTokenSeen {
+				return
+			}
+			firstTokenSeen = true
+			firstTokenElapsed = m.activeTurnElapsedAt(started, at)
+		}
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -5157,11 +5177,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
-			if firstTokenAt.IsZero() {
-				firstTokenAt = m.now()
-			}
+			now := m.now()
+			stampFirstToken(now)
 			if strings.TrimSpace(reasoningText) != "" {
-				flushReasoning(m.now())
+				flushReasoning(now)
 			}
 			m.sendAgentText(runID, delta)
 			if onText != nil {
@@ -5178,6 +5197,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+			if m.turnTimer != nil {
+				m.turnTimer.pause(m.now())
+				defer func() {
+					m.turnTimer.resume(m.now())
+				}()
+			}
 			if onPermissionRequest != nil {
 				return onPermissionRequest(ctx, request)
 			}
@@ -5255,8 +5280,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
-			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
-				firstTokenAt = now
+			if strings.TrimSpace(delta) != "" {
+				stampFirstToken(now)
 			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
@@ -5481,7 +5506,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5491,17 +5516,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
-		elapsed := m.now().Sub(started)
-		ttft := time.Duration(0)
-		if !firstTokenAt.IsZero() {
-			ttft = firstTokenAt.Sub(started)
-		}
+		elapsed := m.activeTurnElapsed(started)
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -5519,7 +5540,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 

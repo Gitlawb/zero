@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,9 +20,10 @@ import (
 )
 
 type scriptedProvider struct {
-	scripts  [][]zeroruntime.StreamEvent
-	requests []zeroruntime.CompletionRequest
-	calls    int
+	scripts    [][]zeroruntime.StreamEvent
+	requests   []zeroruntime.CompletionRequest
+	beforeCall func(int)
+	calls      int
 }
 
 func (provider *scriptedProvider) StreamCompletion(
@@ -38,6 +40,9 @@ func (provider *scriptedProvider) StreamCompletion(
 	provider.calls++
 	if index >= len(provider.scripts) {
 		index = len(provider.scripts) - 1
+	}
+	if provider.beforeCall != nil {
+		provider.beforeCall(index)
 	}
 	ch := make(chan zeroruntime.StreamEvent, len(provider.scripts[index]))
 	for _, event := range provider.scripts[index] {
@@ -355,6 +360,92 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}
 	if countTranscriptRows(next.transcript, rowPermission) != 2 {
 		t.Fatalf("expected request and decision permission rows, got %#v", next.transcript)
+	}
+}
+
+func TestPermissionWaitDoesNotCountTowardTurnElapsed(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	base := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	var clockNanos atomic.Int64
+	clockNanos.Store(base.UnixNano())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "hello"),
+		textScript("write blocked"),
+	}}
+	provider.beforeCall = func(index int) {
+		switch index {
+		case 0:
+			clockNanos.Store(base.Add(2 * time.Second).UnixNano())
+		case 1:
+			clockNanos.Store(base.Add(95 * time.Second).UnixNano())
+		}
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+
+	m.now = func() time.Time {
+		return time.Unix(0, clockNanos.Load()).UTC()
+	}
+	m.input.SetValue("write notes")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- execCmd(cmd)
+	}()
+
+	for received := 0; received < 4; {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		switch runtimeMsg.(type) {
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+			continue
+		case permissionRequestMsg:
+			clockNanos.Store(base.Add(92 * time.Second).UnixNano())
+			if status := plainRender(t, next.workingStatusLine()); !strings.Contains(status, "·  2s  ·") || strings.Contains(status, "still generating") {
+				t.Fatalf("live elapsed advanced during permission wait: %q", status)
+			}
+			updated, _ = next.Update(testKeyText("d"))
+			next = updated.(model)
+			if hint := next.quietGenerationHint(); hint != "" {
+				t.Fatalf("permission wait leaked into quiet-generation age: %q", hint)
+			}
+		}
+		received++
+	}
+
+	finalMsg := receiveFinalMessage(t, finalCh)
+	response, ok := finalMsg.(agentResponseMsg)
+	if !ok {
+		t.Fatalf("expected agent response, got %T", finalMsg)
+	}
+	if response.turnElapsed != 5*time.Second {
+		t.Fatalf("turn elapsed = %s, want 5s of active work", response.turnElapsed)
+	}
+	if response.ttft != 5*time.Second {
+		t.Fatalf("ttft = %s, want 5s with permission wait excluded", response.ttft)
+	}
+	if response.ttft > response.turnElapsed {
+		t.Fatalf("ttft = %s exceeds turn elapsed = %s", response.ttft, response.turnElapsed)
+	}
+	updated, _ = next.Update(finalMsg)
+	next = updated.(model)
+
+	answer, ok := findTranscriptRow(next.transcript, rowAssistant)
+	if !ok {
+		t.Fatalf("expected final assistant row, got %#v", next.transcript)
+	}
+	if answer.turnElapsed != 5*time.Second {
+		t.Fatalf("assistant turn elapsed = %s, want 5s", answer.turnElapsed)
 	}
 }
 
