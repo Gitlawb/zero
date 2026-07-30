@@ -1321,6 +1321,18 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// session, reusing the specialist-card subchat path. Checked before the
 		// transcript hit-test since the sidebar is outside the chat column.
 		if hit, ok := m.sidebarLineAtMouse(msg); ok {
+			if hit.expands {
+				// Toggles in place. A specialist row is keyed by its CARD, and a
+				// running plan task's card key is not a session id yet — there
+				// is nothing to drill into until it finishes, and the detail is
+				// most wanted before then. Clicking the open row closes it.
+				if m.expandedAgent == hit.sessionID {
+					m.expandedAgent = ""
+				} else {
+					m.expandedAgent = hit.sessionID
+				}
+				return m, nil, true
+			}
 			// The subchat drill-in owns the whole (single-column) view; a file
 			// drill-in can't meaningfully stay open behind it.
 			m = m.exitFileView()

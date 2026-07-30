@@ -79,10 +79,11 @@ func TestUpdateHoverTargetOnPlainTextIsNone(t *testing.T) {
 }
 
 func TestUpdateHoverTargetOnSidebarAgentRow(t *testing.T) {
-	// Only a SWARM member row (a session mapped via swarmSessionMap) is clickable
-	// in the sidebar — a Task-delegation specialist row is not (sidebarAgentRows
-	// only records hits from the swarm loop). swarmSidebarTestModel builds exactly
-	// that: real conversation + a mapped swarm member session.
+	// A SWARM member row (a session mapped via swarmSessionMap) is clickable and
+	// drills into that member's session; a specialist row is clickable too but
+	// expands in place (see TestClickingARunningAgentRowExpandsItInPlace). Both
+	// hover the same way. swarmSidebarTestModel builds the swarm case: real
+	// conversation + a mapped member session.
 	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
 	if !m.sidebarActive() {
 		t.Fatal("sanity check failed: sidebar should be active with a swarm member present on a 100-col terminal")

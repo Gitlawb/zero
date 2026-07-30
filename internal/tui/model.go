@@ -214,6 +214,11 @@ type model struct {
 	// orchestrateSelected is the plan task the sidebar's TASK section details.
 	// Clicking a task row in the sidebar sets it; ctrl+g cycles it.
 	orchestrateSelected int
+	// expandedAgent is the AGENTS row showing its brief and spend, keyed by the
+	// specialist's card id. One at a time: the section shares its column with
+	// PLAN, FILES and ACTIVITY, and every row expanded at once would be a
+	// different panel rather than a detail on this one.
+	expandedAgent string
 	// leaderHelpOverlay is the Ctrl+X ? modal listing every leader slash chord.
 	leaderHelpOverlay bool
 	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
@@ -2725,6 +2730,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
 		m.specialists.setTokens(cardKey, msg.tokens)
 		if msg.sessionID != "" && msg.sessionID != cardKey {
+			// The expansion follows the rename. It is keyed by the card id, and
+			// finishing swaps that for the child's real session id — so a row
+			// the user had open would collapse at the exact moment it gained a
+			// result to show.
+			if m.expandedAgent == cardKey {
+				m.expandedAgent = msg.sessionID
+			}
 			m.specialists.reconcileSessionID(cardKey, msg.sessionID)
 			cardKey = msg.sessionID
 		}
