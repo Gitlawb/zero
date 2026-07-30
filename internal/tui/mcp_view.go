@@ -20,6 +20,8 @@ type MCPServerView struct {
 	Target    string
 	Auth      string
 	ToolCount int
+	// Error explains a "failed" state. Empty for every other state.
+	Error string
 }
 
 type MCPToolView struct {
@@ -153,6 +155,13 @@ func mcpManagerServerLines(servers []MCPServerView) []string {
 		}
 		parts = append(parts, transport)
 		lines = append(lines, prefix+strings.Join(parts, " · "))
+		// The reason sits directly under the server rather than in the actions
+		// line, because "failed" on its own sends the reader to check their
+		// config when the answer is usually in the error: a missing binary, a
+		// refused connection, a bad token.
+		if reason := strings.TrimSpace(server.Error); reason != "" {
+			lines = append(lines, "  "+reason)
+		}
 		if target := strings.TrimSpace(server.Target); target != "" {
 			lines = append(lines, "  "+target)
 		}
