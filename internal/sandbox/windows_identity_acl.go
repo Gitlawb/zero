@@ -182,3 +182,17 @@ func windowsPrincipalRevokePlan(principalSID string, paths []string) (WindowsACL
 // windowsACLRevoke removes every ACE naming the trustee on a path, whatever
 // access it granted or denied.
 const windowsACLRevoke WindowsACLAction = "revoke"
+
+// windowsACLPlanPaths returns each distinct path a plan touches, in plan order.
+func windowsACLPlanPaths(plan WindowsACLPlan) []string {
+	seen := make(map[string]struct{}, len(plan.Entries))
+	paths := make([]string, 0, len(plan.Entries))
+	for _, entry := range plan.Entries {
+		if _, ok := seen[entry.Path]; ok {
+			continue
+		}
+		seen[entry.Path] = struct{}{}
+		paths = append(paths, entry.Path)
+	}
+	return paths
+}
