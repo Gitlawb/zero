@@ -245,9 +245,26 @@ func gitCommonDir(ctx context.Context, runGit GitRunner, dir string) (string, er
 	return filepath.Clean(resolved), nil
 }
 
-func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {
-	command := exec.CommandContext(ctx, "git", args...)
+// newHardenedCommand builds a subprocess that dies as one unit on cancel.
+//
+// Extracted so a test can exercise the SAME constructor defaultRunGit uses. A
+// test that only called hardenWorktreeGit would prove the helper sets three
+// fields and prove nothing about whether anything calls it — which is the
+// wiring gap this feature has produced four times.
+func newHardenedCommand(ctx context.Context, dir string, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
+	// Without this a cancelled git is signalled but its Wait can still block on
+	// pipes a grandchild holds open. git is short-lived and rarely forks, so
+	// this is a small risk — but the worktree path is now reached by a plan,
+	// and a plan can be cancelled at any moment by /plans stop or by the run
+	// ending.
+	hardenWorktreeGit(command)
+	return command
+}
+
+func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {
+	command := newHardenedCommand(ctx, dir, "git", args...)
 	// Capture stdout and stderr separately: callers parse Stdout for values
 	// (rev-parse output) and prefer Stderr for error messages. CombinedOutput
 	// merged the two, letting git's stderr warnings pollute parsed output and
