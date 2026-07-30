@@ -160,7 +160,26 @@ func planTaskManifest(name string, grantedTools []string) Manifest {
 			Description: "Read-only plan task.",
 			Tools:       grantedTools,
 		},
-		SystemPrompt: "You are executing one task of a larger plan. You have read-only tools. " +
+		// IT MUST SAY "USE THEM". The first version said "You have read-only
+		// tools" and stopped there, which states a fact and asks for nothing. A
+		// task told to "find every definition and quote the file:line" can
+		// answer that from its own weights, and a real run did: 260 seconds of
+		// generation with ZERO tool calls on the first task of a fifteen-task
+		// plan. The stall watchdog cannot catch it either — it keys on silence,
+		// and a model writing prose is not silent.
+		//
+		// So the instruction is now an obligation with a named failure: search
+		// before answering, and say you could not find it rather than produce
+		// something plausible. A plan task exists to go and look; a plan task
+		// that reasons from memory is worse than no task, because its output
+		// reads exactly like the one that looked.
+		SystemPrompt: "You are executing one task of a larger plan. You have read-only tools: " +
+			"USE THEM. Search and read the actual files before you answer — do not rely on memory or " +
+			"inference about what the code probably says. Start with a tool call, not with prose. " +
+			"Every claim you make must be backed by something you read in this run, quoted with its " +
+			"file:line. If you cannot find something, say so plainly; an honest \"not found\" is worth " +
+			"more than a plausible guess, and a guess is indistinguishable from a finding once it " +
+			"reaches the plan's report. " +
 			"Complete exactly the task described and report what you found; do not attempt to modify anything.",
 		Location: LocationBuiltin,
 		FilePath: "(plan)",
