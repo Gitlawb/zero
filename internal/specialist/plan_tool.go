@@ -61,6 +61,10 @@ type OrchestrateTool struct {
 	// It reports false when it will not run the work, so the tool can say so
 	// instead of returning a run id for a plan nobody started.
 	Launch func(run func(ctx context.Context)) bool
+	// Isolate prepares a worktree for a plan that may write. nil means this run
+	// cannot isolate, and a plan requiring it is REFUSED rather than run in the
+	// parent's tree — see resolvePlanWorkspace.
+	Isolate PlanIsolator
 	// Plans locates saved plans. Both directories empty means saved plans are
 	// simply unavailable — the tool refuses a `saved` reference with a reason
 	// rather than searching nothing and reporting "not found", which would read
@@ -351,14 +355,27 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 					"so a plan launched into the background could never report. Run it in the foreground, or use the interactive TUI.",
 			}
 		}
+		// THE SAME WORKSPACE RULE. Resolved here rather than inside the
+		// goroutine so a plan that cannot be isolated is refused NOW, with a
+		// reason the model reads, instead of failing invisibly on a later turn.
+		// Applying the rule to only one of the two dispatch paths is the defect
+		// this feature has produced three times.
+		workspace, err := resolvePlanWorkspace(ctx, plan, tool.Isolate)
+		if err != nil {
+			return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+		}
 		run := tool.runnerForCall(options)
 		parentTools := tool.ParentTools
 		recorder := tool.Recorder
 		launched := tool.Launch(func(backgroundCtx context.Context) {
+			defer workspace.Release()
 			recordPlanAdmitted(recorder, plan)
-			report := ExecutePlan(backgroundCtx, plan, parentTools, run, recorder)
+			report := ExecutePlanIn(backgroundCtx, plan, workspace, parentTools, run, recorder)
 			recordPlanCompleted(recorder, plan, report)
 		})
+		if !launched {
+			workspace.Release()
+		}
 		if !launched {
 			return tools.Result{
 				Status: tools.StatusError,
@@ -377,8 +394,18 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 		}
 	}
 
+	// WHERE IT RUNS. A read-only plan runs where the parent runs; one that can
+	// write gets a tree of its own or does not run at all. Resolved BEFORE the
+	// admission is recorded, so a refused plan leaves no record of having
+	// started.
+	workspace, err := resolvePlanWorkspace(ctx, plan, tool.Isolate)
+	if err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	defer workspace.Release()
+
 	recordPlanAdmitted(tool.Recorder, plan)
-	report := ExecutePlan(ctx, plan, tool.ParentTools, tool.runnerForCall(options), tool.Recorder)
+	report := ExecutePlanIn(ctx, plan, workspace, tool.ParentTools, tool.runnerForCall(options), tool.Recorder)
 	recordPlanCompleted(tool.Recorder, plan, report)
 
 	result := tools.Result{

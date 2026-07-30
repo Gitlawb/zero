@@ -309,6 +309,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				// The SAME pair of directories the TUI uses, so a plan saved in
 				// one surface is found by the other.
 				Plans: execPlanPaths(workspaceRoot),
+				// Headless runs isolate too: --worktree already exists here, and
+				// a write-capable plan must not be the one path that skips it.
+				Isolate: newPlanIsolator(workspaceRoot),
 			})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())

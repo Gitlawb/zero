@@ -137,6 +137,12 @@ type PlanTaskRequest struct {
 	ParentSessionID       string
 	ParentModel           string
 	ParentReasoningEffort string
+	// Cwd overrides where this task runs. Empty means the parent's workspace,
+	// which is every read-only plan. A write-capable plan sets it to its
+	// isolated worktree, and it is carried per REQUEST rather than captured in
+	// PlanTaskContext because the workspace belongs to a plan, not to the
+	// process — the same reason ParentModel lives here.
+	Cwd string
 	// StallTimeout bounds how long this task may emit nothing. Resolved by
 	// ExecutePlan from the plan's budget so every task in a plan shares one
 	// answer, rather than each runner re-deriving it.
@@ -162,6 +168,13 @@ type PlanRecorder interface {
 // The order comes from the same Kahn pass that proved the graph acyclic, so
 // admission and execution cannot disagree about it.
 func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder) PlanReport {
+	return ExecutePlanIn(ctx, plan, PlanWorkspace{}, parentTools, run, recorder)
+}
+
+// ExecutePlanIn is ExecutePlan with the plan's WORKSPACE named. ExecutePlan is
+// the read-only case — the workspace a plan does not need — kept as the name
+// every existing caller and test already uses.
+func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, parentTools []string, run PlanRunner, recorder PlanRecorder) PlanReport {
 	// THE PLAN'S OWN CONTEXT, derived here rather than by the caller.
 	//
 	// Cancelling it abandons the PLAN and leaves the TURN alive; cancelling the
@@ -276,6 +289,7 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 		result, err := runTaskWithRetries(ctx, retryPolicy{
 			task:         task,
 			tools:        granted,
+			cwd:          workspace.Path,
 			stallTimeout: stallTimeout,
 			maxRetries:   plan.Budget().MaxRetries,
 			deadline:     deadline,
@@ -332,6 +346,7 @@ func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanR
 type retryPolicy struct {
 	task         Task
 	tools        []string
+	cwd          string
 	stallTimeout time.Duration
 	maxRetries   int
 	deadline     time.Time
@@ -360,6 +375,7 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 		result, err = run(ctx, PlanTaskRequest{
 			Task:         policy.task,
 			Tools:        policy.tools,
+			Cwd:          policy.cwd,
 			StallTimeout: policy.stallTimeout,
 		})
 		if result.Duration == 0 {

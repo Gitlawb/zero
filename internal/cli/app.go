@@ -756,6 +756,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// The TUI can carry a background plan: it has a session that
 			// outlives a turn. Headless exec supplies no launcher.
 			Launch: planLaunch.Launch,
+			// A write-capable plan gets a worktree of its own, or is refused.
+			Isolate: newPlanIsolator(workspaceRoot),
 		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -1157,6 +1159,8 @@ type orchestrateWiring struct {
 	// Plans locates saved plans. Empty means a `saved` reference is refused with
 	// a reason rather than searched for in nowhere.
 	Plans specialist.PlanPaths
+	// Isolate prepares a worktree for a write-capable plan. nil refuses one.
+	Isolate specialist.PlanIsolator
 	// Launch runs a plan in the background. nil — the headless default — makes
 	// a background plan refuse rather than start one nothing can report.
 	Launch func(run func(ctx context.Context)) bool
@@ -1241,6 +1245,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		Size:          wiring.Size,
 		Plans:         wiring.Plans,
 		Launch:        wiring.Launch,
+		Isolate:       wiring.Isolate,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }

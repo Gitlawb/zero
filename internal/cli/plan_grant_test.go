@@ -219,3 +219,58 @@ func TestEveryPlanGrantToolIsReadOnlyByCapability(t *testing.T) {
 		t.Fatal("no plan-grant tool was found in the registry; this test checked nothing")
 	}
 }
+
+// BOTH SURFACES SUPPLY AN ISOLATOR. A write-capable plan is refused where none
+// exists, so a surface that forgot to wire one would refuse every write plan
+// with "this run cannot isolate" — correct, and useless.
+func TestBothSurfacesWireAnIsolator(t *testing.T) {
+	if newPlanIsolator("") != nil {
+		t.Fatal("an empty workspace root produced an isolator")
+	}
+	if newPlanIsolator(t.TempDir()) == nil {
+		t.Fatal("a real workspace root produced no isolator")
+	}
+
+	workspace := t.TempDir()
+	registry := newCoreRegistry(workspace)
+	runtime, err := registerSpecialistTools(registry, workspace, 0, nil, nil, nil, orchestrateWiring{
+		Gate:    &specialist.PostureGate{},
+		Isolate: newPlanIsolator(workspace),
+	})
+	if err != nil {
+		t.Fatalf("registerSpecialistTools: %v", err)
+	}
+	t.Cleanup(func() { closeSpecialistRuntime(nil, runtime) })
+	registered, _ := registry.Get(specialist.OrchestrateToolName)
+	tool, ok := registered.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("orchestrate is %T", registered)
+	}
+	if tool.Isolate == nil {
+		t.Fatal("the wiring dropped the isolator; every write-capable plan would be refused")
+	}
+}
+
+// The worktree NAME is derived, not taken. A plan name is model-supplied and
+// reaches a filesystem path, so what comes out has to be a name — the allow-list
+// in worktrees.Prepare is the guarantee, and this is what feeds it something it
+// will accept rather than something it will reject.
+func TestAPlanNameBecomesAUsableWorktreeName(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"sweep", "plan-sweep"},
+		{"pre release", "plan-prerelease"},
+		{"../../etc/passwd", "plan-etcpasswd"},
+		{"", "plan"},
+		{"!!!", "plan"},
+		{"a/b\\c;d", "plan-abcd"},
+	} {
+		if got := planWorktreeName(tc.in); got != tc.want {
+			t.Errorf("planWorktreeName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Long names are bounded, so a plan cannot produce a path component the
+	// filesystem refuses.
+	if got := planWorktreeName(strings.Repeat("x", 300)); len(got) > 64 {
+		t.Fatalf("a long plan name produced a %d-character worktree name", len(got))
+	}
+}

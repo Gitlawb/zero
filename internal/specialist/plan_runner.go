@@ -81,8 +81,11 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			ParentModel:           req.ParentModel,
 			ParentReasoningEffort: req.ParentReasoningEffort,
 			CurrentDepth:          planCtx.Depth,
-			Cwd:                   planCtx.Cwd,
-			PermissionMode:        planCtx.PermissionMode,
+			// The plan's own workspace when it has one, the parent's otherwise.
+			// A write-capable plan runs in an isolated worktree, and this is
+			// the line that puts its children there.
+			Cwd:            planTaskCwd(planCtx.Cwd, req.Cwd),
+			PermissionMode: planCtx.PermissionMode,
 			// THE SECOND HALF of the same defect. The Task tool forwards its
 			// caller's progress callback here (task_tool.go); this path built
 			// the same struct and omitted the field, so a plan task's child
@@ -133,6 +136,15 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		result.Outcome = TaskSucceeded
 		return result, nil
 	}
+}
+
+// planTaskCwd prefers the plan's own workspace over the parent's. An empty
+// override is the read-only case and means "wherever the parent runs".
+func planTaskCwd(parentCwd, override string) string {
+	if strings.TrimSpace(override) != "" {
+		return override
+	}
+	return parentCwd
 }
 
 // planTaskManifest builds the inline manifest a plan task runs under. The tool
