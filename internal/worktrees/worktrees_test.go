@@ -1550,6 +1550,53 @@ func deadProcessPID(t *testing.T) int {
 // as clean and be force-removed by Clean's staleness heuristic. This exercises
 // the real git binary rather than the fake runner, so it also verifies
 // --ignored actually changes git's answer, not just the command we send.
+// TestCleanHonorsTouchLiveness verifies that a stale worktree (mtime older
+// than maxAge) is skipped by Clean when it was recently touched by Prepare,
+// so a long-running but idle task that Prepare is still associated with is
+// not wrongly force-removed.
+func TestCleanHonorsTouchLiveness(t *testing.T) {
+	tempDir := t.TempDir()
+	baseDir := filepath.Join(tempDir, "zero-worktrees")
+	repoRoot := filepath.Join(tempDir, "repo")
+	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
+
+	touchedPath := filepath.Join(repoDir, "touched-task")
+	if err := os.MkdirAll(touchedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Age the worktree past maxAge so it would be pruned without the touch.
+	twoDaysAgo := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(touchedPath, twoDaysAgo, twoDaysAgo); err != nil {
+		t.Fatal(err)
+	}
+	plantOwnershipMarker(t, touchedPath)
+
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: repoRoot},
+			{Stdout: "worktree " + touchedPath + "\nlocked " + leaseReason(os.Getpid()) + "\n"},
+			{ExitCode: 0}, // worktree prune (no-op)
+		},
+	}
+
+	// Touch the directory now, simulating Prepare being called for this worktree.
+	if err := os.Chtimes(touchedPath, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Clean(context.Background(), Options{BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	// The worktree should still exist: Clean skipped it because it's locked
+	// with a live PID, and touching it refreshes mtime.
+	if _, err := os.Stat(touchedPath); err != nil {
+		t.Fatalf("worktree %s was incorrectly removed: %v", touchedPath, err)
+	}
+}
+
 func TestWorktreeIsDirtyCountsIgnoredFilesAsDirty(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

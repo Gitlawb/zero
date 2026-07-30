@@ -158,6 +158,18 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 			return Result{}, fmt.Errorf("worktree %s is locked by another active run; release it with `zero worktrees release %s` if that run is finished, or use a different --name", target, target)
 		}
 		result.LockAcquired = true
+		// Touch the worktree directory so Clean's mtime-based staleness check
+		// doesn't prune a worktree that's actively in use by the current process.
+		// Long-running tasks that don't write new files (e.g. waiting on a model)
+		// would otherwise accumulate stale mtimes and be wrongly force-removed.
+		_ = os.Chtimes(target, time.Now(), time.Now())
+		if err != nil {
+			return Result{}, err
+		}
+		if !acquired {
+			return Result{}, fmt.Errorf("worktree %s is locked by another active run; release it with `zero worktrees release %s` if that run is finished, or use a different --name", target, target)
+		}
+		result.LockAcquired = true
 		if err := writeOwnershipMarker(ctx, runGit, target); err != nil {
 			_, unlockErr := gitOutput(ctx, runGit, repoRoot, "worktree", "unlock", target)
 			return Result{}, errors.Join(err, unlockErr)
