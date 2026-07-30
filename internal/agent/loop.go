@@ -2855,7 +2855,7 @@ func availablePermissionDecisions(event PermissionEvent, args map[string]any, op
 				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
 			}
 		}
-		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) && !filesystemSandboxPrompt(event) && !inlineAdditionalPermissions {
+		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName, options) && !filesystemSandboxPrompt(event) && !inlineAdditionalPermissions {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}
 	}
@@ -3057,7 +3057,17 @@ func grantFilesystemForSandboxPrompt(event PermissionEvent, scope sandbox.Permis
 	}, scope)
 }
 
-func permissionSupportsPersistentDecision(toolName string) bool {
+func permissionSupportsPersistentDecision(toolName string, options Options) bool {
+	// THE TOOL'S OWN DECLARATION FIRST. A name list cannot describe a tool whose
+	// reach depends on its arguments, and it cannot cover a tool that RUNS the
+	// ones already refused below — see tools.PersistentPermissionRefuser.
+	if options.Registry != nil {
+		if tool, found := options.Registry.Get(toolName); found {
+			if refuser, ok := tool.(tools.PersistentPermissionRefuser); ok && refuser.RefusesPersistentPermission() {
+				return false
+			}
+		}
+	}
 	switch toolName {
 	case "bash", "exec_command", "write_stdin", "apply_patch":
 		return false
