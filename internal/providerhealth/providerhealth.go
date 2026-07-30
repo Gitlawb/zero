@@ -46,12 +46,13 @@ const (
 const defaultTimeout = 5 * time.Second
 
 type Options struct {
-	Profile      config.ProviderProfile
-	Connectivity bool
-	HTTPClient   *http.Client
-	Resolver     Resolver
-	Timeout      time.Duration
-	UserAgent    string
+	Profile       config.ProviderProfile
+	Connectivity  bool
+	HTTPClient    *http.Client
+	Resolver      Resolver
+	OAuthResolver providerio.TokenResolver
+	Timeout       time.Duration
+	UserAgent     string
 }
 
 type Resolver interface {
@@ -207,11 +208,26 @@ func Probe(ctx context.Context, options Options) Result {
 		"providerKind": metadata.ProviderKind,
 	}, profile))
 
-	if credentialRequired(profile, metadata.ProviderKind) && !hasCredential(profile) {
+	oauthConfigured := options.OAuthResolver != nil
+	if oauthConfigured {
+		var resolveErr error
+		profile, oauthConfigured, resolveErr = profileWithOAuthCredential(ctx, profile, options.OAuthResolver, false)
+		if resolveErr != nil {
+			result.add(check("provider.auth", "Provider auth", StatusFail, CategoryAuth, "Provider OAuth credential could not be resolved: "+resolveErr.Error(), map[string]any{
+				"oauthLogin": true,
+			}, profile))
+			return result.finalize()
+		}
+	}
+	if credentialRequired(profile, metadata.ProviderKind) && !hasCredential(profile) && !oauthConfigured {
 		result.add(check("provider.auth", "Provider auth", StatusFail, CategoryAuth, fmt.Sprintf("Provider %s requires API credentials.", providerName(profile)), credentialDetails(profile), profile))
 		return result.finalize()
 	}
-	if hasCredential(profile) {
+	if oauthConfigured {
+		result.add(check("provider.auth", "Provider auth", StatusPass, CategoryAuth, fmt.Sprintf("Provider %s has OAuth credentials configured.", providerName(profile)), map[string]any{
+			"oauthLogin": true,
+		}, profile))
+	} else if hasCredential(profile) {
 		result.add(check("provider.auth", "Provider auth", StatusPass, CategoryAuth, fmt.Sprintf("Provider %s has credentials configured.", providerName(profile)), credentialDetails(profile), profile))
 	} else {
 		result.add(check("provider.auth", "Provider auth", StatusPass, CategoryAuth, fmt.Sprintf("Provider %s does not require API credentials.", providerName(profile)), credentialDetails(profile), profile))
@@ -286,9 +302,35 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	if err != nil {
 		return classifyTransportError(err, profile)
 	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
+	defer func(body io.ReadCloser) {
+		_ = body.Close()
+	}(response.Body)
+	if response.StatusCode == http.StatusUnauthorized && options.OAuthResolver != nil {
+		refreshed, ok, refreshErr := profileWithOAuthCredential(requestCtx, options.Profile, options.OAuthResolver, true)
+		if refreshErr != nil {
+			return check("provider.connectivity", "Provider connectivity", StatusFail, CategoryAuth, "Provider OAuth credential refresh failed: "+refreshErr.Error(), map[string]any{
+				"statusCode": response.StatusCode,
+			}, profile)
+		}
+		if ok {
+			_ = response.Body.Close()
+			profile = refreshed
+			request, allowLoopbackOrPrivate, err = healthRequest(requestCtx, profile, kind, options)
+			if err != nil {
+				return check("provider.connectivity", "Provider connectivity", StatusFail, CategoryConfig, err.Error(), nil, profile)
+			}
+			if options.HTTPClient == nil {
+				client = newConnectivityClient(timeout, options.Resolver, sensitiveAuthHeaderNames(profile, kind), allowLoopbackOrPrivate)
+			}
+			response, err = client.Do(request)
+			if err != nil {
+				return classifyTransportError(err, profile)
+			}
+			defer func(body io.ReadCloser) {
+				_ = body.Close()
+			}(response.Body)
+		}
+	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
 	if err != nil {
@@ -318,6 +360,23 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 		"statusCode": response.StatusCode,
 		"endpoint":   request.URL.String(),
 	}, profile)
+}
+
+func profileWithOAuthCredential(ctx context.Context, profile config.ProviderProfile, resolver providerio.TokenResolver, forceRefresh bool) (config.ProviderProfile, bool, error) {
+	if resolver == nil {
+		return profile, false, nil
+	}
+	header, value, ok, err := resolver(ctx, forceRefresh)
+	if err != nil || !ok {
+		return profile, false, err
+	}
+	if strings.TrimSpace(header) == "" {
+		header = "Authorization"
+	}
+	profile.AuthHeader = header
+	profile.AuthScheme = ""
+	profile.AuthHeaderValue = value
+	return profile, true, nil
 }
 
 func healthRequest(ctx context.Context, profile config.ProviderProfile, kind config.ProviderKind, options Options) (*http.Request, bool, error) {
@@ -748,6 +807,9 @@ func redact(message string, profile config.ProviderProfile) string {
 
 func providerSecrets(profile config.ProviderProfile) []string {
 	secrets := []string{profile.APIKey, profile.AuthHeaderValue}
+	if fields := strings.Fields(profile.AuthHeaderValue); len(fields) == 2 {
+		secrets = append(secrets, fields[1])
+	}
 	for _, value := range profile.CustomHeaders {
 		if strings.TrimSpace(value) != "" {
 			secrets = append(secrets, value)
