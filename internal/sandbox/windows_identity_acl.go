@@ -104,12 +104,22 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		// write access to the workspace and could install a hook or rewrite
 		// credential.helper. The capability plan gets away without this because its
 		// child runs as the caller; a separate principal account does not.
+		// Which carveouts are files rather than directories comes from the same
+		// spec list the profile built ReadOnlySubpaths from, so a new carveout
+		// cannot be added without its shape coming along.
+		fileCarveouts := map[string]bool{}
+		for _, spec := range gitMetadataWriteCarveoutSpecs(cleaned) {
+			if spec.IsFile {
+				fileCarveouts[normalizeProfilePath(spec.Path)] = true
+			}
+		}
 		for _, subpath := range normalizeProfilePaths(root.ReadOnlySubpaths) {
 			entries = append(entries, WindowsACLEntry{
-				Action:      WindowsACLDenyWrite,
-				Path:        subpath,
-				Capability:  input.PrincipalSID,
-				Materialize: true,
+				Action:          WindowsACLDenyWrite,
+				Path:            subpath,
+				Capability:      input.PrincipalSID,
+				Materialize:     true,
+				MaterializeFile: fileCarveouts[subpath],
 			})
 		}
 		for _, name := range root.ProtectedMetadataNames {
