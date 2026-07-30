@@ -55,22 +55,25 @@ const (
 	// ZeromaxingEnterNotice announces the flip. It fires once, on the first turn
 	// of the run in which the posture was selected.
 	ZeromaxingEnterNotice = "The zeromaxing execution posture is now active for this session. " +
-		"You have a substantially larger tool-turn budget than usual, so prefer verifying your work over assuming it: " +
-		"read the code you are about to change, run the checks that would catch a mistake, and follow up on anything you noticed but did not confirm."
+		"You have a substantially larger tool-turn budget than usual. Use it for depth on the task that was asked: " +
+		"read before changing, run the checks that would catch a mistake, and follow up on anything you noticed but could not confirm."
 
 	// ZeromaxingBudgetNotice states the budget guideline alongside the enter
 	// notice. Split from it so the two can be asserted independently, and so a
 	// future budget change touches one string.
-	ZeromaxingBudgetNotice = "Budget guideline under zeromaxing: the larger turn budget is for depth on one task, not for widening its scope. " +
-		"Finish what was asked, verify it, and stop — do not start adjacent work because there are turns left."
+	ZeromaxingBudgetNotice = "Budget guideline under zeromaxing: the larger turn budget is for verifying one task thoroughly, not for starting extra work. " +
+		"Finish what was asked, confirm it, and stop."
 
 	// ZeromaxingOrchestrateNotice is appended to the enter notice ONLY when the
-	// orchestrate tool is actually available this run. Phase 1 deliberately
-	// promised no orchestration; naming a tool the run does not have would be a
-	// prompt-level lie the model would try to act on, which is why this is
-	// conditional rather than folded into the enter notice.
-	ZeromaxingOrchestrateNotice = "You also have the orchestrate tool: it runs a declared plan of read-only sub-agent tasks in dependency order, sequentially. " +
-		"Use it when a task splits into independent read-heavy pieces; declare depends_on so the plan records which work was genuinely independent."
+	// orchestrate tool is actually available this run. It is the behavioral
+	// directive that turns zeromaxing from "more turns" into "multi-agent depth".
+	// Naming a tool the run does not have would be a prompt-level lie the model
+	// would try to act on, which is why this is conditional rather than folded
+	// into the enter notice.
+	ZeromaxingOrchestrateNotice = "You also have the orchestrate tool and background task support. " +
+		"For substantive work, split independent read/analyze pieces into a planned DAG with explicit depends_on, run them through the orchestrate tool, and verify the merged findings before acting. " +
+		"For long-running commands, prefer Bash with run_in_background. " +
+		"Work alone only on conversational turns or trivial single-file edits."
 
 	// ZeromaxingStillOnNotice repeats on every continuing turn.
 	//
@@ -82,7 +85,7 @@ const (
 	// ZeromaxingExitNotice announces the flip back. It fires once, on the first
 	// turn of the run after the posture was turned off.
 	ZeromaxingExitNotice = "The zeromaxing execution posture is no longer active. " +
-		"The tool-turn budget has returned to its normal value; work at the usual depth."
+		"The tool-turn budget has returned to its normal value; work at the usual depth and avoid launching heavy multi-step side tasks."
 )
 
 // zeromaxingReminders returns the reminder lines to append before the given
