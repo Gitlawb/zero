@@ -410,3 +410,61 @@ func TestATasksOutputIsBoundedBeforeItLeavesTheBridge(t *testing.T) {
 		t.Errorf("short output = %q, want it trimmed and intact", got)
 	}
 }
+
+// THE WINDOW BETWEEN LAUNCH AND FIRST TASK. The launcher sets the background
+// flag synchronously before it starts the goroutine; the goroutine sets the
+// cancel when the executor reaches its first task. A gate that read only the
+// cancel would wave the next plan straight through the gap between them — and
+// that gap is exactly where the model's next tool call arrives, because a
+// background plan returns immediately by design.
+func TestTheSurfaceReadsBusyFromTheMomentAPlanIsLaunched(t *testing.T) {
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(tea.Msg) {}, 1, nil, "")
+
+	if _, busy := bridge.RunningPlanName(); busy {
+		t.Fatal("a fresh bridge carries no plan")
+	}
+
+	// Launched, not yet executing: no cancel has been handed over.
+	bridge.SetBackground(true)
+	name, busy := bridge.RunningPlanName()
+	if !busy {
+		t.Error("a launched background plan makes the surface busy before its first task runs")
+	}
+	if name == "" {
+		t.Error("the refusal needs something to name, even before admission")
+	}
+
+	// Admitted: the name becomes the real one.
+	bridge.PlanAdmitted(mustPlan(t, "sweep"))
+	if name, _ := bridge.RunningPlanName(); name != "sweep" {
+		t.Errorf("RunningPlanName = %q, want the admitted plan's name", name)
+	}
+
+	// A foreground plan makes it busy through the cancel instead.
+	free := NewPlanProgressBridge()
+	free.Attach(func(tea.Msg) {}, 1, nil, "")
+	free.PlanRunning(func() {})
+	if _, busy := free.RunningPlanName(); !busy {
+		t.Error("a foreground plan holding a cancel makes the surface busy")
+	}
+
+	// And the surface is free again once the plan ends.
+	bridge.PlanCompleted(mustPlan(t, "sweep"), specialist.PlanReport{Status: specialist.PlanCompleted})
+	if _, busy := bridge.RunningPlanName(); busy {
+		t.Error("a finished plan must release the surface")
+	}
+}
+
+func mustPlan(t *testing.T, name string) specialist.Plan {
+	t.Helper()
+	plan, err := specialist.ParsePlan(map[string]any{
+		"name":   name,
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "one"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(1000)},
+	}, specialist.Limits{ParentTools: []string{"read_file"}})
+	if err != nil {
+		t.Fatalf("building the fixture plan: %v", err)
+	}
+	return plan
+}

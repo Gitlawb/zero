@@ -715,6 +715,38 @@ type PlanController interface {
 	WaitWhilePaused(ctx context.Context)
 }
 
+// PlanSurfaceBusy is the optional CONCURRENCY half of a recorder: the surface
+// says whether it is already carrying a plan.
+//
+// ONE PLAN PER SURFACE, and it is not a policy choice — it is what the display
+// can actually represent. The panel holds one plan, the sidebar's PLAN section
+// draws one plan, and the card table that pairs a task with its row is keyed by
+// TASK ID, which is unique within a plan and not between two. Two plans sharing
+// an id as ordinary as "tests" makes one plan's completion close the other
+// plan's row, and leaves a card that nothing can ever close spinning in AGENTS
+// for the rest of the session.
+//
+// The TUI already refused this on the path a USER drives (/plans restart), with
+// a comment saying exactly why. It did not refuse it on the path the MODEL
+// drives, and the model reaches it by launching a background plan — which
+// returns immediately, by design — and then calling orchestrate again.
+type PlanSurfaceBusy interface {
+	// RunningPlanName reports the plan this surface is already carrying. The
+	// name is for the refusal message; the bool is the answer.
+	RunningPlanName() (string, bool)
+}
+
+// runningPlanOn asks the surface whether it is free, best-effort and nil-safe
+// like every other optional half. A recorder that cannot answer is treated as
+// free: the headless path runs one plan per process and has no surface to
+// contend for.
+func runningPlanOn(recorder PlanRecorder) (string, bool) {
+	if busy, ok := recorder.(PlanSurfaceBusy); ok && busy != nil {
+		return busy.RunningPlanName()
+	}
+	return "", false
+}
+
 // planRunning and waitWhilePaused are best-effort and nil-safe, mirroring
 // recordPlanAdmitted: a recorder that does not implement control simply cannot
 // be asked to control anything.

@@ -439,6 +439,27 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	if tool.RunTask == nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: orchestrate has no task runner wired."}
 	}
+	// ONE PLAN AT A TIME, on this path too.
+	//
+	// The surface that displays a plan can hold exactly one, and the card table
+	// pairing tasks with rows is keyed by task id — unique within a plan, not
+	// between two. The TUI already refused a second plan on the path a USER
+	// drives; this is the path the MODEL drives, and it is the reachable one:
+	// a background plan returns immediately by design, so the very next tool
+	// call lands while it is still running.
+	//
+	// Checked AFTER parsing, so an invalid plan is still reported as invalid
+	// rather than blamed on the plan already running — and BEFORE admission, so
+	// a refused plan leaves no record of having started.
+	if running, busy := runningPlanOn(tool.Recorder); busy {
+		return tools.Result{
+			Status: tools.StatusError,
+			Output: fmt.Sprintf(
+				"Error: plan %q is still running, and a session shows one plan at a time. "+
+					"Wait for it to finish — its result arrives on a later turn if it is a background plan — "+
+					"or stop it with /plans stop, then run this one.", running),
+		}
+	}
 
 	// BACKGROUND, when asked for and when this surface can carry one.
 	//

@@ -77,6 +77,15 @@ type PlanProgressBridge struct {
 	// can be routed to the right row. The recorder is the only thing that knows
 	// this pairing — it created it — which is why per-task progress travels
 	// through here rather than being guessed at the display end.
+	//
+	// KEYED BY TASK ID, WHICH IS UNIQUE WITHIN A PLAN AND NOT BETWEEN TWO. That
+	// is sound only because a surface carries one plan at a time, which
+	// specialist.PlanSurfaceBusy enforces at the tool. Were two plans ever to
+	// report here at once, an id as ordinary as "tests" would have one plan's
+	// dispatch overwrite the other's entry: the first completion would close the
+	// wrong row, and the card left behind could never be closed by anything —
+	// it would spin in AGENTS for the rest of the session. If that gate is ever
+	// relaxed, this map needs a plan discriminator BEFORE it is.
 	cardByTask map[string]string
 	// dispatched counts tasks so each gets a unique temporary card key. The
 	// child's real session id is not known until the child process creates it,
@@ -84,6 +93,19 @@ type PlanProgressBridge struct {
 	// the Task tool's card works.
 	dispatched int
 }
+
+// The optional halves the bridge implements, asserted at COMPILE TIME. Each is
+// consulted through a type assertion, so a signature that drifts out of shape
+// does not fail to build — it silently stops being found, and the behaviour it
+// carries disappears with no error anywhere. This branch has shipped that exact
+// defect often enough to pay for four lines.
+var (
+	_ specialist.PlanRecorder             = (*PlanProgressBridge)(nil)
+	_ specialist.PlanLifecycleRecorder    = (*PlanProgressBridge)(nil)
+	_ specialist.PlanController           = (*PlanProgressBridge)(nil)
+	_ specialist.PlanSurfaceBusy          = (*PlanProgressBridge)(nil)
+	_ specialist.PlanTaskProgressRecorder = (*PlanProgressBridge)(nil)
+)
 
 // NewPlanProgressBridge returns a bridge that is inert until Attach is called.
 func NewPlanProgressBridge() *PlanProgressBridge { return &PlanProgressBridge{} }
@@ -273,6 +295,33 @@ func (bridge *PlanProgressBridge) PlanRunningNow() bool {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	return bridge.cancelPlan != nil
+}
+
+// RunningPlanName answers specialist.PlanSurfaceBusy: this surface carries one
+// plan, and it says which.
+//
+// background is consulted ALONGSIDE cancelPlan, not instead of it, because the
+// two are set at different moments. The launcher sets background synchronously
+// before it starts the goroutine; the goroutine sets cancelPlan when the
+// executor reaches its first task. Between those two points the plan is
+// unquestionably running, and a gate reading only cancelPlan would wave the
+// next one straight through the window.
+func (bridge *PlanProgressBridge) RunningPlanName() (string, bool) {
+	if bridge == nil {
+		return "", false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if bridge.cancelPlan == nil && !bridge.background {
+		return "", false
+	}
+	name := bridge.lastPlanName
+	if strings.TrimSpace(name) == "" {
+		// A plan launched but not yet admitted has no name recorded. Refusing
+		// without one is still the right answer; "a plan" is honest.
+		name = "a plan"
+	}
+	return name, true
 }
 
 // clearPauseLocked releases any waiter. Closing the channel rather than sending
@@ -531,6 +580,13 @@ func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report spe
 		// stale cancel would let a later stop cancel a context that has since
 		// been reused, which is the PostureGate lifetime mistake in another
 		// costume.
+		//
+		// These fields belong to THE plan, not to a plan, and clearing them here
+		// is correct only while one plan runs at a time — the same precondition
+		// cardByTask rests on, enforced by specialist.PlanSurfaceBusy. Without
+		// it a foreground plan's completion would strip a still-running
+		// background plan's flag and cancel, and the background plan's result
+		// would then reach nobody: spend nobody sees and no result.
 		bridge.cancelPlan = nil
 		bridge.background = false
 		bridge.clearPauseLocked()
