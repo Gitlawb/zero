@@ -543,3 +543,11 @@ func planIntSet(args map[string]any, key string) (int, bool) {
 		return 0, false
 	}
 }
+
+// planBool reads a boolean argument. Absent, or any other type, is false — a
+// flag that changes where a plan RUNS must be opted into explicitly, never
+// inferred from a value that happened to be there.
+func planBool(args map[string]any, key string) bool {
+	value, _ := args[key].(bool)
+	return value
+}

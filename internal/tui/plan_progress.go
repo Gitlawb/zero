@@ -46,6 +46,15 @@ type PlanProgressBridge struct {
 	// must never fail a plan, but a silent drop would let a user believe a plan
 	// was persisted when it was not.
 	recordErr error
+	// background marks the running plan as one that outlives the run that
+	// launched it. Every message it posts carries the flag, because the panel's
+	// stale-run guard drops anything whose runID is not the active one — which
+	// is right for a foreground plan's leftovers and wrong for a background
+	// plan that is still working.
+	background bool
+	// completed collects finished background plans for the model to be told
+	// about on a later turn. Drained by the agent loop, never by the event loop.
+	completed []string
 	// cancelPlan stops THIS PLAN without stopping the turn. Held only while a
 	// plan is running and dropped in PlanCompleted, so a stop arriving after the
 	// plan ended cannot cancel a context that has since been reused.
@@ -83,7 +92,12 @@ func (bridge *PlanProgressBridge) Attach(sink func(tea.Msg), runID int, store *s
 	defer bridge.mu.Unlock()
 	bridge.sink = sink
 	bridge.runID = runID
-	bridge.dispatched = 0
+	// dispatched is deliberately NOT reset. It was, and that was safe only while
+	// every plan lived inside one run: a background plan still dispatching when
+	// the next run attaches would restart the counter and hand the new run's
+	// tasks card keys the old plan is still using — one card overwriting
+	// another, which is the specialist-card collision defect in a new costume.
+	// A counter monotonic for the bridge's life costs nothing and cannot collide.
 	bridge.store = store
 	bridge.sessionID = sessionID
 	bridge.recordErr = nil
@@ -124,6 +138,39 @@ func (bridge *PlanProgressBridge) PlanRunning(cancel context.CancelFunc) {
 	defer bridge.mu.Unlock()
 	bridge.cancelPlan = cancel
 	bridge.clearPauseLocked()
+}
+
+// SetBackground marks the plan about to run as a background one. Called by the
+// launcher before the plan starts, and cleared when it ends.
+func (bridge *PlanProgressBridge) SetBackground(background bool) {
+	if bridge == nil {
+		return
+	}
+	bridge.mu.Lock()
+	bridge.background = background
+	bridge.mu.Unlock()
+}
+
+// DrainCompletedPlans returns and clears what finished in the background since
+// the last drain, for the agent loop to append to the conversation.
+//
+// Drained by the AGENT loop, on its own goroutine, at the same point the
+// post-edit diagnostics nudge is drained — that is the existing channel for
+// background work reporting into a later turn, and reusing it means a plan
+// completion is budgeted, compacted and ordered exactly like every other
+// tail message.
+func (bridge *PlanProgressBridge) DrainCompletedPlans() string {
+	if bridge == nil {
+		return ""
+	}
+	bridge.mu.Lock()
+	done := bridge.completed
+	bridge.completed = nil
+	bridge.mu.Unlock()
+	if len(done) == 0 {
+		return ""
+	}
+	return strings.Join(done, "\n\n")
 }
 
 // WaitWhilePaused blocks the TOOL's goroutine — never the event loop — until
@@ -311,7 +358,7 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	}
 
 	bridge.send(func(runID int) tea.Msg {
-		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit}
+		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit, background: bridge.isBackground()}
 	})
 }
 
@@ -328,7 +375,7 @@ func (bridge *PlanProgressBridge) TaskDispatched(task specialist.Task) {
 
 	id, summary := task.ID, planTaskSummary(task)
 	bridge.send(func(runID int) tea.Msg {
-		return planTaskStartMsg{runID: runID, taskID: id, summary: summary, cardKey: key}
+		return planTaskStartMsg{runID: runID, taskID: id, summary: summary, cardKey: key, background: bridge.isBackground()}
 	})
 }
 
@@ -373,6 +420,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 			reason:     reason,
 			tokens:     tokens,
 			attempts:   attempts,
+			background: bridge.isBackground(),
 		}
 	})
 }
@@ -380,15 +428,34 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 // PlanCompleted reports the plan's terminal state.
 func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report specialist.PlanReport) {
 	bridge.record(specialist.PlanCompletedEvent(plan, report))
-	// The plan is over: drop the cancel and release any pause. Keeping a stale
-	// cancel would let a later "stop the plan" cancel a context that has since
-	// been reused, which is the PostureGate lifetime mistake in another costume.
+
+	// wasBackground is read BEFORE the flag is cleared and carried down to the
+	// message. Reading it again afterwards returns false — the plan is over —
+	// and the terminal message would then be dropped by the stale-run guard,
+	// leaving a background plan's panel frozen one row from the end. Caught by
+	// the compiler complaining the second read was unused, which is luckier
+	// than it deserved to be.
+	wasBackground := false
 	if bridge != nil {
 		bridge.mu.Lock()
+		wasBackground = bridge.background
+		// The plan is over: drop the cancel and release any pause. Keeping a
+		// stale cancel would let a later stop cancel a context that has since
+		// been reused, which is the PostureGate lifetime mistake in another
+		// costume.
 		bridge.cancelPlan = nil
+		bridge.background = false
 		bridge.clearPauseLocked()
+		if wasBackground {
+			// The MODEL is told, on a later turn, because it was told the plan
+			// was not finished and must not report it as done until it is. A
+			// completion nobody delivers is the background failure mode that
+			// matters: spend nobody sees and no result.
+			bridge.completed = append(bridge.completed, backgroundPlanReport(plan, report))
+		}
 		bridge.mu.Unlock()
 	}
+
 	name := plan.Name()
 	status := string(report.Status)
 	succeeded, failed := report.Succeeded, report.Failed
@@ -400,8 +467,35 @@ func (bridge *PlanProgressBridge) PlanCompleted(plan specialist.Plan, report spe
 			runID: runID, name: name, status: status,
 			succeeded: succeeded, failed: failed, skipped: skipped, cancelled: cancelled,
 			tokensUsed: tokens, tokenLimit: limit, maxSpeedup: speedup,
+			background: wasBackground,
 		}
 	})
+}
+
+// PlanIsBackground reports whether the running plan outlives its run, for a
+// surface that wants to say so.
+func (bridge *PlanProgressBridge) PlanIsBackground() bool { return bridge.isBackground() }
+
+// isBackground reports whether the running plan outlives its run.
+func (bridge *PlanProgressBridge) isBackground() bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.background
+}
+
+// backgroundPlanReport is what the model is told when a background plan ends.
+// The SAME summary a foreground plan returns, prefixed with which plan it was —
+// by the time it arrives the conversation has moved on, and "Plan partial: 1
+// succeeded" with no name attached is a result the model cannot place.
+func backgroundPlanReport(plan specialist.Plan, report specialist.PlanReport) string {
+	name := plan.Name()
+	if name == "" {
+		name = "(unnamed)"
+	}
+	return "The background plan " + name + " has finished. This is its result:\n\n" + report.Summary()
 }
 
 // planOutcomeStatus maps a task outcome onto the card status. Cancelled and

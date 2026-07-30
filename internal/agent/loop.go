@@ -280,6 +280,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			})
 		}
 
+		// A BACKGROUND PLAN that finished since the last turn. Same channel and
+		// the same point in the turn as the diagnostics nudge above: the model
+		// was told the plan was not finished and must not report it as done, so
+		// this is the message that makes that promise good.
+		if options.PlanCompletions != nil {
+			if finished := options.PlanCompletions(); finished != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: finished,
+				})
+			}
+		}
+
 		// Build the per-turn tool list first so proactive compaction can include
 		// the tool-definition tokens (they ride on every request) in its estimate.
 		// partitionTools depends only on registry/permissions/options/loaded, not on
