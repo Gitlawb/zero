@@ -101,9 +101,31 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 // subprocesses. Nonexistent paths are harmless no-ops in every backend's
 // enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
 func gitMetadataWriteCarveouts(root string) []string {
-	return []string{
-		filepath.Join(root, ".git", "hooks"),
-		filepath.Join(root, ".git", "config"),
+	specs := gitMetadataWriteCarveoutSpecs(root)
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		out = append(out, spec.Path)
+	}
+	return out
+}
+
+// gitMetadataCarveout is a write-denied .git path together with the shape git
+// expects it to have. The shape matters to exactly one backend: the Windows ACL
+// plan creates a missing carveout so the deny ACE is in place before git first
+// runs, and creating .git/config as a directory makes `git init` fail outright.
+// Every other backend only ever names the path, so it can ignore IsFile.
+type gitMetadataCarveout struct {
+	Path   string
+	IsFile bool
+}
+
+// gitMetadataWriteCarveoutSpecs is the single source of truth for the carveout
+// set. gitMetadataWriteCarveouts derives its list from this so a path can never
+// be added in one place and have its shape forgotten in the other.
+func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
+	return []gitMetadataCarveout{
+		{Path: filepath.Join(root, ".git", "hooks")},
+		{Path: filepath.Join(root, ".git", "config"), IsFile: true},
 	}
 }
 

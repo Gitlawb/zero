@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -15,9 +16,10 @@ import (
 const windowsFileDeleteChild windows.ACCESS_MASK = 0x00000040
 
 type windowsACLPathGroup struct {
-	Path        string
-	Entries     []WindowsACLEntry
-	Materialize bool
+	Path            string
+	Entries         []WindowsACLEntry
+	Materialize     bool
+	MaterializeFile bool
 }
 
 type windowsACLSnapshot struct {
@@ -61,6 +63,7 @@ func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
 		}
 		group.Entries = append(group.Entries, entry)
 		group.Materialize = group.Materialize || entry.Materialize
+		group.MaterializeFile = group.MaterializeFile || entry.MaterializeFile
 	}
 	out := make([]windowsACLPathGroup, 0, len(byPath))
 	for _, group := range byPath {
@@ -96,7 +99,7 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 			}
 			return windowsACLSnapshot{}, false, nil
 		}
-		if err := os.MkdirAll(path, 0o700); err != nil {
+		if err := materializeWindowsACLTarget(path, group.MaterializeFile); err != nil {
 			return windowsACLSnapshot{}, false, fmt.Errorf("materialize windows ACL target %s: %w", path, err)
 		}
 		materialized = true
@@ -290,4 +293,27 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 		_ = windows.CloseHandle(handle)
 	}
 	return errors.Join(errs...)
+}
+
+// materializeWindowsACLTarget creates a missing ACL target with the shape the
+// owning tool expects. A directory target is created whole; a file target gets
+// its parent chain created and then an empty file, because creating it as a
+// directory would break the tool that owns it rather than just mis-ACL it.
+func materializeWindowsACLTarget(path string, asFile bool) error {
+	if !asFile {
+		return os.MkdirAll(path, 0o700)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	handle, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		// A racing creator winning is fine — the target exists, which is all
+		// materialization needed. Anything else is a real failure.
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	return handle.Close()
 }
