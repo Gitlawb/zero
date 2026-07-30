@@ -3,12 +3,14 @@ package specialist
 import (
 	"context"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // concurrencyProbe records the maximum number of tasks in flight at once, and
@@ -417,5 +419,122 @@ func TestResumeAfterAPartialConcurrentRun(t *testing.T) {
 	// serialise what was a fan-out.
 	if remaining.Budget().MaxWorkers != 4 {
 		t.Fatalf("the remainder's max_workers = %d, want 4", remaining.Budget().MaxWorkers)
+	}
+}
+
+// busySurface is a recorder that reports a plan already on screen — the state
+// the TUI bridge is in from the moment a background plan is launched until it
+// completes.
+type busySurface struct {
+	name     string
+	running  bool
+	admitted []string
+}
+
+func (s *busySurface) TaskDispatched(Task)             {}
+func (s *busySurface) TaskCompleted(TaskResult)        {}
+func (s *busySurface) TaskFailed(TaskResult)           {}
+func (s *busySurface) PlanAdmitted(plan Plan)          { s.admitted = append(s.admitted, plan.Name()) }
+func (s *busySurface) PlanCompleted(Plan, PlanReport)  {}
+func (s *busySurface) RunningPlanName() (string, bool) { return s.name, s.running }
+
+// ONE PLAN AT A TIME, on the path the MODEL drives.
+//
+// The surface holds one plan and the card table is keyed by task id — unique
+// within a plan, not between two. The TUI refused a second plan on the path a
+// USER drives (/plans restart) and not on this one, and this one is the
+// reachable one: a background plan returns immediately by design, so the very
+// next tool call lands while it is still running.
+func TestASecondPlanIsRefusedWhileOneIsRunning(t *testing.T) {
+	gate := &PostureGate{}
+	gate.Set(true)
+	surface := &busySurface{name: "sweep", running: true}
+
+	tool := &OrchestrateTool{
+		PostureActive: gate.Active,
+		ParentTools:   []string{"read_file"},
+		Recorder:      surface,
+		RunTask: NewPlanRunner(PlanTaskContext{
+			Executor:       progressExecutor(t),
+			Cwd:            t.TempDir(),
+			SpecialistName: "explorer",
+		}),
+	}
+	args := map[string]any{
+		"name":   "fix",
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "one"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100000)},
+	}
+
+	result := tool.RunWithOptions(context.Background(), args, tools.RunOptions{})
+	if result.Status != tools.StatusError {
+		t.Fatalf("a second plan must be refused while one runs, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "sweep") {
+		t.Errorf("the refusal must name the plan that is running: %q", result.Output)
+	}
+	if len(surface.admitted) != 0 {
+		t.Errorf("a refused plan must leave no record of having started, got %v", surface.admitted)
+	}
+
+	// And it runs the moment the surface is free again.
+	surface.running = false
+	if result := tool.RunWithOptions(context.Background(), args, tools.RunOptions{}); result.Status == tools.StatusError {
+		t.Fatalf("the plan must run once the surface is free: %s", result.Output)
+	}
+	if len(surface.admitted) != 1 {
+		t.Errorf("expected exactly one admission, got %v", surface.admitted)
+	}
+}
+
+// An INVALID plan is still reported as invalid. Blaming a bad plan on the plan
+// already running would send the model off to wait for something that was never
+// the problem.
+func TestABadPlanIsStillCalledBadWhileAnotherRuns(t *testing.T) {
+	gate := &PostureGate{}
+	gate.Set(true)
+	tool := &OrchestrateTool{
+		PostureActive: gate.Active,
+		ParentTools:   []string{"read_file"},
+		Recorder:      &busySurface{name: "sweep", running: true},
+		RunTask: NewPlanRunner(PlanTaskContext{
+			Executor: progressExecutor(t), Cwd: t.TempDir(), SpecialistName: "explorer",
+		}),
+	}
+	result := tool.RunWithOptions(context.Background(), map[string]any{
+		"name":   "fix",
+		"tasks":  []any{map[string]any{"id": "a", "prompt": "one", "depends_on": []any{"nope"}}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100000)},
+	}, tools.RunOptions{})
+	if result.Status != tools.StatusError {
+		t.Fatal("a plan with a dangling dependency must be refused")
+	}
+	if strings.Contains(result.Output, "still running") {
+		t.Errorf("the dependency error was replaced by the concurrency refusal: %q", result.Output)
+	}
+}
+
+// A recorder that cannot answer is treated as FREE. The headless path runs one
+// plan per process and has no surface to contend for; gating on a question it
+// cannot be asked would refuse every plan `zero exec` ever runs.
+func TestARecorderThatCannotAnswerDoesNotBlockThePlan(t *testing.T) {
+	gate := &PostureGate{}
+	gate.Set(true)
+	tool := &OrchestrateTool{
+		PostureActive: gate.Active,
+		ParentTools:   []string{"read_file"},
+		RunTask: NewPlanRunner(PlanTaskContext{
+			Executor: progressExecutor(t), Cwd: t.TempDir(), SpecialistName: "explorer",
+		}),
+	}
+	if _, busy := runningPlanOn(nil); busy {
+		t.Error("a nil recorder must read as free")
+	}
+	result := tool.RunWithOptions(context.Background(), map[string]any{
+		"name": "p", "tasks": []any{map[string]any{"id": "a", "prompt": "one"}},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100000)},
+	}, tools.RunOptions{})
+	if result.Status == tools.StatusError {
+		t.Fatalf("a plan with no surface to contend for must run: %s", result.Output)
 	}
 }
