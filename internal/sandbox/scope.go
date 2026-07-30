@@ -19,6 +19,17 @@ type Scope struct {
 	workspaceRoot string
 	readRoots     []string
 	extraRoots    []string
+	// tempReads / tempWrites count how many LIVE temporary grants depend on a
+	// root, so one holder's cleanup cannot revoke another's access.
+	//
+	// Without them a temporary grant was add-then-remove with no notion of who
+	// still needed it: the second caller to ask for a root already present got a
+	// NO-OP undo, and the first caller's cleanup removed the root out from under
+	// it. Two read-only tools in the same parallel batch, both blocked on the
+	// same directory, is exactly that shape — and read-only tools are precisely
+	// the ones the batch runs concurrently.
+	tempReads  map[string]int
+	tempWrites map[string]int
 }
 
 // NewScope builds a scope for workspaceRoot plus the given extra roots. The
@@ -119,15 +130,32 @@ func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeRootCoversLocked(root) {
+		// A write root already covers it, permanently. Nothing to release.
 		return root, func() {}, nil
 	}
 	for _, existing := range s.readRoots {
-		if pathWithinRoot(existing, root) {
-			return root, func() {}, nil
+		if !pathWithinRoot(existing, root) {
+			continue
 		}
+		// Already covered — but by WHAT decides whether this caller has
+		// something to release. A permanent read root outlives every grant, so
+		// the undo is genuinely nothing. A TEMPORARY one is held by another
+		// caller who will release it, and that caller must not be able to
+		// revoke this one's access: take a reference on the covering root, so
+		// it survives until the last holder is done.
+		if _, temporary := s.tempReads[existing]; temporary {
+			s.tempReads[existing]++
+			covering := existing
+			return root, func() { s.releaseTemporaryRead(covering) }, nil
+		}
+		return root, func() {}, nil
 	}
 	s.readRoots = append(s.readRoots, root)
-	return root, func() { s.removeReadRoot(root) }, nil
+	if s.tempReads == nil {
+		s.tempReads = map[string]int{}
+	}
+	s.tempReads[root] = 1
+	return root, func() { s.releaseTemporaryRead(root) }, nil
 }
 
 func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
@@ -138,10 +166,25 @@ func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeRootCoversLocked(root) {
+		// Covered already. If a TEMPORARY write grant is what covers it, take a
+		// reference so the covering holder's cleanup cannot revoke this one —
+		// the same rule as reads, and it has to be the same rule or a write
+		// grant would keep the bug reads no longer have.
+		for existing := range s.tempWrites {
+			if pathWithinRoot(existing, root) {
+				s.tempWrites[existing]++
+				covering := existing
+				return root, func() { s.releaseTemporaryWrite(covering) }, nil
+			}
+		}
 		return root, func() {}, nil
 	}
 	s.extraRoots = append(s.extraRoots, root)
-	return root, func() { s.removeWriteRoot(root) }, nil
+	if s.tempWrites == nil {
+		s.tempWrites = map[string]int{}
+	}
+	s.tempWrites[root] = 1
+	return root, func() { s.releaseTemporaryWrite(root) }, nil
 }
 
 func (s *Scope) writeRootCoversLocked(root string) bool {
@@ -151,6 +194,51 @@ func (s *Scope) writeRootCoversLocked(root string) bool {
 		}
 	}
 	return false
+}
+
+// releaseTemporaryRead drops one holder's reference and removes the root only
+// when the last one is gone. IDEMPOTENT per holder is not the property here —
+// each undo is called exactly once — but a double call must not remove a root
+// another holder still needs, so the count floors at zero rather than going
+// negative.
+func (s *Scope) releaseTemporaryRead(root string) {
+	s.mu.Lock()
+	remaining, tracked := s.tempReads[root]
+	if !tracked {
+		s.mu.Unlock()
+		return
+	}
+	remaining--
+	if remaining > 0 {
+		s.tempReads[root] = remaining
+		s.mu.Unlock()
+		return
+	}
+	delete(s.tempReads, root)
+	s.mu.Unlock()
+	s.removeReadRoot(root)
+}
+
+// releaseTemporaryWrite is releaseTemporaryRead for write roots. Two functions
+// rather than one generic helper because they guard different slices and the
+// generic version would take the slice by name — which is how the wrong one
+// gets passed.
+func (s *Scope) releaseTemporaryWrite(root string) {
+	s.mu.Lock()
+	remaining, tracked := s.tempWrites[root]
+	if !tracked {
+		s.mu.Unlock()
+		return
+	}
+	remaining--
+	if remaining > 0 {
+		s.tempWrites[root] = remaining
+		s.mu.Unlock()
+		return
+	}
+	delete(s.tempWrites, root)
+	s.mu.Unlock()
+	s.removeWriteRoot(root)
 }
 
 func (s *Scope) removeReadRoot(root string) {
