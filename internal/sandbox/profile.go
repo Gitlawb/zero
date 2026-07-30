@@ -129,6 +129,39 @@ func gitMetadataWriteCarveoutSpecs(root string) []gitMetadataCarveout {
 	}
 }
 
+// gitMetadataCarveoutSuffixBase is a sentinel root used only to recover the
+// trailing segments of the carveout specs. It is never touched on disk.
+const gitMetadataCarveoutSuffixBase = string(filepath.Separator) + "zero-carveout-base"
+
+// gitMetadataCarveoutIsFile reports whether path names a carveout git expects
+// to be a file.
+//
+// It matches on the trailing segments rather than on a whole reconstructed
+// path. The subpaths reaching the ACL plan are already normalized — resolved
+// through EvalSymlinks where that succeeds — while a rebuilt spec path cannot
+// be, because .git/config does not exist yet at setup and resolution falls back
+// to a plain Clean. On a host where two spellings of the same path differ (an
+// 8.3 short name, different casing) a whole-path equality check silently misses
+// and the carveout is created as a directory again, which is the original bug
+// reintroduced quietly. The suffix cannot drift from the spec list because it
+// is derived from it.
+func gitMetadataCarveoutIsFile(path string) bool {
+	candidate := strings.ToLower(filepath.Clean(strings.TrimSpace(path)))
+	if candidate == "" {
+		return false
+	}
+	for _, spec := range gitMetadataWriteCarveoutSpecs(gitMetadataCarveoutSuffixBase) {
+		if !spec.IsFile {
+			continue
+		}
+		suffix := strings.ToLower(strings.TrimPrefix(spec.Path, gitMetadataCarveoutSuffixBase))
+		if suffix != "" && strings.HasSuffix(candidate, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
 	return permissionProfileFromPolicy(workspaceRoot, policy, scope, "", nil)
 }
