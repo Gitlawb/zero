@@ -221,6 +221,56 @@ func TestProbeConnectivityUsesOAuthCredential(t *testing.T) {
 	}
 }
 
+func TestProbeConnectivityOAuthKeepsStaticKeyRedacted(t *testing.T) {
+	const staticKey = "STATICKEYVALUE1234567890abcdef"
+	var authHeaders []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     "401 Unauthorized",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"invalid key ` + staticKey + `"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "xai",
+			CatalogID:    "xai",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			APIKey:       staticKey,
+			Model:        "grok-4",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
+		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
+			return "Authorization", "Bearer oauth-test-token", true, nil
+		},
+	})
+
+	if len(authHeaders) != 2 {
+		t.Fatalf("Authorization headers = %#v, want initial request and one refresh retry", authHeaders)
+	}
+	for _, header := range authHeaders {
+		if header != "Bearer oauth-test-token" {
+			t.Fatalf("Authorization = %q, want OAuth bearer", header)
+		}
+	}
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Category != CategoryAuth {
+		t.Fatalf("provider.connectivity = %#v, want auth failure", check)
+	}
+	if strings.Contains(check.Message, staticKey) {
+		t.Fatalf("static API key leaked in message: %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "[REDACTED]") {
+		t.Fatalf("expected static API key to be redacted, got %q", check.Message)
+	}
+}
+
 func TestProbeWithoutConnectivityRejectsUnavailableOAuthCredential(t *testing.T) {
 	resolverCalled := false
 	result := Probe(context.Background(), Options{

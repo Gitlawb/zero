@@ -373,7 +373,6 @@ func profileWithOAuthCredential(ctx context.Context, profile config.ProviderProf
 	if strings.TrimSpace(header) == "" {
 		header = "Authorization"
 	}
-	profile.APIKey = ""
 	profile.AuthHeader = header
 	profile.AuthScheme = ""
 	profile.AuthHeaderValue = value
