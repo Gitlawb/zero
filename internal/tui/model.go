@@ -2381,7 +2381,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// makes the glyph spin far too fast (and burns CPU) on screens that sit here
 			// for a while, e.g. the aimlapi checkout wait. The active-run path below
 			// already does this; this keeps idle animation at the same cadence.
-			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating()) && !m.reducedMotion {
+			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating() || m.zeromaxingChipAnimating()) && !m.reducedMotion {
 				var cmd tea.Cmd
 				m.spinner, cmd = m.spinner.Update(msg)
 				m.spinnerPhase++
@@ -5375,7 +5375,7 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 	if m.spinnerTicking || m.reducedMotion {
 		return nil
 	}
-	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() {
+	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() && !m.zeromaxingChipAnimating() {
 		return nil
 	}
 	m.spinnerTicking = true

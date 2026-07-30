@@ -380,3 +380,134 @@ func TestTheSpectrumHoldsStillWhenNothingIsRunning(t *testing.T) {
 		t.Fatalf("the shimmer never advanced across a full period: %v", seen)
 	}
 }
+
+// LOWERCASE, like every other footer label beside it. Shouting was the badge's
+// job and the badge is gone; the word earns attention by moving now.
+func TestThePostureLabelIsLowercase(t *testing.T) {
+	if zeromaxingChipLabel != strings.ToLower(zeromaxingChipLabel) {
+		t.Fatalf("the footer label is %q; it must be lowercase like the labels beside it", zeromaxingChipLabel)
+	}
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	if !strings.Contains(ansiStripLine(m.footerView(m.width)), zeromaxingChipLabel) {
+		t.Fatalf("the footer lost the label:\n%s", ansiStripLine(m.footerView(m.width)))
+	}
+}
+
+// bandPositions reports which letters carry the travelling underline.
+func bandPositions(t *testing.T, m model) string {
+	t.Helper()
+	rendered := m.zeromaxingGlowChip()
+	out := ""
+	for _, letter := range zeromaxingChipLabel {
+		marker := "."
+		for _, run := range strings.Split(rendered, "\x1b[") {
+			if strings.HasSuffix(run, string(letter)) && strings.Contains(run, ";4;") {
+				marker = "^"
+			}
+		}
+		out += marker
+	}
+	return out
+}
+
+// THE HOVER FLOWS. A band travels through the letters and wraps, so hovering
+// reads as motion rather than as a second static state — which is what an
+// underline across the whole word would have been.
+func TestTheHoverBandTravelsThroughTheWord(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+
+	seen := map[string]bool{}
+	lit := 0
+	for step := 0; step < int(zeromaxingFlowPeriod.Milliseconds()); step += 60 {
+		at := time.Unix(0, 0).Add(time.Duration(step) * time.Millisecond)
+		frame := m
+		frame.now = func() time.Time { return at }
+		positions := bandPositions(t, frame)
+		seen[positions] = true
+		if count := strings.Count(positions, "^"); count > zeromaxingFlowBand {
+			t.Fatalf("the band covers %d letters, want at most %d: %s", count, zeromaxingFlowBand, positions)
+		}
+		if strings.Count(positions, "^") > 0 {
+			lit++
+		}
+	}
+	if len(seen) < 3 {
+		t.Fatalf("the band never moved across a full period: %v", seen)
+	}
+	if lit == 0 {
+		t.Fatal("no letter was ever lit; the hover produces no band at all")
+	}
+}
+
+// RESTING carries no band: the flow is what hovering ADDS, and a resting chip
+// that already flowed would make the hover say nothing.
+func TestTheRestingWordCarriesNoBand(t *testing.T) {
+	m := glowModel(t)
+	m.width, m.height = 100, 30
+	if positions := bandPositions(t, m); strings.Contains(positions, "^") {
+		t.Fatalf("the resting word is banded: %s", positions)
+	}
+}
+
+// THE TICK IS BOUNDED BY THE HOVER. An animation that ran on an idle session
+// would be a timer nobody asked for, which is the rule ensureSpinnerTick exists
+// to keep — so it starts when the cursor arrives and stops when it leaves.
+func TestTheChipOnlyAsksForFramesWhileHovered(t *testing.T) {
+	m := glowModel(t)
+	if m.zeromaxingChipAnimating() {
+		t.Fatal("the chip asks for frames while nothing hovers it")
+	}
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+	if !m.zeromaxingChipAnimating() {
+		t.Fatal("the hovered chip asks for no frames, so its band cannot move")
+	}
+	m.reducedMotion = true
+	if m.zeromaxingChipAnimating() {
+		t.Fatal("reduced motion must stop the chip asking for frames")
+	}
+	m.reducedMotion = false
+	m.zeromaxing = 0
+	if m.zeromaxingChipAnimating() {
+		t.Fatal("a chip that is not shown must not ask for frames")
+	}
+}
+
+// Reduced motion pins the band, like every other animation here.
+func TestReducedMotionStopsTheFlow(t *testing.T) {
+	m := glowModel(t)
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
+	m.reducedMotion = true
+	first := bandPositions(t, m)
+	later := m
+	later.now = func() time.Time { return time.Unix(0, 0).Add(500 * time.Millisecond) }
+	if second := bandPositions(t, later); first != second {
+		t.Fatalf("the band moved under reduced motion: %s then %s", first, second)
+	}
+}
+
+// THE SCHEDULER MUST CONSULT IT. Asserting zeromaxingChipAnimating alone passes
+// against an ensureSpinnerTick that ignores it entirely — the predicate would be
+// right and the band would still never move. Sixth instance of that shape today,
+// so this drives the scheduler.
+func TestTheHoverActuallyStartsTheTickLoop(t *testing.T) {
+	idle := glowModel(t)
+	if cmd := idle.ensureSpinnerTick(); cmd != nil {
+		t.Fatal("an idle session with nothing hovered scheduled a timer")
+	}
+
+	hovered := glowModel(t)
+	hovered.hover = hoverTarget{kind: hoverZeromaxingChip}
+	if cmd := hovered.ensureSpinnerTick(); cmd == nil {
+		t.Fatal("hovering the chip scheduled no tick, so its band can never move")
+	}
+	// ...and it does not schedule a SECOND one while the loop already runs.
+	running := glowModel(t)
+	running.hover = hoverTarget{kind: hoverZeromaxingChip}
+	running.spinnerTicking = true
+	if cmd := running.ensureSpinnerTick(); cmd != nil {
+		t.Fatal("a second timer was scheduled while the loop was already alive")
+	}
+}

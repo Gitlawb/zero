@@ -1533,7 +1533,11 @@ func (m model) selfCorrectTransition() execprofile.SelfCorrectTransition {
 
 // zeromaxingChipLabel is the footer indicator for the zeromaxing posture. Kept
 // as a constant so the view and its test assert the same bytes.
-const zeromaxingChipLabel = "ZEROMAXING"
+//
+// LOWERCASE, like every other footer label beside it — "ask", "high", the model
+// name. Shouting it was the badge's job, and the badge is gone; the word earns
+// attention now by moving rather than by being the one thing in caps.
+const zeromaxingChipLabel = "zeromaxing"
 
 // advanceZeromaxing retires the one-shot notices once the run that carried them
 // has finished.
