@@ -443,19 +443,23 @@ func TestZeromaxingFooterChipVisibility(t *testing.T) {
 	if !m.zeromaxingActive() {
 		t.Fatal("Entering: the chip must be shown")
 	}
-	if !strings.Contains(m.statusLine(120), zeromaxingChipLabel) {
-		t.Fatalf("the footer must carry %q while on:\n%s", zeromaxingChipLabel, m.statusLine(120))
+	// STRIPPED, not raw. The chip paints each letter its own hue, so the label
+	// is no longer a contiguous run in the styled output — and the production
+	// hit-testers strip ANSI for exactly this reason. A raw Contains here was
+	// asserting an accident of how the chip happened to be styled.
+	if !strings.Contains(ansiStripLine(m.statusLine(120)), zeromaxingChipLabel) {
+		t.Fatalf("the footer must carry %q while on:\n%s", zeromaxingChipLabel, ansiStripLine(m.statusLine(120)))
 	}
 	m = m.advanceZeromaxing()
-	if !strings.Contains(m.statusLine(120), zeromaxingChipLabel) {
+	if !strings.Contains(ansiStripLine(m.statusLine(120)), zeromaxingChipLabel) {
 		t.Fatal("Active: the chip must still be shown")
 	}
 	m, _ = m.handleEffortCommand("auto")
 	if m.zeromaxingActive() {
 		t.Fatal("Exiting: the posture is already off, so the chip must be hidden")
 	}
-	if strings.Contains(m.statusLine(120), zeromaxingChipLabel) {
-		t.Fatalf("the footer must drop the chip once off:\n%s", m.statusLine(120))
+	if strings.Contains(ansiStripLine(m.statusLine(120)), zeromaxingChipLabel) {
+		t.Fatalf("the footer must drop the chip once off:\n%s", ansiStripLine(m.statusLine(120)))
 	}
 }
 

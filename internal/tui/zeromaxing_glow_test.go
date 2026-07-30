@@ -20,14 +20,12 @@ func glowModel(t *testing.T) model {
 	return m
 }
 
-// The chip is LIT, not merely coloured: a filled badge reads as on from across
-// the room, where amber text reads as another word in the row. The posture
-// raises a cost multiplier, so "is it on?" has to be answerable at a glance.
+// The chip is a LIVE WORD with NO BACKGROUND BOX. A badge signalled "on" by
+// being a solid slab; this signals it by moving, and the footer keeps its calm.
 //
-// Asserted on the RENDERED FOOTER, not on the helper: the first version called
-// zeromaxingGlowChip directly, and reverting the footer to plain amber text
-// passed it.
-func TestTheZeromaxingChipIsAFilledBadge(t *testing.T) {
+// Asserted on the RENDERED FOOTER, not on the helper: an earlier version called
+// zeromaxingGlowChip directly, and reverting the footer to plain text passed it.
+func TestTheZeromaxingChipIsAnUnboxedLiveWord(t *testing.T) {
 	m := glowModel(t)
 	m.width, m.height = 100, 30
 
@@ -35,13 +33,23 @@ func TestTheZeromaxingChipIsAFilledBadge(t *testing.T) {
 	if !strings.Contains(ansi.Strip(footer), zeromaxingChipLabel) {
 		t.Fatalf("the footer does not carry the posture label:\n%s", ansi.Strip(footer))
 	}
-	// A background fill on the label's own run is what distinguishes a lit
-	// badge from coloured text.
-	if !strings.Contains(footer, "48;2;") {
-		t.Fatalf("the footer chip has no background fill, so it is text and not a badge")
+	chip := m.zeromaxingGlowChip()
+	if !strings.Contains(footer, chip) {
+		t.Fatalf("the footer does not render the chip it was given:\n%s", ansi.Strip(footer))
 	}
-	if chip := m.zeromaxingGlowChip(); !strings.Contains(footer, chip) {
-		t.Fatalf("the footer does not render the glow chip it was given:\n%s", ansi.Strip(footer))
+	// NO BACKGROUND FILL anywhere in the chip: the letters carry the signal.
+	if strings.Contains(chip, "48;2;") {
+		t.Fatalf("the posture chip still paints a background box: %q", chip)
+	}
+	// ...and it is genuinely multi-coloured rather than one flat colour.
+	distinct := map[string]bool{}
+	for _, field := range strings.Split(chip, "38;2;") {
+		if end := strings.IndexByte(field, 'm'); end > 0 {
+			distinct[field[:end]] = true
+		}
+	}
+	if len(distinct) < 3 {
+		t.Fatalf("the chip uses %d colours; the word is meant to be a spectrum: %q", len(distinct), chip)
 	}
 }
 
@@ -268,16 +276,11 @@ func TestThePostureChipDoesNotWearThePermissionColour(t *testing.T) {
 
 	chip := m.zeromaxingGlowChip()
 	permission := zeroTheme.permBadge.Render(" PERMISSION ")
-	amberFill := backgroundSequence(permission)
-	if amberFill == "" {
-		t.Skip("this theme renders no background fill, so the colours cannot be compared")
+	if fill := backgroundSequence(permission); fill != "" && strings.Contains(chip, fill) {
+		t.Fatal("the posture chip wears the permission badge's colour; a mode must not read as a caution")
 	}
-	if strings.Contains(chip, amberFill) {
-		t.Fatal("the posture chip is filled with the permission badge's colour; a mode must not read as a caution")
-	}
-	// ...and it is still FILLED, so dropping amber did not turn it back into text.
-	if backgroundSequence(chip) == "" {
-		t.Fatalf("the posture chip lost its fill and is now text: %q", chip)
+	if backgroundSequence(chip) != "" {
+		t.Fatalf("the posture chip paints a background box: %q", chip)
 	}
 }
 
@@ -295,26 +298,28 @@ func backgroundSequence(rendered string) string {
 	return rendered[index : index+end]
 }
 
-// THE HOVER IS A SPECTRUM, not another flat fill. A flat hover on an
-// already-filled chip is two solid blocks differing by a shade; letters that
-// each take their own hue cannot be mistaken for the resting state.
-func TestTheHoveredChipPaintsEachLetterItsOwnHue(t *testing.T) {
+// HOVER IS AN UNDERLINE, not a box. The chip opens /effort, so it must say it
+// is pressable — and a background fill is the one thing this deliberately does
+// not have, so it cannot be the hover signal either.
+func TestTheHoveredChipUnderlinesWithoutABox(t *testing.T) {
 	m := glowModel(t)
 	m.width, m.height = 100, 30
-	m.hover = hoverTarget{kind: hoverZeromaxingChip}
 
+	resting := m.zeromaxingGlowChip()
+	m.hover = hoverTarget{kind: hoverZeromaxingChip}
 	hovered := m.zeromaxingGlowChip()
+
+	if resting == hovered {
+		t.Fatal("the chip renders identically hovered and not, so hovering it says nothing")
+	}
+	if !strings.Contains(hovered, "\x1b[4") && !strings.Contains(hovered, ";4m") && !strings.Contains(hovered, "4;") {
+		t.Fatalf("the hovered chip carries no underline: %q", hovered)
+	}
+	if backgroundSequence(hovered) != "" {
+		t.Fatalf("the hovered chip painted a background box: %q", hovered)
+	}
 	if !strings.Contains(ansi.Strip(hovered), zeromaxingChipLabel) {
 		t.Fatalf("the hovered chip lost its label: %q", ansi.Strip(hovered))
-	}
-	distinct := map[string]bool{}
-	for _, field := range strings.Split(hovered, "38;2;") {
-		if end := strings.IndexByte(field, 'm'); end > 0 {
-			distinct[field[:end]] = true
-		}
-	}
-	if len(distinct) < 3 {
-		t.Fatalf("the hovered chip uses %d foreground colours; a spectrum needs several: %q", len(distinct), hovered)
 	}
 }
 
