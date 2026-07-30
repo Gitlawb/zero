@@ -114,7 +114,7 @@ func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 
 func TestRunDoctorConnectivityUsesOAuthLogin(t *testing.T) {
 	tokenPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
-	userConfigPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: tokenPath})
@@ -148,9 +148,6 @@ func TestRunDoctorConnectivityUsesOAuthLogin(t *testing.T) {
 	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
 			return t.TempDir(), nil
-		},
-		userConfigPath: func() (string, error) {
-			return userConfigPath, nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{
