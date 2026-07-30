@@ -2501,22 +2501,36 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 	m.width, m.height = 100, 30
 	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "hi", final: true})
 
-	// Idle, empty composer, managed mode -> the discoverability hint shows.
-	hint := plainRender(t, m.composerIdleHint())
-	if !strings.Contains(hint, "shortcuts") {
-		t.Fatalf("expected idle hint, got %q", hint)
-	}
-	if strings.Contains(hint, "sidebar") {
-		t.Fatalf("empty sidebar should not be advertised, got %q", hint)
-	}
-	withSidebar := m
-	withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
-	if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-		t.Fatalf("available sidebar should be advertised, got %q", hint)
-	}
-	withSidebar.sidebarHidden = true
-	if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-		t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+	for _, test := range []struct {
+		name  string
+		width int
+	}{
+		{name: "medium", width: 80},
+		{name: "full", width: 100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			idle := m
+			idle.width = test.width
+
+			// Idle, empty composer, managed mode -> the discoverability hint shows.
+			hint := plainRender(t, idle.composerIdleHint())
+			if !strings.Contains(hint, "shortcuts") {
+				t.Fatalf("expected idle hint, got %q", hint)
+			}
+			if strings.Contains(hint, "sidebar") {
+				t.Fatalf("empty sidebar should not be advertised, got %q", hint)
+			}
+
+			withSidebar := idle
+			withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+				t.Fatalf("available sidebar should be advertised, got %q", hint)
+			}
+			withSidebar.sidebarHidden = true
+			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+				t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+			}
+		})
 	}
 	// Hidden during a run.
 	busy := m
