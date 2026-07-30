@@ -46,14 +46,19 @@ type Options struct {
 	SessionStore                *sessions.Store
 	SandboxStore                *sandbox.GrantStore
 	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
-	PeerService                 *peermsg.Service
+	// MCPSkipped carries the servers that failed to start, so /mcp can report
+	// what is actually running rather than what is configured. Startup already
+	// records these; without them the panel derives state from config alone and
+	// shows a server that never connected as "enabled" with no explanation.
+	MCPSkipped          []mcp.SkippedServer
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
+	PeerService         *peermsg.Service
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any
