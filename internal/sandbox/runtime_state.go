@@ -60,7 +60,14 @@ func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error)
 	if err != nil {
 		return SandboxRuntime{}, nil, fmt.Errorf("resolve user cache directory: %w", err)
 	}
-	cacheRoot = filepath.Clean(strings.TrimSpace(cacheRoot))
+	// Canonicalized the SAME way as the workspace root, because
+	// sandboxRuntimeRootFor compares the two: it falls back to a private temp
+	// tree when the derived runtime root would land inside the workspace.
+	// Normalizing only one side made that comparison run on two different
+	// spellings of the same path — /var vs /private/var on macOS, an 8.3 short
+	// name vs its long form on Windows — so the containment check missed and the
+	// fallback never fired.
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
 	if cacheRoot == "" || cacheRoot == "." {
 		return SandboxRuntime{}, nil, errors.New("user cache directory is unavailable")
 	}
