@@ -2,7 +2,10 @@
 
 package sandbox
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // Setup must stay inert unless the principal backend is explicitly opted into.
 // This is the property that makes the branch safe to merge while the privileged
@@ -13,7 +16,8 @@ func TestWindowsSandboxIdentityGating(t *testing.T) {
 		env  map[string]string
 		want bool
 	}{
-		"absent":         {env: map[string]string{}, want: false},
+		// An explicit map entry is authoritative; these cases never reach the
+		// process environment.
 		"empty":          {env: map[string]string{windowsSandboxIdentityEnv: ""}, want: false},
 		"zero":           {env: map[string]string{windowsSandboxIdentityEnv: "0"}, want: false},
 		"true not one":   {env: map[string]string{windowsSandboxIdentityEnv: "true"}, want: false},
@@ -21,8 +25,45 @@ func TestWindowsSandboxIdentityGating(t *testing.T) {
 		"one with space": {env: map[string]string{windowsSandboxIdentityEnv: " 1 "}, want: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			// Pin the process variable too. Every case here supplies an explicit
+			// map entry so none of them should consult it, and pinning proves
+			// that rather than assuming it: without this a developer who exports
+			// the opt-in would see different results from CI.
+			t.Setenv(windowsSandboxIdentityEnv, "1")
 			if got := windowsSandboxIdentityEnabled(testCase.env); got != testCase.want {
 				t.Fatalf("enabled = %v, want %v for %q", got, testCase.want, testCase.env[windowsSandboxIdentityEnv])
+			}
+		})
+	}
+}
+
+// With no map entry the process environment decides. That fallback is what the
+// elevated setup path actually runs on — it passes no Env — so it needs its own
+// coverage rather than riding on a case that also has a map entry.
+func TestWindowsSandboxIdentityGatingFallsBackToTheProcessEnvironment(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		value string
+		set   bool
+		want  bool
+	}{
+		"unset":          {set: false, want: false},
+		"empty":          {value: "", set: true, want: false},
+		"zero":           {value: "0", set: true, want: false},
+		"one":            {value: "1", set: true, want: true},
+		"one with space": {value: " 1 ", set: true, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// t.Setenv registers the restore even when the variable is then
+			// cleared, which is the only way to test a genuinely absent variable
+			// without leaking that state into the rest of the package.
+			t.Setenv(windowsSandboxIdentityEnv, testCase.value)
+			if !testCase.set {
+				if err := os.Unsetenv(windowsSandboxIdentityEnv); err != nil {
+					t.Fatalf("unset %s: %v", windowsSandboxIdentityEnv, err)
+				}
+			}
+			if got := windowsSandboxIdentityEnabled(nil); got != testCase.want {
+				t.Fatalf("enabled = %v, want %v (set=%v value=%q)", got, testCase.want, testCase.set, testCase.value)
 			}
 		})
 	}

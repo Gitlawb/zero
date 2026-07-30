@@ -92,7 +92,7 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 		return 0, false, nil
 	}
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
-	identity, err := lookupWindowsSandboxIdentity(key)
+	identity, err := lookupWindowsSandboxPrincipalForCommand(key)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			// Not provisioned: fall back quietly, this is the default state.
