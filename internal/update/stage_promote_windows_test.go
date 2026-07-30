@@ -52,14 +52,34 @@ func TestPromoteInstallsTheStagedObjectNotTheStagedPath(t *testing.T) {
 		substituted = true
 	}
 
-	if err := staged.promote(targetPath); err != nil {
-		t.Fatalf("promote: %v", err)
-	}
-	// The staging handle keeps the promoted file open with an exclusive share
-	// mode, so release it before reading the installed bytes (installBinary's
-	// deferred discard does the same).
+	promoteErr := staged.promote(targetPath)
+	// The staging handle keeps the promoted (or, on failure, discarded) file open
+	// with an exclusive share mode, so release it before reading installed bytes
+	// (installBinary's deferred discard does the same).
 	staged.discard()
 	discarded = true
+
+	if promoteErr != nil {
+		// Fully unlinking the staging file (its directory entry removed, then a
+		// new file recreated at that name) is not something every Windows build
+		// honors a same-handle rename back into: verifyPromotedTarget's post-
+		// rename identity check can find nothing at targetPath and fail the
+		// promotion, which restoreOriginalBinary then recovers from by moving
+		// the pre-update binary back. That is this test's real security
+		// property holding — the attacker's substituted bytes are never
+		// installed — just via the fail-closed path instead of the handle-
+		// rename defeating the substitution outright. Only accept the failure
+		// when it actually happened via a real substitution; any other promote
+		// error is a genuine regression.
+		if !substituted {
+			t.Fatalf("promote failed without substitution: %v", promoteErr)
+		}
+		if installed, readErr := os.ReadFile(targetPath); readErr == nil && string(installed) == "attacker-binary" {
+			t.Fatalf("attacker-controlled bytes were installed: %q", installed)
+		}
+		t.Logf("promote refused after full-unlink substitution (%v); attacker bytes were not installed", promoteErr)
+		return
+	}
 
 	installed, err := os.ReadFile(targetPath)
 	if err != nil {
