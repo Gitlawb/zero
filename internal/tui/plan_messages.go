@@ -79,6 +79,20 @@ type planTaskDoneMsg struct {
 	background bool
 }
 
+// planTaskProgressMsg is one tool call made by ONE task's child, already
+// resolved to that task's card. The routing happens at the recorder, which is
+// the only place that knows which card belongs to which task.
+type planTaskProgressMsg struct {
+	runID    int
+	taskID   string
+	cardKey  string
+	toolName string
+	detail   string
+	// background marks a plan that outlives the run that launched it, so the
+	// stale-run guard must not drop its progress.
+	background bool
+}
+
 // planCompletedMsg carries the plan's terminal record.
 type planCompletedMsg struct {
 	runID      int

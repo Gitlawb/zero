@@ -132,19 +132,11 @@ type model struct {
 	// (the loop's callback carries only the parent's tool-call id), so they are
 	// attributed to this.
 	//
-	// EMPTY WHEN THE PLAN IS CONCURRENT. With one worker exactly one task runs
-	// at a time and the attribution is sound. With more, the events carry no
-	// task identity at all, so attributing them to whichever task was dispatched
-	// last would show one task's tool calls under another's name. No attribution
-	// is worse than none only if you have never seen the wrong one: a card that
-	// says nothing is honest, a card that says something false is not. Per-task
-	// progress needs the child's identity threaded through the loop's callback,
-	// which is its own change.
-	planRunningCardKey string
-	// planConcurrent records that the running plan has more than one worker, so
-	// the attribution above stays off for its whole life rather than being
-	// re-enabled by the next task that starts.
-	planConcurrent bool
+	// GONE, and deliberately: a plan's child progress now arrives as
+	// planTaskProgressMsg carrying its own task id, resolved by the recorder
+	// that opened the card. What stood here guessed "whichever task was
+	// dispatched last", which stopped being true the moment two tasks could run
+	// at once.
 	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
 	// for the same reason PostureGate is one: the TUI model is a value type
 	// copied on every update, so a closure over it would freeze the first run.
@@ -2694,9 +2686,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.orchestrate.admit(msg, m.now())
-		// More than one worker means child progress cannot be attributed to a
-		// task; see planRunningCardKey.
-		m.planConcurrent = msg.workers > 1
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 			kind:  rowSystem,
 			runID: msg.runID,
@@ -2714,16 +2703,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, m.now())
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
-		// Remember which task is in flight so the plan's progress events — which
-		// arrive keyed by the ORCHESTRATE tool call, not by task — can be
-		// attributed. Sound ONLY when one task runs at a time; a concurrent plan
-		// leaves this empty rather than pointing every child's output at
-		// whichever task started last.
-		if m.planConcurrent {
-			m.planRunningCardKey = ""
-		} else {
-			m.planRunningCardKey = msg.cardKey
-		}
 		return m, nil
 	case planTaskDoneMsg:
 		// A BACKGROUND plan outlives the run that launched it, so the
@@ -2734,9 +2713,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.orchestrate.markDone(msg.taskID, msg.outcome, msg.tokens, msg.attempts, m.now())
-		if m.planRunningCardKey == msg.cardKey {
-			m.planRunningCardKey = ""
-		}
 		cardKey := msg.cardKey
 		if !msg.dispatched {
 			// Never started, so it has no card. Give it its own key and open one
@@ -2768,7 +2744,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.planRunningCardKey = ""
 		m.orchestrate.complete(msg, m.now())
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 			kind:  rowSystem,
@@ -2777,17 +2752,28 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text:  planCompletedLine(msg),
 		})
 		return m, nil
+	case planTaskProgressMsg:
+		// A BACKGROUND plan outlives the run that launched it, so the stale-run
+		// guard must not drop its progress.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		// Already routed to the right card by the recorder, which is the only
+		// thing that knows which card belongs to which task. Nothing here has to
+		// guess, which is the whole point of the message existing.
+		m.specialists.incrementToolCount(msg.cardKey)
+		m.specialists.setCurrentTool(msg.cardKey, msg.toolName, msg.detail)
+		return m, nil
 	case specialistProgressMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		// A plan's progress arrives keyed by the orchestrate tool call, which has
-		// no card of its own; attribute it to the task currently in flight.
-		if _, ok := m.specialists.getBySessionID(msg.toolCallID); !ok && m.planRunningCardKey != "" {
-			m.specialists.incrementToolCount(m.planRunningCardKey)
-			m.specialists.setCurrentTool(m.planRunningCardKey, msg.toolName, msg.detail)
-			return m, nil
-		}
+		// A PLAN's progress no longer arrives here. It comes as
+		// planTaskProgressMsg, already carrying the task it belongs to. This
+		// used to attribute an unrecognised tool-call id to "whichever task was
+		// dispatched last", which was sound while one task ran at a time and
+		// became a lie the moment two could — so the guess is gone rather than
+		// conditioned.
 		// Each progress message is one specialist tool call (OnToolProgress fires only
 		// for EventToolCall); bump the card's tool-call counter so it stops showing a
 		// permanent "0 tool calls" (M18). The tracker is still keyed by the tool-call
@@ -5041,7 +5027,6 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
-	m.planRunningCardKey = ""
 	m.orchestrate.clear()
 	// Re-bind the plan recorder to THIS run. The orchestrate tool holds the
 	// bridge for the process's life (the registry is built once per session),
