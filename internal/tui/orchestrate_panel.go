@@ -652,14 +652,21 @@ func sidebarProgressBar(state orchestratePanelState, width int) string {
 		// zero cells is a failure the bar does not show.
 		return maxInt(1, count*cells/total)
 	}
+	// SOLID MEANS SETTLED. done, failed, skipped and cancelled are terminal — the
+	// task is not coming back, and the bar can spend a full block on it. Running
+	// is not progress, it is work underway, and drawing it with the same solid
+	// block made a plan with four of nine dispatched and NOTHING finished look
+	// 44% complete beside its own "0/9". The half-shade ranks correctly between
+	// the settled blocks and the pending track, and cannot be misread as either.
 	segments := []struct {
 		count int
+		mark  string
 		style lipgloss.Style
 	}{
-		{done, zeroTheme.green},
-		{failed, zeroTheme.red},
-		{skipped + cancelled, zeroTheme.muted},
-		{running, zeroTheme.accent},
+		{done, "█", zeroTheme.green},
+		{failed, "█", zeroTheme.red},
+		{skipped + cancelled, "█", zeroTheme.muted},
+		{running, "▓", zeroTheme.accent},
 	}
 
 	var b strings.Builder
@@ -672,7 +679,7 @@ func sidebarProgressBar(state orchestratePanelState, width int) string {
 		if n <= 0 {
 			continue
 		}
-		b.WriteString(segment.style.Render(strings.Repeat("█", n)))
+		b.WriteString(segment.style.Render(strings.Repeat(segment.mark, n)))
 		used += n
 	}
 	if used < cells {

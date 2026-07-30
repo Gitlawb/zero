@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"strings"
 	"testing"
@@ -844,5 +845,55 @@ func TestTheFooterStandsDownWithBothPlansLive(t *testing.T) {
 		if line := plainRender(t, lines[hit.lineOffset]); !strings.Contains(line, path.Base(hit.path)) {
 			t.Errorf("file hit %q points at %q", hit.path, line)
 		}
+	}
+}
+
+// SOLID MEANS SETTLED. A plan with four of nine tasks dispatched and nothing
+// finished drew a bar 44% filled with the same solid block a completed task
+// gets, directly beside its own "0/9". The bar contradicted its own number, and
+// the number was the one telling the truth.
+func TestTheBarDoesNotCountRunningTasksAsProgress(t *testing.T) {
+	now := time.Unix(1000, 0)
+	admit := func() model {
+		m := model{now: func() time.Time { return now }}
+		var tasks []planGraphTask
+		for i := 0; i < 9; i++ {
+			tasks = append(tasks, planGraphTask{id: fmt.Sprintf("t%d", i)})
+		}
+		m.orchestrate.admit(planAdmittedMsg{runID: 1, name: "pkg-audit", taskCount: 9, tasks: tasks}, now)
+		return m
+	}
+
+	running := admit()
+	for i := 0; i < 4; i++ {
+		running.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", now)
+	}
+	bar := plainRender(t, sidebarProgressBar(running.orchestrate, 36))
+	if strings.Contains(bar, "█") {
+		t.Errorf("nothing has finished, so no cell may be solid: %q", bar)
+	}
+	if !strings.Contains(bar, "▓") {
+		t.Errorf("four tasks are underway and the bar should say so: %q", bar)
+	}
+	if !strings.Contains(bar, "0/9") {
+		t.Errorf("the count must still read 0/9: %q", bar)
+	}
+
+	// A finished task IS solid, so the two are told apart at a glance.
+	mixed := admit()
+	for i := 0; i < 3; i++ {
+		mixed.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", now)
+		mixed.orchestrate.markDone(fmt.Sprintf("t%d", i), "succeeded", 0, 1, now)
+	}
+	mixed.orchestrate.markStarted("t3", "s", "", now)
+	bar = plainRender(t, sidebarProgressBar(mixed.orchestrate, 36))
+	if !strings.Contains(bar, "█") || !strings.Contains(bar, "▓") {
+		t.Errorf("three done and one running must show both marks: %q", bar)
+	}
+	if solid, shade := strings.Index(bar, "█"), strings.Index(bar, "▓"); solid > shade {
+		t.Errorf("settled work comes first in the bar: %q", bar)
+	}
+	if !strings.Contains(bar, "3/9") {
+		t.Errorf("the count must read 3/9: %q", bar)
 	}
 }
