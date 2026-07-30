@@ -510,6 +510,11 @@ var (
 	windowsSandboxUserIsPrivilegedFn  = windowsSandboxUserIsPrivileged
 	grantWindowsSandboxLogonRightsFn  = grantWindowsSandboxLogonRights
 	revokeWindowsSandboxLogonRightsFn = revokeWindowsSandboxLogonRights
+	// applyWindowsACLPlanFn is a seam so a test can pin the ORDER of setup's ACL
+	// work. The revocation below only prevents a stale grant if it runs before
+	// the plan that re-adds the current one; a test that exercised the revoke
+	// helper on its own would pass just as happily with the call site deleted.
+	applyWindowsACLPlanFn = applyWindowsACLPlan
 )
 
 // provisionWindowsSandboxIdentity ensures the managed group and one sandbox
