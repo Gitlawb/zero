@@ -807,6 +807,9 @@ func redact(message string, profile config.ProviderProfile) string {
 
 func providerSecrets(profile config.ProviderProfile) []string {
 	secrets := []string{profile.APIKey, profile.AuthHeaderValue}
+	if fields := strings.Fields(profile.AuthHeaderValue); len(fields) == 2 {
+		secrets = append(secrets, fields[1])
+	}
 	for _, value := range profile.CustomHeaders {
 		if strings.TrimSpace(value) != "" {
 			secrets = append(secrets, value)

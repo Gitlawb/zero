@@ -221,15 +221,18 @@ func TestProbeConnectivityUsesOAuthCredential(t *testing.T) {
 	}
 }
 
-func TestProbeConnectivityOAuthKeepsStaticKeyRedacted(t *testing.T) {
-	const staticKey = "STATICKEYVALUE1234567890abcdef"
+func TestProbeConnectivityOAuthCredentialsAreRedacted(t *testing.T) {
+	const (
+		staticKey  = "STATICKEYVALUE1234567890abcdef"
+		oauthToken = "hf_VASANTHSENTINEL0011223344"
+	)
 	var authHeaders []string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
 		return &http.Response{
 			StatusCode: http.StatusUnauthorized,
 			Status:     "401 Unauthorized",
-			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"invalid key ` + staticKey + `"}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"invalid credentials ` + staticKey + ` and ` + oauthToken + `"}}`)),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -247,7 +250,7 @@ func TestProbeConnectivityOAuthKeepsStaticKeyRedacted(t *testing.T) {
 		HTTPClient:   client,
 		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
-			return "Authorization", "Bearer oauth-test-token", true, nil
+			return "Authorization", "Bearer " + oauthToken, true, nil
 		},
 	})
 
@@ -255,7 +258,7 @@ func TestProbeConnectivityOAuthKeepsStaticKeyRedacted(t *testing.T) {
 		t.Fatalf("Authorization headers = %#v, want initial request and one refresh retry", authHeaders)
 	}
 	for _, header := range authHeaders {
-		if header != "Bearer oauth-test-token" {
+		if header != "Bearer "+oauthToken {
 			t.Fatalf("Authorization = %q, want OAuth bearer", header)
 		}
 	}
@@ -266,8 +269,11 @@ func TestProbeConnectivityOAuthKeepsStaticKeyRedacted(t *testing.T) {
 	if strings.Contains(check.Message, staticKey) {
 		t.Fatalf("static API key leaked in message: %q", check.Message)
 	}
-	if !strings.Contains(check.Message, "[REDACTED]") {
-		t.Fatalf("expected static API key to be redacted, got %q", check.Message)
+	if strings.Contains(check.Message, oauthToken) {
+		t.Fatalf("OAuth token leaked in message: %q", check.Message)
+	}
+	if strings.Count(check.Message, "[REDACTED]") != 2 {
+		t.Fatalf("expected both credentials to be redacted, got %q", check.Message)
 	}
 }
 
