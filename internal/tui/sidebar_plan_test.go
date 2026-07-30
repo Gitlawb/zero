@@ -93,18 +93,32 @@ func TestTheSidebarPlanHeaderShowsProgress(t *testing.T) {
 	}
 }
 
-// update_plan's own steps still win the section when it has any: the two are
-// different things, and the TODO list is the one the model is actively editing.
-func TestUpdatePlanStepsStillWinTheSection(t *testing.T) {
+// BOTH PLANS SHARE THE SECTION, in that order. They are not alternatives: a
+// zeromaxing turn routinely runs an update_plan checklist whose middle step is
+// "run this orchestrate plan", so both are live at once. The section used to
+// hand itself entirely to update_plan, which left the running plan with no
+// sidebar surface and pushed it back into the footer panel it was meant to
+// replace.
+func TestTheSectionHoldsBothPlansAtOnce(t *testing.T) {
 	m := sidebarPlanModel(t)
 	m.plan.steps = []planStep{{content: "a step of the model's own plan", status: "in_progress"}}
 
-	rendered := strings.Join(m.sidebarPlanLines(34), "\n")
-	if !strings.Contains(ansi.Strip(rendered), "a step of the model") {
+	rendered := ansi.Strip(strings.Join(m.sidebarPlanLines(34), "\n"))
+	stepAt := strings.Index(rendered, "a step of the model")
+	taskAt := strings.Index(rendered, "root")
+	if stepAt < 0 {
 		t.Fatalf("update_plan's steps must still render:\n%s", rendered)
 	}
-	if strings.Contains(ansi.Strip(rendered), "root") {
-		t.Fatalf("the orchestrate plan must not displace them:\n%s", rendered)
+	if taskAt < 0 {
+		t.Fatalf("the running plan must have a surface here too:\n%s", rendered)
+	}
+	if stepAt > taskAt {
+		t.Errorf("update_plan's checklist is the outer plan and belongs above:\n%s", rendered)
+	}
+	// Two tallies stacked without a name reads as one list; the running plan
+	// carries its own, because the section header is spent on update_plan's.
+	if !strings.Contains(rendered, "diamond") {
+		t.Errorf("the running plan must name itself under a borrowed header:\n%s", rendered)
 	}
 }
 
@@ -119,8 +133,10 @@ func TestALongPlanIsBoundedInTheSidebar(t *testing.T) {
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(msg, m.now())
 
+	// The block is the progress bar, at most maxSidebarOrchestrateLines tasks,
+	// and the note saying what it dropped.
 	lines := m.sidebarPlanLines(34)
-	if len(lines) > maxSidebarOrchestrateLines+1 {
+	if len(lines) > maxSidebarOrchestrateLines+2 {
 		t.Fatalf("the sidebar drew %d lines for a 20-task plan", len(lines))
 	}
 	if !strings.Contains(ansi.Strip(strings.Join(lines, "\n")), "more") {
