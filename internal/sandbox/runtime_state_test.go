@@ -376,3 +376,32 @@ func TestPrepareSandboxRuntimeNormalizesTheCacheRootBeforeComparingIt(t *testing
 		t.Fatalf("runtime root %q resolves to %q, inside workspace %q; the containment check did not see through the cache root's spelling", runtimeState.Root, resolved, workspace)
 	}
 }
+
+// A path whose final segments do not exist yet must still normalize the same
+// way as one that does. This is the shape macOS CI hit: t.TempDir() sits under
+// /var, a symlink to /private/var, and the cache root it derives has not been
+// created when it is first normalized. Resolving only the workspace left the
+// two sides of the containment check spelled differently.
+func TestCanonicalSandboxWorkspaceRootResolvesThroughAMissingLeaf(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	existing := canonicalSandboxWorkspaceRoot(link)
+	if existing != canonicalSandboxWorkspaceRoot(real) {
+		t.Fatalf("an existing symlinked dir did not resolve: %q vs %q", existing, canonicalSandboxWorkspaceRoot(real))
+	}
+
+	// The leaf, and its parent, do not exist.
+	missing := filepath.Join(link, ".cache", "zero")
+	got := canonicalSandboxWorkspaceRoot(missing)
+	want := filepath.Join(existing, ".cache", "zero")
+	if got != want {
+		t.Errorf("missing leaf normalized to %q, want %q — the ancestor was not resolved", got, want)
+	}
+	if !pathWithinRoot(existing, got) {
+		t.Errorf("%q should be inside %q once both are canonical", got, existing)
+	}
+}

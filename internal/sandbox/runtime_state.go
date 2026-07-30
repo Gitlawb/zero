@@ -274,8 +274,32 @@ func canonicalSandboxWorkspaceRoot(root string) string {
 			cleaned = absolute
 		}
 	}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		return resolved
+	// EvalSymlinks fails outright when the LEAF does not exist, which is the
+	// normal case for a cache or runtime root that has not been created yet. A
+	// plain call therefore resolved an existing workspace while leaving a
+	// not-yet-created cache root unresolved, and the two were compared against
+	// each other — the containment check that decides whether the runtime tree
+	// must move out of the workspace then ran on /private/var/... versus
+	// /var/..., missed, and left the tree inside the workspace.
+	//
+	// Resolve the longest existing ancestor and re-append the rest, so a path
+	// normalizes the same way whether or not its final segments exist yet.
+	remainder := ""
+	current := cleaned
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			if remainder == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Nothing along the path resolved; the cleaned absolute form is the
+			// best stable key available.
+			return cleaned
+		}
+		remainder = filepath.Join(filepath.Base(current), remainder)
+		current = parent
 	}
-	return cleaned
 }
