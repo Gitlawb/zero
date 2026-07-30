@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -393,7 +392,9 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
 	}
-	cacheRoot = filepath.Clean(strings.TrimSpace(cacheRoot))
+	// Same canonicalization as the workspace root above: sandboxRuntimeRootFor
+	// compares them, so they have to be the same spelling of the same path.
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
 	if cacheRoot == "" || cacheRoot == "." {
 		return "", errors.New("user cache directory is unavailable for sandbox runtime")
 	}
