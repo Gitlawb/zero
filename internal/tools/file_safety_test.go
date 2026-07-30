@@ -103,7 +103,7 @@ func TestWriteFileOverwriteRefusedWhenChangedOnDisk(t *testing.T) {
 	}
 }
 
-func TestWriteFileOverwriteAllowedForUntrackedFile(t *testing.T) {
+func TestWriteFileOverwriteRequiresExactRead(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	if err := os.WriteFile(path, []byte("v1\n"), 0o644); err != nil {
@@ -112,15 +112,65 @@ func TestWriteFileOverwriteAllowedForUntrackedFile(t *testing.T) {
 	registry := safetyRegistry(t, dir)
 	tracker := NewFileTracker()
 
-	// Never read through a tool → no baseline → overwrite is the model's call.
+	// Never read through a tool: an overwrite would discard unseen content.
 	res := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
 		"path": "f.txt", "content": "v3\n", "overwrite": true,
 	}, grantedOpts(tracker))
-	if res.Status != StatusOK {
-		t.Fatalf("untracked overwrite should be allowed, got %q", res.Output)
+	if res.Status != StatusError || !strings.Contains(res.Output, "has not been read exactly") {
+		t.Fatalf("unseen overwrite should be refused, got %q", res.Output)
 	}
-	if got, _ := os.ReadFile(path); string(got) != "v3\n" {
-		t.Fatalf("file = %q, want v3", got)
+	if got, _ := os.ReadFile(path); string(got) != "v1\n" {
+		t.Fatalf("file = %q, want original content", got)
+	}
+}
+
+func TestEditFileAllowsSeenRangeAndRejectsUnseenRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	if res := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "f.txt", "start_line": 2, "end_line": 2,
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("partial read failed: %s", res.Output)
+	}
+	if res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "f.txt", "old_string": "gamma", "new_string": "delta",
+	}, opts); res.Status != StatusError || !strings.Contains(res.Output, "has not been read exactly") {
+		t.Fatalf("unseen edit should be refused, got %q", res.Output)
+	}
+	if res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "f.txt", "old_string": "beta", "new_string": "bravo",
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("seen-range edit should succeed, got %q", res.Output)
+	}
+}
+
+func TestMinifiedReadDoesNotAuthorizeExactEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.go")
+	if err := os.WriteFile(path, []byte("package p\n\nvar value = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewScopedReadMinifiedFileTool(dir, nil))
+	registry.Register(NewScopedEditFileTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	if res := registry.RunWithOptions(context.Background(), "read_minified_file", map[string]any{"path": "f.go"}, opts); res.Status != StatusOK {
+		t.Fatalf("minified read failed: %s", res.Output)
+	}
+	res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "f.go", "old_string": "var value = 1", "new_string": "var value = 2",
+	}, opts)
+	if res.Status != StatusError || !strings.Contains(res.Output, "has not been read exactly") {
+		t.Fatalf("minified view must not authorize exact edit, got %q", res.Output)
 	}
 }
 

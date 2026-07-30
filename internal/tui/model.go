@@ -5395,6 +5395,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				tool:            result.Name,
 				status:          result.Status,
 				detail:          toolResultDetail(result),
+				meta:            result.Meta,
 				runID:           runID,
 				changedFiles:    result.ChangedFiles,
 				changeSummaries: result.ChangeSummaries,

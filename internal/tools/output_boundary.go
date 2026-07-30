@@ -63,8 +63,9 @@ func applySelfManagedOutputBudget(tool Tool, toolName string, args map[string]an
 		if budgeted.reason == "" {
 			budgeted.reason = "upstream_tool_budget"
 		}
+		budgeted.spillPath = result.Meta["spill_path"]
 	}
-	if budgeted.truncated {
+	if budgeted.truncated && budgeted.spillPath == "" {
 		budgeted = attachExistingSpill(toolName, result.Output, budget, budgeted)
 	}
 	result.Output = budgeted.text

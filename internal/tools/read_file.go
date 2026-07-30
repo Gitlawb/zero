@@ -96,7 +96,33 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if directBudget {
 		maxBytes = readOutputBudgetBytes
 	}
-	return renderReadFileRange(absolutePath, relativePath, stats.lines, startLine, endLine, maxLines, maxBytes)
+	result := renderReadFileRange(absolutePath, relativePath, stats.lines, startLine, endLine, maxLines, maxBytes)
+	if result.Status == StatusOK && result.Meta["truncation_reason"] != "byte_budget" {
+		seenStart, seenEnd := renderedReadRange(stats.lines, startLine, endLine, maxLines)
+		options.FileTracker.RecordSeenRange(absolutePath, seenStart, seenEnd, stats.lines)
+		if result.Meta == nil {
+			result.Meta = map[string]string{}
+		}
+		result.Meta["file_version"] = stats.hash
+		result.Meta["seen_lines"] = fmt.Sprintf("%d-%d", seenStart, seenEnd)
+	}
+	return result
+}
+
+func renderedReadRange(total, start, end, maxLines int) (int, int) {
+	if start > total {
+		return start, start
+	}
+	if end == 0 || end > total {
+		end = total
+	}
+	if end < start {
+		end = start
+	}
+	if maxLines > 0 && end-start+1 > maxLines {
+		end = start + maxLines - 1
+	}
+	return start, end
 }
 
 func renderReadFileRange(absolutePath string, relativePath string, total int, startLine int, endLine int, maxLines int, maxBytes int) Result {

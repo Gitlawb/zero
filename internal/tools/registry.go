@@ -135,6 +135,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
+		result = reduceCommandOutput(name, args, result)
 		if selfManagedOutput {
 			result = applySelfManagedOutputBudget(tool, name, args, result)
 		} else {

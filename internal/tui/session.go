@@ -635,6 +635,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				tool:            name,
 				status:          status,
 				detail:          output,
+				meta:            payloadStringMap(payload, "meta"),
 				changedFiles:    payloadStringSlice(payload, "changedFiles"),
 				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
 			})
@@ -826,6 +827,23 @@ func payloadStringSlice(payload map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func payloadStringMap(payload map[string]any, key string) map[string]string {
+	value, ok := payloadMap(payload, key)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(value))
+	for name, raw := range value {
+		if text, ok := raw.(string); ok {
+			out[name] = text
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func payloadExecutionChanges(payload map[string]any, key string) []execution.Change {

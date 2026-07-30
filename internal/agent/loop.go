@@ -1076,6 +1076,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}, nil
 		}
 	}
+	if isShellCommandTool(call.Name) {
+		normalizeNoopAdditionalPermissions(args, options.Cwd, options.Sandbox)
+	}
 	// tool_search is the gateway to the allowlisted deferred tools, so a non-empty
 	// EnabledTools allowlist that omits it must NOT reject the call — otherwise the
 	// discovery tool exposed to the model rejects at dispatch time (an inescapable
@@ -2748,6 +2751,45 @@ func shellCommandAdditionalPermissionsRequested(args map[string]any) bool {
 	return strings.TrimSpace(value) == string(tools.SandboxPermissionsWithAdditionalPermissions)
 }
 
+// normalizeNoopAdditionalPermissions treats a provider-expanded empty or
+// already-covered additional_permissions object as if it had been omitted.
+// Some strict-schema providers materialize every optional property and may add
+// a workspace read that the default sandbox already grants; rejecting either
+// no-op makes the model retry an otherwise valid command. Requests that broaden
+// access and malformed payloads are left untouched so validation stays closed.
+func normalizeNoopAdditionalPermissions(args map[string]any, basePath string, engine *sandbox.Engine) {
+	raw, exists := args["additional_permissions"]
+	if !exists || raw == nil {
+		return
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	var profile sandbox.RequestPermissionProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return
+	}
+	normalized, err := sandbox.NormalizeRequestPermissionProfile(profile, basePath)
+	if err != nil {
+		return
+	}
+	noop := normalized.Empty()
+	if !noop && engine != nil {
+		if grantProfile, grantErr := sandbox.RequestPermissionGrantProfile(normalized); grantErr == nil {
+			noop = engine.CoversRequestPermissions(grantProfile)
+		}
+	}
+	if !noop {
+		return
+	}
+	delete(args, "additional_permissions")
+	if rawMode, ok := args["sandbox_permissions"].(string); ok &&
+		strings.TrimSpace(rawMode) == string(tools.SandboxPermissionsWithAdditionalPermissions) {
+		args["sandbox_permissions"] = string(tools.SandboxPermissionsUseDefault)
+	}
+}
+
 func inlineAdditionalPermissionsProfile(args map[string]any, basePath string) (sandbox.RequestPermissionProfile, bool, error) {
 	if !shellCommandAdditionalPermissionsRequested(args) {
 		if _, exists := args["additional_permissions"]; exists {
@@ -2938,22 +2980,20 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 	//   2. tool_search — always present, right after the stable block;
 	//   3. loaded deferred tools, alpha-sorted — APPENDED, so an unloaded->loaded
 	//      transition grows the tail instead of inserting into the eager block.
-	// (tool_search's discovery text still shrinks as tools load, so keeping it and
-	// the loaded tail AFTER the eager block preserves the eager tools' cache across a
-	// load; fully stabilizing the loader's own description is a scoped follow-up.)
+	// tool_search's compact catalog also stays byte-stable as tools load, so only
+	// the appended full-schema tail changes.
 	eager := make([]zeroruntime.ToolDefinition, 0, len(visible))
 	loadedTail := make([]zeroruntime.ToolDefinition, 0)
-	var hiddenTools []tools.Tool
+	var deferredCatalog []tools.Tool
 	for _, tool := range visible {
 		name := tool.Name()
 		if name == tools.ToolSearchToolName {
 			continue // added explicitly between the eager block and the loaded tail
 		}
 		if tools.IsDeferred(tool) {
+			deferredCatalog = append(deferredCatalog, tool)
 			if loaded[name] {
 				loadedTail = append(loadedTail, cachedRuntimeToolDefinition(defCache, tool))
-			} else {
-				hiddenTools = append(hiddenTools, tool)
 			}
 			continue
 		}
@@ -2966,15 +3006,16 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 		return loadedTail[left].Name < loadedTail[right].Name
 	})
 
-	discovery := ""
-	if len(hiddenTools) > 0 {
-		discovery = tools.BuildToolSearchDescription(hiddenTools)
-	}
+	// Keep the catalog byte-stable as tools load. tool_search already redirects
+	// requests for an exposed tool back to the current tool list, so retaining
+	// loaded names costs only compact catalog lines and avoids invalidating the
+	// provider cache at the loader definition on every load.
+	discovery := tools.BuildToolSearchDescription(deferredCatalog)
 
 	// tool_search is guaranteed runnable on the active path, so it is ALWAYS exposed
 	// — even when a non-empty EnabledTools allowlist omits it (the operator
 	// allowlisted the deferred tools, not the loader). It sits right after the stable
-	// eager block and carries the discovery list for still-hidden tools.
+	// eager block and carries the stable deferred-tool catalog.
 	description := loader.Description()
 	if discovery != "" {
 		description = discovery

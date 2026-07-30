@@ -26,6 +26,16 @@ func TestSpecialistDelegationContext(t *testing.T) {
 	if strings.Contains(got, "nameless") {
 		t.Fatalf("nameless entry should be skipped: %q", got)
 	}
+	for _, want := range []string{"reduce total context", "Do not delegate small direct work", "bounded assignment"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing evidence-driven delegation guidance %q: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"delegate to it proactively", "launch several specialists in parallel"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("retained broad delegation guidance %q: %q", unwanted, got)
+		}
+	}
 }
 
 func TestSystemPromptIncludesDelegationOnlyWithSpecialists(t *testing.T) {

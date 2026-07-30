@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -142,5 +143,87 @@ func TestExecuteToolCallStillPromptsForValidAdditionalPermissions(t *testing.T) 
 	}
 	if promptCalls != 1 {
 		t.Fatalf("OnPermissionRequest called %d times, want exactly 1 for a valid elevation request", promptCalls)
+	}
+}
+
+func TestNormalizeProviderExpandedEmptyAdditionalPermissions(t *testing.T) {
+	for _, mode := range []string{
+		string(tools.SandboxPermissionsUseDefault),
+		string(tools.SandboxPermissionsWithAdditionalPermissions),
+	} {
+		args := map[string]any{
+			"command":             "./zero --version",
+			"sandbox_permissions": mode,
+			"additional_permissions": map[string]any{
+				"file_system": map[string]any{
+					"deny_read": []any{},
+					"entries":   []any{},
+					"read":      []any{},
+					"write":     []any{},
+				},
+				"network": map[string]any{"enabled": false},
+			},
+		}
+		normalizeNoopAdditionalPermissions(args, t.TempDir(), nil)
+		if _, exists := args["additional_permissions"]; exists {
+			t.Fatalf("mode %q retained empty additional_permissions: %#v", mode, args)
+		}
+		if got := args["sandbox_permissions"]; got != string(tools.SandboxPermissionsUseDefault) {
+			t.Fatalf("mode %q normalized to %q, want use_default", mode, got)
+		}
+	}
+}
+
+func TestNormalizeAdditionalPermissionsPreservesRealRequest(t *testing.T) {
+	args := map[string]any{
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
+		"additional_permissions": map[string]any{
+			"network": map[string]any{"enabled": true},
+		},
+	}
+	normalizeNoopAdditionalPermissions(args, t.TempDir(), nil)
+	if _, exists := args["additional_permissions"]; !exists {
+		t.Fatal("non-empty additional_permissions was removed")
+	}
+	if got := args["sandbox_permissions"]; got != string(tools.SandboxPermissionsWithAdditionalPermissions) {
+		t.Fatalf("sandbox mode changed to %q", got)
+	}
+}
+
+func TestNormalizeAdditionalPermissionsRemovesWorkspaceReadAlreadyCoveredBySandbox(t *testing.T) {
+	root := t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	args := map[string]any{
+		"command":             "./zero --version",
+		"sandbox_permissions": string(tools.SandboxPermissionsUseDefault),
+		"additional_permissions": map[string]any{
+			"file_system": map[string]any{
+				"entries": []any{
+					map[string]any{
+						"access": "read",
+						"path": map[string]any{
+							"type": "path",
+							"path": ".",
+						},
+					},
+				},
+				"deny_read": []any{},
+				"read":      []any{},
+				"write":     []any{},
+			},
+			"network": map[string]any{"enabled": false},
+		},
+	}
+
+	normalizeNoopAdditionalPermissions(args, root, engine)
+
+	if _, exists := args["additional_permissions"]; exists {
+		t.Fatalf("already-covered additional_permissions was retained: %#v", args)
+	}
+	if got := args["sandbox_permissions"]; got != string(tools.SandboxPermissionsUseDefault) {
+		t.Fatalf("sandbox mode changed to %q", got)
 	}
 }

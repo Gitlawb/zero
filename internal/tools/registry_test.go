@@ -515,3 +515,28 @@ func TestIsDeferralEligibleDecouplesFromDeferred(t *testing.T) {
 		t.Fatal("IsDeferralEligible(optedOut) = true, want false")
 	}
 }
+
+func TestOptionalBuiltinsUseDeferredDiscovery(t *testing.T) {
+	wantDeferred := map[string]bool{
+		"bash":               true,
+		"lsp_navigate":       true,
+		"read_minified_file": true,
+		"web_fetch":          true,
+		"web_search":         true,
+	}
+	for _, tool := range BuiltinCatalog(t.TempDir()) {
+		if _, listed := wantDeferred[tool.Name()]; listed {
+			if !IsDeferred(tool) {
+				t.Errorf("%s should be deferred", tool.Name())
+			}
+			delete(wantDeferred, tool.Name())
+		} else if tool.Name() == "read_file" || tool.Name() == "grep" || tool.Name() == ExecCommandToolName || tool.Name() == "edit_file" {
+			if IsDeferred(tool) {
+				t.Errorf("essential tool %s must stay eager", tool.Name())
+			}
+		}
+	}
+	for missing := range wantDeferred {
+		t.Errorf("deferred builtin %s missing from catalog", missing)
+	}
+}

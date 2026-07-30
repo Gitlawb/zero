@@ -58,6 +58,7 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 		baseTool: baseTool{
 			name:        "web_search",
 			description: "Search the web for a query and return ranked results (title, URL, snippet). Complements web_fetch, which retrieves a single known URL.",
+			deferred:    true,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{

@@ -74,6 +74,11 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if cerr := options.FileTracker.CheckConflict(absolutePath, contentBytes); cerr != nil {
 		return errorResult(fileConflictMessage(relativePath))
 	}
+	if options.FileTracker != nil {
+		if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+			return errorResult(fileUnseenMessage(relativePath))
+		}
+	}
 	content := string(contentBytes)
 	occurrences := strings.Count(content, oldString)
 
@@ -131,7 +136,12 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if !replaceAll && occurrences > 1 {
 		return errorResult(fmt.Sprintf("Error: old_string matches %d locations in %s. Either make old_string more specific, or pass replace_all: true to replace every occurrence.", occurrences, relativePath))
 	}
+	if options.FileTracker != nil && !allOccurrencesSeen(options.FileTracker, absolutePath, content, oldString, replaceAll) {
+		return errorResult(fileUnseenMessage(relativePath))
+	}
 
+	previouslySeenWhole := options.FileTracker.SeenWhole(absolutePath)
+	editStart, _ := lineSpanForOffset(content, strings.Index(content, oldString), len(oldString))
 	updated := strings.Replace(content, oldString, newString, 1)
 	replacedCount := 1
 	if replaceAll {
@@ -155,6 +165,12 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
+	if previouslySeenWhole {
+		options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(updated), lineCount(updated))
+	} else {
+		newEnd := editStart + strings.Count(newString, "\n")
+		options.FileTracker.RecordSeenRange(absolutePath, editStart, newEnd, lineCount(updated))
+	}
 
 	suffix := ""
 	if replacedCount != 1 {
@@ -168,4 +184,32 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// summary, so the red/green diff costs zero model tokens.
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
 	return result
+}
+
+func allOccurrencesSeen(tracker *FileTracker, path, content, oldString string, replaceAll bool) bool {
+	offset := 0
+	for {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			return true
+		}
+		index += offset
+		start, end := lineSpanForOffset(content, index, len(oldString))
+		if !tracker.SeenRange(path, start, end) {
+			return false
+		}
+		if !replaceAll {
+			return true
+		}
+		offset = index + len(oldString)
+	}
+}
+
+func lineSpanForOffset(content string, offset, length int) (int, int) {
+	if offset < 0 {
+		return 1, 1
+	}
+	start := strings.Count(content[:offset], "\n") + 1
+	end := start + strings.Count(content[offset:min(len(content), offset+length)], "\n")
+	return start, end
 }

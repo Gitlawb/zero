@@ -38,7 +38,8 @@ type transcriptRow struct {
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
 	hint       string       // one-line actionable hint, rendered faintly below error rows
 	arg        string       // secondary argument hint (pattern/command), for tool call rows
-	runID      int          // owning run, for tool call rows (0 = rehydrated/unknown)
+	meta       map[string]string
+	runID      int // owning run, for tool call rows (0 = rehydrated/unknown)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
 	expanded   bool // collapsible transcript rows, e.g. provider thoughts

@@ -34,6 +34,7 @@ type FileVersion struct {
 type FileTracker struct {
 	mu       sync.Mutex
 	versions map[string]FileVersion
+	seen     map[string]fileObservation
 	// created preserves the order in which brand-new files (paths that did not
 	// exist before a write tool created them) were first written this session.
 	// A map would lose that order and complicates de-duplication, so a slice
@@ -43,7 +44,20 @@ type FileTracker struct {
 }
 
 func NewFileTracker() *FileTracker {
-	return &FileTracker{versions: make(map[string]FileVersion)}
+	return &FileTracker{
+		versions: make(map[string]FileVersion),
+		seen:     make(map[string]fileObservation),
+	}
+}
+
+type lineRange struct {
+	start int
+	end   int
+}
+
+type fileObservation struct {
+	whole  bool
+	ranges []lineRange
 }
 
 // Record stores the version of absPath given its content and optional stat info.
@@ -63,8 +77,69 @@ func (tracker *FileTracker) RecordHash(absPath string, hash string, info os.File
 		version.MTime = info.ModTime()
 	}
 	tracker.mu.Lock()
+	if previous, ok := tracker.versions[absPath]; !ok || previous.Hash != hash {
+		delete(tracker.seen, absPath)
+	}
 	tracker.versions[absPath] = version
 	tracker.mu.Unlock()
+}
+
+// RecordSeenRange records exact, non-elided source lines returned to the model.
+// Ranges accumulate while the content hash remains unchanged.
+func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total int) {
+	if tracker == nil || start < 1 || end < start {
+		return
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation := tracker.seen[absPath]
+	if start == 1 && end >= total {
+		observation.whole = true
+		observation.ranges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	observation.ranges = append(observation.ranges, lineRange{start: start, end: end})
+	tracker.seen[absPath] = observation
+}
+
+// SeenRange reports whether every line in the requested range was returned
+// exactly to the model for the currently tracked version.
+func (tracker *FileTracker) SeenRange(absPath string, start, end int) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	if observation.whole {
+		return true
+	}
+	for line := start; line <= end; line++ {
+		covered := false
+		for _, seen := range observation.ranges {
+			if line >= seen.start && line <= seen.end {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
+func (tracker *FileTracker) SeenWhole(absPath string) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	return tracker.seen[absPath].whole
 }
 
 // Version returns the recorded version for absPath and whether one exists.
@@ -119,6 +194,7 @@ func (tracker *FileTracker) Forget(absPath string) {
 	}
 	tracker.mu.Lock()
 	delete(tracker.versions, absPath)
+	delete(tracker.seen, absPath)
 	tracker.mu.Unlock()
 }
 
@@ -152,4 +228,8 @@ func HashContent(content []byte) string {
 func fileConflictMessage(relativePath string) string {
 	return "Error writing " + relativePath + ": " + ErrFileChangedOnDisk.Error() +
 		" (it may have been edited outside Zero). Re-read it with read_file, then re-apply your change so you do not overwrite the newer content."
+}
+
+func fileUnseenMessage(relativePath string) string {
+	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file, then retry the edit."
 }

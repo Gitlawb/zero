@@ -29,6 +29,7 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 		baseTool: baseTool{
 			name:        "read_minified_file",
 			description: "Read a source file in a dense, token-cheap form: comments and redundant whitespace removed, no line numbers. Use it to scan or understand code for far fewer tokens than read_file. For exact text, comments, line numbers, or before editing, use read_file instead.",
+			deferred:    true,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{

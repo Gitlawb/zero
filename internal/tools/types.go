@@ -159,6 +159,7 @@ type baseTool struct {
 	parameters   Schema
 	safety       Safety
 	capabilities ToolCapabilities // zero value = EffectUnknown, not thread-safe
+	deferred     bool
 }
 
 func (tool baseTool) Name() string {
@@ -175,6 +176,11 @@ func (tool baseTool) Parameters() Schema {
 
 func (tool baseTool) Safety() Safety {
 	return tool.safety
+}
+
+// Deferred reports whether this built-in is discoverable on demand.
+func (tool baseTool) Deferred() bool {
+	return tool.deferred
 }
 
 func okResult(output string) Result {

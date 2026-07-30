@@ -75,6 +75,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// stale view. Only read current bytes when there is a baseline to compare,
 	// so a first-touch create/overwrite stays a single write with no extra read.
 	if existed {
+		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
+			return errorResult(fileUnseenMessage(relativePath))
+		}
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
@@ -115,6 +118,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(content), lineCount(content))
 	if !existed {
 		options.FileTracker.RecordCreated(absolutePath)
 	}
