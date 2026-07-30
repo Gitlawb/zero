@@ -306,18 +306,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	} else if runtimeRoot != "" {
 		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
 	}
-	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
-		PrincipalSID: identity.SID.String(),
-		WriteRoots:   writeRoots,
-		ReadRoots:    filesystem.ReadRoots,
-		DenyRead:     filesystem.DenyRead,
-		DenyWrite:    filesystem.DenyWrite,
-	})
-	if err != nil {
-		_ = removePrincipal()
-		return nil, err
-	}
-	revertACL, err := applyWindowsACLPlan(plan)
+	revertACL, err := applyWindowsPrincipalACLs(identity.SID.String(), filesystem, writeRoots)
 	if err != nil {
 		_ = removePrincipal()
 		return nil, err
@@ -402,4 +391,55 @@ func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string,
 		return "", fmt.Errorf("create sandbox runtime root: %w", err)
 	}
 	return root, nil
+}
+
+// revokeWindowsPrincipalACEs drops every ACE naming principalSID on paths.
+// A path that does not exist is skipped rather than failing: revocation is
+// cleanup, and there is nothing to clean on a path that was never created.
+func revokeWindowsPrincipalACEs(principalSID string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	plan, err := windowsPrincipalRevokePlan(principalSID, paths)
+	if err != nil {
+		return err
+	}
+	if _, err := applyWindowsACLPlanFn(plan); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyWindowsPrincipalACLs writes the principal's ACEs for one policy: it
+// revokes whatever this trustee already had on the paths the plan touches, then
+// applies the plan.
+//
+// The order is the whole point. applyWindowsACLPlan MERGES into the existing
+// DACL, so without the revocation first a re-run after narrowing a write root
+// or shortening a deny list leaves the previous, wider ACEs beside the new ones
+// and the principal keeps access the current policy no longer grants — the
+// sandbox silently widens as a result of tightening it. Setup does get the
+// chance to notice: marker validation refuses commands with "permission roots
+// or deny lists changed" until setup runs again.
+//
+// Revocation is by TRUSTEE, so it drops every ACE naming this principal on
+// these paths whatever an older version of Zero granted. Its rollback is
+// discarded on purpose: the only failure path from here removes the principal
+// outright, and restoring stale ACEs for an account about to be deleted is the
+// residue this exists to prevent.
+func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy, writeRoots []WritableRoot) (func() error, error) {
+	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
+		PrincipalSID: principalSID,
+		WriteRoots:   writeRoots,
+		ReadRoots:    filesystem.ReadRoots,
+		DenyRead:     filesystem.DenyRead,
+		DenyWrite:    filesystem.DenyWrite,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := revokeWindowsPrincipalACEs(principalSID, windowsACLPlanPaths(plan)); err != nil {
+		return nil, err
+	}
+	return applyWindowsACLPlanFn(plan)
 }
