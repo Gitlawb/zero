@@ -2,10 +2,13 @@ package specialist
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 // concurrencyProbe records the maximum number of tasks in flight at once, and
@@ -264,5 +267,155 @@ func TestNoTaskIsLeftInFlightWhenThePlanReports(t *testing.T) {
 		if report.Tasks[index].ID != id {
 			t.Fatalf("report order %v, want plan order %v", report.Tasks[index].ID, id)
 		}
+	}
+}
+
+// THE EVENT LOG STAYS SINGLE-WRITER under concurrency, and that is what makes
+// the resume reducer safe.
+//
+// Tasks run on their own goroutines; the five lifecycle events do NOT. Dispatch
+// is recorded by the walk before the goroutine starts, and every terminal event
+// by the harvest that the same walk performs. So the log is written by one
+// goroutine in a well-defined order however many tasks overlap — which is why
+// ReducePlanEvents can rely on Sequence and why nothing here needs a lock.
+func TestLifecycleEventsAreWrittenBySingleGoroutine(t *testing.T) {
+	plan := fanOutPlan(t, 4, 12)
+	recorder := &goroutineWitness{}
+	ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			time.Sleep(2 * time.Millisecond)
+			return TaskResult{Outcome: TaskSucceeded}, nil
+		}, recorder)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.goroutines) != 1 {
+		t.Fatalf("the event log was written from %d goroutines: %v", len(recorder.goroutines), recorder.goroutines)
+	}
+	if recorder.dispatched != 12 || recorder.completed != 12 {
+		t.Fatalf("recorded %d dispatches and %d completions for 12 tasks", recorder.dispatched, recorder.completed)
+	}
+}
+
+// goroutineWitness records which goroutine each recorder call arrived on.
+type goroutineWitness struct {
+	mu         sync.Mutex
+	goroutines map[string]bool
+	dispatched int
+	completed  int
+}
+
+func (w *goroutineWitness) note() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.goroutines == nil {
+		w.goroutines = map[string]bool{}
+	}
+	w.goroutines[goroutineLabel()] = true
+}
+
+func (w *goroutineWitness) TaskDispatched(Task) {
+	w.note()
+	w.mu.Lock()
+	w.dispatched++
+	w.mu.Unlock()
+}
+
+func (w *goroutineWitness) TaskCompleted(TaskResult) {
+	w.note()
+	w.mu.Lock()
+	w.completed++
+	w.mu.Unlock()
+}
+
+func (w *goroutineWitness) TaskFailed(TaskResult) { w.note() }
+
+// goroutineLabel identifies the calling goroutine from its stack header. Only a
+// test uses this; production code has no business knowing which goroutine it is
+// on, which is exactly the property being asserted.
+func goroutineLabel() string {
+	buffer := make([]byte, 64)
+	n := runtime.Stack(buffer, false)
+	return string(buffer[:n])[:20]
+}
+
+// RESUME AFTER A PARTIAL CONCURRENT RUN. Several tasks can be in flight when the
+// process dies, so the reducer must report EVERY unfinished one — not just the
+// last — and the remainder must re-run all of them.
+func TestResumeAfterAPartialConcurrentRun(t *testing.T) {
+	plan := mustPlan(t, []any{
+		task("a", "one"), task("b", "two"), task("c", "three"), task("d", "four"),
+		task("e", "join", "a", "b", "c", "d"),
+	}, map[string]any{"max_workers": float64(4)}, readOnlyLimits())
+
+	// a and c finished; b and d were dispatched and never came back — the shape
+	// a crash during a four-wide fan-out actually leaves.
+	events := []sessions.Event{
+		planEvent(1, func() (sessions.EventType, map[string]any) { return PlanAdmittedEvent(plan) }),
+		planEvent(2, func() (sessions.EventType, map[string]any) { return TaskDispatchedEvent(Task{ID: "a"}) }),
+		planEvent(3, func() (sessions.EventType, map[string]any) { return TaskDispatchedEvent(Task{ID: "b"}) }),
+		planEvent(4, func() (sessions.EventType, map[string]any) { return TaskDispatchedEvent(Task{ID: "c"}) }),
+		planEvent(5, func() (sessions.EventType, map[string]any) { return TaskDispatchedEvent(Task{ID: "d"}) }),
+		// Terminal events INTERLEAVED and out of dispatch order, which is what
+		// concurrency produces.
+		planEvent(6, func() (sessions.EventType, map[string]any) { return TaskCompletedEvent(TaskResult{ID: "c"}) }),
+		planEvent(7, func() (sessions.EventType, map[string]any) { return TaskCompletedEvent(TaskResult{ID: "a"}) }),
+	}
+
+	progress, ok := ReducePlanEvents(events)
+	if !ok {
+		t.Fatal("the reducer found no plan")
+	}
+	if len(progress.Unfinished) != 2 {
+		t.Fatalf("unfinished = %v; BOTH in-flight tasks must be reported", progress.Unfinished)
+	}
+	unfinished := map[string]bool{}
+	for _, id := range progress.Unfinished {
+		unfinished[id] = true
+	}
+	if !unfinished["b"] || !unfinished["d"] {
+		t.Fatalf("unfinished = %v, want b and d", progress.Unfinished)
+	}
+
+	remaining, err := RemainingPlan(plan, progress, readOnlyLimits())
+	if err != nil {
+		t.Fatalf("RemainingPlan: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range remaining.Order() {
+		got[id] = true
+	}
+	for _, id := range []string{"b", "d", "e"} {
+		if !got[id] {
+			t.Fatalf("the remainder %v must re-run %q", remaining.Order(), id)
+		}
+	}
+	for _, id := range []string{"a", "c"} {
+		if got[id] {
+			t.Fatalf("the remainder %v re-runs %q, which already succeeded", remaining.Order(), id)
+		}
+	}
+	// e depended on all four; the two that succeeded are stripped and the two
+	// that did not survive as edges, or the remainder would run e before its
+	// real predecessors.
+	for _, task := range remaining.Tasks() {
+		if task.ID != "e" {
+			continue
+		}
+		deps := map[string]bool{}
+		for _, dep := range task.DependsOn {
+			deps[dep] = true
+		}
+		if !deps["b"] || !deps["d"] {
+			t.Fatalf("e depends on %v; the unfinished predecessors must survive", task.DependsOn)
+		}
+		if deps["a"] || deps["c"] {
+			t.Fatalf("e depends on %v; a satisfied dependency must be dropped", task.DependsOn)
+		}
+	}
+	// And the remainder still runs concurrently — narrowing must not quietly
+	// serialise what was a fan-out.
+	if remaining.Budget().MaxWorkers != 4 {
+		t.Fatalf("the remainder's max_workers = %d, want 4", remaining.Budget().MaxWorkers)
 	}
 }

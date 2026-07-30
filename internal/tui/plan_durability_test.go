@@ -2,6 +2,8 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 func durableBridge(t *testing.T) (*PlanProgressBridge, *sessions.Store, string) {
@@ -219,5 +222,81 @@ func TestTheBridgeIsBoundToTheActiveSession(t *testing.T) {
 	}
 	if got := recordedTypes(t, store, session.SessionID); len(got) != 1 || got[0] != sessions.EventPlanAdmitted {
 		t.Fatalf("recorded %v; beginRun did not bind the bridge to the active session", got)
+	}
+}
+
+// A CONCURRENT PLAN RECORDED THROUGH THE REAL BRIDGE, into a real store, with
+// per-task progress arriving from the task goroutines at the same time.
+//
+// This is the combination nothing else exercises: the five lifecycle events are
+// written from the executor's single walk goroutine while TaskProgress is called
+// from every task's own. Under -race it is also the proof that the bridge's lock
+// actually covers what it claims to.
+func TestAConcurrentPlanIsRecordedCompletely(t *testing.T) {
+	bridge, store, sessionID := durableBridge(t)
+
+	const tasks = 8
+	plan := samplePlan(t)
+	bridge.PlanAdmitted(plan)
+
+	// THE OVERLAP HAS TO BE REAL. A first version let each task's goroutine make
+	// five quick calls and finish before the next dispatch, so the reader and
+	// the writer of the card map never actually met and -race had nothing to
+	// find. These spin until told to stop, so later dispatches provably run
+	// while earlier tasks are streaming.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for index := 0; index < tasks; index++ {
+		id := fmt.Sprintf("t%d", index)
+		// Dispatch from the single "walk" goroutine, exactly as the executor
+		// does — the ordering guarantee under test comes from that, not luck.
+		bridge.TaskDispatched(specialist.Task{ID: id, Prompt: "x"})
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					bridge.TaskProgress(id, streamjson.Event{Type: streamjson.EventToolCall, Name: "grep"})
+				}
+			}
+		}(id)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	for index := 0; index < tasks; index++ {
+		bridge.TaskCompleted(specialist.TaskResult{ID: fmt.Sprintf("t%d", index), Attempts: 1})
+	}
+	bridge.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: tasks})
+
+	if err := bridge.RecordingError(); err != nil {
+		t.Fatalf("recording failed: %v", err)
+	}
+	got := recordedTypes(t, store, sessionID)
+	dispatched, completed := 0, 0
+	for _, eventType := range got {
+		switch eventType {
+		case sessions.EventTaskDispatched:
+			dispatched++
+		case sessions.EventTaskCompleted:
+			completed++
+		}
+	}
+	if dispatched != tasks || completed != tasks {
+		t.Fatalf("recorded %d dispatches and %d completions for %d tasks: %v", dispatched, completed, tasks, got)
+	}
+	// Every dispatch precedes its completion in the log, which is what makes an
+	// interrupted plan's in-flight tasks distinguishable on resume.
+	firstCompleted := -1
+	for index, eventType := range got {
+		if eventType == sessions.EventTaskCompleted && firstCompleted < 0 {
+			firstCompleted = index
+		}
+		if eventType == sessions.EventTaskDispatched && firstCompleted >= 0 {
+			t.Fatalf("a dispatch was recorded after a completion: %v", got)
+		}
 	}
 }
