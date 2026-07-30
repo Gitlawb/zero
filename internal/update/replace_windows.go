@@ -67,6 +67,15 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)",
 				ErrTargetPossiblyTampered, err, markErr, kept,
 			)
+		} else if kept != "" {
+			// The move succeeded but the post-move verification did not, so
+			// oldPath is already vacated — point at kept, the path the
+			// (possibly substituted) bytes actually landed at, not the
+			// path that no longer holds them.
+			return fmt.Errorf(
+				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to %s but could not be verified there: %v)",
+				ErrTargetPossiblyTampered, err, markErr, kept, keepErr,
+			)
 		}
 		return fmt.Errorf(
 			"%w: %v (the recovery marker could not be written: %v — manually copy %s somewhere safe now)",
@@ -190,7 +199,11 @@ func keepUnmarkedRecoveryCopy(oldPath string) (string, error) {
 		return "", fmt.Errorf("%w: move verified recovery copy to %s: %v", ErrTargetPossiblyTampered, kept, err)
 	}
 	if err := verifyPromotedTarget(file, kept); err != nil {
-		return "", fmt.Errorf("%w: verify recovery copy at %s: %v", ErrTargetPossiblyTampered, kept, err)
+		// The rename already reported success, so oldPath is no longer a
+		// reliable location for the caller to fall back to — surface kept
+		// anyway so the operator is pointed at the actual (if unverified)
+		// destination instead of a path the move already vacated.
+		return kept, fmt.Errorf("%w: verify recovery copy at %s: %v", ErrTargetPossiblyTampered, kept, err)
 	}
 	return kept, nil
 }

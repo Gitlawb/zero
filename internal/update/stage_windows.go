@@ -201,13 +201,18 @@ func existingRecoveryPaths(targetPath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// NTFS is case-insensitive (case-preserving), so a recovery file can exist
+	// on disk as e.g. "zero.exe.OLD" — fold both sides before matching, or it
+	// silently drops out of every caller's fail-closed check below.
+	lowerBase := strings.ToLower(base)
 	var paths []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == base+".old" ||
-			(strings.HasPrefix(name, base+".") &&
-				strings.HasSuffix(name, ".old") &&
-				len(name) > len(base)+len("..old")) {
+		lowerName := strings.ToLower(name)
+		if lowerName == lowerBase+".old" ||
+			(strings.HasPrefix(lowerName, lowerBase+".") &&
+				strings.HasSuffix(lowerName, ".old") &&
+				len(lowerName) > len(lowerBase)+len("..old")) {
 			paths = append(paths, filepath.Join(dir, name))
 		}
 	}
