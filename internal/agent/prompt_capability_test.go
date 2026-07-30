@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -15,18 +16,37 @@ import (
 // Deliberately not CoreReadOnlyToolsScoped, which despite its name also carries
 // ask_user and request_permissions (both EffectInteractive). A run holding
 // those genuinely can prompt, so the policy applies to it and the gate keeps
-// it; that is why this helper enumerates the plan grant instead.
+// it; that is why this helper narrows to the plan grant instead.
+//
+// IT READS THE AUTHORITATIVE LIST. It used to enumerate its own copy, and the
+// copy differed from specialist.PlanReadOnlyToolNames by exactly one entry —
+// update_plan — which is the entry that broke this. The test asserted the
+// policy was dropped for a grant that was not the grant, and passed for the
+// whole period a real plan child carried the policy. A test that builds its own
+// version of the thing under test cannot catch the thing under test changing.
 func readOnlyRegistry(t *testing.T) *tools.Registry {
 	t.Helper()
-	planTools := map[string]bool{
-		"read_file": true, "read_minified_file": true, "list_directory": true,
-		"grep": true, "glob": true, "lsp_navigate": true,
+	planTools := map[string]bool{}
+	for _, name := range specialist.PlanReadOnlyToolNames() {
+		planTools[name] = true
 	}
 	registry := tools.NewRegistry()
+	registered := 0
 	for _, tool := range tools.CoreReadOnlyToolsScoped(t.TempDir(), nil) {
 		if planTools[tool.Name()] {
 			registry.Register(tool)
+			registered++
 		}
+	}
+	// WHAT THIS CAN AND CANNOT PROVE, said plainly. A grant name that lives
+	// outside the scoped core set is invisible here — update_plan was exactly
+	// that, which is why re-adding it does not fail these tests. This half
+	// proves "a run holding these read-only tools drops the policy"; the other
+	// half, that every name in the grant IS read-only by capability, is
+	// TestEveryPlanGrantToolIsReadOnlyByCapability in internal/cli, against the
+	// real registry. Neither alone is the guarantee.
+	if registered == 0 {
+		t.Fatal("no plan-grant tool was registered; this fixture proves nothing")
 	}
 	return registry
 }
