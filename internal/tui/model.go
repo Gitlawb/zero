@@ -1910,11 +1910,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// /plans are already two different things, and one key toggling
 			// whichever happened to be present would make that worse.
 			if m.noBlockingModal() && !m.orchestrate.isEmpty() {
-				// With the sidebar open the plan lives there, so ctrl+g walks
-				// the task selection — the keyboard route to clicking a row.
-				// Without it, the inline panel is the only surface, so ctrl+g
-				// keeps expanding that.
-				if m.sidebarActive() {
+				// When the sidebar owns the plan, ctrl+g walks the task
+				// selection — the keyboard route to clicking a row. When the
+				// inline panel is the surface instead, ctrl+g keeps expanding
+				// that. Same predicate the panel itself uses, so the key always
+				// acts on whichever one is actually on screen.
+				if m.sidebarOwnsOrchestrate() {
 					return m.cycleOrchestrateSelection(), nil
 				}
 				m.orchestrate.expanded = !m.orchestrate.expanded

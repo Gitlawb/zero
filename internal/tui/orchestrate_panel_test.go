@@ -669,3 +669,119 @@ func TestAMissingFinalTotalDoesNotZeroTheCount(t *testing.T) {
 		t.Fatalf("tokensUsed = %d, want the accumulated count kept when no total arrives", m.orchestrate.tokensUsed)
 	}
 }
+
+// planOwnedByTheSidebar is a model whose RIGHT COLUMN is the running plan's surface:
+// a real terminal, real conversation, an admitted plan, and no update_plan steps
+// (which would otherwise claim the sidebar's PLAN section for themselves).
+func planOwnedByTheSidebar(t *testing.T) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.plan = planPanelState{} // the orchestrate plan, not update_plan, owns the section
+	m.now = func() time.Time { return time.Unix(1000, 0) }
+	m.orchestrate.admit(diamondAdmitted(), m.now())
+	if !m.sidebarActive() {
+		t.Fatal("sanity check failed: an admitted plan on a 100-col terminal must open the sidebar")
+	}
+	return m
+}
+
+// ONE PLAN, ONE SURFACE. The right column carries the progress bar, the task
+// list, the live detail and every task's agent row. The inline panel drawing the
+// same plan two rows above the composer is a second copy of it that costs footer
+// height the conversation wanted.
+func TestTheInlinePanelStandsDownWhenTheSidebarHasThePlan(t *testing.T) {
+	m := planOwnedByTheSidebar(t)
+	if got := m.renderOrchestratePanel(100); got != "" {
+		t.Errorf("the sidebar is showing this plan; the inline panel must not repeat it:\n%s", got)
+	}
+	// Expanding it changes nothing: the duplication is the problem, not the size.
+	m.orchestrate.expanded = true
+	if got := m.renderOrchestratePanel(100); got != "" {
+		t.Errorf("expanded inline panel drew over the sidebar's copy:\n%s", got)
+	}
+}
+
+// A FALLBACK, NOT DEAD CODE. There are real states with no sidebar to carry the
+// plan, and the panel has to still be there in every one of them — otherwise
+// hiding the column loses the running plan entirely.
+func TestTheInlinePanelIsStillTheSurfaceWithoutASidebar(t *testing.T) {
+	for name, arrange := range map[string]func(model) model{
+		"sidebar hidden with ctrl+b": func(m model) model {
+			m.sidebarHidden = true
+			return m
+		},
+		"terminal too narrow for a second column": func(m model) model {
+			m.width = 60
+			return m
+		},
+		"update_plan owns the sidebar's PLAN section": func(m model) model {
+			m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
+			return m
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := arrange(planOwnedByTheSidebar(t))
+			if m.sidebarOwnsOrchestrate() {
+				t.Fatalf("the sidebar must not claim the plan in this state")
+			}
+			rendered := plainRender(t, m.renderOrchestratePanel(100))
+			if !strings.Contains(rendered, "PLAN") {
+				t.Errorf("the plan has no other surface here and must still draw inline, got %q", rendered)
+			}
+		})
+	}
+}
+
+// The column has to arrive WITH the plan, not one task later. Without this the
+// inline panel — which stands down the moment the sidebar takes over — flashes
+// on screen for the gap between admission and the first agent row.
+func TestAnAdmittedPlanAloneOpensTheSidebar(t *testing.T) {
+	m := sidebarTestModel()
+	m.plan = planPanelState{}
+	m.now = func() time.Time { return time.Unix(1000, 0) }
+	if m.sidebarHasContent() {
+		t.Fatal("sanity check failed: no plan, no agents, no files — nothing to show")
+	}
+	m.orchestrate.admit(diamondAdmitted(), m.now())
+	if !m.sidebarHasContent() {
+		t.Error("an admitted plan is the sidebar's content before any task has dispatched")
+	}
+}
+
+// Ctrl+G must act on whichever surface is actually on screen. With the sidebar
+// carrying the plan it walks the task selection; with the inline panel as the
+// surface it expands that. Driven through the real key handler, because the
+// question is what the KEY does, not what the predicate returns.
+func TestCtrlGActsOnWhicheverPlanSurfaceIsOnScreen(t *testing.T) {
+	press := func(m model) model {
+		t.Helper()
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+		return updated.(model)
+	}
+
+	sidebar := press(planOwnedByTheSidebar(t))
+	if sidebar.orchestrate.expanded {
+		t.Error("the sidebar is the surface: ctrl+g must not expand an inline panel that does not draw")
+	}
+
+	inline := planOwnedByTheSidebar(t)
+	inline.sidebarHidden = true
+	if got := press(inline); !got.orchestrate.expanded {
+		t.Error("the inline panel is the only surface: ctrl+g must expand it")
+	}
+
+	// THE CASE THAT SEPARATES THE TWO PREDICATES, and the reason the key was
+	// moved off sidebarActive. The sidebar is up, so sidebarActive() is true —
+	// but update_plan has claimed its PLAN section, so the orchestrate plan is
+	// drawing inline. Keying off "is the sidebar up" cycles a selection in a
+	// list that is not on screen while the panel the user is looking at ignores
+	// the key.
+	contended := planOwnedByTheSidebar(t)
+	contended.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
+	if !contended.sidebarActive() {
+		t.Fatal("sanity check failed: this case needs the sidebar UP and not owning the plan")
+	}
+	if got := press(contended); !got.orchestrate.expanded {
+		t.Error("the sidebar is up but update_plan has its PLAN section: ctrl+g must expand the panel that is actually drawing")
+	}
+}

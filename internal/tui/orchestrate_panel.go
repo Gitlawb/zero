@@ -301,12 +301,40 @@ func (s orchestratePanelState) liveTasks(now time.Time) []orchestrateTask {
 	return live
 }
 
+// sidebarOwnsOrchestrate reports whether the right-hand column is currently the
+// running plan's surface — in which case the inline panel is a second copy of it
+// two rows above the composer, and does not draw.
+//
+// The right column already carries the progress bar, the task list, the live
+// detail and every task's agent row. The inline panel stayed because it predates
+// all of that; keeping both meant the plan announced itself three times on one
+// screen (the admission row, the footer summary, the sidebar) and stole footer
+// height from the conversation to do it.
+//
+// It is a FALLBACK, not dead code. The sidebar needs a wide enough terminal, is
+// suppressed under every full-screen overlay, and hands its PLAN section to
+// update_plan whenever that has steps — so there are real states where the
+// inline panel is the only place a running plan appears, and it still draws in
+// all of them.
+func (m model) sidebarOwnsOrchestrate() bool {
+	if m.orchestrate.isEmpty() || !m.sidebarActive() {
+		return false
+	}
+	// sidebarPlanLines renders update_plan's steps whenever it has any and falls
+	// through to the orchestrate task list only when it does not. With both live
+	// the plan has no sidebar surface, so the inline panel is still the one.
+	return m.plan.isEmpty()
+}
+
 // renderOrchestratePanel draws the plan: one row per task, indented by
 // dependency depth so the shape is legible.
 func (m model) renderOrchestratePanel(width int) string {
 	state := m.orchestrate
 	now := m.orchestrateNow()
 	if !state.visible(now) {
+		return ""
+	}
+	if m.sidebarOwnsOrchestrate() {
 		return ""
 	}
 	if width < orchestrateMinWidth {
