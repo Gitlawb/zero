@@ -170,3 +170,34 @@ func TestANamedWriteToolReachesTheTask(t *testing.T) {
 		t.Fatalf("granted %v; the named write tool must reach the task", granted)
 	}
 }
+
+// ORCHESTRATE MUST NOT BE REMEMBERABLE, and the reason is compositional: a
+// read-only plan never prompts, so every prompt this tool produces is for a
+// plan that can write — and a plan that can write can be given bash, for which
+// the permission layer already refuses to persist an approval.
+//
+// Remembering "always allow orchestrate" would therefore be a strictly broader
+// standing grant than the one that refusal exists to enforce, and it would
+// disable the write-plan approval gate permanently with one keystroke.
+func TestOrchestrateRefusesAPersistentApproval(t *testing.T) {
+	tool := &OrchestrateTool{PostureActive: func() bool { return true }}
+	if !tool.RefusesPersistentPermission() {
+		t.Fatal("orchestrate allows its approval to be remembered, which permanently disables the write-plan gate")
+	}
+	// It stays approvable for THIS call, which is the whole point — only the
+	// permanent form is withheld, exactly as bash behaves.
+	if got := tool.PermissionForArgs(writeCapableArgs()); got != tools.PermissionPrompt {
+		t.Fatalf("permission = %v; a write plan must still be approvable per call", got)
+	}
+	// And bash really is one of the tools a plan may name, which is what makes
+	// the argument above true rather than merely plausible.
+	granted := false
+	for _, name := range PlanWriteToolNames() {
+		if name == "bash" {
+			granted = true
+		}
+	}
+	if !granted {
+		t.Fatal("bash is not in the plan write set; the compositional argument no longer holds and this rule needs rethinking")
+	}
+}

@@ -235,6 +235,20 @@ func (tool *OrchestrateTool) PermanentlyDenied() bool { return !tool.postureActi
 // renderer) and the work lands in a worktree of the plan's own (the isolator).
 // Prompting before either existed would have been asking a user to approve
 // something the screen could not describe.
+// RefusesPersistentPermission reports that an approval for this tool must never
+// be remembered.
+//
+// A read-only plan does not prompt at all, so EVERY prompt this tool produces is
+// for a plan that can write — and a plan that can write can be given bash, for
+// which the permission layer already refuses to persist an approval. Letting
+// "always allow orchestrate" be remembered would be a strictly broader standing
+// grant than the one that refusal exists to prevent, and it would disable the
+// approval gate permanently with a single keystroke.
+//
+// The plan is still approvable for THIS call and for the session; only the
+// permanent form is withheld, which is exactly how bash behaves.
+func (tool *OrchestrateTool) RefusesPersistentPermission() bool { return true }
+
 func (tool *OrchestrateTool) PermissionForArgs(args map[string]any) tools.Permission {
 	if !tool.postureActive() {
 		return tools.PermissionDeny
