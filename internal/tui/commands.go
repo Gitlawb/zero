@@ -27,7 +27,7 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
-	commandRetitle
+	commandRename
 	commandSpec
 	commandInit
 	commandCompact
@@ -226,11 +226,11 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandResume,
 	},
 	{
-		name:        "/retitle",
-		usage:       "/retitle",
+		name:        "/rename",
+		usage:       "/rename [title]",
 		group:       commandGroupSession,
-		description: "Generate concise titles for resumable sessions.",
-		kind:        commandRetitle,
+		description: "Rename the current session (no arg opens an editor).",
+		kind:        commandRename,
 	},
 	{
 		name:        "/spec",

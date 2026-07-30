@@ -813,7 +813,16 @@ func (m model) pickerOverlay(width int) string {
 	// Hints live in the footer (a separator + faint keys), matching the /model
 	// picker and the other bordered boxes.
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-	lines = append(lines, zeroTheme.faint.Render("↑/↓ move   Enter select   Esc close"))
+	footer := zeroTheme.faint.Render("↑/↓ move   Enter select   Esc close")
+	if m.picker.kind == pickerSession {
+		position := 0
+		if len(m.picker.items) > 0 {
+			position = clampInt(m.picker.selected, 0, len(m.picker.items)-1) + 1
+		}
+		count := zeroTheme.faint.Render(fmt.Sprintf("%d / %d", position, len(m.picker.items)))
+		footer = joinHeaderLine(footer, count, innerWidth)
+	}
+	lines = append(lines, footer)
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 

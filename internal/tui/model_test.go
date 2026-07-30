@@ -886,8 +886,9 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got picker=%#v", next.picker)
 	}
-	// Every row carries the session title (in the Label, after the timestamp) and
-	// resolves to / shows the session id (Value + Meta), for both sessions.
+	// Every row carries the session title after the timestamp and resolves by its
+	// hidden session id. Raw ids are implementation detail and must not consume
+	// the visible title width.
 	findByID := func(id string) (pickerItem, bool) {
 		for _, item := range next.picker.items {
 			if item.Value == id {
@@ -904,16 +905,51 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if !strings.Contains(item.Meta, want.id) {
-			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
+		if item.Meta != "" {
+			t.Fatalf("picker %q should not expose raw session id metadata, got %q", want.title, item.Meta)
 		}
 	}
-	// The picker overlay renders the titles and ids.
+	// The picker overlay renders clean title rows plus a position indicator.
 	view := viewString(next.View())
-	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
+	for _, want := range []string{"Resume a session", "Newer", "Older", "1 / 2"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session picker view missing %q:\n%s", want, view)
 		}
+	}
+	for _, id := range []string{first.SessionID, second.SessionID} {
+		if strings.Contains(view, id) {
+			t.Fatalf("session picker view should not expose raw id %q:\n%s", id, view)
+		}
+	}
+
+	// IDs remain searchable even though they are hidden from normal rows.
+	searchByID := *next.picker
+	searchByID.query = first.SessionID
+	searchByID.applyQuery()
+	if len(searchByID.items) != 1 || searchByID.items[0].Value != first.SessionID {
+		t.Fatalf("hidden session id should remain searchable, got %#v", searchByID.items)
+	}
+
+	// An empty result set reports an unambiguous zero position.
+	noResults := next
+	noResults.picker.query = "__missing_session__"
+	noResults.picker.applyQuery()
+	if view := viewString(noResults.View()); !strings.Contains(view, "0 / 0") {
+		t.Fatalf("empty session search should show 0 / 0:\n%s", view)
+	}
+}
+
+func TestSessionPickerLabelAlignsTitles(t *testing.T) {
+	today := sessionPickerLabel("20:47:50", "Today title")
+	older := sessionPickerLabel("Jul 24 10:47", "Older title")
+
+	todayColumn := strings.Index(today, "Today title")
+	olderColumn := strings.Index(older, "Older title")
+	if todayColumn < 0 || olderColumn < 0 {
+		t.Fatalf("sessionPickerLabel omitted a title: today=%q older=%q", today, older)
+	}
+	if todayColumn != olderColumn {
+		t.Fatalf("title columns differ: today=%d (%q), older=%d (%q)", todayColumn, today, olderColumn, older)
 	}
 }
 

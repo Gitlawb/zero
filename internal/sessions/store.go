@@ -719,7 +719,7 @@ func (store *Store) appendPreparedEventsLocked(sessionID string, inputs []prepar
 // serialized under the same per-session lock as AppendEvent and re-reads the
 // latest metadata under that lock before rewriting, so a concurrent append can't
 // clobber the new title (nor the title clobber a concurrent append's event
-// count/timestamp). UpdatedAt is deliberately left untouched: a retitle is not
+// count/timestamp). UpdatedAt is deliberately left untouched: a rename is not
 // activity, so it must not reorder the session in the resumable list. A blank
 // title is rejected so a failed model generation can never erase a useful
 // first-message title, and an unchanged title is a no-op (no rewrite/fsync).
@@ -749,6 +749,40 @@ func (store *Store) UpdateTitle(sessionID string, title string) (Metadata, error
 		return Metadata{}, err
 	}
 	return session, nil
+}
+
+// UpdateTitleIfCurrent replaces a session title only when it still matches
+// expected. It lets background automatic naming avoid overwriting a newer manual
+// rename while keeping the check and write under the same per-session lock.
+func (store *Store) UpdateTitleIfCurrent(sessionID string, expected string, title string) (Metadata, bool, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, false, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return Metadata{}, false, fmt.Errorf("zero session title is required")
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, false, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, false, err
+	}
+	if session.Title != strings.TrimSpace(expected) {
+		return session, false, nil
+	}
+	if session.Title == trimmed {
+		return session, true, nil
+	}
+	session.Title = trimmed
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, false, err
+	}
+	return session, true, nil
 }
 
 // UpdateModel replaces a session's selected model without changing its activity
