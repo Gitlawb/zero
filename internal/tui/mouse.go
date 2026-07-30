@@ -182,7 +182,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// press/drag/release cases above, so it falls through here — resolve what's
 	// under the cursor so it can render with the hover highlight.
 	if mouseHover(msg) {
-		return m.updateHoverTarget(msg), nil
+		hovered := m.updateHoverTarget(msg)
+		// Starting the tick HERE is what lets the hover flow move while the
+		// cursor rests. Bounded by zeromaxingChipAnimating: it runs only while
+		// the chip is actually hovered and stops the moment the cursor leaves,
+		// so an idle session still schedules nothing.
+		return hovered, hovered.ensureSpinnerTick()
 	}
 
 	switch {

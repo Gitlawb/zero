@@ -52,12 +52,12 @@ func (m model) zeromaxingGlowChip() string {
 		return ""
 	}
 	marker := m.zeromaxingPulseGlyph()
-	// HOVER is an UNDERLINE, not a box. The chip is clickable — it opens
-	// /effort — so it has to say so under the cursor, and a background fill is
-	// the one thing this deliberately does not have. An underline reads as
-	// "pressable" without reintroducing the slab.
-	underline := m.hover.kind == hoverZeromaxingChip
-	return m.zeromaxingSpectrumLabel(marker, underline)
+	// HOVER IS A FLOW, not a box and not a static rule. The chip is clickable —
+	// it opens /effort — so it has to say so under the cursor, and a background
+	// fill is the one thing this deliberately does not have. A band travelling
+	// through the letters says "pressable" by moving, which is the same language
+	// the rest of the chip already speaks.
+	return m.zeromaxingSpectrumLabel(marker, m.hover.kind == hoverZeromaxingChip)
 }
 
 // zeromaxingSpectrumLabel paints each character its own hue.
@@ -72,28 +72,84 @@ func (m model) zeromaxingGlowChip() string {
 // no timer of its own — an idle session still schedules none, which is the rule
 // the pulse was built around, and a footer that animated forever would be a
 // timer nobody asked for.
-func (m model) zeromaxingSpectrumLabel(marker string, underline bool) string {
+func (m model) zeromaxingSpectrumLabel(marker string, hovered bool) string {
 	ramp := zeroTheme.spectrum
-	paint := func(style lipgloss.Style, text string) string {
+	letters := []rune(zeromaxingChipLabel)
+	// THE FLOW: a short band that travels left to right through the word and
+	// wraps, so hovering reads as motion rather than as a second static state.
+	// Only the band is underlined, which is what makes it a wave instead of a
+	// rule under the whole label.
+	head := -1
+	if hovered {
+		head = m.zeromaxingFlowHead(len(letters))
+	}
+	inBand := func(index int) bool {
+		if head < 0 {
+			return false
+		}
+		span := len(letters) + zeromaxingFlowBand
+		distance := (index - head + span) % span
+		return distance < zeromaxingFlowBand
+	}
+	paint := func(style lipgloss.Style, text string, lit bool) string {
 		style = style.Bold(true)
-		if underline {
+		if lit {
 			style = style.Underline(true)
 		}
 		return style.Render(text)
 	}
 	if len(ramp) == 0 {
-		return paint(zeroTheme.accent, " "+marker+" "+zeromaxingChipLabel+" ")
+		return paint(zeroTheme.accent, " "+marker+" "+zeromaxingChipLabel+" ", hovered)
 	}
 	offset := m.zeromaxingSpectrumOffset()
 	var out strings.Builder
-	out.WriteString(paint(zeroTheme.faint, " "))
-	out.WriteString(paint(ramp[offset%len(ramp)], marker))
-	out.WriteString(paint(zeroTheme.faint, " "))
-	for index, letter := range zeromaxingChipLabel {
-		out.WriteString(paint(ramp[(index+offset)%len(ramp)], string(letter)))
+	out.WriteString(paint(zeroTheme.faint, " ", false))
+	out.WriteString(paint(ramp[offset%len(ramp)], marker, false))
+	out.WriteString(paint(zeroTheme.faint, " ", false))
+	for index, letter := range letters {
+		out.WriteString(paint(ramp[(index+offset)%len(ramp)], string(letter), inBand(index)))
 	}
-	out.WriteString(paint(zeroTheme.faint, " "))
+	out.WriteString(paint(zeroTheme.faint, " ", false))
 	return out.String()
+}
+
+// zeromaxingChipAnimating reports that the chip needs frames of its own.
+//
+// ONLY WHILE HOVERED, and that bound is the whole justification: an animation
+// that ran on an idle session would be a timer nobody asked for, which is the
+// rule ensureSpinnerTick exists to keep. A cursor resting on a control is a
+// direct interaction, and it stops the moment the cursor leaves.
+//
+// The resting word needs no tick: it walks its colours on the spinner that is
+// already running during a turn, and holds still otherwise.
+func (m model) zeromaxingChipAnimating() bool {
+	return m.zeromaxingActive() && m.hover.kind == hoverZeromaxingChip && !m.reducedMotion
+}
+
+// zeromaxingFlowBand is how many letters the travelling highlight covers. Three
+// reads as a moving band; one reads as a blinking character, and the whole word
+// reads as a static underline.
+const zeromaxingFlowBand = 3
+
+// zeromaxingFlowPeriod is how long the band takes to cross the word once.
+const zeromaxingFlowPeriod = 900 * time.Millisecond
+
+// zeromaxingFlowHead is the band's leading letter.
+//
+// Wall clock, not a frame counter, so the band moves at the same speed whatever
+// cadence the ticks arrive at — and it is pinned under reduced motion, like
+// every other animation here.
+func (m model) zeromaxingFlowHead(letters int) int {
+	if m.reducedMotion || letters <= 0 {
+		return 0
+	}
+	span := int64(letters + zeromaxingFlowBand)
+	period := zeromaxingFlowPeriod.Milliseconds()
+	if period <= 0 {
+		return 0
+	}
+	step := m.now().UnixMilli() % period
+	return int(step * span / period)
 }
 
 // zeromaxingSpectrumOffset rotates the ramp with the pulse. Pinned to 0 under
