@@ -86,6 +86,7 @@ var (
 	procNetUserSetInfo          = netapi32.NewProc("NetUserSetInfo")
 	procNetUserGetInfo          = netapi32.NewProc("NetUserGetInfo")
 	procNetApiBufferFree        = netapi32.NewProc("NetApiBufferFree")
+	procNetUserGetLocalGroups   = netapi32.NewProc("NetUserGetLocalGroups")
 )
 
 // userInfo1 mirrors USER_INFO_1. Field order and widths must match the Win32
@@ -334,6 +335,8 @@ func addWindowsSandboxUserToGroup(username string) error {
 
 // errWindowsSandboxNameCollision reports that the derived account name is taken
 // by a local account Zero did not create. Setup refuses rather than adopting it.
+var errWindowsSandboxPrivilegedAccount = errors.New("the local account matching Zero's derived sandbox name belongs to a privileged group (Administrators, Power Users or Backup Operators); refusing to adopt it as a sandbox principal")
+
 var errWindowsSandboxNameCollision = errors.New("a local account with Zero's derived sandbox name already exists and was not created by Zero")
 
 // windowsSandboxUserIsManaged reports whether a local account is one Zero
@@ -382,6 +385,99 @@ func windowsSandboxUserIsManaged(username string, workspaceKey string) (bool, er
 	return comment == windowsSandboxUserCommentFor(workspaceKey), nil
 }
 
+// localGroupUsersInfo0 mirrors LOCALGROUP_USERS_INFO_0: one group name pointer.
+type localGroupUsersInfo0 struct {
+	Name *uint16
+}
+
+// windowsSandboxUserIsPrivileged reports whether an account belongs to a local
+// group that would make it a poor sandbox principal.
+//
+// Adoption is the reason this exists. Provisioning will take over an account
+// whose name and ownership comment match, and an account that is also in
+// Administrators would hand the sandbox exactly the rights the sandbox is meant
+// to withhold: it could rewrite the ACLs confining it, read the secret locked to
+// the invoking user, and terminate Zero. The name is derived rather than
+// discovered, so an account can end up matching without anyone intending it.
+//
+// Membership is resolved by SID rather than by name so a localised install, where
+// the group is called Administrateurs or Administratoren, is still recognised.
+func windowsSandboxUserIsPrivileged(username string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return false, err
+	}
+	var (
+		buffer  *byte
+		entries uint32
+		total   uint32
+	)
+	status, _, _ := procNetUserGetLocalGroups.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		0, // level: LOCALGROUP_USERS_INFO_0
+		0, // flags: direct membership only
+		uintptr(unsafe.Pointer(&buffer)),
+		uintptr(^uint32(0)), // MAX_PREFERRED_LENGTH
+		uintptr(unsafe.Pointer(&entries)),
+		uintptr(unsafe.Pointer(&total)),
+	)
+	runtime.KeepAlive(name)
+	if status == nerrUserNotFound {
+		return false, nil
+	}
+	if err := netAPIStatus("NetUserGetLocalGroups", status); err != nil {
+		return false, err
+	}
+	if buffer == nil || entries == 0 {
+		return false, nil
+	}
+	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
+
+	privileged, err := privilegedLocalGroupNames()
+	if err != nil {
+		return false, err
+	}
+	groups := unsafe.Slice((*localGroupUsersInfo0)(unsafe.Pointer(buffer)), entries)
+	for _, group := range groups {
+		if group.Name == nil {
+			continue
+		}
+		if privileged[strings.ToLower(windows.UTF16PtrToString(group.Name))] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// privilegedLocalGroupNames resolves the local names of the groups a sandbox
+// principal must not belong to. Resolved from well-known SIDs so the comparison
+// survives a localised Windows install.
+func privilegedLocalGroupNames() (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, wellKnown := range []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinBuiltinAdministratorsSid,
+		windows.WinBuiltinPowerUsersSid,
+		windows.WinBuiltinBackupOperatorsSid,
+	} {
+		sid, err := windows.CreateWellKnownSid(wellKnown)
+		if err != nil {
+			// A group this build of Windows does not define is not a membership
+			// anyone can hold, so it cannot make an account privileged.
+			continue
+		}
+		account, _, _, err := sid.LookupAccount("")
+		if err != nil {
+			continue
+		}
+		out[strings.ToLower(account)] = true
+	}
+	if len(out) == 0 {
+		return nil, errors.New("could not resolve any privileged local group name")
+	}
+	return out, nil
+}
+
 // resolveWindowsSandboxSID looks up the SID for a provisioned principal. The SID
 // is the durable handle: account names can collide with a pre-existing local
 // user, so every ACE and firewall rule is keyed to the SID rather than the name.
@@ -411,6 +507,7 @@ var (
 	resolveWindowsSandboxSIDFn        = resolveWindowsSandboxSID
 	resetWindowsSandboxUserPasswordFn = resetWindowsSandboxUserPassword
 	windowsSandboxUserIsManagedFn     = windowsSandboxUserIsManaged
+	windowsSandboxUserIsPrivilegedFn  = windowsSandboxUserIsPrivileged
 	grantWindowsSandboxLogonRightsFn  = grantWindowsSandboxLogonRights
 	revokeWindowsSandboxLogonRightsFn = revokeWindowsSandboxLogonRights
 )
@@ -451,6 +548,19 @@ func provisionWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentit
 		}
 		if !managed {
 			return windowsSandboxIdentity{}, "", false, fmt.Errorf("%w: %q", errWindowsSandboxNameCollision, username)
+		}
+		// Ours by name and comment is not enough to adopt it. An account that also
+		// sits in Administrators (or Power Users, or Backup Operators) would give
+		// the sandbox the rights the sandbox exists to withhold: it could rewrite
+		// the ACLs confining it, read the secret locked to the invoking user, and
+		// stop Zero. Refuse rather than quietly take it over, and say which account
+		// so an operator can look at it.
+		privileged, err := windowsSandboxUserIsPrivilegedFn(username)
+		if err != nil {
+			return windowsSandboxIdentity{}, "", false, err
+		}
+		if privileged {
+			return windowsSandboxIdentity{}, "", false, fmt.Errorf("%w: %q", errWindowsSandboxPrivilegedAccount, username)
 		}
 		// Deliberately NOT resetting the password here.
 		//
