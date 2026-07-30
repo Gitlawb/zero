@@ -483,7 +483,14 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 				lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
 			}
 		}
-		if a.childSessionID == m.expandedAgent {
+		// NON-EMPTY, matching the hit above. "" is the zero value of BOTH sides:
+		// expandedAgent when nothing is open, and childSessionID for a specialist
+		// keyed by a tool-call id the provider left blank. Comparing them bare
+		// makes such a row permanently expanded — and since the sidebar clips to
+		// its height, four uninvited lines at the top push PLAN, FILES and
+		// ACTIVITY off the bottom. A row that cannot be clicked open must not be
+		// able to open itself.
+		if a.childSessionID != "" && a.childSessionID == m.expandedAgent {
 			lines = append(lines, m.sidebarAgentExpansion(a, room)...)
 		}
 	}
