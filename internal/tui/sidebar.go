@@ -712,7 +712,40 @@ func (m model) sidebarAgentSelectables(width int) []sidebarAgentHit {
 			toggleDone: true,
 		})
 	}
-	return hits
+	kept := hits[:0]
+	for _, hit := range hits {
+		if m.sidebarRowOnScreen(hit.lineOffset) {
+			kept = append(kept, hit)
+		}
+	}
+	return kept
+}
+
+// sidebarRowOnScreen reports whether a sidebar offset names a row the user can
+// actually see.
+//
+// renderContextSidebar clips the column to height-1 and pins the token readout
+// at that last row, but the selectable lists are computed from the FULL section
+// heights — so any offset at or past the clip names a row that was never drawn.
+// Only fileRowAtMouse checked this, inline; the plan, orchestrate and agent
+// hit-testers did not, and a click on the token readout opened whichever row had
+// been pushed underneath it.
+//
+// Applied to the LISTS rather than to each hit-test, so hover resolution and
+// every future consumer inherit it instead of each having to remember.
+func (m model) sidebarRowOnScreen(lineOffset int) bool {
+	if lineOffset < 0 {
+		return false
+	}
+	if m.height <= 0 {
+		// No measured terminal yet, so nothing is known to be off screen. Fail
+		// OPEN here rather than closed: every hit-test that consumes these
+		// tables already requires a live sidebar, and a filter that swallowed
+		// the whole table before the first WindowSizeMsg would make the offsets
+		// untestable in isolation while changing nothing in production.
+		return true
+	}
+	return lineOffset < m.height-1
 }
 
 // agentsToggleHitID keys the header control for hover resolution, which matches

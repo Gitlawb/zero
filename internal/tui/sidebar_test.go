@@ -1026,3 +1026,81 @@ func TestAFinishedAgentExpandsToShowWhatItProduced(t *testing.T) {
 		}
 	}
 }
+
+// A ROW THAT WAS NEVER DRAWN CANNOT BE CLICKED. renderContextSidebar clips the
+// column to height-1 and pins the token readout at that last row, but the
+// selectable tables are built from the full section heights. Only fileRowAtMouse
+// checked this, inline; the plan, orchestrate and agent tables did not — so a
+// click on the token readout opened whichever row had been pushed under it.
+//
+// Expanding an agent is what makes it reachable in one click: the AGENTS body
+// grows by up to four rows and shoves the bottom of PLAN off the column.
+func TestAClickOnTheTokenReadoutSelectsNothing(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.height = 11
+	m.now = func() time.Time { return now }
+	m.plan.steps = []planStep{
+		{content: "alpha", status: "completed"},
+		{content: "bravo", status: "completed"},
+		{content: "charlie", status: "in_progress"},
+		{content: "delta", status: "pending"},
+	}
+	m.specialists.start("worker", "a brief long enough to wrap over two lines in the column", "plantask_1", now.Add(-30*time.Second))
+	m.expandedAgent = "plantask_1" // one click on the agent row
+
+	width := sidebarWidth(m.width)
+	lines := m.renderContextSidebar(width, m.height)
+	last := m.height - 1
+	if got := plainRender(t, lines[last]); !strings.Contains(got, "tokens") {
+		t.Fatalf("sanity check failed: the last row should be the token readout, got %q", got)
+	}
+	// The expansion must actually have pushed a step off, or this proves nothing.
+	if len(m.plan.steps) <= len(m.sidebarPlanSelectables(width)) {
+		t.Fatalf("sanity check failed: no step was pushed off the column")
+	}
+
+	x := m.chatColumnWidth() + 3 + 2
+	if index, ok := m.planStepAtMouse(testMouseClick(tea.MouseLeft, x, last)); ok {
+		t.Errorf("clicking the token readout selected plan step %d, which is not drawn anywhere", index)
+	}
+	for _, hit := range m.sidebarPlanSelectables(width) {
+		if hit.lineOffset >= last {
+			t.Errorf("step %d is offered at offset %d, at or past the clip", hit.stepIndex, hit.lineOffset)
+		}
+	}
+	for _, hit := range m.sidebarAgentSelectables(width) {
+		if hit.lineOffset >= last {
+			t.Errorf("agent hit %q is offered at offset %d, at or past the clip", hit.title, hit.lineOffset)
+		}
+	}
+}
+
+// The running plan's task rows are clickable when update_plan shares the
+// section — and land on the task under the cursor. The offset table used to
+// give up entirely whenever update_plan had steps, and its base did not account
+// for the checklist, the naming line or the bar sitting above the first task.
+func TestOrchestrateTaskClicksLandWithBothPlansInTheSection(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.plan.steps = []planStep{
+		{content: "set up the lab", status: "completed"},
+		{content: "run the plan", status: "in_progress"},
+	}
+	m.orchestrate.admit(diamondAdmitted(), now)
+
+	width := sidebarWidth(m.width)
+	hits := m.sidebarOrchestrateSelectables(width)
+	if len(hits) == 0 {
+		t.Fatal("the running plan's rows must stay clickable when update_plan shares the section")
+	}
+	lines := m.renderContextSidebar(width, m.height)
+	for _, hit := range hits {
+		row := plainRender(t, lines[hit.lineOffset])
+		want := m.orchestrate.tasks[hit.taskIndex].id
+		if !strings.Contains(row, want) {
+			t.Errorf("task %q is offered at offset %d, where the column reads %q", want, hit.lineOffset, row)
+		}
+	}
+}
