@@ -52,7 +52,7 @@ func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, erro
 }
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
-	workspaceRoot = filepath.Clean(strings.TrimSpace(workspaceRoot))
+	workspaceRoot = canonicalSandboxWorkspaceRoot(workspaceRoot)
 	if workspaceRoot == "" || workspaceRoot == "." {
 		return SandboxRuntime{}, nil, errors.New("sandbox runtime requires a workspace root")
 	}
@@ -239,4 +239,36 @@ func permissionProfileWithRuntime(profile PermissionProfile, runtimeState Sandbo
 	}
 	profile.FileSystem.WriteRoots = append(profile.FileSystem.WriteRoots, WritableRoot{Root: runtimeState.Root})
 	return profile
+}
+
+// canonicalSandboxWorkspaceRoot normalizes a workspace root the way
+// Engine.resolveCommandDir already does — clean, absolutize, then resolve
+// symlinks — so every derivation keyed to a workspace agrees on the string.
+//
+// The runtime root is a hash of this, and the elevated Windows setup grants the
+// principal that tree while commands derive it again. Cleaning alone was not
+// enough for the two to agree, and it does not take a symlink for them to
+// differ: a path opened in different casing, or through an 8.3 short name (what
+// a Windows CI runner's TEMP looks like), resolves to a different spelling.
+// Setup then granted one tree and every command used another, so the grant that
+// makes npm/go/pip caches writable landed where nothing reads and surfaced as a
+// bare ACCESS_DENIED.
+//
+// Resolution failing is not an error: an unresolvable root still needs a stable
+// key, and falling back to the cleaned absolute path is what the command path
+// does too.
+func canonicalSandboxWorkspaceRoot(root string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(root))
+	if cleaned == "" || cleaned == "." {
+		return ""
+	}
+	if !filepath.IsAbs(cleaned) {
+		if absolute, err := filepath.Abs(cleaned); err == nil {
+			cleaned = absolute
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return resolved
+	}
+	return cleaned
 }

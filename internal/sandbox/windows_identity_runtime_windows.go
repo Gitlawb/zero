@@ -382,7 +382,7 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 	workspaceRoot := ""
 	for _, candidate := range config.WorkspaceRoots {
 		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			workspaceRoot = canonicalWindowsSandboxWorkspaceRoot(trimmed)
+			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
 			break
 		}
 	}
@@ -490,39 +490,4 @@ func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principal
 		return nil, err
 	}
 	return windowsACLPlanPaths(plan), nil
-}
-
-// canonicalWindowsSandboxWorkspaceRoot normalizes a workspace root the way the
-// COMMAND path already does, so setup and commands agree on what they are keyed
-// to.
-//
-// Engine.resolveCommandDir cleans, absolutizes and then EvalSymlinks the root
-// (internal/sandbox/runner.go). Setup only cleaned it, and the runtime root is a
-// hash of that string, so the two disagreed whenever resolution changed
-// anything. That does not take a symlink: Windows opens a path in any case and
-// EvalSymlinks canonicalizes it, so a workspace entered with different casing
-// hashes one way at setup and another at command time.
-//
-// Setup then granted the principal one runtime tree while every command used a
-// different one, so the grant that exists to make npm/go/pip caches writable
-// landed somewhere nothing reads and the failure surfaced as a bare
-// ACCESS_DENIED on a cache write.
-//
-// EvalSymlinks failing is not an error: an unresolvable root still needs a
-// stable key, and falling back to the cleaned absolute path is what the command
-// path does too.
-func canonicalWindowsSandboxWorkspaceRoot(root string) string {
-	cleaned := filepath.Clean(strings.TrimSpace(root))
-	if cleaned == "" || cleaned == "." {
-		return ""
-	}
-	if !filepath.IsAbs(cleaned) {
-		if absolute, err := filepath.Abs(cleaned); err == nil {
-			cleaned = absolute
-		}
-	}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		return resolved
-	}
-	return cleaned
 }
