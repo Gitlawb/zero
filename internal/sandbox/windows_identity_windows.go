@@ -658,6 +658,36 @@ func lookupWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, 
 	return windowsSandboxIdentity{Username: username, SID: sid}, nil
 }
 
+// lookupWindowsSandboxPrincipalForCommand resolves the principal a command will
+// actually run as, and refuses one that has since joined a privileged group.
+//
+// Provisioning already refuses a privileged account, but group membership is not
+// frozen at setup: the account can be added to Administrators, Power Users or
+// Backup Operators afterwards. Minting a token for it would hand the sandboxed
+// command exactly the privileges the sandbox exists to withhold, so the check has
+// to run again on the path that mints the token, not only on the path that
+// created the account.
+//
+// Deliberately NOT folded into lookupWindowsSandboxIdentity: teardown resolves
+// the same identity to revoke its logon rights before deleting it, and it must
+// stay able to clean up an account that has become privileged rather than
+// refusing to touch it. Refusing there would leave the very account this guards
+// against permanently undeletable by Zero.
+func lookupWindowsSandboxPrincipalForCommand(workspaceKey string) (windowsSandboxIdentity, error) {
+	identity, err := lookupWindowsSandboxIdentity(workspaceKey)
+	if err != nil {
+		return windowsSandboxIdentity{}, err
+	}
+	privileged, err := windowsSandboxUserIsPrivilegedFn(identity.Username)
+	if err != nil {
+		return windowsSandboxIdentity{}, err
+	}
+	if privileged {
+		return windowsSandboxIdentity{}, fmt.Errorf("%w: %q", errWindowsSandboxPrivilegedAccount, identity.Username)
+	}
+	return identity, nil
+}
+
 // classifyWindowsSandboxLookupError decides whether a failed SID resolution
 // means "setup has not run" or "this principal exists but is unusable".
 //
