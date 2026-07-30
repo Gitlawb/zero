@@ -516,9 +516,34 @@ var errWindowsSandboxIdentityUnavailable = errors.New("no Zero sandbox principal
 // has not run.
 func lookupWindowsSandboxIdentity(workspaceKey string) (windowsSandboxIdentity, error) {
 	username := windowsSandboxUserName(workspaceKey)
-	sid, err := resolveWindowsSandboxSID(username)
+	// Ownership is checked here as well as at provisioning, because the account
+	// NAME cannot carry the whole workspace key.
+	//
+	// The name keeps 11 characters of the digest; the comment holds all of it.
+	// Provisioning refuses a name whose comment names a different workspace, and
+	// without the same check here the workspace that LOST that race would still
+	// resolve the name to a SID and quietly use the other workspace's principal,
+	// its secret and its ACL identity. Setup would have failed for it, so this is
+	// the path that decides whether the refusal actually holds.
+	//
+	// A collision is very unlikely with real keys, roughly 2^-44 per pair, but the
+	// cost of being wrong is one workspace running as another's identity, and the
+	// check is one syscall on a path that is already doing several.
+	// SID resolution runs FIRST so "no such account" stays the unavailable
+	// sentinel. windowsSandboxUserIsManaged answers false for both an absent
+	// account and one belonging to someone else, so checking it before this would
+	// report an unprovisioned workspace as a name collision and turn the ordinary
+	// not-set-up case into an error the operator has to interpret.
+	sid, err := resolveWindowsSandboxSIDFn(username)
 	if err != nil {
 		return windowsSandboxIdentity{}, classifyWindowsSandboxLookupError(err)
+	}
+	managed, err := windowsSandboxUserIsManagedFn(username, workspaceKey)
+	if err != nil {
+		return windowsSandboxIdentity{}, err
+	}
+	if !managed {
+		return windowsSandboxIdentity{}, fmt.Errorf("%w: %q", errWindowsSandboxNameCollision, username)
 	}
 	return windowsSandboxIdentity{Username: username, SID: sid}, nil
 }

@@ -209,9 +209,10 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	if !windowsProcessIsElevated() {
 		t.Skip("provisioning requires an elevated process")
 	}
-	// A leftover account from an interrupted run is harmless now that
-	// provisioning resets the password, but starting clean keeps a failure here
-	// from being explained by residue from a previous one.
+	// Starting clean keeps a failure here from being explained by residue from a
+	// previous run. Provisioning no longer resets an adopted account's password,
+	// so a leftover account would otherwise be adopted with a password this test
+	// never learns.
 	_ = removeWindowsSandboxIdentity(windowsSandboxUserName("ziptest01"))
 
 	identity, password, _, err := provisionWindowsSandboxIdentity("ziptest01")
@@ -246,23 +247,45 @@ func TestProvisionWindowsSandboxIdentityRoundTrip(t *testing.T) {
 	if again.Username != identity.Username || !again.SID.Equals(identity.SID) {
 		t.Fatalf("provisioning is not idempotent: %s then %s", identity, again)
 	}
-	// The password returned for an account that already existed has to BE that
-	// account's password. NetUserAdd leaves an existing account entirely alone,
-	// so without an explicit reset this second value is a fresh random string
-	// that never authenticates, and the caller would store it as the secret and
-	// leave every later command failing to log on with a principal that looks
-	// correctly provisioned. Logging on is the only honest way to assert it.
 	if secondPassword == "" {
 		t.Fatal("second provision returned an empty password")
 	}
-	if err := grantWindowsSandboxLogonRights(again.SID); err != nil {
-		t.Fatalf("grant logon rights: %v", err)
+	// Deliberately NOT logging on with secondPassword. Provisioning does not
+	// rotate an adopted account any more, so that value is a fresh random string
+	// the account does not hold; rotation happens in
+	// provisionWindowsSandboxPrincipalForSetup, immediately before the secret is
+	// written, to keep the window where no stored password authenticates as small
+	// as possible.
+	//
+	// The guarantee worth asserting is therefore the one the setup path makes:
+	// after it returns, the stored secret logs the principal on. That covers
+	// rotation, the secret write and the logon right in one assertion, and it is
+	// the thing a broken re-setup would actually break.
+	config := WindowsSandboxCommandConfig{
+		SandboxHome:    t.TempDir(),
+		WorkspaceRoots: []string{`C:\ziptest01`},
 	}
-	token, err := logonWindowsSandboxPrincipal(again.Username, secondPassword)
+	setupIdentity, _, err := provisionWindowsSandboxPrincipalForSetup(config)
 	if err != nil {
-		t.Fatalf("logon with the password from the second provision: %v", err)
+		t.Fatalf("setup provision: %v", err)
+	}
+	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, setupIdentity.Username)
+	if err != nil {
+		t.Fatalf("secret path: %v", err)
+	}
+	storedPassword, err := readWindowsSandboxSecret(secretPath)
+	if err != nil {
+		t.Fatalf("read stored secret: %v", err)
+	}
+	token, err := logonWindowsSandboxPrincipal(setupIdentity.Username, storedPassword)
+	if err != nil {
+		t.Fatalf("logon with the secret the setup path stored: %v", err)
 	}
 	_ = token.Close()
+	t.Cleanup(func() {
+		_ = revokeWindowsSandboxLogonRights(setupIdentity.SID)
+		_ = removeWindowsSandboxIdentity(setupIdentity.Username)
+	})
 	// Lookup must find what provisioning created.
 	found, err := lookupWindowsSandboxIdentity("ziptest01")
 	if err != nil {

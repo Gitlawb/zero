@@ -95,11 +95,21 @@ func buildWindowsPrincipalACLPlan(input windowsPrincipalACLInput) (WindowsACLPla
 		if cleaned == "" {
 			return WindowsACLPlan{}, fmt.Errorf("windows principal ACL plan: unusable write root %q", root.Root)
 		}
+		// Materialized, like the metadata and policy denies below and above.
+		//
+		// These are the git control-plane carveouts (.git/config, .git/hooks). On a
+		// workspace where git has not run yet they do not exist at setup time, and
+		// applyWindowsACLPlan skips a target that is absent, so the ACEs were never
+		// written. Once git created those paths the principal still held inherited
+		// write access to the workspace and could install a hook or rewrite
+		// credential.helper. The capability plan gets away without this because its
+		// child runs as the caller; a separate principal account does not.
 		for _, subpath := range normalizeProfilePaths(root.ReadOnlySubpaths) {
 			entries = append(entries, WindowsACLEntry{
-				Action:     WindowsACLDenyWrite,
-				Path:       subpath,
-				Capability: input.PrincipalSID,
+				Action:      WindowsACLDenyWrite,
+				Path:        subpath,
+				Capability:  input.PrincipalSID,
+				Materialize: true,
 			})
 		}
 		for _, name := range root.ProtectedMetadataNames {

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -286,9 +287,28 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	}
 
 	filesystem := config.PermissionProfile.FileSystem
+	writeRoots := filesystem.WriteRoots
+	// The runtime tree has to be granted here, at setup, because nothing grants it
+	// later.
+	//
+	// permissionProfileWithRuntime appends the per-workspace runtime root to
+	// WriteRoots on every COMMAND, and redirects HOME, GOCACHE, npm_config_cache
+	// and friends into it. That root lives under the user cache, not the
+	// workspace, so the profile setup sees never contains it. On the
+	// restricted-token path that costs nothing, since the child still runs as the
+	// caller and already has rights there. A principal is a separate local account
+	// with none, so without this every npm install, go build or pip install fails
+	// on a cache write with a bare ACCESS_DENIED and nothing pointing at the
+	// sandbox as the cause.
+	if runtimeRoot, err := setupWindowsSandboxRuntimeRoot(config); err != nil {
+		_ = removePrincipal()
+		return nil, err
+	} else if runtimeRoot != "" {
+		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
+	}
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: identity.SID.String(),
-		WriteRoots:   filesystem.WriteRoots,
+		WriteRoots:   writeRoots,
 		ReadRoots:    filesystem.ReadRoots,
 		DenyRead:     filesystem.DenyRead,
 		DenyWrite:    filesystem.DenyWrite,
@@ -341,4 +361,45 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 		return err
 	}
 	return removeWindowsSandboxIdentity(username)
+}
+
+// setupWindowsSandboxRuntimeRoot resolves this workspace's runtime root and
+// makes sure it exists, so the principal ACL plan can name it.
+//
+// It is created here rather than left to the first command because
+// applyWindowsACLPlan skips a target that does not exist: granting write on a
+// directory that setup never made would silently no-op, and the failure would
+// only show up later as a denied cache write. Creating it under the elevated
+// setup process is safe, since it lives under the invoking user's own cache
+// directory and prepareSandboxRuntime would create it on the same path anyway.
+//
+// An empty return means there is no runtime root to grant (no workspace root
+// configured), which is not an error: the caller simply grants nothing extra.
+func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string, error) {
+	workspaceRoot := ""
+	for _, candidate := range config.WorkspaceRoots {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			workspaceRoot = filepath.Clean(trimmed)
+			break
+		}
+	}
+	if workspaceRoot == "" {
+		return "", nil
+	}
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
+	}
+	cacheRoot = filepath.Clean(strings.TrimSpace(cacheRoot))
+	if cacheRoot == "" || cacheRoot == "." {
+		return "", errors.New("user cache directory is unavailable for sandbox runtime")
+	}
+	root, err := sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create sandbox runtime root: %w", err)
+	}
+	return root, nil
 }
