@@ -855,3 +855,40 @@ func TestSpendSegmentsDropRatherThanTruncate(t *testing.T) {
 		})
 	}
 }
+
+// "" is the zero value on BOTH sides of the expansion test: expandedAgent when
+// nothing is open, and childSessionID for a specialist keyed by a tool-call id
+// the provider left blank. Compared bare, such a row is permanently expanded —
+// and because the sidebar clips to its height, the uninvited lines push PLAN,
+// FILES and ACTIVITY off the bottom of the column.
+func TestAnAgentWithNoCardKeyNeverExpandsItself(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.specialists.start("mystery", "a brief nobody asked to see", "", now.Add(-30*time.Second))
+	if m.expandedAgent != "" {
+		t.Fatal("sanity check failed: nothing should be expanded")
+	}
+
+	width := sidebarWidth(m.width)
+	rendered := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if strings.Contains(rendered, "nobody asked to see") {
+		t.Errorf("a row with no card key expanded itself against the zero value:\n%s", rendered)
+	}
+	if hits := m.sidebarAgentSelectables(width); len(hits) != 0 {
+		t.Errorf("a row with no card key is not clickable, so it has no way to be opened: %+v", hits)
+	}
+
+	// And the sections below it keep their place.
+	lines := m.renderContextSidebar(width, m.height)
+	var planHeader int
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(plainRender(t, line)), "PLAN") {
+			planHeader = i
+			break
+		}
+	}
+	if planHeader == 0 || planHeader > 4 {
+		t.Errorf("PLAN should sit just below a single-row AGENTS section, found it at line %d", planHeader)
+	}
+}
