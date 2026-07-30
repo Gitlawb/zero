@@ -47,6 +47,10 @@ type specialistInfo struct {
 	tokenCount     int // total tokens consumed
 	currentTool    string
 	currentDetail  string
+	// result is what the agent PRODUCED, bounded at the bridge. The sidebar
+	// shows the head of it when its row is expanded; the whole thing lives in
+	// the child's own session, which the card's drill-in opens.
+	result string
 }
 
 // specialistTracker holds the live state for every specialist the parent agent
@@ -106,6 +110,19 @@ func (t *specialistTracker) setTokens(childSessionID string, tokens int) {
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
 			t.specialists[index].tokenCount = tokens
+			return
+		}
+	}
+}
+
+// setResult records what a finished agent produced.
+func (t *specialistTracker) setResult(childSessionID, result string) {
+	if strings.TrimSpace(result) == "" {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].result = result
 			return
 		}
 	}

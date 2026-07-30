@@ -67,6 +67,11 @@ type planTaskDoneMsg struct {
 	status     specialistStatus
 	outcome    string
 	reason     string
+	// output is what the task produced, bounded at the bridge. Until this
+	// existed the TUI knew a task had finished and what it cost, but never what
+	// it actually returned — so a finished agent row could report everything
+	// except the thing the user ran it for.
+	output string
 	// tokens is what the task actually spent. The card omits the segment when
 	// it is zero rather than reporting a total nobody measured.
 	tokens int

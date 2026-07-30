@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"strings"
 	"testing"
@@ -925,5 +926,138 @@ func TestAnAgentWithNoCardKeyNeverExpandsItself(t *testing.T) {
 	}
 	if planHeader == 0 || planHeader > 4 {
 		t.Errorf("PLAN should sit just below a single-row AGENTS section, found it at line %d", planHeader)
+	}
+}
+
+// doneAgentsModel: two finished specialists past their linger, one still
+// running — the state a plan is in for most of its life.
+func doneAgentsModel(t *testing.T, now time.Time) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	for i, name := range []string{"a-reltime", "a-fsutil"} {
+		key := fmt.Sprintf("plantask_%d", i+1)
+		m.specialists.start(name, "You are auditing package "+name, key, now.Add(-40*time.Second))
+		m.specialists.complete(key, specialistCompleted, 0, "", now.Add(-30*time.Second))
+		m.specialists.setResult(key, "pkg: 3 findings.\nreltime.go:41 — Parse ignores the tz suffix")
+	}
+	m.specialists.start("d-report", "producing the report", "plantask_3", now.Add(-9*time.Second))
+	return m
+}
+
+// A plan's finished tasks ARE its result. They used to vanish a second and a
+// half after each one landed, so a nine-task run that succeeded showed an empty
+// AGENTS section and no way to ask what any of them did.
+func TestTheDoneToggleRevealsFinishedAgents(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	width := sidebarWidth(m.width)
+
+	if got := m.doneAgentCount(); got != 2 {
+		t.Fatalf("doneAgentCount = %d, want 2", got)
+	}
+	collapsed := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if strings.Contains(collapsed, "a-reltime") {
+		t.Errorf("finished agents stay hidden until asked for:\n%s", collapsed)
+	}
+	if header := plainRender(t, m.sidebarAgentHeader(width)); !strings.Contains(header, "2 done") {
+		t.Errorf("the header must advertise what the toggle would reveal: %q", header)
+	}
+
+	// The toggle is clickable at the header row.
+	hits := m.sidebarAgentSelectables(width)
+	var toggle *sidebarAgentHit
+	for i := range hits {
+		if hits[i].toggleDone {
+			toggle = &hits[i]
+		}
+	}
+	if toggle == nil {
+		t.Fatal("the header's toggle must be clickable")
+	}
+	if toggle.lineOffset != 0 {
+		t.Fatalf("the toggle sits on the AGENTS header at offset 0, got %d", toggle.lineOffset)
+	}
+
+	x0 := m.chatColumnWidth() + 3
+	opened, _, handled := m.handleTranscriptSelectionMouse(
+		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
+	if !handled || !opened.showDoneAgents {
+		t.Fatalf("the click must open the finished list: handled=%v shown=%v", handled, opened.showDoneAgents)
+	}
+	shown := plainRender(t, strings.Join(opened.sidebarAgentLines(width), "\n"))
+	for _, want := range []string{"a-reltime", "a-fsutil", "d-report"} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("expected %q in the opened list:\n%s", want, shown)
+		}
+	}
+
+	// And it closes again.
+	closed, _, _ := opened.handleTranscriptSelectionMouse(
+		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
+	if closed.showDoneAgents {
+		t.Error("a second click must close the finished list")
+	}
+}
+
+// THE STATE THE TOGGLE EXISTS FOR. When every agent has finished there are no
+// rows left, so a control hung off the rows would be unclickable in precisely
+// the case it is needed.
+func TestTheDoneToggleIsClickableWithNoLiveAgents(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	m.specialists.complete("plantask_3", specialistCompleted, 0, "", now.Add(-30*time.Second))
+	width := sidebarWidth(m.width)
+
+	if len(m.sidebarAgentLines(width)) != 0 {
+		t.Fatal("sanity check failed: every agent has finished, so no rows remain")
+	}
+	hits := m.sidebarAgentSelectables(width)
+	if len(hits) != 1 || !hits[0].toggleDone {
+		t.Fatalf("the toggle must survive an empty list, got %+v", hits)
+	}
+	x0 := m.chatColumnWidth() + 3
+	opened, _, handled := m.handleTranscriptSelectionMouse(
+		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: 0})
+	if !handled || !opened.showDoneAgents {
+		t.Fatal("clicking the toggle with no live agents must still open the list")
+	}
+	if got := len(opened.sidebarAgentLines(width)); got != 3 {
+		t.Errorf("expected all three finished agents, got %d rows", got)
+	}
+}
+
+// WHAT IT PRODUCED, which is the thing the agent was run for. Every other line
+// of the expansion says how the work went; this is the work.
+func TestAFinishedAgentExpandsToShowWhatItProduced(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	m.showDoneAgents = true
+	width := sidebarWidth(m.width)
+
+	hits := m.sidebarAgentSelectables(width)
+	var row *sidebarAgentHit
+	for i := range hits {
+		if hits[i].sessionID == "plantask_1" {
+			row = &hits[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("the finished agent's row must be clickable, got %+v", hits)
+	}
+
+	x0 := m.chatColumnWidth() + 3
+	opened, _, handled := m.handleTranscriptSelectionMouse(
+		tea.MouseClickMsg{Button: tea.MouseLeft, X: x0, Y: row.lineOffset})
+	if !handled || opened.expandedAgent != "plantask_1" {
+		t.Fatalf("clicking a finished agent must expand it, got %q", opened.expandedAgent)
+	}
+	shown := plainRender(t, strings.Join(opened.sidebarAgentLines(width), "\n"))
+	// Checked against what a 30-cell column actually renders: the result wraps
+	// nothing and truncates per line, so assert on the head of each.
+	for _, want := range []string{"3 findings", "reltime.go:41"} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("the expansion must show what the agent produced (missing %q):\n%s", want, shown)
+		}
 	}
 }

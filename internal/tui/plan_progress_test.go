@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -338,5 +340,73 @@ func TestAFinishedTasksCardIsNotResolvableByALaterPlan(t *testing.T) {
 	}
 	if done.dispatched {
 		t.Error("a skipped task resolved against the previous plan's card for the same id")
+	}
+}
+
+// THE WIRING, not the pieces. TaskResult.Output has always held the child's full
+// answer and the TUI never saw it: the model knew a task had finished and what
+// it cost, but not what it returned — so a finished agent row could report
+// everything except the thing the user ran it for.
+//
+// Driven bridge → message → Update, because testing setResult directly would
+// pass with the bridge sending nothing at all.
+func TestATasksOutputReachesTheAgentRow(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 7, nil, "")
+
+	bridge.TaskDispatched(specialist.Task{ID: "a-reltime", Prompt: "audit pkg/reltime"})
+	bridge.TaskCompleted(specialist.TaskResult{
+		ID:      "a-reltime",
+		Outcome: specialist.TaskSucceeded,
+		Output:  "pkg/reltime: 3 findings.\nreltime.go:41 — Parse ignores the tz suffix",
+		Tokens:  22781,
+	})
+
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 7
+	for _, msg := range got {
+		updated, _ := m.Update(msg)
+		m = updated.(model)
+	}
+
+	info, ok := m.specialists.getBySessionID("plantask_1")
+	if !ok {
+		t.Fatalf("no card for the finished task: %+v", m.specialists.all())
+	}
+	if !strings.Contains(info.result, "Parse ignores the tz suffix") {
+		t.Errorf("the task's output never reached its card, got %q", info.result)
+	}
+}
+
+// The child's answer is not budgeted for the event loop. The report task in a
+// nine-task plan returned a hundred thousand tokens of it; carrying that through
+// the loop and holding it per task for the session would be paying megabytes for
+// text nothing reads. The whole answer stays in the child's session.
+func TestATasksOutputIsBoundedBeforeItLeavesTheBridge(t *testing.T) {
+	long := strings.Repeat("finding line that goes on and on. ", 500)
+	if len(long) <= planTaskOutputLimit {
+		t.Fatalf("sanity check failed: the fixture must exceed the limit")
+	}
+	bounded := boundTaskOutput(long)
+	if len(bounded) > planTaskOutputLimit+len("…") {
+		t.Errorf("bounded output is %d bytes, limit is %d", len(bounded), planTaskOutputLimit)
+	}
+	if !strings.HasSuffix(bounded, "…") {
+		t.Errorf("a truncated answer must say it was truncated: %q", bounded[maxInt(0, len(bounded)-40):])
+	}
+	if !utf8.ValidString(bounded) {
+		t.Error("the cut must land on a rune boundary")
+	}
+
+	// A multibyte character straddling the limit must not be split in half.
+	multi := strings.Repeat("é", planTaskOutputLimit)
+	if b := boundTaskOutput(multi); !utf8.ValidString(b) {
+		t.Error("multibyte output was cut mid-rune")
+	}
+
+	// Short output passes through whole, with no ellipsis implying loss.
+	if got := boundTaskOutput("  brief answer  "); got != "brief answer" {
+		t.Errorf("short output = %q, want it trimmed and intact", got)
 	}
 }

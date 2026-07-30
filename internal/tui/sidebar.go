@@ -210,14 +210,36 @@ func (m model) sidebarSpecialists() []specialistInfo {
 			continue
 		}
 		// Linger a finished specialist for sidebarAgentLinger (a fading ✓), then
-		// drop it — a smooth exit rather than an abrupt pop.
-		if a.status != specialistRunning && !a.completedAt.IsZero() &&
+		// drop it — a smooth exit rather than an abrupt pop. Unless the user has
+		// asked to keep them, in which case they stay for the session: a plan's
+		// finished tasks are its RESULT, and dropping them left a nine-task run
+		// showing an empty AGENTS section the moment it succeeded.
+		if !m.showDoneAgents && a.status != specialistRunning && !a.completedAt.IsZero() &&
 			m.now().Sub(a.completedAt) >= sidebarAgentLinger {
 			continue
 		}
 		out = append(out, a)
 	}
 	return out
+}
+
+// doneAgentCount is how many finished specialists the toggle would reveal —
+// those past their linger, which the section would otherwise have dropped.
+//
+// Counted from the tracker rather than from sidebarSpecialists, because that
+// already applies the toggle and would report zero whenever the toggle is on.
+func (m model) doneAgentCount() int {
+	var n int
+	for _, a := range m.specialists.all() {
+		if a.status == specialistError && strings.Contains(strings.ToLower(a.errorMsg), "not found") {
+			continue
+		}
+		if a.status != specialistRunning && !a.completedAt.IsZero() &&
+			m.now().Sub(a.completedAt) >= sidebarAgentLinger {
+			n++
+		}
+	}
+	return n
 }
 
 // sidebarHasAgents reports whether the two-column sidebar is active AND has at
@@ -236,10 +258,29 @@ func (m model) sidebarHasAgents() bool {
 // active agents — specialist delegations plus swarm/team members.
 func (m model) sidebarAgentHeader(width int) string {
 	n := len(m.sidebarSpecialists()) + len(m.swarmSpawnedAgents())
-	if n == 0 {
+	count := ""
+	if n > 0 {
+		count = fmt.Sprintf("%d", n)
+	}
+	// The finished-agents toggle rides the header's count. A plan's finished
+	// tasks are its RESULT, and they used to vanish a second and a half after
+	// each one landed — so a nine-task run that succeeded showed an empty
+	// AGENTS section and no way to ask what any of them did.
+	if done := m.doneAgentCount(); done > 0 || m.showDoneAgents {
+		mark := fmt.Sprintf("▸%d done", done)
+		if m.showDoneAgents {
+			mark = fmt.Sprintf("▾%d done", done)
+		}
+		if count != "" {
+			count += " · " + mark
+		} else {
+			count = mark
+		}
+	}
+	if count == "" {
 		return sidebarHeader("AGENTS", width)
 	}
-	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	return sidebarHeaderWithCount("AGENTS", count, zeroTheme.muted, width)
 }
 
 // swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
@@ -399,6 +440,8 @@ type sidebarAgentHit struct {
 	lineOffset int
 	sessionID  string
 	title      string
+	// toggleDone marks the header's finished-agents control rather than an agent.
+	toggleDone bool
 	// expands marks a row whose click TOGGLES ITS DETAIL in place rather than
 	// drilling into a child session. Specialist rows are keyed by their card,
 	// and a plan task's card key is not a session id until the task finishes and
@@ -533,6 +576,11 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 // prompt belongs in the task's card, not in a 26-cell column.
 const sidebarAgentExpansionBriefLines = 2
 
+// sidebarAgentExpansionResultLines caps the head of the agent's own output. Four
+// lines is a look at what it produced, not a reader for it — the whole answer is
+// in the child's session, which the card's drill-in opens.
+const sidebarAgentExpansionResultLines = 4
+
 // fitSegments joins as many " · "-separated segments as fit in width and DROPS
 // the rest, rather than joining them all and truncating the result.
 //
@@ -619,6 +667,26 @@ func (m model) sidebarAgentExpansion(info specialistInfo, room int) []string {
 			out = append(out, indent+zeroTheme.faint.Render(truncateStep(reason, body)))
 		}
 	}
+
+	// WHAT IT PRODUCED, which is the thing the agent was run for. Everything
+	// above says how the work went; this is the work. Sanitised per line, since
+	// a child's answer is untrusted text and an ANSI escape in it would repaint
+	// the column.
+	if result := strings.TrimSpace(info.result); result != "" {
+		shown := 0
+		for _, raw := range strings.Split(result, "\n") {
+			line := strings.TrimSpace(sanitizeCardText(raw))
+			if line == "" {
+				continue
+			}
+			if shown >= sidebarAgentExpansionResultLines {
+				out = append(out, indent+zeroTheme.faint.Render("…"))
+				break
+			}
+			out = append(out, indent+zeroTheme.ink.Render(truncateStep(line, body)))
+			shown++
+		}
+	}
 	return out
 }
 
@@ -632,8 +700,27 @@ func (m model) sidebarAgentSelectables(width int) []sidebarAgentHit {
 	for i := range hits {
 		hits[i].lineOffset++ // shift past the AGENTS header at sidebar index 0
 	}
+	// The header's toggle is registered INDEPENDENTLY of the rows. When every
+	// agent has finished and the toggle is off there are no rows at all, and
+	// hanging the control off them would make it unclickable in precisely the
+	// state it exists for.
+	if m.doneAgentCount() > 0 || m.showDoneAgents {
+		hits = append(hits, sidebarAgentHit{
+			lineOffset: 0,
+			sessionID:  agentsToggleHitID,
+			title:      "completed agents",
+			toggleDone: true,
+		})
+	}
 	return hits
 }
+
+// agentsToggleHitID keys the header control for hover resolution, which matches
+// hits by session id. The NUL prefix is not decoration: it makes collision with
+// a real session id — a uuid, a plantask key, a provider tool-call id —
+// impossible rather than merely unlikely, and an id that collides would light
+// the wrong row on hover.
+const agentsToggleHitID = "\x00agents-done-toggle"
 
 // agentExitFading reports whether a finished agent is in the later half of its
 // linger window (sidebarAgentLinger), so its row dims toward faint just before

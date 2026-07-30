@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -360,6 +361,30 @@ func (bridge *PlanProgressBridge) send(build func(runID int) tea.Msg) {
 // so it can never collide with a tool call id.
 func planTaskKey(n int) string { return fmt.Sprintf("plantask_%d", n) }
 
+// planTaskOutputLimit bounds what a task's result contributes to the model.
+//
+// TaskResult.Output is the child's FULL answer and is deliberately not
+// truncated at the tool boundary — the report task in a nine-task plan returned
+// a hundred thousand tokens of it. The sidebar shows a few lines; carrying the
+// rest through the event loop and holding it per task for the life of the
+// session would be paying megabytes for text nothing reads. The whole answer is
+// still in the child's session, which the row's drill-in opens.
+const planTaskOutputLimit = 2000
+
+func boundTaskOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if len(output) <= planTaskOutputLimit {
+		return output
+	}
+	// Cut on a rune boundary: a half-written multibyte character renders as a
+	// replacement glyph, which reads as corruption rather than truncation.
+	cut := planTaskOutputLimit
+	for cut > 0 && !utf8.RuneStart(output[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(output[:cut]) + "…"
+}
+
 // PlanAdmitted announces the plan so the transcript can show that N tasks are
 // about to run rather than going silent until the first one finishes.
 func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
@@ -469,6 +494,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 	// handler creates the card on demand.
 	taskID, sessionID, reason := result.ID, result.SessionID, result.Err
 	outcome, tokens, attempts := result.Outcome, result.Tokens, result.Attempts
+	output := boundTaskOutput(result.Output)
 	bridge.send(func(runID int) tea.Msg {
 		return planTaskDoneMsg{
 			runID:      runID,
@@ -481,6 +507,7 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 			reason:     reason,
 			tokens:     tokens,
 			attempts:   attempts,
+			output:     output,
 			background: bridge.isBackground(),
 		}
 	})
