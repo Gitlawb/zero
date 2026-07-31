@@ -198,6 +198,9 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 	if err != nil {
 		return Status{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Status{}, err
+	}
 	key := ProviderKey(provider)
 	if err := m.store.Save(key, token); err != nil {
 		return Status{}, err

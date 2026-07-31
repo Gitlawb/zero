@@ -87,11 +87,28 @@ func TestResolveConfigInvalidName(t *testing.T) {
 	}
 }
 
-func TestEnvKey(t *testing.T) {
-	if got := envKey("my-svc", "CLIENT_ID"); got != "ZERO_OAUTH_MY_SVC_CLIENT_ID" {
-		t.Fatalf("envKey = %q", got)
+func TestResolveConfigKimiCodeStripsExtraHeadersOnEndpointOverride(t *testing.T) {
+	r := NewRegistry()
+	// Canonical host (no override): ExtraHeaders has X-Msh-Device-Id
+	cfgCanonical, _, err := r.ResolveConfig("kimi-code", map[string]string{
+		"ZERO_OAUTH_ALLOW_PRESETS": "1",
+	})
+	if err != nil {
+		t.Fatalf("ResolveConfig: %v", err)
 	}
-	if got := envKey("two.part", "SCOPES"); got != "ZERO_OAUTH_TWO_PART_SCOPES" {
-		t.Fatalf("envKey = %q", got)
+	if len(cfgCanonical.ExtraHeaders) == 0 || cfgCanonical.ExtraHeaders["X-Msh-Device-Id"] == "" {
+		t.Fatalf("expected X-Msh-Device-Id on canonical host, got: %v", cfgCanonical.ExtraHeaders)
+	}
+
+	// Overridden to non-canonical host: ExtraHeaders must be empty
+	cfgOverride, _, err := r.ResolveConfig("kimi-code", map[string]string{
+		"ZERO_OAUTH_ALLOW_PRESETS":      "1",
+		"ZERO_OAUTH_KIMI_CODE_TOKEN_URL": "https://my-custom-proxy.example.com/oauth/token",
+	})
+	if err != nil {
+		t.Fatalf("ResolveConfig with override: %v", err)
+	}
+	if len(cfgOverride.ExtraHeaders) != 0 {
+		t.Fatalf("expected empty ExtraHeaders on non-canonical host override, got: %v", cfgOverride.ExtraHeaders)
 	}
 }

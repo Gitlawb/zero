@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"net/url"
 	"os"
 	"strings"
 
@@ -156,12 +157,27 @@ func scopesOrPreset(envScopes string, preset []string) []string {
 // builds. This is a protocol requirement of the provider's OWN backend
 // (not tied to whether its preset client_id or an operator-supplied one is in
 // use), so unlike the presets above it applies regardless of
-// ZERO_OAUTH_ALLOW_PRESETS.
-func providerExtraHeaders(name string) map[string]string {
+// ZERO_OAUTH_ALLOW_PRESETS. Overridden endpoints are checked so device identity
+// headers are not sent to arbitrary third-party hosts.
+func providerExtraHeaders(name string, overriddenEndpoints ...string) map[string]string {
 	if strings.ToLower(strings.TrimSpace(name)) == "kimi-code" {
+		for _, ep := range overriddenEndpoints {
+			if ep = strings.TrimSpace(ep); ep != "" && !isCanonicalKimiHost(ep) {
+				return nil
+			}
+		}
 		return kimiExtraHeaders()
 	}
 	return nil
+}
+
+func isCanonicalKimiHost(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "auth.kimi.com" || host == "api.kimi.com" || host == "kimi.com" || strings.HasSuffix(host, ".kimi.com") || strings.HasSuffix(host, ".moonshot.cn")
 }
 
 // kimiExtraHeaders returns the X-Msh-* vendor-identity headers Kimi Code's

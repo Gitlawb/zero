@@ -151,6 +151,7 @@ func repairAbandonedDeviceID(path, id string) string {
 		return existingID
 	}
 	lockPath := path + ".lock"
+	ownerToken := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if !os.IsExist(err) {
@@ -160,13 +161,18 @@ func repairAbandonedDeviceID(path, id string) string {
 			return existingID
 		}
 		// If lockPath exists but is stale (owner crashed), break lock and retry once.
-		// Use os.Rename to break the lock atomically so multiple racers seeing the
-		// same stale lock don't blindly unlink a fresh lock created by a winner.
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 2*time.Second {
-			stalePath := fmt.Sprintf("%s.stale.%d.%d", lockPath, os.Getpid(), time.Now().UnixNano())
-			if os.Rename(lockPath, stalePath) == nil {
-				_ = os.Remove(stalePath)
-				lock, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		// Verify lock token and use os.Rename to break the lock atomically so multiple
+		// racers seeing the same stale lock don't blindly unlink a fresh lock.
+		if raw, readErr := os.ReadFile(lockPath); readErr == nil {
+			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 2*time.Second {
+				stalePath := fmt.Sprintf("%s.stale.%d.%d", lockPath, os.Getpid(), time.Now().UnixNano())
+				// Re-verify content before renaming to prevent lock stealing
+				if curRaw, _ := os.ReadFile(lockPath); string(curRaw) == string(raw) {
+					if os.Rename(lockPath, stalePath) == nil {
+						_ = os.Remove(stalePath)
+						lock, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+					}
+				}
 			}
 		}
 		if err != nil {
@@ -176,9 +182,13 @@ func repairAbandonedDeviceID(path, id string) string {
 			return id
 		}
 	}
+	_, _ = lock.WriteString(ownerToken + "\n")
+	_ = lock.Sync()
 	defer func() {
 		_ = lock.Close()
-		_ = os.Remove(lockPath)
+		if curRaw, _ := os.ReadFile(lockPath); strings.TrimSpace(string(curRaw)) == ownerToken {
+			_ = os.Remove(lockPath)
+		}
 	}()
 
 	if existingID := readValidDeviceID(path); existingID != "" {

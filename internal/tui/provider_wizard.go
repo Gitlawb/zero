@@ -2146,6 +2146,13 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 			customHeaders = runtimeDescriptor.CustomHeaders
 		}
 		profile.CustomHeaders = maps.Clone(customHeaders)
+		if provider.ID == "kimi-code" {
+			for k := range profile.CustomHeaders {
+				if strings.HasPrefix(strings.ToLower(k), "x-msh-") {
+					delete(profile.CustomHeaders, k)
+				}
+			}
+		}
 		if providerWizardIsAimlapi(provider) {
 			profile.CustomHeaders = aimlapi.WithResolvedPartnerHeader(profile.CustomHeaders)
 		}

@@ -1071,6 +1071,10 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 		}
 		merged := copyStringMap(catalogHeaders)
 		for key, value := range profile.CustomHeaders {
+			// Do not let stored X-Msh-* headers override fresh RuntimeHeaders.
+			if descriptor.RuntimeHeaders != nil && strings.HasPrefix(strings.ToLower(key), "x-msh-") {
+				continue
+			}
 			// Header names are case-insensitive. Preserve the catalog spelling while
 			// replacing its value so request construction cannot see two colliding
 			// map entries whose eventual winner depends on iteration order.
