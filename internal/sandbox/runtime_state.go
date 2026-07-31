@@ -43,12 +43,26 @@ type SandboxRuntime struct {
 // one directory while commands write to another, and the failure is a bare
 // ACCESS_DENIED from npm or go build with nothing pointing at the sandbox.
 func sandboxRuntimeRootFor(workspaceRoot string, cacheRoot string) (string, error) {
-	digest := sha256.Sum256([]byte(workspaceRoot))
-	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
-	if !pathWithinRoot(workspaceRoot, root) {
+	if root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot); ok {
 		return root, nil
 	}
 	return fallbackSandboxRuntimeRoot(workspaceRoot)
+}
+
+// deterministicSandboxRuntimeRoot returns the cache-derived runtime root and
+// whether it is usable, meaning it lands outside the workspace. It creates
+// nothing, which sandboxRuntimeRootFor cannot promise: its fallback calls
+// os.MkdirTemp.
+//
+// Callers that only need to NAME the tree — teardown, working out which paths a
+// principal could hold an ACE on — have to use this. Going through
+// sandboxRuntimeRootFor there would create a fresh temp directory on the way
+// out, and a useless one at that, since the fallback root is random per process
+// and would never match the one the commands actually used.
+func deterministicSandboxRuntimeRoot(workspaceRoot string, cacheRoot string) (string, bool) {
+	digest := sha256.Sum256([]byte(workspaceRoot))
+	root := filepath.Join(cacheRoot, "zero", "runtime", "v1", hex.EncodeToString(digest[:8]))
+	return root, !pathWithinRoot(workspaceRoot, root)
 }
 
 func prepareSandboxRuntime(workspaceRoot string) (SandboxRuntime, func(), error) {
