@@ -176,3 +176,28 @@ func TestHandleConfigCommandTogglesRecaps(t *testing.T) {
 		t.Errorf("unknown arg should be rejected, got %q", text)
 	}
 }
+
+func TestHandleConfigCommandCancelsInFlightRecap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := model{
+		recapsEnabled: true,
+		recapRunning:  true,
+		recapCancel:   cancel,
+		idleRecap:     "old recap",
+	}
+
+	m, _ = m.handleConfigCommand("recaps off")
+	if m.recapRunning || m.recapCancel != nil || m.idleRecap != "" {
+		t.Fatalf(
+			"disabling recaps did not clear in-flight state: running=%v cancel=%v recap=%q",
+			m.recapRunning,
+			m.recapCancel != nil,
+			m.idleRecap,
+		)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("disabling recaps did not cancel in-flight generation context")
+	}
+}

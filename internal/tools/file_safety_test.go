@@ -177,9 +177,8 @@ func TestEditFileReplaceAllRecordsEveryShiftedReplacementSpan(t *testing.T) {
 	}, opts); res.Status != StatusOK {
 		t.Fatalf("replace_all failed: %q", res.Output)
 	}
-	if !tracker.SeenRange(path, 5, 6) {
-		t.Fatal("shifted second replacement span was not recorded as seen")
-	}
+	// This follow-up targets both generated "right" lines. It succeeds only if
+	// replace_all recorded the shifted second replacement as seen.
 	if res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
 		"path":        "f.txt",
 		"old_string":  "right",
