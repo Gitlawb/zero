@@ -3394,7 +3394,7 @@ func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 func TestPlanModeAdvertisesOnlySafeTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(root) {
+	for _, tool := range tools.CoreToolsScoped(root, nil) {
 		registry.Register(tool)
 	}
 	provider := &mockProvider{
@@ -3585,7 +3585,7 @@ func TestPlanModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
 func TestPlanModeDeniesLSPNavigateToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewLSPNavigateTool(root))
+	registry.Register(tools.NewScopedLSPNavigateTool(root, nil))
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -3627,7 +3627,7 @@ func TestPlanModeDeniesLSPNavigateToolCalls(t *testing.T) {
 func TestPlanModeDeniesHiddenToolCalls(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	provider := providerCallingWriteFileThenAnswer("done")
 
 	result, err := Run(context.Background(), "plan", provider, Options{
