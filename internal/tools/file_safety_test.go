@@ -215,7 +215,7 @@ func TestApplyPatchCompleteCreationCreditsSuppliedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(updated), "updated content\n"; got != want {
+	if got, want := strings.ReplaceAll(string(updated), "\r\n", "\n"), "updated content\n"; got != want {
 		t.Fatalf("follow-up edit content = %q, want %q", got, want)
 	}
 }
