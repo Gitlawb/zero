@@ -44,8 +44,8 @@ func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
 }
 
 func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
-	root := t.TempDir()
-	base := t.TempDir()
+	root := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
 	// autoAbsoluteGitDir answers Prepare's post-lock ownership-marker write
 	// (`git rev-parse --absolute-git-dir`) for the newly created worktree
 	// without a canned result: without it, the fake runner falls off the end
@@ -210,7 +210,7 @@ func TestReleaseFallsBackToCwdWhenWorktreeDirMissing(t *testing.T) {
 	// (git keeps a prunable entry after a manual rm -rf) with Zero's lease
 	// reason, or the ownership check refuses the unlock.
 	repoRoot := physicalTestPath(t, t.TempDir())
-	missingPath := filepath.Join(t.TempDir(), "zero-worktree-"+repoKey(repoRoot), "already-deleted")
+	missingPath := filepath.Join(physicalTestPath(t, t.TempDir()), "zero-worktree-"+repoKey(repoRoot), "already-deleted")
 	runner := &fakeRunner{results: []CommandResult{
 		{Stdout: "worktree " + repoRoot + "\nworktree " + missingPath + "\nlocked " + leaseReasonPrefix + "\n"},
 		{},
@@ -321,8 +321,8 @@ func TestReleasePropagatesGitFailure(t *testing.T) {
 }
 
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
-	root := t.TempDir()
-	base := t.TempDir()
+	root := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	if err := os.MkdirAll(sourceGit, 0o700); err != nil {
 		t.Fatal(err)
@@ -384,8 +384,8 @@ func TestPrepareRejectsWorktreeLockedByAnotherRun(t *testing.T) {
 	// supposedly isolated tree, and whichever exits first would release the
 	// single Git lock out from under the other, so Prepare must reject the
 	// in-use lease instead of returning the path.
-	root := t.TempDir()
-	base := t.TempDir()
+	root := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	if err := os.MkdirAll(sourceGit, 0o700); err != nil {
 		t.Fatal(err)
@@ -745,10 +745,10 @@ func TestPrepareValidatesRequestBeforeCleanup(t *testing.T) {
 }
 
 func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
-	root := t.TempDir()
-	base := t.TempDir()
+	root := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
-	otherGit := filepath.Join(t.TempDir(), ".git")
+	otherGit := filepath.Join(physicalTestPath(t, t.TempDir()), ".git")
 	for _, dir := range []string{sourceGit, otherGit} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -992,7 +992,7 @@ func TestCleanPrunesStaleWorktrees(t *testing.T) {
 // Clean must check ExitCode itself rather than trusting a nil error to mean
 // the removal succeeded.
 func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1038,7 +1038,7 @@ func TestCleanReportsErrorOnFailedRemoval(t *testing.T) {
 }
 
 func TestCleanAggregatesMultipleFailedRemovals(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1334,7 +1334,7 @@ func TestCleanReclaimsReleasedWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 	// output) must be reclaimable, or every released worktree with such
 	// artifacts leaks disk forever. The dirty probe for unlocked entries
 	// therefore omits --ignored.
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1395,7 +1395,7 @@ func TestCleanReclaimsReleasedWorktreeWithOnlyIgnoredFiles(t *testing.T) {
 // --ignored because a crashed task never signaled completion.
 func TestCleanRecoversExpiredLease(t *testing.T) {
 	deadPID := deadProcessPID(t)
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1807,7 +1807,7 @@ func TestParseWorktreeListTracksLockedState(t *testing.T) {
 
 func TestCleanUnlocksExpiredLeaseBeforePruningMissingDir(t *testing.T) {
 	deadPID := deadProcessPID(t)
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
