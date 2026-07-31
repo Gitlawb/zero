@@ -1022,17 +1022,28 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	targetRemote := strings.TrimSpace(options.remote)
 	if !options.yes {
 		_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
 		if err != nil {
 			return writeExecUsageError(stderr, err.Error())
 		}
+		if targetRemote == "" {
+			targetRemote = remoteForCheck
+		}
+	}
+	if targetRemote == "" {
+		if deps.branchUpstreamRemote != nil {
+			targetRemote = deps.branchUpstreamRemote(context.Background(), workspaceRoot, "")
+		}
+		if targetRemote == "" {
+			targetRemote = "origin"
+		}
+	}
 
-		targetRemote := firstNonEmptyString(options.remote, remoteForCheck)
-		if deps.isUnbornRemote != nil {
-			if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
-				return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
-			}
+	if deps.isUnbornRemote != nil {
+		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
+			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
 		}
 	}
 
@@ -1353,17 +1364,36 @@ func generateAutoBranchSlug(ctx context.Context, provider zeroruntime.Provider, 
 // line so a preamble sentence is never mistaken for the slug.
 var slugLineRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
 
+func isPreambleText(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if strings.HasSuffix(lower, ":") || strings.HasSuffix(lower, ".") || strings.HasSuffix(lower, "!") || strings.HasSuffix(lower, "?") {
+		return true
+	}
+	preambles := []string{
+		"here is", "here's", "below is", "below are", "sure", "certainly",
+		"i suggest", "suggested branch", "branch name", "recommended branch",
+		"how about", "you could use",
+	}
+	for _, p := range preambles {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractBranchSlug pulls the intended slug out of a model response that didn't
 // follow the "output only the raw slug" instruction exactly. It drops Markdown
 // code-fence lines, then prefers a line that already looks like a kebab-case
 // slug: that skips a leading preamble such as "Here is a suggested branch
-// name:" in favor of the "add-login-page" line that follows it, and it unwraps
-// a fenced reply whose only real content is the slug. When no line is already
-// slug-shaped it falls back to the first non-fence, non-empty line (trimmed of
-// surrounding quotes) so a plain multi-word "add login page" reply still
-// slugifies correctly rather than being returned verbatim.
+// name:" in favor of the "add-login-page" line that follows it. If no line is
+// strictly kebab-cased, it prefers a plausible non-preamble line (e.g. "add login
+// page" following "Here is a suggested branch name:"), so plain multi-word
+// replies still slugify correctly without taking the preamble text.
 func extractBranchSlug(text string) string {
-	fallback := ""
+	var firstLine string
+	var plausibleLine string
+
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "```") {
@@ -1373,12 +1403,32 @@ func extractBranchSlug(text string) string {
 		if line == "" {
 			continue
 		}
-		if slugLineRe.MatchString(line) {
-			return line
+
+		candidate := line
+		if idx := strings.Index(line, ":"); idx != -1 {
+			after := strings.TrimSpace(strings.Trim(line[idx+1:], `"'`))
+			if after != "" {
+				candidate = after
+			}
 		}
-		if fallback == "" {
-			fallback = line
+
+		if slugLineRe.MatchString(candidate) {
+			return candidate
+		}
+
+		if firstLine == "" {
+			firstLine = candidate
+		}
+
+		if !isPreambleText(line) && !isPreambleText(candidate) {
+			if plausibleLine == "" {
+				plausibleLine = candidate
+			}
 		}
 	}
-	return fallback
+
+	if plausibleLine != "" {
+		return plausibleLine
+	}
+	return firstLine
 }

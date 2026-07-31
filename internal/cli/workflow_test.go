@@ -1263,6 +1263,8 @@ func TestExtractBranchSlug(t *testing.T) {
 	}{
 		{"RawSlug", "add-login-page", "add-login-page"},
 		{"Preamble", "Here is a suggested branch name:\nadd-login-page", "add-login-page"},
+		{"PreambleWithMultiWord", "Here is a suggested branch name:\nadd login page", "add login page"},
+		{"PreambleInlineWithColon", "Here is a suggested branch name: add login page", "add login page"},
 		{"CodeFence", "```\nadd-login-page\n```", "add-login-page"},
 		{"FencedWithLanguage", "```text\nadd-login-page\n```", "add-login-page"},
 		{"QuotedPhrase", "\n\"add login page\"\n", "add login page"},
@@ -1285,6 +1287,7 @@ func TestEnsureFeatureBranchExtractsSlugFromMessyLLMReplies(t *testing.T) {
 		response string
 	}{
 		{"Preamble", "Here is a suggested branch name:\nadd-login-page"},
+		{"PreambleWithMultiWord", "Here is a suggested branch name:\nadd login page"},
 		{"CodeFence", "```\nadd-login-page\n```"},
 		{"FencedWithLanguage", "```text\nadd-login-page\n```"},
 	} {
@@ -1866,6 +1869,41 @@ func TestRunChangesPushSkipsBranchCreationWithYes(t *testing.T) {
 	}
 	if isDefaultBranchCalled {
 		t.Fatal("expected isDefaultBranch not to be consulted when --yes is passed")
+	}
+}
+
+func TestRunChangesPRRejectsUnbornRemoteEvenWithYes(t *testing.T) {
+	cwd := t.TempDir()
+	isUnbornRemoteCalled := false
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "pr", "--yes", "--fill"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
+			isUnbornRemoteCalled = true
+			if remote != "origin" {
+				t.Fatalf("expected remote %q, got %q", "origin", remote)
+			}
+			return true, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			t.Fatal("pushChanges should not be called on unborn remote")
+			return zerogit.PushResult{}, nil
+		},
+		createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+			t.Fatal("createPR should not be called on unborn remote")
+			return zerogit.PRResult{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if !isUnbornRemoteCalled {
+		t.Fatal("expected isUnbornRemote to be consulted even when --yes is passed")
+	}
+	if !strings.Contains(stderr.String(), "cannot create pull request on unborn remote origin") {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
 
