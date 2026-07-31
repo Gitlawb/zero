@@ -16,15 +16,24 @@ import (
 // refused the overwrite forever while telling the model to read the file again.
 func TestLargeFileBecomesWritableAfterScopedReadsCoverIt(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "big.go")
+	// read_file resolves the workspace root through EvalSymlinks before it
+	// records anything, so the tracker is keyed on the resolved path. On macOS
+	// t.TempDir() sits under /var, a symlink to /private/var, and asserting
+	// against the raw path would look up a key that never existed — passing on
+	// Windows and failing there.
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	path := filepath.Join(resolvedDir, "big.go")
 
 	const lines = 2400
 	var builder strings.Builder
 	for index := 0; index < lines; index++ {
 		builder.WriteString(fmt.Sprintf("line %06d %s\n", index, strings.Repeat("x", 60)))
 	}
-	if err := os.WriteFile(path, []byte(builder.String()), 0o600); err != nil {
-		t.Fatalf("seed file: %v", err)
+	if writeErr := os.WriteFile(path, []byte(builder.String()), 0o600); writeErr != nil {
+		t.Fatalf("seed file: %v", writeErr)
 	}
 
 	tracker := NewFileTracker()
