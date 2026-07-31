@@ -379,6 +379,43 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 	}
 }
 
+func TestMaybeCompactStopsAfterSupersededReadsReachThreshold(t *testing.T) {
+	body := strings.Repeat("same source line\n", 1000)
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		toolCallWithArgs("old", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old", Content: body},
+		toolCallWithArgs("new", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new", Content: body},
+	}
+	pruned, reclaimed := pruneSupersededReadResults(messages)
+	if reclaimed <= 0 {
+		t.Fatal("test setup did not reclaim superseded read output")
+	}
+	prunedSize := estimateTokens(pruned)
+	if estimateTokens(messages) <= prunedSize {
+		t.Fatal("test setup does not cross the compaction threshold")
+	}
+
+	provider := &summarizeRecordingProvider{}
+	state := &compactionState{
+		enabled:      true,
+		threshold:    prunedSize,
+		preserveLast: 2,
+	}
+	got := state.maybeCompact(context.Background(), provider, messages, nil)
+
+	if provider.summarizeCalls != 0 {
+		t.Fatalf("cheap pruning should avoid the summarizer, got %d calls", provider.summarizeCalls)
+	}
+	if state.lowWaterMark != prunedSize {
+		t.Fatalf("lowWaterMark = %d, want %d", state.lowWaterMark, prunedSize)
+	}
+	if !strings.Contains(got[2].Content, "superseded identical") || got[4].Content != body {
+		t.Fatalf("unexpected pruned messages: %#v", got)
+	}
+}
+
 // reactiveProvider builds up history with a tool call on turn 1, then errors
 // with a context-limit message on turn 2 (once the history is large enough that
 // compaction can shrink it), then succeeds on the same-turn retry. Summary

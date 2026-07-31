@@ -64,3 +64,34 @@ func TestReduceCommandOutputFailsOpenForCompoundAndFailedOutput(t *testing.T) {
 		t.Fatalf("failure evidence should pass through when there is no repetitive success bulk: %q", result.Output)
 	}
 }
+
+func TestSelfManagedBudgetPreservesRawSpillWhenReducedOutputAlsoTruncates(t *testing.T) {
+	raw := "raw output\n" + strings.Repeat("ok  \texample.test/raw\t0.01s\n", 1000)
+	rawSpill := spillTruncatedOutput(ExecCommandToolName, raw)
+	if rawSpill == "" {
+		t.Fatal("failed to create raw spill")
+	}
+	reduced := strings.Repeat("reduced but still large\n", 1000)
+	result := applySelfManagedOutputBudget(
+		NewExecCommandTool(t.TempDir(), newExecSessionManager()),
+		ExecCommandToolName,
+		map[string]any{"cmd": "go test ./...", "max_output_tokens": 100},
+		Result{
+			Status:    StatusOK,
+			Output:    reduced,
+			Truncated: true,
+			Meta: map[string]string{
+				"spill_path":        rawSpill,
+				"truncation_reason": "command_aware_reduction",
+			},
+		},
+	)
+
+	if result.Meta["spill_path"] != rawSpill {
+		t.Fatalf("budget boundary replaced raw spill: got %q want %q", result.Meta["spill_path"], rawSpill)
+	}
+	spilled, err := os.ReadFile(result.Meta["spill_path"])
+	if err != nil || string(spilled) != raw {
+		t.Fatalf("raw spill was not preserved: err=%v", err)
+	}
+}

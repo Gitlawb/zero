@@ -149,6 +149,30 @@ func TestEditFileAllowsSeenRangeAndRejectsUnseenRange(t *testing.T) {
 	}, opts); res.Status != StatusOK {
 		t.Fatalf("seen-range edit should succeed, got %q", res.Output)
 	}
+	if content, err := os.ReadFile(path); err != nil || !strings.Contains(string(content), "bravo") {
+		t.Fatalf("seen-range edit did not update the file: content=%q err=%v", content, err)
+	}
+}
+
+func TestWriteFileCanOverwriteNewlyCreatedEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	if res := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path": "empty.txt", "content": "",
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("empty create failed: %q", res.Output)
+	}
+	if res := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path": "empty.txt", "content": "now populated\n", "overwrite": true,
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("empty overwrite should succeed: %q", res.Output)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "empty.txt")); err != nil || string(content) != "now populated\n" {
+		t.Fatalf("unexpected overwritten content: content=%q err=%v", content, err)
+	}
 }
 
 func TestMinifiedReadDoesNotAuthorizeExactEdit(t *testing.T) {

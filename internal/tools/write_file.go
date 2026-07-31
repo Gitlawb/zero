@@ -110,6 +110,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
@@ -118,7 +119,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(content), lineCount(content))
+	if content == modelKnownContent {
+		options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(content), lineCount(content))
+	}
 	if !existed {
 		options.FileTracker.RecordCreated(absolutePath)
 	}

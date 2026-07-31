@@ -198,7 +198,7 @@ func TestNormalizeAdditionalPermissionsRemovesWorkspaceReadAlreadyCoveredBySandb
 	})
 	args := map[string]any{
 		"command":             "./zero --version",
-		"sandbox_permissions": string(tools.SandboxPermissionsUseDefault),
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
 		"additional_permissions": map[string]any{
 			"file_system": map[string]any{
 				"entries": []any{

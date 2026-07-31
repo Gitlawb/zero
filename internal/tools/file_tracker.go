@@ -87,12 +87,21 @@ func (tracker *FileTracker) RecordHash(absPath string, hash string, info os.File
 // RecordSeenRange records exact, non-elided source lines returned to the model.
 // Ranges accumulate while the content hash remains unchanged.
 func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total int) {
-	if tracker == nil || start < 1 || end < start {
+	if tracker == nil || start < 1 {
 		return
 	}
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	observation := tracker.seen[absPath]
+	if total == 0 {
+		observation.whole = true
+		observation.ranges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	if end < start {
+		return
+	}
 	if start == 1 && end >= total {
 		observation.whole = true
 		observation.ranges = nil

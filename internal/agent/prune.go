@@ -134,10 +134,11 @@ var supersedableReadTools = map[string]bool{
 // same read call. It runs when context pressure already requires a rewrite, so
 // it does not trade a warm provider-cache prefix for a small apparent saving.
 func pruneSupersededReadResults(messages []zeroruntime.Message) ([]zeroruntime.Message, int) {
-	type seenResult struct {
+	type seenResultKey struct {
+		call    string
 		content string
 	}
-	seen := map[string]seenResult{}
+	seen := map[seenResultKey]struct{}{}
 	out := messages
 	reclaimed := 0
 	copied := false
@@ -151,8 +152,11 @@ func pruneSupersededReadResults(messages []zeroruntime.Message) ([]zeroruntime.M
 		if !ok || !supersedableReadTools[call.Name] {
 			continue
 		}
-		key := call.Name + "\x00" + strings.TrimSpace(call.Arguments)
-		if newer, exists := seen[key]; exists && newer.content == message.Content {
+		key := seenResultKey{
+			call:    call.Name + "\x00" + strings.TrimSpace(call.Arguments),
+			content: message.Content,
+		}
+		if _, exists := seen[key]; exists {
 			placeholder := fmt.Sprintf("[superseded identical %s result — the newer result remains in context]", call.Name)
 			if !copied {
 				out = append([]zeroruntime.Message(nil), messages...)
@@ -162,7 +166,7 @@ func pruneSupersededReadResults(messages []zeroruntime.Message) ([]zeroruntime.M
 			reclaimed += max(0, ApproxTextTokens(message.Content)-ApproxTextTokens(placeholder))
 			continue
 		}
-		seen[key] = seenResult{content: message.Content}
+		seen[key] = struct{}{}
 	}
 	return out, reclaimed
 }

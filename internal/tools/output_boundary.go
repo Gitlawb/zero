@@ -57,13 +57,15 @@ func applySelfManagedOutputBudget(tool Tool, toolName string, args map[string]an
 
 	category := resolveOutputCategory(tool, toolName, args)
 	budgeted := budgetSemanticOutput(result.Output, category, budget)
+	if result.Truncated && budgeted.spillPath == "" {
+		budgeted.spillPath = result.Meta["spill_path"]
+	}
 	if result.Truncated && !budgeted.truncated {
 		budgeted.truncated = true
 		budgeted.reason = result.Meta["truncation_reason"]
 		if budgeted.reason == "" {
 			budgeted.reason = "upstream_tool_budget"
 		}
-		budgeted.spillPath = result.Meta["spill_path"]
 	}
 	if budgeted.truncated && budgeted.spillPath == "" {
 		budgeted = attachExistingSpill(toolName, result.Output, budget, budgeted)

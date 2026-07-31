@@ -171,3 +171,25 @@ func TestPruneSupersededReadResultsKeepsChangedAndMutatingResults(t *testing.T) 
 		}
 	}
 }
+
+func TestPruneSupersededReadResultsFindsMatchingBodyAcrossChangedRead(t *testing.T) {
+	bodyA := strings.Repeat("version a\n", 100)
+	bodyB := strings.Repeat("version b\n", 100)
+	messages := []zeroruntime.Message{
+		toolCallWithArgs("old-a", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old-a", Content: bodyA},
+		toolCallWithArgs("middle-b", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "middle-b", Content: bodyB},
+		toolCallWithArgs("new-a", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new-a", Content: bodyA},
+	}
+
+	out, reclaimed := pruneSupersededReadResults(messages)
+
+	if reclaimed <= 0 || !strings.Contains(out[1].Content, "superseded identical") {
+		t.Fatalf("older matching body was not pruned across a changed result: reclaimed=%d output=%q", reclaimed, out[1].Content)
+	}
+	if out[3].Content != bodyB || out[5].Content != bodyA {
+		t.Fatal("changed middle result and newest matching result must remain exact")
+	}
+}
