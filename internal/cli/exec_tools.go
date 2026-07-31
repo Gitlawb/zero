@@ -73,6 +73,24 @@ func toolListContains(names []string, want string) bool {
 }
 
 func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error) {
+	if pm := strings.ToLower(strings.TrimSpace(options.permissionMode)); pm != "" {
+		switch pm {
+		case "plan":
+			return agent.PermissionModePlan, nil
+		case "spec-draft", "spec_draft":
+			return agent.PermissionModeSpecDraft, nil
+		case "auto":
+			return agent.PermissionModeAuto, nil
+		case "member", "member-auto", "member_auto":
+			return agent.PermissionModeMemberAuto, nil
+		case "ask":
+			return agent.PermissionModeAsk, nil
+		case "unsafe", "high":
+			return agent.PermissionModeUnsafe, nil
+		default:
+			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, ask, or unsafe.", options.permissionMode)}
+		}
+	}
 	// Validate --auto first, regardless of --skip-permissions-unsafe, so an
 	// invalid autonomy value is always rejected. (Previously the unsafe path
 	// short-circuited before validation, letting "--auto bogus" slip through

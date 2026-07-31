@@ -59,7 +59,7 @@ func (m model) handlePlanCommand(args string) (model, string) {
 // Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup, commandSpec:
+	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandMCP:
 		return true
 	default:
 		return false
