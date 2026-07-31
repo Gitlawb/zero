@@ -163,3 +163,63 @@ func TestGitConfigCarveoutShapeSurvivesANonCanonicalRoot(t *testing.T) {
 		t.Fatal("no .git/config entry in the plan")
 	}
 }
+
+// Teardown must name the runtime tree without creating anything. The comment
+// on windowsPrincipalTeardownPaths claimed that and it was false: the resolver
+// it used ends in sandboxRuntimeRootFor, whose fallback calls os.MkdirTemp, so
+// a workspace whose cache root sits inside it made setup's cleanup path create
+// a fresh temp directory on its way out — and a useless one, since the fallback
+// root is random per process and never matches what commands used.
+func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
+	workspace := t.TempDir()
+	// Force the branch that falls back: cache root inside the workspace.
+	original := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
+	t.Cleanup(func() { sandboxUserCacheDir = original })
+
+	before := tempDirEntryCount(t)
+
+	// Drive the PRODUCTION teardown path, not the helper. Calling the resolver
+	// directly passes just as happily with the call site reverted to the one
+	// that creates.
+	paths, err := windowsPrincipalTeardownPaths(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{workspace},
+		CommandCWD:     workspace,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: workspace}},
+			},
+		},
+	}, "S-1-5-32-546")
+	if err != nil {
+		t.Fatalf("windowsPrincipalTeardownPaths: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Error("teardown named no paths at all; the workspace root should still be revoked")
+	}
+	if after := tempDirEntryCount(t); after != before {
+		t.Errorf("temp directory gained %d entries; naming the paths must not create one", after-before)
+	}
+
+	// And the setup resolver, which is allowed to create, still does.
+	created, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{workspace},
+		CommandCWD:     workspace,
+	})
+	if err != nil {
+		t.Fatalf("windowsSandboxRuntimeRootPath: %v", err)
+	}
+	if created == "" {
+		t.Error("setup's resolver should still fall back to a usable tree")
+	}
+}
+
+func tempDirEntryCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+	return len(entries)
+}

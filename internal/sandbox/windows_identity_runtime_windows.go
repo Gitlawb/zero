@@ -405,6 +405,39 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 	return sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
 }
 
+// windowsSandboxDeterministicRuntimeRootPath names the cache-derived runtime
+// tree without creating anything, and returns "" when that tree is unusable
+// because it would land inside the workspace.
+//
+// Teardown needs this rather than windowsSandboxRuntimeRootPath: that one ends
+// in sandboxRuntimeRootFor, whose fallback calls os.MkdirTemp, so merely asking
+// for the name would make a directory on the way out.
+func windowsSandboxDeterministicRuntimeRootPath(config WindowsSandboxCommandConfig) (string, error) {
+	workspaceRoot := ""
+	for _, candidate := range config.WorkspaceRoots {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			workspaceRoot = canonicalSandboxWorkspaceRoot(trimmed)
+			break
+		}
+	}
+	if workspaceRoot == "" {
+		return "", nil
+	}
+	cacheRoot, err := sandboxUserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
+	}
+	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
+	if cacheRoot == "" || cacheRoot == "." {
+		return "", errors.New("user cache directory is unavailable for sandbox runtime")
+	}
+	root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot)
+	if !ok {
+		return "", nil
+	}
+	return root, nil
+}
+
 // setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
 // Teardown wants the name without the side effect, so the derivation lives in
 // windowsSandboxRuntimeRootPath above and this only adds the mkdir.
@@ -504,13 +537,18 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 }
 
 // windowsPrincipalTeardownPaths names every path this principal could hold an
-// ACE on, derived the same way setup derived them: the policy's roots plus the
-// per-workspace runtime tree. The runtime root is resolved without creating it,
-// since teardown has no business making directories on its way out.
+// ACE on: the policy's roots plus the per-workspace runtime tree.
+//
+// The runtime root is derived through deterministicSandboxRuntimeRoot rather
+// than the resolver setup uses, because teardown must create nothing on its way
+// out and that resolver's fallback calls os.MkdirTemp. When the deterministic
+// root is unusable there is simply no runtime tree to revoke: the fallback root
+// commands used was random and per-process, so nothing here could name it
+// anyway.
 func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
 	filesystem := config.PermissionProfile.FileSystem
 	writeRoots := filesystem.WriteRoots
-	runtimeRoot, err := windowsSandboxRuntimeRootPath(config)
+	runtimeRoot, err := windowsSandboxDeterministicRuntimeRootPath(config)
 	if err != nil {
 		return nil, err
 	}
