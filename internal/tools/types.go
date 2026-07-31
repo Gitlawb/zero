@@ -115,6 +115,9 @@ type Result struct {
 	ChangeSummaries []execution.Change
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
+	// pendingFileObservation is proposed by read_file and committed only after
+	// the final model-visible output boundary confirms the exact content survived.
+	pendingFileObservation *pendingFileObservation
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.

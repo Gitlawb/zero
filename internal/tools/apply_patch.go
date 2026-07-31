@@ -80,9 +80,11 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	var createdTargets []string
+	var fullySuppliedTargets []string
 	wholeBefore := map[string]bool{}
 	if options.FileTracker != nil {
 		createdTargets = missingPatchTargets(applyRoot, patch)
+		fullySuppliedTargets = completeCreatedPatchTargets(applyRoot, patch)
 		for _, path := range patchHeaderPaths(patch) {
 			if path == "" || path == "/dev/null" {
 				continue
@@ -111,9 +113,9 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
-	createdBefore := make(map[string]bool, len(createdTargets))
-	for _, absolute := range createdTargets {
-		createdBefore[absolute] = true
+	fullySupplied := make(map[string]bool, len(fullySuppliedTargets))
+	for _, absolute := range fullySuppliedTargets {
+		fullySupplied[absolute] = true
 	}
 	// Re-baseline files changed by this tool. When the model had already seen the
 	// whole input (or supplied a complete new file), the exact patch plus that
@@ -127,7 +129,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 				continue
 			}
 			info, _ := os.Stat(absolute)
-			wasWhole := wholeBefore[absolute] || createdBefore[absolute]
+			wasWhole := wholeBefore[absolute] || fullySupplied[absolute]
 			options.FileTracker.Record(absolute, content, info)
 			if wasWhole {
 				lines := lineCount(string(content))
@@ -156,6 +158,60 @@ func missingPatchTargets(root string, patch string) []string {
 		}
 	}
 	return missing
+}
+
+// completeCreatedPatchTargets returns only files whose full contents are
+// supplied by a /dev/null creation patch. A missing rename/copy destination is
+// created by git too, but its bytes come from an unread source and must not gain
+// whole-file observation credit.
+func completeCreatedPatchTargets(root string, patch string) []string {
+	seen := map[string]bool{}
+	var created []string
+	oldRemaining, newRemaining := 0, 0
+	inHunk := false
+	fromDevNull := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+			switch {
+			case strings.HasPrefix(line, "-"):
+				oldRemaining--
+			case strings.HasPrefix(line, "+"):
+				newRemaining--
+			case strings.HasPrefix(line, "\\"):
+			default:
+				oldRemaining--
+				newRemaining--
+			}
+			continue
+		}
+		inHunk = false
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			fromDevNull = false
+		case strings.HasPrefix(line, "@@"):
+			oldRemaining, newRemaining = parseHunkCounts(line)
+			inHunk = oldRemaining > 0 || newRemaining > 0
+		case strings.HasPrefix(line, "--- "):
+			fromDevNull = patchFileHeaderPath(line) == "/dev/null"
+		case strings.HasPrefix(line, "+++ "):
+			path := patchFileHeaderPath(line)
+			if !fromDevNull || path == "" || path == "/dev/null" {
+				fromDevNull = false
+				continue
+			}
+			fromDevNull = false
+			absolute, _, err := resolveWorkspaceTargetPath(root, stripPatchPrefix(path))
+			if err != nil || seen[absolute] {
+				continue
+			}
+			if _, err := os.Stat(absolute); !os.IsNotExist(err) {
+				continue
+			}
+			seen[absolute] = true
+			created = append(created, absolute)
+		}
+	}
+	return created
 }
 
 func recordCreatedPatchTargets(tracker *FileTracker, missingBefore []string) {
@@ -264,20 +320,23 @@ func patchHeaderPaths(patch string) []string {
 			oldRemaining, newRemaining = parseHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			// Take everything after the fixed 4-char prefix instead of splitting on
-			// spaces, so a path that contains spaces survives. Drop a trailing
-			// tab-delimited timestamp (unified-diff convention) and unquote a
-			// C-quoted git path (git quotes names with spaces/specials) (L18).
-			rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
-			if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
-				rest = rest[:tab]
-			}
-			if p := strings.TrimSpace(unquoteGitPath(rest)); p != "" && p != "/dev/null" {
+			if p := patchFileHeaderPath(line); p != "" && p != "/dev/null" {
 				paths = append(paths, stripPatchPrefix(p))
 			}
 		}
 	}
 	return paths
+}
+
+func patchFileHeaderPath(line string) string {
+	if len(line) < len("--- ") {
+		return ""
+	}
+	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
+	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
+		rest = rest[:tab]
+	}
+	return strings.TrimSpace(unquoteGitPath(rest))
 }
 
 // parseHunkCounts reads the old/new line counts from a "@@ -a,b +c,d @@" header.

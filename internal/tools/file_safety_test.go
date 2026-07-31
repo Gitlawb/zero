@@ -118,6 +118,101 @@ func TestApplyPatchPreservesWholeFileObservationForFollowUpEdit(t *testing.T) {
 	}
 }
 
+func TestApplyPatchRenameOrCopyDoesNotCreditUnreadDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "rename",
+			patch: strings.Join([]string{
+				"diff --git a/source.txt b/destination.txt",
+				"similarity index 100%",
+				"rename from source.txt",
+				"rename to destination.txt",
+				"",
+			}, "\n"),
+		},
+		{
+			name: "copy",
+			patch: strings.Join([]string{
+				"diff --git a/source.txt b/destination.txt",
+				"similarity index 100%",
+				"copy from source.txt",
+				"copy to destination.txt",
+				"",
+			}, "\n"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "source.txt"), []byte("unread source\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			registry := safetyRegistry(t, dir)
+			registry.Register(NewScopedApplyPatchTool(dir, nil))
+			tracker := NewFileTracker()
+			opts := grantedOpts(tracker)
+
+			if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": tc.patch}, opts); result.Status != StatusOK {
+				if gitApplyUnavailable(result.Output) {
+					t.Skipf("git binary unavailable: %s", result.Output)
+				}
+				t.Fatalf("apply_patch failed: %s", result.Output)
+			}
+			destination, err := filepath.EvalSymlinks(filepath.Join(dir, "destination.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tracker.SeenWhole(destination) {
+				t.Fatal("rename/copy destination was credited as fully seen without a read")
+			}
+			result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+				"path": "destination.txt", "content": "blind overwrite\n", "overwrite": true,
+			}, opts)
+			if result.Status != StatusError || !strings.Contains(result.Output, "has not been read exactly") {
+				t.Fatalf("blind destination overwrite was not refused: %#v", result)
+			}
+		})
+	}
+}
+
+func TestApplyPatchCompleteCreationCreditsSuppliedFile(t *testing.T) {
+	dir := t.TempDir()
+	registry := safetyRegistry(t, dir)
+	registry.Register(NewScopedApplyPatchTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+	patch := strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+supplied content",
+		"",
+	}, "\n")
+	if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": patch}, opts); result.Status != StatusOK {
+		if gitApplyUnavailable(result.Output) {
+			t.Skipf("git binary unavailable: %s", result.Output)
+		}
+		t.Fatalf("apply_patch failed: %s", result.Output)
+	}
+	created, err := filepath.EvalSymlinks(filepath.Join(dir, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.SeenWhole(created) {
+		t.Fatal("complete /dev/null creation was not credited as supplied content")
+	}
+	result := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "new.txt", "old_string": "supplied", "new_string": "updated",
+	}, opts)
+	if result.Status != StatusOK {
+		t.Fatalf("follow-up edit of supplied file failed: %s", result.Output)
+	}
+}
+
 func TestWriteFileOverwriteRefusedWhenChangedOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

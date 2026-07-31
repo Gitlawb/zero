@@ -170,6 +170,60 @@ func TestExactByteReadsAdvanceAlongUTF8Boundaries(t *testing.T) {
 	}
 }
 
+func TestRegistryTruncationDoesNotCreditUndeliveredByteRanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unicode.min.js")
+	content := strings.Repeat("界", 84_000)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	result := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "unicode.min.js", "byte_offset": 0, "byte_limit": readFileByteChunkMax,
+	}, grantedOpts(tracker))
+	if !result.Truncated {
+		t.Fatalf("precondition: multibyte chunk was not truncated at the registry boundary: %#v", result.Meta)
+	}
+	next, err := strconv.Atoi(result.Meta["next_byte_offset"])
+	if err != nil || next <= 0 {
+		t.Fatalf("invalid continuation offset %q", result.Meta["next_byte_offset"])
+	}
+	if tracker.SeenBytes(resolvedPath, 0, next) || tracker.SeenWhole(resolvedPath) {
+		t.Fatal("registry-truncated bytes were credited as delivered to the model")
+	}
+}
+
+func TestRegistryTruncationDoesNotCreditWholeLineRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unicode.go")
+	content := strings.Repeat("界界界界界界界界\n", 4_000)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	result := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "unicode.go",
+	}, grantedOpts(tracker))
+	if !result.Truncated {
+		t.Fatalf("precondition: multibyte line read was not truncated at the registry boundary: %#v", result.Meta)
+	}
+	if tracker.SeenWhole(resolvedPath) {
+		t.Fatal("registry-truncated line output credited the whole file")
+	}
+}
+
 func TestPartialByteEditDoesNotCreditAnEntireLongLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bundle.min.js")

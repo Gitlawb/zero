@@ -67,6 +67,16 @@ type fileObservation struct {
 	byteRanges []lineRange // zero-based, half-open byte intervals
 }
 
+type pendingFileObservation struct {
+	path     string
+	output   string
+	hash     string
+	start    int
+	end      int
+	total    int
+	byteMode bool
+}
+
 // Record stores the version of absPath given its content and optional stat info.
 func (tracker *FileTracker) Record(absPath string, content []byte, info os.FileInfo) {
 	tracker.RecordHash(absPath, HashContent(content), info)

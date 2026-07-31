@@ -1357,7 +1357,8 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Cwd:               options.Cwd,
 		// Per-session file version tracker so write_file/edit_file refuse to clobber
 		// a file that changed on disk outside Zero since it was last read.
-		FileTracker: options.FileTracker,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
 		// Post-edit diagnostics are NOT forwarded to the tools: they used to run
 		// synchronously inside edit_file/write_file and block every mutating tool
 		// call on the language server (≥300ms debounce floor, 10s cap). The loop
@@ -1409,6 +1410,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			result = registry.RebudgetAfterHook(call.Name, args, result)
 		}
 	}
+	result = registry.CommitFileObservation(result, options.FileTracker)
 	// Stamp the sandbox risk classification for this EXECUTED call so run-policy
 	// observers can see the risk of an allowed mutation. Prefer the preflight
 	// decision's classification when the sandbox evaluated the call; otherwise

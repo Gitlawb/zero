@@ -113,9 +113,16 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if byteMode {
 		result, seenStart, seenEnd := renderReadFileBytes(absolutePath, relativePath, stats.bytes, byteOffset, byteLimit)
 		if result.Status == StatusOK && !result.Truncated && seenEnd > seenStart {
-			options.FileTracker.RecordSeenBytes(absolutePath, seenStart, seenEnd, stats.bytes)
-			result.Meta["file_version"] = stats.hash
-			result.Meta["seen_bytes"] = fmt.Sprintf("%d-%d", seenStart, seenEnd)
+			if options.deferFileObservation {
+				result.pendingFileObservation = &pendingFileObservation{
+					path: absolutePath, output: result.Output, hash: stats.hash,
+					start: seenStart, end: seenEnd, total: stats.bytes, byteMode: true,
+				}
+			} else {
+				options.FileTracker.RecordSeenBytes(absolutePath, seenStart, seenEnd, stats.bytes)
+				result.Meta["file_version"] = stats.hash
+				result.Meta["seen_bytes"] = fmt.Sprintf("%d-%d", seenStart, seenEnd)
+			}
 		}
 		return result
 	}
@@ -127,12 +134,19 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	result := renderReadFileRange(absolutePath, relativePath, stats.lines, startLine, endLine, maxLines, maxBytes)
 	if result.Status == StatusOK && result.Meta["truncation_reason"] != "byte_budget" {
 		seenStart, seenEnd := renderedReadRange(stats.lines, startLine, endLine, maxLines)
-		options.FileTracker.RecordSeenRange(absolutePath, seenStart, seenEnd, stats.lines)
-		if result.Meta == nil {
-			result.Meta = map[string]string{}
+		if options.deferFileObservation {
+			result.pendingFileObservation = &pendingFileObservation{
+				path: absolutePath, output: result.Output, hash: stats.hash,
+				start: seenStart, end: seenEnd, total: stats.lines,
+			}
+		} else {
+			options.FileTracker.RecordSeenRange(absolutePath, seenStart, seenEnd, stats.lines)
+			if result.Meta == nil {
+				result.Meta = map[string]string{}
+			}
+			result.Meta["file_version"] = stats.hash
+			result.Meta["seen_lines"] = fmt.Sprintf("%d-%d", seenStart, seenEnd)
 		}
-		result.Meta["file_version"] = stats.hash
-		result.Meta["seen_lines"] = fmt.Sprintf("%d-%d", seenStart, seenEnd)
 	}
 	return result
 }
