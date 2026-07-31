@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -265,27 +266,16 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 
 // keyringLockPath returns the cross-process lock file location for the
 // keyring backend's read-modify-write, derived from the keyring identity
-// itself (the service/account the index is stored under) and anchored on the
-// user's home directory (see resolveHomeDir) rather than os.UserCacheDir() or
-// os.TempDir(): those pick XDG_CACHE_HOME/TMPDIR per PROCESS, so two
-// processes of the SAME real user with different cache/temp roots (a common
-// case: sandboxes, CI, per-shell overrides) computed different lock files,
-// both read the same fixed keyring index, and could publish competing
-// updates that silently hid one process's token. HOME does not vary this way
-// for a given real user. A single shared ${TMPDIR}/zero-oauth-keyring.lockfile
-// would also let any other account on a multi-user host pre-create or keep
-// refreshing the victim's lock and time out their Load/Status/Save/Delete,
-// even though each user has a separate OS keychain, so only when even the
-// home directory can't be resolved does this fall back to a temp file scoped
-// by uid so two different users never collide on one path.
+// itself (service + index account) and anchored on the user's OS home directory
+// (via user.Current()) rather than caller-controlled environment overrides
+// like HOME, XDG_CACHE_HOME, or TMPDIR: those pick different paths per process
+// (sandboxes, CI harnesses, launcher profiles), so two processes for the same
+// OS user would take different lock files while writing to the same OS keychain.
 func keyringLockPath(env map[string]string, service, account string) string {
 	name := keyringLockFileName(service, account)
-	// Use OS.UserHomeDir (not resolveHomeDir) for a stable per-OS-user
-	// identity. resolveHomeDir honors ZERO_OAUTH_TOKENS_PATH and
-	// XDG_CONFIG_HOME overrides; using those for the lock path means
-	// two processes for the same keychain user with different HOME
-	// values take different locks, both read-modify-write the shared
-	// keyring index, and one saved token can be left unindexed.
+	if u, err := user.Current(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
+		return filepath.Join(u.HomeDir, ".cache", "zero", name)
+	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return filepath.Join(home, ".cache", "zero", name)
 	}
@@ -695,21 +685,21 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 		if err := json.Unmarshal(raw, &token); err != nil {
 			return nil, false, fmt.Errorf("oauth: invalid keyring token entry %q: %w", key, err)
 		}
-		tokens[key] = token
-	}
 
-	if !legacyLoaded {
-		if lt, lerr := b.readLegacyTokens(); lerr == nil {
-			legacyTokens = lt
+		// Check if legacy blob holds a fresher token for this indexed key
+		// (e.g. refreshed by an old binary running concurrently).
+		if !legacyLoaded {
+			if lt, lerr := b.readLegacyTokens(); lerr == nil {
+				legacyTokens = lt
+			}
+			legacyLoaded = true
 		}
-	}
-	for key, legacyToken := range legacyTokens {
-		if ValidateKey(key) != nil {
-			continue
+		if legacyToken, has := legacyTokens[key]; has {
+			if legacyIsFresher(legacyToken, token) {
+				token = legacyToken
+			}
 		}
-		if _, exists := tokens[key]; !exists {
-			tokens[key] = legacyToken
-		}
+		tokens[key] = token
 	}
 
 	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
@@ -761,14 +751,21 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // legacyIsFresher reports whether the legacy copy of an already-indexed key
 // should win over the indexed copy. An old binary running alongside the new one
 // refreshes tokens only in the legacy combined entry, and a refresh pushes the
-// expiry later, so a strictly later expiry on the legacy side is the
+// expiry later (or updates token material when expires_in is omitted), so a
+// strictly later expiry or updated token material on the legacy side is the
 // signal that it holds a newer credential. Zero (unknown) expiries are valid.
 func legacyIsFresher(legacy, current Token) bool {
-	if legacy.ExpiresAt.After(current.ExpiresAt) {
-		return true
-	}
-	if legacy.ExpiresAt.Equal(current.ExpiresAt) {
+	if !legacy.ExpiresAt.IsZero() && !current.ExpiresAt.IsZero() {
+		if legacy.ExpiresAt.After(current.ExpiresAt) {
+			return true
+		}
+		if current.ExpiresAt.After(legacy.ExpiresAt) {
+			return false
+		}
 		return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
+	}
+	if legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken {
+		return true
 	}
 	return false
 }
@@ -871,7 +868,11 @@ func (b keyringBlob) write(data []byte) error {
 		if err != nil {
 			return err
 		}
-		if err := b.kr.Set(b.service, key, base64.StdEncoding.EncodeToString(raw)); err != nil {
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		if len(encoded) > maxKeyringSingleEntryBytes {
+			return fmt.Errorf("oauth: token payload for %q (%d bytes) exceeds single keyring entry bound (%d bytes); use file or encrypted-file storage", key, len(encoded), maxKeyringSingleEntryBytes)
+		}
+		if err := b.kr.Set(b.service, key, encoded); err != nil {
 			return err
 		}
 	}
@@ -899,6 +900,11 @@ func (b keyringBlob) write(data []byte) error {
 	}
 	return nil
 }
+
+// maxKeyringSingleEntryBytes bounds a single base64-encoded token secret so
+// that the line passed to macOS `security -i` stays comfortably under the
+// 4095-byte command line cap (see internal/keyring).
+const maxKeyringSingleEntryBytes = 3800
 
 // maxKeyringIndexChunkBytes bounds one index chunk's raw JSON payload so its
 // base64 encoding plus command framing stays well under the macOS

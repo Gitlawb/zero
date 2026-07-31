@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -971,7 +972,11 @@ func TestKeyringLockPathIsPerUser(t *testing.T) {
 	if got == filepath.Join(os.TempDir(), "zero-"+name) {
 		t.Fatalf("lock path is the shared temp path %q; a co-tenant could grief it", got)
 	}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+	if u, err := user.Current(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
+		if want := filepath.Join(u.HomeDir, ".cache", "zero", name); got != want {
+			t.Fatalf("lock path = %q, want per-user home-anchored path %q", got, want)
+		}
+	} else if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		if want := filepath.Join(home, ".cache", "zero", name); got != want {
 			t.Fatalf("lock path = %q, want per-user home-anchored path %q", got, want)
 		}
@@ -1415,5 +1420,155 @@ func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testi
 	}
 	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
 		t.Fatal("legacy blob should be removed once it was actually read and reconciled")
+	}
+}
+
+func TestStoreKeyringLockPathStableAcrossDifferentHomeEnvs(t *testing.T) {
+	kr := newFakeKR()
+	s1, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"HOME": filepath.Join(t.TempDir(), "home1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"HOME": filepath.Join(t.TempDir(), "home2")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := s1.blob.(keyringBlob).lockPath
+	p2 := s2.blob.(keyringBlob).lockPath
+	if p1 != p2 {
+		t.Fatalf("lockPath mismatch for different HOME envs: s1=%q, s2=%q", p1, p2)
+	}
+
+	if err := s1.Save(ProviderKey("alpha"), Token{AccessToken: "token1"}); err != nil {
+		t.Fatalf("s1.Save: %v", err)
+	}
+	got, ok, err := s2.Load(ProviderKey("alpha"))
+	if err != nil || !ok || got.AccessToken != "token1" {
+		t.Fatalf("s2.Load: got=%#v, ok=%v, err=%v", got, ok, err)
+	}
+}
+
+func TestStoreKeyringMergesFreshLegacyRefreshOnLoadWithoutSave(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Now().Add(-10 * time.Minute)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "stale-a", ExpiresAt: t1}); err != nil {
+		t.Fatal(err)
+	}
+
+	t2 := time.Now().Add(1 * time.Hour)
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "fresh-a", RefreshToken: "fresh-r", ExpiresAt: t2},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	got, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok {
+		t.Fatalf("Load: ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != "fresh-a" {
+		t.Fatalf("Load returned stale token %#v, want fresh legacy token", got)
+	}
+}
+
+func TestStoreKeyringLegacyIsFresherHandlesZeroExpiryRefreshes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Now().Add(10 * time.Minute)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1}); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "new-a", RefreshToken: "new-r", ExpiresAt: time.Time{}},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	got, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok {
+		t.Fatalf("Load: ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != "new-a" || got.RefreshToken != "new-r" {
+		t.Fatalf("Load = %#v, want legacy zero-expiry refresh", got)
+	}
+}
+
+func TestStoreKeyringDeleteNotResurrectedWhenLegacyDeleteFailsOrRewritten(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed legacy blob with alpha (logged out token)
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "a-legacy"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// Delete alpha
+	removed, err := s.Delete(ProviderKey("alpha"))
+	if err != nil || !removed {
+		t.Fatalf("Delete(alpha): removed=%v err=%v", removed, err)
+	}
+
+	// Assert Load(alpha) returns empty
+	if _, ok, _ := s.Load(ProviderKey("alpha")); ok {
+		t.Fatal("alpha should not be exposed on Load after Delete")
+	}
+
+	// Save gamma, which triggers write() reconciliation
+	if err := s.Save(ProviderKey("gamma"), Token{AccessToken: "g"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Assert alpha was not resurrected into the index
+	if _, ok, _ := s.Load(ProviderKey("alpha")); ok {
+		t.Fatal("alpha was resurrected into index after Delete")
+	}
+}
+
+func TestStoreKeyringRejectsOversizedSingleTokenPayload(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	huge := Token{
+		AccessToken: "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("A", 6000) + ".sig",
+	}
+	err = s.Save(ProviderKey("huge"), huge)
+	if err == nil {
+		t.Fatal("Save succeeded for oversized single token payload; want error")
+	}
+	if !strings.Contains(err.Error(), "exceeds single keyring entry bound") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }

@@ -12,6 +12,10 @@ import (
 )
 
 const (
+	// fileLockTimeout is the deadline for acquiring the cross-process lock.
+	// Critical sections held under this lock consist of file operations or a
+	// small number of OS keyring subprocess calls (typically < 100ms total),
+	// so 5 seconds provides a comfortable upper bound under normal operation.
 	fileLockTimeout    = 5 * time.Second
 	fileLockStaleAfter = 30 * time.Second
 )
