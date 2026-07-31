@@ -2763,6 +2763,17 @@ func (m model) View() tea.View {
 	// background behind in the user's scrollback after exit.
 	if m.altScreen {
 		view.BackgroundColor = zeroTheme.bgPanel
+		// Also fill the frame content with the panel surface, not just the
+		// terminal's default background. Relying on view.BackgroundColor alone
+		// leaves blank/padding cells (and anything ClearScreen erases) on the
+		// terminal's own default, which is white on a light terminal — so light
+		// themes flash a blinding white instead of their cream surface. Wrapping
+		// the content paints every cell (including blank lines) with the theme
+		// panel, so the surface is uniform regardless of the terminal default and
+		// ClearScreen repaints to the theme color instead of white.
+		if m.width > 0 && m.height > 0 {
+			content = zeroTheme.panel.Width(m.width).Height(m.height).Render(content)
+		}
 	}
 	// Always requested, independent of the notifier: the composer cursor's
 	// focus/blink behavior (composerBlinkMsg above) needs tea.FocusMsg/BlurMsg
