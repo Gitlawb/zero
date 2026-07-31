@@ -360,6 +360,19 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	if err != nil {
 		return "", planControlNotice("warning", fmt.Sprintf("%s does not validate: %v", stored.Path, err)), false
 	}
+	// The reduction keeps only the LAST admitted plan's progress, so it may
+	// belong to a different plan than the one being resumed. Narrowing across
+	// that boundary silently drops work: ids like "tests" or "lint" collide
+	// between plans routinely, and every task of this plan whose id sits in the
+	// other plan's succeeded set would vanish from the remainder and never run.
+	//
+	// Compared against plan.Name(), not stored.Name: plan_admitted records the
+	// plan's own name, which is independent of the name it was saved under.
+	if progress.Name != plan.Name() {
+		return "", planControlNotice("warning", fmt.Sprintf(
+			"The last plan to run in this session was %q, not %q, so there is no record of what %q already did. Use /plans run %s to run it from the start.",
+			progress.Name, plan.Name(), plan.Name(), stored.Name)), false
+	}
 	remaining, err := specialist.RemainingPlan(plan, progress, m.savedPlanLimits())
 	if err != nil {
 		return "", planControlNotice("info", err.Error()), false

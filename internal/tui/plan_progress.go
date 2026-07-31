@@ -324,6 +324,29 @@ func (bridge *PlanProgressBridge) RunningPlanName() (string, bool) {
 	return name, true
 }
 
+// BackgroundPlanLive reports whether a BACKGROUND plan is still in flight.
+//
+// beginRun wipes the orchestrate panel so a previous turn's plan cannot bleed
+// into the new one, which is right for a foreground plan and wrong for a
+// background one: those are built to outlive the run that launched them, and
+// every message they post carries the background flag precisely to survive the
+// stale-run guard. Wiping anyway leaves the guard passing messages that then
+// no-op against an empty byID, so the PLAN surface vanishes for the rest of the
+// plan's life while it keeps running.
+//
+// background is consulted alongside cancelPlan for the same reason
+// RunningPlanName does it: the launcher sets background synchronously before
+// starting the goroutine, and cancelPlan only appears once the executor reaches
+// its first task. Reading either alone leaves a window.
+func (bridge *PlanProgressBridge) BackgroundPlanLive() bool {
+	if bridge == nil {
+		return false
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return bridge.background && (bridge.cancelPlan != nil || bridge.lastPlanName != "")
+}
+
 // clearPauseLocked releases any waiter. Closing the channel rather than sending
 // on it means every waiter wakes and a late waiter never blocks.
 func (bridge *PlanProgressBridge) clearPauseLocked() {
@@ -662,12 +685,15 @@ func planOutcomeStatus(outcome specialist.TaskOutcome) specialistStatus {
 // planTaskSummary is a SHORT label for the card. The full prompt stays in the
 // tool output; a display surface never becomes the data path.
 func planTaskSummary(task specialist.Task) string {
-	summary := strings.TrimSpace(task.Prompt)
+	// Sanitized, not just newline-cut. Task prompts are model-authored and can
+	// carry whatever a poisoned file or web page fed into the orchestrate args,
+	// and this string is painted into the inline panel, the sidebar rows and the
+	// detail pane. Cutting at the first newline leaves every other control byte
+	// intact, so an ESC/OSC sequence survives and can repaint the terminal.
+	// sanitizeCardText already drops exactly these for the permission cards.
+	summary := sanitizeCardText(task.Prompt)
 	if summary == "" {
 		return ""
-	}
-	if index := strings.IndexAny(summary, "\r\n"); index >= 0 {
-		summary = summary[:index]
 	}
 	return truncateRunes(summary, planTaskSummaryWidth)
 }
