@@ -113,7 +113,7 @@ type PreferencesConfig struct {
 	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
 	Theme string `json:"theme,omitempty"`
 	// Recaps is a tri-state: nil (unset) defaults to ON; an explicit false means
-	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
+	// the user turned idle recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
 }
@@ -130,7 +130,7 @@ type RecentModelEntry struct {
 // MaxRecentModels caps the persisted/displayed recent-selection history.
 const MaxRecentModels = 5
 
-// RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
+// RecapsEnabled reports whether idle recaps are on. Unset defaults to ON.
 func (p PreferencesConfig) RecapsEnabled() bool {
 	return p.Recaps == nil || *p.Recaps
 }

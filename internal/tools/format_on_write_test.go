@@ -80,10 +80,18 @@ func TestFormatOnWriteFormatsAndKeepsTrackerConsistent(t *testing.T) {
 	edit = NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
 		"path":       "a.go",
 		"old_string": "func A() {",
-		"new_string": "func B() {",
+		"new_string": "func B( ) {",
 	}, RunOptions{FileTracker: tracker})
 	if edit.Status != StatusOK {
 		t.Fatalf("follow-up edit after exact read failed: %q", edit.Output)
+	}
+	edit = NewScopedEditFileTool(dir, nil).(optionsAwareTool).RunWithOptions(context.Background(), map[string]any{
+		"path":       "a.go",
+		"old_string": "func B() {",
+		"new_string": "func C() {",
+	}, RunOptions{FileTracker: tracker})
+	if edit.Status != StatusError || !strings.Contains(edit.Output, "has not been read exactly") {
+		t.Fatalf("formatter-modified edit must require an exact read: %q", edit.Output)
 	}
 }
 

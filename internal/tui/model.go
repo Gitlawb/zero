@@ -472,8 +472,11 @@ type model struct {
 	// pins), this is maintained by recordRecentModel on every successful
 	// switch and persisted via config.SetRecentModels.
 	recentModels                 []config.RecentModelEntry
-	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
-	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
+	recapsEnabled                bool // idle orientation note (config: recaps on|off)
+	recapSeq                     int
+	recapRunning                 bool
+	recapCancel                  context.CancelFunc
+	idleRecap                    string
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -1154,6 +1157,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(flushedMsg); ok {
 		m.printInFlight = false
 		return m.drainFlushQueue()
+	}
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseMsg:
+		m = m.cancelIdleRecap()
 	}
 	next, cmd := m.updateModel(msg)
 	nm, ok := next.(model)
@@ -2466,15 +2473,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var titleCmd, recapCmd tea.Cmd
 		if msg.err == nil {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
-			// Post-turn recap (gated on the recaps preference): one short sentence
-			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
+			// Arm an idle recap only after a successful answer. The timer performs
+			// no provider work unless the session stays untouched long enough.
 			var finalAnswer string
 			for _, row := range msg.rows {
 				if row.kind == rowAssistant && row.final {
 					finalAnswer = row.text
 				}
 			}
-			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
+			m, recapCmd = m.maybeScheduleIdleRecap(msg.runID, finalAnswer)
 		}
 		// End-of-turn git sweep: catch file mutations the tool stream couldn't
 		// report (bash scaffolding, subagent edits) so the FILES sidebar is
@@ -2507,6 +2514,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
+	case recapIdleMsg:
+		return m.handleRecapIdle(msg)
 	case recapGeneratedMsg:
 		return m.handleRecapGenerated(msg)
 	case compactResultMsg:
@@ -2993,6 +3002,8 @@ func (m model) footerView(width int) string {
 	// so the footer height is unchanged.
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if recap := strings.TrimSpace(m.idleRecap); recap != "" {
+		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), width))
 	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
 		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
 	}
@@ -4848,6 +4859,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 // (normal prompt + spec draft/impl) keeps these in sync — a missing
 // turnStartedAt previously dropped the elapsed timer on spec-mode runs.
 func (m model) beginRun(cancel context.CancelFunc) model {
+	m = m.cancelIdleRecap()
 	if m.prepareRunCompletionWarning != nil {
 		m.prepareRunCompletionWarning()
 	}
