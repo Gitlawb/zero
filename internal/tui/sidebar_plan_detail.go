@@ -117,6 +117,15 @@ func (m model) orchestrateHeaderAtMouse(msg tea.MouseMsg) bool {
 	if !m.sidebarActive() || m.orchestrate.isEmpty() {
 		return false
 	}
+	// Same modal guard orchestrateTaskAtMouse carries directly above. sidebar.go
+	// notes that each hit-tester supplies its own suggestionsActive() guard
+	// because sidebarActive() deliberately does not exclude the palette; without
+	// it, clicking the PLAN header while the / palette is open toggles the
+	// section behind the overlay.
+	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		return false
+	}
 	sidebarW := sidebarWidth(m.width)
 	if sidebarW <= 0 {
 		return false

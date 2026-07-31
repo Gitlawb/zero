@@ -164,6 +164,17 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// Not while a turn is in flight: the effort picker refuses mid-run for
 		// the same reason /effort does, and opening one that cannot be acted on
 		// would be a dead dialog.
+		//
+		// Nor while another modal owns the screen. This branch runs BEFORE the
+		// surface switch below, so it is not covered by the guards there: with
+		// the /model picker or a provider wizard open, a click here would swap
+		// in a fresh effort picker and discard whatever the open one had loaded
+		// or the user had typed. The sidebar hit-testers each carry the same
+		// guard for the same reason.
+		if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+			m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+			return m, nil
+		}
 		if !m.pending {
 			if picker := m.newEffortPicker(); picker != nil {
 				m.picker = picker

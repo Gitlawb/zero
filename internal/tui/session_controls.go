@@ -72,6 +72,17 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	// so "/effort zeromaxing and /profile zeromaxing resolve identically" is
 	// true by construction instead of by two implementations a test hopes agree.
 	if args == execprofile.Name {
+		// Same idle-session rule /profile enforces, and for the same reason: this
+		// delegates to handleProfileCommand, which mutates the turn budget, the
+		// self-correct setting and the shared orchestrate gate. The budget
+		// propagates to sub-agents spawned later in the same run, so changing it
+		// mid-run leaves one turn running under two different budgets. Reaching
+		// the same mutation through the effort namespace must not skip the guard
+		// the profile namespace applies.
+		if m.pending {
+			return m, `Effort
+Finish or stop the current run before switching to the zeromaxing posture.`
+		}
 		return m.handleProfileCommand(execprofile.Name)
 	}
 	if args == "auto" {
