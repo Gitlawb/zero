@@ -349,6 +349,8 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
+	sess.turnMu.Lock()
+	defer sess.turnMu.Unlock()
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
 	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
