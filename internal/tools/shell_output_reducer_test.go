@@ -84,6 +84,23 @@ func TestReduceGoTestPassingPackagesPreservesCoverageResults(t *testing.T) {
 	}
 }
 
+func TestReduceGoTestPassingPackagesPreservesIndentedTestLogs(t *testing.T) {
+	output := strings.Join([]string{
+		"    ok  user-provided test log",
+		"    ?   another test log",
+		"ok  \texample.test/pkg\t0.01s",
+	}, "\n")
+
+	reduced, omitted := reduceGoTestPassingPackages(output)
+	if !strings.Contains(reduced, "    ok  user-provided test log") ||
+		!strings.Contains(reduced, "    ?   another test log") {
+		t.Fatalf("indented test log was removed: %q", reduced)
+	}
+	if omitted != 1 {
+		t.Fatalf("omitted=%d, want only the package result omitted", omitted)
+	}
+}
+
 func TestSelfManagedBudgetPreservesRawSpillWhenReducedOutputAlsoTruncates(t *testing.T) {
 	raw := "raw output\n" + strings.Repeat("ok  \texample.test/raw\t0.01s\n", 1000)
 	rawSpill := spillTruncatedOutput(ExecCommandToolName, raw)

@@ -9,6 +9,25 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+type normalizationRecordingShellTool struct {
+	calls []map[string]any
+}
+
+func (tool *normalizationRecordingShellTool) Name() string { return "bash" }
+func (tool *normalizationRecordingShellTool) Description() string {
+	return "record normalized shell arguments"
+}
+func (tool *normalizationRecordingShellTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: true}
+}
+func (tool *normalizationRecordingShellTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionAllow}
+}
+func (tool *normalizationRecordingShellTool) Run(_ context.Context, args map[string]any) tools.Result {
+	tool.calls = append(tool.calls, cloneArgs(args))
+	return tools.Result{Status: tools.StatusOK}
+}
+
 // A shell call that sets sandbox_permissions: with_additional_permissions but
 // omits (or malforms) additional_permissions can never succeed: the same
 // validation runs again at grant time regardless of the user's decision. It
@@ -171,6 +190,41 @@ func TestNormalizeProviderExpandedEmptyAdditionalPermissions(t *testing.T) {
 		if got := args["sandbox_permissions"]; got != string(tools.SandboxPermissionsUseDefault) {
 			t.Fatalf("mode %q normalized to %q, want use_default", mode, got)
 		}
+	}
+}
+
+func TestExecuteToolCallNormalizesProviderExpandedEmptyAdditionalPermissions(t *testing.T) {
+	tool := &normalizationRecordingShellTool{}
+	registry := tools.NewRegistry()
+	registry.Register(tool)
+
+	result, err := executeToolCall(
+		context.Background(),
+		registry,
+		ToolCall{
+			ID:   "c1",
+			Name: "bash",
+			Arguments: `{"command":"./zero --version","sandbox_permissions":"with_additional_permissions",` +
+				`"additional_permissions":{"file_system":{"deny_read":[],"entries":[],"read":[],"write":[]},"network":{"enabled":false}}}`,
+		},
+		PermissionModeAuto,
+		Options{Cwd: t.TempDir()},
+	)
+	if err != nil {
+		t.Fatalf("executeToolCall: %v", err)
+	}
+	if result.Status != tools.StatusOK {
+		t.Fatalf("provider-expanded empty permissions were rejected: %s", result.Output)
+	}
+	if len(tool.calls) != 1 {
+		t.Fatalf("shell tool calls = %d, want 1", len(tool.calls))
+	}
+	args := tool.calls[0]
+	if _, exists := args["additional_permissions"]; exists {
+		t.Fatalf("executeToolCall retained empty additional_permissions: %#v", args)
+	}
+	if got := args["sandbox_permissions"]; got != string(tools.SandboxPermissionsUseDefault) {
+		t.Fatalf("sandbox mode = %q, want use_default", got)
 	}
 }
 
