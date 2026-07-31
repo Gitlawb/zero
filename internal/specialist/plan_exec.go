@@ -193,6 +193,22 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	// lifetime is.
 	ctx, cancelPlan := context.WithCancel(ctx)
 	defer cancelPlan()
+	// max_wall_seconds bounds the PLAN, which means it has to reach the children.
+	// The pre-dispatch check below is not a bound on its own: it is consulted
+	// only when the walk needs a free slot, so a plan whose ready set fits the
+	// worker pool dispatches in one wave and is never gated again. Measured at
+	// max_workers=4 with a 1s wall and four 2s tasks: 2.0s elapsed, reported
+	// "completed", nothing skipped — while the same plan at max_workers=1
+	// correctly reported partial. Asking for parallelism deleted the bound.
+	//
+	// A deadline on the plan context fixes that with the machinery a user stop
+	// already proves works, and the walk keeps its skip-the-rest behaviour for
+	// tasks not yet dispatched.
+	if wall := plan.Budget().MaxWall; wall > 0 {
+		var cancelWall context.CancelFunc
+		ctx, cancelWall = context.WithTimeout(ctx, wall)
+		defer cancelWall()
+	}
 	planRunning(recorder, cancelPlan)
 
 	tasks := map[string]Task{}
@@ -254,7 +270,15 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 				cancelled = true
 				result.Outcome = TaskCancelled
 				if result.Err == "" {
-					result.Err = "cancelled: the run was stopped while this task was running"
+					// Which one matters to the reader: a wall-budget stop is the
+					// plan spending what it was allowed, a cancel is a person
+					// deciding. Reporting both as "the run was stopped" left a
+					// user looking for who stopped it.
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+						result.Err = "cancelled: the plan's max_wall_seconds elapsed while this task was running"
+					} else {
+						result.Err = "cancelled: the run was stopped while this task was running"
+					}
 				}
 				results[id] = result
 				failed[id] = true
@@ -315,10 +339,16 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// not blocked by a dependency and the budget did not run out.
 		if cancelled || ctx.Err() != nil {
 			cancelled = true
+			// Same distinction the in-flight path draws: a wall-budget expiry is
+			// the plan spending what it was allowed, not a person stopping it.
+			reason := "cancelled: the run was stopped before this task ran"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				reason = "cancelled: the plan's max_wall_seconds elapsed before this task ran"
+			}
 			result := TaskResult{
 				ID:      id,
 				Outcome: TaskCancelled,
-				Err:     "cancelled: the run was stopped before this task ran",
+				Err:     reason,
 			}
 			results[id] = result
 			failed[id] = true
