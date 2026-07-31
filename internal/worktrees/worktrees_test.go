@@ -661,7 +661,7 @@ func TestReleaseRecoversDeletedWorktreeUnderSymlinkedBaseDir(t *testing.T) {
 	if err := Release(ctx, Options{RunGit: runner.Run, Cwd: repo}, deletedPath); err != nil {
 		t.Fatalf("Release must recover a deleted worktree under a symlinked base dir: %v", err)
 	}
-	if got := runner.commandLine(1); got != "git worktree unlock "+deletedPath {
+	if got := runner.commandLine(1); got != "git worktree unlock "+physicalPath {
 		t.Fatalf("git worktree unlock command = %q", got)
 	}
 }
@@ -781,8 +781,8 @@ func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
 }
 
 func TestPrepareValidatesNameAndExistingDirectory(t *testing.T) {
-	root := t.TempDir()
-	base := t.TempDir()
+	root := physicalTestPath(t, t.TempDir())
+	base := physicalTestPath(t, t.TempDir())
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: root + "\n"},
@@ -899,7 +899,7 @@ func fixedTime(value string) func() time.Time {
 }
 
 func TestCleanPrunesStaleWorktrees(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1847,7 +1847,7 @@ func TestCleanUnlocksExpiredLeaseBeforePruningMissingDir(t *testing.T) {
 }
 
 func TestCleanMigratesAndReclaimsLegacyZeroWorktrees(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))

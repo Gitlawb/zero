@@ -125,7 +125,7 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 	result := Result{
 		Name:         name,
 		Path:         target,
-		RepoRoot:     repoRoot,
+		RepoRoot:     primaryRoot,
 		SourceBranch: branch,
 		SourceCommit: commit,
 	}
@@ -318,13 +318,14 @@ func Release(ctx context.Context, options Options, path string) error {
 			dir = cwd
 		}
 	}
-	if err := verifyZeroOwnedWorktree(ctx, runGit, dir, path); err != nil {
+	matchedPath, err := verifyZeroOwnedWorktree(ctx, runGit, dir, path)
+	if err != nil {
 		if errors.Is(err, errAlreadyUnlocked) {
 			return nil
 		}
 		return err
 	}
-	if _, err := gitOutput(ctx, runGit, dir, "worktree", "unlock", path); err != nil {
+	if _, err := gitOutput(ctx, runGit, dir, "worktree", "unlock", matchedPath); err != nil {
 		return fmt.Errorf("unlock git worktree: %w", err)
 	}
 	return nil
@@ -421,14 +422,14 @@ func isLegacyZeroWorktree(ctx context.Context, runGit GitRunner, target string, 
 // the main repository (its first entry is always the main working tree, from
 // any worktree, regardless of git-dir layout), so this needs no branching on
 // which of Release's two cwd cases is in play.
-func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, path string) error {
+func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, path string) (string, error) {
 	output, err := gitOutput(ctx, runGit, dir, "worktree", "list", "--porcelain")
 	if err != nil {
-		return fmt.Errorf("resolve repository for %s: %w", path, err)
+		return "", fmt.Errorf("resolve repository for %s: %w", path, err)
 	}
 	entries := parseWorktreeList(output)
 	if len(entries) == 0 {
-		return fmt.Errorf("resolve repository for %s: git worktree list returned no entries", path)
+		return "", fmt.Errorf("resolve repository for %s: git worktree list returned no entries", path)
 	}
 	// entries[0].path is always the main worktree (see primaryWorktreeRoot),
 	// which is what Prepare now also keys its repoKey off, so this and Prepare
@@ -445,7 +446,7 @@ func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, 
 		}
 	}
 	if !hasZeroComponent {
-		return fmt.Errorf("refusing to release %s: not a zero-managed worktree (expected an ancestor directory named %q)", path, want)
+		return "", fmt.Errorf("refusing to release %s: not a zero-managed worktree (expected an ancestor directory named %q)", path, want)
 	}
 
 	// Require a registered porcelain entry before unlocking. Matching only
@@ -454,45 +455,35 @@ func verifyZeroOwnedWorktree(ctx context.Context, runGit GitRunner, dir string, 
 	// Path comparison uses canonicalizePath so a lexical user argument
 	// (macOS /var vs /private/var, symlink --worktree-dir) still matches
 	// the physical spelling git worktree list reports.
-	matched := false
+	var matchedPath string
 	for _, entry := range entries {
 		if canonicalizePath(entry.path) != target {
 			continue
 		}
-		matched = true
+		matchedPath = entry.path
 		if !entry.locked {
 			// Already unlocked: nothing to release. Treat as success so a
 			// double release is a no-op rather than a git "not locked" error.
-			return errAlreadyUnlocked
+			return "", errAlreadyUnlocked
 		}
 		if !strings.HasPrefix(entry.lockReason, leaseReasonPrefix) {
-			return fmt.Errorf("refusing to release %s: locked with reason %q, not a zero lease", path, entry.lockReason)
+			return "", fmt.Errorf("refusing to release %s: locked with reason %q, not a zero lease", path, entry.lockReason)
 		}
-		// The lease prefix is a public string a user can copy onto their own
-		// `git worktree lock` call for a worktree they created by hand under
-		// this same predictable directory, so it is a cheap first filter, not
-		// proof. When the worktree directory still exists, require the
-		// ownership marker Prepare actually persists before trusting it. If
-		// the directory is already gone (the documented `release -C` recovery
-		// path for a worktree deleted by hand), there is no marker left to
-		// check and nothing left for a forced removal to destroy, so the
-		// prefix match above is enough to let a genuinely orphaned zero lease
-		// still be cleared.
 		if info, statErr := os.Stat(entry.path); statErr == nil && info.IsDir() {
 			owned, err := hasOwnershipMarker(ctx, runGit, entry.path)
 			if err != nil {
-				return fmt.Errorf("verify worktree ownership for %s: %w", path, err)
+				return "", fmt.Errorf("verify worktree ownership for %s: %w", path, err)
 			}
 			if !owned {
-				return fmt.Errorf("refusing to release %s: missing zero ownership marker (not created by `zero worktrees prepare`)", path)
+				return "", fmt.Errorf("refusing to release %s: missing zero ownership marker (not created by `zero worktrees prepare`)", path)
 			}
 		}
 		break
 	}
-	if !matched {
-		return fmt.Errorf("refusing to release %s: not a registered worktree of this repository", path)
+	if matchedPath == "" {
+		return "", fmt.Errorf("refusing to release %s: not a registered worktree of this repository", path)
 	}
-	return nil
+	return matchedPath, nil
 }
 
 // errAlreadyUnlocked is a sentinel for a Zero-managed path whose git lock is

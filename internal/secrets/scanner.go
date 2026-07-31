@@ -45,11 +45,8 @@ var patterns = []pattern{
 	{"github_pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)},
 	{"slack_token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)},
 	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)},
-	// Distinguish modern prefixed keys (sk-proj- / sk-svcacct- / sk-admin-),
-	// Anthropic keys (sk-ant-apiNN- / sk-ant-), and hyphenated OpenAI-compatible
-	// provider keys (sk-or-v1- for OpenRouter) from normal kebab-case phrases, and
-	// match legacy sk-<alnum> keys by length (>= 20).
-	{"openai_key", regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-|or-v1-|ant-api\d{2}-|ant-)[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{20,}`)},
+	{"anthropic_key", regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)},
+	{"openai_key", regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-|or-v1-)[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{20,}`)},
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
 	{"private_key_block", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`)},
