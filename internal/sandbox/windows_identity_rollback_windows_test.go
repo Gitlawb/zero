@@ -117,9 +117,8 @@ func TestWindowsACLAllowWriteGrantsDelete(t *testing.T) {
 	// READ_CONTROL and SYNCHRONIZE, so testing a composite constant with & is
 	// satisfied by any grant at all and proves nothing.
 	for label, bit := range map[string]windows.ACCESS_MASK{
-		"DELETE":            windows.DELETE,
-		"FILE_DELETE_CHILD": windowsFileDeleteChild,
-		"FILE_WRITE_DATA":   windows.FILE_WRITE_DATA,
+		"DELETE":          windows.DELETE,
+		"FILE_WRITE_DATA": windows.FILE_WRITE_DATA,
 	} {
 		if mask&bit == 0 {
 			t.Errorf("write grant is missing %s", label)
@@ -128,9 +127,18 @@ func TestWindowsACLAllowWriteGrantsDelete(t *testing.T) {
 	// Granting these would let the principal rewrite the very restrictions
 	// placed on it. They are in the deny mask for that reason and must not
 	// appear here.
+	//
+	// FILE_DELETE_CHILD belongs in this set and was originally in the one
+	// above, on the reasoning that the grant should mirror the deny mask. On a
+	// parent it authorises deleting a child whatever the child's own DACL says,
+	// so on a write root it hands back the write-denied carve-outs underneath:
+	// delete .git/config, recreate it, and the replacement inherits the grant
+	// with no deny of its own. Mirroring the deny mask is the wrong instinct —
+	// denying a capability is not a reason to grant it.
 	for label, bit := range map[string]windows.ACCESS_MASK{
-		"WRITE_DAC":   windows.WRITE_DAC,
-		"WRITE_OWNER": windows.WRITE_OWNER,
+		"WRITE_DAC":         windows.WRITE_DAC,
+		"WRITE_OWNER":       windows.WRITE_OWNER,
+		"FILE_DELETE_CHILD": windowsFileDeleteChild,
 	} {
 		if mask&bit != 0 {
 			t.Errorf("write grant unexpectedly includes %s", label)
