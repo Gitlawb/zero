@@ -413,6 +413,14 @@ func (state *compactionState) maybeCompact(
 	// the bodies of old, large tool results (the model has already acted on
 	// them). If that brings us back under threshold, skip the paid summarizer
 	// entirely and preserve recent turns verbatim.
+	if pruned, reclaimed := pruneSupersededReadResults(messages); reclaimed > 0 {
+		messages = pruned
+		size = state.calibratedTokens(estimateTokens(messages) + toolTokens)
+		if size <= state.threshold {
+			state.lowWaterMark = size
+			return messages
+		}
+	}
 	if pruned, reclaimed := pruneStaleToolOutput(messages, state.preserveLast); reclaimed > 0 {
 		messages = pruned
 		size = state.calibratedTokens(estimateTokens(messages) + toolTokens)

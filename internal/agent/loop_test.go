@@ -332,7 +332,8 @@ type sandboxDeniedExecCommandRetryTool struct {
 func (tool *sandboxDeniedExecCommandRetryTool) Name() string { return "exec_command" }
 
 type sandboxNetworkDeniedRetryTool struct {
-	calls []map[string]any
+	calls                      []map[string]any
+	deferFileObservationCommit []bool
 }
 
 func (tool *sandboxNetworkDeniedRetryTool) Name() string        { return "bash" }
@@ -355,6 +356,7 @@ func (tool *sandboxNetworkDeniedRetryTool) Run(ctx context.Context, args map[str
 }
 func (tool *sandboxNetworkDeniedRetryTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	tool.calls = append(tool.calls, cloneArgs(args))
+	tool.deferFileObservationCommit = append(tool.deferFileObservationCommit, options.DeferFileObservationCommit)
 	if shellNetworkAllowed(ctx, options.Sandbox, args) {
 		return tools.Result{Status: tools.StatusOK, Output: "server started"}
 	}
@@ -397,7 +399,8 @@ func agentNativeBackendStub() sandbox.Backend {
 }
 
 type sandboxNamespaceLimitedRetryTool struct {
-	calls []map[string]any
+	calls                      []map[string]any
+	deferFileObservationCommit []bool
 }
 
 func (tool *sandboxNamespaceLimitedRetryTool) Name() string        { return "bash" }
@@ -416,8 +419,12 @@ func (tool *sandboxNamespaceLimitedRetryTool) Parameters() tools.Schema {
 func (tool *sandboxNamespaceLimitedRetryTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
 }
-func (tool *sandboxNamespaceLimitedRetryTool) Run(_ context.Context, args map[string]any) tools.Result {
+func (tool *sandboxNamespaceLimitedRetryTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
+}
+func (tool *sandboxNamespaceLimitedRetryTool) RunWithOptions(_ context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	tool.calls = append(tool.calls, cloneArgs(args))
+	tool.deferFileObservationCommit = append(tool.deferFileObservationCommit, options.DeferFileObservationCommit)
 	if args["sandbox_permissions"] == string(tools.SandboxPermissionsRequireEscalated) {
 		return tools.Result{Status: tools.StatusOK, Output: "stdout:\nUSER PID COMMAND\nanaxy 42 firefox\nanaxy 43 Discord"}
 	}
@@ -482,6 +489,9 @@ func TestRunRetriesShellUnsandboxedAfterSandboxNamespaceLimitedOutput(t *testing
 	}
 	if retryTool.calls[1]["sandbox_permissions"] != string(tools.SandboxPermissionsRequireEscalated) {
 		t.Fatalf("retry args = %#v, want require_escalated", retryTool.calls[1])
+	}
+	if len(retryTool.deferFileObservationCommit) != 2 || !retryTool.deferFileObservationCommit[1] {
+		t.Fatalf("retry defer flags = %#v, want retry observation deferred", retryTool.deferFileObservationCommit)
 	}
 	if len(requests) != 1 {
 		t.Fatalf("permission requests = %#v, want one unsandboxed retry approval", requests)
@@ -633,6 +643,9 @@ func TestRunRetriesNetworkDeniedShellWithNetworkGrant(t *testing.T) {
 	}
 	if _, escalated := retryTool.calls[1]["sandbox_permissions"]; escalated {
 		t.Fatalf("network retry must stay sandboxed, got retry args %#v", retryTool.calls[1])
+	}
+	if len(retryTool.deferFileObservationCommit) != 2 || !retryTool.deferFileObservationCommit[1] {
+		t.Fatalf("retry defer flags = %#v, want retry observation deferred", retryTool.deferFileObservationCommit)
 	}
 	if len(requests) != 1 || requests[0].Reason != sandbox.ReasonNetworkBlocked {
 		t.Fatalf("permission requests = %#v, want one network approval", requests)

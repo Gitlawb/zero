@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -34,6 +35,7 @@ type FileVersion struct {
 type FileTracker struct {
 	mu       sync.Mutex
 	versions map[string]FileVersion
+	seen     map[string]fileObservation
 	// created preserves the order in which brand-new files (paths that did not
 	// exist before a write tool created them) were first written this session.
 	// A map would lose that order and complicates de-duplication, so a slice
@@ -43,7 +45,36 @@ type FileTracker struct {
 }
 
 func NewFileTracker() *FileTracker {
-	return &FileTracker{versions: make(map[string]FileVersion)}
+	return &FileTracker{
+		versions: make(map[string]FileVersion),
+		seen:     make(map[string]fileObservation),
+	}
+}
+
+type lineRange struct {
+	start int
+	end   int
+}
+
+type fileObservation struct {
+	whole bool
+	// total is the file's line count as of the last recorded read, so coverage
+	// can be judged from the ranges alone. Without it a file read in pieces
+	// could never be known to have been seen in full.
+	total      int
+	ranges     []lineRange
+	totalBytes int
+	byteRanges []lineRange // zero-based, half-open byte intervals
+}
+
+type pendingFileObservation struct {
+	path     string
+	output   string
+	hash     string
+	start    int
+	end      int
+	total    int
+	byteMode bool
 }
 
 // Record stores the version of absPath given its content and optional stat info.
@@ -63,8 +94,198 @@ func (tracker *FileTracker) RecordHash(absPath string, hash string, info os.File
 		version.MTime = info.ModTime()
 	}
 	tracker.mu.Lock()
+	if previous, ok := tracker.versions[absPath]; !ok || previous.Hash != hash {
+		delete(tracker.seen, absPath)
+	}
 	tracker.versions[absPath] = version
 	tracker.mu.Unlock()
+}
+
+// RecordSeenRange records exact, non-elided source lines returned to the model.
+// Ranges accumulate while the content hash remains unchanged.
+func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total int) {
+	if tracker == nil || start < 1 {
+		return
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation := tracker.seen[absPath]
+	if total == 0 {
+		observation.whole = true
+		observation.ranges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	if end < start {
+		return
+	}
+	// A new line count means the file changed shape since the last read, so
+	// previously recorded ranges no longer describe it.
+	if observation.total != 0 && observation.total != total {
+		observation = fileObservation{}
+	}
+	observation.total = total
+	if start == 1 && end >= total {
+		observation.whole = true
+		observation.ranges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	observation.ranges = append(observation.ranges, lineRange{start: start, end: end})
+	tracker.seen[absPath] = observation
+}
+
+// RecordSeenBytes records an exact, non-elided byte interval returned to the
+// model. Byte intervals make oversized single-line files recoverable without
+// crediting the model for the omitted middle of a truncated line read.
+func (tracker *FileTracker) RecordSeenBytes(absPath string, start, end, total int) {
+	if tracker == nil || start < 0 || end < start || total < 0 || end > total {
+		return
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation := tracker.seen[absPath]
+	if total == 0 {
+		observation.whole = true
+		observation.byteRanges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	if observation.totalBytes != 0 && observation.totalBytes != total {
+		observation = fileObservation{}
+	}
+	observation.totalBytes = total
+	if start == 0 && end >= total {
+		observation.whole = true
+		observation.byteRanges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	observation.byteRanges = append(observation.byteRanges, lineRange{start: start, end: end})
+	tracker.seen[absPath] = observation
+}
+
+// coversFully reports whether ranges together cover every line in [start, end].
+//
+// Ranges are merged rather than scanned line by line: a caller asking about a
+// large file would otherwise walk every line against every recorded range, and
+// the answer is the same.
+func coversFully(ranges []lineRange, start int, end int) bool {
+	if start > end {
+		return true
+	}
+	if len(ranges) == 0 {
+		return false
+	}
+	sorted := make([]lineRange, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(left int, right int) bool {
+		if sorted[left].start != sorted[right].start {
+			return sorted[left].start < sorted[right].start
+		}
+		return sorted[left].end < sorted[right].end
+	})
+	next := start
+	for _, seen := range sorted {
+		if seen.start > next {
+			return false
+		}
+		if seen.end >= next {
+			next = seen.end + 1
+		}
+		if next > end {
+			return true
+		}
+	}
+	return next > end
+}
+
+// coversBytes reports whether half-open byte ranges cover [start, end).
+func coversBytes(ranges []lineRange, start, end int) bool {
+	if start >= end {
+		return true
+	}
+	if len(ranges) == 0 {
+		return false
+	}
+	sorted := make([]lineRange, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(left, right int) bool {
+		if sorted[left].start != sorted[right].start {
+			return sorted[left].start < sorted[right].start
+		}
+		return sorted[left].end < sorted[right].end
+	})
+	next := start
+	for _, seen := range sorted {
+		if seen.start > next {
+			return false
+		}
+		if seen.end > next {
+			next = seen.end
+		}
+		if next >= end {
+			return true
+		}
+	}
+	return false
+}
+
+// SeenRange reports whether every line in the requested range was returned
+// exactly to the model for the currently tracked version.
+func (tracker *FileTracker) SeenRange(absPath string, start, end int) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	if observation.whole {
+		return true
+	}
+	return coversFully(observation.ranges, start, end)
+}
+
+// SeenBytes reports whether every byte in [start, end) was returned exactly to
+// the model for the currently tracked version.
+func (tracker *FileTracker) SeenBytes(absPath string, start, end int) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	return observation.whole || coversBytes(observation.byteRanges, start, end)
+}
+
+func (tracker *FileTracker) SeenWhole(absPath string) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	if observation.whole {
+		return true
+	}
+	// Derived from the ranges rather than tracked as its own flag. The flag was
+	// only ever set by a SINGLE read covering the file, so a file read in two
+	// halves stayed "not seen whole" forever even though SeenRange agreed every
+	// line had been seen — and write_file, which gates on this, then refused the
+	// overwrite with advice to read the file that could not change the answer.
+	if observation.total > 0 && coversFully(observation.ranges, 1, observation.total) {
+		return true
+	}
+	return observation.totalBytes > 0 && coversBytes(observation.byteRanges, 0, observation.totalBytes)
 }
 
 // Version returns the recorded version for absPath and whether one exists.
@@ -119,6 +340,7 @@ func (tracker *FileTracker) Forget(absPath string) {
 	}
 	tracker.mu.Lock()
 	delete(tracker.versions, absPath)
+	delete(tracker.seen, absPath)
 	tracker.mu.Unlock()
 }
 
@@ -152,4 +374,8 @@ func HashContent(content []byte) string {
 func fileConflictMessage(relativePath string) string {
 	return "Error writing " + relativePath + ": " + ErrFileChangedOnDisk.Error() +
 		" (it may have been edited outside Zero). Re-read it with read_file, then re-apply your change so you do not overwrite the newer content."
+}
+
+func fileUnseenMessage(relativePath string) string {
+	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file, or use byte_offset/byte_limit for an oversized single line, then retry the edit."
 }

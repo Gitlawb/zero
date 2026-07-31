@@ -43,6 +43,7 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 		baseTool: baseTool{
 			name:        "bash",
 			description: "Execute a shell command inside the workspace (or an explicitly granted extra directory) after permission is granted. " + shellGuidance,
+			deferred:    true,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{

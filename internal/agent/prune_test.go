@@ -25,6 +25,13 @@ func toolCallMsg(id, name string) zeroruntime.Message {
 	}
 }
 
+func toolCallWithArgs(id, name, args string) zeroruntime.Message {
+	return zeroruntime.Message{
+		Role:      zeroruntime.MessageRoleAssistant,
+		ToolCalls: []zeroruntime.ToolCall{{ID: id, Name: name, Arguments: args}},
+	}
+}
+
 func TestPruneSkipsSmallSessions(t *testing.T) {
 	// Total reclaimable is under the gate → no pruning.
 	msgs := []zeroruntime.Message{
@@ -118,5 +125,71 @@ func TestPruneDoesNotMutateInput(t *testing.T) {
 	}
 	if msgs[1].Content != original {
 		t.Fatal("pruneStaleToolOutput must not mutate the caller's slice")
+	}
+}
+
+func TestPruneSupersededReadResultsOnlyDropsIdenticalOlderReads(t *testing.T) {
+	body := strings.Repeat("same source line\n", 1000)
+	messages := []zeroruntime.Message{
+		toolCallWithArgs("old", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old", Content: body},
+		toolCallWithArgs("different", "read_file", `{"path":"b.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "different", Content: body},
+		toolCallWithArgs("new", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new", Content: body},
+	}
+	out, reclaimed := pruneSupersededReadResults(messages)
+	if reclaimed <= 0 || !strings.Contains(out[1].Content, "superseded identical") {
+		t.Fatalf("older duplicate was not pruned: reclaimed=%d output=%q", reclaimed, out[1].Content)
+	}
+	if out[3].Content != body || out[5].Content != body {
+		t.Fatal("different call and newest result must remain exact")
+	}
+	if messages[1].Content != body {
+		t.Fatal("input slice was mutated")
+	}
+}
+
+func TestPruneSupersededReadResultsKeepsChangedAndMutatingResults(t *testing.T) {
+	messages := []zeroruntime.Message{
+		toolCallWithArgs("r1", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "r1", Content: "version one"},
+		toolCallWithArgs("r2", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "r2", Content: "version two"},
+		toolCallWithArgs("e1", "edit_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "e1", Content: "edited"},
+		toolCallWithArgs("e2", "edit_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "e2", Content: "edited"},
+	}
+	out, reclaimed := pruneSupersededReadResults(messages)
+	if reclaimed != 0 {
+		t.Fatalf("unsafe results were pruned: %d", reclaimed)
+	}
+	for index := range messages {
+		if out[index].Content != messages[index].Content {
+			t.Fatalf("message %d changed unexpectedly", index)
+		}
+	}
+}
+
+func TestPruneSupersededReadResultsFindsMatchingBodyAcrossChangedRead(t *testing.T) {
+	bodyA := strings.Repeat("version a\n", 100)
+	bodyB := strings.Repeat("version b\n", 100)
+	messages := []zeroruntime.Message{
+		toolCallWithArgs("old-a", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old-a", Content: bodyA},
+		toolCallWithArgs("middle-b", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "middle-b", Content: bodyB},
+		toolCallWithArgs("new-a", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new-a", Content: bodyA},
+	}
+
+	out, reclaimed := pruneSupersededReadResults(messages)
+
+	if reclaimed <= 0 || !strings.Contains(out[1].Content, "superseded identical") {
+		t.Fatalf("older matching body was not pruned across a changed result: reclaimed=%d output=%q", reclaimed, out[1].Content)
+	}
+	if out[3].Content != bodyB || out[5].Content != bodyA {
+		t.Fatal("changed middle result and newest matching result must remain exact")
 	}
 }

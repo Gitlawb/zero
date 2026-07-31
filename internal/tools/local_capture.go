@@ -40,6 +40,7 @@ func newCaptureArtifactTool(options LocalControlArtifactOptions) Tool {
 	return captureArtifactTool{
 		baseTool: baseTool{
 			name:        "capture_artifact",
+			deferred:    true,
 			description: "Capture local browser, desktop, or terminal state into the configured artifact directory.",
 			parameters: Schema{
 				Type: "object",

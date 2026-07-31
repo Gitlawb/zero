@@ -546,7 +546,7 @@ func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error
 	return cfg, nil
 }
 
-// SetRecapsEnabled persists the post-turn recap preference, mirroring
+// SetRecapsEnabled persists the idle recap preference, mirroring
 // SetFavoriteModels (read-modify-atomic-write).
 func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
 	path = strings.TrimSpace(path)

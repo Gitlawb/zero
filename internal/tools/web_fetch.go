@@ -107,6 +107,7 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 		baseTool: baseTool{
 			name:        "web_fetch",
 			description: "Fetch text from a public remote HTTP or HTTPS URL after network permission is granted. Do not use for localhost, private network URLs, or local dev servers; use bash with curl for those.",
+			deferred:    true,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{

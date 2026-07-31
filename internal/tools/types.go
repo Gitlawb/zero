@@ -115,6 +115,9 @@ type Result struct {
 	ChangeSummaries []execution.Change
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
+	// pendingFileObservation is proposed by read_file and committed only after
+	// the final model-visible output boundary confirms the exact content survived.
+	pendingFileObservation *pendingFileObservation
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.
@@ -159,6 +162,7 @@ type baseTool struct {
 	parameters   Schema
 	safety       Safety
 	capabilities ToolCapabilities // zero value = EffectUnknown, not thread-safe
+	deferred     bool
 }
 
 func (tool baseTool) Name() string {
@@ -175,6 +179,11 @@ func (tool baseTool) Parameters() Schema {
 
 func (tool baseTool) Safety() Safety {
 	return tool.safety
+}
+
+// Deferred reports whether this built-in is discoverable on demand.
+func (tool baseTool) Deferred() bool {
+	return tool.deferred
 }
 
 func okResult(output string) Result {

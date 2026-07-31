@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -29,6 +31,10 @@ type RunOptions struct {
 	// disk outside Zero since it was last read. nil disables the feature entirely
 	// (the read/write tools behave exactly as before).
 	FileTracker *FileTracker
+	// DeferFileObservationCommit lets a caller with an additional output layer
+	// commit exact-read credit after that final layer has run.
+	DeferFileObservationCommit bool
+	deferFileObservation       bool
 	// EnabledTools / DisabledTools carry the run's operator tool filters so a
 	// filter-aware tool (tool_search) never discloses or loads an operator-hidden
 	// tool. They use the same allow/deny semantics as the agent's filter gate:
@@ -130,16 +136,22 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	// args/paths) are redacted at the boundary just like tool output. The output
 	// ceiling runs after the scrub so the transcript and the spill file agree on
 	// what was hidden.
+	commitFileObservation := !options.DeferFileObservationCommit
+	options.deferFileObservation = true
 	selfManagedOutput := false
 	var tool Tool
 	var ok bool
 	defer func() {
 		result = scrubResultSecrets(result)
+		result = reduceCommandOutput(name, args, result)
 		if selfManagedOutput {
 			result = applySelfManagedOutputBudget(tool, name, args, result)
 		} else {
 			result = applyRegistryOutputBudget(tool, name, args, result)
 			result = enforceOutputCeiling(name, result)
+		}
+		if commitFileObservation {
+			result = registry.CommitFileObservation(result, options.FileTracker)
 		}
 	}()
 
@@ -218,6 +230,32 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	res := tool.Run(ctx, args)
 	res.SandboxDecision = sandboxDecision
 	return res
+}
+
+// CommitFileObservation grants exact-read credit only when the tool's complete
+// output remains intact at the final boundary that will be sent to the model.
+func (registry *Registry) CommitFileObservation(result Result, tracker *FileTracker) Result {
+	observation := result.pendingFileObservation
+	result.pendingFileObservation = nil
+	if observation == nil || tracker == nil || result.Status != StatusOK || result.Truncated ||
+		!strings.HasPrefix(result.Output, observation.output) {
+		return result
+	}
+	if observation.byteMode {
+		tracker.RecordSeenBytes(observation.path, observation.start, observation.end, observation.total)
+	} else {
+		tracker.RecordSeenRange(observation.path, observation.start, observation.end, observation.total)
+	}
+	if result.Meta == nil {
+		result.Meta = map[string]string{}
+	}
+	result.Meta["file_version"] = observation.hash
+	if observation.byteMode {
+		result.Meta["seen_bytes"] = fmt.Sprintf("%d-%d", observation.start, observation.end)
+	} else {
+		result.Meta["seen_lines"] = fmt.Sprintf("%d-%d", observation.start, observation.end)
+	}
+	return result
 }
 
 func effectiveToolPermission(tool Tool, args map[string]any) Permission {

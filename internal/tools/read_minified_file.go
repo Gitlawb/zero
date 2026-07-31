@@ -29,6 +29,7 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 		baseTool: baseTool{
 			name:        "read_minified_file",
 			description: "Read a source file in a dense, token-cheap form: comments and redundant whitespace removed, no line numbers. Use it to scan or understand code for far fewer tokens than read_file. For exact text, comments, line numbers, or before editing, use read_file instead.",
+			deferred:    true,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -112,7 +113,7 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
 	toolResult := Result{Status: StatusOK, Output: output, Meta: meta}
 	if directBudget {
-		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
+		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for normal files, or byte_offset/byte_limit for an oversized single line")
 	}
 	return toolResult
 }

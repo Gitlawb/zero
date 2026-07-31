@@ -121,3 +121,67 @@ func toolNameForResult(messages []zeroruntime.Message, index int) string {
 func isPrunedPlaceholder(content string) bool {
 	return strings.HasPrefix(strings.TrimSpace(content), "[pruned ")
 }
+
+var supersedableReadTools = map[string]bool{
+	"read_file":          true,
+	"read_minified_file": true,
+	"grep":               true,
+	"glob":               true,
+	"list_directory":     true,
+}
+
+// pruneSupersededReadResults removes only older byte-identical results of the
+// same read call. It runs when context pressure already requires a rewrite, so
+// it does not trade a warm provider-cache prefix for a small apparent saving.
+func pruneSupersededReadResults(messages []zeroruntime.Message) ([]zeroruntime.Message, int) {
+	type seenResultKey struct {
+		call    string
+		content string
+	}
+	seen := map[seenResultKey]struct{}{}
+	out := messages
+	reclaimed := 0
+	copied := false
+
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Role != zeroruntime.MessageRoleTool || isPrunedPlaceholder(message.Content) {
+			continue
+		}
+		call, ok := toolCallForResult(messages, index)
+		if !ok || !supersedableReadTools[call.Name] {
+			continue
+		}
+		key := seenResultKey{
+			call:    call.Name + "\x00" + strings.TrimSpace(call.Arguments),
+			content: message.Content,
+		}
+		if _, exists := seen[key]; exists {
+			placeholder := fmt.Sprintf("[superseded identical %s result — the newer result remains in context]", call.Name)
+			if !copied {
+				out = append([]zeroruntime.Message(nil), messages...)
+				copied = true
+			}
+			out[index].Content = placeholder
+			reclaimed += max(0, ApproxTextTokens(message.Content)-ApproxTextTokens(placeholder))
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	return out, reclaimed
+}
+
+func toolCallForResult(messages []zeroruntime.Message, resultIndex int) (zeroruntime.ToolCall, bool) {
+	id := messages[resultIndex].ToolCallID
+	if id == "" {
+		return zeroruntime.ToolCall{}, false
+	}
+	for index := resultIndex - 1; index >= 0; index-- {
+		for _, call := range messages[index].ToolCalls {
+			if call.ID == id {
+				return call, true
+			}
+		}
+	}
+	return zeroruntime.ToolCall{}, false
+}
