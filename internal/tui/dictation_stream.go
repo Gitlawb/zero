@@ -79,7 +79,7 @@ func (m model) startStreamingDictation() (model, tea.Cmd) {
 // composer, replacing the previously-rendered live region wholesale so the text
 // builds up in place as the user keeps talking.
 func (m model) handleDictationPartial(msg sttPartialMsg) model {
-	if msg.sessionID != 0 && msg.sessionID != m.dictation.sessionID {
+	if msg.sessionID != m.dictation.sessionID {
 		return m
 	}
 	// Ignore stragglers that arrive after the session ended (cancel/final).

@@ -127,6 +127,7 @@ func newDictationController(opts Options) dictationController {
 		platform:       dictation.DetectPlatform(),
 		downloadRoot:   opts.STTDownloadRoot,
 		userConfigPath: opts.UserConfigPath,
+		sessionID:      1,
 	}
 }
 
@@ -378,7 +379,7 @@ func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) 
 // handleDictationTranscribed inserts the final transcript into the composer (or
 // submits it when stt.autoSubmit is on), then returns to idle.
 func (m model) handleDictationTranscribed(msg dictationTranscribedMsg) (tea.Model, tea.Cmd) {
-	if msg.sessionID != 0 && msg.sessionID != m.dictation.sessionID {
+	if msg.sessionID != m.dictation.sessionID {
 		return m, nil
 	}
 	streaming := m.dictation.streaming || msg.streaming

@@ -353,6 +353,16 @@ func TestStaleDictationCompletionIgnoredAfterCancel(t *testing.T) {
 		t.Fatalf("composer text = %q, want 'original composer text'", m.composer.text)
 	}
 
+	// Stale partial message from session 1 must be ignored
+	stalePartial := sttPartialMsg{
+		sessionID: 1,
+		text:      "stale partial that should be ignored",
+	}
+	mPartial := m.handleDictationPartial(stalePartial)
+	if mPartial.composer.text != "original composer text" {
+		t.Fatalf("composer text changed to %q after stale partial", mPartial.composer.text)
+	}
+
 	staleMsg := dictationTranscribedMsg{
 		sessionID: 1,
 		text:      "stale text that should be ignored",
@@ -367,5 +377,46 @@ func TestStaleDictationCompletionIgnoredAfterCancel(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatalf("expected no command for stale completion, got %v", cmd)
+	}
+}
+
+func TestStaleDictationSessionZeroIgnoredAfterCancel(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "initial composer text", cursor: 21})
+	m.dictation.sessionID = 0
+	m.dictation.phase = dictRecording
+
+	m, _ = m.cancelDictation()
+
+	// Session 0 was reset to session 1
+	if m.dictation.sessionID != 1 {
+		t.Fatalf("dictation.sessionID = %d after cancel, want 1", m.dictation.sessionID)
+	}
+
+	// Stale partial from session 0 must be ignored
+	stalePartial := sttPartialMsg{
+		sessionID: 0,
+		text:      "stale partial from session 0",
+	}
+	mPartial := m.handleDictationPartial(stalePartial)
+	if mPartial.composer.text != "initial composer text" {
+		t.Fatalf("composer text changed to %q after stale session 0 partial", mPartial.composer.text)
+	}
+
+	// Stale completion from session 0 must be ignored
+	staleMsg := dictationTranscribedMsg{
+		sessionID: 0,
+		text:      "stale completion from session 0",
+		submit:    true,
+		streaming: true,
+	}
+	afterStale, cmd := m.handleDictationTranscribed(staleMsg)
+	got := afterStale.(model)
+
+	if got.composer.text != "initial composer text" {
+		t.Fatalf("composer text changed to %q after stale session 0 completion", got.composer.text)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command for stale session 0 completion, got %v", cmd)
 	}
 }
