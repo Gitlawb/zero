@@ -83,14 +83,16 @@ These classes drive multi-round reviews. Fix them before requesting review:
   checks over duplicated helpers that drift.
 - **Security edges:** Keep secrets out of argv, env dumps, and logs. Redact
   success and error paths (including stderr). Fail closed on ownership, lease,
-  and permission checks. Lexical path checks alone do not stop symlink or
-  reparse escape: resolve and re-validate containment before use. On multi-step
-  setup, roll back only what this run created; never destroy pre-existing
-  resources you did not create; never report success when cleanup or unlock
-  failed.
-- **Atomic shared state:** Use an atomic replace (or equivalent exclusive
-  write) for files concurrent readers may observe. Serialize read-modify-write
-  of lockfiles and shared stores.
+  and permission checks. Do not rely on pre-open path resolution
+  (`EvalSymlinks` then open) for containment: that is a check-to-use race.
+  Bind containment at open/use time (no-follow or handle-relative APIs, and
+  platform equivalents for reparse points). On multi-step setup, roll back
+  only what this run created; never destroy pre-existing resources you did
+  not create; never report success when cleanup or unlock failed.
+- **Atomic shared state:** Write a complete temporary file, then atomically
+  replace the destination so concurrent readers never see a partial write.
+  Exclusive create or a write lock alone is not enough for readers. Serialize
+  the full read-modify-write sequence for lockfiles and shared stores.
 - **Tests match the claim:** Every behavior or security-boundary change needs a
   regression test, including the failure path. Path-sensitive logic needs at
   least one non-Linux path case (or a hermetic fake that exercises the same
