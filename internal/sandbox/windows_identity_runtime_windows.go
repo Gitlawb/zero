@@ -160,7 +160,7 @@ var windowsSandboxPrincipalWarnOnce sync.Once
 // therefore cleaned up, rather than an account nothing holds the secret for.
 func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) (windowsSandboxIdentity, bool, error) {
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
-	identity, password, created, err := provisionWindowsSandboxIdentity(key)
+	identity, password, created, err := provisionWindowsSandboxIdentityFn(key)
 
 	// Undo whatever this run actually did, in reverse, on any failure after the
 	// account exists. Without it a failure between creating the account and
@@ -177,7 +177,7 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	// Resolved from the account name rather than the identity, so it is known
 	// before anything can fail.
 	secretPath, secretPathErr := windowsSandboxSecretPath(config.SandboxHome, windowsSandboxUserName(key))
-	undo := func() {
+	undo := func() error {
 		// Only when this run invalidated it. The secret is removed if this run
 		// created the account, or if it rotated an existing account's password,
 		// because in both cases what is on disk cannot authenticate and absent
@@ -189,8 +189,21 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		// secret whenever setup failed before rotation on a machine that was
 		// already provisioned. The account kept its old password, the only copy
 		// of it was deleted, and the sandbox silently degraded.
+		//
+		// This one failure is reported rather than swallowed. The others below
+		// leave residue; this one leaves a CREDENTIAL for a password that no
+		// longer works, which is the stale-secret state the invariant above
+		// exists to prevent. Staying quiet would claim the invariant was restored
+		// when it was not, and the operator would instead meet a
+		// provisioned-but-unusable principal on the next command.
+		var cleanupErr error
 		if secretPath != "" && (created || rotated) {
-			_ = removeWindowsSandboxSecret(secretPath)
+			if err := removeWindowsSandboxSecretFn(secretPath); err != nil {
+				cleanupErr = fmt.Errorf(
+					"sandbox secret %s is stale and could not be removed, so the next command will "+
+						"fail to log the principal on rather than falling back; delete it and re-run "+
+						"`zero sandbox setup`: %w", secretPath, err)
+			}
 		}
 		// Only for an account this run created, and attempted rather than
 		// completed.
@@ -214,22 +227,20 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 		if created {
 			_ = removeWindowsSandboxIdentity(identity.Username)
 		}
+		return cleanupErr
 	}
 
 	if err != nil {
 		// provisionWindowsSandboxIdentity can fail after creating the account, so
 		// this path needs the same cleanup even though nothing below ran.
-		undo()
-		return windowsSandboxIdentity{}, false, err
+		return windowsSandboxIdentity{}, false, errors.Join(err, undo())
 	}
 	rightsAttempted = true
 	if err := grantWindowsSandboxLogonRightsFn(identity.SID); err != nil {
-		undo()
-		return windowsSandboxIdentity{}, false, err
+		return windowsSandboxIdentity{}, false, errors.Join(err, undo())
 	}
 	if secretPathErr != nil {
-		undo()
-		return windowsSandboxIdentity{}, false, secretPathErr
+		return windowsSandboxIdentity{}, false, errors.Join(secretPathErr, undo())
 	}
 	// Rotation happens HERE, immediately before the secret is committed, rather
 	// than inside provisioning where it used to.
@@ -243,14 +254,12 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 	// not offer.
 	if !created {
 		if err := resetWindowsSandboxUserPasswordFn(identity.Username, password); err != nil {
-			undo()
-			return windowsSandboxIdentity{}, false, err
+			return windowsSandboxIdentity{}, false, errors.Join(err, undo())
 		}
 		rotated = true
 	}
-	if err := writeWindowsSandboxSecret(secretPath, password); err != nil {
-		undo()
-		return windowsSandboxIdentity{}, false, err
+	if err := writeWindowsSandboxSecretFn(secretPath, password); err != nil {
+		return windowsSandboxIdentity{}, false, errors.Join(err, undo())
 	}
 	return identity, created, nil
 }
@@ -567,3 +576,11 @@ func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principal
 	}
 	return windowsACLPlanPaths(plan), nil
 }
+
+// Seams for the two elevated calls the provisioning rollback depends on, so the
+// stale-secret recovery path is reachable in tests without an elevated machine.
+var (
+	provisionWindowsSandboxIdentityFn = provisionWindowsSandboxIdentity
+	removeWindowsSandboxSecretFn      = removeWindowsSandboxSecret
+	writeWindowsSandboxSecretFn       = writeWindowsSandboxSecret
+)
