@@ -11,6 +11,11 @@ the active theme and the registered names without opening the picker.
 
 ## Dune (`dune`)
 
+A warm sand-and-cream palette with charcoal ink, soft amber accent, and
+quantization-safe diff bands.
+
+## Dune Dark (`dune-dark`)
+
 A dark, colorblind-safe palette matching Claude Code's daltonized dark mode:
 near-black surface, white ink, and a deuteranopia-adjusted brand-orange
 accent.

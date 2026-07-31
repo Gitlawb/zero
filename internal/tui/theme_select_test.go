@@ -275,18 +275,26 @@ func TestNewThemePresetsWired(t *testing.T) {
 	if !ok {
 		t.Fatal("theme 'dune' is not registered")
 	}
-	if !dune.IsDark {
-		t.Error("theme 'dune' should be marked as dark")
+	if dune.IsDark {
+		t.Error("theme 'dune' should be marked as light")
 	}
 
-	for _, name := range []string{"neon", "dune"} {
+	duneDark, ok := lookupTheme("dune-dark")
+	if !ok {
+		t.Fatal("theme 'dune-dark' is not registered")
+	}
+	if !duneDark.IsDark {
+		t.Error("theme 'dune-dark' should be marked as dark")
+	}
+
+	for _, name := range []string{"neon", "dune", "dune-dark"} {
 		if !validThemeMode(name) {
 			t.Errorf("%q should be a valid --theme/ZERO_THEME value", name)
 		}
 	}
 
-	if !contains(themeModes, "neon") || !contains(themeModes, "dune") {
-		t.Errorf("themeModes = %v, want it to include neon and dune (the /theme picker list)", themeModes)
+	if !contains(themeModes, "neon") || !contains(themeModes, "dune") || !contains(themeModes, "dune-dark") {
+		t.Errorf("themeModes = %v, want it to include neon, dune, and dune-dark (the /theme picker list)", themeModes)
 	}
 }
 
@@ -316,9 +324,9 @@ func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
 
 func TestExtendedThemeContrastInvariants(t *testing.T) {
 	// Skip validation for old built-in themes if they have established, non-compliant palettes,
-	// but enforce strict compliance on the newly introduced 'neon' and 'dune' themes.
+	// but enforce strict compliance on the newly introduced 'neon', 'dune', and 'dune-dark' themes.
 	for _, entry := range themeRegistry {
-		if entry.Name != "neon" && entry.Name != "dune" {
+		if entry.Name != "neon" && entry.Name != "dune" && entry.Name != "dune-dark" {
 			continue
 		}
 		name, pal := entry.Name, entry.Palette
@@ -428,55 +436,50 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 		return r > g && r > b
 	}
 
-	dune := palettes["dune"]
-	if sep := wcagRatio(t, q(dune.selBg), q(dune.panel)); sep < 1.10 {
-		t.Errorf("dune: selBg vs panel separation %.2f < 1.10 after xterm-256 quantization (%s vs %s)", sep, q(dune.selBg), q(dune.panel))
-	}
-	for _, pair := range []struct{ name, fg, bg string }{
-		{"accent on selBg", dune.accent, dune.selBg},
-		{"blue on selBg", dune.blue, dune.selBg},
-		{"faintest on selBg", dune.faintest, dune.selBg},
-		{"ink on selBg", dune.ink, dune.selBg},
-	} {
-		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
-			t.Errorf("dune: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+	for _, themeName := range []string{"dune", "dune-dark"} {
+		pal := palettes[themeName]
+		if sep := wcagRatio(t, q(pal.selBg), q(pal.panel)); sep < 1.10 {
+			t.Errorf("%s: selBg vs panel separation %.2f < 1.10 after xterm-256 quantization (%s vs %s)", themeName, sep, q(pal.selBg), q(pal.panel))
 		}
-	}
-	// Dune's diff row/word bands must keep the same add/del distinctness on
-	// 256-color terminals that Neon's already guard below: the original
-	// addBg/delBg (#0a1f14/#240a0e) both quantized to the same gray (#121212),
-	// making added and removed lines indistinguishable.
-	if q(dune.addBg) == q(dune.delBg) || !greenish(q(dune.addBg)) || !reddish(q(dune.delBg)) {
-		t.Errorf("dune: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
-			dune.addBg, q(dune.addBg), dune.delBg, q(dune.delBg))
-	}
-	if q(dune.addBgWord) == q(dune.delBgWord) || !greenish(q(dune.addBgWord)) || !reddish(q(dune.delBgWord)) {
-		t.Errorf("dune: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
-			dune.addBgWord, q(dune.addBgWord), dune.delBgWord, q(dune.delBgWord))
-	}
-	if q(dune.addBgWord) == q(dune.addBg) {
-		t.Errorf("dune: changed span is indistinguishable from its add row after quantization (both %s)", q(dune.addBg))
-	}
-	if q(dune.delBgWord) == q(dune.delBg) {
-		t.Errorf("dune: changed span is indistinguishable from its del row after quantization (both %s)", q(dune.delBg))
-	}
-	if r := wcagRatio(t, q(dune.green), q(dune.addBg)); r < 4.5 {
-		t.Errorf("dune: green on addBg = %.2f < 4.5 after quantization", r)
-	}
-	if r := wcagRatio(t, q(dune.red), q(dune.delBg)); r < 4.5 {
-		t.Errorf("dune: red on delBg = %.2f < 4.5 after quantization", r)
-	}
-	// The two rendered diff-content pairs a 256-color terminal actually shows:
-	// line numbers (faintest on addBg/delBg) and highlighted changed spans
-	// (addInk/delInk on their word bands). Mirrors the Neon assertions below.
-	for _, pair := range []struct{ name, fg, bg string }{
-		{"faintest on addBg", dune.faintest, dune.addBg},
-		{"faintest on delBg", dune.faintest, dune.delBg},
-		{"addInk on addBgWord", dune.addInk, dune.addBgWord},
-		{"delInk on delBgWord", dune.delInk, dune.delBgWord},
-	} {
-		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
-			t.Errorf("dune: %s = %.2f < 4.5 after quantization (%s on %s)", pair.name, r, q(pair.fg), q(pair.bg))
+		for _, pair := range []struct{ name, fg, bg string }{
+			{"accent on selBg", pal.accent, pal.selBg},
+			{"blue on selBg", pal.blue, pal.selBg},
+			{"faintest on selBg", pal.faintest, pal.selBg},
+			{"ink on selBg", pal.ink, pal.selBg},
+		} {
+			if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+				t.Errorf("%s: %s = %.2f < 4.5 after xterm-256 quantization (%s on %s)", themeName, pair.name, r, q(pair.fg), q(pair.bg))
+			}
+		}
+		if q(pal.addBg) == q(pal.delBg) || !greenish(q(pal.addBg)) || !reddish(q(pal.delBg)) {
+			t.Errorf("%s: add/del row bands lose their green/red identity after quantization: addBg %s -> %s, delBg %s -> %s",
+				themeName, pal.addBg, q(pal.addBg), pal.delBg, q(pal.delBg))
+		}
+		if q(pal.addBgWord) == q(pal.delBgWord) || !greenish(q(pal.addBgWord)) || !reddish(q(pal.delBgWord)) {
+			t.Errorf("%s: word-span bands lose their green/red identity after quantization: addBgWord %s -> %s, delBgWord %s -> %s",
+				themeName, pal.addBgWord, q(pal.addBgWord), pal.delBgWord, q(pal.delBgWord))
+		}
+		if q(pal.addBgWord) == q(pal.addBg) {
+			t.Errorf("%s: changed span is indistinguishable from its add row after quantization (both %s)", themeName, q(pal.addBg))
+		}
+		if q(pal.delBgWord) == q(pal.delBg) {
+			t.Errorf("%s: changed span is indistinguishable from its del row after quantization (both %s)", themeName, q(pal.delBg))
+		}
+		if r := wcagRatio(t, q(pal.green), q(pal.addBg)); r < 4.5 {
+			t.Errorf("%s: green on addBg = %.2f < 4.5 after quantization", themeName, r)
+		}
+		if r := wcagRatio(t, q(pal.red), q(pal.delBg)); r < 4.5 {
+			t.Errorf("%s: red on delBg = %.2f < 4.5 after quantization", themeName, r)
+		}
+		for _, pair := range []struct{ name, fg, bg string }{
+			{"faintest on addBg", pal.faintest, pal.addBg},
+			{"faintest on delBg", pal.faintest, pal.delBg},
+			{"addInk on addBgWord", pal.addInk, pal.addBgWord},
+			{"delInk on delBgWord", pal.delInk, pal.delBgWord},
+		} {
+			if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+				t.Errorf("%s: %s = %.2f < 4.5 after quantization (%s on %s)", themeName, pair.name, r, q(pair.fg), q(pair.bg))
+			}
 		}
 	}
 

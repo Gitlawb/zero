@@ -433,14 +433,46 @@ var solarizedLightPalette = palette{
 	cardPerm:  "#c4ae63",
 }
 
-// dunePalette is a dark theme based on Claude Code's colorblind-friendly
+// dunePalette is a warm sand-and-cream color scheme: sand/cream surface,
+// charcoal ink, and a soft amber accent.
+var dunePalette = palette{
+	panel:     "#f2e9d8",
+	promptBg:  "#e9dcbf",
+	line:      "#d9c7a3",
+	line2:     "#c2a97c",
+	ink:       "#2b241a",
+	muted:     "#473e32",
+	faint:     "#554a3a",
+	faintest:  "#655648",
+	accent:    "#724028", // darkened from #8f5215 for AA on selBg (5.46:1) that also survives ANSI-256 downsampling (quantizes to #444444, 6.47:1 on quantized selBg)
+	green:     "#38572a",
+	red:       "#872d24", // darkened from #963328 so delBg contrast survives ANSI-256 downsampling
+	amber:     "#6d4600",
+	blue:      "#2f5680",
+	gitAdd:    "#38572a",
+	gitDel:    "#963328",
+	addBg:     "#d0f0c0", // quantizes to xterm green #d7ffd7, keeping add/del rows distinct on 256-color terminals
+	delBg:     "#fcd8d4", // quantizes to xterm red #ffd7d7
+	addBgWord: "#a5e090",
+	delBgWord: "#f8b8af",
+	permBg:    "#f0dfae",
+	selBg:     "#e0cf98",
+	addInk:    "#264018",
+	delInk:    "#5c1810",
+	onAccent:  "#fdf6ea",
+	cardRun:   "#b08a4a",
+	cardErr:   "#b57560",
+	cardPerm:  "#c2a04a",
+}
+
+// duneDarkPalette is a dark theme based on Claude Code's colorblind-friendly
 // (daltonized) dark mode. The base surface is near-black (Claude Code's true
 // dark canvas), with white ink and the brand-orange accent adjusted for
 // deuteranopia. Diff signals reuse the proven dark-theme structure so every
 // WCAG-AA invariant still holds; the accent and status colors (blue success,
 // red error, amber warning) follow Claude Code's daltonized palette so
 // additions stay distinguishable under color blindness.
-var dunePalette = palette{
+var duneDarkPalette = palette{
 	panel:     "#0e0e10", // Claude Code dark canvas — near-black
 	promptBg:  "#262626", // submitted user-prompt bubble
 	line:      "#242429", // borders/separators
@@ -454,8 +486,8 @@ var dunePalette = palette{
 	red:       "#ff6666", // error rgb(255,102,102)
 	amber:     "#ffcc00", // warning rgb(255,204,0)
 	blue:      "#99ccff", // permission rgb(153,204,255)
-	gitAdd:    "#7db87a",
-	gitDel:    "#b87a7a",
+	gitAdd:    "#5eccfa", // daltonized green for colorblind visibility
+	gitDel:    "#ff6666", // daltonized red
 	addBg:     "#003500", // diff added band — quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals (previous #0a1f14/#240a0e both collapsed to #121212)
 	delBg:     "#350000", // diff removed band — quantizes to xterm red #5f0000 (see addBg)
 	addBgWord: "#007400", // word-level added span — quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
@@ -496,9 +528,10 @@ var themeRegistry = []themeEntry{
 	{Name: "rose-pine", Label: "Rosé Pine", Palette: rosePinePalette, IsDark: true},
 	{Name: "everforest", Label: "Everforest", Palette: everforestPalette, IsDark: true},
 	{Name: "neon", Label: "Neon", Palette: neonPalette, IsDark: true},
-	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: true},
+	{Name: "dune-dark", Label: "Dune Dark", Palette: duneDarkPalette, IsDark: true},
 	{Name: "light", Label: "light", Palette: lightPalette, IsDark: false},
 	{Name: "solarized-light", Label: "Solarized Light", Palette: solarizedLightPalette, IsDark: false},
+	{Name: "dune", Label: "Dune", Palette: dunePalette, IsDark: false},
 }
 
 // themeByName indexes the registry by lowercased name for O(1) lookup. Built as a
