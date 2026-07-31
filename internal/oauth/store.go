@@ -702,6 +702,23 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 		tokens[key] = token
 	}
 
+	// Keep legacy-only keys visible through the compatibility window:
+	// an old binary may have logged into a provider after the index was created.
+	if !legacyLoaded {
+		if lt, lerr := b.readLegacyTokens(); lerr == nil {
+			legacyTokens = lt
+		}
+		legacyLoaded = true
+	}
+	for key, legacyToken := range legacyTokens {
+		if ValidateKey(key) != nil {
+			continue
+		}
+		if _, has := tokens[key]; !has {
+			tokens[key] = legacyToken
+		}
+	}
+
 	data, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: tokens})
 	if err != nil {
 		return nil, false, err
@@ -755,19 +772,7 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // strictly later expiry or updated token material on the legacy side is the
 // signal that it holds a newer credential. Zero (unknown) expiries are valid.
 func legacyIsFresher(legacy, current Token) bool {
-	if !legacy.ExpiresAt.IsZero() && !current.ExpiresAt.IsZero() {
-		if legacy.ExpiresAt.After(current.ExpiresAt) {
-			return true
-		}
-		if current.ExpiresAt.After(legacy.ExpiresAt) {
-			return false
-		}
-		return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
-	}
-	if legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken {
-		return true
-	}
-	return false
+	return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
 }
 
 // write replaces the keyring's token entries with state, ordered so that
@@ -935,6 +940,10 @@ const maxKeyringIndexChunks = 128
 // maxKeyringIndexChunks) while still rejecting a damaged index promptly.
 const maxKeyringIndexKeys = 512
 
+// maxRawKeyringIndexKeys bounds the raw decoded element count before
+// deduplication or map preallocation, guarding against DoS from duplicate keys.
+const maxRawKeyringIndexKeys = 16384
+
 // errKeyringIndexTooManyKeys is returned when a decoded index (or one of its
 // chunks) claims more keys than maxKeyringIndexKeys.
 func errKeyringIndexTooManyKeys(count int) error {
@@ -977,6 +986,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		if err := json.Unmarshal(raw, &rawKeys); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
+		if len(rawKeys) > maxRawKeyringIndexKeys {
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys))
+		}
 		keys := dedupeValidKeys(rawKeys)
 		if len(keys) > maxKeyringIndexKeys {
 			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
@@ -998,6 +1010,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		return nil, false, 0, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
 	}
 	rawKeys := header.Keys
+	if len(rawKeys) > maxRawKeyringIndexKeys {
+		return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys))
+	}
 	for i := 1; i < header.Chunks; i++ {
 		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
 		if err != nil {
@@ -1013,6 +1028,9 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 		var more []string
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+		}
+		if len(rawKeys)+len(more) > maxRawKeyringIndexKeys {
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys) + len(more))
 		}
 		rawKeys = append(rawKeys, more...)
 	}
