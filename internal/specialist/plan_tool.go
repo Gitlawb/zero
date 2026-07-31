@@ -88,7 +88,8 @@ const (
 func (tool *OrchestrateTool) Name() string { return OrchestrateToolName }
 
 func (tool *OrchestrateTool) Description() string {
-	return "Execute a structured plan of read-only sub-agent tasks in dependency order. " +
+	return "Execute a structured plan of sub-agent tasks in dependency order. " +
+		"Tasks inherit the parent's sandbox and tool grant; write tools are grantable to a task by name. " +
 		"Independent tasks run in parallel up to budget.max_workers; declare dependencies with depends_on and a task never starts before what it waits on has finished. " +
 		// The either/or the schema cannot express, and the shape worth
 		// encouraging: a plan is only worth more than reading the code yourself
@@ -208,7 +209,11 @@ func (tool *OrchestrateTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect: tools.SideEffectShell,
 		Permission: permission,
-		Reason:     "Runs a plan of read-only specialist sub-agents under the parent's sandbox and tool grant.",
+		// Not "read-only": this Reason is rendered on the approval card, and
+		// PermissionForArgs only prompts when argsCanWrite is true — so every
+		// card a user actually sees is asking about a plan that CAN write.
+		// Describing it as read-only there was precisely backwards.
+		Reason: "Runs a plan of specialist sub-agents under the parent's sandbox and tool grant; tasks may hold write tools granted by name.",
 		// Irrelevant while Permission is Allow (auto advertises Allow tools
 		// anyway) and equally irrelevant while it is Deny (ToolAdvertised
 		// short-circuits on Deny before reading this). Left false so the field

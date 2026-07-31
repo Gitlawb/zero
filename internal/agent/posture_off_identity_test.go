@@ -15,11 +15,20 @@ import (
 
 // THE ADDITIVITY PROOF.
 //
-// ZeroMaxing Phase 2 adds an `orchestrate` tool. The overriding constraint is
-// that with the posture OFF, Zero is BYTE-IDENTICAL to a build without the
-// feature — not almost, identical. Same advertised tool set, same
-// tool-definition bytes, same assembled system prompt, therefore the same token
-// count and the same provider request.
+// ZeroMaxing Phase 2 adds an `orchestrate` tool. The constraint proved here is
+// that REGISTERING THAT TOOL changes nothing while the posture is OFF: same
+// advertised tool set, same tool-definition bytes, same assembled system
+// prompt, therefore the same token count and the same provider request.
+//
+// Stated narrowly on purpose. "With the posture off, Zero is byte-identical to
+// a build without the feature" is the tempting phrasing and it is not true:
+// system_prompt.go drops the ~5 KB confirmation policy for any run that cannot
+// mutate, and runCanMutate is evaluated regardless of posture. An all-read-only
+// run — `zero exec --enabled-tools read_file,grep`, or a read-only specialist
+// child — therefore gets a smaller prompt than a build without the feature,
+// posture off. That drop is deliberate and fails closed; it is simply not part
+// of what this test proves, and the comparison below could not catch it anyway
+// since both registries take the same branch.
 //
 // The proof is a CONTROLLED COMPARISON rather than a frozen hash of the whole
 // prefix. Two registries are built that differ in exactly one thing — whether

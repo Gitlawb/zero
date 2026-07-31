@@ -480,17 +480,34 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		MaxWorkers: planInt(raw, "max_workers"),
 		MaxTokens:  planInt(raw, "max_tokens"),
 	}
-	if seconds := planInt(raw, "max_wall_seconds"); seconds > 0 {
-		budget.MaxWall = time.Duration(seconds) * time.Second
+	// Rejected rather than read as "unset". planInt returns 0 for both an absent
+	// key and a present-but-negative one, so a bare `seconds > 0` let a
+	// model-supplied -60 vanish and the plan run unbounded with no error. Every
+	// other numeric here refuses a negative — max_retries and max_tokens
+	// explicitly, max_stall_seconds even refuses positive values under its floor
+	// — so silently accepting this one was the odd case out, and the failure is
+	// the worst kind: a budget the caller asked for that is not applied.
+	if seconds, set := planIntSet(raw, "max_wall_seconds"); set {
+		if seconds < 0 {
+			return Budget{}, fmt.Errorf("budget.max_wall_seconds must not be negative; %d was requested", seconds)
+		}
+		if seconds > 0 {
+			budget.MaxWall = time.Duration(seconds) * time.Second
+		}
 	}
-	if seconds := planInt(raw, "max_stall_seconds"); seconds > 0 {
+	if seconds, set := planIntSet(raw, "max_stall_seconds"); set {
+		if seconds < 0 {
+			return Budget{}, fmt.Errorf("budget.max_stall_seconds must not be negative; %d was requested", seconds)
+		}
 		stall := time.Duration(seconds) * time.Second
-		if stall < minStallTimeout {
+		if seconds > 0 && stall < minStallTimeout {
 			return Budget{}, fmt.Errorf(
 				"budget.max_stall_seconds must be at least %d: below that the watchdog fires on ordinary think-time and becomes a random task-killer",
 				int(minStallTimeout.Seconds()))
 		}
-		budget.MaxStall = stall
+		if seconds > 0 {
+			budget.MaxStall = stall
+		}
 	}
 	// max_retries needs PRESENCE, not a value: an explicit 0 means "do not retry
 	// this plan" and an absent key means "use the default", and planInt cannot
