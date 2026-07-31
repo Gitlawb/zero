@@ -53,7 +53,7 @@ func TestRevokeDropsStalePrincipalACEsBeforeReapply(t *testing.T) {
 	}
 	// Revocation has to cover the paths the OLD plan touched, not just the new
 	// one — the whole point is the path that left the policy.
-	if err := revokeWindowsPrincipalACEs(principal, windowsACLPlanPaths(wide)); err != nil {
+	if _, err := revokeWindowsPrincipalACEs(principal, windowsACLPlanPaths(wide)); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if _, err := applyWindowsACLPlan(narrow); err != nil {
@@ -72,7 +72,7 @@ func TestRevokeDropsStalePrincipalACEsBeforeReapply(t *testing.T) {
 // an error — setup would otherwise fail on any carveout git has not made yet.
 func TestRevokeIgnoresPathsThatDoNotExist(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "never-created")
-	if err := revokeWindowsPrincipalACEs("S-1-5-32-546", []string{missing}); err != nil {
+	if _, err := revokeWindowsPrincipalACEs("S-1-5-32-546", []string{missing}); err != nil {
 		t.Fatalf("revoke over a missing path: %v", err)
 	}
 }
@@ -147,5 +147,61 @@ func TestApplyPrincipalACLsRevokesBeforeApplying(t *testing.T) {
 	}
 	if actions[1] == windowsACLRevoke {
 		t.Error("second plan was another revocation; the current grants were never applied")
+	}
+}
+
+// The revocation's rollback has to be returned, not discarded.
+//
+// Discarding it was justified on the grounds that the only failure path from
+// applyWindowsPrincipalACLs removes the principal outright, so restoring ACEs
+// for a doomed account would be pointless. That holds only for a principal the
+// run CREATED. #812 keeps an ADOPTED principal alive on failure rather than
+// destroying a working account someone else provisioned — and then the discarded
+// snapshot left it logged-on and unable to reach its own workspace, with its
+// previous ACEs revoked and the new ones rolled back.
+func TestApplyPrincipalACLsRollbackRestoresTheRevokedACEs(t *testing.T) {
+	prevApply := applyWindowsACLPlanFn
+	t.Cleanup(func() { applyWindowsACLPlanFn = prevApply })
+
+	var applied []WindowsACLAction
+	var reverted []WindowsACLAction
+	applyWindowsACLPlanFn = func(plan WindowsACLPlan) (func() error, error) {
+		action := WindowsACLAction("")
+		if len(plan.Entries) > 0 {
+			action = plan.Entries[0].Action
+		}
+		applied = append(applied, action)
+		return func() error {
+			reverted = append(reverted, action)
+			return nil
+		}, nil
+	}
+
+	workspace := t.TempDir()
+	filesystem := FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: workspace}},
+	}
+	rollback, err := applyWindowsPrincipalACLs("S-1-5-32-546", filesystem, filesystem.WriteRoots)
+	if err != nil {
+		t.Fatalf("applyWindowsPrincipalACLs: %v", err)
+	}
+	if len(applied) != 2 || applied[0] != windowsACLRevoke {
+		t.Fatalf("applied %v, want a revocation then the grants", applied)
+	}
+	if err := rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	// Both halves must unwind, and in reverse order: the grant comes off first,
+	// then the ACEs the revocation removed go back.
+	if len(reverted) != 2 {
+		t.Fatalf("rollback reverted %v, want both the grant and the revocation", reverted)
+	}
+	if reverted[0] == windowsACLRevoke {
+		t.Error("rollback undid the revocation before the grant; the grant would survive")
+	}
+	if reverted[1] != windowsACLRevoke {
+		t.Errorf("rollback never restored the revoked ACEs, got %v", reverted)
 	}
 }

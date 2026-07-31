@@ -353,8 +353,12 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 		// renamed cannot be cleaned, and refusing to remove the account over it
 		// would strand the principal and its logon rights permanently — a worse
 		// outcome than a leftover ACE on a path that may not exist any more.
+		//
+		// The rollback is discarded here on purpose, unlike at setup: this is
+		// teardown, the account is about to be deleted, and putting its ACEs back
+		// is the opposite of what the caller asked for.
 		if paths, pathsErr := windowsPrincipalTeardownPaths(config, identity.SID.String()); pathsErr == nil {
-			_ = revokeWindowsPrincipalACEs(identity.SID.String(), paths)
+			_, _ = revokeWindowsPrincipalACEs(identity.SID.String(), paths)
 		}
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
 			return err
@@ -415,21 +419,20 @@ func setupWindowsSandboxRuntimeRoot(config WindowsSandboxCommandConfig) (string,
 	return root, nil
 }
 
-// revokeWindowsPrincipalACEs drops every ACE naming principalSID on paths.
+// revokeWindowsPrincipalACEs drops every ACE naming principalSID on paths and
+// returns a rollback that puts them back.
+//
 // A path that does not exist is skipped rather than failing: revocation is
 // cleanup, and there is nothing to clean on a path that was never created.
-func revokeWindowsPrincipalACEs(principalSID string, paths []string) error {
+func revokeWindowsPrincipalACEs(principalSID string, paths []string) (func() error, error) {
 	if len(paths) == 0 {
-		return nil
+		return func() error { return nil }, nil
 	}
 	plan, err := windowsPrincipalRevokePlan(principalSID, paths)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := applyWindowsACLPlanFn(plan); err != nil {
-		return err
-	}
-	return nil
+	return applyWindowsACLPlanFn(plan)
 }
 
 // applyWindowsPrincipalACLs writes the principal's ACEs for one policy: it
@@ -460,10 +463,44 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 	if err != nil {
 		return nil, err
 	}
-	if err := revokeWindowsPrincipalACEs(principalSID, windowsACLPlanPaths(plan)); err != nil {
+	// The revocation's own rollback matters, and discarding it was a real bug.
+	//
+	// It was discarded on the reasoning that the only failure path from here
+	// removes the principal outright, so restoring stale ACEs for an account
+	// about to be deleted would be pointless. That holds for a principal this
+	// run CREATED. It is false for one this run ADOPTED: setup keeps a
+	// pre-existing account on failure rather than destroying someone else's
+	// working principal, so discarding the snapshot left that account alive with
+	// its previous ACEs stripped and the new ones rolled back — logged on and
+	// unable to reach its own workspace.
+	//
+	// Restoring the pre-revocation DACL first, then the grant, unwinds in the
+	// reverse order they were applied.
+	restoreRevoked, err := revokeWindowsPrincipalACEs(principalSID, windowsACLPlanPaths(plan))
+	if err != nil {
 		return nil, err
 	}
-	return applyWindowsACLPlanFn(plan)
+	revertGrant, err := applyWindowsACLPlanFn(plan)
+	if err != nil {
+		if restoreRevoked != nil {
+			_ = restoreRevoked()
+		}
+		return nil, err
+	}
+	return func() error {
+		grantErr := revertGrant()
+		// Restore the pre-revocation ACEs even when reverting the grant failed:
+		// leaving the principal with neither set is the state this exists to
+		// avoid. Report the grant error, since that is the one leaving residue.
+		var restoreErr error
+		if restoreRevoked != nil {
+			restoreErr = restoreRevoked()
+		}
+		if grantErr != nil {
+			return grantErr
+		}
+		return restoreErr
+	}, nil
 }
 
 // windowsPrincipalTeardownPaths names every path this principal could hold an
