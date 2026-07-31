@@ -429,7 +429,7 @@ func looksLikeToken(w string) bool {
 // Redact removes known API-key and bearer-token forms from provider messages.
 func Redact(message string, secrets ...string) string {
 	for _, secret := range secrets {
-		if secret != "" && !strings.HasPrefix(secret, "[REDACTED") {
+		if secret != "" {
 			message = strings.ReplaceAll(message, secret, "[REDACTED]")
 		}
 	}
@@ -439,7 +439,7 @@ func Redact(message string, secrets ...string) string {
 			strings.EqualFold(strings.TrimRight(words[index], ":"), "Token") ||
 			strings.EqualFold(strings.TrimRight(words[index], ":"), "X-Api-Key") ||
 			strings.EqualFold(strings.TrimRight(words[index], ":"), "api-key")
-		if hdr && !strings.HasPrefix(words[index+1], "[REDACTED") && looksLikeToken(words[index+1]) {
+		if hdr && looksLikeToken(words[index+1]) {
 			words[index+1] = "[REDACTED]"
 		}
 	}
