@@ -71,6 +71,11 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	if !seen[RequestPermissionsToolName] {
 		t.Fatalf("expected %s in core read-only tools", RequestPermissionsToolName)
 	}
+	// By name as well as by count: the count alone still passes if one reader is
+	// swapped for another.
+	if !seen[ViewImageToolName] {
+		t.Fatalf("expected %s in core read-only tools", ViewImageToolName)
+	}
 }
 
 func TestRegistryAllReturnsToolsSortedByName(t *testing.T) {

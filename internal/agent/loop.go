@@ -656,6 +656,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// between tool_results breaks strict provider replay) — same after-batch
 		// rationale as turnRequestedModel above.
 		var changedFilesThisBatch []string
+		// Images produced by tools this turn, held until every tool_result is
+		// recorded. They travel as user messages, and a user message between two
+		// tool_results breaks strict provider replay — Anthropic coalesces them
+		// into one user block list and requires the tool_result blocks first, so
+		// interleaving yields [tool_result, text, image, tool_result] and a 400.
+		// Same reason the self-correction feedback below is deferred.
+		var toolImageMessages []zeroruntime.Message
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
@@ -717,7 +724,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// message also keeps the one-tool-result-per-tool-call pairing intact,
 			// which the providers validate.
 			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
-				messages = append(messages, imageMessage)
+				toolImageMessages = append(toolImageMessages, imageMessage)
 			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
@@ -729,11 +736,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if abortErr != nil {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolResult.Output
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
@@ -757,6 +766,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -775,6 +785,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
+		// Every tool_result for this turn is now recorded, including aborted
+		// placeholders, so the images can follow without splitting them.
+		messages = append(messages, toolImageMessages...)
+		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
