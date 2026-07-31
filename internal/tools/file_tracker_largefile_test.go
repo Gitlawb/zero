@@ -30,7 +30,7 @@ func TestLargeFileBecomesWritableAfterScopedReadsCoverIt(t *testing.T) {
 	const lines = 2400
 	var builder strings.Builder
 	for index := 0; index < lines; index++ {
-		builder.WriteString(fmt.Sprintf("line %06d %s\n", index, strings.Repeat("x", 60)))
+		fmt.Fprintf(&builder, "line %06d %s\n", index, strings.Repeat("x", 60))
 	}
 	if writeErr := os.WriteFile(path, []byte(builder.String()), 0o600); writeErr != nil {
 		t.Fatalf("seed file: %v", writeErr)
