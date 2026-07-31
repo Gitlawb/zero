@@ -1420,7 +1420,7 @@ func extractBranchSlug(text string) string {
 			firstLine = candidate
 		}
 
-		if !isPreambleText(line) && !isPreambleText(candidate) {
+		if (!isPreambleText(line) || candidate != line) && !isPreambleText(candidate) {
 			if plausibleLine == "" {
 				plausibleLine = candidate
 			}
