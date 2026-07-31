@@ -100,15 +100,15 @@ func (role windowsSandboxRole) roleTag() string {
 // Win32 status codes that mean "already there". Treated as success so
 // provisioning converges instead of failing on a second run.
 const (
-	nerrSuccess         = 0
-	nerrGroupExists     = 2223
+	nerrSuccess     = 0
+	nerrGroupExists = 2223
+	// NERR_GroupNotFound, the group half of nerrUserNotFound below.
+	nerrGroupNotFound   = 2220
 	nerrUserExists      = 2224
 	errorAliasExists    = 1379
 	errorMemberInAlias  = 1378
 	errorAccessDenied32 = 5
 	nerrUserNotFound    = 2221
-	// NERR_GroupNotFound, the group half of nerrUserNotFound above.
-	nerrGroupNotFound = 2220
 )
 
 // USER_INFO_1 privilege and flag values.
@@ -124,13 +124,13 @@ var (
 	netapi32                    = windows.NewLazySystemDLL("netapi32.dll")
 	procNetUserAdd              = netapi32.NewProc("NetUserAdd")
 	procNetLocalGroupAdd        = netapi32.NewProc("NetLocalGroupAdd")
+	procNetLocalGroupGetInfo    = netapi32.NewProc("NetLocalGroupGetInfo")
 	procNetLocalGroupAddMembers = netapi32.NewProc("NetLocalGroupAddMembers")
 	procNetUserDel              = netapi32.NewProc("NetUserDel")
 	procNetUserSetInfo          = netapi32.NewProc("NetUserSetInfo")
 	procNetUserGetInfo          = netapi32.NewProc("NetUserGetInfo")
 	procNetApiBufferFree        = netapi32.NewProc("NetApiBufferFree")
 	procNetUserGetLocalGroups   = netapi32.NewProc("NetUserGetLocalGroups")
-	procNetLocalGroupGetInfo    = netapi32.NewProc("NetLocalGroupGetInfo")
 )
 
 // userInfo1 mirrors USER_INFO_1. Field order and widths must match the Win32
@@ -260,75 +260,6 @@ func netAPIStatus(call string, status uintptr, okStatuses ...uintptr) error {
 	return fmt.Errorf("%s: status %d", call, status)
 }
 
-// windowsSandboxGroupIsOwned reports whether an EXISTING group of our name
-// carries Zero's managed comment.
-//
-// Mirrors windowsSandboxUserIsManaged, which asks the same question of an
-// account, and for the same reason: a name is not proof of provenance.
-func windowsSandboxGroupIsOwned() (bool, error) {
-	name, err := windows.UTF16PtrFromString(windowsSandboxGroupName)
-	if err != nil {
-		return false, err
-	}
-	var buffer *byte
-	status, _, _ := procNetLocalGroupGetInfo.Call(
-		0, // local machine
-		uintptr(unsafe.Pointer(name)),
-		1, // level: LOCALGROUP_INFO_1
-		uintptr(unsafe.Pointer(&buffer)),
-	)
-	runtime.KeepAlive(name)
-	if status == nerrGroupNotFound {
-		return false, nil
-	}
-	if err := netAPIStatus("NetLocalGroupGetInfo", status); err != nil {
-		return false, err
-	}
-	if buffer == nil {
-		return false, nil
-	}
-	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
-	info := (*localGroupInfo1)(unsafe.Pointer(buffer))
-	if info.Comment == nil {
-		return false, nil
-	}
-	return windows.UTF16PtrToString(info.Comment) == windowsSandboxGroupComment, nil
-}
-
-// resolveWindowsSandboxGroupAdd turns NetLocalGroupAdd's status into a verdict.
-//
-// Split out from the syscall so the DECISION can be tested without creating a
-// real local group, which needs Administrator and would leave machine state
-// behind.
-//
-// "Already exists" used to be treated as plain success, so any local group that
-// happened to be called ZeroSandboxUsers was adopted: its members, and every
-// grant already keyed to it, silently became part of the sandbox's identity.
-// A name is not proof of provenance. Creating the group ourselves needs no
-// check, since we just made it. Adopting one does.
-func resolveWindowsSandboxGroupAdd(status uintptr, owned func() (bool, error)) error {
-	if err := netAPIStatus("NetLocalGroupAdd", status, nerrGroupExists, errorAliasExists); err != nil {
-		return err
-	}
-	if status != nerrGroupExists && status != errorAliasExists {
-		return nil
-	}
-	isOwned, err := owned()
-	if err != nil {
-		return err
-	}
-	if !isOwned {
-		// Refused rather than adopted, renamed around, or deleted. Removing
-		// somebody else's group would be destructive, and provisioning into it
-		// would hand the sandbox whatever that group already grants, so the only
-		// safe move is to stop and name what is in the way.
-		return fmt.Errorf("a local group named %s already exists but was not created by Zero (its comment is not %q); "+
-			"rename or remove it, or the sandbox principal would inherit whatever that group already grants",
-			windowsSandboxGroupName, windowsSandboxGroupComment)
-	}
-	return nil
-}
-
 // ensureWindowsSandboxGroup creates the managed local group, or adopts it when
 // it already exists AND carries our ownership comment.
 func ensureWindowsSandboxGroup() error {
@@ -375,13 +306,47 @@ func resolveWindowsSandboxOfflineGroupSID() (string, error) {
 // ensureWindowsLocalGroup creates a local group, or leaves it alone when it
 // already exists.
 func ensureWindowsLocalGroup(groupName string, groupComment string) error {
-	name, err := windows.UTF16PtrFromString(groupName)
+	status, err := addWindowsLocalGroupFn(groupName, groupComment)
 	if err != nil {
 		return err
 	}
+	if status == nerrGroupExists || status == errorAliasExists {
+		// A group with this name already exists, which is the normal re-run case
+		// — but only if it is OURS. The offline group's SID is installed on the
+		// persistent WFP deny filters and the sandbox principal is made a member
+		// of it, so silently adopting a same-named group created by some other
+		// tool or by policy would cut off every existing member's outbound
+		// traffic and hand our principal that group's permissions.
+		owned, err := windowsLocalGroupOwnedByZeroFn(groupName, groupComment)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("local group %q already exists and is not managed by zero; "+
+				"rename or remove it before running sandbox setup", groupName)
+		}
+		return nil
+	}
+	return netAPIStatus("NetLocalGroupAdd", status)
+}
+
+// Seams for the two Win32 calls behind group creation, so the already-exists
+// branch is reachable in tests without an elevated machine.
+var (
+	addWindowsLocalGroupFn         = addWindowsLocalGroup
+	windowsLocalGroupOwnedByZeroFn = windowsLocalGroupOwnedByZero
+)
+
+// addWindowsLocalGroup issues NetLocalGroupAdd and hands back its raw status so
+// the caller can distinguish "already exists" from a real failure.
+func addWindowsLocalGroup(groupName string, groupComment string) (uintptr, error) {
+	name, err := windows.UTF16PtrFromString(groupName)
+	if err != nil {
+		return 0, err
+	}
 	comment, err := windows.UTF16PtrFromString(groupComment)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	info := localGroupInfo1{Name: name, Comment: comment}
 	status, _, _ := procNetLocalGroupAdd.Call(
@@ -395,7 +360,42 @@ func ensureWindowsLocalGroup(groupName string, groupComment string) error {
 	runtime.KeepAlive(info)
 	runtime.KeepAlive(name)
 	runtime.KeepAlive(comment)
-	return resolveWindowsSandboxGroupAdd(status, windowsSandboxGroupIsOwnedFn)
+	return status, nil
+}
+
+// windowsLocalGroupOwnedByZero reports whether an existing local group carries
+// the managed-group marker this setup writes, so a foreign group that merely
+// shares the name is never adopted.
+func windowsLocalGroupOwnedByZero(groupName string, wantComment string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(groupName)
+	if err != nil {
+		return false, err
+	}
+	var buffer *byte
+	status, _, _ := procNetLocalGroupGetInfo.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		1, // level: LOCALGROUP_INFO_1
+		uintptr(unsafe.Pointer(&buffer)),
+	)
+	runtime.KeepAlive(name)
+	if status == nerrGroupNotFound {
+		// It existed a moment ago and does not now. Treat that as not-ours
+		// rather than guessing; the next setup run recreates it cleanly.
+		return false, nil
+	}
+	if err := netAPIStatus("NetLocalGroupGetInfo", status); err != nil {
+		return false, err
+	}
+	if buffer == nil {
+		return false, nil
+	}
+	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
+	info := (*localGroupInfo1)(unsafe.Pointer(buffer))
+	if info.Comment == nil {
+		return false, nil
+	}
+	return windows.UTF16PtrToString(info.Comment) == wantComment, nil
 }
 
 // ensureWindowsSandboxUser creates a sandbox account with the supplied password.
@@ -754,7 +754,6 @@ func resolveWindowsSandboxSID(username string) (*windows.SID, error) {
 // ordinary machine and would pass without reaching the code it names.
 var (
 	ensureWindowsSandboxGroupFn           = ensureWindowsSandboxGroup
-	windowsSandboxGroupIsOwnedFn          = windowsSandboxGroupIsOwned
 	ensureWindowsSandboxOfflineGroupFn    = ensureWindowsSandboxOfflineGroup
 	ensureWindowsSandboxUserFn            = ensureWindowsSandboxUser
 	addWindowsSandboxUserToGroupFn        = addWindowsSandboxUserToGroup
