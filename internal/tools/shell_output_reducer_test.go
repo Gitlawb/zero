@@ -1,11 +1,31 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 )
+
+type commandReducerFixtureTool struct {
+	name   string
+	output string
+}
+
+func (tool commandReducerFixtureTool) Name() string { return tool.name }
+func (tool commandReducerFixtureTool) Description() string {
+	return "returns command output for reducer integration tests"
+}
+func (tool commandReducerFixtureTool) Parameters() Schema {
+	return Schema{Type: "object", AdditionalProperties: true}
+}
+func (tool commandReducerFixtureTool) Safety() Safety {
+	return Safety{SideEffect: SideEffectRead, Permission: PermissionAllow, Reason: "test output"}
+}
+func (tool commandReducerFixtureTool) Run(context.Context, map[string]any) Result {
+	return Result{Status: StatusOK, Output: tool.output}
+}
 
 func TestReduceCommandOutputCompactsPassingGoPackagesAndKeepsRawArtifact(t *testing.T) {
 	var lines []string
@@ -129,5 +149,131 @@ func TestSelfManagedBudgetPreservesRawSpillWhenReducedOutputAlsoTruncates(t *tes
 	spilled, err := os.ReadFile(result.Meta["spill_path"])
 	if err != nil || string(spilled) != raw {
 		t.Fatalf("raw spill was not preserved: err=%v", err)
+	}
+}
+
+func TestReduceCommandOutputCompactsRecognizedTestAndBuildNoise(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	for _, testCase := range commandReducerCorpus()[1:] {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": testCase.command}, Result{
+				Status: StatusOK,
+				Output: testCase.output,
+			})
+			if result.Meta["command_output_reduced"] != "true" {
+				t.Fatalf("recognized command output was not reduced: %#v", result)
+			}
+			if !strings.Contains(result.Output, testCase.want) || !strings.Contains(result.Output, "exit_code: 0") {
+				t.Fatalf("decisive summary or exit status was lost: %q", result.Output)
+			}
+			spillPath := result.Meta["spill_path"]
+			spilled, err := os.ReadFile(spillPath)
+			if err != nil {
+				t.Fatalf("read raw artifact: %v", err)
+			}
+			if string(spilled) != testCase.output {
+				t.Fatal("raw artifact differs from original output")
+			}
+		})
+	}
+}
+
+func TestReduceCommandOutputPreservesFailureEvidence(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	passing := make([]string, 0, commandReducerMinPassingLines+2)
+	for index := 0; index < commandReducerMinPassingLines+2; index++ {
+		passing = append(passing, fmt.Sprintf("test module::case_%02d ... ok", index))
+	}
+	original := strings.Join(append(passing,
+		"test module::broken ... FAILED",
+		"failures:",
+		"---- module::broken stdout ----",
+		"assertion failed: expected zero",
+		"test result: FAILED. 14 passed; 1 failed; finished in 0.08s",
+		"exit_code: 101",
+	), "\n")
+
+	result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": "cargo test --workspace"}, Result{
+		Status: StatusError,
+		Output: original,
+	})
+	for _, evidence := range []string{"module::broken ... FAILED", "assertion failed: expected zero", "14 passed; 1 failed", "exit_code: 101"} {
+		if !strings.Contains(result.Output, evidence) {
+			t.Fatalf("failure evidence %q was lost: %q", evidence, result.Output)
+		}
+	}
+	if result.Meta["command_output_reduced"] != "true" {
+		t.Fatalf("repetitive passing output was not reduced: %#v", result)
+	}
+}
+
+func TestReduceCommandOutputPassesThroughUnsupportedAndCompoundCommands(t *testing.T) {
+	original := strings.Repeat("PASS src/example.test.ts\n", commandReducerMinPassingLines+2) + "exit_code: 0"
+	for _, command := range []string{
+		"npm test | tee test.log",
+		"cargo test && echo done",
+		"pytest; notify-send done",
+		"cargo test 1>test.log",
+		"cargo test 2>>errors.log",
+		"git status --short",
+	} {
+		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": command}, Result{Status: StatusOK, Output: original})
+		if result.Output != original || result.Meta != nil {
+			t.Fatalf("command %q should pass through exactly, got %#v", command, result)
+		}
+	}
+}
+
+func TestReduceCommandOutputAllowsTrailingStderrMerge(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fixture := commandReducerCorpus()[1]
+	result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": fixture.command + " 2>&1"}, Result{
+		Status: StatusOK,
+		Output: fixture.output,
+	})
+	if result.Meta["command_output_reducer"] != "cargo_test" {
+		t.Fatalf("trailing stderr merge prevented reduction: %#v", result)
+	}
+}
+
+func TestReduceCommandOutputRequiresAuthoritativeRunnerSummary(t *testing.T) {
+	lookalikes := map[string]string{
+		"cargo test":  "test user::message ... ok",
+		"cargo check": "Checking a custom deployment state",
+		"pytest":      "application log ........ [100%]",
+		"npm test":    "PASS user-provided log message",
+	}
+	for command, line := range lookalikes {
+		original := strings.Repeat(line+"\n", commandReducerMinPassingLines+2) + "exit_code: 0"
+		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": command}, Result{Status: StatusOK, Output: original})
+		if result.Output != original || result.Meta != nil {
+			t.Fatalf("summary-free output for %q should pass through, got %#v", command, result)
+		}
+	}
+}
+
+func TestRegistryAppliesCommandReducerToExecAndBashTools(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fixture := commandReducerCorpus()[1]
+	for _, toolName := range []string{ExecCommandToolName, "bash"} {
+		t.Run(toolName, func(t *testing.T) {
+			registry := NewRegistry()
+			registry.Register(commandReducerFixtureTool{name: toolName, output: fixture.output})
+			args := map[string]any{"cmd": fixture.command}
+			if toolName == "bash" {
+				args = map[string]any{"command": fixture.command}
+			}
+			result := registry.Run(context.Background(), toolName, args)
+			if result.Status != StatusOK || result.Meta["command_output_reducer"] != "cargo_test" {
+				t.Fatalf("registry result was not reduced: %#v", result)
+			}
+			if !strings.Contains(result.Output, fixture.want) {
+				t.Fatalf("registry reduction lost summary: %q", result.Output)
+			}
+			spilled, err := os.ReadFile(result.Meta["spill_path"])
+			if err != nil || string(spilled) != fixture.output {
+				t.Fatalf("registry raw artifact mismatch: err=%v", err)
+			}
+		})
 	}
 }
