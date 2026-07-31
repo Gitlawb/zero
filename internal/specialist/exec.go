@@ -167,10 +167,13 @@ const permissionModeUnsafe = "unsafe"
 var readOnlySpecialistTools = map[string]bool{
 	"read_file":          true,
 	"read_minified_file": true,
-	"list_directory":     true,
-	"grep":               true,
-	"glob":               true,
-	"update_plan":        true,
+	// Reads one image file through read_file's own path scoping and mutates
+	// nothing, so it carries the same auto-approval as the other pure readers.
+	"view_image":     true,
+	"list_directory": true,
+	"grep":           true,
+	"glob":           true,
+	"update_plan":    true,
 }
 
 // IsReadOnlySpecialist reports whether the named specialist resolves to a

@@ -709,6 +709,16 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Content:    toolResult.Output,
 				ToolCallID: toolResult.ToolCallID,
 			})
+			// Images ride a following USER message rather than the tool result
+			// above. Every provider drops images on a tool-role message —
+			// Anthropic's tool_result content is a string, Gemini's is a
+			// functionResponse, and OpenAI guards its image parts to the user role
+			// — so attaching them there would silently deliver nothing. A separate
+			// message also keeps the one-tool-result-per-tool-call pairing intact,
+			// which the providers validate.
+			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
+				messages = append(messages, imageMessage)
+			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
 			// returns context.Canceled rather than fabricating a headless answer. Stop
@@ -1431,6 +1441,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Output:          result.Output,
 		Truncated:       result.Truncated,
 		Meta:            result.Meta,
+		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
 		ChangeSummaries: result.ChangeSummaries,
@@ -3212,4 +3223,38 @@ func copyMessages(messages []Message) []Message {
 		copied[index].Images = zeroruntime.CloneImageBlocks(message.Images)
 	}
 	return copied
+}
+
+// toolResultImageMessage builds the user message that carries a tool's images
+// to the model, or reports false when the tool produced none.
+//
+// The text names the tool so the model can tell which call an image came from
+// when several ran in one turn — the images arrive detached from their tool
+// result, so nothing else associates them.
+func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
+	for _, image := range result.Images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		mediaType := zeroruntime.NormalizeImageMediaType(image.MediaType)
+		if mediaType == "" {
+			// Outside the provider allow-list. Dropping it beats sending bytes a
+			// provider will reject and failing the whole turn.
+			continue
+		}
+		images = append(images, zeroruntime.ImageBlock{MediaType: mediaType, Data: image.Data})
+	}
+	if len(images) == 0 {
+		return zeroruntime.Message{}, false
+	}
+	label := result.Name
+	if label == "" {
+		label = "tool"
+	}
+	return zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "Image output from " + label + ":",
+		Images:  images,
+	}, true
 }

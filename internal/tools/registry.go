@@ -261,6 +261,9 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedReadFileTool(workspaceRoot, scope),
 		NewScopedReadMinifiedFileTool(workspaceRoot, scope),
+		// view_image is read-only and shares read_file's path scoping, so it
+		// belongs with the other readers rather than behind a gate.
+		NewScopedViewImageTool(workspaceRoot, scope),
 		NewScopedListDirectoryTool(workspaceRoot, scope),
 		NewScopedGlobTool(workspaceRoot, scope),
 		NewScopedGrepTool(workspaceRoot, scope),
