@@ -154,6 +154,45 @@ func TestEditFileAllowsSeenRangeAndRejectsUnseenRange(t *testing.T) {
 	}
 }
 
+func TestEditFileReplaceAllRecordsEveryShiftedReplacementSpan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("before\nneedle\nmiddle\nneedle\nafter\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	if res := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "f.txt", "start_line": 2, "end_line": 4,
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("partial read failed: %q", res.Output)
+	}
+	if res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path":        "f.txt",
+		"old_string":  "needle",
+		"new_string":  "left\nright",
+		"replace_all": true,
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("replace_all failed: %q", res.Output)
+	}
+	if !tracker.SeenRange(path, 5, 6) {
+		t.Fatal("shifted second replacement span was not recorded as seen")
+	}
+	if res := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path":        "f.txt",
+		"old_string":  "right",
+		"new_string":  "done",
+		"replace_all": true,
+	}, opts); res.Status != StatusOK {
+		t.Fatalf("follow-up edit of every replacement should succeed: %q", res.Output)
+	}
+	if content, err := os.ReadFile(path); err != nil || strings.Count(string(content), "done") != 2 {
+		t.Fatalf("unexpected follow-up content: content=%q err=%v", content, err)
+	}
+}
+
 func TestWriteFileCanOverwriteNewlyCreatedEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	registry := safetyRegistry(t, dir)

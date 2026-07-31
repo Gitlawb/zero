@@ -141,7 +141,6 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 
 	previouslySeenWhole := options.FileTracker.SeenWhole(absolutePath)
-	editStart, _ := lineSpanForOffset(content, strings.Index(content, oldString), len(oldString))
 	updated := strings.Replace(content, oldString, newString, 1)
 	replacedCount := 1
 	if replaceAll {
@@ -151,6 +150,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
+	editedSpans := replacementLineSpans(content, updated, oldString, newString, replaceAll)
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
@@ -170,8 +170,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		if previouslySeenWhole {
 			options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(updated), lineCount(updated))
 		} else {
-			newEnd := editStart + strings.Count(newString, "\n")
-			options.FileTracker.RecordSeenRange(absolutePath, editStart, newEnd, lineCount(updated))
+			for _, span := range editedSpans {
+				options.FileTracker.RecordSeenRange(absolutePath, span.start, span.end, lineCount(updated))
+			}
 		}
 	}
 
@@ -187,6 +188,30 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// summary, so the red/green diff costs zero model tokens.
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
 	return result
+}
+
+// replacementLineSpans returns every post-edit line range whose exact contents
+// came from newString. Byte offsets are translated from the original content
+// with a cumulative delta so replace_all remains correct when earlier
+// replacements add or remove lines before later occurrences.
+func replacementLineSpans(content, updated, oldString, newString string, replaceAll bool) []lineRange {
+	spans := make([]lineRange, 0, 1)
+	offset := 0
+	delta := 0
+	for {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			return spans
+		}
+		index += offset
+		start, end := lineSpanForOffset(updated, index+delta, len(newString))
+		spans = append(spans, lineRange{start: start, end: end})
+		if !replaceAll {
+			return spans
+		}
+		offset = index + len(oldString)
+		delta += len(newString) - len(oldString)
+	}
 }
 
 func allOccurrencesSeen(tracker *FileTracker, path, content, oldString string, replaceAll bool) bool {
