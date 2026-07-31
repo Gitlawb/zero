@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // A file past the read byte budget cannot be read whole in one call: the read is
@@ -76,5 +78,132 @@ func TestLargeFileBecomesWritableAfterScopedReadsCoverIt(t *testing.T) {
 	}, options)
 	if overwrite.Status != StatusOK {
 		t.Fatalf("overwrite refused after the file was fully read in scoped reads: %s", overwrite.Output)
+	}
+}
+
+func TestSingleLongLineBecomesWritableAfterExactByteReads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bundle.min.js")
+	content := strings.Repeat("x", readOutputBudgetBytes*3)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve file: %v", err)
+	}
+
+	tracker := NewFileTracker()
+	options := RunOptions{FileTracker: tracker}
+	ctx := context.Background()
+	read := NewReadFileTool(dir).(interface {
+		RunWithOptions(context.Context, map[string]any, RunOptions) Result
+	})
+	write := NewScopedWriteFileTool(dir, nil).(interface {
+		RunWithOptions(context.Context, map[string]any, RunOptions) Result
+	})
+
+	full := read.RunWithOptions(ctx, map[string]any{"path": "bundle.min.js"}, options)
+	if full.Meta["truncation_reason"] != "byte_budget" {
+		t.Fatalf("precondition: expected byte truncation, got %#v", full.Meta)
+	}
+	if tracker.SeenWhole(resolvedPath) {
+		t.Fatal("a truncated line read must not credit the whole file")
+	}
+
+	const chunkSize = 64 * 1024
+	for offset := 0; offset < len(content); offset += chunkSize {
+		result := read.RunWithOptions(ctx, map[string]any{
+			"path":        "bundle.min.js",
+			"byte_offset": offset,
+			"byte_limit":  chunkSize,
+		}, options)
+		if result.Status != StatusOK || result.Truncated {
+			t.Fatalf("byte read at %d was not exact: status=%s truncated=%v output=%q", offset, result.Status, result.Truncated, result.Output)
+		}
+	}
+	if !tracker.SeenWhole(resolvedPath) {
+		t.Fatal("exact byte reads covered the file but it is not seen whole")
+	}
+
+	overwrite := write.RunWithOptions(ctx, map[string]any{
+		"path": "bundle.min.js", "content": "replaced\n", "overwrite": true,
+	}, options)
+	if overwrite.Status != StatusOK {
+		t.Fatalf("overwrite refused after exact byte reads: %s", overwrite.Output)
+	}
+}
+
+func TestExactByteReadsAdvanceAlongUTF8Boundaries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unicode.min.js")
+	content := strings.Repeat("😀", 40_000)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := NewFileTracker()
+	options := RunOptions{FileTracker: tracker}
+	read := NewReadFileTool(dir).(interface {
+		RunWithOptions(context.Context, map[string]any, RunOptions) Result
+	})
+	offset := 0
+	for offset < len(content) {
+		result := read.RunWithOptions(context.Background(), map[string]any{
+			"path": "unicode.min.js", "byte_offset": offset, "byte_limit": 65_535,
+		}, options)
+		if result.Status != StatusOK || result.Truncated || !utf8.ValidString(result.Output) {
+			t.Fatalf("invalid exact UTF-8 read at %d: %#v", offset, result)
+		}
+		next, parseErr := strconv.Atoi(result.Meta["next_byte_offset"])
+		if parseErr != nil || next <= offset {
+			t.Fatalf("invalid continuation offset %q after %d", result.Meta["next_byte_offset"], offset)
+		}
+		offset = next
+	}
+	if !tracker.SeenWhole(resolvedPath) {
+		t.Fatal("UTF-8-safe byte reads covered the file but it is not seen whole")
+	}
+}
+
+func TestPartialByteEditDoesNotCreditAnEntireLongLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bundle.min.js")
+	content := "UNIQUE_TARGET" + strings.Repeat("x", readOutputBudgetBytes*2)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+	read := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "bundle.min.js", "byte_offset": 0, "byte_limit": 64,
+	}, opts)
+	if read.Status != StatusOK || read.Truncated {
+		t.Fatalf("exact byte read failed: %#v", read)
+	}
+	edit := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "bundle.min.js", "old_string": "UNIQUE_TARGET", "new_string": "UPDATED_TARGET",
+	}, opts)
+	if edit.Status != StatusOK {
+		t.Fatalf("edit of exactly observed bytes failed: %s", edit.Output)
+	}
+	if tracker.SeenWhole(resolvedPath) {
+		t.Fatal("editing observed bytes credited the unread remainder of the long line")
+	}
+	overwrite := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path": "bundle.min.js", "content": "replacement", "overwrite": true,
+	}, opts)
+	if overwrite.Status != StatusError {
+		t.Fatalf("whole overwrite should remain blocked after a partial byte read, got %#v", overwrite)
 	}
 }

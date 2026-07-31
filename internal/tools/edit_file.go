@@ -150,7 +150,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
-	editedSpans := replacementLineSpans(content, updated, oldString, newString, replaceAll)
+	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
@@ -171,7 +171,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 			options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(updated), lineCount(updated))
 		} else {
 			for _, span := range editedSpans {
-				options.FileTracker.RecordSeenRange(absolutePath, span.start, span.end, lineCount(updated))
+				options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))
 			}
 		}
 	}
@@ -190,11 +190,10 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	return result
 }
 
-// replacementLineSpans returns every post-edit line range whose exact contents
-// came from newString. Byte offsets are translated from the original content
-// with a cumulative delta so replace_all remains correct when earlier
-// replacements add or remove lines before later occurrences.
-func replacementLineSpans(content, updated, oldString, newString string, replaceAll bool) []lineRange {
+// replacementByteSpans returns every half-open post-edit byte range whose exact
+// contents came from newString. Offsets are translated from the original with a
+// cumulative delta so replace_all remains correct after earlier replacements.
+func replacementByteSpans(content, oldString, newString string, replaceAll bool) []lineRange {
 	spans := make([]lineRange, 0, 1)
 	offset := 0
 	delta := 0
@@ -204,8 +203,8 @@ func replacementLineSpans(content, updated, oldString, newString string, replace
 			return spans
 		}
 		index += offset
-		start, end := lineSpanForOffset(updated, index+delta, len(newString))
-		spans = append(spans, lineRange{start: start, end: end})
+		start := index + delta
+		spans = append(spans, lineRange{start: start, end: start + len(newString)})
 		if !replaceAll {
 			return spans
 		}
@@ -223,7 +222,7 @@ func allOccurrencesSeen(tracker *FileTracker, path, content, oldString string, r
 		}
 		index += offset
 		start, end := lineSpanForOffset(content, index, len(oldString))
-		if !tracker.SeenRange(path, start, end) {
+		if !tracker.SeenBytes(path, index, index+len(oldString)) && !tracker.SeenRange(path, start, end) {
 			return false
 		}
 		if !replaceAll {

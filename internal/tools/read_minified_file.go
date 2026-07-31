@@ -113,7 +113,7 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
 	toolResult := Result{Status: StatusOK, Output: output, Meta: meta}
 	if directBudget {
-		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
+		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for normal files, or byte_offset/byte_limit for an oversized single line")
 	}
 	return toolResult
 }

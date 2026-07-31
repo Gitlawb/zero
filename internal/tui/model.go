@@ -476,6 +476,9 @@ type model struct {
 	recapSeq                     int
 	recapRunning                 bool
 	recapCancel                  context.CancelFunc
+	recapTimerCancel             context.CancelFunc
+	recapIdleArmed               bool
+	recapIdleRunID               int
 	idleRecap                    string
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
@@ -1158,9 +1161,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.printInFlight = false
 		return m.drainFlushQueue()
 	}
+	var recapActivityCmd tea.Cmd
 	switch msg.(type) {
 	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseMsg:
-		m = m.cancelIdleRecap()
+		m, recapActivityCmd = m.resetIdleRecapAfterActivity()
 	}
 	next, cmd := m.updateModel(msg)
 	nm, ok := next.(model)
@@ -1170,7 +1174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	return nm, batchCommands(cmd, mouseCmd, flushCmd)
+	return nm, batchCommands(cmd, mouseCmd, flushCmd, recapActivityCmd)
 }
 
 func batchCommands(cmds ...tea.Cmd) tea.Cmd {

@@ -69,8 +69,9 @@ func reduceGoTestPassingPackages(output string) (string, int) {
 	omitted := 0
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "ok  \t") || strings.HasPrefix(trimmed, "?   \t") ||
-			strings.HasPrefix(trimmed, "ok  ") || strings.HasPrefix(trimmed, "?   ") {
+		packageSuccess := strings.HasPrefix(trimmed, "ok  \t") || strings.HasPrefix(trimmed, "?   \t") ||
+			strings.HasPrefix(trimmed, "ok  ") || strings.HasPrefix(trimmed, "?   ")
+		if packageSuccess && !strings.Contains(trimmed, "coverage:") && !strings.Contains(trimmed, "[no test files]") {
 			omitted++
 			continue
 		}

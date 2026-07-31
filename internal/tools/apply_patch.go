@@ -80,8 +80,17 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	var createdTargets []string
+	wholeBefore := map[string]bool{}
 	if options.FileTracker != nil {
 		createdTargets = missingPatchTargets(applyRoot, patch)
+		for _, path := range patchHeaderPaths(patch) {
+			if path == "" || path == "/dev/null" {
+				continue
+			}
+			if absolute, _, rerr := resolveWorkspaceTargetPath(applyRoot, path); rerr == nil {
+				wholeBefore[absolute] = options.FileTracker.SeenWhole(absolute)
+			}
+		}
 	}
 
 	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
@@ -102,13 +111,28 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
-	// git apply already rejects a patch whose context drifted, so it has its own
-	// staleness guard. Drop any tracked baseline for the files it rewrote so a
-	// subsequent edit_file/write_file re-reads instead of false-flagging the
-	// patch's own change as an external modification.
+	createdBefore := make(map[string]bool, len(createdTargets))
+	for _, absolute := range createdTargets {
+		createdBefore[absolute] = true
+	}
+	// Re-baseline files changed by this tool. When the model had already seen the
+	// whole input (or supplied a complete new file), the exact patch plus that
+	// input determines the whole output, so a follow-up edit needs no wasted read.
+	// Partial observations remain conservative and are cleared by Record.
 	for _, changed := range result.ChangedFiles {
 		if absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, changed); rerr == nil {
-			options.FileTracker.Forget(absolute)
+			content, readErr := os.ReadFile(absolute)
+			if readErr != nil {
+				options.FileTracker.Forget(absolute)
+				continue
+			}
+			info, _ := os.Stat(absolute)
+			wasWhole := wholeBefore[absolute] || createdBefore[absolute]
+			options.FileTracker.Record(absolute, content, info)
+			if wasWhole {
+				lines := lineCount(string(content))
+				options.FileTracker.RecordSeenRange(absolute, 1, lines, lines)
+			}
 		}
 	}
 	recordCreatedPatchTargets(options.FileTracker, createdTargets)

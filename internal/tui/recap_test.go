@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -148,6 +149,37 @@ func TestUserActivityCancelsAndClearsIdleRecap(t *testing.T) {
 	case <-ctx.Done():
 	default:
 		t.Fatal("activity did not cancel in-flight recap context")
+	}
+}
+
+func TestUserActivityRearmsPendingIdleRecap(t *testing.T) {
+	provider := &fakeProvider{}
+	m := newModel(context.Background(), Options{Provider: provider})
+	m.recapsEnabled = true
+	m.runID = 7
+	m.transcript = []transcriptRow{{kind: rowAssistant, text: "done", final: true}}
+	m, initial := m.maybeScheduleIdleRecap(7, "done")
+	if initial == nil {
+		t.Fatal("precondition: successful turn did not arm recap")
+	}
+
+	oldTimerDone := make(chan tea.Msg, 1)
+	go func() { oldTimerDone <- initial() }()
+	updated, cmd := m.Update(tea.MouseMotionMsg{})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("activity canceled the pending recap without rearming the idle timer")
+	}
+	if next.recapSeq <= m.recapSeq {
+		t.Fatalf("activity did not invalidate the old timer: before=%d after=%d", m.recapSeq, next.recapSeq)
+	}
+	select {
+	case msg := <-oldTimerDone:
+		if msg != nil {
+			t.Fatalf("canceled timer returned %#v, want nil", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("activity left the old four-minute timer running")
 	}
 }
 

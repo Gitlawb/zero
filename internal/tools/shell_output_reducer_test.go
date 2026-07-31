@@ -65,6 +65,25 @@ func TestReduceCommandOutputFailsOpenForCompoundAndFailedOutput(t *testing.T) {
 	}
 }
 
+func TestReduceGoTestPassingPackagesPreservesCoverageResults(t *testing.T) {
+	output := strings.Join([]string{
+		"ok  \texample.test/a\t0.01s\tcoverage: 82.4% of statements",
+		"?   \texample.test/b\t[no test files]",
+		"ok  \texample.test/c\t0.01s",
+	}, "\n")
+
+	reduced, omitted := reduceGoTestPassingPackages(output)
+	if !strings.Contains(reduced, "coverage: 82.4% of statements") {
+		t.Fatalf("coverage result was removed: %q", reduced)
+	}
+	if !strings.Contains(reduced, "[no test files]") {
+		t.Fatalf("no-test-files result was removed: %q", reduced)
+	}
+	if omitted != 1 {
+		t.Fatalf("omitted=%d, want only the plain passing line omitted", omitted)
+	}
+}
+
 func TestSelfManagedBudgetPreservesRawSpillWhenReducedOutputAlsoTruncates(t *testing.T) {
 	raw := "raw output\n" + strings.Repeat("ok  \texample.test/raw\t0.01s\n", 1000)
 	rawSpill := spillTruncatedOutput(ExecCommandToolName, raw)

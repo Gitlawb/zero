@@ -146,17 +146,42 @@ func (m model) maybeScheduleIdleRecap(runID int, answer string) (model, tea.Cmd)
 	if !m.recapsEnabled || m.provider == nil || strings.TrimSpace(answer) == "" {
 		return m, nil
 	}
+	m.recapIdleArmed = true
+	m.recapIdleRunID = runID
+	return m.scheduleIdleRecap(runID)
+}
+
+func (m model) scheduleIdleRecap(runID int) (model, tea.Cmd) {
 	m.recapSeq++
 	seq := m.recapSeq
-	return m, tea.Tick(recapIdleDelay, func(time.Time) tea.Msg {
-		return recapIdleMsg{runID: runID, seq: seq}
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	m.recapTimerCancel = cancel
+	return m, func() tea.Msg {
+		timer := time.NewTimer(recapIdleDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return recapIdleMsg{runID: runID, seq: seq}
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 // cancelIdleRecap invalidates pending timers, aborts provider work, and clears
 // the ephemeral orientation note as soon as the user resumes activity.
 func (m model) cancelIdleRecap() model {
+	m.recapIdleArmed = false
+	m.recapIdleRunID = 0
+	return m.clearIdleRecapWork()
+}
+
+func (m model) clearIdleRecapWork() model {
 	m.recapSeq++
+	if m.recapTimerCancel != nil {
+		m.recapTimerCancel()
+		m.recapTimerCancel = nil
+	}
 	if m.recapCancel != nil {
 		m.recapCancel()
 		m.recapCancel = nil
@@ -164,6 +189,19 @@ func (m model) cancelIdleRecap() model {
 	m.recapRunning = false
 	m.idleRecap = ""
 	return m
+}
+
+// resetIdleRecapAfterActivity restarts the inactivity window for a completed
+// turn. Activity still cancels in-flight generation and clears the ephemeral
+// note, but scrolling or reading no longer disables recaps until another turn.
+func (m model) resetIdleRecapAfterActivity() (model, tea.Cmd) {
+	armed := m.recapIdleArmed
+	runID := m.recapIdleRunID
+	m = m.clearIdleRecapWork()
+	if !armed || !m.recapsEnabled || m.provider == nil || runID != m.runID {
+		return m, nil
+	}
+	return m.scheduleIdleRecap(runID)
 }
 
 // handleRecapIdle starts generation only if the same run is still genuinely
@@ -177,6 +215,7 @@ func (m model) handleRecapIdle(msg recapIdleMsg) (model, tea.Cmd) {
 	if strings.TrimSpace(m.recapContext()) == "" {
 		return m, nil
 	}
+	m.recapTimerCancel = nil
 	ctx, cancel := context.WithTimeout(context.Background(), recapTimeout)
 	m.recapCancel = cancel
 	m.recapRunning = true
@@ -191,6 +230,8 @@ func (m model) handleRecapGenerated(msg recapGeneratedMsg) (model, tea.Cmd) {
 	}
 	m.recapCancel = nil
 	m.recapRunning = false
+	m.recapIdleArmed = false
+	m.recapIdleRunID = 0
 	recap := strings.TrimSpace(msg.recap)
 	if msg.err != nil || recap == "" || m.pending || m.compactInFlight ||
 		strings.TrimSpace(m.composerValue()) != "" || !m.noBlockingModal() {

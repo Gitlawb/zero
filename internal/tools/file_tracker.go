@@ -61,8 +61,10 @@ type fileObservation struct {
 	// total is the file's line count as of the last recorded read, so coverage
 	// can be judged from the ranges alone. Without it a file read in pieces
 	// could never be known to have been seen in full.
-	total  int
-	ranges []lineRange
+	total      int
+	ranges     []lineRange
+	totalBytes int
+	byteRanges []lineRange // zero-based, half-open byte intervals
 }
 
 // Record stores the version of absPath given its content and optional stat info.
@@ -110,8 +112,7 @@ func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total in
 	// A new line count means the file changed shape since the last read, so
 	// previously recorded ranges no longer describe it.
 	if observation.total != 0 && observation.total != total {
-		observation.ranges = nil
-		observation.whole = false
+		observation = fileObservation{}
 	}
 	observation.total = total
 	if start == 1 && end >= total {
@@ -121,6 +122,36 @@ func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total in
 		return
 	}
 	observation.ranges = append(observation.ranges, lineRange{start: start, end: end})
+	tracker.seen[absPath] = observation
+}
+
+// RecordSeenBytes records an exact, non-elided byte interval returned to the
+// model. Byte intervals make oversized single-line files recoverable without
+// crediting the model for the omitted middle of a truncated line read.
+func (tracker *FileTracker) RecordSeenBytes(absPath string, start, end, total int) {
+	if tracker == nil || start < 0 || end < start || total < 0 || end > total {
+		return
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation := tracker.seen[absPath]
+	if total == 0 {
+		observation.whole = true
+		observation.byteRanges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	if observation.totalBytes != 0 && observation.totalBytes != total {
+		observation = fileObservation{}
+	}
+	observation.totalBytes = total
+	if start == 0 && end >= total {
+		observation.whole = true
+		observation.byteRanges = nil
+		tracker.seen[absPath] = observation
+		return
+	}
+	observation.byteRanges = append(observation.byteRanges, lineRange{start: start, end: end})
 	tracker.seen[absPath] = observation
 }
 
@@ -159,6 +190,37 @@ func coversFully(ranges []lineRange, start int, end int) bool {
 	return next > end
 }
 
+// coversBytes reports whether half-open byte ranges cover [start, end).
+func coversBytes(ranges []lineRange, start, end int) bool {
+	if start >= end {
+		return true
+	}
+	if len(ranges) == 0 {
+		return false
+	}
+	sorted := make([]lineRange, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(left, right int) bool {
+		if sorted[left].start != sorted[right].start {
+			return sorted[left].start < sorted[right].start
+		}
+		return sorted[left].end < sorted[right].end
+	})
+	next := start
+	for _, seen := range sorted {
+		if seen.start > next {
+			return false
+		}
+		if seen.end > next {
+			next = seen.end
+		}
+		if next >= end {
+			return true
+		}
+	}
+	return false
+}
+
 // SeenRange reports whether every line in the requested range was returned
 // exactly to the model for the currently tracked version.
 func (tracker *FileTracker) SeenRange(absPath string, start, end int) bool {
@@ -175,6 +237,21 @@ func (tracker *FileTracker) SeenRange(absPath string, start, end int) bool {
 		return true
 	}
 	return coversFully(observation.ranges, start, end)
+}
+
+// SeenBytes reports whether every byte in [start, end) was returned exactly to
+// the model for the currently tracked version.
+func (tracker *FileTracker) SeenBytes(absPath string, start, end int) bool {
+	if tracker == nil {
+		return true
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	return observation.whole || coversBytes(observation.byteRanges, start, end)
 }
 
 func (tracker *FileTracker) SeenWhole(absPath string) bool {
@@ -195,10 +272,10 @@ func (tracker *FileTracker) SeenWhole(absPath string) bool {
 	// halves stayed "not seen whole" forever even though SeenRange agreed every
 	// line had been seen — and write_file, which gates on this, then refused the
 	// overwrite with advice to read the file that could not change the answer.
-	if observation.total <= 0 {
-		return false
+	if observation.total > 0 && coversFully(observation.ranges, 1, observation.total) {
+		return true
 	}
-	return coversFully(observation.ranges, 1, observation.total)
+	return observation.totalBytes > 0 && coversBytes(observation.byteRanges, 0, observation.totalBytes)
 }
 
 // Version returns the recorded version for absPath and whether one exists.
@@ -290,5 +367,5 @@ func fileConflictMessage(relativePath string) string {
 }
 
 func fileUnseenMessage(relativePath string) string {
-	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file, then retry the edit."
+	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file, or use byte_offset/byte_limit for an oversized single line, then retry the edit."
 }

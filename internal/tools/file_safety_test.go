@@ -79,6 +79,45 @@ func TestEditFileSucceedsWhenUnchangedAndRebaselines(t *testing.T) {
 	}
 }
 
+func TestApplyPatchPreservesWholeFileObservationForFollowUpEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	registry.Register(NewScopedApplyPatchTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	if result := registry.RunWithOptions(context.Background(), "read_file", map[string]any{"path": "f.txt"}, opts); result.Status != StatusOK {
+		t.Fatalf("read_file failed: %s", result.Output)
+	}
+	patch := strings.Join([]string{
+		"diff --git a/f.txt b/f.txt",
+		"--- a/f.txt",
+		"+++ b/f.txt",
+		"@@ -1,2 +1,2 @@",
+		"-alpha",
+		"+gamma",
+		" beta",
+		"",
+	}, "\n")
+	if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": patch}, opts); result.Status != StatusOK {
+		if gitApplyUnavailable(result.Output) {
+			t.Skipf("git binary unavailable: %s", result.Output)
+		}
+		t.Fatalf("apply_patch failed: %s", result.Output)
+	}
+
+	result := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "f.txt", "old_string": "beta", "new_string": "delta",
+	}, opts)
+	if result.Status != StatusOK {
+		t.Fatalf("follow-up edit should not require a wasted re-read: %s", result.Output)
+	}
+}
+
 func TestWriteFileOverwriteRefusedWhenChangedOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
