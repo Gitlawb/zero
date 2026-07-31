@@ -30,7 +30,7 @@ func TestFormatBashOutputRedactsAnthropicKey(t *testing.T) {
 	if strings.Contains(out, "sk-ant-api03") {
 		t.Fatalf("bash output leaked an Anthropic key: %q", out)
 	}
-	if !strings.Contains(out, "[REDACTED:openai_key]") {
+	if !strings.Contains(out, "[REDACTED:anthropic_key]") {
 		t.Fatalf("expected typed redaction placeholder, got %q", out)
 	}
 }
