@@ -134,7 +134,18 @@ func (m model) savePlanText(name string) string {
 // already ran, because the tier moved since, would be refusing to record
 // history.
 func (m model) savedPlanLimits() specialist.Limits {
-	return specialist.Limits{ParentTools: specialist.PlanReadOnlyToolNames()}
+	// GRANTABLE, not read-only. These limits parse a plan that is being saved,
+	// shown, restarted or resumed — plans that already ran, or are about to run
+	// through the ordinary path with its own approval gate. Granting only the
+	// read-only names here meant a plan that ParsePlan accepts at run time
+	// (write tools may be named per task) failed to parse on every /plans verb,
+	// so the entire durability surface silently excluded exactly the plans whose
+	// work is most worth keeping.
+	//
+	// This widens no authority: the parent grant is intersected again when the
+	// plan actually runs, and a write-capable plan still needs its approval and
+	// its isolated worktree.
+	return specialist.Limits{ParentTools: specialist.PlanGrantableToolNames()}
 }
 
 func (m model) savedPlansText() string {

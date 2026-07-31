@@ -173,16 +173,9 @@ func planTaskManifest(name string, grantedTools []string) Manifest {
 		// something plausible. A plan task exists to go and look; a plan task
 		// that reasons from memory is worse than no task, because its output
 		// reads exactly like the one that looked.
-		SystemPrompt: "You are executing one task of a larger plan. You have read-only tools: " +
-			"USE THEM. Search and read the actual files before you answer — do not rely on memory or " +
-			"inference about what the code probably says. Start with a tool call, not with prose. " +
-			"Every claim you make must be backed by something you read in this run, quoted with its " +
-			"file:line. If you cannot find something, say so plainly; an honest \"not found\" is worth " +
-			"more than a plausible guess, and a guess is indistinguishable from a finding once it " +
-			"reaches the plan's report. " +
-			"Complete exactly the task described and report what you found; do not attempt to modify anything.",
-		Location: LocationBuiltin,
-		FilePath: "(plan)",
+		SystemPrompt: planTaskSystemPrompt(grantedTools),
+		Location:     LocationBuiltin,
+		FilePath:     "(plan)",
 		// AUTHORITATIVE, not a hint: this is the already-intersected grant, and
 		// an empty one must refuse the child rather than expand to the default
 		// read-only category. ExecutePlan refuses before reaching here, so this
@@ -190,4 +183,45 @@ func planTaskManifest(name string, grantedTools []string) Manifest {
 		ResolvedTools: grantedTools,
 		ToolsResolved: true,
 	}
+}
+
+// planTaskSystemPrompt builds the child's contract from the tools it was
+// ACTUALLY granted.
+//
+// It used to be one literal that told every task "You have read-only tools" and
+// "do not attempt to modify anything" — including a task that named write_file
+// or bash, which ParsePlan permits by design ("A TASK MAY NOW NAME A WRITE
+// TOOL, and only by naming it"). A child instructed not to modify anything will
+// not use the write tool it was granted, so the grant, the approval prompt it
+// triggered, and the worktree prepared for it all bought nothing.
+//
+// The read-only wording stays exactly as it was for the read-only case, which
+// is the overwhelming majority and the one whose phrasing was tuned.
+func planTaskSystemPrompt(grantedTools []string) string {
+	const investigate = "USE THEM. Search and read the actual files before you answer — do not rely on memory or " +
+		"inference about what the code probably says. Start with a tool call, not with prose. " +
+		"Every claim you make must be backed by something you read in this run, quoted with its " +
+		"file:line. If you cannot find something, say so plainly; an honest \"not found\" is worth " +
+		"more than a plausible guess, and a guess is indistinguishable from a finding once it " +
+		"reaches the plan's report. "
+	if !grantsPlanWriteTool(grantedTools) {
+		return "You are executing one task of a larger plan. You have read-only tools: " + investigate +
+			"Complete exactly the task described and report what you found; do not attempt to modify anything."
+	}
+	return "You are executing one task of a larger plan. " + investigate +
+		"You have been granted tools that CHANGE things, and only the ones named in your task. " +
+		"Make exactly the change the task describes and nothing beyond it: no drive-by fixes, no " +
+		"reformatting, no edits to files the task did not name. Report what you changed, with file:line."
+}
+
+// grantsPlanWriteTool reports whether a grant contains any tool that can change
+// something, using the same allow-list ParsePlan validates against so the two
+// cannot drift.
+func grantsPlanWriteTool(grantedTools []string) bool {
+	for _, name := range grantedTools {
+		if planWriteTools[name] {
+			return true
+		}
+	}
+	return false
 }
