@@ -181,6 +181,12 @@ func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
 		_ = windows.CloseHandle(handle)
 		return 0, false, fmt.Errorf("refusing to apply ACL to reparse-point target %s: possible path swap during elevated setup", path)
 	}
+	// Ancestors are resolved by CreateFile even with FILE_FLAG_OPEN_REPARSE_POINT,
+	// so the check above is not enough on its own.
+	if err := verifyWindowsACLTargetNotRedirected(handle, path); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, false, err
+	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	return handle, isDir, nil
 }
@@ -226,22 +232,29 @@ func windowsExplicitAccessEntries(entries []WindowsACLEntry, isDir bool) ([]wind
 func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACCESS_MASK, error) {
 	switch action {
 	case WindowsACLAllowWrite:
-		// DELETE and FILE_DELETE_CHILD are part of the grant, not extras.
-		// FILE_GENERIC_WRITE covers creating and modifying but not removing or
-		// renaming, and a rename needs delete access on the source. Under the
-		// old same-user token that gap was invisible, because the caller already
-		// held inherited rights on its own tree; a sandbox principal is a
-		// separate account with no such inheritance, so without these it can
-		// write a file it can never delete. Ordinary editing and most git
-		// operations rewrite files by replacing them, so the omission fails
-		// normal work rather than an edge case.
+		// DELETE is part of the grant, not an extra. FILE_GENERIC_WRITE covers
+		// creating and modifying but not removing or renaming, and a rename needs
+		// delete access on the source. Under the old same-user token that gap was
+		// invisible, because the caller already held inherited rights on its own
+		// tree; a sandbox principal is a separate account with no such
+		// inheritance, so without DELETE it can write a file it can never delete.
+		// Ordinary editing and most git operations rewrite files by replacing
+		// them, so the omission fails normal work rather than an edge case.
 		//
-		// WindowsACLDenyWrite below already treats delete as part of write. This
-		// keeps the grant symmetric with the deny instead of covering less.
-		// WRITE_DAC and WRITE_OWNER stay out on purpose: they are in the deny
-		// mask to stop the principal rewriting its own restrictions, and
-		// granting them here would hand back exactly that.
-		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE | windows.DELETE | windowsFileDeleteChild, nil
+		// FILE_DELETE_CHILD is deliberately NOT granted, for the same reason
+		// WRITE_DAC and WRITE_OWNER are not. On a parent it authorises deleting a
+		// child whatever the child's own DACL says, so granting it on a write root
+		// hands back the write-denied carve-outs underneath it: a principal could
+		// delete .git/config and recreate it, and the replacement inherits this
+		// grant with no deny of its own — restoring exactly the credential.helper
+		// and core.hooksPath control the carve-out exists to prevent.
+		//
+		// It was granted here originally to keep the mask symmetric with
+		// WindowsACLDenyWrite, which does treat FILE_DELETE_CHILD as part of
+		// write. Symmetry is the wrong goal: denying a capability is not a reason
+		// to grant it. DELETE alone covers removing and renaming files the
+		// principal owns inside its roots, which is what the grant is for.
+		return windows.GRANT_ACCESS, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE | windows.DELETE, nil
 	case WindowsACLAllowRead:
 		// Read and traverse without write. A sandbox principal is a separate
 		// account with no inherent access to the caller's tree, so a read-only
