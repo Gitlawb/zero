@@ -1018,3 +1018,56 @@ func classifyWindowsSandboxLookupError(err error) error {
 	}
 	return err
 }
+
+// windowsSandboxUserInLocalGroup reports direct membership of one named local
+// group. Network denial is keyed to the offline group's SID on the WFP filters,
+// so the command path uses this to confirm the account it is about to log on
+// still carries the membership that makes those filters apply to it.
+//
+// Indirected through a var so the command path can be tested without an
+// elevated machine.
+var windowsSandboxUserInLocalGroupFn = windowsSandboxUserInLocalGroup
+
+func windowsSandboxUserInLocalGroup(username string, groupName string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return false, err
+	}
+	var (
+		buffer  *byte
+		entries uint32
+		total   uint32
+	)
+	status, _, _ := procNetUserGetLocalGroups.Call(
+		0, // local machine
+		uintptr(unsafe.Pointer(name)),
+		0, // level: LOCALGROUP_USERS_INFO_0
+		0, // flags: direct membership only
+		uintptr(unsafe.Pointer(&buffer)),
+		uintptr(^uint32(0)), // MAX_PREFERRED_LENGTH
+		uintptr(unsafe.Pointer(&entries)),
+		uintptr(unsafe.Pointer(&total)),
+	)
+	runtime.KeepAlive(name)
+	if status == nerrUserNotFound {
+		return false, nil
+	}
+	if err := netAPIStatus("NetUserGetLocalGroups", status); err != nil {
+		return false, err
+	}
+	if buffer == nil || entries == 0 {
+		return false, nil
+	}
+	defer procNetApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
+	want := strings.ToLower(groupName)
+	groups := unsafe.Slice((*localGroupUsersInfo0)(unsafe.Pointer(buffer)), entries)
+	for _, group := range groups {
+		if group.Name == nil {
+			continue
+		}
+		if strings.ToLower(windows.UTF16PtrToString(group.Name)) == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}

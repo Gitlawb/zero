@@ -109,7 +109,7 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 	// offline one is in the group the block filters match, so choosing here is
 	// what enforces the mode.
 	role := windowsSandboxRoleForNetwork(config.PermissionProfile.Network.Mode)
-	identity, err := lookupWindowsSandboxPrincipalForCommand(key, role)
+	identity, err := lookupWindowsSandboxPrincipalForCommandFn(key, role)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			// Not provisioned. On the restricted-token tier the marker check has
@@ -126,11 +126,31 @@ func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.T
 		// operator has to see, not a reason to pretend setup never ran.
 		return 0, false, err
 	}
+	// Selecting the offline account is only half of what denies it the network.
+	// The WFP filters match the OFFLINE GROUP'S SID, so an account that has
+	// drifted out of that group — local policy, an administrator, a re-setup that
+	// could not re-add it — still logs on from a stored secret and its token no
+	// longer satisfies the filter condition. It would get full egress under a
+	// profile that asked for none. Re-check the membership the mode depends on
+	// rather than trusting the marker written when setup last succeeded.
+	if role == windowsSandboxRoleOffline {
+		member, err := windowsSandboxUserInLocalGroupFn(identity.Username, windowsSandboxOfflineGroupName)
+		if err != nil {
+			return 0, false, err
+		}
+		if !member {
+			// Fail closed toward the weaker-but-still-denied path: the restricted
+			// token carries the offline marker the same filters match, so egress
+			// stays blocked. Handing back this principal token would not.
+			warnWindowsSandboxOfflineMembershipMissing(identity.Username)
+			return 0, false, nil
+		}
+	}
 	secretPath, err := windowsSandboxSecretPath(config.SandboxHome, identity.Username)
 	if err != nil {
 		return 0, false, err
 	}
-	password, err := readWindowsSandboxSecret(secretPath)
+	password, err := readWindowsSandboxSecretFn(secretPath)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 			// The account exists but its password does not. Setup was interrupted
@@ -833,6 +853,34 @@ var (
 	removeWindowsSandboxSecretFn      = removeWindowsSandboxSecret
 	writeWindowsSandboxSecretFn       = writeWindowsSandboxSecret
 )
+
+// warnWindowsSandboxOfflineMembershipMissing reports the one drift that would
+// otherwise silently hand a no-network profile full egress.
+//
+// Separate from the missing-secret warning because the remedy differs and
+// because this one is a containment failure rather than a setup gap: the
+// account is fine, its group membership is not. Once per process, for the same
+// reason as its sibling — this sits on the command path.
+var warnWindowsSandboxOfflineMembershipMissing = func(username string) {
+	windowsSandboxOfflineMembershipWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr,
+			"[zero] sandbox principal %q is no longer a member of %q, which is the group the network "+
+				"block filters match. Falling back to the restricted-token sandbox, which still denies "+
+				"the network but does not confine reads. "+
+				"Re-run `zero sandbox setup` from an elevated terminal to restore it.\n",
+			username, windowsSandboxOfflineGroupName)
+	})
+}
+
+var windowsSandboxOfflineMembershipWarnOnce sync.Once
+
+// Seam for the principal lookup, so the command path's mode-enforcement checks
+// are reachable in tests without a provisioned machine.
+var lookupWindowsSandboxPrincipalForCommandFn = lookupWindowsSandboxPrincipalForCommand
+
+// Seam for the secret read on the command path, so the mode-enforcement gates
+// ahead of it can be exercised without a provisioned secret on disk.
+var readWindowsSandboxSecretFn = readWindowsSandboxSecret
 
 // Seam for the lookup the unrecorded-principal retirement decides on, so that
 // decision is observable in a test without a provisioned machine — on which the
