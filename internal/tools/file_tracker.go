@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -56,7 +57,11 @@ type lineRange struct {
 }
 
 type fileObservation struct {
-	whole  bool
+	whole bool
+	// total is the file's line count as of the last recorded read, so coverage
+	// can be judged from the ranges alone. Without it a file read in pieces
+	// could never be known to have been seen in full.
+	total  int
 	ranges []lineRange
 }
 
@@ -102,6 +107,13 @@ func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total in
 	if end < start {
 		return
 	}
+	// A new line count means the file changed shape since the last read, so
+	// previously recorded ranges no longer describe it.
+	if observation.total != 0 && observation.total != total {
+		observation.ranges = nil
+		observation.whole = false
+	}
+	observation.total = total
 	if start == 1 && end >= total {
 		observation.whole = true
 		observation.ranges = nil
@@ -110,6 +122,41 @@ func (tracker *FileTracker) RecordSeenRange(absPath string, start, end, total in
 	}
 	observation.ranges = append(observation.ranges, lineRange{start: start, end: end})
 	tracker.seen[absPath] = observation
+}
+
+// coversFully reports whether ranges together cover every line in [start, end].
+//
+// Ranges are merged rather than scanned line by line: a caller asking about a
+// large file would otherwise walk every line against every recorded range, and
+// the answer is the same.
+func coversFully(ranges []lineRange, start int, end int) bool {
+	if start > end {
+		return true
+	}
+	if len(ranges) == 0 {
+		return false
+	}
+	sorted := make([]lineRange, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(left int, right int) bool {
+		if sorted[left].start != sorted[right].start {
+			return sorted[left].start < sorted[right].start
+		}
+		return sorted[left].end < sorted[right].end
+	})
+	next := start
+	for _, seen := range sorted {
+		if seen.start > next {
+			return false
+		}
+		if seen.end >= next {
+			next = seen.end + 1
+		}
+		if next > end {
+			return true
+		}
+	}
+	return next > end
 }
 
 // SeenRange reports whether every line in the requested range was returned
@@ -127,19 +174,7 @@ func (tracker *FileTracker) SeenRange(absPath string, start, end int) bool {
 	if observation.whole {
 		return true
 	}
-	for line := start; line <= end; line++ {
-		covered := false
-		for _, seen := range observation.ranges {
-			if line >= seen.start && line <= seen.end {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			return false
-		}
-	}
-	return true
+	return coversFully(observation.ranges, start, end)
 }
 
 func (tracker *FileTracker) SeenWhole(absPath string) bool {
@@ -148,7 +183,22 @@ func (tracker *FileTracker) SeenWhole(absPath string) bool {
 	}
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
-	return tracker.seen[absPath].whole
+	observation, ok := tracker.seen[absPath]
+	if !ok {
+		return false
+	}
+	if observation.whole {
+		return true
+	}
+	// Derived from the ranges rather than tracked as its own flag. The flag was
+	// only ever set by a SINGLE read covering the file, so a file read in two
+	// halves stayed "not seen whole" forever even though SeenRange agreed every
+	// line had been seen — and write_file, which gates on this, then refused the
+	// overwrite with advice to read the file that could not change the answer.
+	if observation.total <= 0 {
+		return false
+	}
+	return coversFully(observation.ranges, 1, observation.total)
 }
 
 // Version returns the recorded version for absPath and whether one exists.
