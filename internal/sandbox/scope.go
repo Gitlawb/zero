@@ -214,9 +214,14 @@ func (s *Scope) releaseTemporaryRead(root string) {
 		s.mu.Unlock()
 		return
 	}
+	// Both mutations under ONE hold. Dropping the lock between them opened a
+	// window where the root was still in readRoots but no longer in tempReads:
+	// a concurrent AddTemporaryRead landing there reads it as a PERMANENT root,
+	// hands its caller a no-op undo, and then this call strips the root — so
+	// that caller believes it holds access it has already silently lost.
 	delete(s.tempReads, root)
+	s.readRoots = removeScopeRoot(s.readRoots, root)
 	s.mu.Unlock()
-	s.removeReadRoot(root)
 }
 
 // releaseTemporaryWrite is releaseTemporaryRead for write roots. Two functions
@@ -236,21 +241,10 @@ func (s *Scope) releaseTemporaryWrite(root string) {
 		s.mu.Unlock()
 		return
 	}
+	// Same single-hold rule as releaseTemporaryRead above.
 	delete(s.tempWrites, root)
-	s.mu.Unlock()
-	s.removeWriteRoot(root)
-}
-
-func (s *Scope) removeReadRoot(root string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.readRoots = removeScopeRoot(s.readRoots, root)
-}
-
-func (s *Scope) removeWriteRoot(root string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.extraRoots = removeScopeRoot(s.extraRoots, root)
+	s.mu.Unlock()
 }
 
 func removeScopeRoot(roots []string, root string) []string {
