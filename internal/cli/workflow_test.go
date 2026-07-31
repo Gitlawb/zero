@@ -2050,3 +2050,78 @@ func TestEnsureFeatureBranchFailsClosedWhenTrackingRefCannotBeRefreshed(t *testi
 		t.Fatal("expected createBranch not to be called when the tracking ref could not be refreshed")
 	}
 }
+
+func TestEnsureFeatureBranchRequiresLeaseWhenPushedToDifferentRemote(t *testing.T) {
+	cwd := t.TempDir()
+	branch, _, requireNew, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "upstream", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "user/feature", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
+			return "origin"
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch: %v", err)
+	}
+	if branch != "user/feature" {
+		t.Fatalf("branch = %q, want user/feature", branch)
+	}
+	if !requireNew {
+		t.Fatal("expected requireNewRemoteBranch to be true when target remote differs from upstream remote")
+	}
+}
+
+func TestEnsureFeatureBranchRollsBackOnMarkGeneratedBranchFailure(t *testing.T) {
+	cwd := t.TempDir()
+	deletedBranch := ""
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return true, "main", "origin", nil
+		},
+		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
+			return 1, nil
+		},
+		inspectChanges: featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser: func(ctx context.Context, cwd string) string { return "user" },
+		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			return zerogit.BranchResult{Branch: options.Name}, nil
+		},
+		markGeneratedBranch: func(ctx context.Context, cwd, branch string) error {
+			return errors.New("config lock error")
+		},
+		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
+			deletedBranch = branchToDelete
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "config lock error") {
+		t.Fatalf("expected mark error, got %v", err)
+	}
+	if deletedBranch != "user/readme-md" {
+		t.Fatalf("expected rollback deletion of user/readme-md, got %q", deletedBranch)
+	}
+}
+
+func TestRunChangesPRYesBypassesDefaultBranchCheck(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "pr", "--yes", "--fill"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "", "", errors.New("remote unreachable")
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			return zerogit.PushResult{Remote: "origin", Branch: "main"}, nil
+		},
+		createPR: func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+			return zerogit.PRResult{Output: "https://example.invalid/pr/1"}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d with --yes even when isDefaultBranch errors, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+}

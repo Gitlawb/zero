@@ -892,6 +892,27 @@ func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, 
 	return err == nil, nil
 }
 
+// UpstreamRemote returns the configured upstream remote name for branch (e.g. "origin"),
+// or "" if no upstream is configured.
+func UpstreamRemote(ctx context.Context, cwd, branch string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "config", "branch."+branch+".remote")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// DeleteBranch switches to fallbackBranch and deletes branchToDelete.
+func DeleteBranch(ctx context.Context, cwd, fallbackBranch, branchToDelete string, runGit Runner) error {
+	runGit, _ = resolveRunners(runGit, nil)
+	if _, err := gitOutput(ctx, runGit, cwd, "checkout", fallbackBranch); err != nil {
+		return err
+	}
+	_, err := gitOutput(ctx, runGit, cwd, "branch", "-D", branchToDelete)
+	return err
+}
+
 // IsUnbornRemote reports whether remote is a freshly created repository with
 // no refs at all (no branches, no HEAD). ensureFeatureBranch consults this
 // when CommitsAhead fails to determine why: a genuinely empty remote has no

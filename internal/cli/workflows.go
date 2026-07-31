@@ -1022,15 +1022,17 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
-	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
-	}
+	if !options.yes {
+		_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
+		if err != nil {
+			return writeExecUsageError(stderr, err.Error())
+		}
 
-	targetRemote := firstNonEmptyString(options.remote, remoteForCheck)
-	if deps.isUnbornRemote != nil {
-		if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
-			return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
+		targetRemote := firstNonEmptyString(options.remote, remoteForCheck)
+		if deps.isUnbornRemote != nil {
+			if unborn, unbornErr := deps.isUnbornRemote(context.Background(), workspaceRoot, targetRemote); unbornErr == nil && unborn {
+				return writeExecUsageError(stderr, fmt.Sprintf("cannot create pull request on unborn remote %s: push the initial default branch first", targetRemote))
+			}
 		}
 	}
 
@@ -1179,10 +1181,13 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	}
 	if !isDefault {
 		requireNewRemoteBranch := false
-		if deps.branchHasUpstream != nil && deps.isGeneratedBranch != nil {
-			hasUpstream, upstreamErr := deps.branchHasUpstream(ctx, workspaceRoot, currentBranch)
-			isGenerated := deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch)
-			requireNewRemoteBranch = isGenerated && (upstreamErr != nil || !hasUpstream)
+		if deps.isGeneratedBranch != nil && deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch) {
+			targetRemote := firstNonEmptyString(requestedRemote, remote)
+			upstreamRemote := ""
+			if deps.branchUpstreamRemote != nil {
+				upstreamRemote = deps.branchUpstreamRemote(ctx, workspaceRoot, currentBranch)
+			}
+			requireNewRemoteBranch = (upstreamRemote == "" || upstreamRemote != targetRemote)
 		}
 		return currentBranch, remote, requireNewRemoteBranch, nil
 	}
@@ -1286,6 +1291,9 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	}
 	if deps.markGeneratedBranch != nil {
 		if err := deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch); err != nil {
+			if deps.deleteBranch != nil {
+				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
+			}
 			return "", "", false, fmt.Errorf("failed to mark generated branch: %w", err)
 		}
 	}
