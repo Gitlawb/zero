@@ -1786,8 +1786,9 @@ func hooksSuppressed(options Options) bool {
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
+// Note: beforeTool runs even in plan mode so fail-closed policy vetoes apply to read calls.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
-	if options.Hooks == nil || hooksSuppressed(options) {
+	if options.Hooks == nil {
 		return hooks.DispatchOutcome{}, false
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
