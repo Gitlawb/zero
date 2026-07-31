@@ -5360,7 +5360,14 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
-	m.orchestrate.clear()
+	// The orchestrate panel survives a new run while a BACKGROUND plan is still
+	// working. Those plans outlive the run that launched them by design, and
+	// their messages carry the background flag to pass the stale-run guard —
+	// clearing byID here would let the guard pass them into an empty panel,
+	// where they no-op and the PLAN surface disappears until the plan ends.
+	if !m.planProgress.BackgroundPlanLive() {
+		m.orchestrate.clear()
+	}
 	// Re-bind the plan recorder to THIS run. The orchestrate tool holds the
 	// bridge for the process's life (the registry is built once per session),
 	// so the run id has to be pushed in per run — the PostureGate problem, same
