@@ -1695,20 +1695,21 @@ func sandboxRestrictionRetryReason(result tools.Result) string {
 
 func runToolForNetworkRetry(ctx context.Context, registry *tools.Registry, name string, toolCallID string, args map[string]any, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) tools.Result {
 	return registry.RunWithOptions(ctx, name, cloneArgs(args), tools.RunOptions{
-		PermissionGranted: true,
-		PermissionMode:    string(permissionMode),
-		Autonomy:          options.Autonomy,
-		Sandbox:           options.Sandbox,
-		ToolCallID:        toolCallID,
-		SessionID:         options.SessionID,
-		Model:             options.Model,
-		ReasoningEffort:   options.ReasoningEffort,
-		Depth:             options.Depth,
-		Cwd:               options.Cwd,
-		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          progressCallback,
+		PermissionGranted:          true,
+		PermissionMode:             string(permissionMode),
+		Autonomy:                   options.Autonomy,
+		Sandbox:                    options.Sandbox,
+		ToolCallID:                 toolCallID,
+		SessionID:                  options.SessionID,
+		Model:                      options.Model,
+		ReasoningEffort:            options.ReasoningEffort,
+		Depth:                      options.Depth,
+		Cwd:                        options.Cwd,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
+		EnabledTools:               options.EnabledTools,
+		DisabledTools:              options.DisabledTools,
+		Progress:                   progressCallback,
 	})
 }
 
@@ -1723,20 +1724,21 @@ func unsandboxedRetryArgs(args map[string]any) map[string]any {
 
 func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, name string, toolCallID string, args map[string]any, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) tools.Result {
 	return registry.RunWithOptions(ctx, name, args, tools.RunOptions{
-		PermissionGranted: true,
-		PermissionMode:    string(permissionMode),
-		Autonomy:          options.Autonomy,
-		Sandbox:           options.Sandbox,
-		ToolCallID:        toolCallID,
-		SessionID:         options.SessionID,
-		Model:             options.Model,
-		ReasoningEffort:   options.ReasoningEffort,
-		Depth:             options.Depth,
-		Cwd:               options.Cwd,
-		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          progressCallback,
+		PermissionGranted:          true,
+		PermissionMode:             string(permissionMode),
+		Autonomy:                   options.Autonomy,
+		Sandbox:                    options.Sandbox,
+		ToolCallID:                 toolCallID,
+		SessionID:                  options.SessionID,
+		Model:                      options.Model,
+		ReasoningEffort:            options.ReasoningEffort,
+		Depth:                      options.Depth,
+		Cwd:                        options.Cwd,
+		FileTracker:                options.FileTracker,
+		DeferFileObservationCommit: true,
+		EnabledTools:               options.EnabledTools,
+		DisabledTools:              options.DisabledTools,
+		Progress:                   progressCallback,
 	})
 }
 

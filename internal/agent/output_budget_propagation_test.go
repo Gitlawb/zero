@@ -75,11 +75,15 @@ func outputBudgetHookDispatcherFor(toolName string, repeats int) *hooks.Dispatch
 
 func TestExecuteToolCallCommitsReadObservationAfterFinalBoundary(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "small.txt")
-	if err := os.WriteFile(path, []byte("known content\n"), 0o600); err != nil {
+	targetPath := filepath.Join(root, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("known content\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
+	linkPath := filepath.Join(root, "small.txt")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(linkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +105,15 @@ func TestExecuteToolCallCommitsReadObservationAfterFinalBoundary(t *testing.T) {
 func TestExecuteToolCallDoesNotCommitReadObservationBeforeHookBudget(t *testing.T) {
 	t.Setenv("ZERO_TOOL_OUTPUT_CEILING_TOKENS", "80")
 	root := t.TempDir()
-	path := filepath.Join(root, "small.txt")
-	if err := os.WriteFile(path, []byte("known content\n"), 0o600); err != nil {
+	targetPath := filepath.Join(root, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("known content\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
+	linkPath := filepath.Join(root, "small.txt")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(linkPath)
 	if err != nil {
 		t.Fatal(err)
 	}

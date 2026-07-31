@@ -211,6 +211,13 @@ func TestApplyPatchCompleteCreationCreditsSuppliedFile(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("follow-up edit of supplied file failed: %s", result.Output)
 	}
+	updated, err := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(updated), "updated content\n"; got != want {
+		t.Fatalf("follow-up edit content = %q, want %q", got, want)
+	}
 }
 
 func TestWriteFileOverwriteRefusedWhenChangedOnDisk(t *testing.T) {
