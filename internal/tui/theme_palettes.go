@@ -485,9 +485,13 @@ var duneDarkPalette = palette{
 	line:      "#242429", // borders/separators
 	line2:     "#414147",
 	ink:       "#ececee",
-	muted:     "#ccccd2", // secondary text — bright gray, top of the ramp
-	faint:     "#b8b8c0", // hints/metadata
-	faintest:  "#55c6cd", // line numbers/separators — a neutral gray at this brightness quantizes to xterm #005f00's near-neighbor at only 2.97:1 on the add-diff gutter; nudging toward cyan (still under the faint/faintest/panel ramp) keeps AA (4.62:1) once xterm-256 rounds it. On 16-color (bright cyan on green) the ratio is ~4.10:1 — short of AA but the best cyan that still sits under faint in the ramp
+	// Gray ramp (ink > muted > faint > faintest > panel) is kept light enough
+	// that faintest maps to ANSI white / xterm #c6c6c6 and clears WCAG AA on the
+	// green add gutter under both 16-color and 256-color profiles. Prior cyan
+	// #55c6cd mapped to bright cyan at only 4.10:1 on ANSI green (short of AA).
+	muted:     "#e0e0e6", // secondary text
+	faint:     "#d4d4dc", // hints/metadata
+	faintest:  "#c8c8d0", // line numbers/separators (and diff gutters)
 	accent:    "#ff9628", // brand/claude rgb(255,150,40), adjusted for deuteranopia
 	green:     "#c8c8e9", // success — soft periwinkle (cool/daltonized). Maps to ANSI white so add-sign text stays AA (5.14:1) on the green add band under 16-color; saturated cyan/blue collapses to bright blue at 1.67:1
 	red:       "#ffc0c8", // error — soft pink. Maps to ANSI white so del-sign text stays AA (10.95:1) on the maroon del band under 16-color; bright red collapses to 2.74:1 on maroon

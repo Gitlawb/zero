@@ -561,24 +561,22 @@ func TestDuneDarkANSI16Contrast(t *testing.T) {
 	// Diff sign text and changed-word text: the pairs users actually read on
 	// add/del rows under 16-color. Prior values were bright-blue-on-green
 	// (1.67:1) and bright-red-on-maroon (2.74:1).
+	// Diff sign text, changed-word text, and gutter line numbers (faintest on
+	// addBg/delBg): users actually read these under 16-color. Prior values were
+	// bright-blue-on-green (1.67:1), bright-red-on-maroon (2.74:1), and
+	// bright-cyan-on-green (4.10:1, short of AA). All must clear WCAG AA.
 	for _, pair := range []struct{ name, fg, bg string }{
 		{"green on addBg", pal.green, pal.addBg},
 		{"red on delBg", pal.red, pal.delBg},
 		{"addInk on addBgWord", pal.addInk, pal.addBgWord},
 		{"delInk on delBgWord", pal.delInk, pal.delBgWord},
+		{"faintest on addBg", pal.faintest, pal.addBg},
 		{"faintest on delBg", pal.faintest, pal.delBg},
 	} {
 		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
 			t.Errorf("dune-dark: %s = %.2f < 4.5 after ANSI 16-color conversion (%s on %s)",
 				pair.name, r, q(pair.fg), q(pair.bg))
 		}
-	}
-	// Line numbers on the add band: bright cyan on ANSI green lands at ~4.10:1.
-	// That is the best cyan still under faint in the gray ramp; require it stay
-	// above 4.0 so a further regression is still caught.
-	if r := wcagRatio(t, q(pal.faintest), q(pal.addBg)); r < 4.0 {
-		t.Errorf("dune-dark: faintest on addBg = %.2f < 4.0 after ANSI 16-color conversion (%s on %s)",
-			r, q(pal.faintest), q(pal.addBg))
 	}
 
 	// Selected-row affordances that share the cool success/permission tokens.
