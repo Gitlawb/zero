@@ -105,6 +105,27 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		}
 	})
 
+	t.Run("missing command credential root fails closed without host mutation", func(t *testing.T) {
+		commandRoot := filepath.Join(tempDirOutsideDefaultTemp(t), "missing-command-home")
+		commandConfig := filepath.Join(commandRoot, "config")
+		launched := filepath.Join(root, "command-credential-root-launched")
+		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+		_, err := engine.BuildCommandPlan(CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", "echo launched > " + shellQuote(launched)},
+			Dir:  root,
+			Env:  []string{"HOME=" + commandRoot, "XDG_CONFIG_HOME=" + commandConfig},
+		})
+		if err == nil || !strings.Contains(err.Error(), "created after launch") {
+			t.Fatalf("BuildCommandPlan error = %v, want future credential-directory failure", err)
+		}
+		for _, path := range []string{commandRoot, commandConfig, launched} {
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("failed-closed planning materialized command-controlled path %q: %v", path, statErr)
+			}
+		}
+	})
+
 	// The mid-session race the EnsureDenyReadDirs contract exists for: nothing
 	// under $XDG_CONFIG_HOME exists when the plan is built, so bubblewrap would
 	// have had no mount destination to mask. The sandbox creates Zero's own

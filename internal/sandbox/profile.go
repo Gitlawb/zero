@@ -59,9 +59,14 @@ type FileSystemPolicy struct {
 	// durably must refuse the command rather than run it behind a mask that does
 	// not hold. Pathname-policy backends enforce them normally, absent or not.
 	CommandDenyReadFinalFiles []string `json:"commandDenyReadFinalFiles,omitempty"`
-	DenyWrite                 []string `json:"denyWrite,omitempty"`
-	IncludePlatformRoots      bool     `json:"includePlatformRoots,omitempty"`
-	AllowTemp                 bool     `json:"allowTemp,omitempty"`
+	// CommandDenyReadDirs are directory-shaped credential roots derived from a
+	// command-supplied environment. Existing directories can be masked without
+	// host mutation; a mount-based backend must fail closed when one is absent,
+	// because creating an arbitrary command-selected host directory is unsafe.
+	CommandDenyReadDirs  []string `json:"commandDenyReadDirs,omitempty"`
+	DenyWrite            []string `json:"denyWrite,omitempty"`
+	IncludePlatformRoots bool     `json:"includePlatformRoots,omitempty"`
+	AllowTemp            bool     `json:"allowTemp,omitempty"`
 }
 
 type WritableRoot struct {
@@ -131,7 +136,13 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 		})
 	}
 	userDenyRead := normalizeProfilePaths(policy.DenyRead)
-	credentials := credentialDenyReadPaths(policy, credentialCommandDir, credentialEnv)
+	commandAllowedRoots := append([]string{}, roots...)
+	for _, root := range readRoots {
+		if root != profileRootPath() {
+			commandAllowedRoots = append(commandAllowedRoots, root)
+		}
+	}
+	credentials := credentialDenyReadPaths(policy, credentialCommandDir, credentialEnv, dedupeStrings(commandAllowedRoots))
 	credentials = finalizeCredentialDenyPaths(credentials, userDenyRead)
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -144,6 +155,7 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			EnsureDenyReadDirs:          credentials.EnsureDirs,
 			ProcessTrustedDenyReadFiles: credentials.ProcessTrustedFinalFiles,
 			CommandDenyReadFinalFiles:   credentials.CommandFinalFiles,
+			CommandDenyReadDirs:         credentials.CommandDirs,
 			DenyWrite:                   normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots:        true,
 			AllowTemp:                   true,
@@ -204,6 +216,7 @@ type credentialDenyPaths struct {
 	// never gain its host-side privileges, but tracked so a backend that cannot
 	// deny a replaceable pathname can fail closed on them too.
 	CommandFinalFiles []string
+	CommandDirs       []string
 }
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
@@ -233,7 +246,7 @@ type credentialDenyPaths struct {
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
 // must keep reflecting user configuration alone.
-func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []string) credentialDenyPaths {
+func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []string, commandAllowedRoots []string) credentialDenyPaths {
 	if runtime.GOOS == "windows" {
 		return credentialDenyPaths{}
 	}
@@ -265,10 +278,17 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 	}
 	trusted.Paths = dedupeStrings(trusted.Paths)
 	trusted.ProcessTrustedFinalFiles = dedupeStrings(trusted.ProcessTrustedFinalFiles)
+	processDirs := append([]string{}, trusted.Dirs...)
 	appendUntrusted := func(options credentialPathOptions) {
 		paths := credentialDenyReadPathsIn(options, policy.AllowRead)
+		// A command-controlled credential setting cannot revoke a root that was
+		// deliberately granted to that same command. Dropping only overlapping
+		// command candidates preserves all unrelated process and command denies.
+		paths.Paths = pathsOutsideOverlappingRoots(paths.Paths, commandAllowedRoots)
+		paths.Dirs = pathsOutsideOverlappingRoots(paths.Dirs, commandAllowedRoots)
 		trusted.Paths = append(trusted.Paths, paths.Paths...)
 		trusted.Dirs = append(trusted.Dirs, paths.Dirs...)
+		trusted.CommandDirs = append(trusted.CommandDirs, paths.Dirs...)
 		// Carry the final token pathnames too. They are still untrusted — no
 		// carveouts, no EnsureDirs, no host mutation — but a deny that a rename
 		// can detach is not a deny, and skipping an absent one leaves whatever
@@ -278,7 +298,7 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 		for _, file := range credentialFinalTokenFiles(options) {
 			for _, final := range []string{file, file + ".secret"} {
 				candidate := normalizeCredentialFinalPath(final)
-				if candidate == "" || credentialPathReincluded(allowRoots, candidate) {
+				if candidate == "" || credentialPathReincluded(allowRoots, candidate) || len(pathsOutsideOverlappingRoots([]string{candidate}, commandAllowedRoots)) == 0 {
 					continue
 				}
 				trusted.Paths = append(trusted.Paths, candidate)
@@ -302,6 +322,7 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 	}
 	trusted.Paths = dedupeStrings(trusted.Paths)
 	trusted.Dirs = dedupeStrings(trusted.Dirs)
+	trusted.CommandDirs = pathsExcluding(dedupeStrings(trusted.CommandDirs), processDirs)
 	return trusted
 }
 
@@ -554,10 +575,17 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		}
 	}
 	for _, tokenPath := range options.OAuthTokens {
-		candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
-		publicationDirs := credentialPublicationDirs(tokenPath)
-		dirs = append(dirs, publicationDirs...)
-		ensureDirs = append(ensureDirs, publicationDirs...)
+		if options.OAuthStorage == "keyring" {
+			// The keyring backend does not open the override or any publication
+			// siblings. Keep the pathname as a conservative ordinary deny, but do
+			// not manufacture unused .publish directories on the host.
+			candidates = append(candidates, tokenPath)
+		} else {
+			candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
+			publicationDirs := credentialPublicationDirs(tokenPath)
+			dirs = append(dirs, publicationDirs...)
+			ensureDirs = append(ensureDirs, publicationDirs...)
+		}
 	}
 	for _, tokenPath := range options.MCPOAuthTokens {
 		candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
@@ -765,6 +793,7 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 	}
 	credentials.Paths = dedupeStrings(paths)
 	credentials.Dirs = credentialRetainedDirs(credentials.Paths, credentials.Dirs)
+	credentials.CommandDirs = credentialRetainedDirs(credentials.Paths, credentials.CommandDirs)
 	credentials.Carveouts = credentialCarveoutPaths(credentials.Paths, credentials.Carveouts)
 	credentials.EnsureDirs = credentialRetainedDirs(credentials.Paths, credentials.EnsureDirs)
 	credentials.ProcessTrustedFinalFiles = credentialRetainedFiles(

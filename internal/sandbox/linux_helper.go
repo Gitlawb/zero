@@ -235,6 +235,12 @@ func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 	if files := profile.FileSystem.CommandDenyReadFinalFiles; len(files) > 0 {
 		return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
+	for _, dir := range profile.FileSystem.CommandDenyReadDirs {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential directory created after launch: %s; create the directory before running the command, move it outside the command environment, or add its path to sandbox allowRead", dir)
+		}
+	}
 	return nil
 }
 

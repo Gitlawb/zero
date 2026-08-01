@@ -656,8 +656,8 @@ func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(plan.Dir, "credentials", "tokens.json")
-	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, want) {
-		t.Fatalf("DenyReadIfExists = %#v, want command-relative override %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
+	if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, want) {
+		t.Fatalf("DenyReadIfExists = %#v, command-relative override must not mask allowed workspace path %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
 	}
 	if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want)) {
 		t.Fatalf("DenyReadIfExists = %#v, must not mask override parent %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want))
@@ -710,10 +710,11 @@ func TestBuildCommandPlanDeniesRelativeOverrideAtProcessAndCommandDir(t *testing
 	processStore := filepath.Join(processDir, "tokens.json")
 	// The path a sandboxed child (e.g. a nested Zero) would resolve instead.
 	commandStore := filepath.Join(commandDir, "tokens.json")
-	for _, want := range []string{processStore, commandStore} {
-		if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
-			t.Fatalf("DenyReadIfExists = %#v, want relative override resolved to %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
-		}
+	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(processStore)) {
+		t.Fatalf("DenyReadIfExists = %#v, want process override resolved to %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, processStore)
+	}
+	if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, normalizeProfilePath(commandStore)) {
+		t.Fatalf("DenyReadIfExists = %#v, command-relative override must not mask allowed workspace path %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, commandStore)
 	}
 	// Neither resolution may mask the parent directory itself: that would hide the
 	// workspace or a temp root from every sandboxed command.
@@ -834,9 +835,14 @@ func TestPermissionProfileUnionsProcessAndCommandCredentialRootsWithoutCreatingC
 		filepath.Join(childConfig, "gh", "hosts.yml"),
 		filepath.Join(childConfig, "gcloud"),
 	}
-	for _, want := range append([]string{parentZero, childZero, parentToken, childToken}, childCredentialPaths...) {
+	for _, want := range []string{parentZero, parentToken} {
 		if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(want)) {
-			t.Errorf("DenyReadIfExists = %#v, want process/command root %q", fs.DenyReadIfExists, want)
+			t.Errorf("DenyReadIfExists = %#v, want process root %q", fs.DenyReadIfExists, want)
+		}
+	}
+	for _, unwanted := range append([]string{childZero, childToken}, childCredentialPaths...) {
+		if stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(unwanted)) {
+			t.Errorf("DenyReadIfExists = %#v, command credential setting masked allowed root %q", fs.DenyReadIfExists, unwanted)
 		}
 	}
 	for _, want := range []string{parentZero, parentToken + credentialPublicationDirSuffix} {
@@ -911,7 +917,7 @@ func TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap(t *testing.T) {
 		t.Fatalf("baseline bwrap planning must succeed, got %v", err)
 	}
 
-	commandToken := filepath.Join(t.TempDir(), "command-store", "tokens.json")
+	commandToken := filepath.Join(tempDirOutsideDefaultTemp(t), "command-store", "tokens.json")
 	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace,
 		[]string{"ZERO_OAUTH_TOKENS_PATH=" + commandToken})
 	fs := profile.FileSystem
@@ -954,7 +960,7 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", config)
 	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
 	workspace := t.TempDir()
-	tokenPath := filepath.Join(t.TempDir(), "tokens.json")
+	tokenPath := filepath.Join(tempDirOutsideDefaultTemp(t), "tokens.json")
 
 	t.Run("process environment", func(t *testing.T) {
 		t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
@@ -967,8 +973,19 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 		if len(fs.ProcessTrustedDenyReadFiles) != 0 {
 			t.Fatalf("ProcessTrustedDenyReadFiles = %#v, keyring does not publish token files", fs.ProcessTrustedDenyReadFiles)
 		}
+		for _, publicationDir := range credentialPublicationDirs(tokenPath) {
+			if stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(publicationDir)) || stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(publicationDir)) {
+				t.Fatalf("keyring profile retained unused publication directory %q: %#v", publicationDir, fs)
+			}
+		}
 		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
 			t.Fatalf("keyring override must not make bubblewrap fail closed: %v", err)
+		}
+		_ = buildLinuxBwrapFilesystemPlan(profile)
+		for _, publicationDir := range credentialPublicationDirs(tokenPath) {
+			if _, err := os.Stat(publicationDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("keyring planning created unused publication directory %q: %v", publicationDir, err)
+			}
 		}
 	})
 
@@ -986,10 +1003,102 @@ func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
 		if len(fs.CommandDenyReadFinalFiles) != 0 {
 			t.Fatalf("CommandDenyReadFinalFiles = %#v, keyring does not publish token files", fs.CommandDenyReadFinalFiles)
 		}
+		for _, publicationDir := range credentialPublicationDirs(tokenPath) {
+			if stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(publicationDir)) || stringSliceContains(fs.EnsureDenyReadDirs, normalizeProfilePath(publicationDir)) {
+				t.Fatalf("command keyring profile retained unused publication directory %q: %#v", publicationDir, fs)
+			}
+		}
 		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
 			t.Fatalf("command keyring override must not make bubblewrap fail closed: %v", err)
 		}
 	})
+}
+
+func TestCommandCredentialDirectoriesFailClosedWithoutHostMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+	commandConfig := filepath.Join(tempDirOutsideDefaultTemp(t), "missing-command-config")
+	commandZero := filepath.Join(commandConfig, "zero")
+	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+		"HOME=" + filepath.Dir(commandConfig),
+		"XDG_CONFIG_HOME=" + commandConfig,
+	})
+	if !stringSliceContains(profile.FileSystem.CommandDenyReadDirs, normalizeProfilePath(commandZero)) {
+		t.Fatalf("CommandDenyReadDirs = %#v, want future command credential root %q", profile.FileSystem.CommandDenyReadDirs, commandZero)
+	}
+	if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "created after launch") {
+		t.Fatalf("validateLinuxBwrapPermissionProfile error = %v, want future-directory failure", err)
+	}
+	_ = buildLinuxBwrapFilesystemPlan(profile)
+	if _, err := os.Stat(commandConfig); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planning created command-controlled directory %q: %v", commandConfig, err)
+	}
+
+	fileRoot := filepath.Join(tempDirOutsideDefaultTemp(t), "not-a-directory")
+	if err := os.WriteFile(fileRoot, []byte("not a credential directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile.FileSystem.CommandDenyReadDirs = []string{fileRoot}
+	if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "created after launch") {
+		t.Fatalf("regular-file command credential root error = %v, want fail closed", err)
+	}
+
+	existingRoot := tempDirOutsideDefaultTemp(t)
+	profile.FileSystem.CommandDenyReadDirs = []string{existingRoot}
+	profile.FileSystem.DenyReadIfExists = append(profile.FileSystem.DenyReadIfExists, existingRoot)
+	if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+		t.Fatalf("existing command credential directory must remain maskable: %v", err)
+	}
+	plan := buildLinuxBwrapFilesystemPlan(profile)
+	if !strings.Contains(strings.Join(plan.Args, "\x00"), "--perms\x00000\x00--tmpfs\x00"+normalizeProfilePath(existingRoot)) {
+		t.Fatalf("existing command credential directory was not masked: %#v", plan.Args)
+	}
+	if stringSliceContains(profile.FileSystem.EnsureDenyReadDirs, normalizeProfilePath(existingRoot)) {
+		t.Fatalf("existing command credential directory gained host-creation privilege: %#v", profile.FileSystem.EnsureDenyReadDirs)
+	}
+}
+
+func TestCommandCredentialSettingsDoNotMaskAllowedRoots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	workspace := t.TempDir()
+	externalCloud := tempDirOutsideDefaultTemp(t)
+	profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+		"CLOUDSDK_CONFIG=" + workspace,
+		"GOOGLE_APPLICATION_CREDENTIALS=" + filepath.Join(externalCloud, "service-account.json"),
+	})
+	fs := profile.FileSystem
+	if stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(workspace)) {
+		t.Fatalf("command CLOUDSDK_CONFIG masked workspace: %#v", fs.DenyReadIfExists)
+	}
+	serviceAccount := normalizeProfilePath(filepath.Join(externalCloud, "service-account.json"))
+	if !stringSliceContains(fs.DenyReadIfExists, serviceAccount) {
+		t.Fatalf("non-overlapping credential file was dropped: %#v", fs.DenyReadIfExists)
+	}
+	bwrap := buildLinuxBwrapFilesystemPlan(profile)
+	if strings.Contains(strings.Join(bwrap.Args, "\x00"), "--perms\x00000\x00--tmpfs\x00"+normalizeProfilePath(workspace)) {
+		t.Fatalf("bwrap overlaid an unreadable mask on the workspace: %#v", bwrap.Args)
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, DefaultPolicy(), "")
+	if strings.Contains(sbpl, `(deny file-read* (subpath "`+sandboxProfileString(normalizeProfilePath(workspace))+`"))`) {
+		t.Fatalf("Seatbelt denied the command workspace:\n%s", sbpl)
+	}
+	if !strings.Contains(sbpl, sandboxProfileString(serviceAccount)) {
+		t.Fatalf("Seatbelt dropped non-overlapping credential deny %q:\n%s", serviceAccount, sbpl)
+	}
 }
 
 func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
@@ -1034,7 +1143,7 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 			},
 			commandEnv: []string{
 				"ZERO_OAUTH_STORAGE=encrypted-file",
-				"ZERO_OAUTH_TOKENS_PATH=" + filepath.Join(t.TempDir(), "command-oauth.json"),
+				"ZERO_OAUTH_TOKENS_PATH=" + filepath.Join(tempDirOutsideDefaultTemp(t), "command-oauth.json"),
 			},
 			commandMarker: true,
 		},
@@ -1047,7 +1156,7 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 			},
 			commandEnv: []string{
 				"ZERO_OAUTH_STORAGE=keyring",
-				"ZERO_MCP_OAUTH_TOKENS_PATH=" + filepath.Join(t.TempDir(), "command-mcp.json"),
+				"ZERO_MCP_OAUTH_TOKENS_PATH=" + filepath.Join(tempDirOutsideDefaultTemp(t), "command-mcp.json"),
 			},
 			commandMarker: true,
 		},

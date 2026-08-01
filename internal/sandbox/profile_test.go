@@ -19,7 +19,15 @@ func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profileHome := filepath.Join(workspace, "profile-home")
+	profileHome, err := os.MkdirTemp(".", ".credential-profile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(profileHome) })
+	profileHome, err = filepath.Abs(profileHome)
+	if err != nil {
+		t.Fatal(err)
+	}
 	envMap := map[string]string{"HOME": "", "USERPROFILE": profileHome, "XDG_CONFIG_HOME": ""}
 	oauthPath, err := oauth.ResolveStorePath(envMap)
 	if err != nil {
@@ -111,8 +119,8 @@ func TestCredentialDeniesMatchRelativeTokenOverridesFromStoreResolution(t *testi
 		t.Fatal(err)
 	}
 	for _, storePath := range []string{oauthPath, mcpPath} {
-		if !containsPath(plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath) {
-			t.Fatalf("DenyReadIfExists = %#v, want override path %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath)
+		if containsPath(plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath) {
+			t.Fatalf("DenyReadIfExists = %#v, command override must not mask allowed workspace path %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath)
 		}
 	}
 }

@@ -797,7 +797,8 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 				Network            bool `json:"network"`
 				Workspace          bool `json:"workspace"`
 			} `json:"guards"`
-			GrantsPath string `json:"grantsPath"`
+			GrantsPath            string `json:"grantsPath"`
+			PermissionProfileNote string `json:"permissionProfileNote"`
 		}
 		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 			t.Fatalf("decode effective JSON: %v\n%s", err, stdout.String())
@@ -814,6 +815,9 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 		if payload.Plan.SupportLevel != string(sandbox.BackendSupportUnavailable) || payload.GrantsPath == "" {
 			t.Fatalf("unexpected effective plan/grants: %#v %q", payload.Plan, payload.GrantsPath)
 		}
+		if payload.PermissionProfileNote != permissionProfileScopeNote {
+			t.Fatalf("permissionProfileNote = %q, want %q", payload.PermissionProfileNote, permissionProfileScopeNote)
+		}
 	})
 }
 
@@ -824,6 +828,9 @@ func TestEffectiveSandboxPolicyListsWriteRoots(t *testing.T) {
 	}
 	if !strings.Contains(output, "enforce_workspace: true\nwrite_roots: /ws, /extra") {
 		t.Fatalf("write_roots should directly follow enforce_workspace, got:\n%s", output)
+	}
+	if !strings.Contains(output, "permission_profile_note: "+permissionProfileScopeNote) {
+		t.Fatalf("effective text missing permission profile scope warning:\n%s", output)
 	}
 	if strings.Contains(output, "write_roots_error") {
 		t.Fatalf("unexpected write_roots_error line without an error:\n%s", output)
