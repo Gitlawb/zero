@@ -109,7 +109,6 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	}
 	defer releasePromotionLock()
 
-	oldPath := targetPath + ".old"
 	relocatedRecoveries, recoveryErr := relocatedRecoveryPaths(targetPath)
 	if recoveryErr != nil {
 		return fmt.Errorf("%w: inspect relocated recovery state for %s: %v", ErrTargetPossiblyTampered, targetPath, recoveryErr)
@@ -170,22 +169,30 @@ func (staged *stagedBinary) promote(targetPath string) error {
 			)
 		}
 	}
-	// Never overwrite an existing .old recovery copy. It may be the last binary
-	// this updater verified even when its deletable .keep marker is gone. In that
-	// state, preserve .old and move the current target under a fresh name instead.
-	asidePath := oldPath
-	if _, err := os.Lstat(oldPath); !errors.Is(err, os.ErrNotExist) {
-		suffix, suffixErr := randomStagingSuffix()
-		if suffixErr != nil {
-			return fmt.Errorf("choose recovery path: %w", suffixErr)
-		}
-		asidePath = targetPath + "." + suffix + ".old"
+	// Always use a namespaced unpredictable aside path. Besides avoiding any
+	// existing recovery copy, this gives trusted cleanup state a narrow path
+	// format to validate instead of accepting arbitrary *.old files.
+	suffix, suffixErr := randomStagingSuffix()
+	if suffixErr != nil {
+		return fmt.Errorf("choose recovery path: %w", suffixErr)
 	}
+	asidePath := targetPath + ".zero-update-" + suffix + ".old"
 	// Bind cleanup candidates before opening the promotion gap. A fresh scan
 	// after promotion could capture an aside concurrently created by another
 	// updater and erase the copy it needs to restore on failure.
 	cleanupCandidates := prepareRecoveryCleanup(targetPath)
 	defer closeRecoveryCleanupCandidates(cleanupCandidates)
+	// Retain the identity of the object being moved aside. The aside pathname is
+	// writable by the threat principal after os.Rename, so state written later
+	// must be bound to this pre-rename object rather than whichever object a
+	// pathname reopen happens to find.
+	var originalIdentity *recoveryIdentity
+	if original, openErr := openIdentityFile(targetPath); openErr == nil {
+		defer func() { _ = original.Close() }()
+		if identity, identityErr := recoveryFileIdentity(original); identityErr == nil {
+			originalIdentity = &identity
+		}
+	}
 	if err := os.Rename(targetPath, asidePath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
@@ -210,10 +217,14 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	}
 	// targetPath now names the staged object this updater verified, so older
 	// unmarked aside copies are no longer the only known-good binaries. Retire
-	// them through handles while preserving the copy created by this promotion.
-	// This keeps repeated upgrades bounded without trusting a public pathname
-	// before a verified replacement is installed.
-	cleanupSupersededRecoveryCopies(cleanupCandidates)
+	// them through handles only after recording the copy created by this
+	// promotion in trusted per-user state. If recording fails, preserve every
+	// copy rather than falling back to an install-directory filename as proof.
+	if originalIdentity != nil {
+		if err := recordRecoveryCleanup(targetPath, asidePath, *originalIdentity); err == nil {
+			cleanupSupersededRecoveryCopies(cleanupCandidates)
+		}
+	}
 	staged.path = targetPath
 	staged.promoted = true
 	return nil
@@ -422,7 +433,10 @@ var fileRenameInfoHeaderSize = func() uintptr {
 }()
 
 // renameFileByHandle renames the object file refers to, not the object its
-// current pathname resolves to. targetPath must be fully qualified.
+// current pathname resolves to. The destination is relative to an open handle
+// for targetPath's parent directory; this avoids Windows-version differences in
+// absolute FILE_RENAME_INFO path handling and binds destination resolution to
+// the directory opened for this operation.
 //
 // It is a package var, like stageBinary, so a test can simulate
 // SetFileInformationByHandle reporting success without the rename actually
@@ -430,17 +444,36 @@ var fileRenameInfoHeaderSize = func() uintptr {
 // against — without needing to reproduce whatever Windows-version-specific
 // condition triggers it for real.
 func renameOpenFile(file *os.File, targetPath string) error {
-	name, err := windows.UTF16FromString(targetPath)
+	directoryPath, err := windows.UTF16PtrFromString(filepath.Dir(targetPath))
 	if err != nil {
 		return err
 	}
-	name = name[:len(name)-1] // FileNameLength counts bytes without the terminator
+	directory, err := windows.CreateFile(
+		directoryPath,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return fmt.Errorf("open rename target directory %s: %w", filepath.Dir(targetPath), err)
+	}
+	defer func() { _ = windows.CloseHandle(directory) }()
+
+	name, err := windows.UTF16FromString(filepath.Base(targetPath))
+	if err != nil {
+		return err
+	}
+	// Keep room for the terminator even though FileNameLength excludes it.
 	buffer := make([]byte, int(fileRenameInfoHeaderSize)+len(name)*2)
 	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
 	// ReplaceIfExists stays false: promote already renamed the running binary
 	// aside, so a target that exists again means something raced the update, and
 	// failing is better than clobbering whatever appeared there.
-	info.FileNameLength = uint32(len(name) * 2)
+	info.RootDirectory = directory
+	info.FileNameLength = uint32((len(name) - 1) * 2)
 	for index, unit := range name {
 		binary.LittleEndian.PutUint16(buffer[int(fileRenameInfoHeaderSize)+index*2:], unit)
 	}

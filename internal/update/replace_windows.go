@@ -3,13 +3,17 @@
 package update
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unsafe"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"golang.org/x/sys/windows"
 )
 
@@ -253,26 +257,180 @@ func oldBinaryPreserved(oldPath string) bool {
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-// prepareRecoveryCleanup binds existing unmarked aside copies to no-follow
-// handles before promotion. Taking this snapshot before targetPath is renamed
-// prevents cleanup from capturing an aside concurrently created by another
-// updater after this promotion begins.
+type recoveryCleanupRecord struct {
+	Path          string `json:"path"`
+	VolumeSerial  uint32 `json:"volumeSerial"`
+	FileIndexHigh uint32 `json:"fileIndexHigh"`
+	FileIndexLow  uint32 `json:"fileIndexLow"`
+}
+
+var recoveryCleanupStateDir = func() (string, error) {
+	root, err := config.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "zero", "update-recovery"), nil
+}
+
+func recoveryCleanupRecordPath(targetPath string) (string, error) {
+	dir, err := recoveryCleanupStateDir()
+	if err != nil {
+		return "", err
+	}
+	absolute, err := filepath.Abs(targetPath)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(absolute))))
+	return filepath.Join(dir, fmt.Sprintf("%x.json", digest)), nil
+}
+
+func validUpdaterRecoveryPath(targetPath string, recoveryPath string) bool {
+	if !strings.EqualFold(filepath.Clean(filepath.Dir(targetPath)), filepath.Clean(filepath.Dir(recoveryPath))) {
+		return false
+	}
+	name := strings.ToLower(filepath.Base(recoveryPath))
+	prefix := strings.ToLower(filepath.Base(targetPath)) + ".zero-update-"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".old") {
+		return false
+	}
+	suffix := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".old")
+	if len(suffix) != 32 {
+		return false
+	}
+	for _, character := range suffix {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+// prepareRecoveryCleanup opens only the exact object vouched for by trusted
+// per-user state from the previous successful promotion. Recovery discovery is
+// intentionally broad and filename-based so suspicious state fails closed, but
+// destructive cleanup never treats an install-directory name as provenance.
 func prepareRecoveryCleanup(targetPath string) []*os.File {
-	paths, err := existingRecoveryPaths(targetPath)
+	recordPath, err := recoveryCleanupRecordPath(targetPath)
 	if err != nil {
 		return nil
 	}
-	var candidates []*os.File
-	for _, path := range paths {
-		if oldBinaryPreserved(path) {
-			continue
-		}
-		file, err := openRecoveryCopy(path)
-		if err == nil {
-			candidates = append(candidates, file)
-		}
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		return nil
 	}
-	return candidates
+	var record recoveryCleanupRecord
+	if json.Unmarshal(data, &record) != nil ||
+		!validUpdaterRecoveryPath(targetPath, record.Path) || oldBinaryPreserved(record.Path) {
+		return nil
+	}
+	file, err := openRecoveryCopy(record.Path)
+	if err != nil {
+		return nil
+	}
+	identity, err := recoveryFileIdentity(file)
+	if err != nil || identity.VolumeSerial != record.VolumeSerial ||
+		identity.FileIndexHigh != record.FileIndexHigh || identity.FileIndexLow != record.FileIndexLow {
+		_ = file.Close()
+		return nil
+	}
+	return []*os.File{file}
+}
+
+type recoveryIdentity struct {
+	VolumeSerial  uint32
+	FileIndexHigh uint32
+	FileIndexLow  uint32
+}
+
+func recoveryFileIdentity(file *os.File) (recoveryIdentity, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return recoveryIdentity{}, err
+	}
+	return recoveryIdentity{
+		VolumeSerial:  info.VolumeSerialNumber,
+		FileIndexHigh: info.FileIndexHigh,
+		FileIndexLow:  info.FileIndexLow,
+	}, nil
+}
+
+func openIdentityFile(path string) (*os.File, error) {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyFreshRegularFile(handle, path); err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+func recordRecoveryCleanup(targetPath string, recoveryPath string, expected recoveryIdentity) error {
+	if !validUpdaterRecoveryPath(targetPath, recoveryPath) {
+		return fmt.Errorf("invalid updater recovery path %s", recoveryPath)
+	}
+	file, err := openRecoveryCopy(recoveryPath)
+	if err != nil {
+		return err
+	}
+	identity, err := recoveryFileIdentity(file)
+	_ = file.Close()
+	if err != nil {
+		return err
+	}
+	if identity != expected {
+		return fmt.Errorf("recovery path %s does not name the moved-aside binary", recoveryPath)
+	}
+	record := recoveryCleanupRecord{
+		Path:          recoveryPath,
+		VolumeSerial:  identity.VolumeSerial,
+		FileIndexHigh: identity.FileIndexHigh,
+		FileIndexLow:  identity.FileIndexLow,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	recordPath, err := recoveryCleanupRecordPath(targetPath)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(recordPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, filepath.Base(recordPath)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, recordPath)
 }
 
 type fileDispositionInfo struct {
@@ -304,5 +462,5 @@ func cleanupSupersededRecoveryCopies(candidates []*os.File) {
 // pathname cannot prove that an .old file is obsolete under the writable-install-
 // directory threat model: a deleted .keep marker, an interrupted promotion, or
 // an operator-approved retry can all leave .old as the last verified binary.
-// Safe bounded cleanup would require trusted state outside that directory.
+// Bounded cleanup instead runs after promotion using identity-bound trusted state.
 func CleanupStaleBinary(string) {}
