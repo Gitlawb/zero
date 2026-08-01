@@ -256,7 +256,6 @@ func TestPromoteRefusesWhileRecoveryCopyIsMarked(t *testing.T) {
 	// Clearing the marker is the operator accepting the installed binary; the
 	// next promotion proceeds normally without destroying the recovery copy.
 	clearOldBinaryPreserved(oldPath)
-	CleanupStaleBinary(targetPath)
 	stubRandomStagingSuffix(t, "deadbeef")
 	if err := installBinary(sourcePath, targetPath); err != nil {
 		t.Fatalf("installBinary after the operator cleared the marker: %v", err)
@@ -467,7 +466,7 @@ func TestInstallBinaryInstallsVerifiedBytes(t *testing.T) {
 		t.Fatalf("recovery paths = %v, want one namespaced updater recovery", recoveries)
 	}
 	if old, err := os.ReadFile(recoveries[0]); err != nil {
-		t.Fatalf("the replaced binary must be preserved for later cleanup: %v", err)
+		t.Fatalf("the replaced binary must be preserved as the recovery copy: %v", err)
 	} else if string(old) != "old-binary" {
 		t.Fatalf("preserved binary = %q, want the previous one", old)
 	}
@@ -703,4 +702,60 @@ func TestInstallBinaryCleansUpWhenStagingFails(t *testing.T) {
 		t.Fatal("installBinary with an unreadable source succeeded, want error")
 	}
 	assertNoStagingLeftovers(t, dir)
+}
+
+// TestDiscardDeletesTheStagedObjectThroughItsHandle pins that failure-path
+// cleanup removes the object this updater staged rather than re-resolving the
+// staging name after the handle is released.
+func TestDiscardDeletesTheStagedObjectThroughItsHandle(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	staged, err := createStagedBinary(targetPath)
+	if err != nil {
+		t.Fatalf("createStagedBinary: %v", err)
+	}
+	stagingPath := staged.path
+
+	staged.discard()
+
+	if _, err := os.Lstat(stagingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged object survived discard: %v", err)
+	}
+	assertNoStagingLeftovers(t, dir)
+}
+
+// TestDiscardLeavesASubstitutedStagingEntryAlone is the impostor-survival
+// counterpart of the POSIX promote tests: cleanup is bound to the staged
+// object, so an entry a principal who can write the installation directory
+// plants at the staging name once the handle is gone is never deleted. The
+// substitution is staged by hand here because the exclusive, no-share handle
+// makes it impossible while the updater still holds the object.
+func TestDiscardLeavesASubstitutedStagingEntryAlone(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	staged, err := createStagedBinary(targetPath)
+	if err != nil {
+		t.Fatalf("createStagedBinary: %v", err)
+	}
+	stagingPath := staged.path
+	// Run the handle-bound half of discard, then let the substitution win the
+	// race that a pathname-based removal would lose.
+	staged.discardOpenObject()
+	if err := staged.file.Close(); err != nil {
+		t.Fatalf("Close staged handle: %v", err)
+	}
+	const impostorContent = "attacker-owned file that cleanup must not delete"
+	if err := os.WriteFile(stagingPath, []byte(impostorContent), 0o600); err != nil {
+		t.Fatalf("WriteFile impostor: %v", err)
+	}
+
+	staged.discardPaths()
+
+	got, err := os.ReadFile(stagingPath)
+	if err != nil {
+		t.Fatalf("cleanup removed the substituted staging entry: %v", err)
+	}
+	if string(got) != impostorContent {
+		t.Fatalf("substituted entry = %q, want it left untouched", got)
+	}
 }

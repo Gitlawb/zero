@@ -133,12 +133,10 @@ func removeStagingDirectoryIfSame(parent *os.File, name string, createdStat unix
 	_ = unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
 }
 
-// createStagingFile remains the direct-path primitive exercised by the link
-// regression tests.
-func createStagingFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
-}
-
+// createStagingFileAt creates name inside the directory dir is bound to.
+// O_EXCL refuses any pre-existing entry — including a dangling symlink, which
+// POSIX guarantees is not resolved — and O_NOFOLLOW refuses a symlink at the
+// final component, so neither can redirect the verified bytes elsewhere.
 func createStagingFileAt(dir *os.File, name string, displayPath string) (*os.File, error) {
 	fd, err := unix.Openat(
 		int(dir.Fd()),
@@ -192,9 +190,10 @@ func (staged *stagedBinary) verifyStagedIdentity() error {
 	return nil
 }
 
-// CleanupStaleBinary preserves random staging directories because their public
-// filename shape is not proof that this updater created them.
-func CleanupStaleBinary(targetPath string) {}
+// discardOpenObject has nothing to do here: discardPaths already removes the
+// staged child through the descriptor bound to the private staging directory,
+// which no other principal can write, so there is no pathname handoff to close.
+func (staged *stagedBinary) discardOpenObject() {}
 
 // discardPaths removes the child through the bound directory descriptor and
 // removes the directory only while its original parent entry still names it.

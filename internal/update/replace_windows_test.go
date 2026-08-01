@@ -85,82 +85,6 @@ func TestRestoreOriginalBinaryFlagsPossibleTamperingWhenRestoreFails(t *testing.
 	}
 }
 
-func TestCleanupStaleBinaryPreservesUnverifiableStagingFiles(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero.exe")
-	unverifiable := filepath.Join(dir, "zero.exe.0123456789abcdef0123456789abcdef.new")
-	if err := os.WriteFile(unverifiable, []byte("data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	CleanupStaleBinary(targetPath)
-
-	if _, err := os.Stat(unverifiable); err != nil {
-		t.Fatalf("unverifiable staging file must be preserved: %v", err)
-	}
-}
-
-func TestCleanupStaleBinaryPreservesOldWhenTargetIsAbsent(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero.exe")
-	oldPath := targetPath + ".old"
-	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
-		t.Fatalf("WriteFile old binary: %v", err)
-	}
-
-	CleanupStaleBinary(targetPath)
-
-	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
-		t.Fatalf("target must not be created: %v", err)
-	}
-	got, err := os.ReadFile(oldPath)
-	if err != nil {
-		t.Fatalf("ReadFile preserved old binary: %v", err)
-	}
-	if string(got) != "known-good" {
-		t.Fatalf("preserved old binary = %q, want known-good", got)
-	}
-}
-
-// TestCleanupStaleBinaryPreservesMarkedOldWhenTargetExists covers jatmn's #751
-// P3 follow-up: after ErrTargetPossiblyTampered, targetPath holds exactly the
-// bytes the updater could NOT verify while .old holds the ones it could. The
-// next Apply saw a present target and deleted .old as an ordinary leftover,
-// erasing the recovery copy the failure had just told the operator to use.
-func TestCleanupStaleBinaryPreservesMarkedOldWhenTargetExists(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero.exe")
-	oldPath := targetPath + ".old"
-	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
-		t.Fatalf("WriteFile target: %v", err)
-	}
-	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
-		t.Fatalf("WriteFile old binary: %v", err)
-	}
-	markOldBinaryPreserved(oldPath)
-
-	CleanupStaleBinary(targetPath)
-
-	got, err := os.ReadFile(oldPath)
-	if err != nil {
-		t.Fatalf("marked recovery copy was removed: %v", err)
-	}
-	if string(got) != "known-good" {
-		t.Fatalf("preserved old binary = %q, want known-good", got)
-	}
-	if _, err := os.Stat(oldPath + oldBinaryPreservedSuffix); err != nil {
-		t.Fatalf("marker must survive alongside the copy it protects: %v", err)
-	}
-
-	// Marker deletion is not proof that the recovery copy is obsolete: a writer
-	// in the installation directory can delete the marker between invocations.
-	clearOldBinaryPreserved(oldPath)
-	CleanupStaleBinary(targetPath)
-	if got, err := os.ReadFile(oldPath); err != nil || string(got) != "known-good" {
-		t.Fatalf("unmarked recovery copy = %q err=%v, want known-good", got, err)
-	}
-}
-
 // TestRestoreOriginalBinaryMarksPreservedCopy pins the other half: the path that
 // reports "original preserved at <.old>" is the path that makes that true across
 // runs.
@@ -189,7 +113,6 @@ func TestRestoreOriginalBinaryMarksPreservedCopy(t *testing.T) {
 	if !oldBinaryPreserved(oldPath) {
 		t.Fatal("a failed restore must mark the preserved copy so later cleanup keeps it")
 	}
-	CleanupStaleBinary(targetPath)
 	if _, err := os.Stat(oldPath); err != nil {
 		t.Fatalf("recovery copy was removed after a failed restore: %v", err)
 	}
@@ -238,14 +161,9 @@ func TestMarkOldBinaryPreservedRefusesPreCreatedLink(t *testing.T) {
 			if string(got) != victimContent {
 				t.Fatalf("marker write followed the planted %s and wrote into %q: %q", kind, victim, got)
 			}
-			// The recovery copy is still preserved, which is the marker's purpose.
-			targetPath := filepath.Join(dir, "zero.exe")
-			if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
-				t.Fatalf("WriteFile target: %v", err)
-			}
-			CleanupStaleBinary(targetPath)
+			// The recovery copy itself is untouched, which is the marker's purpose.
 			if _, err := os.Stat(oldPath); err != nil {
-				t.Fatalf("recovery copy was removed despite a marker being present: %v", err)
+				t.Fatalf("recovery copy was removed while planting the marker: %v", err)
 			}
 		})
 	}
@@ -295,7 +213,7 @@ func TestMarkOldBinaryPreservedRemovesPartialMarkerBeforeRelocation(t *testing.T
 // CodeRabbit's marker finding that surfacing the failure alone does not: when no
 // marker can be established, nothing on disk tells the next run to keep the
 // copy, so it is moved out from under routine cleanup instead of being left at
-// the one name CleanupStaleBinary deletes.
+// the ordinary "<target>.old" recovery name.
 func TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")
@@ -337,11 +255,6 @@ func TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails(t *testing.T) {
 	}
 	if _, err := os.Lstat(oldPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("old recovery path still exists after move: %v", err)
-	}
-	// And routine cleanup cannot reach it: it only ever removes "<target>.old".
-	CleanupStaleBinary(targetPath)
-	if _, err := os.Stat(kept); err != nil {
-		t.Fatalf("cleanup removed the kept recovery copy: %v", err)
 	}
 }
 
@@ -446,33 +359,4 @@ func openWithoutSharing(path string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(handle), path), nil
-}
-
-func TestCleanupStaleBinaryPreservesOldWhenTargetExists(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero.exe")
-	oldPath := targetPath + ".old"
-	if err := os.WriteFile(targetPath, []byte("current"), 0o755); err != nil {
-		t.Fatalf("WriteFile target: %v", err)
-	}
-	if err := os.WriteFile(oldPath, []byte("stale"), 0o755); err != nil {
-		t.Fatalf("WriteFile old binary: %v", err)
-	}
-
-	CleanupStaleBinary(targetPath)
-
-	old, err := os.ReadFile(oldPath)
-	if err != nil {
-		t.Fatalf("ReadFile preserved old binary: %v", err)
-	}
-	if string(old) != "stale" {
-		t.Fatalf("old binary = %q, want stale", old)
-	}
-	got, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("ReadFile target: %v", err)
-	}
-	if string(got) != "current" {
-		t.Fatalf("target = %q, want current", got)
-	}
 }

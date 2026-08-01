@@ -329,6 +329,12 @@ func (staged *stagedBinary) discard() {
 	if staged == nil {
 		return
 	}
+	// Removal is bound to the staged object before the handle is released
+	// wherever the platform allows it (Windows, via delete-on-close). Once the
+	// handle is gone the staging pathname can be re-resolved, and under the
+	// writable-install-directory threat model that entry may by then name a file
+	// this updater never created.
+	staged.discardOpenObject()
 	if staged.file != nil {
 		_ = staged.file.Close()
 	}

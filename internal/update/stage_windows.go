@@ -60,12 +60,16 @@ func createStagingFile(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}
+	file := os.NewFile(uintptr(handle), path)
 	if err := verifyFreshRegularFile(handle, path); err != nil {
-		_ = windows.CloseHandle(handle)
-		_ = os.Remove(path)
+		// Delete through the handle rather than by pathname: the object this
+		// process just created is the only thing it may remove, and its name is
+		// writable by the threat principal the moment the handle is released.
+		_ = deleteFileByHandle(file)
+		_ = file.Close()
 		return nil, err
 	}
-	return os.NewFile(uintptr(handle), path), nil
+	return file, nil
 }
 
 // verifyFreshRegularFile defends in depth against the handle unexpectedly
@@ -405,14 +409,30 @@ func verifyPromotedTarget(file *os.File, targetPath string) error {
 	return nil
 }
 
+// discardOpenObject schedules the staged object for deletion through the handle
+// it was created with, so failure-path cleanup removes exactly the object this
+// updater staged. The pathname alternative (os.Remove after the handle is
+// closed) re-resolves the staging entry, and a principal who can write in the
+// installation directory can substitute that entry in the gap — the same
+// handoff createStagingFile and promote are built to avoid. Deletion takes
+// effect when the last handle closes, which discard does immediately after.
+//
+// If the request fails, the staged file is left behind rather than removed by
+// name: a leaked file costs disk, deleting an attacker-chosen entry costs the
+// operator a file they own.
+func (staged *stagedBinary) discardOpenObject() {
+	if staged.promoted || staged.file == nil {
+		return
+	}
+	_ = deleteFileByHandle(staged.file)
+}
+
 func (staged *stagedBinary) discardPaths() {
 	// POSIX-only state is present in the shared struct and always nil here.
 	_ = staged.dir
 	_ = staged.dirHandle
 	_ = staged.parentHandle
-	if !staged.promoted && staged.path != "" {
-		_ = os.Remove(staged.path)
-	}
+	// Nothing is removed by pathname here; see discardOpenObject.
 }
 
 // fileRenameInfo mirrors FILE_RENAME_INFO. FileName is a variable-length WCHAR

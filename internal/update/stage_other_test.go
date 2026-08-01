@@ -9,11 +9,24 @@ import (
 	"testing"
 )
 
+// stageAtPath drives the production staging primitive — createStagingFileAt,
+// the one createStagedBinary calls — against path by binding a descriptor to
+// its parent first. The tests below go through it rather than a path-taking
+// helper of their own so that weakening the real open flags fails them.
+func stageAtPath(path string) (*os.File, error) {
+	parent, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = parent.Close() }()
+	return createStagingFileAt(parent, filepath.Base(path), path)
+}
+
 // TestCreateStagingFileRefusesPrecreatedHardLink is the regression test for
 // #742: a lower-privileged attacker who can write in the installation
 // directory pre-creates the staging path as a hard link to another file the
-// (possibly elevated) updater can write. createStagingFile must fail instead
-// of opening and truncating through that link.
+// (possibly elevated) updater can write. Staging must fail instead of opening
+// and truncating through that link.
 func TestCreateStagingFileRefusesPrecreatedHardLink(t *testing.T) {
 	dir := t.TempDir()
 	victim := filepath.Join(dir, "victim")
@@ -25,8 +38,8 @@ func TestCreateStagingFileRefusesPrecreatedHardLink(t *testing.T) {
 		t.Fatalf("Link: %v", err)
 	}
 
-	if _, err := createStagingFile(staged); err == nil {
-		t.Fatal("createStagingFile succeeded through a pre-existing hard link, want error")
+	if _, err := stageAtPath(staged); err == nil {
+		t.Fatal("staging succeeded through a pre-existing hard link, want error")
 	}
 
 	data, err := os.ReadFile(victim)
@@ -52,8 +65,8 @@ func TestCreateStagingFileRefusesPrecreatedSymlink(t *testing.T) {
 		t.Fatalf("Symlink: %v", err)
 	}
 
-	if _, err := createStagingFile(staged); err == nil {
-		t.Fatal("createStagingFile succeeded through a pre-existing symlink, want error")
+	if _, err := stageAtPath(staged); err == nil {
+		t.Fatal("staging succeeded through a pre-existing symlink, want error")
 	}
 
 	data, err := os.ReadFile(victim)
@@ -71,9 +84,9 @@ func TestCreateStagingFileSucceedsForFreshPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "staged")
 
-	file, err := createStagingFile(path)
+	file, err := stageAtPath(path)
 	if err != nil {
-		t.Fatalf("createStagingFile: %v", err)
+		t.Fatalf("stageAtPath: %v", err)
 	}
 	if _, err := file.WriteString("payload"); err != nil {
 		t.Fatalf("WriteString: %v", err)
@@ -107,7 +120,7 @@ func TestCreateStagingFileConcurrentRaceOnlyOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			file, err := createStagingFile(path)
+			file, err := stageAtPath(path)
 			if err != nil {
 				return
 			}
@@ -124,6 +137,6 @@ func TestCreateStagingFileConcurrentRaceOnlyOneWinner(t *testing.T) {
 		}
 	}
 	if winners != 1 {
-		t.Fatalf("concurrent createStagingFile winners = %d, want exactly 1", winners)
+		t.Fatalf("concurrent staging winners = %d, want exactly 1", winners)
 	}
 }

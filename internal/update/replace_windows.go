@@ -141,32 +141,41 @@ var markOldBinaryPreserved = func(oldPath string) error {
 		}
 		return fmt.Errorf("create recovery marker %s: %w", markerPath, err)
 	}
+	marker := os.NewFile(uintptr(handle), markerPath)
 	if err := verifyFreshRegularFile(handle, markerPath); err != nil {
-		_ = windows.CloseHandle(handle)
-		_ = os.Remove(markerPath)
+		_ = deleteFileByHandle(marker)
+		_ = marker.Close()
 		return err
 	}
-	marker := os.NewFile(uintptr(handle), markerPath)
 	writeErr := writeRecoveryMarker(marker)
-	closeErr := marker.Close()
-	if writeErr != nil || closeErr != nil {
-		// A partial marker must not be left beside a recovery copy that the
-		// caller then relocates. Remove the entry we created before returning an
-		// error. If it cannot be removed (or its state cannot be established),
-		// conservatively treat marker creation as successful so oldPath remains
-		// the authoritative recovery location.
-		removeErr := os.Remove(markerPath)
-		_, statErr := os.Lstat(markerPath)
-		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) ||
-			statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-			return nil
-		}
-		if writeErr != nil {
-			return fmt.Errorf("write recovery marker %s: %w", markerPath, writeErr)
-		}
-		return fmt.Errorf("close recovery marker %s: %w", markerPath, closeErr)
+	// A partial marker must not be left beside a recovery copy that the caller
+	// then relocates. Delete the object this process created through its own
+	// handle — never by pathname, which the threat principal can point at
+	// something else once the handle is released.
+	var deleteErr error
+	if writeErr != nil {
+		deleteErr = deleteFileByHandle(marker)
 	}
-	return nil
+	closeErr := marker.Close()
+	if writeErr == nil {
+		// A close failure still leaves the fully written marker in place, and
+		// its presence is the entire state this function records.
+		_ = closeErr
+		return nil
+	}
+	// Below, the write failed. Each remaining branch decides between reporting
+	// that failure and conservatively claiming success — and only a confirmed
+	// absence of the marker earns the report, because claiming success keeps
+	// oldPath as the authoritative recovery location, which is the safe answer.
+	if deleteErr != nil {
+		// The partial marker could not be removed, so it is still there.
+		return nil
+	}
+	if _, statErr := os.Lstat(markerPath); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		// Something occupies the marker name, or its state cannot be established.
+		return nil
+	}
+	return fmt.Errorf("write recovery marker %s: %w", markerPath, writeErr)
 }
 
 var writeRecoveryMarker = func(marker *os.File) error {
@@ -437,6 +446,19 @@ type fileDispositionInfo struct {
 	DeleteFile byte
 }
 
+// deleteFileByHandle marks the object file refers to for deletion, which takes
+// effect when its last handle closes. It never resolves a pathname, so it can
+// only ever delete the object this process already holds open.
+func deleteFileByHandle(file *os.File) error {
+	info := fileDispositionInfo{DeleteFile: 1}
+	return windows.SetFileInformationByHandle(
+		windows.Handle(file.Fd()),
+		windows.FileDispositionInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	)
+}
+
 func closeRecoveryCleanupCandidates(candidates []*os.File) {
 	for _, file := range candidates {
 		_ = file.Close()
@@ -448,19 +470,6 @@ func closeRecoveryCleanupCandidates(candidates []*os.File) {
 // delete sharing, so their entries cannot be substituted in the meantime.
 func cleanupSupersededRecoveryCopies(candidates []*os.File) {
 	for _, file := range candidates {
-		info := fileDispositionInfo{DeleteFile: 1}
-		_ = windows.SetFileInformationByHandle(
-			windows.Handle(file.Fd()),
-			windows.FileDispositionInfo,
-			(*byte)(unsafe.Pointer(&info)),
-			uint32(unsafe.Sizeof(info)),
-		)
+		_ = deleteFileByHandle(file)
 	}
 }
-
-// CleanupStaleBinary intentionally preserves Windows recovery copies. A public
-// pathname cannot prove that an .old file is obsolete under the writable-install-
-// directory threat model: a deleted .keep marker, an interrupted promotion, or
-// an operator-approved retry can all leave .old as the last verified binary.
-// Bounded cleanup instead runs after promotion using identity-bound trusted state.
-func CleanupStaleBinary(string) {}

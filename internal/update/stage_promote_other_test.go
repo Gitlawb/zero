@@ -233,18 +233,3 @@ func TestInstallBinaryCleansUpWhenStagingFails(t *testing.T) {
 	}
 	assertNoStagingLeftovers(t, dir)
 }
-
-func TestCleanupStaleBinaryPreservesUnverifiableStagingDirectories(t *testing.T) {
-	dir := t.TempDir()
-	targetPath := filepath.Join(dir, "zero")
-	unverifiable := filepath.Join(dir, stagingDirPrefix+"1234567890")
-	if err := os.Mkdir(unverifiable, 0o700); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-
-	CleanupStaleBinary(targetPath)
-
-	if _, err := os.Stat(unverifiable); err != nil {
-		t.Fatalf("unverifiable staging directory must be preserved: %v", err)
-	}
-}
