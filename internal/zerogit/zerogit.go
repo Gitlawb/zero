@@ -877,23 +877,64 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 	return err
 }
 
-// HasUpstream reports whether branch has a configured upstream/tracking ref,
-// meaning a push has already succeeded for it at least once. ensureFeatureBranch
-// consults this when it is called again with a non-default current branch: a
-// generated branch that just lost a force-with-lease race against a
-// concurrent creator is left checked out locally with no upstream recorded, so
-// a retry must not treat it the same as an ordinary, already-published feature
-// branch and drop the nonexistence lease. Any failure to resolve the upstream
-// (including "no upstream configured") reports false so the caller keeps
-// requiring the lease, which is the safe direction.
-func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, error) {
+// UpstreamRef returns the short remote-tracking name for branch's configured
+// upstream (for example "origin/user/slug"), or "" when none is configured or
+// the ref cannot be resolved. Callers that need to know whether Zero's own
+// `push -u` published exactly <remote>/<branch> compare this string rather than
+// reading branch.<name>.remote alone: with branch.autoSetupMerge=inherit,
+// `git checkout -b` copies remote=origin and merge=refs/heads/main from the
+// source branch before any push, so a remote config field is not publication
+// state.
+func UpstreamRef(ctx context.Context, cwd, branch string, runGit Runner) string {
 	runGit, _ = resolveRunners(runGit, nil)
-	_, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", branch+"@{upstream}")
-	return err == nil, nil
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// HasUpstream reports whether branch has a published upstream tracking the same
+// branch name on a remote (the relationship `git push -u <remote> <branch>`
+// records). ensureFeatureBranch consults this when it is called again with a
+// non-default current branch: a generated branch that just lost a
+// force-with-lease race against a concurrent creator is left checked out
+// locally without that relationship, so a retry must not treat it the same as
+// an ordinary, already-published feature branch and drop the nonexistence
+// lease.
+//
+// An inherited upstream to a different branch (branch.autoSetupMerge=inherit
+// copies origin/main onto a new user/slug) is not publication state and reports
+// false. Any failure to resolve the upstream (including "no upstream
+// configured") also reports false so the caller keeps requiring the lease.
+func HasUpstream(ctx context.Context, cwd, branch string, runGit Runner) (bool, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false, nil
+	}
+	ref := UpstreamRef(ctx, cwd, branch, runGit)
+	if ref == "" {
+		return false, nil
+	}
+	// rev-parse --abbrev-ref prints "<remote>/<branch>"; branch names may
+	// themselves contain slashes (user/slug), so take everything after the
+	// first slash as the tracked branch name.
+	_, tracked, ok := strings.Cut(ref, "/")
+	if !ok || tracked == "" {
+		return false, nil
+	}
+	return tracked == branch, nil
 }
 
 // UpstreamRemote returns the configured upstream remote name for branch (e.g. "origin"),
-// or "" if no upstream is configured.
+// or "" if no upstream is configured. This alone is not proof of publication:
+// branch.autoSetupMerge=inherit copies branch.<name>.remote from the source
+// branch before any push. Prefer UpstreamRef when checking that <remote>/<branch>
+// was actually published.
 func UpstreamRemote(ctx context.Context, cwd, branch string, runGit Runner) string {
 	runGit, _ = resolveRunners(runGit, nil)
 	out, err := gitOutput(ctx, runGit, cwd, "config", "branch."+branch+".remote")

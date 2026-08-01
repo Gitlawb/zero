@@ -1172,16 +1172,17 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // remote-collision probe runs before this returns, and closing that race
 // requires Push's push itself to assert the destination is still new. That
 // requirement also carries across a retry: if the current branch is already
-// non-default (this call didn't create it) but has no configured upstream
-// yet, it's either a fresh manual branch or this exact generated branch after
-// a lost force-with-lease race, and either way the lease still needs to be
-// asserted rather than silently dropped. After a successful create, the
-// original default branch ref is moved back to its remote-tracking tip so the
-// feature branch exclusively owns the publishable commits (otherwise local
-// main keeps them and diverges after a squash-merge); a failed restore rolls
-// the feature branch back. allowDefaultBranch (the --yes flag) and dryRun
-// both opt out via the "" branch / false return, leaving Push's own
-// guard/preview behavior on the default branch unaffected.
+// non-default (this call didn't create it) but has not been successfully
+// published to the exact target remote under the same branch name, keep the
+// nonexistence lease. branch.<name>.remote alone is not enough: with
+// branch.autoSetupMerge=inherit, checkout -b copies remote=origin from the
+// source branch before any push. After a successful create, the original
+// default branch ref is moved back to its own upstream tip (not necessarily
+// the push destination) so the feature branch exclusively owns the
+// publishable commits; a failed restore rolls the feature branch back.
+// allowDefaultBranch (the --yes flag) and dryRun both opt out via the ""
+// branch / false return, leaving Push's own guard/preview behavior on the
+// default branch unaffected.
 //
 // autoNaming gates the LLM naming path (--auto): these commands were
 // git-only, and sending the change diff to a configured provider on every
@@ -1192,10 +1193,11 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // sent for LLM naming has that cap honored here just as the commit path does.
 // The working tree must be clean and HEAD must be ahead of the resolved remote
 // default before a branch is created; otherwise the push would either leave
-// uncommitted edits behind or publish an empty comparison. The one exception
-// is a confirmed-unborn remote (freshly created, zero refs): it has no
-// tracking ref to check ahead-ness or diff against at all, so that check is
-// bypassed rather than failing the very first push a new remote will ever see.
+// uncommitted edits behind or publish an empty comparison. A confirmed-unborn
+// remote (freshly created, zero refs) is not auto-branched: pushing only a
+// feature branch would leave the remote without its configured default
+// (dangling HEAD), and the next `changes pr` cannot recover. Establish the
+// initial default branch with --yes first, then auto-branch subsequent work.
 func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, workspaceRoot string, requestedRemote string, allowDefaultBranch bool, dryRun bool, autoNaming bool, maxDiffBytes int, deps appDeps) (string, string, bool, error) {
 	if allowDefaultBranch || dryRun {
 		return "", strings.TrimSpace(requestedRemote), false, nil
@@ -1208,12 +1210,17 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	if !isDefault {
 		requireNewRemoteBranch := false
 		if deps.isGeneratedBranch != nil && deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch) {
+			// Keep the zero-value lease unless this exact <remote>/<branch>
+			// relationship was recorded by a successful push -u. Inherited
+			// origin/main (autoSetupMerge=inherit) and a push to a different
+			// remote both leave the lease in place.
 			targetRemote := firstNonEmptyString(requestedRemote, remote)
-			upstreamRemote := ""
-			if deps.branchUpstreamRemote != nil {
-				upstreamRemote = deps.branchUpstreamRemote(ctx, workspaceRoot, currentBranch)
+			publishedRef := targetRemote + "/" + currentBranch
+			upstreamRef := ""
+			if deps.branchUpstreamRef != nil {
+				upstreamRef = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
 			}
-			requireNewRemoteBranch = (upstreamRemote == "" || upstreamRemote != targetRemote)
+			requireNewRemoteBranch = upstreamRef != publishedRef
 		}
 		return currentBranch, remote, requireNewRemoteBranch, nil
 	}
@@ -1247,39 +1254,35 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// commit that is not already on the remote default branch. A clean,
 	// up-to-date default branch would otherwise publish a feature branch at the
 	// exact default tip. If the ahead count cannot be determined (for example
-	// the remote-tracking ref was never fetched), fail rather than guess -
-	// unless the remote is confirmed unborn (freshly created, zero refs): it
-	// then has no <remote>/<currentBranch> tracking ref for commitsAhead to
-	// exist against, which is proof there is nothing published yet rather than
-	// an unknown state, and every commit on HEAD is new relative to it.
+	// the remote-tracking ref was never fetched), fail rather than guess. When
+	// the remote is confirmed unborn, refuse auto-branching entirely: the
+	// initial default branch must be established first (changes push --yes)
+	// so the remote has a real HEAD before any feature branch is published.
 	ahead, aheadErr := deps.commitsAhead(ctx, workspaceRoot, remote, currentBranch)
-	unbornRemote := false
 	if fetchErr != nil || aheadErr != nil {
+		var unbornRemote bool
 		var unbornErr error
-		unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
-		if unbornErr != nil || !unbornRemote {
-			cause := aheadErr
-			if cause == nil {
-				cause = fetchErr
-			}
-			return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, cause)
+		if deps.isUnbornRemote != nil {
+			unbornRemote, unbornErr = deps.isUnbornRemote(ctx, workspaceRoot, remote)
 		}
-	} else if ahead == 0 {
+		if unbornErr == nil && unbornRemote {
+			return "", "", false, fmt.Errorf("remote %s has no branches yet; push the initial default branch first with --yes (`zero changes push --yes`), then use auto-branching for subsequent work", remote)
+		}
+		cause := aheadErr
+		if cause == nil {
+			cause = fetchErr
+		}
+		return "", "", false, fmt.Errorf("cannot determine whether HEAD is ahead of %s/%s: %w; fetch the remote tracking branch first", remote, currentBranch, cause)
+	}
+	if ahead == 0 {
 		return "", "", false, fmt.Errorf("no changes to publish: HEAD is not ahead of %s/%s; commit your work before pushing", remote, currentBranch)
 	}
 
 	// Name the branch (and, with --auto, send the provider) from what HEAD is
 	// actually ahead of the resolved remote branch by, using the same ref
 	// commitsAhead just checked. A working-tree snapshot can describe edits a
-	// commit-only push will never include. A confirmed-unborn remote has no
-	// such ref to diff against either, so leave BaseRef empty: Inspect falls
-	// back to the (already known clean) working-tree snapshot, summary.Files
-	// comes back empty, and the headCommitSubject fallback below names the
-	// branch instead.
+	// commit-only push will never include.
 	baseRef := remote + "/" + currentBranch
-	if unbornRemote {
-		baseRef = ""
-	}
 	summary, err := deps.inspectChanges(ctx, zerogit.InspectOptions{Cwd: workspaceRoot, BaseRef: baseRef, MaxDiffBytes: maxDiffBytes})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to inspect changes: %w", err)
@@ -1310,6 +1313,17 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		}
 	}
 
+	// Capture the source default branch's own upstream before leaving it.
+	// --remote selects the push destination; restore must not rewrite local
+	// main to upstream/main when main still tracks origin/main (fork setups).
+	restoreTip := ""
+	if deps.branchUpstreamRef != nil {
+		restoreTip = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
+	}
+	if restoreTip == "" {
+		restoreTip = remote + "/" + currentBranch
+	}
+
 	name := zerogit.BuildBranchName(deps.currentGitUser(ctx, workspaceRoot), slug)
 	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
 	if err != nil {
@@ -1326,19 +1340,17 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	// The normal flow commits on the default branch first, then creates the
 	// feature branch at the same HEAD. Without moving the original default
 	// ref back, local main keeps the pre-squash commits and diverges from
-	// origin/main after a squash-merge (and a later pull/push can re-publish
+	// its upstream after a squash-merge (and a later pull/push can re-publish
 	// them). Once the feature branch owns those commits, restore the default
-	// branch to the remote-tracking tip CommitsAhead already used. A
-	// confirmed-unborn remote has no such tip; leave the default ref alone.
+	// branch to the source branch's own upstream tip captured above.
 	// Failure-safe: if the restore fails, delete the feature branch and
 	// check the default branch back out so the tree is not left half-moved.
-	if !unbornRemote && deps.resetBranchRef != nil {
-		tip := remote + "/" + currentBranch
-		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, tip); err != nil {
+	if deps.resetBranchRef != nil {
+		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, restoreTip); err != nil {
 			if deps.deleteBranch != nil {
 				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
 			}
-			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, tip, err)
+			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, restoreTip, err)
 		}
 	}
 	if !jsonMode {

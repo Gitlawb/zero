@@ -1417,3 +1417,50 @@ func TestCurrentBranchReturnsCheckedOutName(t *testing.T) {
 		t.Fatalf("CurrentBranch = %q, want feature/work", got)
 	}
 }
+
+// TestHasUpstreamRejectsInheritedMainUpstream covers branch.autoSetupMerge=inherit:
+// checkout -b copies origin/main onto the new branch before any push -u. That
+// must not count as a published upstream for the generated branch name.
+func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "remote.git")
+	repo := filepath.Join(tmp, "repo")
+	runGitCommand(t, tmp, "init", "--bare", bare)
+	runGitCommand(t, tmp, "init", repo)
+	runGitCommand(t, repo, "config", "user.name", "Zero")
+	runGitCommand(t, repo, "config", "user.email", "zero@example.invalid")
+	runGitCommand(t, repo, "checkout", "-b", "main")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "initial\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "Initial commit")
+	runGitCommand(t, repo, "remote", "add", "origin", bare)
+	runGitCommand(t, repo, "push", "-u", "origin", "main")
+	runGitCommand(t, repo, "config", "branch.autoSetupMerge", "inherit")
+	runGitCommand(t, repo, "checkout", "-b", "user/slug")
+
+	if ref := UpstreamRef(context.Background(), repo, "user/slug", nil); ref != "origin/main" {
+		t.Fatalf("UpstreamRef after inherit = %q, want origin/main", ref)
+	}
+	has, err := HasUpstream(context.Background(), repo, "user/slug", nil)
+	if err != nil {
+		t.Fatalf("HasUpstream: %v", err)
+	}
+	if has {
+		t.Fatal("HasUpstream must reject inherited origin/main for user/slug")
+	}
+
+	runGitCommand(t, repo, "push", "-u", "origin", "user/slug")
+	if ref := UpstreamRef(context.Background(), repo, "user/slug", nil); ref != "origin/user/slug" {
+		t.Fatalf("UpstreamRef after push -u = %q, want origin/user/slug", ref)
+	}
+	has, err = HasUpstream(context.Background(), repo, "user/slug", nil)
+	if err != nil {
+		t.Fatalf("HasUpstream after push: %v", err)
+	}
+	if !has {
+		t.Fatal("HasUpstream must accept exact origin/user/slug after push -u")
+	}
+}

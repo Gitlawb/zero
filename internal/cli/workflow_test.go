@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1639,24 +1640,21 @@ func TestEnsureFeatureBranchFailsWhenUnbornCheckErrors(t *testing.T) {
 	}
 }
 
-// TestEnsureFeatureBranchCreatesBranchOnConfirmedUnbornRemote covers the P1
-// review finding on PR 671: a brand-new empty remote has no
-// <remote>/<branch> tracking ref, so commitsAhead's rev-list lookup fails
-// not because HEAD has nothing to publish but because the ref it needs
-// cannot exist yet. Before the fix this dead-ended `zero changes push`/`pr`
-// on the very first invocation from a local default branch against a fresh
-// remote - exactly the scenario the auto-branch feature was written to
-// unblock. A confirmed-unborn remote must bypass the ahead-count check (and
-// the equally impossible diff-base inspect) and still create the branch.
-func TestEnsureFeatureBranchCreatesBranchOnConfirmedUnbornRemote(t *testing.T) {
+// TestEnsureFeatureBranchRefusesUnbornRemote covers jatmn's P1: auto-creating
+// only a feature branch on a brand-new empty remote leaves remote HEAD
+// dangling (no default branch), so the next `changes pr` fails closed and a
+// later `push --yes` of main publishes the same tip with no PR diff. Refuse
+// auto-branching until the initial default branch is established with --yes.
+func TestEnsureFeatureBranchRefusesUnbornRemote(t *testing.T) {
 	cwd := t.TempDir()
-	var createdName string
+	createBranchCalled := false
 	var isUnbornRemoteCalled bool
 
-	branch, remote, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
+		inspectChanges: featureBranchInspect(nil, ""),
 		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
 			return 0, errors.New("unknown revision origin/main..HEAD")
 		},
@@ -1667,27 +1665,19 @@ func TestEnsureFeatureBranchCreatesBranchOnConfirmedUnbornRemote(t *testing.T) {
 			}
 			return true, nil
 		},
-		inspectChanges: featureBranchInspect(nil, ""), // no tracking ref to diff against; name from HEAD
-		headCommitSubject: func(ctx context.Context, cwd string) string {
-			return "init"
-		},
-		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
-			createdName = options.Name
+			createBranchCalled = true
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("ensureFeatureBranch returned error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no branches yet") || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("expected unborn-remote refuse error mentioning --yes, got %v", err)
 	}
 	if !isUnbornRemoteCalled {
 		t.Fatal("expected isUnbornRemote to be consulted after commitsAhead failed")
 	}
-	if !created || branch != createdName || remote != "origin" {
-		t.Fatalf("expected a created branch on origin, got branch=%q remote=%q created=%v", branch, remote, created)
-	}
-	if !strings.HasPrefix(branch, "someone/init") {
-		t.Fatalf("expected a name derived from the HEAD commit subject, got %q", branch)
+	if created || createBranchCalled {
+		t.Fatal("expected no feature branch on an unborn remote")
 	}
 }
 
@@ -1941,13 +1931,13 @@ func TestRunChangesPushPreservesLeaseOnRetryAfterCollision(t *testing.T) {
 			// lease-rejected attempt.
 			return false, "someone/readme-md", "origin", nil
 		},
-		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
 			if branch != "someone/readme-md" {
 				t.Fatalf("unexpected branch queried for upstream: %q", branch)
 			}
 			// The first push never landed (it lost the lease), so this
-			// branch has no upstream recorded yet.
-			return false, nil
+			// branch has no published upstream for origin/someone/readme-md.
+			return ""
 		},
 		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
 			return true
@@ -1978,9 +1968,8 @@ func TestRunChangesPushPreservesLeaseOnRetryAfterCollision(t *testing.T) {
 }
 
 // TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch is the
-// companion case: a branch with a configured upstream has already been
-// pushed successfully at least once, so an ordinary subsequent push is not a
-// collision retry and must not have the nonexistence lease reasserted.
+// companion case: a generated branch whose exact <remote>/<branch> was
+// published by push -u must not reassert the nonexistence lease.
 func TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch(t *testing.T) {
 	cwd := t.TempDir()
 	var requireNewRemoteBranch bool
@@ -1991,8 +1980,11 @@ func TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch(t *testing.T
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return false, "someone/readme-md", "origin", nil
 		},
-		branchHasUpstream: func(ctx context.Context, cwd, branch string) (bool, error) {
-			return true, nil
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return "origin/someone/readme-md"
 		},
 		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
 			requireNewRemoteBranch = options.RequireNewRemoteBranch
@@ -2005,6 +1997,42 @@ func TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch(t *testing.T
 	}
 	if requireNewRemoteBranch {
 		t.Fatal("expected an already-published branch not to require the nonexistence lease")
+	}
+}
+
+// TestRunChangesPushPreservesLeaseWhenInheritedOriginRemoteConfig covers the
+// autoSetupMerge=inherit race: branch.remote equals origin before any push,
+// but the upstream ref is still origin/main. Lease must stay.
+func TestRunChangesPushPreservesLeaseWhenInheritedOriginRemoteConfig(t *testing.T) {
+	cwd := t.TempDir()
+	var requireNewRemoteBranch bool
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "someone/readme-md", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
+			// Misleading: inherit copies remote=origin from main.
+			return "origin"
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return "origin/main"
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			requireNewRemoteBranch = options.RequireNewRemoteBranch
+			return zerogit.PushResult{Remote: options.Remote, Branch: options.Branch}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !requireNewRemoteBranch {
+		t.Fatal("expected lease kept when only an inherited origin/main upstream exists")
 	}
 }
 
@@ -2110,8 +2138,9 @@ func TestEnsureFeatureBranchRequiresLeaseWhenPushedToDifferentRemote(t *testing.
 		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
 			return true
 		},
-		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
-			return "origin"
+		// Already published to origin/user/feature, but this push targets upstream.
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return "origin/user/feature"
 		},
 	})
 	if err != nil {
@@ -2121,7 +2150,79 @@ func TestEnsureFeatureBranchRequiresLeaseWhenPushedToDifferentRemote(t *testing.
 		t.Fatalf("branch = %q, want user/feature", branch)
 	}
 	if !requireNew {
-		t.Fatal("expected requireNewRemoteBranch to be true when target remote differs from upstream remote")
+		t.Fatal("expected requireNewRemoteBranch to be true when target remote differs from published upstream")
+	}
+}
+
+// TestEnsureFeatureBranchKeepsLeaseWhenUpstreamIsInheritedMain covers
+// branch.autoSetupMerge=inherit: checkout -b copies remote=origin and
+// merge=refs/heads/main, so branch@{upstream} is origin/main even though
+// origin/user/slug was never published. The lease must stay.
+func TestEnsureFeatureBranchKeepsLeaseWhenUpstreamIsInheritedMain(t *testing.T) {
+	cwd := t.TempDir()
+	_, _, requireNew, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "user/slug", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			// Inherited from main via autoSetupMerge=inherit, not a real push -u.
+			return "origin/main"
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch: %v", err)
+	}
+	if !requireNew {
+		t.Fatal("expected lease kept when upstream is inherited origin/main, not origin/user/slug")
+	}
+}
+
+// TestEnsureFeatureBranchDropsLeaseOnlyAfterExactPublishedRef: after a real
+// push -u origin user/slug, retry must not reassert the nonexistence lease.
+func TestEnsureFeatureBranchDropsLeaseOnlyAfterExactPublishedRef(t *testing.T) {
+	cwd := t.TempDir()
+	_, _, requireNew, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "user/slug", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return "origin/user/slug"
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch: %v", err)
+	}
+	if requireNew {
+		t.Fatal("expected lease dropped after exact origin/user/slug was published")
+	}
+}
+
+// TestEnsureFeatureBranchKeepsLeaseAfterLostRace: force-with-lease rejected
+// the first push; no upstream for the generated branch exists yet.
+func TestEnsureFeatureBranchKeepsLeaseAfterLostRace(t *testing.T) {
+	cwd := t.TempDir()
+	_, _, requireNew, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "user/slug", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatalf("ensureFeatureBranch: %v", err)
+	}
+	if !requireNew {
+		t.Fatal("expected lease kept after a lost force-with-lease race with no published upstream")
 	}
 }
 
@@ -2252,31 +2353,41 @@ func TestEnsureFeatureBranchRollsBackWhenDefaultRestoreFails(t *testing.T) {
 	}
 }
 
-// TestEnsureFeatureBranchSkipsDefaultRestoreOnUnbornRemote: a confirmed-unborn
-// remote has no origin/main tip to restore to; the restore must be skipped
-// rather than failing the first push.
-func TestEnsureFeatureBranchSkipsDefaultRestoreOnUnbornRemote(t *testing.T) {
+// TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote covers jatmn's P2:
+// --remote selects the push destination only. When local main tracks
+// origin/main and the user passes --remote upstream, restore must leave main
+// at origin/main, not rewrite it to upstream/main.
+func TestEnsureFeatureBranchRestoresSourceUpstreamOnForkRemote(t *testing.T) {
 	cwd := t.TempDir()
-	resetCalled := false
+	var resetBranch, resetTip string
 
-	_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 0, appDeps{
+	_, _, created, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "upstream", false, false, false, 0, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
-			return true, "main", "origin", nil
+			if options.Remote != "upstream" {
+				t.Fatalf("expected requested remote upstream, got %q", options.Remote)
+			}
+			return true, "main", "upstream", nil
 		},
-		commitsAhead: func(ctx context.Context, cwd, remote, branch string) (int, error) {
-			return 0, errors.New("unknown revision origin/main..HEAD")
+		commitsAhead:       func(ctx context.Context, cwd, remote, branch string) (int, error) { return 1, nil },
+		refreshTrackingRef: func(ctx context.Context, cwd, remote, branch string) error { return nil },
+		inspectChanges:     featureBranchInspect([]zerogit.FileChange{{Path: "README.md", Status: "modified"}}, ""),
+		currentGitUser:     func(ctx context.Context, cwd string) string { return "Someone" },
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			if branch != "main" {
+				t.Fatalf("expected upstream query for main, got %q", branch)
+			}
+			// Fork: main tracks origin, not the push destination.
+			return "origin/main"
 		},
-		isUnbornRemote: func(ctx context.Context, cwd, remote string) (bool, error) {
-			return true, nil
-		},
-		inspectChanges:    featureBranchInspect(nil, ""),
-		headCommitSubject: func(ctx context.Context, cwd string) string { return "init" },
-		currentGitUser:    func(ctx context.Context, cwd string) string { return "Someone" },
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
+			if options.Remote != "upstream" {
+				t.Fatalf("expected create against upstream, got %q", options.Remote)
+			}
 			return zerogit.BranchResult{Branch: options.Name}, nil
 		},
 		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
-			resetCalled = true
+			resetBranch = branch
+			resetTip = newTip
 			return nil
 		},
 	})
@@ -2284,10 +2395,10 @@ func TestEnsureFeatureBranchSkipsDefaultRestoreOnUnbornRemote(t *testing.T) {
 		t.Fatalf("ensureFeatureBranch returned error: %v", err)
 	}
 	if !created {
-		t.Fatal("expected a branch to be created on an unborn remote")
+		t.Fatal("expected a feature branch to be created")
 	}
-	if resetCalled {
-		t.Fatal("expected resetBranchRef not to run when the remote is unborn")
+	if resetBranch != "main" || resetTip != "origin/main" {
+		t.Fatalf("expected restore main -> origin/main (source upstream), got %q -> %q", resetBranch, resetTip)
 	}
 }
 
@@ -2416,5 +2527,123 @@ func TestRunChangesPRYesRejectsUnbornNonOriginUpstream(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cannot create pull request on unborn remote upstream") {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+// TestRunChangesBareRemotePushThenPRUsable is the end-to-end bare-remote
+// regression for jatmn's unborn P1: auto-branch must not be the first remote
+// ref. Establish main with --yes, then auto-branch a second commit and show
+// that changes pr remains usable (push + createPR succeed against a remote
+// that has a real default branch).
+func TestRunChangesBareRemotePushThenPRUsable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "remote.git")
+	repo := filepath.Join(tmp, "repo")
+	// -b main so remote HEAD points at the default branch GitHub/new repos use;
+	// otherwise a bare repo's HEAD stays on master and IsDefaultBranch fails
+	// closed after the first main push (dangling HEAD + existing heads).
+	runWorkflowGit(t, tmp, "init", "--bare", "-b", "main", bare)
+	runWorkflowGit(t, tmp, "init", repo)
+	runWorkflowGit(t, repo, "config", "user.name", "Zero")
+	runWorkflowGit(t, repo, "config", "user.email", "zero@example.invalid")
+	runWorkflowGit(t, repo, "checkout", "-b", "main")
+	writeWorkflowFile(t, filepath.Join(repo, "README.md"), "initial\n")
+	runWorkflowGit(t, repo, "add", "README.md")
+	runWorkflowGit(t, repo, "commit", "-m", "Initial commit")
+	runWorkflowGit(t, repo, "remote", "add", "origin", bare)
+
+	// Auto-branch on an unborn remote must refuse (not publish only a feature branch).
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return repo, nil },
+	})
+	if exitCode == exitSuccess {
+		t.Fatalf("expected unborn remote to refuse auto-branch, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no branches yet") {
+		t.Fatalf("expected unborn refuse message, got stderr=%q", stderr.String())
+	}
+
+	// Establish the default branch.
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"changes", "push", "--yes"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return repo, nil },
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("push --yes failed: exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	heads := runWorkflowGit(t, bare, "show-ref", "--heads")
+	if !strings.Contains(heads, "refs/heads/main") {
+		t.Fatalf("expected bare remote to have main after --yes, got %q", heads)
+	}
+
+	// Second commit: auto-branch + push, then pr against an established remote.
+	writeWorkflowFile(t, filepath.Join(repo, "feature.txt"), "work\n")
+	runWorkflowGit(t, repo, "add", "feature.txt")
+	runWorkflowGit(t, repo, "commit", "-m", "add feature")
+
+	var pushedBranch string
+	var prCalled bool
+	stdout.Reset()
+	stderr.Reset()
+	deps := defaultAppDeps()
+	deps.getwd = func() (string, error) { return repo, nil }
+	deps.currentGitUser = func(ctx context.Context, cwd string) string { return "Someone" }
+	basePush := deps.pushChanges
+	deps.pushChanges = func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+		pushedBranch = options.Branch
+		return basePush(ctx, options)
+	}
+	deps.createPR = func(ctx context.Context, options zerogit.PROptions) (zerogit.PRResult, error) {
+		prCalled = true
+		return zerogit.PRResult{Output: "https://example.invalid/pr/1"}, nil
+	}
+
+	exitCode = runWithDeps([]string{"changes", "push"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("auto-branch push failed: exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if pushedBranch == "" || pushedBranch == "main" {
+		t.Fatalf("expected auto-created feature branch push, got %q", pushedBranch)
+	}
+	heads = runWorkflowGit(t, bare, "show-ref", "--heads")
+	if !strings.Contains(heads, "refs/heads/main") {
+		t.Fatalf("expected main to remain on bare remote, got %q", heads)
+	}
+	if !strings.Contains(heads, "refs/heads/"+pushedBranch) {
+		t.Fatalf("expected feature branch %q on bare remote, got %q", pushedBranch, heads)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"changes", "pr", "--fill"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("changes pr failed after established remote: exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if !prCalled {
+		t.Fatal("expected createPR to run once the default branch exists")
+	}
+}
+
+func runWorkflowGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+	}
+	return string(out)
+}
+
+func writeWorkflowFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

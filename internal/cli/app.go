@@ -100,6 +100,7 @@ type appDeps struct {
 	refreshTrackingRef     func(context.Context, string, string, string) error
 	branchHasUpstream      func(context.Context, string, string) (bool, error)
 	branchUpstreamRemote   func(context.Context, string, string) string
+	branchUpstreamRef      func(context.Context, string, string) string
 	currentGitBranch       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
 	resetBranchRef         func(context.Context, string, string, string) error
@@ -234,6 +235,9 @@ func defaultAppDeps() appDeps {
 		},
 		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
 			return zerogit.UpstreamRemote(ctx, cwd, branch, nil)
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return zerogit.UpstreamRef(ctx, cwd, branch, nil)
 		},
 		currentGitBranch: func(ctx context.Context, cwd string) string {
 			return zerogit.CurrentBranch(ctx, cwd, nil)
@@ -638,6 +642,17 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.branchHasUpstream == nil {
 		deps.branchHasUpstream = defaults.branchHasUpstream
 	}
+	if deps.branchUpstreamRemote == nil {
+		deps.branchUpstreamRemote = defaults.branchUpstreamRemote
+	}
+	if deps.branchUpstreamRef == nil {
+		deps.branchUpstreamRef = defaults.branchUpstreamRef
+	}
+	if deps.currentGitBranch == nil {
+		deps.currentGitBranch = defaults.currentGitBranch
+	}
+	// deleteBranch and resetBranchRef stay nil when unset so unit tests that
+	// mock createBranch without a real git tree do not hit real restore/delete.
 	if deps.markGeneratedBranch == nil {
 		if deps.createBranch != nil {
 			deps.markGeneratedBranch = func(context.Context, string, string) error { return nil }
