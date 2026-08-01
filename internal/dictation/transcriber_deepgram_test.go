@@ -208,7 +208,12 @@ func TestDeepgramSinglePassRedaction(t *testing.T) {
 	if ferr == nil {
 		t.Fatal("expected error")
 	}
-	if strings.Contains(ferr.Error(), "[REDACTED:[REDACTED") {
-		t.Errorf("nested redaction marker created: %v", ferr)
+	got := ferr.Error()
+	if strings.Contains(got, "sk-key1234567890abcdef1234") {
+		t.Fatalf("API key leaked into stream error: %q", got)
+	}
+	// One key occurrence must produce exactly one redaction marker (no double wrap).
+	if strings.Count(got, "[REDACTED]") != 1 {
+		t.Fatalf("redaction markers in %q: want exactly 1 [REDACTED]", got)
 	}
 }

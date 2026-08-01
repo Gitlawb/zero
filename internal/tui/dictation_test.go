@@ -143,12 +143,16 @@ func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
 	// context.Canceled) can still arrive afterward. With stt.autoSubmit on,
 	// that must never fall through to msg.submit and fire the composer's
 	// restored pre-existing text.
+	// Matching sessionID is required so this hits the context.Canceled branch
+	// rather than only the stale-session gate (session 0 after cancel would be
+	// dropped before that branch runs).
 	m := model{}
+	m.dictation.sessionID = 1
 	m.setComposerState(composerState{text: "existing prompt", cursor: len("existing prompt")})
 	m.dictation.phase = dictRecording
 	m.dictation.streaming = true
 
-	m = m.handleDictationPartial(sttPartialMsg{text: "half-formed transcript"})
+	m = m.handleDictationPartial(sttPartialMsg{sessionID: 1, text: "half-formed transcript"})
 	if m.composer.text != "existing prompt half-formed transcript" {
 		t.Fatalf("partial did not render into composer: %q", m.composer.text)
 	}
@@ -160,6 +164,7 @@ func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
 
 	// The already-buffered event's message arrives after the cancel above.
 	next, cmd := m.handleDictationTranscribed(dictationTranscribedMsg{
+		sessionID: m.dictation.sessionID,
 		text:      "half-formed transcript",
 		err:       context.Canceled,
 		submit:    true,
@@ -171,6 +176,26 @@ func TestDictationCanceledStreamRaceDoesNotAutoSubmit(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("a raced cancellation must not return a submit command")
+	}
+}
+
+// TestStaleDictationPartialIgnoredWhileLive pins the session-ID gate on
+// handleDictationPartial while a new session is still recording. Cancel-then-
+// stale cases are already covered by the phase guard; this case needs a live
+// phase so only the session check drops the ghost partial.
+func TestStaleDictationPartialIgnoredWhileLive(t *testing.T) {
+	m := model{}
+	m.dictation.sessionID = 2
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m.setComposerState(composerState{text: "user typed this", cursor: len("user typed this")})
+
+	got := m.handleDictationPartial(sttPartialMsg{
+		sessionID: 1,
+		text:      "ghost text from session 1",
+	})
+	if got.composer.text != "user typed this" {
+		t.Fatalf("stale partial while live: got %q, want %q", got.composer.text, "user typed this")
 	}
 }
 

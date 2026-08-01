@@ -119,6 +119,7 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 			if ctx.Err() != nil {
 				return compose(), ctx.Err()
 			}
+			//nolint:staticcheck // Preserve established user-facing error text.
 			return compose(), fmt.Errorf("Deepgram stream error: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {

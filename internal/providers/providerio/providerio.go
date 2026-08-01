@@ -428,11 +428,10 @@ func Redact(message string, secrets ...string) string {
 	}
 	words := strings.Fields(message)
 	for index := 0; index < len(words)-1; index++ {
-		hdr := strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") ||
-			strings.EqualFold(strings.TrimRight(words[index], ":"), "Token") ||
-			strings.EqualFold(strings.TrimRight(words[index], ":"), "X-Api-Key") ||
-			strings.EqualFold(strings.TrimRight(words[index], ":"), "api-key")
-		if hdr && looksLikeToken(words[index+1]) {
+		// Only redact the word after "Bearer" when it is actually token-shaped, so the
+		// provider's own help text ("use Bearer authentication", "Bearer token") is no
+		// longer corrupted into "authorization [REDACTED]". (AUDIT-H7)
+		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") && looksLikeToken(words[index+1]) {
 			words[index+1] = "[REDACTED]"
 		}
 	}
