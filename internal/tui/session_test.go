@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,9 +20,10 @@ import (
 )
 
 type scriptedProvider struct {
-	scripts  [][]zeroruntime.StreamEvent
-	requests []zeroruntime.CompletionRequest
-	calls    int
+	scripts    [][]zeroruntime.StreamEvent
+	requests   []zeroruntime.CompletionRequest
+	beforeCall func(int)
+	calls      int
 }
 
 func (provider *scriptedProvider) StreamCompletion(
@@ -38,6 +40,9 @@ func (provider *scriptedProvider) StreamCompletion(
 	provider.calls++
 	if index >= len(provider.scripts) {
 		index = len(provider.scripts) - 1
+	}
+	if provider.beforeCall != nil {
+		provider.beforeCall(index)
 	}
 	ch := make(chan zeroruntime.StreamEvent, len(provider.scripts[index]))
 	for _, event := range provider.scripts[index] {
@@ -188,7 +193,7 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 		},
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	m := newModel(context.Background(), Options{
 		Cwd:          root,
 		ProviderName: "openai",
@@ -251,7 +256,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		},
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessages := []tea.Msg{}
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newModel(context.Background(), Options{
@@ -358,6 +363,92 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}
 }
 
+func TestPermissionWaitDoesNotCountTowardTurnElapsed(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	base := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	var clockNanos atomic.Int64
+	clockNanos.Store(base.UnixNano())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "hello"),
+		textScript("write blocked"),
+	}}
+	provider.beforeCall = func(index int) {
+		switch index {
+		case 0:
+			clockNanos.Store(base.Add(2 * time.Second).UnixNano())
+		case 1:
+			clockNanos.Store(base.Add(95 * time.Second).UnixNano())
+		}
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+
+	m.now = func() time.Time {
+		return time.Unix(0, clockNanos.Load()).UTC()
+	}
+	m.input.SetValue("write notes")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- execCmd(cmd)
+	}()
+
+	for received := 0; received < 4; {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		switch runtimeMsg.(type) {
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+			continue
+		case permissionRequestMsg:
+			clockNanos.Store(base.Add(92 * time.Second).UnixNano())
+			if status := plainRender(t, next.workingStatusLine()); !strings.Contains(status, "·  2s  ·") || strings.Contains(status, "still generating") {
+				t.Fatalf("live elapsed advanced during permission wait: %q", status)
+			}
+			updated, _ = next.Update(testKeyText("d"))
+			next = updated.(model)
+			if hint := next.quietGenerationHint(); hint != "" {
+				t.Fatalf("permission wait leaked into quiet-generation age: %q", hint)
+			}
+		}
+		received++
+	}
+
+	finalMsg := receiveFinalMessage(t, finalCh)
+	response, ok := finalMsg.(agentResponseMsg)
+	if !ok {
+		t.Fatalf("expected agent response, got %T", finalMsg)
+	}
+	if response.turnElapsed != 5*time.Second {
+		t.Fatalf("turn elapsed = %s, want 5s of active work", response.turnElapsed)
+	}
+	if response.ttft != 5*time.Second {
+		t.Fatalf("ttft = %s, want 5s with permission wait excluded", response.ttft)
+	}
+	if response.ttft > response.turnElapsed {
+		t.Fatalf("ttft = %s exceeds turn elapsed = %s", response.ttft, response.turnElapsed)
+	}
+	updated, _ = next.Update(finalMsg)
+	next = updated.(model)
+
+	answer, ok := findTranscriptRow(next.transcript, rowAssistant)
+	if !ok {
+		t.Fatalf("expected final assistant row, got %#v", next.transcript)
+	}
+	if answer.turnElapsed != 5*time.Second {
+		t.Fatalf("assistant turn elapsed = %s, want 5s", answer.turnElapsed)
+	}
+}
+
 func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	store := testSessionStore(t)
 	root := t.TempDir()
@@ -366,7 +457,7 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 		textScript("write allowed"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 
@@ -414,7 +505,7 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 		textScript("second write"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, grantStore, runtimeMessageCh)
 
@@ -852,7 +943,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 		textScript("never reached"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")
@@ -929,7 +1020,7 @@ func TestCtrlCCancelsAndFlushesCheckpointSessionEvents(t *testing.T) {
 		textScript("never reached"),
 	}}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewScopedWriteFileTool(root, nil))
 	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")
@@ -1053,6 +1144,35 @@ func TestResumedPromptIncludesSessionContext(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected resumed prompt to contain %q, got %q", want, prompt)
 		}
+	}
+}
+
+func TestResumeActiveGoalDoesNotStartAutomaticRun(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "resume_active_goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateGoal(session.SessionID, "Wait for explicit resume", 0); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:     &scriptedProvider{},
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.input.SetValue("/resume " + session.SessionID)
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil || next.pending {
+		t.Fatal("resuming a session unexpectedly started a billed goal run")
+	}
+	if next.activeSession.Goal == nil || next.activeSession.Goal.Status != sessions.GoalStatusActive {
+		t.Fatalf("active goal was not restored: %#v", next.activeSession.Goal)
+	}
+	if !transcriptContains(next.transcript, "run /goal resume to continue") {
+		t.Fatalf("resume did not explain how to continue the goal: %#v", next.transcript)
 	}
 }
 

@@ -23,12 +23,16 @@ type clipboardImageMsg struct {
 	err       error
 }
 
+// readClipboardImage is the OS clipboard image reader. A var so tests can
+// substitute a stub instead of depending on the developer's real clipboard.
+var readClipboardImage = imageinput.ReadClipboardImage
+
 // readClipboardImageCmd reads the OS clipboard for image content off the
 // Update goroutine. Returns a clipboardImageMsg with the bytes, or nil (no
 // command) if there is no image — the caller treats nil as a silent no-op.
 func readClipboardImageCmd() tea.Cmd {
 	return func() tea.Msg {
-		data, mediaType, err := imageinput.ReadClipboardImage()
+		data, mediaType, err := readClipboardImage()
 		if err != nil {
 			return clipboardImageMsg{err: err}
 		}
@@ -54,7 +58,8 @@ func pasteFromClipboardCmd() tea.Cmd {
 // right-click paste (clipboardReadMsg) so a bracketed paste and a right-click
 // paste behave identically. Surfaces with no editable text field (a permission/
 // spec prompt, the MCP manager, an open picker, the detailed transcript) swallow
-// the paste; empty content is a no-op.
+// the paste. The session rename editor accepts text only; empty content is a
+// no-op there rather than an image probe.
 func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// A paste is a deliberate action, same as a keypress or click — it means
 	// the user moved on to something else, so it disarms a stale Esc
@@ -71,6 +76,14 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// toggle instead of going solid.
 	m.lastCharTime = m.now()
 	m.composerCursorVisible = true
+	if m.renamePrompt != nil {
+		if content == "" {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.PasteMsg{Content: sanitizeComposerInput(content)})
+		return m, cmd
+	}
 	if content == "" {
 		// Empty text clipboard — the user may have pasted a screenshot.
 		// Probe the OS clipboard for image content asynchronously.

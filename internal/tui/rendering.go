@@ -1131,7 +1131,13 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 	lines := []string{top, body}
 	if reason := permissionDisplayReason(request.Reason); reason != "" {
-		lines = append(lines, fill(zeroTheme.muted).Render(reason))
+		reasonWidth := width
+		if widthTier(width) != tierTiny {
+			reasonWidth = maxInt(1, width-4)
+		}
+		for _, line := range wrapPlainText(reason, reasonWidth) {
+			lines = append(lines, fill(zeroTheme.muted).Render(line))
+		}
 	}
 	// Surface exactly what the grant covers (file/dir/host) so "always" is a
 	// clear, bounded choice rather than a blind tool-wide yes.
@@ -1467,22 +1473,65 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
 	// diff tools whose body must stay reviewable, and short output.
 	collapsedFooter := ""
-	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && !(!failed && (isExploreTool(name) || isLocalControlTool(name))) {
+	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && (failed || (!isExploreTool(name) && !isLocalControlTool(name))) {
 		collapsedFooter = collapsedToolFooter(row.detail)
 	}
 	if collapsedFooter != "" && !row.expanded {
-		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		head := toolCardHead(name, headTarget, headArg, toolResultBudgetTag(row.meta), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
 	}
 	bodyOpts := opts
 	bodyOpts.expanded = row.expanded
 	body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
-	head := toolCardHead(name, headTarget, headArg, body.headTag, row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+	head := toolCardHead(name, headTarget, headArg, joinToolHeadTags(body.headTag, toolResultBudgetTag(row.meta)), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 	footer := body.footer
 	if collapsedFooter != "" && row.expanded && footer == "" {
 		footer = "▾ collapse"
 	}
 	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
+}
+
+func joinToolHeadTags(tags ...string) string {
+	var present []string
+	for _, tag := range tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			present = append(present, tag)
+		}
+	}
+	return strings.Join(present, " · ")
+}
+
+func toolResultBudgetTag(meta map[string]string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	reduced := meta["command_output_reduced"] == "true" || meta["truncated"] == "true"
+	if !reduced {
+		return ""
+	}
+	original, originalErr := strconv.Atoi(meta["output_budget_estimated_original_tokens"])
+	retained, retainedErr := strconv.Atoi(meta["output_budget_estimated_retained_tokens"])
+	if commandOriginal, err := strconv.Atoi(meta["command_output_original_tokens"]); err == nil {
+		original, originalErr = commandOriginal, nil
+	}
+	if commandRetained, err := strconv.Atoi(meta["command_output_retained_tokens"]); err == nil {
+		retained, retainedErr = commandRetained, nil
+	}
+	tag := "compact output"
+	if originalErr == nil && retainedErr == nil && original > retained {
+		tag = fmt.Sprintf("compact %s→%s tok", compactCount(original), compactCount(retained))
+	}
+	if strings.TrimSpace(meta["spill_path"]) != "" {
+		tag += " · raw saved"
+	}
+	return tag
+}
+
+func compactCount(value int) string {
+	if value < 1000 {
+		return strconv.Itoa(value)
+	}
+	return fmt.Sprintf("%.1fk", float64(value)/1000)
 }
 
 // confirmationVerbPattern matches a single-line success confirmation that only

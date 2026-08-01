@@ -38,7 +38,8 @@ type transcriptRow struct {
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
 	hint       string       // one-line actionable hint, rendered faintly below error rows
 	arg        string       // secondary argument hint (pattern/command), for tool call rows
-	runID      int          // owning run, for tool call rows (0 = rehydrated/unknown)
+	meta       map[string]string
+	runID      int // owning run, for tool call rows (0 = rehydrated/unknown)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
 	expanded   bool // collapsible transcript rows, e.g. provider thoughts
@@ -398,8 +399,10 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.GrantMatched {
 		parts = append(parts, "approved by saved permission")
 	}
-	if event.Reason != "" {
-		parts = append(parts, permissionDisplayReason(event.Reason))
+	if event.Action == agent.PermissionActionPrompt {
+		if reason := permissionDisplayReason(event.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
 	}
 	if event.Block != nil {
 		parts = append(parts, permissionBlockDetail(event))
@@ -438,7 +441,9 @@ func permissionBlockDetail(event agent.PermissionEvent) string {
 	if path := strings.TrimSpace(event.Block.Path); path != "" {
 		parts = append(parts, "path: "+path)
 	}
-	if reason := permissionDisplayReason(event.Block.Reason); reason != "" {
+	reason := permissionDisplayReason(event.Block.Reason)
+	eventReason := permissionDisplayReason(event.Reason)
+	if reason != "" && reason != eventReason {
 		parts = append(parts, reason)
 	}
 	return strings.Join(parts, "  ")

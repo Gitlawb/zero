@@ -336,7 +336,7 @@ func TestRunProactiveCompactionTriggers(t *testing.T) {
 	}
 
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	result, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:               registry,
@@ -364,7 +364,7 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 		},
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	_, err := Run(context.Background(), strings.Repeat("y", 8000), provider, Options{
 		Registry:       registry,
@@ -376,6 +376,43 @@ func TestRunNoCompactionWhenContextWindowZero(t *testing.T) {
 	}
 	if provider.summarizeCalls != 0 {
 		t.Fatalf("expected no compaction when ContextWindow==0, got %d summarize calls", provider.summarizeCalls)
+	}
+}
+
+func TestMaybeCompactStopsAfterSupersededReadsReachThreshold(t *testing.T) {
+	body := strings.Repeat("same source line\n", 1000)
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		toolCallWithArgs("old", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "old", Content: body},
+		toolCallWithArgs("new", "read_file", `{"path":"a.go"}`),
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "new", Content: body},
+	}
+	pruned, reclaimed := pruneSupersededReadResults(messages)
+	if reclaimed <= 0 {
+		t.Fatal("test setup did not reclaim superseded read output")
+	}
+	prunedSize := estimateTokens(pruned)
+	if estimateTokens(messages) <= prunedSize {
+		t.Fatal("test setup does not cross the compaction threshold")
+	}
+
+	provider := &summarizeRecordingProvider{}
+	state := &compactionState{
+		enabled:      true,
+		threshold:    prunedSize,
+		preserveLast: 2,
+	}
+	got := state.maybeCompact(context.Background(), provider, messages, nil)
+
+	if provider.summarizeCalls != 0 {
+		t.Fatalf("cheap pruning should avoid the summarizer, got %d calls", provider.summarizeCalls)
+	}
+	if state.lowWaterMark != prunedSize {
+		t.Fatalf("lowWaterMark = %d, want %d", state.lowWaterMark, prunedSize)
+	}
+	if !strings.Contains(got[2].Content, "superseded identical") || got[4].Content != body {
+		t.Fatalf("unexpected pruned messages: %#v", got)
 	}
 }
 
@@ -427,7 +464,7 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	// the compaction closure. read_file also returns a sizeable result that
 	// bloats the history.
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	// ContextWindow large enough that proactive compaction never triggers, so
 	// only the reactive path can save the run.
@@ -491,7 +528,7 @@ func TestRunReactiveRetryDoesNotDoubleEmitText(t *testing.T) {
 		finalText:   "recovered",
 	}
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
 
 	var deltas []string
 	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{

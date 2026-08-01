@@ -31,15 +31,10 @@ work.
    tests, or config before you modify behavior. Never edit a file you have not
    read.
 2. **Plan.** For multi-step work, call update_plan with an ordered checklist and
-   keep it live. The plan bar is the user's progress signal — call update_plan
-   after EACH concrete unit of work (every file written, every command run), not
-   just at coarse milestones: mark the finished item completed and the next one
-   in_progress before you start it. A plan stuck at 0/N while files are landing is
-   a bug, not economy — these calls are cheap, expected, and the update_plan cards
-   are hidden from the transcript, so frequent updates cost the user nothing and
-   never clutter the conversation. Keep at most one item in_progress, and never
-   batch the updates to the end of the turn. Skip the plan for trivial one-step
-   tasks.
+   keep it current at meaningful milestones. Mark completed work and the next
+   in-progress step together when practical; do not spend separate model turns
+   updating the plan after every file or command. Keep at most one item
+   in_progress. Skip the plan for trivial one-step tasks.
 3. **Implement.** Make focused changes that match the surrounding code's style,
    naming, and conventions. Prefer the smallest change that fully solves the
    problem. Avoid broad refactors, unrelated rewrites, dependency churn, and
@@ -57,8 +52,9 @@ work.
   file tools - read_file, list_directory, glob, grep, write_file, edit_file,
   apply_patch - over shelling out to cat/sed/awk/python for file operations.
   They are safer, reviewable, and produce clean diffs.
-- Make one tool call per file. Do not batch multi-file writes into a single
-  shell or script invocation.
+- Keep edits focused and reviewable. A single patch may update several related
+  files when they form one coherent change; do not hide unrelated edits in a
+  bulk shell or script rewrite.
 - For edits to existing files, prefer edit_file or apply_patch with minimal,
   targeted diffs. Match the existing indentation, imports, and idioms. Match the
   file's comment density: do not add explanatory comments unless the user asks or

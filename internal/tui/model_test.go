@@ -352,7 +352,7 @@ func TestClearCommandResetsTranscript(t *testing.T) {
 
 func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{Registry: registry})
 	m.input.SetValue("/tools")
 
@@ -463,7 +463,7 @@ func TestPlanCommandHandlesMissingPlanTool(t *testing.T) {
 
 func TestContextCommandShowsSessionState(t *testing.T) {
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(tools.NewScopedReadFileTool(".", nil))
 	m := newModel(context.Background(), Options{
 		Cwd:            `D:\codings\Opensource\Zero`,
 		ProviderName:   "openai",
@@ -886,8 +886,9 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got picker=%#v", next.picker)
 	}
-	// Every row carries the session title (in the Label, after the timestamp) and
-	// resolves to / shows the session id (Value + Meta), for both sessions.
+	// Every row carries the session title after the timestamp and resolves by its
+	// hidden session id. Raw ids are implementation detail and must not consume
+	// the visible title width.
 	findByID := func(id string) (pickerItem, bool) {
 		for _, item := range next.picker.items {
 			if item.Value == id {
@@ -904,16 +905,51 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if !strings.Contains(item.Meta, want.id) {
-			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
+		if item.Meta != "" {
+			t.Fatalf("picker %q should not expose raw session id metadata, got %q", want.title, item.Meta)
 		}
 	}
-	// The picker overlay renders the titles and ids.
+	// The picker overlay renders clean title rows plus a position indicator.
 	view := viewString(next.View())
-	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
+	for _, want := range []string{"Resume a session", "Newer", "Older", "1 / 2"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session picker view missing %q:\n%s", want, view)
 		}
+	}
+	for _, id := range []string{first.SessionID, second.SessionID} {
+		if strings.Contains(view, id) {
+			t.Fatalf("session picker view should not expose raw id %q:\n%s", id, view)
+		}
+	}
+
+	// IDs remain searchable even though they are hidden from normal rows.
+	searchByID := *next.picker
+	searchByID.query = first.SessionID
+	searchByID.applyQuery()
+	if len(searchByID.items) != 1 || searchByID.items[0].Value != first.SessionID {
+		t.Fatalf("hidden session id should remain searchable, got %#v", searchByID.items)
+	}
+
+	// An empty result set reports an unambiguous zero position.
+	noResults := next
+	noResults.picker.query = "__missing_session__"
+	noResults.picker.applyQuery()
+	if view := viewString(noResults.View()); !strings.Contains(view, "0 / 0") {
+		t.Fatalf("empty session search should show 0 / 0:\n%s", view)
+	}
+}
+
+func TestSessionPickerLabelAlignsTitles(t *testing.T) {
+	today := sessionPickerLabel("20:47:50", "Today title")
+	older := sessionPickerLabel("Jul 24 10:47", "Older title")
+
+	todayColumn := strings.Index(today, "Today title")
+	olderColumn := strings.Index(older, "Older title")
+	if todayColumn < 0 || olderColumn < 0 {
+		t.Fatalf("sessionPickerLabel omitted a title: today=%q older=%q", today, older)
+	}
+	if todayColumn != olderColumn {
+		t.Fatalf("title columns differ: today=%d (%q), older=%d (%q)", todayColumn, today, olderColumn, older)
 	}
 }
 
@@ -1396,7 +1432,7 @@ func TestBeginRunPreparesRunCompletionWarningEachTurn(t *testing.T) {
 	})
 
 	m = m.beginRun(nil)
-	m = m.beginRun(nil)
+	_ = m.beginRun(nil)
 
 	if prepares != 2 {
 		t.Fatalf("PrepareRunCompletionWarning called %d times, want once per run", prepares)
@@ -1606,6 +1642,9 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
 		t.Fatalf("focused permission prompt must not render risk labels, got %q", view)
 	}
+	if count := strings.Count(view, request.Reason); count != 1 {
+		t.Fatalf("focused permission reason rendered %d times, want once:\n%s", count, view)
+	}
 }
 
 func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
@@ -1716,6 +1755,34 @@ func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
 	for _, blocked := range []string{"risk:", "risk=", "block=", "mode=", "permission=", "side_effect=", "autonomy="} {
 		if strings.Contains(rendered, blocked) {
 			t.Fatalf("denied permission row must not render %q, got %q", blocked, rendered)
+		}
+	}
+}
+
+func TestPermissionRowRendersIdenticalEventAndBlockReasonOnce(t *testing.T) {
+	const reason = "Reading /home/dev/.nvm requires access outside the workspace."
+	event := agent.PermissionEvent{
+		ToolCallID:     "call_read",
+		ToolName:       "list_directory",
+		Action:         agent.PermissionActionDeny,
+		DecisionAction: agent.PermissionDecisionDeny,
+		SideEffect:     "read",
+		Reason:         reason,
+		Scope:          "/home/dev/.nvm",
+		Block: &sandbox.Block{
+			Code:   sandbox.BlockOutsideWorkspace,
+			Path:   "/home/dev/.nvm",
+			Reason: reason,
+		},
+	}
+
+	row := permissionTranscriptRow(event)
+	if count := strings.Count(event.Reason+"\n"+row.detail, reason); count != 1 {
+		t.Fatalf("permission reason represented %d times, want once: detail=%q", count, row.detail)
+	}
+	for _, want := range []string{"denied by user", "outside workspace", "path: /home/dev/.nvm"} {
+		if !strings.Contains(row.detail, want) {
+			t.Fatalf("permission detail missing %q: %q", want, row.detail)
 		}
 	}
 }
@@ -2470,9 +2537,36 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 	m.width, m.height = 100, 30
 	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "hi", final: true})
 
-	// Idle, empty composer, managed mode -> the discoverability hint shows.
-	if h := plainRender(t, m.composerIdleHint()); !strings.Contains(h, "shortcuts") {
-		t.Fatalf("expected idle hint, got %q", h)
+	for _, test := range []struct {
+		name  string
+		width int
+	}{
+		{name: "medium", width: 80},
+		{name: "full", width: 100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			idle := m
+			idle.width = test.width
+
+			// Idle, empty composer, managed mode -> the discoverability hint shows.
+			hint := plainRender(t, idle.composerIdleHint())
+			if !strings.Contains(hint, "shortcuts") {
+				t.Fatalf("expected idle hint, got %q", hint)
+			}
+			if strings.Contains(hint, "sidebar") {
+				t.Fatalf("empty sidebar should not be advertised, got %q", hint)
+			}
+
+			withSidebar := idle
+			withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+				t.Fatalf("available sidebar should be advertised, got %q", hint)
+			}
+			withSidebar.sidebarHidden = true
+			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
+				t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+			}
+		})
 	}
 	// Hidden during a run.
 	busy := m

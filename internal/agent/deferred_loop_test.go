@@ -150,7 +150,7 @@ func assertNoDeferredDiscoveryMessage(t *testing.T, request zeroruntime.Completi
 func TestPartitionToolsInactiveIsByteIdenticalAndDropsToolSearch(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
 	registry.Register(fakeDeferredTool{name: "mcp__srv__a", desc: "tool a"})
 	registry.Register(fakeToolSearchTool{})
 
@@ -305,8 +305,8 @@ func TestPartitionToolsActiveExcludesDisabledDeferredFromDiscoveryAndExposed(t *
 func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(root)) // non-deferred builtin
-	registry.Register(fakeToolSearchTool{})        // non-deferred, must stay exposed
+	registry.Register(tools.NewScopedReadFileTool(root, nil)) // non-deferred builtin
+	registry.Register(fakeToolSearchTool{})                   // non-deferred, must stay exposed
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
 
@@ -341,15 +341,15 @@ func TestPartitionToolsActiveHidesUnloadedExposesLoaded(t *testing.T) {
 	if search.Description != discovery || !strings.Contains(search.Description, "mcp") {
 		t.Fatalf("tool_search description must carry discovery source, got %q", search.Description)
 	}
-	if strings.Contains(search.Description, "mcp__srv__alpha") {
-		t.Fatalf("tool_search description must not list already-loaded tool names, got %q", search.Description)
+	if !strings.Contains(search.Description, "mcp__srv__alpha") {
+		t.Fatalf("stable tool_search catalog must retain already-loaded tool names, got %q", search.Description)
 	}
 	if !strings.Contains(search.Description, "mcp__srv__beta") {
 		t.Fatalf("tool_search description must list exact hidden tool names, got %q", search.Description)
 	}
 }
 
-func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
+func TestPartitionToolsActiveNothingHiddenKeepsStableCatalog(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
@@ -368,9 +368,8 @@ func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
 	if !exposedNames["tool_search"] {
 		t.Fatalf("expected tool_search exposed on active path, got %#v", exposed)
 	}
-	// No hidden tools means no dynamic discovery text is needed.
-	if reminder != "" {
-		t.Fatalf("expected empty discovery text when nothing is hidden, got %q", reminder)
+	if !strings.Contains(reminder, "mcp__srv__alpha") || !strings.Contains(reminder, "mcp__srv__beta") {
+		t.Fatalf("stable catalog must retain all deferred names after loading, got %q", reminder)
 	}
 }
 

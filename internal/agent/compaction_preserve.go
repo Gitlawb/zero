@@ -610,15 +610,6 @@ func formatPreservedState(plan string, task *preservedTaskState, edits, tools, s
 	return preservedStateLabel + "\n" + string(encoded)
 }
 
-// parsePreservedState recovers the plan + skills from a prior summary's preserved
-// block. JSON escaping makes this lossless even when a skill body contains
-// markdown headings, code fences, or quotes. Returns ("", nil) when absent or
-// malformed.
-func parsePreservedState(summaryContent string) (string, []skillEntry) {
-	state := parsePreservedStateBlock(summaryContent)
-	return state.Plan, preservedSkillsToEntries(state.Skills)
-}
-
 func parsePreservedStateBlock(summaryContent string) preservedState {
 	idx := strings.LastIndex(summaryContent, preservedStateLabel)
 	if idx < 0 {

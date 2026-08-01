@@ -29,7 +29,7 @@ func tempDirOutsideDefaultTemp(t *testing.T) string {
 }
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
-	toolset := CoreReadOnlyTools(t.TempDir())
+	toolset := CoreReadOnlyToolsScoped(t.TempDir(), nil)
 	if len(toolset) != 9 {
 		t.Fatalf("expected 9 core read-only tools, got %d", len(toolset))
 	}
@@ -144,7 +144,7 @@ func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
 }
 
 func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
-	readOnly := CoreReadOnlyTools(t.TempDir())
+	readOnly := CoreReadOnlyToolsScoped(t.TempDir(), nil)
 	for _, tool := range readOnly {
 		if tool.Name() == "web_fetch" {
 			t.Fatal("web_fetch should not be exposed by read-only core tools")
@@ -152,7 +152,7 @@ func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
 	}
 
 	found := false
-	for _, tool := range CoreTools(t.TempDir()) {
+	for _, tool := range CoreToolsScoped(t.TempDir(), nil) {
 		if tool.Name() == "web_fetch" {
 			found = true
 			break
@@ -165,7 +165,7 @@ func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
 
 func TestRegistryRunsToolsThroughSafePath(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(NewReadFileTool(t.TempDir()))
+	registry.Register(NewScopedReadFileTool(t.TempDir(), nil))
 
 	result := registry.Run(context.Background(), "read_file", map[string]any{
 		"path": "missing.txt",
@@ -229,7 +229,7 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
@@ -262,7 +262,7 @@ func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
 		root := t.TempDir()
 		outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 		registry := NewRegistry()
-		registry.Register(NewWriteFileTool(root))
+		registry.Register(NewScopedWriteFileTool(root, nil))
 		engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy()})
 
 		result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
@@ -302,7 +302,7 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	registry.Register(NewWriteFileTool(root))
+	registry.Register(NewScopedWriteFileTool(root, nil))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
@@ -513,5 +513,46 @@ func TestIsDeferralEligibleDecouplesFromDeferred(t *testing.T) {
 	optedOut := fakeDeferredTool{baseTool: baseTool{name: "opted_out"}, deferred: false}
 	if IsDeferralEligible(optedOut) {
 		t.Fatal("IsDeferralEligible(optedOut) = true, want false")
+	}
+}
+
+func TestOptionalBuiltinsUseDeferredDiscovery(t *testing.T) {
+	wantDeferred := map[string]bool{
+		"bash":               true,
+		"browser_action":     true,
+		"browser_click":      true,
+		"browser_connect":    true,
+		"browser_install":    true,
+		"browser_launch":     true,
+		"browser_open":       true,
+		"browser_press":      true,
+		"browser_snapshot":   true,
+		"browser_type":       true,
+		"capture_artifact":   true,
+		"desktop_action":     true,
+		"desktop_snapshot":   true,
+		"desktop_windows":    true,
+		"lsp_navigate":       true,
+		"read_minified_file": true,
+		"terminal_session":   true,
+		"web_fetch":          true,
+		"web_search":         true,
+	}
+	for _, tool := range BuiltinCatalog(t.TempDir()) {
+		if _, listed := wantDeferred[tool.Name()]; listed {
+			if !IsDeferred(tool) {
+				t.Errorf("%s should be deferred", tool.Name())
+			}
+			delete(wantDeferred, tool.Name())
+		} else if tool.Name() == "read_file" || tool.Name() == "grep" || tool.Name() == ExecCommandToolName || tool.Name() == "edit_file" {
+			if IsDeferred(tool) {
+				t.Errorf("essential tool %s must stay eager", tool.Name())
+			}
+		} else if IsDeferred(tool) {
+			t.Errorf("unexpected deferred builtin %s", tool.Name())
+		}
+	}
+	for missing := range wantDeferred {
+		t.Errorf("deferred builtin %s missing from catalog", missing)
 	}
 }

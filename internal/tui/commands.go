@@ -27,7 +27,7 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
-	commandRetitle
+	commandRename
 	commandSpec
 	commandInit
 	commandCompact
@@ -50,6 +50,7 @@ const (
 	commandBTW
 	commandSkills
 	commandLoop
+	commandGoal
 	commandVoice
 	commandSTTModel
 	commandUnknown
@@ -225,11 +226,11 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandResume,
 	},
 	{
-		name:        "/retitle",
-		usage:       "/retitle",
+		name:        "/rename",
+		usage:       "/rename [title]",
 		group:       commandGroupSession,
-		description: "Generate concise titles for resumable sessions.",
-		kind:        commandRetitle,
+		description: "Rename the current session (no arg opens an editor).",
+		kind:        commandRename,
 	},
 	{
 		name:        "/spec",
@@ -339,6 +340,13 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandLoop,
 	},
 	{
+		name:        "/goal",
+		usage:       "/goal [--tokens N] <objective> | status | pause | resume | edit | clear",
+		group:       commandGroupSession,
+		description: "Create and pursue one persistent objective for this session.",
+		kind:        commandGoal,
+	},
+	{
 		name:        "/help",
 		usage:       "/help",
 		group:       commandGroupMeta,
@@ -432,32 +440,6 @@ func resolveCommand(name string) (commandDefinition, bool) {
 		}
 	}
 	return commandDefinition{}, false
-}
-
-func listCommandNames() []string {
-	names := make([]string, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		names = append(names, command.name)
-		names = append(names, command.aliases...)
-	}
-	return names
-}
-
-func formatCommandHelpLines() []string {
-	return formatGroupedCommandHelpLines()
-}
-
-func formatGroupedCommandHelpLines() []string {
-	lines := make([]string, 0, len(commandDefinitions)+len(commandGroupOrder()))
-	for _, group := range commandGroupOrder() {
-		groupLines := commandHelpLinesForGroup(group)
-		if len(groupLines) == 0 {
-			continue
-		}
-		lines = append(lines, string(group)+":")
-		lines = append(lines, groupLines...)
-	}
-	return lines
 }
 
 func formatGroupedCommandHelp() string {

@@ -77,11 +77,10 @@ func TestRegisterToolSearchIfEligibleSkipsWhenThresholdZero(t *testing.T) {
 	}
 }
 
-func TestDeferredEligibleCountIgnoresCoreTools(t *testing.T) {
+func TestDeferredEligibleCountIncludesOptionalBuiltins(t *testing.T) {
 	registry := newCoreRegistry(t.TempDir())
-	// newCoreRegistry holds only built-ins; none implement Deferred().
-	if got := deferredEligibleCount(registry, agent.PermissionModeAuto, nil, nil); got != 0 {
-		t.Fatalf("deferredEligibleCount(core) = %d, want 0", got)
+	if got := deferredEligibleCount(registry, agent.PermissionModeAuto, nil, nil); got < 3 {
+		t.Fatalf("deferredEligibleCount(core) = %d, want at least 3 optional built-ins", got)
 	}
 }
 

@@ -153,10 +153,7 @@ func unsafeCommandPrefix(prefix []string) bool {
 			return true
 		}
 	}
-	if unsafeCommandPrefixLauncher(prefix[0]) {
-		return true
-	}
-	return false
+	return unsafeCommandPrefixLauncher(prefix[0])
 }
 
 func unsafeCommandPrefixPart(part string) bool {

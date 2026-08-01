@@ -51,10 +51,8 @@ request, or completing an implementation task:
    or run focused tests with `-race`, when concurrency is affected.
 4. **Build**: `go run ./cmd/zero-release build`.
 5. **Smoke test**: `go run ./cmd/zero-release smoke`.
-6. **Advisory lint**:
-   `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
-7. **Security**:
-   `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
+6. **Advisory lint**: `make lint-static`.
+7. **Security**: `make vulncheck`.
 8. **Diff hygiene**: `git diff HEAD --check` (covers staged and unstaged
    tracked changes).
 

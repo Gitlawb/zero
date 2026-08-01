@@ -427,13 +427,6 @@ type Result struct {
 	IncompleteReason string
 }
 
-// Truncated reports whether the final response ended abnormally (cut off at the
-// output token cap or withheld by a content filter) rather than completing
-// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
-func (result Result) Truncated() bool {
-	return result.FinishReason != ""
-}
-
 // TruncationNotice returns a user-facing warning when the final response was
 // truncated, or "" for a normal completion. Shared by the CLI and TUI so the
 // wording stays consistent.

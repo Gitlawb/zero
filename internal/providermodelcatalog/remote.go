@@ -132,6 +132,8 @@ func ModelsDevProviderID(provider providercatalog.Descriptor) string {
 		return "zai"
 	case "minimaxi-cn":
 		return "minimax"
+	case "fireworks":
+		return "fireworks-ai"
 	default:
 		return strings.TrimSpace(provider.ID)
 	}

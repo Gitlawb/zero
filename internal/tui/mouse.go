@@ -568,10 +568,6 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - rect.y}, true
 }
 
-func (m model) overlayMouseTop(overlayHeight int, width int) int {
-	return m.overlayMouseRect(overlayHeight, width).y
-}
-
 func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 	if overlayHeight <= 0 {
 		return tuiRect{}

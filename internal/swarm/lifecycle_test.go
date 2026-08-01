@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -217,6 +218,141 @@ func TestPermanentErrorNoRetry(t *testing.T) {
 	}
 }
 
+func TestLifecycleAdmissionRejectedAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+	sw.Close()
+
+	if _, err := sw.Spawn(Policy{}, "team", "teammate", "task", ""); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("Spawn after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if _, err := sw.Handoff(Policy{}, "team", "task", "teammate", "note"); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("Handoff after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if _, err := sw.AdoptOrphans(Policy{}, "team", "teammate"); !errors.Is(err, ErrSwarmClosed) {
+		t.Fatalf("AdoptOrphans after Close error = %v, want ErrSwarmClosed", err)
+	}
+	if got := len(l.recorded()); got != 0 {
+		t.Fatalf("launches after Close = %d, want 0", got)
+	}
+}
+
+func TestCloseDoesNotLaunchQueuedMembers(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	sw := newSwarmFor(t, l)
+
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		if err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if got := len(l.recorded()); got != 2 {
+		t.Fatalf("initial launches = %d, want 2 with one queued", got)
+	}
+
+	sw.Close()
+	if got := len(l.recorded()); got != 2 {
+		t.Fatalf("launches after Close = %d, want queued member not launched", got)
+	}
+	for _, id := range ids {
+		task, ok := sw.Coordinator().Get(id)
+		if !ok || !task.Status.terminal() {
+			t.Fatalf("task %s after Close = %+v, want terminal", id, task)
+		}
+	}
+}
+
+func TestClosePreventsMemberRetry(t *testing.T) {
+	started := make(chan struct{}, maxMemberRestarts+1)
+	release := make(chan struct{})
+	l := FuncLauncher{Run: func(context.Context, MemberSpec) (MemberResult, error) {
+		started <- struct{}{}
+		<-release
+		return MemberResult{}, ErrMemberTemporary
+	}}
+	sw := newSwarmFor(t, l)
+	_, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial member did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after retryable member exit")
+	}
+	select {
+	case <-started:
+		t.Fatal("member retried after Close")
+	default:
+	}
+}
+
+func TestCloseWaitsForMemberWatchers(t *testing.T) {
+	release := make(chan struct{})
+	l := FuncLauncher{Run: func(context.Context, MemberSpec) (MemberResult, error) {
+		<-release
+		return MemberResult{Result: "done"}, nil
+	}}
+	sw := newSwarmFor(t, l)
+	id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	waitFor(t, "task running", func() bool {
+		task, ok := sw.Coordinator().Get(id)
+		return ok && task.Status == StatusRunning
+	})
+
+	const callers = 3
+	closing := make(chan struct{}, callers)
+	closed := make(chan struct{}, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			closing <- struct{}{}
+			sw.Close()
+			closed <- struct{}{}
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		<-closing
+	}
+	select {
+	case <-closed:
+		t.Fatal("a Close caller returned before the member watcher exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for i := 0; i < callers; i++ {
+		select {
+		case <-closed:
+		case <-time.After(3 * time.Second):
+			t.Fatal("all Close callers did not return after the member watcher exited")
+		}
+	}
+}
+
 func TestHandoffDeliversNoteAndRetiresOriginal(t *testing.T) {
 	gate := make(chan struct{})
 	l := newLauncher(okFor)
@@ -363,4 +499,588 @@ func TestSpawnUnknownAgentType(t *testing.T) {
 	if _, err := sw.Spawn(Policy{}, "team", "does-not-exist", "task", ""); err == nil {
 		t.Fatal("Spawn with unknown agent type must error")
 	}
+}
+
+// blockingLauncher blocks inside Launch until its context is cancelled — the
+// shape of a real launcher that waits on a slot, a daemon connection, or a
+// sandbox handshake before it can return a handle.
+type blockingLauncher struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (l *blockingLauncher) Launch(ctx context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestCloseCancelsLauncherBlockedInLaunch is the regression test for holding
+// lifecycle admission across MemberLauncher.Launch. When admission was a read lock
+// held for the caller's whole duration, this deadlocked: the spawn sat inside
+// Launch waiting for its context, while Close waited for the write lock it needed
+// before it could cancel that very context. Neither side could progress, so both
+// the spawn and every Close caller hung.
+//
+// Admission is now a counted ticket, so Close can flip the flag, cancel, and then
+// wait the ticket out.
+func TestCloseCancelsLauncherBlockedInLaunch(t *testing.T) {
+	launcher := &blockingLauncher{entered: make(chan struct{})}
+	sw := newSwarmFor(t, launcher)
+
+	spawned := make(chan error, 1)
+	go func() {
+		_, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		spawned <- err
+	}()
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked against a launcher blocked in Launch")
+	}
+	select {
+	case <-spawned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Spawn never returned after Close cancelled the launch context")
+	}
+}
+
+// TestCloseWaitsForAdmittedSpawn pins the other half of the contract: Close is a
+// barrier, so it must not return while an admitted spawn is still running. Without
+// the lifecycleWork wait, Close could finish while this launch was mid-flight.
+func TestCloseWaitsForAdmittedSpawn(t *testing.T) {
+	entered := make(chan struct{})
+	finish := make(chan struct{})
+	launcher := &gatedLaunchLauncher{entered: entered, finish: finish}
+	sw := newSwarmFor(t, launcher)
+
+	go func() {
+		_, _ = sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an admitted spawn was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(finish)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the admitted spawn finished")
+	}
+}
+
+// TestAdmittedDispatchDoesNotLaunchAfterClose covers an operation that won a
+// lifecycle ticket before shutdown but did not reach dispatch until after Close
+// set closed. The ticket keeps Close from returning early, but it must not permit
+// a new external launch with the already-cancelled swarm context.
+func TestAdmittedDispatchDoesNotLaunchAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+	sw.maxTeamSize = 1
+
+	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
+		t.Fatalf("Register late task: %v", err)
+	}
+	release, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		t.Fatalf("beginLifecycleAdmission: %v", err)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+
+	sw.dispatchAdmitted(MemberSpec{
+		ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team",
+	})
+	release()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the admitted dispatch finished")
+	}
+	if got := len(l.recorded()); got != 0 {
+		t.Fatalf("launches after closed was set = %d, want 0", got)
+	}
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after rejected launch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get("late-task")
+	if !ok {
+		t.Fatal("late task vanished")
+	}
+	if task.Status != StatusFailed || !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("late task after Close = %+v, want failed with ErrSwarmClosed", task)
+	}
+}
+
+// TestCloseBetweenLaunchPrecheckAndReturn rejects and reaps a handle created by
+// a Launch that straddles shutdown. The launch has passed the pre-check when it
+// enters the gate; Close then sets closed and cancels its context before the
+// launcher is allowed to return successfully.
+func TestCloseBetweenLaunchPrecheckAndReturn(t *testing.T) {
+	launcher := &closeRaceLauncher{
+		entered: make(chan struct{}),
+		finish:  make(chan struct{}),
+		waited:  make(chan struct{}),
+	}
+	sw := newSwarmFor(t, launcher)
+
+	spawned := make(chan string, 1)
+	go func() {
+		id, _ := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+		spawned <- id
+	}()
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(launcher.finish)
+
+	var id string
+	select {
+	case id = <-spawned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Spawn did not return after Launch")
+	}
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after late handle was reaped")
+	}
+	select {
+	case <-launcher.waited:
+	default:
+		t.Fatal("late handle was not reaped")
+	}
+
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced Launch = %d, want 0", got)
+	}
+	if got := len(team.liveAgents()); got != 0 {
+		t.Fatalf("registered members after close-raced Launch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get(id)
+	if !ok {
+		t.Fatal("task vanished")
+	}
+	if task.Status != StatusFailed || !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("task after close-raced Launch = %+v, want failed with ErrSwarmClosed", task)
+	}
+}
+
+type closeRaceLauncher struct {
+	entered chan struct{}
+	finish  chan struct{}
+	waited  chan struct{}
+	once    sync.Once
+}
+
+func (l *closeRaceLauncher) Launch(ctx context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return &closeRaceHandle{id: spec.ID, ctx: ctx, waited: l.waited}, nil
+}
+
+type closeRaceHandle struct {
+	id     string
+	ctx    context.Context
+	waited chan struct{}
+	once   sync.Once
+}
+
+func (h *closeRaceHandle) ID() string { return h.id }
+
+func (h *closeRaceHandle) Wait() (MemberResult, error) {
+	<-h.ctx.Done()
+	h.once.Do(func() { close(h.waited) })
+	return MemberResult{}, h.ctx.Err()
+}
+
+// TestCloseBetweenRetryLaunchPrecheckAndReturn is the retry counterpart of
+// TestCloseBetweenLaunchPrecheckAndReturn: a bounded relaunch wins admission and
+// passes the pre-check, then Close lands while the launcher is inside Launch. The
+// relaunched handle must be reaped rather than adopted, so the watcher never
+// resumes supervising a member started after shutdown began — a relaunch whose
+// member goes on to succeed must not be recorded as the task's outcome.
+func TestCloseBetweenRetryLaunchPrecheckAndReturn(t *testing.T) {
+	launcher := &retryCloseRaceLauncher{
+		entered: make(chan struct{}),
+		finish:  make(chan struct{}),
+		late:    &retryLateHandle{id: "teammate-1"},
+	}
+	sw := newSwarmFor(t, launcher)
+
+	id, err := sw.Spawn(Policy{}, "team", "teammate", "task", "")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// The first member exits retryable, so the watcher is now inside the relaunch.
+	select {
+	case <-launcher.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher never entered the relaunch Launch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	close(launcher.finish)
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the late relaunch handle was reaped")
+	}
+	if got := launcher.launchCount(); got != 2 {
+		t.Fatalf("launch attempts = %d, want 2 (initial + one relaunch)", got)
+	}
+	if got := launcher.late.waitCount(); got != 1 {
+		t.Fatalf("late relaunch handle waits = %d, want 1 (reaped, not supervised)", got)
+	}
+
+	team := sw.team("team")
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced relaunch = %d, want 0", got)
+	}
+	if got := len(team.liveAgents()); got != 0 {
+		t.Fatalf("registered members after close-raced relaunch = %d, want 0", got)
+	}
+	task, ok := sw.Coordinator().Get(id)
+	if !ok {
+		t.Fatal("task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("task after close-raced relaunch = %+v, want failed, not the late member's outcome", task)
+	}
+	if task.Result != "" {
+		t.Fatalf("task result after close-raced relaunch = %q, want the late member's result discarded", task.Result)
+	}
+}
+
+// retryCloseRaceLauncher fails its first member with a retryable error, then
+// blocks inside the relaunch's Launch until the test releases it.
+type retryCloseRaceLauncher struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	finish  chan struct{}
+	late    *retryLateHandle
+	once    sync.Once
+}
+
+func (l *retryCloseRaceLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.mu.Lock()
+	l.calls++
+	first := l.calls == 1
+	l.mu.Unlock()
+	if first {
+		return &temporaryHandle{id: spec.ID}, nil
+	}
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return l.late, nil
+}
+
+func (l *retryCloseRaceLauncher) launchCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+// temporaryHandle exits immediately with a retryable error, driving the watcher
+// into its bounded relaunch path.
+type temporaryHandle struct{ id string }
+
+func (h *temporaryHandle) ID() string { return h.id }
+
+func (h *temporaryHandle) Wait() (MemberResult, error) {
+	return MemberResult{}, ErrMemberTemporary
+}
+
+// retryLateHandle models a member whose work does not consult the cancelled
+// launch context and reports success. Adopting it after shutdown would record a
+// post-close result on the task, so a correct shutdown reaps it exactly once and
+// discards what it returns.
+type retryLateHandle struct {
+	id    string
+	mu    sync.Mutex
+	waits int
+}
+
+func (h *retryLateHandle) ID() string { return h.id }
+
+func (h *retryLateHandle) Wait() (MemberResult, error) {
+	h.mu.Lock()
+	h.waits++
+	h.mu.Unlock()
+	return MemberResult{Result: "late result", SessionID: "late-session"}, nil
+}
+
+func (h *retryLateHandle) waitCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.waits
+}
+
+func TestCloseRacesLifecycleAdmission(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	sw := newSwarmFor(t, l)
+
+	const spawns = 64
+	start := make(chan struct{})
+	results := make(chan struct {
+		id  string
+		err error
+	}, spawns)
+	var callers sync.WaitGroup
+	callers.Add(spawns)
+	for i := 0; i < spawns; i++ {
+		go func() {
+			defer callers.Done()
+			<-start
+			id, err := sw.Spawn(Policy{}, "team", "teammate", "racing task", "")
+			results <- struct {
+				id  string
+				err error
+			}{id: id, err: err}
+		}()
+	}
+	closed := make(chan struct{})
+	go func() {
+		<-start
+		sw.Close()
+		close(closed)
+	}()
+
+	close(start)
+	callers.Wait()
+	<-closed
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			if !errors.Is(result.err, ErrSwarmClosed) {
+				t.Fatalf("Spawn racing Close error = %v, want ErrSwarmClosed", result.err)
+			}
+			continue
+		}
+		task, ok := sw.Coordinator().Get(result.id)
+		if !ok || !task.Status.terminal() {
+			t.Fatalf("admitted task %q after Close = %+v, want terminal", result.id, task)
+		}
+	}
+	for _, task := range sw.Coordinator().List() {
+		if !task.Status.terminal() {
+			t.Fatalf("task %q remained %s after Close", task.ID, task.Status)
+		}
+	}
+}
+
+// TestCloseFailsQueuedSpecOnLateCreatedTeam is the regression test for queue
+// sweeping after shutdown begins. Spawn/Handoff/AdoptOrphans calls that obtained
+// tickets before closed flipped can still create a team and append to its queue.
+// Close must wait for those calls before both snapshotting teams and sweeping
+// their queues, or a late-created team's queued task remains pending forever.
+//
+// This drives that interleaving directly: two operations obtain tickets before
+// Close, then the first creates and fills a previously unseen one-slot team and
+// the second queues behind it after Close has flipped closed.
+func TestCloseFailsQueuedSpecOnLateCreatedTeam(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	sw.maxTeamSize = 1
+
+	if _, err := sw.coord.Register("late-task", "late-agent", "team", "late work"); err != nil {
+		t.Fatalf("Register late task: %v", err)
+	}
+	firstRelease, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		t.Fatalf("first beginLifecycleAdmission: %v", err)
+	}
+	secondRelease, err := sw.beginLifecycleAdmission()
+	if err != nil {
+		firstRelease()
+		t.Fatalf("second beginLifecycleAdmission: %v", err)
+	}
+	runningSpec := MemberSpec{ID: "running-agent", TaskID: "running-task", AgentType: "teammate", Team: "team"}
+	queuedSpec := MemberSpec{ID: "late-agent", TaskID: "late-task", AgentType: "teammate", Team: "team"}
+
+	closed := make(chan struct{})
+	go func() {
+		sw.Close()
+		close(closed)
+	}()
+	waitFor(t, "swarm closed state", func() bool {
+		sw.lifecycleMu.RLock()
+		defer sw.lifecycleMu.RUnlock()
+		return sw.closed
+	})
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an admitted ticket was still open")
+	default:
+	}
+
+	// Neither operation touched a team before Close took its old, buggy snapshot.
+	// Finish the team-admission portion of both operations while their tickets are
+	// still held: the first creates the team and fills its only slot; the second
+	// appends to that late-created team's queue.
+	team := sw.team("team")
+	if !team.admit(runningSpec) {
+		t.Fatal("first spec should take the late-created team's only slot")
+	}
+	firstRelease()
+	if team.admit(queuedSpec) {
+		t.Fatal("second spec should queue on the late-created team")
+	}
+	secondRelease()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the admitted ticket released")
+	}
+
+	if got := team.QueueDepth(); got != 0 {
+		t.Fatalf("queue depth after Close = %d, want 0 (late spec swept)", got)
+	}
+	task, ok := sw.Coordinator().Get("late-task")
+	if !ok {
+		t.Fatal("late-queued task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("late-queued task status = %v, want %v (failed, not stranded)", task.Status, StatusFailed)
+	}
+	if !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("late-queued task err = %q, want it to mention %q", task.Err, ErrSwarmClosed.Error())
+	}
+}
+
+// TestAfterExitAdmittedFailsDequeuedSpecAfterClose is the regression test for
+// jatmn's second #776 finding: afterExitAdmitted used to dequeue a queued spec
+// (t.onExit) and launch it unconditionally once its own ticket was granted,
+// even though Close can flip closed in the gap between that dequeue — which
+// makes the spec invisible to Close's clearQueue sweep — and the launch. A
+// launcher that performs work before honoring its cancelled context could then
+// start a brand new worker after shutdown had already begun.
+func TestAfterExitAdmittedFailsDequeuedSpecAfterClose(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+
+	if _, err := sw.coord.Register("queued-task", "queued-agent", "team", "queued work"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	spec := MemberSpec{ID: "queued-agent", TaskID: "queued-task", AgentType: "teammate", Team: "team"}
+
+	// Occupy the only slot, then queue spec behind it.
+	team := &Team{Name: "team", members: map[string]*Member{}, maxSize: 1}
+	if !team.admit(MemberSpec{ID: "running-agent", TaskID: "running-task"}) {
+		t.Fatal("first spec should take the only slot")
+	}
+	if team.admit(spec) {
+		t.Fatal("second spec should queue, not launch, over the cap")
+	}
+
+	// Simulate shutdown racing in between this call's ticket admission (already
+	// granted, hence no beginLifecycleAdmission call here) and its dequeue+launch,
+	// exactly like the finding describes: closed is already set by the time
+	// afterExitAdmitted's post-dequeue check runs.
+	sw.lifecycleMu.Lock()
+	sw.closed = true
+	sw.lifecycleMu.Unlock()
+
+	sw.afterExitAdmitted(team) // running-agent "exits" -> dequeues spec
+
+	if got := team.Running(); got != 0 {
+		t.Fatalf("team running after close-raced drain = %d, want 0 (slot released, not held for a launch)", got)
+	}
+	task, ok := sw.Coordinator().Get("queued-task")
+	if !ok {
+		t.Fatal("dequeued task vanished")
+	}
+	if task.Status != StatusFailed {
+		t.Fatalf("dequeued task status = %v, want %v (failed, not launched)", task.Status, StatusFailed)
+	}
+	if !strings.Contains(task.Err, ErrSwarmClosed.Error()) {
+		t.Fatalf("dequeued task err = %q, want it to mention %q", task.Err, ErrSwarmClosed.Error())
+	}
+	for _, s := range l.recorded() {
+		if s.ID == "queued-agent" {
+			t.Fatal("a spec dequeued after shutdown began must never launch")
+		}
+	}
+}
+
+// gatedLaunchLauncher blocks in Launch until the test releases it, ignoring
+// context cancellation so the test controls exactly when the admitted work ends.
+type gatedLaunchLauncher struct {
+	entered chan struct{}
+	finish  chan struct{}
+	once    sync.Once
+}
+
+func (l *gatedLaunchLauncher) Launch(_ context.Context, spec MemberSpec) (MemberHandle, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-l.finish
+	return &funcHandle{id: spec.ID, done: closedChan()}, nil
+}
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }

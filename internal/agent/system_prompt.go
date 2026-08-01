@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/repomap"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/workspaceseed"
 )
 
@@ -178,21 +179,19 @@ func approvedCommandPrefixContext(options Options) string {
 	return "## Approved Command Prefixes\n\nThe following command prefixes have already been approved and do not need another permission prompt:\n" + strings.Join(lines, "\n")
 }
 
-// specialistDelegationContext nudges the orchestrator to offload read-heavy or
-// parallelizable work to a specialist sub-agent via the Task tool, keeping large
-// tool outputs out of the main context. It renders only when specialists are
-// known (which is only where the Task tool is actually registered), so a run with
-// no delegatable specialists produces the previous prompt unchanged.
+// specialistDelegationContext describes when a specialist earns its extra
+// context and coordination cost. It renders only when specialists are known
+// (which is only where the Task tool is actually registered), so a run with no
+// delegatable specialists produces the previous prompt unchanged.
 func specialistDelegationContext(options Options) string {
 	if len(options.Specialists) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("<specialists>\n")
-	b.WriteString("Delegate focused or read-heavy work to a specialist sub-agent with the Task tool instead of doing it inline. ")
-	b.WriteString("When a request matches a specialist's purpose, delegate to it proactively — you do not need the user to ask first. ")
-	b.WriteString("This keeps large tool outputs — searches, file dumps, multi-step exploration — out of your own context, so you stay fast and token-efficient. ")
-	b.WriteString("Prefer delegating codebase search and exploration; for independent subtasks, launch several specialists in parallel. Handle small, direct edits yourself.\n")
+	b.WriteString("Use the Task tool when a specialist's focused context, expertise, or an independent parallel subtask is likely to improve quality or reduce total context. ")
+	b.WriteString("Do not delegate small direct work, duplicate exploration, or split sequential steps merely because a specialist is available. ")
+	b.WriteString("When delegating, give a bounded assignment and consume its concise evidence instead of importing a long transcript.\n")
 	b.WriteString("Available specialists (call Task with the matching name when the task fits its purpose):\n")
 	for _, info := range options.Specialists {
 		name := strings.TrimSpace(info.Name)
@@ -310,11 +309,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("<environment>\n")
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
-	if runtime.GOOS == "windows" {
-		b.WriteString("Shell syntax: Windows cmd.exe syntax for exec_command/bash tools. To put | & > < etc inside an arg value, use double quotes around the value, not single quotes (single quotes do not protect metachars in cmd.exe): gh --jq \".a | b\", go test -run \"A|B\". Do not pipe to or invoke POSIX coreutils from Git for Windows (usr\\bin head/grep/tail/cat/...): they are MSYS binaries and fail under the write-restricted sandbox; use native Zero tools (grep, read_file, list_directory, glob) or cmd.exe findstr/more instead, or sandbox_permissions require_escalated only when host-level execution is truly required. Prefer the workdir/cwd argument over cd when changing directories.\n")
-	} else {
-		b.WriteString("Shell syntax: /bin/sh syntax for exec_command/bash tools; prefer the workdir/cwd argument instead of cd when changing directories.\n")
-	}
+	b.WriteString(tools.HostShellEnvironmentGuidance() + "\n")
 	if branch := gitBranchForPrompt(cwd); branch != "" {
 		b.WriteString("Git branch: " + branch + "\n")
 	}

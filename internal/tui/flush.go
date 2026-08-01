@@ -46,7 +46,7 @@ func (m model) settledRow(row transcriptRow, rc rowContext) bool {
 		if row.id != "" && rc.resolved[rcKey(row.runID, row.id)] {
 			return true
 		}
-		return !(m.pending && row.runID != 0 && row.runID == m.activeRunID)
+		return !m.pending || row.runID == 0 || row.runID != m.activeRunID
 	case rowPermission:
 		event := row.permission
 		if event == nil || event.ToolCallID == "" || event.Action != agent.PermissionActionPrompt {
@@ -57,7 +57,7 @@ func (m model) settledRow(row transcriptRow, rc rowContext) bool {
 		}
 		// An undecided prompt renders live (with the modal card) until its
 		// decision lands or its run ends.
-		return !(m.pending && row.runID != 0 && row.runID == m.activeRunID)
+		return !m.pending || row.runID == 0 || row.runID != m.activeRunID
 	default:
 		// User/system/error/assistant/ask-user rows are appended in final form;
 		// welcome rows render nothing and settle trivially.

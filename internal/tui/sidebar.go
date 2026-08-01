@@ -65,7 +65,7 @@ func (m model) sidebarToggleAllowed() bool {
 		return false
 	}
 	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil || m.suggestionsActive() {
 		return false
 	}
 	// Home/welcome screen: stay single-column until there's real conversation.
@@ -113,7 +113,7 @@ func (m model) sidebarAvailable() bool {
 	// suggestionsActive() guard, so clicks still go to the palette and not to the
 	// sidebar rows underneath it.
 	if m.setup.visible || m.helpOverlay || m.leaderHelpOverlay || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil {
+		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil {
 		return false
 	}
 	// Home/welcome screen: stay single-column until there's real conversation, so
