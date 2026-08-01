@@ -264,7 +264,12 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	// A deadline on the plan context fixes that with the machinery a user stop
 	// already proves works, and the walk keeps its skip-the-rest behaviour for
 	// tasks not yet dispatched.
-	if wall := plan.Budget().MaxWall; wall > 0 {
+	// ONE SOURCE FOR THE WALL, read here and at the deadline below. Two sites
+	// reading the budget differently is how they drift: this one bounds the
+	// children through the context, that one skips tasks not yet dispatched, and
+	// a plan whose backstop reached only one of them would kill work in flight
+	// while still dispatching more, or the reverse.
+	if wall := planWallBudget(plan.Budget()); wall > 0 {
 		var cancelWall context.CancelFunc
 		ctx, cancelWall = context.WithTimeout(ctx, wall)
 		defer cancelWall()
@@ -294,7 +299,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	spend := &planSpend{limit: int64(plan.Budget().MaxTokens)}
 
 	deadline := time.Time{}
-	if wall := plan.Budget().MaxWall; wall > 0 {
+	if wall := planWallBudget(plan.Budget()); wall > 0 {
 		deadline = time.Now().Add(wall)
 	}
 	// One stall timeout for the whole plan, resolved once.
@@ -817,6 +822,37 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 		"## Your task\n\n" + task.Prompt
 }
 
+// unmeteredWallBudget is the wall bound applied to a plan that asked for NO
+// bound of any kind.
+//
+// EVERY PLAN SHOULD HAVE AT LEAST ONE. A plan with no max_tokens has nothing to
+// meter against — and on a provider that reports no usage at all, max_tokens
+// would not have bounded it either: the meter reads the child's usage events,
+// and a provider that emits none leaves it at zero forever while the work runs.
+// Nothing then stops the plan except the work finishing.
+//
+// Generous on purpose. Measured plans on this repo ran 3-5 minutes of wall time;
+// an hour is far beyond any of them and exists to catch the runaway, not to
+// discipline a slow plan. A caller who wants longer says so, and one who set
+// max_tokens is left alone entirely — they already chose their bound.
+const unmeteredWallBudget = time.Hour
+
+// planWallBudget is the wall bound a plan actually runs under: its own when it
+// named one, and otherwise a default ONLY when it named no token bound either.
+//
+// Applied narrowly on purpose. Defaulting a wall for every plan would put a new
+// ceiling over plans that deliberately run unbounded; this only catches the plan
+// that asked for no bound at all, which is the one that cannot be stopped.
+func planWallBudget(budget Budget) time.Duration {
+	if budget.MaxWall > 0 {
+		return budget.MaxWall
+	}
+	if budget.MaxTokens > 0 {
+		return 0
+	}
+	return unmeteredWallBudget
+}
+
 // tokensPerToolCall is what one tool call costs a plan task, measured: a task
 // that made 28 calls spent 232,416 tokens, another 24 calls for 259,705. The
 // number is a rough proxy and is used as one — a model cannot see its own token
@@ -1002,6 +1038,17 @@ func (report PlanReport) Summary() string {
 	// fold said which — the reader had to diff the plan against the report to
 	// find out. An incomplete answer that does not announce itself gets used as
 	// a complete one.
+	// SPEND THAT COULD NOT BE MEASURED IS NOT SPEND THAT DID NOT HAPPEN.
+	//
+	// TokensUsed is summed from the children's own usage events, so a provider
+	// that emits none reports zero however much it billed — and a max_tokens set
+	// against that number bounds nothing at all while reading like a guarantee.
+	// Said plainly, because the alternative is a plan that appears to have cost
+	// nothing.
+	if report.TokensUsed == 0 && report.Succeeded > 0 {
+		b.WriteString("spend could not be measured: this provider reported no token usage, " +
+			"so max_tokens cannot bound a plan here — use max_wall_seconds instead.\n")
+	}
 	if unrun := tasksCutForBudget(report.Tasks); len(unrun) > 0 {
 		fmt.Fprintf(&b, "%d task(s) never ran (budget exhausted): %s\n", len(unrun), strings.Join(unrun, ", "))
 	}
