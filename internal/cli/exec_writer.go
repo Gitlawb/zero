@@ -278,13 +278,28 @@ func (writer *execEventWriter) usage(usage agent.Usage) {
 		promptTokens := usage.EffectiveInputTokens()
 		completionTokens := usage.EffectiveOutputTokens()
 		totalTokens := usage.TotalTokens()
-		writer.writeStreamJSON(streamjson.Event{
+		event := streamjson.Event{
 			Type:             streamjson.EventUsage,
 			RunID:            writer.runID,
 			PromptTokens:     &promptTokens,
 			CompletionTokens: &completionTokens,
 			TotalTokens:      &totalTokens,
-		})
+		}
+		// THE SAME FIELDS THE SESSION RECORD KEEPS. A parent summarising this
+		// stream is the only place a sub-agent's turn can be priced, and it was
+		// being handed prompt/completion/total alone — so every child turn was
+		// priced as fully uncached. Non-zero only, exactly like
+		// usage.EventUsagePayload, so the common shape is unchanged.
+		if cached := usage.CachedInputTokens; cached > 0 {
+			event.CachedInputTokens = &cached
+		}
+		if written := usage.CacheWriteTokens; written > 0 {
+			event.CacheWriteTokens = &written
+		}
+		if reasoning := usage.ReasoningTokens; reasoning > 0 {
+			event.ReasoningTokens = &reasoning
+		}
+		writer.writeStreamJSON(event)
 	}
 }
 

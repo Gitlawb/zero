@@ -428,8 +428,8 @@ func TestPlanPartialMapsToIncompleteExit(t *testing.T) {
 	plan, err := specialist.ParsePlan(map[string]any{
 		"name":   "p",
 		"tasks":  []any{map[string]any{"id": "a", "prompt": "x"}},
-		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(10)},
-	}, specialist.Limits{MaxTasks: 5, MaxTokens: 100})
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(100_000)},
+	}, specialist.Limits{MaxTasks: 5})
 	if err != nil {
 		t.Fatalf("ParsePlan: %v", err)
 	}

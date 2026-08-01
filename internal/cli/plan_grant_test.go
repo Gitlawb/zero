@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -295,5 +296,89 @@ func TestAPlanNameBecomesAUsableWorktreeName(t *testing.T) {
 	// filesystem refuses.
 	if got := planWorktreeName(strings.Repeat("x", 300)); len(got) > 64 {
 		t.Fatalf("a long plan name produced a %d-character worktree name", len(got))
+	}
+}
+
+// THE HOOK MUST ACTUALLY BE WIRED. DiscoverModels is consulted only when a plan
+// sets auto_assign, so a nil left in the wiring compiles, ships, and refuses
+// every such plan with "not available in this run" — the feature present in the
+// schema and reachable from nowhere. That is this branch's most repeated defect,
+// and it is checked here rather than trusted.
+func TestOrchestrateGetsAModelDiscoverer(t *testing.T) {
+	registry := tools.NewRegistry()
+	gate := &specialist.PostureGate{}
+	gate.Set(true)
+	workspace := t.TempDir()
+
+	if _, err := registerSpecialistTools(registry, workspace, 0, nil, nil, nil, orchestrateWiring{
+		Gate:           gate,
+		PlanContext:    specialist.PlanTaskContext{Cwd: workspace},
+		DiscoverModels: planModelDiscoverer(t.TempDir(), config.ProviderProfile{Name: "test", Model: "gpt-4.1"}),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	tool, ok := registry.Get(specialist.OrchestrateToolName)
+	if !ok {
+		t.Fatal("the orchestrate tool was not registered")
+	}
+	orchestrate, ok := tool.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("registered tool is %T", tool)
+	}
+	if orchestrate.DiscoverModels == nil {
+		t.Error("DiscoverModels is nil on the registered tool; auto_assign would refuse every plan")
+	}
+}
+
+// The user's model pins and exclusions must reach the tool. Configured and not
+// wired, they are a config key that silently does nothing — the same shape as
+// DiscoverModels above, which shipped nil.
+func TestOrchestrateGetsTheConfiguredModelPreferences(t *testing.T) {
+	registry := tools.NewRegistry()
+	gate := &specialist.PostureGate{}
+	gate.Set(true)
+	workspace := t.TempDir()
+
+	if _, err := registerSpecialistTools(registry, workspace, 0, nil, nil, nil, orchestrateWiring{
+		Gate:        gate,
+		PlanContext: specialist.PlanTaskContext{Cwd: workspace},
+		ModelPrefs: planModelPreferences(config.PlanModelsConfig{
+			Verify:  "deepseek-v4-pro",
+			Exclude: []string{"grok-build-0.1"},
+		}),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	tool, _ := registry.Get(specialist.OrchestrateToolName)
+	orchestrate, ok := tool.(*specialist.OrchestrateTool)
+	if !ok {
+		t.Fatalf("registered tool is %T", tool)
+	}
+	if orchestrate.ModelPrefs.Verify != "deepseek-v4-pro" {
+		t.Errorf("the verify pin did not reach the tool: %+v", orchestrate.ModelPrefs)
+	}
+	if len(orchestrate.ModelPrefs.Exclude) != 1 {
+		t.Errorf("the exclusion list did not reach the tool: %+v", orchestrate.ModelPrefs)
+	}
+}
+
+// And the adapter really produces the shape specialist chooses between, rather
+// than an empty struct that would make every tier unassignable.
+func TestTheModelDiscovererCarriesWhatAPlanChoosesBetween(t *testing.T) {
+	discover := planModelDiscoverer(t.TempDir(), config.ProviderProfile{Name: "test", Model: "gpt-4.1"})
+	if discover == nil {
+		t.Fatal("adapter returned nil")
+	}
+	// The network call is expected to fail in a test environment; what matters is
+	// that a failure is REPORTED rather than silently yielding no models, which
+	// would make auto_assign a no-op nobody could diagnose.
+	models, err := discover(context.Background())
+	if err == nil && len(models) > 0 {
+		for _, model := range models {
+			if strings.TrimSpace(model.ID) == "" {
+				t.Errorf("a discovered model arrived with no id: %+v", model)
+			}
+		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/localcontrol"
@@ -744,11 +745,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// so the run's grant is every read-only tool the registry holds.
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil, planProgress,
 		orchestrateWiring{
-			Gate: zeromaxingGate,
+			DiscoverModels: planModelDiscoverer(workspaceRoot, resolved.Provider),
+			// The LIVE scope, not a snapshot of it. A request_permissions grant
+			// lands mid-session and must reach the children dispatched after it.
+			ExtraWriteRoots: scope.Roots,
+			ProbeModel:      planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
+			ModelPrefs:      planModelPreferences(resolved.Profiles.PlanModels),
+			Gate:            zeromaxingGate,
 			// Depth stays 0: the TUI is always a root session — it has no
 			// --depth and is never launched as a child — so zero is the
 			// measured value here, not an unset one.
-			PlanContext: specialist.PlanTaskContext{Cwd: workspaceRoot, Depth: 0},
+			PlanContext: specialist.PlanTaskContext{
+				Cwd: workspaceRoot, Depth: 0,
+				PostureReasoningEffort: string(execprofile.Zeromaxing.ReasoningEffort),
+			},
 			// The plan-size tier, from the SAME resolved config the rest of this
 			// wiring reads. Project config may only have tightened it.
 			Size:  resolved.Profiles.PlanSizeTier(),
@@ -1152,6 +1162,13 @@ type orchestrateWiring struct {
 	Gate *specialist.PostureGate
 	// PlanContext supplies the run-invariant state a plan task inherits.
 	PlanContext specialist.PlanTaskContext
+	// ExtraWriteRoots reports the run's non-workspace roots at LAUNCH time, so a
+	// child's sandbox covers the same ground its parent's does. nil means the
+	// workspace only, which is what every child got before this existed.
+	ExtraWriteRoots func() []string
+	// ProbeModel proves a model will actually run before any task is assigned it.
+	// nil skips proving, which is what every plan did before this existed.
+	ProbeModel specialist.ModelProber
 	// Size is the configured plan-size tier. The zero value is the default tier,
 	// so a call site that has no resolved config yet still gets a real ceiling
 	// rather than none.
@@ -1164,6 +1181,11 @@ type orchestrateWiring struct {
 	// Launch runs a plan in the background. nil — the headless default — makes
 	// a background plan refuse rather than start one nothing can report.
 	Launch func(run func(ctx context.Context)) bool
+	// DiscoverModels lists what the active provider can serve, for auto_assign.
+	// nil makes a plan asking for it refuse with a reason.
+	DiscoverModels specialist.ModelDiscoverer
+	// ModelPrefs carries the user's per-role model pins and exclusions.
+	ModelPrefs specialist.ModelPreferences
 }
 
 // planParentTools is the run's grant: the tools a plan task may inherit.
@@ -1208,7 +1230,14 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	if err != nil {
 		return nil, err
 	}
-	executor := specialist.Executor{Paths: paths}
+	executor := specialist.Executor{
+		Paths: paths,
+		// The run's own roots, read at every launch. Without this a child is
+		// confined more tightly than its parent: a run granted a directory
+		// outside its workspace could create and populate it, then watch every
+		// plan task be refused at that same directory.
+		ExtraWriteRoots: wiring.ExtraWriteRoots,
+	}
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {
 		return nil, err
@@ -1242,15 +1271,18 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		planContext.SpecialistName = "explorer"
 	}
 	registry.Register(&specialist.OrchestrateTool{
-		PostureActive: wiring.Gate.Active,
-		RunTask:       specialist.NewPlanRunner(planContext),
-		Recorder:      recorder,
-		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
-		Depth:         planContext.Depth,
-		Size:          wiring.Size,
-		Plans:         wiring.Plans,
-		Launch:        wiring.Launch,
-		Isolate:       wiring.Isolate,
+		PostureActive:  wiring.Gate.Active,
+		RunTask:        specialist.NewPlanRunner(planContext),
+		Recorder:       recorder,
+		ParentTools:    planParentTools(registry, enabledTools, disabledTools),
+		Depth:          planContext.Depth,
+		Size:           wiring.Size,
+		Plans:          wiring.Plans,
+		Launch:         wiring.Launch,
+		Isolate:        wiring.Isolate,
+		DiscoverModels: wiring.DiscoverModels,
+		ProbeModel:     wiring.ProbeModel,
+		ModelPrefs:     wiring.ModelPrefs,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }

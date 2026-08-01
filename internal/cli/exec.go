@@ -267,6 +267,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// no-op, so events before that point are simply not recorded — recording is
 	// best-effort and must never be the thing that fails a run.
 	planRecorder := &planSessionRecorder{}
+	// DECLARED HERE, built further down. The specialist wiring below closes over
+	// it so a child launched later is confined to the same roots this run holds;
+	// reading it at registration time would capture nil forever, which is the
+	// same reason planGate is a pointer.
+	var execScope *sandbox.Scope
 	if shouldRegisterExecSpecialistTools(options) {
 		// Specialist tools register before the full config resolve below (so
 		// --list-tools stays offline). swarm.maxTeamSize is not affected by
@@ -277,9 +282,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// the same ceiling an unset value gets, never "no ceiling". A config
 		// error must not be the thing that removes a bound.
 		planSize := config.DefaultPlanSize
+		// The provider profile is captured alongside the other early config so
+		// auto_assign can list this provider's models. Hoisted out of the if
+		// because the wiring below needs it; the zero value simply means
+		// discovery is unavailable and a plan asking for it is told so.
+		var planProvider config.ProviderProfile
+		var planModelPrefs config.PlanModelsConfig
 		if earlyCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
 			maxTeamSize = earlyCfg.Swarm.MaxTeamSize
 			planSize = earlyCfg.Profiles.PlanSizeTier()
+			planProvider = earlyCfg.Provider
+			planModelPrefs = earlyCfg.Profiles.PlanModels
 		}
 		var err error
 		// The posture is fixed for a headless run, so the gate is set once here
@@ -292,9 +305,29 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// parent grant, so a task can never hold a tool this run was denied.
 		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize,
 			options.enabledTools, options.disabledTools, planRecorder, orchestrateWiring{
-				Gate: planGate,
+				DiscoverModels: planModelDiscoverer(workspaceRoot, planProvider),
+				// Same live scope the run's own tools are confined by, so a child
+				// stands on the same ground rather than on less.
+				//
+				// A CLOSURE OVER THE VARIABLE, not over its value: the scope is
+				// built further down this function, and a child is launched long
+				// after both. Reading it here would capture nil forever — the same
+				// reason planGate above is a pointer.
+				ExtraWriteRoots: func() []string {
+					if execScope == nil {
+						return nil
+					}
+					return execScope.Roots()
+				},
+				// Proves a model will actually run before a task is assigned it,
+				// so the plan never dispatches onto something the provider only
+				// advertises.
+				ProbeModel: planModelProber(workspaceRoot, planProvider, deps.newProvider),
+				ModelPrefs: planModelPreferences(planModelPrefs),
+				Gate:       planGate,
 				PlanContext: specialist.PlanTaskContext{
-					Cwd: workspaceRoot,
+					PostureReasoningEffort: string(execprofile.Zeromaxing.ReasoningEffort),
+					Cwd:                    workspaceRoot,
 					// Resolved permission mode is not available this early; the
 					// executor applies its own fail-safe mapping from an empty mode
 					// (never unsafe), so a plan task can never exceed the parent.
@@ -401,7 +434,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
-	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	execScope, err = sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
