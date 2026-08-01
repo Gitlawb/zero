@@ -913,6 +913,62 @@ func DeleteBranch(ctx context.Context, cwd, fallbackBranch, branchToDelete strin
 	return err
 }
 
+// CurrentBranch returns the short name of the currently checked-out branch, or
+// "" when HEAD is detached / unresolvable. Callers that need the branch's
+// configured upstream (for example the --yes unborn-remote preflight) use this
+// instead of IsDefaultBranch so a remote-HEAD lookup failure does not block
+// remote resolution.
+func CurrentBranch(ctx context.Context, cwd string, runGit Runner) string {
+	runGit, _ = resolveRunners(runGit, nil)
+	out, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	return branch
+}
+
+// ResetBranchRef points the local branch ref at newTip without checking the
+// branch out. ensureFeatureBranch uses this after creating a feature branch
+// that owns the publishable commits: the normal flow commits on the default
+// branch first, then creates user/slug at the same HEAD, and without this
+// restore the local default keeps those commits and diverges from the remote
+// after a squash-merge. newTip is typically the remote-tracking ref
+// (origin/main) that CommitsAhead already used. Refuses to move the currently
+// checked-out branch so callers must have already switched to the feature
+// branch.
+func ResetBranchRef(ctx context.Context, cwd, branch, newTip string, runGit Runner) error {
+	runGit, _ = resolveRunners(runGit, nil)
+	branch = strings.TrimSpace(branch)
+	newTip = strings.TrimSpace(newTip)
+	if branch == "" {
+		return fmt.Errorf("branch name required")
+	}
+	if newTip == "" {
+		return fmt.Errorf("new tip required")
+	}
+	// Branch becomes refs/heads/<branch>; reject traversal / absolute forms so
+	// a hostile branch name cannot escape the heads namespace.
+	if strings.Contains(branch, "..") || strings.HasPrefix(branch, "/") || strings.ContainsAny(branch, "\\ \t\n") {
+		return fmt.Errorf("invalid branch name %q", branch)
+	}
+	headBranch, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil && strings.TrimSpace(headBranch) == branch {
+		return fmt.Errorf("refusing to move currently checked-out branch %q", branch)
+	}
+	tipSHA, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--verify", newTip+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("resolve tip %q: %w", newTip, err)
+	}
+	if _, err := gitOutput(ctx, runGit, cwd, "update-ref", "refs/heads/"+branch, strings.TrimSpace(tipSHA)); err != nil {
+		return fmt.Errorf("update-ref refs/heads/%s: %w", branch, err)
+	}
+	return nil
+}
+
 // IsUnbornRemote reports whether remote is a freshly created repository with
 // no refs at all (no branches, no HEAD). ensureFeatureBranch consults this
 // when CommitsAhead fails to determine why: a genuinely empty remote has no

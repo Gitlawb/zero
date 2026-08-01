@@ -100,7 +100,9 @@ type appDeps struct {
 	refreshTrackingRef     func(context.Context, string, string, string) error
 	branchHasUpstream      func(context.Context, string, string) (bool, error)
 	branchUpstreamRemote   func(context.Context, string, string) string
+	currentGitBranch       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
+	resetBranchRef         func(context.Context, string, string, string) error
 	markGeneratedBranch    func(context.Context, string, string) error
 	isGeneratedBranch      func(context.Context, string, string) bool
 	runTUI                 func(context.Context, tui.Options) int
@@ -233,8 +235,14 @@ func defaultAppDeps() appDeps {
 		branchUpstreamRemote: func(ctx context.Context, cwd, branch string) string {
 			return zerogit.UpstreamRemote(ctx, cwd, branch, nil)
 		},
+		currentGitBranch: func(ctx context.Context, cwd string) string {
+			return zerogit.CurrentBranch(ctx, cwd, nil)
+		},
 		deleteBranch: func(ctx context.Context, cwd, fallbackBranch, branchToDelete string) error {
 			return zerogit.DeleteBranch(ctx, cwd, fallbackBranch, branchToDelete, nil)
+		},
+		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
+			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil)
 		},
 		markGeneratedBranch: func(ctx context.Context, cwd, branch string) error {
 			return zerogit.MarkGeneratedBranch(ctx, cwd, branch, nil)

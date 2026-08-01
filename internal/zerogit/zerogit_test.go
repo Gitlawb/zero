@@ -1353,3 +1353,67 @@ func TestCreateBranchFailsWhenRemoteProbeFails(t *testing.T) {
 		t.Fatal("expected an error when the remote probe fails")
 	}
 }
+
+// TestResetBranchRefMovesDefaultWithoutTouchingFeature covers the post
+// auto-branch restore: after checkout -b user/slug at the same HEAD as main,
+// main must be moved back to origin/main so the feature branch exclusively
+// owns the publishable commits.
+func TestResetBranchRefMovesDefaultWithoutTouchingFeature(t *testing.T) {
+	root := initGitRepo(t, true)
+	// Normalize the default branch name (git may pick master on older installs).
+	runGitCommand(t, root, "branch", "-M", "main")
+	base := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+
+	// Simulate origin/main at the base tip, then a local commit on main.
+	runGitCommand(t, root, "update-ref", "refs/remotes/origin/main", base)
+	writeTestFile(t, filepath.Join(root, "feature.txt"), "work\n")
+	runGitCommand(t, root, "add", "feature.txt")
+	runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "add feature")
+	featureTip := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	if featureTip == base {
+		t.Fatal("expected a new commit on main before branching")
+	}
+
+	// Create the feature branch at HEAD (same as ensureFeatureBranch / CreateBranch).
+	runGitCommand(t, root, "checkout", "-b", "someone/feature-txt")
+	if err := ResetBranchRef(context.Background(), root, "main", "origin/main", nil); err != nil {
+		t.Fatalf("ResetBranchRef: %v", err)
+	}
+
+	mainTip := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "refs/heads/main"))
+	if mainTip != base {
+		t.Fatalf("main tip = %s, want base %s (must not keep the new commit)", mainTip, base)
+	}
+	stillFeature := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "refs/heads/someone/feature-txt"))
+	if stillFeature != featureTip {
+		t.Fatalf("feature branch tip = %s, want %s", stillFeature, featureTip)
+	}
+	head := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
+	if head != "someone/feature-txt" {
+		t.Fatalf("HEAD = %q, want someone/feature-txt", head)
+	}
+}
+
+func TestResetBranchRefRefusesCheckedOutBranch(t *testing.T) {
+	root := initGitRepo(t, true)
+	runGitCommand(t, root, "branch", "-M", "main")
+	base := strings.TrimSpace(runGitCommand(t, root, "rev-parse", "HEAD"))
+	runGitCommand(t, root, "update-ref", "refs/remotes/origin/main", base)
+
+	err := ResetBranchRef(context.Background(), root, "main", "origin/main", nil)
+	if err == nil || !strings.Contains(err.Error(), "currently checked-out") {
+		t.Fatalf("expected refuse-checked-out error, got %v", err)
+	}
+}
+
+func TestCurrentBranchReturnsCheckedOutName(t *testing.T) {
+	root := initGitRepo(t, true)
+	runGitCommand(t, root, "branch", "-M", "main")
+	if got := CurrentBranch(context.Background(), root, nil); got != "main" {
+		t.Fatalf("CurrentBranch = %q, want main", got)
+	}
+	runGitCommand(t, root, "checkout", "-b", "feature/work")
+	if got := CurrentBranch(context.Background(), root, nil); got != "feature/work" {
+		t.Fatalf("CurrentBranch = %q, want feature/work", got)
+	}
+}

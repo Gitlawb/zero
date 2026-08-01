@@ -1022,19 +1022,30 @@ func runChangesPR(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return writeExecUsageError(stderr, err.Error())
 	}
 
+	// Resolve the remote the unborn-remote preflight (and later push) will
+	// target. Explicit --remote wins. Otherwise:
+	//   - without --yes: IsDefaultBranch resolves the current branch's
+	//     upstream (then "origin"), matching Push's remote resolution;
+	//   - with --yes: skip IsDefaultBranch so a remote-HEAD failure cannot
+	//     block the documented default-branch override, but still resolve the
+	//     current branch and its configured upstream so a fork's non-origin
+	//     upstream is not silently replaced by "origin".
 	targetRemote := strings.TrimSpace(options.remote)
-	if !options.yes {
-		_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
-		if err != nil {
-			return writeExecUsageError(stderr, err.Error())
-		}
-		if targetRemote == "" {
-			targetRemote = remoteForCheck
-		}
-	}
 	if targetRemote == "" {
-		if deps.branchUpstreamRemote != nil {
-			targetRemote = deps.branchUpstreamRemote(context.Background(), workspaceRoot, "")
+		if !options.yes {
+			_, _, remoteForCheck, err := deps.isDefaultBranch(context.Background(), zerogit.DefaultBranchOptions{Cwd: workspaceRoot, Remote: options.remote})
+			if err != nil {
+				return writeExecUsageError(stderr, err.Error())
+			}
+			targetRemote = remoteForCheck
+		} else {
+			currentBranch := ""
+			if deps.currentGitBranch != nil {
+				currentBranch = deps.currentGitBranch(context.Background(), workspaceRoot)
+			}
+			if deps.branchUpstreamRemote != nil && currentBranch != "" {
+				targetRemote = deps.branchUpstreamRemote(context.Background(), workspaceRoot, currentBranch)
+			}
 		}
 		if targetRemote == "" {
 			targetRemote = "origin"
@@ -1164,8 +1175,12 @@ func generateAutoCommitMessage(ctx context.Context, provider zeroruntime.Provide
 // non-default (this call didn't create it) but has no configured upstream
 // yet, it's either a fresh manual branch or this exact generated branch after
 // a lost force-with-lease race, and either way the lease still needs to be
-// asserted rather than silently dropped. allowDefaultBranch (the --yes flag)
-// and dryRun both opt out via the "" branch / false return, leaving Push's own
+// asserted rather than silently dropped. After a successful create, the
+// original default branch ref is moved back to its remote-tracking tip so the
+// feature branch exclusively owns the publishable commits (otherwise local
+// main keeps them and diverges after a squash-merge); a failed restore rolls
+// the feature branch back. allowDefaultBranch (the --yes flag) and dryRun
+// both opt out via the "" branch / false return, leaving Push's own
 // guard/preview behavior on the default branch unaffected.
 //
 // autoNaming gates the LLM naming path (--auto): these commands were
@@ -1306,6 +1321,24 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
 			}
 			return "", "", false, fmt.Errorf("failed to mark generated branch: %w", err)
+		}
+	}
+	// The normal flow commits on the default branch first, then creates the
+	// feature branch at the same HEAD. Without moving the original default
+	// ref back, local main keeps the pre-squash commits and diverges from
+	// origin/main after a squash-merge (and a later pull/push can re-publish
+	// them). Once the feature branch owns those commits, restore the default
+	// branch to the remote-tracking tip CommitsAhead already used. A
+	// confirmed-unborn remote has no such tip; leave the default ref alone.
+	// Failure-safe: if the restore fails, delete the feature branch and
+	// check the default branch back out so the tree is not left half-moved.
+	if !unbornRemote && deps.resetBranchRef != nil {
+		tip := remote + "/" + currentBranch
+		if err := deps.resetBranchRef(ctx, workspaceRoot, currentBranch, tip); err != nil {
+			if deps.deleteBranch != nil {
+				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
+			}
+			return "", "", false, fmt.Errorf("failed to restore default branch %s to %s after auto-branching: %w", currentBranch, tip, err)
 		}
 	}
 	if !jsonMode {
