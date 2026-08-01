@@ -85,8 +85,10 @@ These classes drive multi-round reviews. Fix them before requesting review:
   success and error paths (including stderr). Fail closed on ownership, lease,
   and permission checks. Do not rely on pre-open path resolution
   (`EvalSymlinks` then open) for containment: that is a check-to-use race.
-  Bind containment at open/use time (no-follow or handle-relative APIs, and
-  platform equivalents for reparse points). On multi-step setup, roll back
+  Bind containment at open/use time with rooted or handle-relative,
+  traversal-resistant APIs. If a no-follow API is used, apply it to every
+  traversed component and enforce the platform's reparse-point protections;
+  final-component-only no-follow is insufficient. On multi-step setup, roll back
   only what this run created; never destroy pre-existing resources you did
   not create; never report success when cleanup or unlock failed.
 - **Atomic shared state:** Write a complete temporary file, then atomically
