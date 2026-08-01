@@ -140,9 +140,12 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 	if entries, err := os.ReadDir(installDir); err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			// On Windows, replaceBinary leaves "<name>.old" behind (the running
-			// binary is renamed aside, not deleted) for later best-effort cleanup.
-			if name == binaryName || (optionalName != "" && name == optionalName) || name == binaryName+".old" || (optionalName != "" && name == optionalName+".old") {
+			// On Windows, replacement leaves a namespaced recovery copy of each
+			// replaced binary for identity-bound cleanup by a later update.
+			windowsRecovery := runtime.GOOS == "windows" && strings.HasSuffix(name, ".old") &&
+				(strings.HasPrefix(name, binaryName+".zero-update-") ||
+					optionalName != "" && strings.HasPrefix(name, optionalName+".zero-update-"))
+			if name == binaryName || (optionalName != "" && name == optionalName) || windowsRecovery {
 				continue
 			}
 			t.Fatalf("unexpected extra file left in install dir: %s", name)
