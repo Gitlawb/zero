@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
@@ -139,28 +141,67 @@ func TestRunKeepsToolResultsContiguousWhenAToolReturnsAnImage(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	firstTool, lastTool, imageIndex := -1, -1, -1
+	// Two separate ifs rather than a switch: a tool-role message that also
+	// carried images would match only the first arm of a switch, so a regression
+	// that put the image back on the tool result would read as "no image at all"
+	// instead of naming what actually happened.
+	type toolResult struct {
+		index int
+		id    string
+	}
+	var toolResults []toolResult
+	imageIndex := -1
 	for index, message := range result.Messages {
-		switch {
-		case message.Role == zeroruntime.MessageRoleTool:
-			if firstTool < 0 {
-				firstTool = index
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolResults = append(toolResults, toolResult{index: index, id: message.ToolCallID})
+		}
+		if len(message.Images) > 0 {
+			if imageIndex >= 0 {
+				t.Fatalf("image delivered twice, at %d and %d; recorded %s", imageIndex, index, messageShape(result.Messages))
 			}
-			lastTool = index
-		case len(message.Images) > 0:
 			imageIndex = index
 		}
 	}
-	if firstTool < 0 || lastTool == firstTool {
-		t.Fatalf("expected two tool results, got messages %#v", result.Messages)
-	}
 	if imageIndex < 0 {
-		t.Fatal("the image never reached the model")
+		t.Fatalf("the image never reached the model; recorded %s", messageShape(result.Messages))
 	}
-	if imageIndex > firstTool && imageIndex < lastTool {
-		t.Errorf("image message at %d splits the tool results at %d and %d", imageIndex, firstTool, lastTool)
+	if len(toolResults) != 2 {
+		t.Fatalf("got %d tool-result messages for 2 tool calls; recorded %s", len(toolResults), messageShape(result.Messages))
 	}
-	if imageIndex < lastTool {
-		t.Errorf("image message at %d precedes the last tool result at %d", imageIndex, lastTool)
+	if toolResults[0].id != "c1" || toolResults[1].id != "c2" {
+		t.Errorf("tool results answered %q then %q, want c1 then c2", toolResults[0].id, toolResults[1].id)
 	}
+	// The contract Anthropic enforces: every tool_result block has to come before
+	// any other block in the user message it lands in. Anything wedged between
+	// the two results breaks that, which is the 400 this PR exists to avoid.
+	if toolResults[1].index != toolResults[0].index+1 {
+		t.Errorf("tool results at %d and %d are not adjacent; %q message at %d splits them; recorded %s",
+			toolResults[0].index, toolResults[1].index, result.Messages[toolResults[0].index+1].Role,
+			toolResults[0].index+1, messageShape(result.Messages))
+	}
+	// Follows the last tool result, deliberately NOT pinned to exactly last+1.
+	// appendUserBlocks coalesces consecutive user-role content, so
+	// [tool_result, tool_result, text, image] still maps to tool_result blocks
+	// first and replays fine; pinning would redden that valid shape for nothing.
+	if imageIndex <= toolResults[1].index {
+		t.Errorf("image message at %d does not follow the last tool result at %d; recorded %s",
+			imageIndex, toolResults[1].index, messageShape(result.Messages))
+	}
+}
+
+// messageShape renders the conversation as a compact role list so a failure says
+// what the ordering actually was instead of dumping whole messages.
+func messageShape(messages []zeroruntime.Message) string {
+	parts := make([]string, 0, len(messages))
+	for index, message := range messages {
+		part := fmt.Sprintf("%d:%s", index, message.Role)
+		if message.ToolCallID != "" {
+			part += "(" + message.ToolCallID + ")"
+		}
+		if len(message.Images) > 0 {
+			part += "+image"
+		}
+		parts = append(parts, part)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
