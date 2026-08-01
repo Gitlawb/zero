@@ -44,6 +44,7 @@ func runTrust(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 func trustCurrentDir(stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	cwd, err := deps.getwd()
 	if err != nil {
+		// Flatten with %s: ErrorMessage stringifies inline, so %w would be a no-op.
 		return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("resolve workspace: %s", err), redaction.Options{}), exitCrash)
 	}
 	if err := workspacetrust.Trust(cwd); err != nil {
@@ -86,6 +87,7 @@ func trustRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case 0:
 		cwd, err := deps.getwd()
 		if err != nil {
+			// Flatten with %s: ErrorMessage stringifies inline, so %w would be a no-op.
 			return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("resolve workspace: %s", err), redaction.Options{}), exitCrash)
 		}
 		target = cwd
