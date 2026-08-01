@@ -1454,8 +1454,11 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 	// upload the complete diff.
 	cwd := t.TempDir()
 	var gotMaxDiffBytes int
+	mockProv := &mockCommitMsgProvider{
+		response: "feat/capped-diff-branch",
+	}
 
-	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, false, 4096, appDeps{
+	_, _, _, err := ensureFeatureBranch(context.Background(), &bytes.Buffer{}, false, cwd, "", false, false, true, 4096, appDeps{
 		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
 			return true, "main", "origin", nil
 		},
@@ -1465,10 +1468,16 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 				return zerogit.ChangeSummary{Clean: true}, nil
 			}
 			gotMaxDiffBytes = options.MaxDiffBytes
-			return zerogit.ChangeSummary{Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}}}, nil
+			return zerogit.ChangeSummary{
+				Files: []zerogit.FileChange{{Path: "README.md", Status: "modified"}},
+				Diff:  "diff --git a/README.md b/README.md\n+capped diff content",
+			}, nil
 		},
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, nil
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return mockProv, nil
 		},
 		currentGitUser: func(ctx context.Context, cwd string) string { return "Someone" },
 		createBranch: func(ctx context.Context, options zerogit.BranchOptions) (zerogit.BranchResult, error) {
@@ -1480,6 +1489,9 @@ func TestEnsureFeatureBranchThreadsDiffBytesToInspect(t *testing.T) {
 	}
 	if gotMaxDiffBytes != 4096 {
 		t.Fatalf("expected MaxDiffBytes 4096 threaded into Inspect, got %d", gotMaxDiffBytes)
+	}
+	if len(mockProv.req.Messages) == 0 || !strings.Contains(mockProv.req.Messages[len(mockProv.req.Messages)-1].Content, "capped diff content") {
+		t.Fatalf("expected provider request to contain capped diff content, got %#v", mockProv.req)
 	}
 }
 
