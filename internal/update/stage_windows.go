@@ -3,11 +3,13 @@
 package update
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -101,7 +103,23 @@ func verifyFreshRegularFile(handle windows.Handle, path string) error {
 // instead. Renaming the object the handle already refers to removes that handoff:
 // there is no second lookup to win.
 func (staged *stagedBinary) promote(targetPath string) error {
+	releasePromotionLock, err := acquirePromotionLock(targetPath)
+	if err != nil {
+		return fmt.Errorf("lock binary promotion: %w", err)
+	}
+	defer releasePromotionLock()
+
 	oldPath := targetPath + ".old"
+	relocatedRecoveries, recoveryErr := relocatedRecoveryPaths(targetPath)
+	if recoveryErr != nil {
+		return fmt.Errorf("%w: inspect relocated recovery state for %s: %v", ErrTargetPossiblyTampered, targetPath, recoveryErr)
+	}
+	if len(relocatedRecoveries) != 0 {
+		return fmt.Errorf(
+			"%w: a previous update moved the last binary this updater verified to %s after recovery-marker creation failed; restore the correct recovery binary or remove it after verifying %s before updating again",
+			ErrTargetPossiblyTampered, strings.Join(relocatedRecoveries, ", "), targetPath,
+		)
+	}
 	// Refuse to promote while a previous failure left its recovery copy in place.
 	//
 	// Skipping the cleanup below is not enough to protect it: os.Rename uses
@@ -163,6 +181,11 @@ func (staged *stagedBinary) promote(targetPath string) error {
 		}
 		asidePath = targetPath + "." + suffix + ".old"
 	}
+	// Bind cleanup candidates before opening the promotion gap. A fresh scan
+	// after promotion could capture an aside concurrently created by another
+	// updater and erase the copy it needs to restore on failure.
+	cleanupCandidates := prepareRecoveryCleanup(targetPath)
+	defer closeRecoveryCleanupCandidates(cleanupCandidates)
 	if err := os.Rename(targetPath, asidePath); err != nil {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
@@ -185,9 +208,57 @@ func (staged *stagedBinary) promote(targetPath string) error {
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)
 	}
+	// targetPath now names the staged object this updater verified, so older
+	// unmarked aside copies are no longer the only known-good binaries. Retire
+	// them through handles while preserving the copy created by this promotion.
+	// This keeps repeated upgrades bounded without trusting a public pathname
+	// before a verified replacement is installed.
+	cleanupSupersededRecoveryCopies(cleanupCandidates)
 	staged.path = targetPath
 	staged.promoted = true
 	return nil
+}
+
+// acquirePromotionLock serializes the full target-specific recovery transaction
+// across updater processes. Without it, one updater could capture another's
+// unmarked aside while that process is still trying to restore or mark it.
+// Windows mutex ownership is thread-affine, so the caller remains pinned until
+// the returned release function runs.
+func acquirePromotionLock(targetPath string) (func(), error) {
+	absolutePath, err := filepath.Abs(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(absolutePath))))
+	name, err := windows.UTF16PtrFromString(fmt.Sprintf("Local\\zero-update-%x", digest))
+	if err != nil {
+		return nil, err
+	}
+
+	runtime.LockOSThread()
+	handle, createErr := windows.CreateMutex(nil, false, name)
+	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+		runtime.UnlockOSThread()
+		return nil, createErr
+	}
+	if handle == 0 {
+		runtime.UnlockOSThread()
+		return nil, fmt.Errorf("create target mutex returned an invalid handle")
+	}
+	event, waitErr := windows.WaitForSingleObject(handle, windows.INFINITE)
+	if waitErr != nil || event != windows.WAIT_OBJECT_0 && event != windows.WAIT_ABANDONED {
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+		if waitErr != nil {
+			return nil, waitErr
+		}
+		return nil, fmt.Errorf("wait for target mutex returned %#x", event)
+	}
+	return func() {
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+	}, nil
 }
 
 // existingRecoveryPaths returns every canonical or randomized aside path that
@@ -213,6 +284,37 @@ func existingRecoveryPaths(targetPath string) ([]string, error) {
 			(strings.HasPrefix(lowerName, lowerBase+".") &&
 				strings.HasSuffix(lowerName, ".old") &&
 				len(lowerName) > len(lowerBase)+len("..old")) {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	return paths, nil
+}
+
+// relocatedRecoveryPaths returns copies moved to the distinct recovery name
+// after a failed restore could not establish a .keep marker. Unlike ordinary
+// unmarked .old files, these are authoritative unresolved recovery state and
+// must block every later promotion until the operator resolves them.
+func relocatedRecoveryPaths(targetPath string) ([]string, error) {
+	dir := filepath.Dir(targetPath)
+	base := strings.ToLower(filepath.Base(targetPath))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	prefix := base + "."
+	var paths []string
+	for _, entry := range entries {
+		name := entry.Name()
+		lowerName := strings.ToLower(name)
+		if !strings.HasPrefix(lowerName, prefix) || !strings.HasSuffix(lowerName, ".recovery") {
+			continue
+		}
+		// The canonical relocation is <target>.old.<suffix>.recovery.
+		// A failed promotion that already used a randomized aside can also
+		// produce <target>.<aside-suffix>.old.<recovery-suffix>.recovery.
+		middle := strings.TrimSuffix(strings.TrimPrefix(lowerName, prefix), ".recovery")
+		if strings.HasPrefix(middle, "old.") && len(middle) > len("old.") ||
+			strings.Contains(middle, ".old.") {
 			paths = append(paths, filepath.Join(dir, name))
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -450,6 +451,144 @@ func TestInstallBinaryInstallsVerifiedBytes(t *testing.T) {
 		t.Fatalf("preserved binary = %q, want the previous one", old)
 	}
 	assertNoStagingLeftovers(t, dir)
+}
+
+func TestInstallBinaryBoundsRecoveryCopiesAcrossRepeatedUpgrades(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("version-0"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+
+	for version := 1; version <= 4; version++ {
+		contents := fmt.Sprintf("version-%d", version)
+		sourcePath := filepath.Join(t.TempDir(), "new-binary")
+		if err := os.WriteFile(sourcePath, []byte(contents), 0o755); err != nil {
+			t.Fatalf("WriteFile source: %v", err)
+		}
+		if err := installBinary(sourcePath, targetPath); err != nil {
+			t.Fatalf("installBinary version %d: %v", version, err)
+		}
+		recoveries, err := existingRecoveryPaths(targetPath)
+		if err != nil {
+			t.Fatalf("existingRecoveryPaths: %v", err)
+		}
+		if len(recoveries) != 1 {
+			t.Fatalf("recovery count after version %d = %d (%v), want 1", version, len(recoveries), recoveries)
+		}
+		previous, err := os.ReadFile(recoveries[0])
+		if err != nil {
+			t.Fatalf("ReadFile recovery after version %d: %v", version, err)
+		}
+		wantPrevious := fmt.Sprintf("version-%d", version-1)
+		if string(previous) != wantPrevious {
+			t.Fatalf("recovery after version %d = %q, want %q", version, previous, wantPrevious)
+		}
+	}
+}
+
+func TestInstallBinaryRefusesRelocatedRecoveryCopy(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	recoveryPath := targetPath + ".old.deadbeef.recovery"
+	if err := os.WriteFile(recoveryPath, []byte("last-verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile recovery: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-release"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if !strings.Contains(err.Error(), recoveryPath) {
+		t.Fatalf("installBinary error = %v, want recovery path %s", err, recoveryPath)
+	}
+	if got, readErr := os.ReadFile(targetPath); readErr != nil || string(got) != "unverified" {
+		t.Fatalf("target = %q err=%v, want unchanged unverified bytes", got, readErr)
+	}
+	if got, readErr := os.ReadFile(recoveryPath); readErr != nil || string(got) != "last-verified" {
+		t.Fatalf("recovery = %q err=%v, want last-verified", got, readErr)
+	}
+}
+
+func TestInstallBinaryRefusesRecoveryRelocatedFromRandomizedAside(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	recoveryPath := targetPath + ".aside.old.relocation.recovery"
+	if err := os.WriteFile(recoveryPath, []byte("last-verified"), 0o755); err != nil {
+		t.Fatalf("WriteFile recovery: %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(sourcePath, []byte("verified-release"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	err := installBinary(sourcePath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("installBinary error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if got, readErr := os.ReadFile(recoveryPath); readErr != nil || string(got) != "last-verified" {
+		t.Fatalf("recovery = %q err=%v, want last-verified", got, readErr)
+	}
+}
+
+func TestPromotionLockSerializesSameTarget(t *testing.T) {
+	targetPath := filepath.Join(t.TempDir(), "zero.exe")
+	releaseFirst, err := acquirePromotionLock(targetPath)
+	if err != nil {
+		t.Fatalf("acquire first promotion lock: %v", err)
+	}
+
+	started := make(chan struct{})
+	acquired := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	secondResult := make(chan error, 1)
+	go func() {
+		close(started)
+		release, err := acquirePromotionLock(strings.ToUpper(targetPath))
+		if err != nil {
+			secondResult <- err
+			return
+		}
+		close(acquired)
+		<-releaseSecond
+		release()
+		secondResult <- nil
+	}()
+	<-started
+	select {
+	case <-acquired:
+		releaseFirst()
+		close(releaseSecond)
+		<-secondResult
+		t.Fatal("second promotion acquired the same target lock before release")
+	case err := <-secondResult:
+		releaseFirst()
+		t.Fatalf("acquire second promotion lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirst()
+	select {
+	case <-acquired:
+		close(releaseSecond)
+		if err := <-secondResult; err != nil {
+			t.Fatalf("release second promotion lock: %v", err)
+		}
+	case err := <-secondResult:
+		t.Fatalf("acquire second promotion lock: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second promotion did not acquire the target lock after release")
+	}
 }
 
 // TestInstallBinaryCleansUpWhenStagingFails covers the cleanup ordering: a

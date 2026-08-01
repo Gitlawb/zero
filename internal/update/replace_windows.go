@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -250,6 +251,53 @@ func clearOldBinaryPreserved(oldPath string) {
 func oldBinaryPreserved(oldPath string) bool {
 	_, err := os.Lstat(oldPath + oldBinaryPreservedSuffix)
 	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+// prepareRecoveryCleanup binds existing unmarked aside copies to no-follow
+// handles before promotion. Taking this snapshot before targetPath is renamed
+// prevents cleanup from capturing an aside concurrently created by another
+// updater after this promotion begins.
+func prepareRecoveryCleanup(targetPath string) []*os.File {
+	paths, err := existingRecoveryPaths(targetPath)
+	if err != nil {
+		return nil
+	}
+	var candidates []*os.File
+	for _, path := range paths {
+		if oldBinaryPreserved(path) {
+			continue
+		}
+		file, err := openRecoveryCopy(path)
+		if err == nil {
+			candidates = append(candidates, file)
+		}
+	}
+	return candidates
+}
+
+type fileDispositionInfo struct {
+	DeleteFile byte
+}
+
+func closeRecoveryCleanupCandidates(candidates []*os.File) {
+	for _, file := range candidates {
+		_ = file.Close()
+	}
+}
+
+// cleanupSupersededRecoveryCopies marks the exact pre-promotion objects for
+// deletion only after the replacement has been verified. The handles deny
+// delete sharing, so their entries cannot be substituted in the meantime.
+func cleanupSupersededRecoveryCopies(candidates []*os.File) {
+	for _, file := range candidates {
+		info := fileDispositionInfo{DeleteFile: 1}
+		_ = windows.SetFileInformationByHandle(
+			windows.Handle(file.Fd()),
+			windows.FileDispositionInfo,
+			(*byte)(unsafe.Pointer(&info)),
+			uint32(unsafe.Sizeof(info)),
+		)
+	}
 }
 
 // CleanupStaleBinary intentionally preserves Windows recovery copies. A public
