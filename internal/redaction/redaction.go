@@ -68,9 +68,10 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
-// openaiKeyPattern mirrors secrets.Scan's broad sk- body. Matches without a
-// digit are left alone (kebab-case false positives); real keys always carry
-// digits. Applied via ReplaceAllStringFunc rather than the plain list below.
+// openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
+// prefixes (sk-proj-/sk-svcacct-/sk-admin-) are always redacted; other sk-
+// matches without a digit are left alone (kebab-case false positives).
+// Applied via ReplaceAllStringFunc rather than the plain list below.
 var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 
 // textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
@@ -222,10 +223,10 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
-	// openai keys first so the digit filter can drop kebab-case false positives
+	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !secretMatchHasDigit(match) {
+		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) {
 			return match
 		}
 		return replacement
@@ -236,8 +237,16 @@ func RedactString(value string, options Options) string {
 	return redacted
 }
 
+// knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
+// known OpenAI-issued forms redact even with an alphabet-only body.
+func knownOpenAIKeyPrefix(match string) bool {
+	return strings.HasPrefix(match, "sk-proj-") ||
+		strings.HasPrefix(match, "sk-svcacct-") ||
+		strings.HasPrefix(match, "sk-admin-")
+}
+
 // secretMatchHasDigit is the redaction-side twin of secrets.containsDigit:
-// real sk- keys always embed a digit; pure letter/hyphen kebab phrases do not.
+// unknown sk- vendor keys always embed a digit; pure letter/hyphen kebab phrases do not.
 func secretMatchHasDigit(s string) bool {
 	for _, r := range s {
 		if r >= '0' && r <= '9' {

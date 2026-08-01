@@ -283,3 +283,21 @@ func TestScanIgnoresKebabCaseStartingWithSk(t *testing.T) {
 		t.Errorf("expected no match for non-secret kebab-case phrase %q, got: %#v", phrase, findings)
 	}
 }
+
+func TestScanDetectsAlphabetOnlyKnownOpenAIPrefixes(t *testing.T) {
+	// Known OpenAI-issued prefixes redact even when the body has no digit.
+	// Unknown sk- forms still require a digit (see TestScanIgnoresKebabCase…).
+	for _, key := range []string{
+		"sk-proj-abcdefghijklmnopqrstuvwxyz",
+		"sk-svcacct-abcdefghijklmnopqrstuvwx",
+		"sk-admin-abcdefghijklmnopqrstuvwxyz",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "openai_key" {
+			t.Fatalf("expected one openai_key for alphabet-only %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("alphabet-only known OpenAI form leaked: %q", redacted)
+		}
+	}
+}

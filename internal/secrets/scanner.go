@@ -70,7 +70,10 @@ func Scan(text string) []Finding {
 	seen := map[string]Finding{}
 	for _, p := range patterns {
 		for _, m := range p.re.FindAllString(text, -1) {
-			if p.typ == "openai_key" && !containsDigit(m) {
+			// Drop pure kebab FPs (sk-learn-…) unless the match is a known
+			// OpenAI-issued prefix form (sk-proj-/sk-svcacct-/sk-admin-), which
+			// we always treat as credentials even when the body has no digit.
+			if p.typ == "openai_key" && !knownOpenAIKeyPrefix(m) && !containsDigit(m) {
 				continue
 			}
 			if _, ok := seen[m]; !ok {
@@ -96,7 +99,7 @@ func Scan(text string) []Finding {
 
 // containsDigit reports whether s has at least one ASCII digit. Used to drop
 // openai_key regex hits that are pure kebab-case words (no digit) while still
-// accepting every real sk- key format, which always embeds digits.
+// accepting vendor keys that always embed digits.
 func containsDigit(s string) bool {
 	for _, r := range s {
 		if r >= '0' && r <= '9' {
@@ -104,6 +107,15 @@ func containsDigit(s string) bool {
 		}
 	}
 	return false
+}
+
+// knownOpenAIKeyPrefix reports whether match is a known OpenAI-issued sk-
+// form. Those prefixes are redacted even when the body has no digit; unknown
+// sk- vendor forms still need a digit so kebab phrases stay un-redacted.
+func knownOpenAIKeyPrefix(match string) bool {
+	return strings.HasPrefix(match, "sk-proj-") ||
+		strings.HasPrefix(match, "sk-svcacct-") ||
+		strings.HasPrefix(match, "sk-admin-")
 }
 
 // Redact replaces every detected secret in text with a typed placeholder and

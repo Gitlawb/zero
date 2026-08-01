@@ -161,6 +161,17 @@ func TestRedactString_OpenAIKeyDigitFilterAndVendorPrefixes(t *testing.T) {
 			t.Errorf("RedactString leaked %q: %q", secret, out)
 		}
 	}
+	// Known OpenAI prefixes redact even with an alphabet-only body.
+	for _, secret := range []string{
+		"sk-proj-abcdefghijklmnopqrstuvwxyz",
+		"sk-svcacct-abcdefghijklmnopqrstuvwx",
+		"sk-admin-abcdefghijklmnopqrstuvwxyz",
+	} {
+		out := RedactString("token="+secret, o)
+		if strings.Contains(out, secret) {
+			t.Errorf("alphabet-only known OpenAI form leaked %q: %q", secret, out)
+		}
+	}
 	// No-digit kebab phrase must survive (parity with secrets.Scan).
 	phrase := "sk-learn-machine-learning-model"
 	out := RedactString("testing "+phrase+" in text", o)
