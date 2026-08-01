@@ -8,7 +8,7 @@ import (
 
 func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 	input := strings.Join([]string{
-		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz"}`,
+		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz0"}`,
 		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456",
 		"https://zero:super-secret@example.test/path?token=glpat-abcdefghijklmnopqrstuvwxyz",
 		"-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----",
@@ -17,7 +17,7 @@ func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 	got := RedactString(input, Options{ExtraSecretValues: []string{"super-secret"}})
 
 	for _, leaked := range []string{
-		"sk-proj-abcdefghijklmnopqrstuvwxyz",
+		"sk-proj-abcdefghijklmnopqrstuvwxyz0",
 		"ghp_abcdefghijklmnopqrstuvwxyz123456",
 		"super-secret",
 		"glpat-abcdefghijklmnopqrstuvwxyz",

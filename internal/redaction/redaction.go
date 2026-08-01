@@ -68,6 +68,11 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
+// openaiKeyPattern mirrors secrets.Scan's broad sk- body. Matches without a
+// digit are left alone (kebab-case false positives); real keys always carry
+// digits. Applied via ReplaceAllStringFunc rather than the plain list below.
+var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
+
 // textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
 // shared high-confidence shapes. A leading \b keeps each pattern from firing
 // mid-word; a trailing \b is omitted so a secret followed by more word
@@ -75,8 +80,9 @@ var sensitiveKeys = map[string]struct{}{
 // and a secret that ends in "-" (allowed by some body classes) is fully
 // redacted rather than leaving the hyphen behind. glpat is redaction-only
 // (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
+// openai keys are handled separately (digit filter). JWT has a strict form
+// (both segments start with eyJ) and a looser three-segment form.
 var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-|or-v1-)[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{20,}`),
 	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
 	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
 	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
@@ -85,6 +91,7 @@ var textSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 }
 
 var (
@@ -215,10 +222,29 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + "=" + replacement
 	})
+	// openai keys first so the digit filter can drop kebab-case false positives
+	// before any other pattern rewrites nearby text.
+	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		if !secretMatchHasDigit(match) {
+			return match
+		}
+		return replacement
+	})
 	for _, pattern := range textSecretPatterns {
 		redacted = pattern.ReplaceAllString(redacted, replacement)
 	}
 	return redacted
+}
+
+// secretMatchHasDigit is the redaction-side twin of secrets.containsDigit:
+// real sk- keys always embed a digit; pure letter/hyphen kebab phrases do not.
+func secretMatchHasDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func RedactValue(value any, options Options) any {

@@ -135,16 +135,50 @@ func TestRedactString_MultiPartAuthSchemes(t *testing.T) {
 // redacted (by the token-format patterns), never the file:line prefix.
 func TestRedactString_PreservesFileLineColons(t *testing.T) {
 	o := Options{}
-	in := "    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz"
+	in := "    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	out := RedactString(in, o)
 	if !strings.Contains(out, "secret_test.go:12:") {
 		t.Errorf("file:line prefix mangled: %q", out)
 	}
-	if strings.Contains(out, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
+	if strings.Contains(out, "sk-proj-abcdefghijklmnopqrstuvwxyz0") {
 		t.Errorf("secret leaked: %q", out)
 	}
 	if !strings.Contains(out, RedactedSecret) {
 		t.Errorf("expected the token to be redacted: %q", out)
+	}
+}
+
+func TestRedactString_OpenAIKeyDigitFilterAndVendorPrefixes(t *testing.T) {
+	o := Options{}
+	// Vendor / fixture shapes that the enumerated-prefix approach missed.
+	for _, secret := range []string{
+		"sk-test-secret1234567890",
+		"sk-fw-1SENTINEL_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sk-live-1SENTINELaaaaaaaaaa_bbbbbbbbbb-cccc",
+	} {
+		out := RedactString("approved with "+secret, o)
+		if strings.Contains(out, secret) {
+			t.Errorf("RedactString leaked %q: %q", secret, out)
+		}
+	}
+	// No-digit kebab phrase must survive (parity with secrets.Scan).
+	phrase := "sk-learn-machine-learning-model"
+	out := RedactString("testing "+phrase+" in text", o)
+	if !strings.Contains(out, phrase) {
+		t.Fatalf("digit filter over-redacted kebab phrase: %q", out)
+	}
+}
+
+func TestRedactString_LooseJWTForms(t *testing.T) {
+	o := Options{}
+	for _, token := range []string{
+		"eyJhbGciOiJIUzI1NiJ9.U0VOVElORUxwYXlsb2Fk.SENTINELsignature123",
+		"eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.SENTINELencryptedkey.SENTINELiv",
+	} {
+		out := RedactString("auth="+token, o)
+		if strings.Contains(out, "eyJhbGci") {
+			t.Errorf("RedactString leaked jwt material from %q: %q", token, out)
+		}
 	}
 }
 

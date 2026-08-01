@@ -93,7 +93,7 @@ func TestRunWorktreesPrepareReportsErrors(t *testing.T) {
 }
 
 func TestRunWorktreesPrepareRedactsPathsInOutput(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	cwd := filepath.Join(t.TempDir(), secret, "repo")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
@@ -427,7 +427,7 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 }
 
 func TestRunVerifyRedactsWorkspacePathsInOutput(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	cwd := filepath.Join(t.TempDir(), secret, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)

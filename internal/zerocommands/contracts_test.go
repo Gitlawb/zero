@@ -52,7 +52,7 @@ func TestConfigSnapshotRedactsProviderURLsAndResolvesAPIModels(t *testing.T) {
 }
 
 func TestConfigSnapshotRedactsProviderWarnings(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	resolved := config.ResolvedConfig{
 		Providers: []config.ProviderProfile{
 			{

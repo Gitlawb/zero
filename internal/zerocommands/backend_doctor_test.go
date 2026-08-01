@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewBackendDoctorReportSurfacesDiagnosticsAndActions(t *testing.T) {
-	secret := "sk-proj-" + strings.Repeat("a", 24)
+	secret := "sk-proj-" + strings.Repeat("a", 23) + "0"
 	report := NewBackendDoctorReport(BackendDoctorInput{
 		MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 			"remote": {

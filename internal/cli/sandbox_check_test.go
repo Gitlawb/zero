@@ -152,7 +152,7 @@ func TestRunSandboxCheckMatchedGrantRedactsReason(t *testing.T) {
 	if _, err := store.Grant(sandbox.GrantInput{
 		ToolName: "read_file",
 		Decision: sandbox.GrantAllow,
-		Reason:   "approved with sk-proj-testsecret1234567890ab",
+		Reason:   "approved with sk-test-secret1234567890",
 	}); err != nil {
 		t.Fatalf("seed grant: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRunSandboxCheckMatchedGrantRedactsReason(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("check exit=%d stderr=%s", exitCode, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "sk-proj-testsecret1234567890ab") {
+	if strings.Contains(stdout.String(), "sk-test-secret1234567890") {
 		t.Fatalf("grant reason leaked a secret into the snapshot:\n%s", stdout.String())
 	}
 	var payload struct {

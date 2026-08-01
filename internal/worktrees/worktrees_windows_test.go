@@ -22,6 +22,21 @@ func TestOpenProcessErrorMeansAliveOnInvalidParameter(t *testing.T) {
 	}
 }
 
+func TestOpenProcessErrorMeansAliveOnAmbiguousErrors(t *testing.T) {
+	// Any error other than INVALID_PARAMETER is ambiguity under
+	// processAlive's fail-closed contract (handle pressure, OOM, etc.).
+	for _, err := range []error{
+		windows.ERROR_ACCESS_DENIED,
+		windows.ERROR_NOT_ENOUGH_MEMORY,
+		windows.ERROR_NO_SYSTEM_RESOURCES,
+		windows.ERROR_TOO_MANY_OPEN_FILES,
+	} {
+		if !openProcessErrorMeansAlive(err) {
+			t.Fatalf("%v must be treated as alive", err)
+		}
+	}
+}
+
 func TestOsProcessAliveReportsLiveSelf(t *testing.T) {
 	if !osProcessAlive(os.Getpid()) {
 		t.Fatal("current process must report alive")

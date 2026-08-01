@@ -6,7 +6,7 @@ import (
 )
 
 func TestSnapshotFromSummaryRedactsDiffAndBuildsEvents(t *testing.T) {
-	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0"
 	summary := ChangeSummary{
 		Root:     "/repo/" + secret,
 		Branch:   "feature/" + secret,

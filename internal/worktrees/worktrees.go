@@ -145,14 +145,27 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		// A reused worktree may have been released by a prior run's exit, and
 		// an unlocked target is exposed to Clean's staleness heuristic while
 		// this caller is still using it, so re-establish the lease here. A
-		// lock already held means another run is still using the path: two
-		// live runs must not share one supposedly isolated checkout (they
-		// would edit the same tree, and whichever exits first would release
-		// the single Git lock out from under the other), so reject it rather
-		// than hand the second caller an unprotected shared workspace.
+		// lock already held by a live owner means another run is still using
+		// the path: two live runs must not share one supposedly isolated
+		// checkout, so reject it. A Zero lease whose recorded PID is dead
+		// (SIGKILL, crash) is reclaimable the same way Clean recovers it —
+		// otherwise a crashed `zero exec --worktree --worktree-name X` bricks
+		// that name until someone runs release by hand.
 		acquired, err := lockWorktree(ctx, runGit, repoRoot, target, options.LeasePID)
 		if err != nil {
 			return Result{}, err
+		}
+		if !acquired {
+			reclaimed, reclaimErr := reclaimDeadOwnerLease(ctx, runGit, repoRoot, target)
+			if reclaimErr != nil {
+				return Result{}, reclaimErr
+			}
+			if reclaimed {
+				acquired, err = lockWorktree(ctx, runGit, repoRoot, target, options.LeasePID)
+				if err != nil {
+					return Result{}, err
+				}
+			}
 		}
 		if !acquired {
 			return Result{}, fmt.Errorf("worktree %s is locked by another active run; release it with `zero worktrees release %s` if that run is finished, or use a different --name", target, target)
@@ -292,6 +305,35 @@ func lockWorktree(ctx context.Context, runGit GitRunner, repoRoot string, target
 		message = fmt.Sprintf("git worktree lock exited with code %d", lockResult.ExitCode)
 	}
 	return false, fmt.Errorf("lock git worktree: %s", message)
+}
+
+// reclaimDeadOwnerLease unlocks target when its porcelain entry is a Zero
+// lease whose recorded PID is provably dead. Live owners, human locks, and
+// PID-less Zero leases are left alone. Returns true only when an unlock ran
+// successfully so the caller can retry lockWorktree.
+func reclaimDeadOwnerLease(ctx context.Context, runGit GitRunner, repoRoot string, target string) (bool, error) {
+	output, err := gitOutput(ctx, runGit, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("list git worktrees for lease reclaim: %w", err)
+	}
+	want := canonicalizePath(target)
+	for _, entry := range parseWorktreeList(output) {
+		if canonicalizePath(entry.path) != want {
+			continue
+		}
+		if !entry.locked {
+			return false, nil
+		}
+		pid, ok := leasePID(entry.lockReason)
+		if !ok || processAlive(pid) {
+			return false, nil
+		}
+		if _, err := gitOutput(ctx, runGit, repoRoot, "worktree", "unlock", entry.path); err != nil {
+			return false, fmt.Errorf("reclaim dead-owner lease on %s: %w", entry.path, err)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // Release unlocks a worktree that Prepare locked, via `git worktree unlock`,
@@ -849,13 +891,25 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 		}
 
 		if worktreeIsStale(statPath, cutoff) {
-			// An explicit release is the owner's completion signal, so a
-			// worktree holding only gitignored residue (node_modules, build
-			// output) after release is reclaimable - otherwise every released
-			// worktree with such artifacts leaks forever. An expired lease is
-			// NOT a completion signal (the task may have died mid-work), so
-			// there ignored files still count as live data.
-			if worktreeIsDirty(ctx, runGit, statPath, expiredLease) {
+			// Ownership / legacy status first: the dirty probe's includeIgnored
+			// flag depends on it. An explicit release (unlocked, marker present)
+			// is a completion signal, so ignored residue is reclaimable. An
+			// expired lease is not (task may have died mid-work). A legacy
+			// pre-upgrade worktree never had Release at all — unlocked was its
+			// only state — so it gets the same benefit of the doubt as a
+			// crashed lease: ignored files block removal. Probing dirty before
+			// this would treat every legacy unlocked worktree as released and
+			// delete gitignored contents (e.g. .env) on first post-upgrade Clean.
+			owned, err := hasOwnershipMarker(ctx, runGit, statPath)
+			if err != nil {
+				continue
+			}
+			legacy := false
+			if !owned {
+				legacy = isLegacyZeroWorktree(ctx, runGit, statPath, repoDir, entry)
+			}
+			includeIgnored := expiredLease || legacy
+			if worktreeIsDirty(ctx, runGit, statPath, includeIgnored) {
 				// A stale mtime only means nothing changed at the worktree's
 				// top level or below recently; it does not mean the task
 				// holding it is done. Uncommitted or untracked changes are
@@ -864,16 +918,8 @@ func Clean(ctx context.Context, options Options, maxAge time.Duration) error {
 				// gets committed/cleaned (no longer dirty) or unlocked.
 				continue
 			}
-			// Require the ownership marker Prepare itself persists before
-			// force-touching anything below. For legacy Zero worktrees created
-			// before markers existed, verify they are in repoDir with a Zero
-			// lease and migrate them by writing the marker.
-			owned, err := hasOwnershipMarker(ctx, runGit, statPath)
-			if err != nil {
-				continue
-			}
 			if !owned {
-				if isLegacyZeroWorktree(ctx, runGit, statPath, repoDir, entry) {
+				if legacy {
 					if writeErr := writeOwnershipMarker(ctx, runGit, statPath); writeErr == nil {
 						owned = true
 					}

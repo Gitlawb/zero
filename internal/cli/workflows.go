@@ -152,7 +152,7 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 	// up front so the unlock target is unambiguous regardless of cwd.
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecUsageError(stderr, redactCLIString(err.Error()))
 	}
 	// Release falls back to Options.Cwd as git's working directory when the
 	// worktree directory itself was deleted by hand instead of released; with
@@ -168,7 +168,7 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 	if cwdFlag != "" {
 		workspaceRoot, err := resolveWorkspaceRoot(cwdFlag, deps)
 		if err != nil {
-			return writeExecUsageError(stderr, err.Error())
+			return writeExecUsageError(stderr, redactCLIString(err.Error()))
 		}
 		releaseOptions.Cwd = workspaceRoot
 	} else if workspaceRoot, rootErr := resolveWorkspaceRoot("", deps); rootErr == nil {

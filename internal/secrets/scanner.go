@@ -46,11 +46,19 @@ var patterns = []pattern{
 	{"slack_token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)},
 	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)},
 	{"anthropic_key", regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)},
-	{"openai_key", regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-|or-v1-)[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{20,}`)},
+	// Broad body (allows - and _) so sk-proj-…, sk-or-v1-…, sk-fw-…, and
+	// legacy sk-<alnum> all match. Scan drops matches with no digit so
+	// kebab-case false positives like sk-learn-machine-learning-model stay
+	// un-redacted (real keys always carry digits).
+	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)},
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
 	{"private_key_block", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`)},
+	// Strict JWS (both header and payload are JSON, so both start with eyJ)
+	// plus a looser three-segment form for non-JSON payloads and the first
+	// three segments of a compact JWE.
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
+	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
 }
 
 // Scan returns the distinct secrets found in text (deduplicated by match,
@@ -62,6 +70,9 @@ func Scan(text string) []Finding {
 	seen := map[string]Finding{}
 	for _, p := range patterns {
 		for _, m := range p.re.FindAllString(text, -1) {
+			if p.typ == "openai_key" && !containsDigit(m) {
+				continue
+			}
 			if _, ok := seen[m]; !ok {
 				seen[m] = Finding{Type: p.typ, Match: m}
 			}
@@ -81,6 +92,18 @@ func Scan(text string) []Finding {
 		return out[i].Match < out[j].Match
 	})
 	return out
+}
+
+// containsDigit reports whether s has at least one ASCII digit. Used to drop
+// openai_key regex hits that are pure kebab-case words (no digit) while still
+// accepting every real sk- key format, which always embeds digits.
+func containsDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // Redact replaces every detected secret in text with a typed placeholder and

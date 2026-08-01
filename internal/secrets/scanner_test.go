@@ -123,19 +123,49 @@ func TestScanDetectsModernPrefixedOpenAIKeys(t *testing.T) {
 }
 
 func TestScanDetectsHyphenatedOpenAICompatibleKeys(t *testing.T) {
-	// OpenRouter's sk-or-v1- keys are hyphenated like the modern sk-proj-
-	// family; the legacy sk-<alnum-only> branch does not match a "-" right
-	// after "sk-", so this format needs its own explicit prefix branch.
-	key := "sk-or-v1-1234567890abcdef1234567890abcdef1234567890abcdef1234"
-	redacted, findings := Redact("token=" + key)
-	if len(findings) != 1 || findings[0].Type != "openai_key" {
-		t.Fatalf("expected one openai_key finding for %q, got %#v", key, findings)
+	// Vendor-prefixed keys (OpenRouter sk-or-v1-, Fireworks sk-fw-, live keys)
+	// use hyphens beyond the enumerated prefixes. The broad sk-[A-Za-z0-9_-]
+	// pattern plus the digit filter must catch them without listing every vendor.
+	for _, key := range []string{
+		"sk-or-v1-1234567890abcdef1234567890abcdef1234567890abcdef1234",
+		// Vendor prefixes not in any allow-list; digit filter still accepts them.
+		"sk-fw-1SENTINEL_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sk-live-1SENTINELaaaaaaaaaa_bbbbbbbbbb-cccc",
+		"sk-test-secret1234567890",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "openai_key" {
+			t.Fatalf("expected one openai_key finding for %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("key leaked after redaction: %q", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED:openai_key]") {
+			t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+		}
 	}
-	if strings.Contains(redacted, key) {
-		t.Fatalf("key leaked after redaction: %q", redacted)
+}
+
+func TestScanDetectsLooseJWTForms(t *testing.T) {
+	// Strict form requires the second segment to start with eyJ (JSON payload).
+	// Compact JWS with a non-JSON payload and the first three segments of a
+	// compact JWE still need to redact.
+	cases := []string{
+		"eyJhbGciOiJIUzI1NiJ9.U0VOVElORUxwYXlsb2Fk.SENTINELsignature123",
+		"eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.SENTINELencryptedkey.SENTINELiv.SENTINELciphertext.SENTINELtag12345",
 	}
-	if !strings.Contains(redacted, "[REDACTED:openai_key]") {
-		t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+	for _, token := range cases {
+		redacted, findings := Redact("auth=" + token)
+		if len(findings) == 0 {
+			t.Fatalf("expected jwt finding for %q, got none", token)
+		}
+		if findings[0].Type != "jwt" {
+			t.Fatalf("expected jwt type for %q, got %#v", token, findings)
+		}
+		// At least the leading three segments (or the full three-part JWS) must go.
+		if strings.Contains(redacted, "eyJhbGci") {
+			t.Fatalf("jwt header leaked after redaction: %q", redacted)
+		}
 	}
 }
 

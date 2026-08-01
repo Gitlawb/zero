@@ -31,11 +31,10 @@ func osProcessAlive(pid int) bool {
 }
 
 // openProcessErrorMeansAlive classifies an OpenProcess failure. Only
-// ERROR_ACCESS_DENIED means a process with this PID exists (owned by another
-// user, or protected by policy) but we lack rights to query it - fail closed
-// by treating that ambiguity as alive. Any other error (typically
-// ERROR_INVALID_PARAMETER, for a PID that names no running process) means the
-// PID genuinely does not exist.
+// ERROR_INVALID_PARAMETER means the PID names no running process (dead).
+// Every other error - access denied under another user, handle pressure,
+// out-of-memory, and any other ambiguity - fails closed as alive, matching
+// processAlive's contract and the POSIX sibling.
 func openProcessErrorMeansAlive(err error) bool {
-	return errors.Is(err, windows.ERROR_ACCESS_DENIED)
+	return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 }
