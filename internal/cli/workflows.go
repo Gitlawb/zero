@@ -131,7 +131,7 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 			cwdFlag = value
 			index = next
 		case strings.HasPrefix(arg, "--cwd="):
-			cwdFlag = strings.TrimPrefix(arg, "--cwd=")
+			cwdFlag = strings.TrimSpace(strings.TrimPrefix(arg, "--cwd="))
 		case strings.HasPrefix(arg, "-"):
 			return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees release flag %q", arg))
 		default:
@@ -177,7 +177,9 @@ func runWorktreesRelease(args []string, stdout io.Writer, stderr io.Writer, deps
 	if err := deps.releaseWorktree(context.Background(), releaseOptions, absPath); err != nil {
 		return writeExecUsageError(stderr, redactCLIString(err.Error()))
 	}
-	if _, err := fmt.Fprintf(stdout, "released %s\n", redactCLIString(path)); err != nil {
+	// Print the absolute path that was released so relative arguments still
+	// show an unambiguous target in the confirmation line.
+	if _, err := fmt.Fprintf(stdout, "released %s\n", redactCLIString(absPath)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -882,6 +884,7 @@ prepare flags:
       --dir <path>        Base directory for Zero worktrees
   -C, --cwd <path>        Source repository directory
       --json              Print JSON output
+  -h, --help              Show this help
 
 release flags:
   -C, --cwd <path>        Source repository directory (required if the

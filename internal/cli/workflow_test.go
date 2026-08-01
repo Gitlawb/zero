@@ -1060,7 +1060,7 @@ func TestRunChangesCommitAuto(t *testing.T) {
 		Root:   cwd,
 		Branch: "main",
 		Files:  []zerogit.FileChange{{Path: "README.md", Status: "modified"}},
-		Diff:   "some diff content with ghp_SECRETKEYHERE",
+		Diff:   "some diff content with ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 	}
 
 	mockProv := &mockCommitMsgProvider{
@@ -1108,7 +1108,7 @@ func TestRunChangesCommitAuto(t *testing.T) {
 	}
 	// Verify that secret in the diff was redacted
 	promptContent := mockProv.req.Messages[0].Content
-	if strings.Contains(promptContent, "ghp_SECRETKEYHERE") {
+	if strings.Contains(promptContent, "ghp_1234567890abcdefghijklmnopqrstuvwxyz") {
 		t.Fatal("expected secret in diff to be redacted, but it was found in the prompt")
 	}
 	if !strings.Contains(promptContent, "[REDACTED]") && !strings.Contains(promptContent, "REDACTED") {

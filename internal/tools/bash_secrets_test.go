@@ -26,8 +26,9 @@ func TestFormatBashOutputLeavesCleanOutputAlone(t *testing.T) {
 }
 
 func TestFormatBashOutputRedactsAnthropicKey(t *testing.T) {
-	out := formatBashOutput("anthropic key: sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz-12345\n", "", 0)
-	if strings.Contains(out, "sk-ant-api03") {
+	key := "sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz-12345"
+	out := formatBashOutput("anthropic key: "+key+"\n", "", 0)
+	if strings.Contains(out, key) {
 		t.Fatalf("bash output leaked an Anthropic key: %q", out)
 	}
 	if !strings.Contains(out, "[REDACTED:anthropic_key]") {

@@ -1126,7 +1126,7 @@ func TestWorktreeIsStaleTrueForOldUntouchedTree(t *testing.T) {
 // only changes when an entry is added/removed/renamed directly inside it, not
 // when a long-running task edits an existing nested file.
 func TestCleanSkipsWorktreeWithRecentNestedActivity(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1167,7 +1167,8 @@ func TestCleanSkipsWorktreeWithRecentNestedActivity(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + activePath + "\n"},
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + activePath + "\n"},
 			{ExitCode: 0}, // worktree prune
 		},
 	}
@@ -1176,9 +1177,19 @@ func TestCleanSkipsWorktreeWithRecentNestedActivity(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
+	// Nested activity makes worktreeIsStale false before any status/remove.
+	if got, want := runner.commandLine(1), "git worktree list --porcelain"; got != want {
+		t.Fatalf("call 1 = %q, want %q", got, want)
+	}
+	if got, want := runner.commandLine(2), "git worktree prune"; got != want {
+		t.Fatalf("call 2 = %q, want %q (not-stale skip before status/remove)", got, want)
+	}
 	for _, call := range runner.calls {
 		if len(call.args) > 0 && call.args[0] == "remove" {
 			t.Fatalf("Clean removed an actively-edited worktree: %v", call.args)
+		}
+		if len(call.args) > 0 && call.args[0] == "status" {
+			t.Fatalf("Clean probed status on a not-stale worktree: %v", call.args)
 		}
 	}
 }
@@ -1454,7 +1465,7 @@ func TestCleanRecoversExpiredLease(t *testing.T) {
 // left behind, so they still block removal.
 func TestCleanSkipsExpiredLeaseWithIgnoredData(t *testing.T) {
 	deadPID := deadProcessPID(t)
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1474,7 +1485,8 @@ func TestCleanSkipsExpiredLeaseWithIgnoredData(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + crashedPath + "\nlocked " + leaseReason(deadPID) + "\n"},
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + crashedPath + "\nlocked " + leaseReason(deadPID) + "\n"},
 			{Stdout: "!! ignored-data\n"}, // status --porcelain --ignored
 			{ExitCode: 0},                 // worktree prune
 		},
@@ -1482,6 +1494,14 @@ func TestCleanSkipsExpiredLeaseWithIgnoredData(t *testing.T) {
 
 	if err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
 		t.Fatalf("Clean failed: %v", err)
+	}
+	// Prove the dirty probe with --ignored actually ran (the guard under test),
+	// not that Clean skipped the entry for an unrelated ownership reason.
+	if got, want := runner.commandLine(2), "git status --porcelain --ignored"; got != want {
+		t.Fatalf("status call = %q, want %q", got, want)
+	}
+	if got, want := runner.commandLine(3), "git worktree prune"; got != want {
+		t.Fatalf("call 3 = %q, want %q", got, want)
 	}
 	for _, call := range runner.calls {
 		if len(call.args) > 1 && call.args[0] == "worktree" && (call.args[1] == "remove" || call.args[1] == "unlock") {
@@ -1493,7 +1513,7 @@ func TestCleanSkipsExpiredLeaseWithIgnoredData(t *testing.T) {
 // TestCleanHonorsLiveLease: a lease whose recorded owner is still running is
 // never expired, regardless of staleness.
 func TestCleanHonorsLiveLease(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1513,13 +1533,21 @@ func TestCleanHonorsLiveLease(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + livePath + "\nlocked " + leaseReason(os.Getpid()) + "\n"},
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + livePath + "\nlocked " + leaseReason(os.Getpid()) + "\n"},
 			{ExitCode: 0}, // worktree prune
 		},
 	}
 
 	if err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
 		t.Fatalf("Clean failed: %v", err)
+	}
+	// Live lease short-circuits before status/remove: list then prune only.
+	if got, want := runner.commandLine(1), "git worktree list --porcelain"; got != want {
+		t.Fatalf("call 1 = %q, want %q", got, want)
+	}
+	if got, want := runner.commandLine(2), "git worktree prune"; got != want {
+		t.Fatalf("call 2 = %q, want %q (live lease skips status/remove)", got, want)
 	}
 	for _, call := range runner.calls {
 		if len(call.args) > 0 && (call.args[0] == "remove" || call.args[0] == "status") {
@@ -1544,18 +1572,12 @@ func deadProcessPID(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
-// worktreeIsDirty must count files matched by .gitignore as dirty content: a
-// worktree holding only ignored task data (credentials, generated drafts) has
-// nothing to show in plain `git status --porcelain` and would otherwise pass
-// as clean and be force-removed by Clean's staleness heuristic. This exercises
-// the real git binary rather than the fake runner, so it also verifies
-// --ignored actually changes git's answer, not just the command we send.
 // TestCleanHonorsTouchLiveness verifies that a stale worktree (mtime older
 // than maxAge) is skipped by Clean when it was recently touched by Prepare,
 // so a long-running but idle task that Prepare is still associated with is
-// not wrongly force-removed.
+// not wrongly force-removed. Fresh mtime alone is enough; no lock is required.
 func TestCleanHonorsTouchLiveness(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1573,11 +1595,22 @@ func TestCleanHonorsTouchLiveness(t *testing.T) {
 		t.Fatal(err)
 	}
 	plantOwnershipMarker(t, touchedPath)
+	// Re-age the marker files planted above so only the subsequent touch
+	// refreshes liveness.
+	if err := filepath.WalkDir(touchedPath, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, twoDaysAgo, twoDaysAgo)
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + touchedPath + "\nlocked " + leaseReason(os.Getpid()) + "\n"},
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + touchedPath + "\n"},
 			{ExitCode: 0}, // worktree prune (no-op)
 		},
 	}
@@ -1587,16 +1620,32 @@ func TestCleanHonorsTouchLiveness(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Clean(context.Background(), Options{BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
+	if err := Clean(context.Background(), Options{Cwd: repoRoot, BaseDir: baseDir, RunGit: runner.Run}, 24*time.Hour); err != nil {
 		t.Fatalf("Clean: %v", err)
 	}
-	// The worktree should still exist: Clean skipped it because it's locked
-	// with a live PID, and touching it refreshes mtime.
+	// Fresh touch makes worktreeIsStale false before status/remove.
+	if got, want := runner.commandLine(1), "git worktree list --porcelain"; got != want {
+		t.Fatalf("call 1 = %q, want %q", got, want)
+	}
+	if got, want := runner.commandLine(2), "git worktree prune"; got != want {
+		t.Fatalf("call 2 = %q, want %q (fresh mtime skips status/remove)", got, want)
+	}
+	for _, call := range runner.calls {
+		if len(call.args) > 0 && (call.args[0] == "remove" || call.args[0] == "status") {
+			t.Fatalf("Clean touched a freshly-touched worktree: %v", call.args)
+		}
+	}
 	if _, err := os.Stat(touchedPath); err != nil {
 		t.Fatalf("worktree %s was incorrectly removed: %v", touchedPath, err)
 	}
 }
 
+// worktreeIsDirty must count files matched by .gitignore as dirty content: a
+// worktree holding only ignored task data (credentials, generated drafts) has
+// nothing to show in plain `git status --porcelain` and would otherwise pass
+// as clean and be force-removed by Clean's staleness heuristic. This exercises
+// the real git binary rather than the fake runner, so it also verifies
+// --ignored actually changes git's answer, not just the command we send.
 func TestWorktreeIsDirtyCountsIgnoredFilesAsDirty(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -1718,7 +1767,7 @@ func TestCleanIgnoresWorktreeOutsideOwnedSubtree(t *testing.T) {
 // while waiting on a model, network, or user for far longer than the
 // staleness window, without ever writing to the tree again in that time.
 func TestCleanSkipsDirtyStaleWorktree(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := physicalTestPath(t, t.TempDir())
 	baseDir := filepath.Join(tempDir, "zero-worktrees")
 	repoRoot := filepath.Join(tempDir, "repo")
 	repoDir := filepath.Join(baseDir, "zero-worktree-"+repoKey(repoRoot))
@@ -1738,7 +1787,8 @@ func TestCleanSkipsDirtyStaleWorktree(t *testing.T) {
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: repoRoot},
-			{Stdout: "worktree " + dirtyPath + "\n"},
+			// Main worktree must be listed first: Clean keys repoDir off entries[0].
+			{Stdout: "worktree " + repoRoot + "\nworktree " + dirtyPath + "\n"},
 			{Stdout: " M internal/pkg/handler.go\n"}, // status --porcelain: dirty
 			{ExitCode: 0},                            // worktree prune
 		},
@@ -1748,6 +1798,13 @@ func TestCleanSkipsDirtyStaleWorktree(t *testing.T) {
 		t.Fatalf("Clean failed: %v", err)
 	}
 
+	// Prove the dirty status probe actually ran (the guard under test).
+	if got, want := runner.commandLine(2), "git status --porcelain"; got != want {
+		t.Fatalf("status call = %q, want %q", got, want)
+	}
+	if got, want := runner.commandLine(3), "git worktree prune"; got != want {
+		t.Fatalf("call 3 = %q, want %q", got, want)
+	}
 	for _, call := range runner.calls {
 		if len(call.args) > 0 && call.args[0] == "remove" {
 			t.Fatalf("Clean removed a dirty worktree: %v", call.args)

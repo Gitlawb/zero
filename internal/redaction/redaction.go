@@ -68,16 +68,23 @@ var sensitiveKeys = map[string]struct{}{
 	"zero_api_key":          {},
 }
 
+// textSecretPatterns mirror secrets.Scan for end-boundary behavior and the
+// shared high-confidence shapes. A leading \b keeps each pattern from firing
+// mid-word; a trailing \b is omitted so a secret followed by more word
+// characters outside its body class (e.g. AKIA…EXAMPLEEXTRA) still matches,
+// and a secret that ends in "-" (allowed by some body classes) is fully
+// redacted rather than leaving the hyphen behind. glpat is redaction-only
+// (not in secrets.Scan); ASIA temporary access keys are kept alongside AKIA.
 var textSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9._-]{12,}\b`),
-	regexp.MustCompile(`\bsk-ant-api\d{2}-[A-Za-z0-9._-]{12,}\b`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{12,}\b`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{12,}\b`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}\b`),
-	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{12,}\b`),
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{12,}\b`),
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
+	regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-|or-v1-)[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{20,}`),
+	regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),
+	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`),
+	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{12,}`),
+	regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`),
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 }
 
 var (
