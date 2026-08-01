@@ -21,7 +21,7 @@ func savedPlanFixture(t *testing.T) Plan {
 			"tools": []any{"grep"}, "phase": "analysis"},
 		task("right", "read b", "root"),
 	}, map[string]any{
-		"max_workers": float64(1), "max_tokens": float64(5000),
+		"max_workers": float64(1), "max_tokens": float64(500_000),
 		"max_wall_seconds": float64(600), "max_stall_seconds": float64(45), "max_retries": float64(2),
 	}, readOnlyLimits())
 }

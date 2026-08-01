@@ -24,7 +24,15 @@ type StreamUsage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
-	Events           int
+	// CachedInputTokens, CacheWriteTokens and ReasoningTokens are what make a
+	// child's turn PRICEABLE by its parent. Absent, every rolled-up sub-agent
+	// turn was costed as if nothing had been cached — on a plan task, where the
+	// same large prompt is re-sent each turn, that is the overwhelming majority
+	// of the input.
+	CachedInputTokens int
+	CacheWriteTokens  int
+	ReasoningTokens   int
+	Events            int
 }
 
 func (usage StreamUsage) HasUsage() bool {
@@ -86,6 +94,17 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 				result.Usage.TotalTokens += *event.TotalTokens
 			} else {
 				result.Usage.TotalTokens += eventPromptTokens + eventCompletionTokens
+			}
+			// Summed, not overwritten: a task makes one provider call per turn
+			// and each reports its own cache split.
+			if event.CachedInputTokens != nil {
+				result.Usage.CachedInputTokens += *event.CachedInputTokens
+			}
+			if event.CacheWriteTokens != nil {
+				result.Usage.CacheWriteTokens += *event.CacheWriteTokens
+			}
+			if event.ReasoningTokens != nil {
+				result.Usage.ReasoningTokens += *event.ReasoningTokens
 			}
 		}
 	}

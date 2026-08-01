@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -66,6 +67,21 @@ type OrchestrateTool struct {
 	// cannot isolate, and a plan requiring it is REFUSED rather than run in the
 	// parent's tree — see resolvePlanWorkspace.
 	Isolate PlanIsolator
+	// DiscoverModels reports what the active provider can serve, for
+	// auto_assign. nil means auto-assignment is unavailable and a plan asking
+	// for it is told so rather than silently running without it.
+	DiscoverModels ModelDiscoverer
+	// ProbeModel asks whether the provider will actually RUN a model, as opposed
+	// to merely listing it. nil skips proving entirely, which is the behaviour
+	// every plan had before this existed.
+	ProbeModel ModelProber
+	// probes remembers verdicts for the life of the process, so the cost is one
+	// trivial request per model per session rather than per plan.
+	probes probeCache
+	// ModelPrefs is what the user has said about which models plans may use:
+	// per-role pins and an exclusion list. Empty leaves the automatic choice
+	// alone, which is the behaviour for anyone who never configures it.
+	ModelPrefs ModelPreferences
 	// Plans locates saved plans. Both directories empty means saved plans are
 	// simply unavailable — the tool refuses a `saved` reference with a reason
 	// rather than searching nothing and reporting "not found", which would read
@@ -136,13 +152,39 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			"name":        {Type: "string", Description: "Short label for the plan."},
 			"description": {Type: "string", Description: "What the plan is for."},
 			"tasks": {
-				Type:        "array",
-				Description: "The plan's tasks. Each has an id, a prompt, optional depends_on ids, an optional read-only tool subset, and an optional phase label.",
+				Type: "array",
+				Description: "The plan's tasks. Each has an id, a prompt, optional depends_on ids, an optional read-only tool subset, and an optional phase label. " +
+					"A task may also name a model to run on — any model this provider serves, by id or alias; omit it to inherit " +
+					"this session's model. Use it to spend where it matters: a cheaper model for mechanical scanning, a stronger " +
+					"one for the tasks that judge or decide. A name the provider cannot serve fails when the task runs.\n\n" +
+					// WRITING THE TASKS IS THE LEVER, and it sits upstream of everything
+					// else this tool does. Routing cannot rescue a badly split plan and
+					// verification cannot rescue a task that never asked a real question.
+					// A measured run produced ten tasks whose prompts all opened with the
+					// same wrapper — ten paraphrases of one job rather than ten jobs.
+					"Writing good tasks matters more than how many you write:\n" +
+					"- A task should be a whole question someone could answer alone and be judged right or wrong about. " +
+					"\"Trace how X is computed and quote file:line for each step\" is a task; \"look at X\" is not.\n" +
+					"- Split by SUBJECT, never by phrasing. Two tasks that would read the same files are one task.\n" +
+					"- Say what the task must return. A task whose output cannot be checked cannot be verified by anything downstream.\n" +
+					"- Use depends_on for real dependencies only. A dependent receives its dependencies' results in its prompt, " +
+					"so chain a task that must build on findings — and leave independent work independent so it runs in parallel.\n" +
+					"- Do not split one modest job into pieces to look thorough. Fewer, larger, genuinely independent tasks beat many small ones: " +
+					"each task pays for its own context.\n" +
+					"- Be honest about what a task can do. A task that reads and reports is not the same as one that decides; " +
+					"give the deciding work to a task that says it is deciding, and name a stronger model for it.",
 			},
 			"saved": {
 				Type: "string",
 				Description: "Run a plan saved earlier, by name, instead of supplying tasks. " +
 					"Mutually exclusive with tasks/budget/name/description: a saved plan runs as it was saved.",
+			},
+			"auto_assign": {
+				Type: "boolean",
+				Description: "Pick a model per task automatically from what this provider serves: the cheapest tool-calling model " +
+					"for tasks that scan or read, a mid-priced one for tasks that change code, and the strongest for tasks that " +
+					"judge or verify. Off by default. A task that names its own model is never overridden, and the result reports " +
+					"what was chosen.",
 			},
 			"background": {
 				Type: "boolean",
@@ -151,7 +193,7 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			},
 			"budget": {
 				Type:        "object",
-				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried.",
+				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried. max_tokens_per_task bounds what ONE task may spend; without it a single task can spend many times the whole plan's budget. Sizing, from measured runs: a task that traces or audits a large repo cost 510k-1,017k tokens; one reasoning over what its dependencies already found costs far less. A cap BELOW what a task needs saves nothing — a plan capping tasks at 200k lost all six of them between 213k and 259k and still spent 1,437,049 tokens, finishing none. A capped task is told its budget and asked to write a partial answer before reaching it, so tight is survivable and too-tight is not. Budget from task count x expected depth, or omit max_tokens to run unbounded within this run's own ceiling. A budget too small for its task count is refused at admission rather than half-spent: when the plan runs out, tasks in flight are cancelled and the rest never run, so the answer comes back incomplete.",
 			},
 		},
 		// EMPTY, and the either/or lives in the DESCRIPTION instead.
@@ -354,6 +396,7 @@ func (tool *OrchestrateTool) runnerForCall(options tools.RunOptions) PlanRunner 
 		req.ParentSessionID = options.SessionID
 		req.ParentModel = options.Model
 		req.ParentReasoningEffort = options.ReasoningEffort
+		req.ParentToolCallID = options.ToolCallID
 		return run(ctx, req)
 	}
 }
@@ -434,6 +477,35 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	args, err := tool.resolveSavedPlan(args)
 	if err != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	// AUTO-ASSIGNMENT RUNS BEFORE THE CONSTRUCTOR, on the arguments.
+	//
+	// Not inside ParsePlan: that has six call sites, four of them TUI verb and
+	// render paths through savedPlanLimits(), and a provider probe on those would
+	// block the interface, make parsing non-deterministic, and give a saved plan
+	// different models every time it was re-admitted. Here it happens once, on
+	// the dispatch path, where a network call is already expected.
+	//
+	// Working on the args rather than the parsed plan is what makes an assigned
+	// model indistinguishable from a hand-written one: same validation, same
+	// Args() round trip into a saved plan, same resume.
+	// VALIDATE BEFORE SPENDING ANYTHING. Auto-assignment lists the provider's
+	// models and, when routing is on, spends a call on a frontier model before a
+	// single task runs — and it was doing that for plans that were then rejected
+	// outright: a duplicate task id, a cycle, one task over the size tier. A
+	// model that proposes an oversized plan twice paid for routing twice and got
+	// nothing either time.
+	//
+	// ParsePlan is pure — no I/O, no network — so running it first costs
+	// microseconds against a provider round trip. Assignment can only ADD a model
+	// field to tasks that already parsed, so nothing it does can rescue a plan
+	// that failed here, and the real parse below still has the final word.
+	if _, err := ParsePlan(args, tool.limits(options)); err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	assignNotes, autoErr := tool.autoAssignModels(ctx, args, options)
+	if autoErr != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + autoErr.Error()}
 	}
 	// ParsePlan validates as part of parsing; there is no other constructor, so
 	// this call cannot be bypassed by any argument shape.
@@ -536,7 +608,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 
 	result := tools.Result{
 		Status: tools.StatusOK,
-		Output: report.Summary(),
+		Output: report.Summary() + planWorkspaceNote(workspace) + autoAssignSummary(assignNotes),
 		Meta: map[string]string{
 			"plan_status": string(report.Status),
 			"max_speedup": strconv.FormatFloat(report.MaxSpeedup, 'f', 2, 64),
@@ -549,4 +621,200 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 		result.Status = tools.StatusError
 	}
 	return result
+}
+
+// autoAssignModels fills in a model per task when the plan asked for it,
+// returning one note per assignment for the result.
+//
+// OFF UNLESS ASKED. planBool reports false for a missing key, and that is the
+// wanted default: turning it on by default would change which model every
+// existing plan runs on — and what it costs — without anyone choosing that.
+//
+// The two unavailable cases are told apart deliberately. A plan that asked for
+// auto-assignment on a run that CANNOT do it is refused, because silently
+// running without it is the thing the user asked not to happen. A provider that
+// answers but offers nothing usable is NOT an error: every task simply inherits,
+// which is exactly the behaviour before this existed.
+func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[string]any, options tools.RunOptions) ([]string, error) {
+	// THE ARGUMENT WINS IN BOTH DIRECTIONS. A plan that supplies auto_assign is
+	// believed — true or false — and only a plan that says nothing falls back to
+	// what the user configured. Without the presence check a configured default
+	// of true could never be turned off for a single plan, because an absent
+	// argument and an explicit false look identical.
+	requested, supplied := planBoolSet(args, "auto_assign")
+	if !supplied {
+		requested = tool.ModelPrefs.AutoAssign
+	}
+	if !requested {
+		return nil, nil
+	}
+	// ASKED FOR vs CONFIGURED, and they must fail differently.
+	//
+	// A plan that SAYS auto_assign wants it: running silently without it is the
+	// thing that request exists to prevent, so an unavailable run is refused.
+	// A CONFIGURED default is a standing preference, not a demand — refusing
+	// every plan because a models endpoint blinked would make one setting break
+	// all planning, offline or behind a proxy. There it degrades: nothing is
+	// assigned, the reason is reported, and the plan runs on the session's model
+	// exactly as it did before the setting existed.
+	if tool.DiscoverModels == nil {
+		if !supplied {
+			return []string{"none — this run cannot list the provider's models, so every task kept this session's model"}, nil
+		}
+		return nil, fmt.Errorf(
+			"auto_assign is not available in this run — it needs a provider that can list its models. " +
+				"Name a model per task instead, or omit auto_assign to inherit this session's model")
+	}
+	raw, ok := args["tasks"].([]any)
+	if !ok {
+		// A saved plan or a malformed one: leave it entirely to ParsePlan, which
+		// owns every message about task shape.
+		return nil, nil
+	}
+	models, err := tool.DiscoverModels(ctx)
+	if err != nil {
+		if !supplied {
+			return []string{"none — could not list the provider's models (" + err.Error() +
+				"), so every task kept this session's model"}, nil
+		}
+		return nil, fmt.Errorf("auto_assign could not list the provider's models: %w", err)
+	}
+	// PROVED BEFORE ANYTHING IS BUILT FROM IT. Tiers, the served set and the
+	// router's candidate list are all derived from this slice, so a model that
+	// cannot run has to be gone before any of them exist — filtering later would
+	// leave it in the tiers it was already ranked into.
+	models, probeNotes := proveModels(ctx, models, tool.ProbeModel, &tool.probes)
+
+	tiers := buildModelTiers(models, tool.ModelPrefs)
+	served := servedModels(models)
+
+	// THE SESSION'S OWN MODEL MUST BE IN THE LIST, or the list is not this
+	// provider's and nothing built from it can be trusted.
+	//
+	// Discovery and child execution resolve the provider by different routes, and
+	// when those routes disagree this is the only place that can notice. A real
+	// run proved how bad the disagreement is: the session was xai/grok-4.5, the
+	// discovered list was nineteen Ollama models, and because grok-4.5 was absent
+	// from it even routerModel's "the session's model comes first" rule rejected
+	// the session's model — so the ROUTER ITSELF ran on qwen3.5:397b and the
+	// provider refused it. Four tasks died at dispatch on models that never
+	// existed for them.
+	//
+	// Every downstream guard was defeated by the same root fact. The served-set
+	// check passed, because the wrong list was internally consistent. Refusing
+	// here turns a plan-wide failure into the no-op it should always have been:
+	// every task keeps the session's model, which is exactly what it did before
+	// this feature existed.
+	//
+	// Guarded on a NON-EMPTY served set: an empty one means discovery told us
+	// nothing, which is the existing fail-open and not evidence of disagreement.
+	if parent := strings.TrimSpace(options.Model); parent != "" && len(served) > 0 && !servedContains(served, parent) {
+		mismatch := fmt.Sprintf(
+			"none — this session runs on %q, which is not among the %d model(s) discovered, "+
+				"so that list belongs to a different provider and was ignored "+
+				"(every task kept this session's model)", parent, len(models))
+		if !supplied {
+			return []string{mismatch}, nil
+		}
+		// Asked for explicitly: the same evidence, raised rather than reported,
+		// because a plan that demanded auto-assignment must not quietly not get it.
+		return nil, fmt.Errorf("auto_assign refused: %s", mismatch)
+	}
+
+	// THE ROUTER READS THE TASKS; the classifier only reads their verbs. It runs
+	// once per plan, on the strongest model available, and every way it can fail
+	// falls back to the classifier — a routing decision is worth having, never
+	// worth stopping a plan for.
+	// The router needs a grant only so the child is not refused for holding
+	// none; it reads nothing. Parent identity is attached by runnerForCall.
+	routerGrant, _ := planToolGrant(Task{}, tool.ParentTools)
+	router := routerModel(tool.ModelPrefs, tiers, served, options.Model)
+	routed, routerTokens, routeErr := routeTaskModels(ctx, tool.runnerForCall(options), PlanTaskRequest{Tools: routerGrant},
+		router, routableTasks(raw), eligibleForRouting(models, tool.ModelPrefs), tool.ModelPrefs.RouterGuidance)
+
+	tasks, notes := assignModelsToTaskArgs(raw, tiers, tool.ModelPrefs, served, routed)
+	// SAID, NOT SILENT. A model disappearing from routing with no explanation is
+	// indistinguishable from a bug, and these are precisely the ids the user has
+	// been adding to planModels.exclude by hand after each plan died on one.
+	for _, dropped := range probeNotes {
+		notes = append(notes, "not offered — "+dropped)
+	}
+	args["tasks"] = tasks
+	if len(routed) > 0 {
+		// NAME THE ROUTER. A per-task model that appeared from nowhere is
+		// indistinguishable from the classifier's guess, and the whole reason to
+		// pay for a routing call is being able to see whose judgement it was.
+		// NAME THE PRICE WITH THE NAME. Routing spends a frontier-model call
+		// before a single task runs, and it is not part of any task's total —
+		// so without this line the plan's reported spend is under its real spend
+		// by exactly this much, every run, invisibly.
+		headline := "routed by " + router
+		if routerTokens > 0 {
+			headline += fmt.Sprintf(" (%d tokens)", routerTokens)
+		}
+		notes = append([]string{headline}, notes...)
+	}
+	if routeErr != nil {
+		// Reported, not raised. The plan ran with classifier routing, and a user
+		// who configured a router deserves to know it did not answer.
+		notes = append(notes, "router unavailable ("+routeErr.Error()+"); roles chosen from task wording instead")
+	}
+	if len(notes) == 0 {
+		// ASKED FOR AND DID NOTHING IS A RESULT, and it has to say WHICH nothing.
+		//
+		// One message covered two unrelated causes and blamed the wrong one: a
+		// run with nineteen perfectly good models reported "none were usable"
+		// when the truth was that no task looked like scan, implement or verify,
+		// so nothing was assigned. That sent the reader hunting through provider
+		// capabilities for a problem that was in the task wording.
+		if tiers == (modelTiers{}) {
+			notes = append(notes, fmt.Sprintf(
+				"none — %d model(s) discovered, none of them usable for a plan task "+
+					"(every task kept this session's model)", len(models)))
+		} else {
+			notes = append(notes, fmt.Sprintf(
+				"none — %d model(s) available, but no task called for a different one "+
+					"(every task kept this session's model)", len(models)))
+		}
+	}
+	return notes, nil
+}
+
+// planWorkspaceNote says WHERE a write-capable plan did its work.
+//
+// PlanWorkspace.Describe exists "for the approval card and the run" and nothing
+// read it, so a plan that wrote files reported what it did and never where. The
+// work lands in a git worktree that is deliberately NOT removed afterwards —
+// "a plan that wrote produced work nobody has reviewed; deleting it would delete
+// the only copy" — which makes an unnamed location the difference between work
+// the user can review and work they cannot find.
+//
+// Empty for a read-only plan, which runs in the parent's own tree and has
+// nothing to disclose.
+func planWorkspaceNote(workspace PlanWorkspace) string {
+	if !workspace.Isolated {
+		return ""
+	}
+	where := strings.TrimSpace(workspace.Describe)
+	if where == "" {
+		where = strings.TrimSpace(workspace.Path)
+	}
+	if where == "" {
+		return ""
+	}
+	return "\n\nThis plan wrote in an isolated workspace: " + where +
+		"\nIt is left in place for review; nothing was written to the parent tree."
+}
+
+// autoAssignSummary reports what auto-assignment chose.
+//
+// REPORTED, not merely applied. A feature that silently changes which model
+// each task runs on — and therefore what the plan costs — has to say what it
+// did, or the user cannot tell a plan that ran as they expected from one that
+// did not. Empty when nothing was assigned, so the untouched path is unchanged.
+func autoAssignSummary(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	return "\n\nModels assigned automatically:\n  " + strings.Join(notes, "\n  ")
 }

@@ -20,7 +20,7 @@ func singleTaskPlanArgs(task map[string]any) map[string]any {
 	return map[string]any{
 		"name":   "p",
 		"tasks":  []any{task},
-		"budget": map[string]any{"max_workers": 1, "max_tokens": 1000},
+		"budget": map[string]any{"max_workers": 1, "max_tokens": 500_000},
 	}
 }
 
@@ -81,7 +81,7 @@ func TestToolsResolvedSurvivesAJSONRoundTrip(t *testing.T) {
 // ever built, but if that check were bypassed the manifest itself must still
 // not expand. This is the belt to planToolGrant's braces.
 func TestPlanTaskManifestMarksItsGrantAuthoritative(t *testing.T) {
-	manifest := planTaskManifest("explorer", []string{})
+	manifest := planTaskManifest("explorer", "", "", []string{})
 	if !manifest.ToolsResolved {
 		t.Fatal("a plan task's manifest carries an already-intersected grant; it must be marked authoritative")
 	}
@@ -135,7 +135,7 @@ func TestPlanToolGrantInheritsOnlyWhatTheParentHolds(t *testing.T) {
 func TestParsePlanRejectsAToolTheParentDoesNotHold(t *testing.T) {
 	_, err := ParsePlan(
 		singleTaskPlanArgs(map[string]any{"id": "a", "prompt": "p", "tools": []any{"read_file"}}),
-		Limits{MaxTasks: 20, MaxTokens: 200000, ParentTools: []string{"grep"}},
+		Limits{MaxTasks: 20, ParentTools: []string{"grep"}},
 	)
 	if err == nil {
 		t.Fatal("a task requesting a tool the run does not hold must be rejected")
@@ -164,7 +164,7 @@ func TestParsePlanRejectsEveryToolWhenNoGrantWasSupplied(t *testing.T) {
 func TestExecutePlanFailsAnUngrantableTaskWithoutDispatchingIt(t *testing.T) {
 	plan := mustParsePlan(t,
 		singleTaskPlanArgs(map[string]any{"id": "a", "prompt": "p"}),
-		Limits{MaxTasks: 20, MaxTokens: 200000, ParentTools: []string{"grep"}},
+		Limits{MaxTasks: 20, ParentTools: []string{"grep"}},
 	)
 	dispatched := 0
 	report := ExecutePlan(context.Background(), plan, nil,
@@ -323,7 +323,7 @@ func TestReadOnlyToolSetsAgree(t *testing.T) {
 // the consequence the drift produced, asserted at the behaviour rather than at
 // the two maps.
 func TestAFullPlanGrantIsAReadOnlyManifest(t *testing.T) {
-	manifest := planTaskManifest("explorer", PlanReadOnlyToolNames())
+	manifest := planTaskManifest("explorer", "", "", PlanReadOnlyToolNames())
 	if !manifestIsReadOnly(manifest) {
 		t.Fatalf("a manifest holding exactly the plan grant %v is not considered read-only", PlanReadOnlyToolNames())
 	}

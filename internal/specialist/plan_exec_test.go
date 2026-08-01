@@ -139,8 +139,12 @@ func TestAllFailedPlanIsFailed(t *testing.T) {
 
 // (o) BUDGET ENFORCED AT DISPATCH. Validation alone is a promise, not a bound.
 func TestBudgetExhaustionMidPlanIsPartial(t *testing.T) {
+	// AT REALISTIC SCALE, because refuseImplausibleBudget now rejects a budget
+	// that cannot cover its own tasks — and a 100-token budget for three tasks is
+	// exactly the arithmetic it exists to refuse. The property under test is
+	// unchanged; only the numbers are ones a real plan could carry.
 	budget := okBudget()
-	budget["max_tokens"] = float64(100)
+	budget["max_tokens"] = float64(150_000)
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, budget, readOnlyLimits())
 
 	dispatched := []string{}
@@ -148,10 +152,10 @@ func TestBudgetExhaustionMidPlanIsPartial(t *testing.T) {
 		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
 			task := req.Task
 			dispatched = append(dispatched, task.ID)
-			return TaskResult{Outcome: TaskSucceeded, Tokens: 60, Output: "ok"}, nil
+			return TaskResult{Outcome: TaskSucceeded, Tokens: 90_000, Output: "ok"}, nil
 		}, nil)
 
-	// Two tasks at 60 tokens exhaust a 100-token budget; the third is skipped.
+	// Two tasks at 90k exhaust a 150k budget; the third is skipped.
 	if len(dispatched) != 2 {
 		t.Fatalf("the budget must stop dispatch after it is spent, dispatched %v", dispatched)
 	}
@@ -203,7 +207,7 @@ func TestToolGrantIsIntersectedAtDispatch(t *testing.T) {
 // An empty Tools inherits the parent's READ-ONLY grant — never the parent's
 // mutating tools, even when the parent holds them.
 func TestEmptyToolsInheritsOnlyReadOnlyParentTools(t *testing.T) {
-	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), Limits{MaxTasks: 5, MaxTokens: 1000})
+	plan := mustPlan(t, []any{task("a", "x")}, okBudget(), Limits{MaxTasks: 5})
 	var granted []string
 	ExecutePlan(context.Background(), plan, []string{"read_file", "grep", "write_file", "bash"},
 		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
@@ -368,7 +372,9 @@ func TestRealRunnerFeedsTheBudgetMeter(t *testing.T) {
 				Started: true,
 				Events: []streamjson.Event{
 					{Type: "assistant", Text: "done"},
-					{Type: "usage", TotalTokens: intPtrForTest(500)},
+					// More than the whole plan budget: the first task alone blows it,
+					// which is what proves the meter is fed by the REAL runner.
+					{Type: "usage", TotalTokens: intPtrForTest(200_000)},
 				},
 			}, nil
 		},
@@ -376,7 +382,9 @@ func TestRealRunnerFeedsTheBudgetMeter(t *testing.T) {
 	runner := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
 
 	budget := okBudget()
-	budget["max_tokens"] = float64(1) // one token: the first task alone blows it
+	// The floor of what admission will accept for three tasks; the first task
+	// alone spends more than all of it, which is the condition under test.
+	budget["max_tokens"] = float64(150_000)
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, budget, readOnlyLimits())
 
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"}, runner, nil)

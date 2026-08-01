@@ -17,7 +17,7 @@ func narrowManifest() Manifest {
 	// ResolvedTools would be re-expanded to the default read-only category —
 	// which is what the first version of this test did, and it then "failed"
 	// against correct code.
-	return planTaskManifest("explorer", []string{"grep"})
+	return planTaskManifest("explorer", "", "", []string{"grep"})
 }
 
 func enabledToolsOf(args []string) string {

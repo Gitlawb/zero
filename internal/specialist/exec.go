@@ -50,6 +50,28 @@ type Executor struct {
 	BackgroundManager     *background.Manager
 	BackgroundManagerFunc BackgroundManagerFunc
 	BackgroundRuntime     *Runtime
+	// ExtraWriteRoots reports the directories THIS RUN may reach outside its
+	// workspace, so a child is confined to the same ground its parent stands on
+	// rather than to less.
+	//
+	// A CHILD GETTING LESS THAN ITS PARENT IS ALSO A BUG, and it produced a real
+	// one: a run was granted ~/zm-lab mid-session, created it, copied packages
+	// into it, then dispatched plan tasks to read them. Every task was refused
+	// — "the target directory is outside the workspace boundary" — because a
+	// child rebuilds its sandbox from --cwd alone and the grant lived only in
+	// the parent's engine. Two tasks died, two dependents were skipped, and a
+	// whole retry plan was spent rediscovering the boundary.
+	//
+	// A FUNCTION, not a slice, because the answer changes DURING the run: a
+	// request_permissions grant lands mid-session, and a value captured at
+	// wiring time would carry the roots the run started with forever — which is
+	// precisely the staleness that made plan model discovery probe the wrong
+	// provider.
+	//
+	// This never widens beyond the parent. It reports what the parent already
+	// holds; a child still cannot ask for more, and the sandbox it builds is its
+	// own.
+	ExtraWriteRoots func() []string
 }
 
 type BuildArgsInput struct {
@@ -245,6 +267,11 @@ type ExecResult struct {
 	// never fire — found by driving the real binary, invisible to a unit test
 	// whose fake runner fabricated its own token counts.
 	TotalTokens int
+	// ExitCode is the child process's own exit code, carried so a caller can tell
+	// WHY it stopped without reading its prose. childExitIncomplete in particular
+	// means "stopped with work unfinished", which a plan treats differently from a
+	// wrong answer.
+	ExitCode int
 }
 
 type ChildRunResult struct {
@@ -346,7 +373,43 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}
+	// READ HERE, not passed in. A field on the input would be one more thing every
+	// call site must remember, and this file already carries the scar: the resume
+	// path forgot the model the fresh path carried, and the plan path forgot the
+	// progress callback the Task path carried. The executor knows its own run;
+	// asking it directly is the only version with no seam to forget.
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
+}
+
+// appendExtraWriteRootArgs emits one --add-dir per root the RUN already holds.
+//
+// The child's own workspace is skipped: --cwd already covers it, and repeating
+// it as an extra root says the same thing twice in a way a reader would have to
+// check. Blank entries are dropped rather than emitted as an empty flag value,
+// which the child would reject outright and turn a scope detail into a launch
+// failure.
+func appendExtraWriteRootArgs(args []string, roots []string, cwd string) []string {
+	workspace := strings.TrimSpace(cwd)
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" || root == workspace {
+			continue
+		}
+		args = append(args, "--add-dir", root)
+	}
+	return args
+}
+
+// extraWriteRoots reports the run's non-workspace roots, or none when the caller
+// never wired the supplier — the same fail-safe direction as every other unset
+// hook here: a child confined more tightly than its parent is a smaller problem
+// than one confined less.
+func (executor Executor) extraWriteRoots() []string {
+	if executor.ExtraWriteRoots == nil {
+		return nil
+	}
+	return executor.ExtraWriteRoots()
 }
 
 func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsResult, error) {
@@ -391,6 +454,12 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}
+	// THE SAME ROOTS THE FRESH PATH EMITS. This file's own history is the reason
+	// it is spelled out: the resume path once forgot the model the fresh path
+	// carried, so a resumed task silently ran on a different one. A resumed task
+	// confined more tightly than the task it resumes would fail on files it had
+	// already read.
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 
@@ -541,6 +610,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		ParentSessionID: options.ParentSessionID,
 		ChildSessionID:  built.SessionID,
 		SpecialistName:  manifest.Metadata.Name,
+		Model:           resolvedChildModel(manifest, options.ParentModel),
 		Description:     params.Description,
 		ToolCallID:      options.ToolCallID,
 		Mode:            "background",
@@ -652,6 +722,7 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		ParentSessionID: options.ParentSessionID,
 		ChildSessionID:  built.SessionID,
 		SpecialistName:  manifest.Metadata.Name,
+		Model:           resolvedChildModel(manifest, options.ParentModel),
 		Description:     params.Description,
 		ToolCallID:      options.ToolCallID,
 		Mode:            mode,
@@ -662,11 +733,28 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 	if err != nil {
 		exitCode := run.exitCodeOr(-1)
 		summary := SummarizeStream(run.Events, exitCode)
-		executor.recordSpecialistStop(accounting, summary, "error", summary.ExitCode, err, false)
+		// ROLLED UP EVEN THOUGH IT FAILED, for the same reason TotalTokens is
+		// returned below: spend does not become hypothetical because the task
+		// died. This branch passed a hard-coded false and appended no usage
+		// event, so a child killed mid-run had every token it had already spent
+		// vanish from the parent's session record — and `zero usage` under-
+		// reported by exactly that much.
+		rolledUp := executor.rollUpSpecialistUsage(accounting, summary)
+		executor.recordSpecialistStop(accounting, summary, "error", summary.ExitCode, err, rolledUp)
 		// Carry the child session id even on a post-start failure so a caller (the
 		// swarm launcher -> FailWithSession) can still make the failed member
 		// drillable; the session exists once the child has started.
-		return ExecResult{SessionID: built.SessionID}, err
+		//
+		// AND ITS TOKENS. The summary above already holds what the child spent
+		// before it died, and returning ExecResult without them reported zero for
+		// work that was billed: a plan's budget was never decremented for a failed
+		// task and its total under-counted every one. Spend does not become
+		// hypothetical because the task failed.
+		return ExecResult{
+			SessionID:   built.SessionID,
+			TotalTokens: summary.Usage.EffectiveTotalTokens(),
+			ExitCode:    summary.ExitCode,
+		}, err
 	}
 	summary := SummarizeStream(run.Events, run.ExitCode)
 	rolledUp := executor.rollUpSpecialistUsage(accounting, summary)
@@ -675,6 +763,7 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		Result:      BuildFinalResult(run.Events, run.Stderr, run.ExitCode, run.Signal),
 		SessionID:   built.SessionID,
 		TotalTokens: summary.Usage.EffectiveTotalTokens(),
+		ExitCode:    summary.ExitCode,
 	}, nil
 }
 
@@ -776,11 +865,22 @@ func (executor Executor) cleanupBackgroundPromptFile(taskID string, promptFile s
 	cleanupPromptFile(promptFile)
 }
 
-func appendModelArgs(args []string, manifest Manifest, parentModel string, parentReasoningEffort string) []string {
-	resolvedModel := strings.TrimSpace(manifest.Metadata.Model)
-	if resolvedModel == "" {
-		resolvedModel = strings.TrimSpace(parentModel)
+// resolvedChildModel is what the child will actually run on: its own model when
+// the manifest names one, the parent's otherwise.
+//
+// ONE RULE, TWO READERS. The argv builder needs it to pass --model, and usage
+// accounting needs it to price the tokens against the right model. Computing it
+// twice is how the command line and the bill come to disagree about which model
+// did the work.
+func resolvedChildModel(manifest Manifest, parentModel string) string {
+	if model := strings.TrimSpace(manifest.Metadata.Model); model != "" {
+		return model
 	}
+	return strings.TrimSpace(parentModel)
+}
+
+func appendModelArgs(args []string, manifest Manifest, parentModel string, parentReasoningEffort string) []string {
+	resolvedModel := resolvedChildModel(manifest, parentModel)
 	if resolvedModel != "" {
 		args = append(args, "--model", resolvedModel)
 	}

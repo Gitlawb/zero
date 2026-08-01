@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -72,10 +73,43 @@ type TaskResult struct {
 	// of errors.Is, which is what silently disabled every stall retry in the
 	// prototype.
 	Stalled bool
+	// Model is what the task actually ran on, empty when it inherited the
+	// parent's. Reported so a per-task model is OBSERVABLE: the feature changes
+	// which model does the work and what it costs, and a change nobody can see
+	// is one nobody can check.
+	Model string
 	// Attempts is how many times the task ran, always at least 1 for a task that
 	// was dispatched. Duration and Tokens are the TOTALS across those attempts,
 	// because what the plan spent is what the plan spent.
 	Attempts int
+	// Declined reports that the child stopped with its work clearly unfinished —
+	// it said it could not do the task rather than doing it wrongly.
+	//
+	// A CODE, NOT A MESSAGE. The child exits childExitIncomplete for exactly this,
+	// so the signal is structural like Stalled; the prose that accompanies it
+	// ("the final message admits the objective was not met") is for the reader,
+	// never for the decision.
+	//
+	// It matters because a decline is usually TRANSIENT in a way a wrong answer is
+	// not. A measured plan had one task decline on a directory that existed and
+	// that its three sibling tasks read without trouble; the decline cost that
+	// task, its dependent, and the final report — a third of the plan.
+	Declined bool
+	// ModelRejected reports that the task died without its assigned model ever
+	// producing anything — the signature of a provider refusing the MODEL rather
+	// than the work failing. Set by the runner, read by runTaskWithRetries to
+	// decide whether one attempt on the parent's model is worth spending.
+	//
+	// A FLAG, not a message match, exactly like Stalled and for the same reason.
+	ModelRejected bool
+	// RetriedOnParentModel names the assigned model that could not run, on a task
+	// the plan then re-ran on the session's own model. Empty for everything else.
+	//
+	// Reported because a silent fallback is the worst of both worlds: the plan
+	// says it used the model it chose while something else did the work, and the
+	// next plan picks the same broken model again. Seeing it is what lets the
+	// name be added to planModels.exclude.
+	RetriedOnParentModel string
 }
 
 // PlanReport is the plan's terminal record, carried in plan_completed.
@@ -145,6 +179,14 @@ type PlanTaskRequest struct {
 	ParentSessionID       string
 	ParentModel           string
 	ParentReasoningEffort string
+	// ParentToolCallID is the orchestrate call this task belongs to.
+	//
+	// The Task tool carries it and this path did not, so a plan task's child was
+	// the only kind of child whose accounting could not be traced back to the
+	// call that spawned it — spend recorded against a session with nothing
+	// naming what asked for it. Same shape as every other gap in this file: a
+	// value present at the tool, consumed by accounting, and dropped in between.
+	ParentToolCallID string
 	// Cwd overrides where this task runs. Empty means the parent's workspace,
 	// which is every read-only plan. A write-capable plan sets it to its
 	// isolated worktree, and it is carried per REQUEST rather than captured in
@@ -155,6 +197,24 @@ type PlanTaskRequest struct {
 	// ExecutePlan from the plan's budget so every task in a plan shares one
 	// answer, rather than each runner re-deriving it.
 	StallTimeout time.Duration
+	// Spend is the plan's live token meter, shared by every task in flight. A
+	// task that crosses the plan's limit while running is stopped by it — the
+	// dispatch-time check cannot, because it only sees numbers that have already
+	// landed. nil means no live metering.
+	Spend *planSpend
+	// MaxTaskTokens bounds what THIS task may spend. 0 is unbounded, which is
+	// every plan that does not ask for a cap.
+	MaxTaskTokens int
+	// SystemPrompt replaces the plan-task system prompt for this request. Empty
+	// keeps the plan-task prompt, which is every task of every plan.
+	//
+	// IT EXISTS FOR THE ROUTER, which is not a plan task at all. The plan-task
+	// prompt opens "You have read-only tools: USE THEM. Start with a tool call,
+	// not prose" — sound advice for work, and a direct contradiction of the
+	// router's own instruction to reply with JSON and nothing else. The single
+	// highest-leverage prompt in the system, the one choosing every other task's
+	// model, was being told to do the opposite of what it was asked.
+	SystemPrompt string
 }
 
 // PlanRunner runs one task. The executor depends on this seam rather than on
@@ -229,6 +289,9 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	budgetLeft := plan.Budget().MaxTokens
 	bounded := budgetLeft > 0
 	budgetExhausted := false
+	// The live meter, shared by every task in flight. Same limit, consulted from
+	// inside a running task rather than between two of them.
+	spend := &planSpend{limit: int64(plan.Budget().MaxTokens)}
 
 	deadline := time.Time{}
 	if wall := plan.Budget().MaxWall; wall > 0 {
@@ -293,6 +356,27 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			results[id] = result
 			failed[id] = true
 			report.Failed++
+			recordFailed(recorder, result)
+			return
+		}
+		// A TERMINAL OUTCOME THE RUNNER ALREADY DECIDED IS NOT OVERWRITTEN.
+		//
+		// The line below used to be unconditional, and the guard above tests only
+		// TaskFailed — so a runner returning TaskCancelled with no error fell
+		// through and was relabelled a success. A real plan killed all six of its
+		// tasks for running over budget and reported "6 succeeded, 0 failed, 0
+		// skipped", with the kill notice sitting in each task's own result text
+		// where the headline contradicted it.
+		//
+		// Work that did not finish, reported as done, is the failure this whole
+		// executor is built to prevent; the runner is the only thing that watched
+		// the task run, so when it names an outcome, that outcome stands.
+		if result.Outcome == TaskCancelled {
+			results[id] = result
+			// Its dependents are blocked, exactly as for a failure: a task that
+			// was cut short did not produce what they were waiting for.
+			failed[id] = true
+			report.Cancelled++
 			recordFailed(recorder, result)
 			return
 		}
@@ -402,14 +486,22 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			continue
 		}
 
+		// WHAT ITS DEPENDENCIES FOUND, handed to it rather than left for it to
+		// rediscover. See dependencyBriefing.
+		task.Prompt = withDependencyBriefing(task, results)
+		// AND WHAT IT MAY SPEND, so it can land instead of being shot down.
+		task.Prompt = withTokenBudgetNotice(task.Prompt, plan.Budget().MaxTokensPerTask)
+
 		recordDispatched(recorder, task)
 		policy := retryPolicy{
-			task:         task,
-			tools:        granted,
-			cwd:          workspace.Path,
-			stallTimeout: stallTimeout,
-			maxRetries:   plan.Budget().MaxRetries,
-			deadline:     deadline,
+			task:          task,
+			tools:         granted,
+			cwd:           workspace.Path,
+			stallTimeout:  stallTimeout,
+			spend:         spend,
+			maxTaskTokens: plan.Budget().MaxTokensPerTask,
+			maxRetries:    plan.Budget().MaxRetries,
+			deadline:      deadline,
 		}
 		slots.take()
 		started := time.Now()
@@ -449,13 +541,24 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 // PlanTaskRequest is one: this parameter list is the thing that grows, and a
 // positional list is where a second call site quietly omits a field.
 type retryPolicy struct {
-	task         Task
-	tools        []string
-	cwd          string
-	stallTimeout time.Duration
-	maxRetries   int
-	deadline     time.Time
+	task          Task
+	tools         []string
+	cwd           string
+	stallTimeout  time.Duration
+	maxRetries    int
+	spend         *planSpend
+	maxTaskTokens int
+	deadline      time.Time
 }
+
+// childExitIncomplete is the child's exit code for "stopped with work clearly
+// unfinished".
+//
+// DUPLICATED FROM internal/cli's exitIncomplete, deliberately: cli imports this
+// package, so the constant cannot travel the other way without inverting the
+// dependency. Two definitions of one number is a thing that drifts, so cli owns
+// a test asserting they agree — the only defence available.
+const childExitIncomplete = 4
 
 // runTaskWithRetries runs one task, retrying it ONLY when it stalled.
 //
@@ -475,13 +578,25 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 	var totalDuration time.Duration
 	var totalTokens int
 
+	// fellBackFrom is the assigned model that would not run, once the task has
+	// been re-dispatched on the parent's. Non-empty is also what BOUNDS the
+	// fallback at exactly one: a provider that refuses the parent's model too
+	// must not put this loop into a spawn cycle.
+	var fellBackFrom string
+	// retriedAfterDecline bounds the decline retry at exactly one. A model that
+	// declines twice is telling us something about the task, not having a bad
+	// moment.
+	retriedAfterDecline := false
+
 	for attempt := 1; ; attempt++ {
 		started := time.Now()
 		result, err = run(ctx, PlanTaskRequest{
-			Task:         policy.task,
-			Tools:        policy.tools,
-			Cwd:          policy.cwd,
-			StallTimeout: policy.stallTimeout,
+			Task:          policy.task,
+			Tools:         policy.tools,
+			Cwd:           policy.cwd,
+			StallTimeout:  policy.stallTimeout,
+			Spend:         policy.spend,
+			MaxTaskTokens: policy.maxTaskTokens,
 		})
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
@@ -491,8 +606,67 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 		result.Attempts = attempt
 		result.Duration = totalDuration
 		result.Tokens = totalTokens
+		// Carried across the fallback: the task that finally ran on the parent's
+		// model must still report which model could not run, or the same broken
+		// model is chosen again by the next plan and nothing says why.
+		result.RetriedOnParentModel = fellBackFrom
 
 		switch {
+		case result.ModelRejected && fellBackFrom == "" && strings.TrimSpace(policy.task.Model) != "":
+			// AN ASSIGNED MODEL THE PROVIDER WILL NOT RUN IS NOT THE TASK'S FAULT.
+			//
+			// Auto-assignment picks from the list the provider itself published,
+			// so "listed but unusable" is the normal failure of a discovery
+			// endpoint that describes products rather than endpoints — a model
+			// belonging to another account, or one whose id lists on /v1/models
+			// while chat completions answers "Multi Agent requests are not allowed
+			// on chat completions". Falling back to the model the session is
+			// demonstrably able to run costs one child and saves the task.
+			//
+			// Gated by the SAME stops as a stall retry, because it spends the same
+			// thing: a cancelled run and an exhausted wall budget both refuse.
+			// Not gated by maxRetries — that budget bounds stall THRASHING, where
+			// the same model reruns the same work hoping it answers this time.
+			// This is a different model, tried once, and fellBackFrom is its bound.
+			if ctx.Err() != nil {
+				return result, err
+			}
+			if !policy.deadline.IsZero() && time.Now().After(policy.deadline) {
+				return result, err
+			}
+			fellBackFrom = strings.TrimSpace(policy.task.Model)
+			policy.task.Model = ""
+			continue
+		case result.Declined && !retriedAfterDecline:
+			// A DECLINE IS WORTH ONE MORE ATTEMPT, and a wrong answer is not.
+			//
+			// The distinction is the whole justification. "Running it again buys
+			// the same report" is true of a task that read the code and concluded
+			// wrongly — it will conclude the same thing. It is not true of a task
+			// that said it could not proceed: a measured plan had one decline on a
+			// directory that existed and that its three siblings read without
+			// trouble, and that single refusal cost the task, its dependent, and
+			// the final report.
+			//
+			// Gated by the SAME stops as every other retry here, because it spends
+			// the same thing. Not gated by maxRetries: that budget bounds stall
+			// thrashing, where the same model reruns the same work hoping for a
+			// different mood. This is one attempt, bounded by its own flag.
+			if ctx.Err() != nil {
+				return result, err
+			}
+			if !policy.deadline.IsZero() && time.Now().After(policy.deadline) {
+				return result, err
+			}
+			retriedAfterDecline = true
+			// AWAY FROM THE MODEL THAT DECLINED, when there is somewhere to go.
+			// Repeating the same model is the weakest version of this; the
+			// session's own model is one the parent is demonstrably able to run.
+			if fellBackFrom == "" && strings.TrimSpace(policy.task.Model) != "" {
+				fellBackFrom = strings.TrimSpace(policy.task.Model)
+				policy.task.Model = ""
+			}
+			continue
 		case !result.Stalled:
 			// Anything other than a stall is an ANSWER, including a failure. The
 			// child ran and reported; running it again buys the same report.
@@ -533,6 +707,165 @@ func terminalStatus(report PlanReport) PlanStatus {
 		// never ran, reported as done, which is RC-F exactly.
 		return PlanPartial
 	}
+}
+
+// planSpend is the plan's token meter as it happens, rather than after the fact.
+//
+// budgetLeft next to it is the AUTHORITATIVE post-completion number and still
+// decides dispatch. This one exists because that one arrives too late: it moves
+// only when a task finishes, so nothing between dispatch and completion can be
+// stopped by it. A measured run spent 3,091,618 against a 200,000 budget and the
+// meter did not move once while it happened — four tasks were in flight, each
+// unbounded, and the first decrement landed after all of them had finished.
+//
+// Both sum the same usage events, so they agree at the end; they differ only in
+// WHEN they can be consulted.
+type planSpend struct {
+	spent atomic.Int64
+	limit int64
+}
+
+// add records tokens and reports whether the plan has now crossed its limit.
+// An unset limit never reports crossed — unbounded is a deliberate choice.
+func (spend *planSpend) add(tokens int) bool {
+	if spend == nil || tokens <= 0 {
+		return false
+	}
+	total := spend.spent.Add(int64(tokens))
+	return spend.limit > 0 && total > spend.limit
+}
+
+// Per-dependency and whole-briefing caps on what a task is told about its
+// dependencies.
+//
+// BOUNDED BECAUSE THE ALTERNATIVE DOES NOT TERMINATE. A twenty-task plan where
+// every task inherits every ancestor's full output is a context-overflow machine:
+// the last task in a chain would carry the entire plan. The caps are generous
+// enough to carry a real answer and small enough that a deep chain stays inside
+// one context.
+//
+// A task that needs MORE than the cap still holds its read tools and the file
+// paths its dependency quoted, so nothing is unreachable — it is one tool call
+// away instead of free.
+const (
+	dependencyBriefingPerTask = 4000
+	dependencyBriefingTotal   = 12000
+)
+
+// withDependencyBriefing prefixes a task's prompt with what its dependencies
+// found, and returns the prompt unchanged when it has none.
+//
+// depends_on ORDERED EXECUTION AND PASSED NOTHING, which is the defect this
+// closes. A task named as a dependency ran first and its output went to the
+// report; the dependent started from a blank context and had to rediscover the
+// same files. Two costs, both measured on real runs:
+//
+//   - Every judgement task re-read what the tracing tasks had already read. The
+//     largest avoidable spend in a plan.
+//   - A synthesising task received CONCLUSIONS with no trace behind them, so it
+//     could repeat a claim but never check one. That is exactly how a plan
+//     reported that MCP servers inherit an unscrubbed environment: the tracing
+//     task had walked the scrubbing path, and the task that wrote the finding
+//     could not see it.
+//
+// SUCCEEDED DEPENDENCIES ONLY. A failed dependency skips its dependents
+// entirely (firstFailedDependency), so anything reaching here succeeded; a
+// cancelled or empty result contributes nothing rather than an empty heading.
+//
+// Deterministic order, following DependsOn as the plan declared it, so the same
+// plan produces the same prompt — a resumed plan must not differ from its first
+// run because a map iterated differently.
+func withDependencyBriefing(task Task, results map[string]TaskResult) string {
+	if len(task.DependsOn) == 0 {
+		return task.Prompt
+	}
+	var brief strings.Builder
+	remaining := dependencyBriefingTotal
+	for _, id := range task.DependsOn {
+		result, ok := results[id]
+		if !ok || result.Outcome != TaskSucceeded {
+			continue
+		}
+		output := strings.TrimSpace(result.Output)
+		if output == "" || remaining <= 0 {
+			continue
+		}
+		budget := dependencyBriefingPerTask
+		if budget > remaining {
+			budget = remaining
+		}
+		truncated := false
+		if len(output) > budget {
+			output, truncated = output[:budget], true
+		}
+		remaining -= len(output)
+		fmt.Fprintf(&brief, "### Result of task %q\n%s\n", id, output)
+		if truncated {
+			// SAID, not silent. A reader that cannot tell it was given part of an
+			// answer will treat the part as the whole.
+			brief.WriteString("[truncated — re-read the files named above if you need more]\n")
+		}
+		brief.WriteString("\n")
+	}
+	if brief.Len() == 0 {
+		return task.Prompt
+	}
+	return "## What the tasks you depend on already found\n\n" +
+		brief.String() +
+		"Use this instead of rediscovering it. Verify anything you are about to rely on — " +
+		"a claim above is a previous task's conclusion, not established fact.\n\n" +
+		"## Your task\n\n" + task.Prompt
+}
+
+// tokensPerToolCall is what one tool call costs a plan task, measured: a task
+// that made 28 calls spent 232,416 tokens, another 24 calls for 259,705. The
+// number is a rough proxy and is used as one — a model cannot see its own token
+// meter, but it can count its own tool calls, so this converts a budget it
+// cannot observe into a quantity it can.
+const tokensPerToolCall = 8_000
+
+// budgetLandingStrip is the share of a task's cap held back so a task that
+// decides to stop still has room to WRITE its answer.
+//
+// Told to stop at its full cap, a task would still be composing when the hard
+// limit arrived and be killed mid-sentence — the very outcome this exists to
+// avoid. It is told a smaller number and killed at the real one; the gap is the
+// runway.
+const budgetLandingStrip = 5 // one fifth held back
+
+// withTokenBudgetNotice tells a task what it may spend, in a unit it can count.
+//
+// A CAP THAT ONLY KILLS PRODUCES NOTHING. A measured plan set
+// max_tokens_per_task to 200,000; every one of its six tasks was killed between
+// 213k and 259k having done substantial reading, and the run cost 1,437,049
+// tokens for zero completed tasks. Each was most of the way to an answer nobody
+// received. Overspending and getting answers is a bad trade; overspending and
+// getting nothing is a worse one.
+//
+// So the cap is announced as a DEADLINE rather than sprung as a guillotine. A
+// task that knows its bound can stop investigating and write down what it found,
+// and a partial answer carrying file:line evidence is worth incomparably more
+// than a corpse. The hard kill stays as the backstop for a task that ignores it.
+//
+// Silent when there is no cap, which is every plan that does not ask for one.
+func withTokenBudgetNotice(prompt string, maxTaskTokens int) string {
+	if maxTaskTokens <= 0 {
+		return prompt
+	}
+	announced := maxTaskTokens - maxTaskTokens/budgetLandingStrip
+	calls := announced / tokensPerToolCall
+	if calls < 1 {
+		calls = 1
+	}
+	return prompt + fmt.Sprintf(
+		"\n\n## Your budget for this task\n\n"+
+			"About %d tokens — roughly %d tool calls at this repo's typical cost. You cannot see your own "+
+			"token count, so count tool calls instead.\n\n"+
+			"Read what matters most FIRST, and start writing your answer well before you reach that number. "+
+			"A partial answer quoting file:line for what you did check is worth far more than being cut off "+
+			"mid-investigation, which returns nothing at all. If you run short, say plainly what you did not "+
+			"get to rather than guessing at it.",
+		announced, calls)
 }
 
 // firstFailedDependency names the dependency that blocked a task, so the record
@@ -661,14 +994,48 @@ func (report PlanReport) Summary() string {
 		fmt.Fprintf(&b, ", %d cancelled", report.Cancelled)
 	}
 	b.WriteString(".\n")
+	// NAME WHAT NEVER RAN, at the top.
+	//
+	// A budget-skipped task says so in its own row, in the same small text every
+	// other row uses, and the headline says only "partial". A measured run came
+	// back missing a third of the questions it was asked and nothing above the
+	// fold said which — the reader had to diff the plan against the report to
+	// find out. An incomplete answer that does not announce itself gets used as
+	// a complete one.
+	if unrun := tasksCutForBudget(report.Tasks); len(unrun) > 0 {
+		fmt.Fprintf(&b, "%d task(s) never ran (budget exhausted): %s\n", len(unrun), strings.Join(unrun, ", "))
+	}
+	// SAY WHEN THE REQUEST WAS NOT HONOURED. The struct promises both numbers —
+	// "a plan that asked for sixteen and ran six has not been given sixteen" —
+	// and then only Workers was ever printed, so the trim was invisible and the
+	// speedup below it looked like the plan's own fault. Stated only when they
+	// differ, so the ordinary line is unchanged.
+	if report.WorkersRequested > 0 && report.Workers > 0 && report.WorkersRequested != report.Workers {
+		fmt.Fprintf(&b, "workers: %d (requested %d; this machine allowed fewer)\n",
+			report.Workers, report.WorkersRequested)
+	}
 	fmt.Fprintf(&b, "sequential total: %s · critical path: %s · max_speedup: %.2fx\n",
 		report.SequentialTotal.Round(time.Millisecond), report.CriticalPath.Round(time.Millisecond), report.MaxSpeedup)
 	for _, task := range report.Tasks {
 		fmt.Fprintf(&b, "\n  - %s [%s] %s", task.ID, task.Outcome, task.Duration.Round(time.Millisecond))
+		// Only when the task named one. A line saying "on <the model you are
+		// already using>" against every task is noise that hides the one line
+		// that matters.
+		if task.Model != "" {
+			fmt.Fprintf(&b, " on %s", task.Model)
+		}
 		// A retried task cost more than its one line suggests. Stated only when
 		// it happened, so the common case stays unchanged.
 		if task.Attempts > 1 {
 			fmt.Fprintf(&b, " (%d attempts)", task.Attempts)
+		}
+		// NAME THE MODEL THAT COULD NOT RUN. The task succeeded, so nothing else
+		// on this line would hint that the plan's own choice was unusable — and
+		// an unusable model stays in the discovered list, so the next plan picks
+		// it again. This line is what makes it fixable, by exclusion or by
+		// telling the provider.
+		if task.RetriedOnParentModel != "" {
+			fmt.Fprintf(&b, " (fell back from %s, which this provider would not run)", task.RetriedOnParentModel)
 		}
 		if task.Output != "" {
 			b.WriteString("\n      result:\n" + task.Output)
@@ -678,6 +1045,21 @@ func (report PlanReport) Summary() string {
 		}
 	}
 	return b.String()
+}
+
+// tasksCutForBudget names the tasks a budget stopped — skipped before they ran,
+// or cancelled while running. Both are questions the plan did not answer.
+func tasksCutForBudget(tasks []TaskResult) []string {
+	var out []string
+	for _, task := range tasks {
+		switch {
+		case task.Outcome == TaskSkippedBudget:
+			out = append(out, task.ID)
+		case task.Outcome == TaskCancelled && strings.Contains(task.Err, "token budget"):
+			out = append(out, task.ID)
+		}
+	}
+	return out
 }
 
 func recordDispatched(recorder PlanRecorder, task Task) {

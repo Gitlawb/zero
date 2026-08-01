@@ -14,8 +14,12 @@ func planArgs(tasks []any, budget map[string]any) map[string]any {
 	return map[string]any{"name": "p", "tasks": tasks, "budget": budget}
 }
 
+// okBudget is a budget that PASSES admission — refuseImplausibleBudget rejects a
+// plan whose budget cannot cover its own tasks, and 1000 tokens for anything
+// could not. Generous on purpose: these fixtures are about task behaviour, and a
+// budget that runs out mid-fixture would make them about the budget instead.
 func okBudget() map[string]any {
-	return map[string]any{"max_workers": float64(1), "max_tokens": float64(1000)}
+	return map[string]any{"max_workers": float64(1), "max_tokens": float64(2_000_000)}
 }
 
 func task(id, prompt string, deps ...string) map[string]any {
@@ -31,7 +35,11 @@ func task(id, prompt string, deps ...string) map[string]any {
 }
 
 func readOnlyLimits() Limits {
-	return Limits{MaxTasks: 20, MaxTokens: 100_000, ParentTools: []string{"read_file", "grep", "glob"}}
+	// MaxTokens 0 mirrors production: defaultPlanMaxTokens is 0, meaning this run
+	// puts NO ceiling on what a plan may request. A fixture with a ceiling
+	// production does not have makes every budget test answer a question nobody
+	// asks.
+	return Limits{MaxTasks: 20, ParentTools: []string{"read_file", "grep", "glob"}}
 }
 
 // (e) ParsePlan is the ONLY constructor. A zero Plan is inert, so no exported
@@ -208,14 +216,18 @@ func TestParsePlanRequiresABudgetButNotATokenCap(t *testing.T) {
 // A caller that DOES want a bound still gets one, enforced exactly as before.
 func TestAnExplicitTokenBoundStillStopsThePlan(t *testing.T) {
 	budget := okBudget()
-	budget["max_tokens"] = float64(1)
+	// Two tasks at the admission floor; each reports more than half of it, so
+	// the bound is crossed after the first.
+	budget["max_tokens"] = float64(100_000)
 	plan, err := ParsePlan(planArgs([]any{task("a", "x"), task("b", "y")}, budget), readOnlyLimits())
 	if err != nil {
 		t.Fatalf("ParsePlan: %v", err)
 	}
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
 		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
-			return TaskResult{ID: req.Task.ID, Outcome: TaskSucceeded, Tokens: 100}, nil
+			// More than the whole budget, so the meter is negative before the
+			// second dispatch is considered.
+			return TaskResult{ID: req.Task.ID, Outcome: TaskSucceeded, Tokens: 110_000}, nil
 		}, nil)
 	if report.Skipped != 1 {
 		t.Fatalf("an explicit bound must still cut the plan short: %+v", report)
@@ -364,7 +376,7 @@ func TestAnUnqualifiedTaskNeverInheritsWriteTools(t *testing.T) {
 func TestParsePlanRejectsToolsOutsideTheParentGrant(t *testing.T) {
 	raw := task("a", "x")
 	raw["tools"] = []any{"read_file", "grep"}
-	limits := Limits{MaxTasks: 20, MaxTokens: 1000, ParentTools: []string{"read_file"}}
+	limits := Limits{MaxTasks: 20, ParentTools: []string{"read_file"}}
 	_, err := ParsePlan(planArgs([]any{raw}, okBudget()), limits)
 	if err == nil {
 		t.Fatal("a task requesting a tool the parent does not hold must be rejected")

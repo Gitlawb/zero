@@ -51,6 +51,10 @@ type Task struct {
 	// Phase is a display and ordering label only. It carries no execution
 	// semantics in Phase 2 — a barrier is expressible as dependencies.
 	Phase string
+	// Model is the CANONICAL registry id this task runs on, empty to inherit the
+	// parent's. Stored canonical rather than as the caller wrote it, because the
+	// id is what reaches the child's argv — see resolveTaskModel.
+	Model string
 }
 
 // Budget bounds a plan. Every field is required to be sane at admission and
@@ -63,7 +67,21 @@ type Budget struct {
 	// rather than letting the request stand as if it were honoured.
 	MaxWorkers int
 	MaxTokens  int
-	MaxWall    time.Duration
+	// MaxTokensPerTask bounds what ONE task may spend. Optional; 0 is unbounded,
+	// which is every plan that does not ask for a cap.
+	//
+	// A PLAN-LEVEL BUDGET CANNOT STOP ONE TASK FROM EATING EVERYTHING, and that
+	// is not theoretical: in a measured six-task plan against 200,000 tokens, a
+	// single task spent 1,017,177 — five times the whole plan's budget — and the
+	// cheapest one that finished spent 510,017. Nothing bounded them, because the
+	// plan's own limit is only consulted between tasks.
+	//
+	// Kept separate from max_tokens rather than derived from it. A derived cap
+	// (budget ÷ remaining tasks) changes the economics of every existing plan
+	// without anyone choosing it, which is the same argument this codebase
+	// already makes for auto_assign being opt-in.
+	MaxTokensPerTask int
+	MaxWall          time.Duration
 	// MaxStall bounds how long a single task may emit NOTHING before it is
 	// stopped. Distinct from MaxWall, which bounds the whole plan: a plan can
 	// sit inside its wall budget while one task is wedged and the rest never
@@ -199,6 +217,13 @@ func (p Plan) Args() map[string]any {
 		if task.Phase != "" {
 			entry["phase"] = task.Phase
 		}
+		// EMITTED HERE OR LOST ENTIRELY. Args() is the round trip behind
+		// /plans save, /plans show, resume and the staged _resume plan; a model
+		// on the struct but not in this map means the plan reruns on the parent's
+		// model with nothing anywhere reporting the change.
+		if task.Model != "" {
+			entry["model"] = task.Model
+		}
 		tasks = append(tasks, entry)
 	}
 	budget := map[string]any{
@@ -207,6 +232,9 @@ func (p Plan) Args() map[string]any {
 	}
 	if p.budget.MaxTokens > 0 {
 		budget["max_tokens"] = p.budget.MaxTokens
+	}
+	if p.budget.MaxTokensPerTask > 0 {
+		budget["max_tokens_per_task"] = p.budget.MaxTokensPerTask
 	}
 	if p.budget.MaxWall > 0 {
 		budget["max_wall_seconds"] = int(p.budget.MaxWall.Seconds())
@@ -303,8 +331,76 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	if err := refuseImplausibleBudget(budget, len(plan.tasks), limits); err != nil {
+		return Plan{}, err
+	}
 	plan.budget = budget
 	return plan, nil
+}
+
+// minimumPlausibleTaskTokens is the floor below which a per-task share of the
+// budget cannot buy a task at all.
+//
+// DELIBERATELY AN ORDER OF MAGNITUDE BELOW WHAT ANYTHING REALLY COSTS. In a
+// measured six-task plan the CHEAPEST task that completed spent 510,017 tokens;
+// the dearest spent 1,017,177. This is not a typical cost and must never be read
+// as one — it is the point below which the arithmetic is impossible, so the only
+// plans it can refuse are plans that were never going to finish.
+//
+// A task pays for its whole prompt on every turn, so even a single lookup
+// answering in two turns costs tens of thousands. 50k buys a very small task and
+// nothing more.
+const minimumPlausibleTaskTokens = 50_000
+
+// refuseImplausibleBudget rejects a plan whose budget cannot cover its own tasks,
+// BEFORE anything is spent.
+//
+// Neither of the two things that happen without it is a good outcome. A measured
+// run admitted six tasks against 200,000 tokens, spent 3,091,618 — fifteen times
+// over — and still returned an incomplete answer, because the two tasks that had
+// not started yet were skipped once the meter finally caught up. The user paid
+// for the overrun AND lost a third of the audit.
+//
+// Killing a task mid-flight (the other repair) at least stops the bleeding, but
+// bills for everything spent before the knife. Refusing here costs nothing at
+// all, and is the only response that can still produce a COMPLETE answer: the
+// caller raises the number or asks for fewer tasks and runs a plan that finishes.
+//
+// Silent on an unset budget. Unbounded is a deliberate choice — see planBudget —
+// and this must not turn it back into a required field by the back door.
+func refuseImplausibleBudget(budget Budget, taskCount int, limits Limits) error {
+	if budget.MaxTokens <= 0 || taskCount <= 0 {
+		return nil
+	}
+	needed := taskCount * minimumPlausibleTaskTokens
+	if budget.MaxTokens >= needed {
+		return nil
+	}
+	// THE ADVICE MUST BE FOLLOWABLE. When this run's own ceiling is below what
+	// the plan would need, "raise max_tokens" is advice the next call cannot
+	// take — the ceiling refuses it — and the caller loops between two errors
+	// that each blame the other. The plan is simply too big for this run, and
+	// saying so is the only thing that ends the loop.
+	if limits.MaxTokens > 0 && limits.MaxTokens < needed {
+		// "Ask for at most 0 tasks" is not advice. When the run's ceiling cannot
+		// fund even one task, no plan fits and the caller needs to hear that
+		// rather than a number to aim at.
+		if affordable := limits.MaxTokens / minimumPlausibleTaskTokens; affordable >= 1 {
+			return fmt.Errorf(
+				"%d tasks need about %d tokens and this run is capped at %d — the plan is too big for this run. "+
+					"Ask for at most %d task(s), or split the work across runs",
+				taskCount, needed, limits.MaxTokens, affordable)
+		}
+		return fmt.Errorf(
+			"this run is capped at %d tokens, which cannot fund a single plan task (they rarely cost less than %d). "+
+				"Do the work directly instead of planning it, or raise this run's ceiling",
+			limits.MaxTokens, minimumPlausibleTaskTokens)
+	}
+	return fmt.Errorf(
+		"budget.max_tokens is %d for %d tasks — about %d per task, and a plan task rarely costs less than %d "+
+			"(a measured six-task plan spent 3,091,618). Raise max_tokens to at least %d, or ask for fewer tasks. "+
+			"Omitting max_tokens runs unbounded within this run's own ceiling",
+		budget.MaxTokens, taskCount, budget.MaxTokens/taskCount, minimumPlausibleTaskTokens, needed)
 }
 
 // topologicalOrder runs Kahn's algorithm. It returns the emitted order, or the
@@ -477,8 +573,9 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		return Budget{}, fmt.Errorf("plan requires a budget object with max_workers")
 	}
 	budget := Budget{
-		MaxWorkers: planInt(raw, "max_workers"),
-		MaxTokens:  planInt(raw, "max_tokens"),
+		MaxWorkers:       planInt(raw, "max_workers"),
+		MaxTokens:        planInt(raw, "max_tokens"),
+		MaxTokensPerTask: planInt(raw, "max_tokens_per_task"),
 	}
 	// Rejected rather than read as "unset". planInt returns 0 for both an absent
 	// key and a present-but-negative one, so a bare `seconds > 0` let a
@@ -560,6 +657,32 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	if limits.MaxTokens > 0 && budget.MaxTokens > limits.MaxTokens {
 		return Budget{}, fmt.Errorf("budget.max_tokens %d exceeds the limit of %d for this run", budget.MaxTokens, limits.MaxTokens)
 	}
+	if budget.MaxTokensPerTask < 0 {
+		return Budget{}, fmt.Errorf("budget.max_tokens_per_task must not be negative")
+	}
+	// A CAP BELOW WHAT ANY TASK COSTS KILLS EVERY TASK, and the plan pays in
+	// full for nothing. Measured: a plan capping tasks at 200,000 lost all six
+	// between 213k and 259k and cost 1,437,049 tokens with no completed work.
+	//
+	// Checked against the same floor as the plan budget, and for the same reason
+	// — it is the point below which the arithmetic is impossible, not a typical
+	// cost. A cap above it can still be tight; that is what the landing-strip
+	// notice in withTokenBudgetNotice is for.
+	if budget.MaxTokensPerTask > 0 && budget.MaxTokensPerTask < minimumPlausibleTaskTokens {
+		return Budget{}, fmt.Errorf(
+			"budget.max_tokens_per_task is %d, and a plan task rarely costs less than %d — every task would be "+
+				"cut short and the plan would pay for all of them and finish nothing. Raise it, or omit it to leave tasks unbounded",
+			budget.MaxTokensPerTask, minimumPlausibleTaskTokens)
+	}
+	// A per-task cap ABOVE the plan's own budget bounds nothing — the plan limit
+	// would always bite first — and reads like a guarantee that no task will
+	// exceed it. Refused rather than clamped, for the same reason max_workers is:
+	// a trimmed number is one nobody can reason about afterwards.
+	if budget.MaxTokens > 0 && budget.MaxTokensPerTask > budget.MaxTokens {
+		return Budget{}, fmt.Errorf(
+			"budget.max_tokens_per_task %d exceeds budget.max_tokens %d — a per-task cap above the plan's own budget bounds nothing",
+			budget.MaxTokensPerTask, budget.MaxTokens)
+	}
 	return budget, nil
 }
 
@@ -575,6 +698,16 @@ func planTask(raw any, index int) (Task, error) {
 		Tools:     planStrings(fields, "tools"),
 		Phase:     planString(fields, "phase"),
 	}
+	// REFUSED AT ADMISSION, not degraded at dispatch. The manifest loader already
+	// treats an unknown model as fatal, so falling back to the parent's here
+	// would soften an existing rejection — and a plan that asked for a stronger
+	// model on its verify stage, silently ran on a weaker one, and still reported
+	// success is indistinguishable from one that worked.
+	model, err := resolveTaskModel(planString(fields, "model"))
+	if err != nil {
+		return Task{}, fmt.Errorf("task at position %d: %w", index, err)
+	}
+	task.Model = model
 	if task.ID == "" {
 		return Task{}, fmt.Errorf("task at position %d has no id", index)
 	}
@@ -632,6 +765,17 @@ func planInt(args map[string]any, key string) int {
 // planIntSet also reports whether the key was PRESENT, for the settings where
 // an explicit 0 and an absent key mean different things. planInt is this
 // function with the answer discarded, so the two can never decode differently.
+// planBoolSet reports a boolean argument AND whether it was supplied at all.
+//
+// planBool cannot distinguish false from absent, which is fine when absent means
+// off — and wrong the moment a default can come from somewhere else. A plan
+// saying auto_assign:false must be able to override a config that turned it on,
+// and that requires knowing the difference.
+func planBoolSet(args map[string]any, key string) (bool, bool) {
+	value, ok := args[key].(bool)
+	return value, ok
+}
+
 func planIntSet(args map[string]any, key string) (int, bool) {
 	switch value := args[key].(type) {
 	case float64:

@@ -2,9 +2,13 @@ package specialist
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -31,6 +35,15 @@ type PlanTaskContext struct {
 	Depth          int
 	// SpecialistName is the read-only specialist each plan task runs as.
 	SpecialistName string
+	// PostureReasoningEffort is the effort the zeromaxing posture asks for, used
+	// only as the fallback in planTaskReasoningEffort.
+	//
+	// PASSED IN rather than read from execprofile, and not for tidiness: this
+	// package cannot import execprofile at all. execprofile imports agent, and
+	// agent's own test binary imports specialist, so the reference compiled fine
+	// and broke `go test ./internal/agent` with an import cycle. The caller
+	// already knows the posture; it hands over the one value needed.
+	PostureReasoningEffort string
 }
 
 // NewPlanRunner adapts Executor.Run into a PlanRunner.
@@ -68,8 +81,54 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		stopWatchdog := watchdog.watch(taskCtx, cancelTask)
 		defer stopWatchdog()
 
+		// A WRITE TASK THAT CALLED NO TOOL DID NOT DO THE WORK, and the plan must
+		// not record it as success. Counted from the child's own stream, which is
+		// the only evidence the parent has of what the child actually did.
+		toolCalls := &atomic.Int64{}
+		// THE METER READS THE STREAM, so a budget can be enforced while the task
+		// is running rather than after it has finished.
+		//
+		// Every usage event a child emits is one provider call it has already
+		// been billed for. Waiting for the child to exit before counting them is
+		// what let a measured plan spend 3,091,618 against a 200,000 budget: four
+		// tasks in flight, none of them bounded, and the first number landing
+		// after all four were done.
+		taskTokens := &atomic.Int64{}
+		overspent := &atomic.Value{}
+		counted := func(event streamjson.Event) {
+			if event.Type == streamjson.EventToolCall {
+				toolCalls.Add(1)
+			}
+			if event.Type == streamjson.EventUsage && event.TotalTokens != nil {
+				spent := *event.TotalTokens
+				task := taskTokens.Add(int64(spent))
+				// BOTH LIMITS, and the task's own is checked first so its message
+				// names the cap the caller actually set for it.
+				switch {
+				case req.MaxTaskTokens > 0 && task > int64(req.MaxTaskTokens):
+					overspent.Store(fmt.Sprintf(
+						"task %s stopped after %d tokens: budget.max_tokens_per_task is %d",
+						task_ID(req), task, req.MaxTaskTokens))
+					cancelTask()
+				case req.Spend.add(spent):
+					overspent.Store(fmt.Sprintf(
+						"task %s stopped: the plan's token budget ran out while it was running",
+						task_ID(req)))
+					cancelTask()
+				}
+			}
+			if req.Progress != nil {
+				req.Progress(event)
+			}
+		}
+
 		started := time.Now()
-		manifest := planTaskManifest(planCtx.SpecialistName, grantedTools)
+		manifest := planTaskManifest(planCtx.SpecialistName, task.Model,
+			planTaskReasoningEffort(task.Model, req.ParentReasoningEffort, planCtx.PostureReasoningEffort),
+			grantedTools)
+		if override := strings.TrimSpace(req.SystemPrompt); override != "" {
+			manifest.SystemPrompt = override
+		}
 		res, err := planCtx.Executor.Run(taskCtx, TaskParameters{
 			Name:        planCtx.SpecialistName,
 			Prompt:      task.Prompt,
@@ -80,6 +139,7 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			ParentSessionID:       req.ParentSessionID,
 			ParentModel:           req.ParentModel,
 			ParentReasoningEffort: req.ParentReasoningEffort,
+			ToolCallID:            req.ParentToolCallID,
 			CurrentDepth:          planCtx.Depth,
 			// The plan's own workspace when it has one, the parent's otherwise.
 			// A write-capable plan runs in an isolated worktree, and this is
@@ -92,13 +152,34 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// streamed to nobody. Same class as finding 7 (ParentModel): a
 			// second construction path that does not carry what the first one
 			// did. Fixed with the tool-side half, not separately.
-			Progress: watchedProgress(watchdog, req.Progress),
-			// Explicitly NOT MemberAutonomy: Phase 2 tasks are read-only, and
-			// granting it here would be the authority widening that was ruled
-			// out as needing its own decision.
+			Progress: watchedProgress(watchdog, counted),
+			// THE RUNG MUST MATCH THE GRANT, and for a long time it did not.
+			//
+			// This said "explicitly NOT MemberAutonomy: Phase 2 tasks are
+			// read-only", which was true when every plan task was. Write-capable
+			// plans then arrived with a grant, an approval prompt and a worktree
+			// — and nobody came back here. specialistAutonomy maps every
+			// non-unsafe parent to "low", so the child was handed write_file in
+			// its manifest and launched at read-only autonomy, which never
+			// advertises it. The model, wanting a tool it could not see,
+			// narrated the write and leaked fragments of the call into its text
+			// ("belwrite_file"). Zero tool calls, no file, and until the guard
+			// above it also reported success.
+			//
+			// DERIVED FROM THE GRANT, like the prompt: a read-only task stays at
+			// "low" exactly as before, so nothing about an ordinary plan changes.
+			// member-auto is the rung built for this — it advertises in-workspace
+			// write/edit and sandboxed shell while the sandbox still gates every
+			// call, and it normalizes to Auto everywhere except advertisement, so
+			// authority is not widened beyond what an interactive auto agent
+			// already has. For a plan task the workspace IS the isolated
+			// worktree, which is what makes that bound meaningful here.
+			MemberAutonomy: grantsPlanWriteTool(grantedTools),
 		})
 		result := TaskResult{
-			ID:        task.ID,
+			ID: task.ID,
+			// What it actually ran on, carried back so the report can say so.
+			Model:     task.Model,
 			Duration:  time.Since(started),
 			SessionID: res.SessionID,
 			Output:    res.Result.Output,
@@ -107,6 +188,15 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// provider that never reports usage cannot be budget-bounded by
 			// token count; MaxWall is the backstop in that case.
 			Tokens: res.TotalTokens,
+		}
+		// CHECKED BEFORE THE WATCHDOG. Both cancel the same context, so a task
+		// stopped for budget looks exactly like a stalled one from the outside —
+		// and a stall is RETRYABLE. Retrying a task that was stopped for spending
+		// too much is the worst possible response to it.
+		if reason, ok := overspent.Load().(string); ok && reason != "" {
+			result.Outcome = TaskCancelled
+			result.Err = reason
+			return result, nil
 		}
 		if watchdog.didFire() {
 			// A stall and a user cancellation both surface as a context error;
@@ -124,6 +214,7 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		if err != nil {
 			result.Outcome = TaskFailed
 			result.Err = err.Error()
+			result.ModelRejected = modelLookedUnusable(result, task, toolCalls.Load())
 			return result, err
 		}
 		if res.Result.Status == tools.StatusError {
@@ -131,11 +222,84 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// let a plan report work that did not happen.
 			result.Outcome = TaskFailed
 			result.Err = res.Result.Output
+			result.ModelRejected = modelLookedUnusable(result, task, toolCalls.Load())
+			// A DECLINE IS NOT A WRONG ANSWER. The child exits with this code when
+			// it stopped with work unfinished — it said it could not, rather than
+			// doing it badly — and that is worth one more attempt in a way a wrong
+			// answer never is.
+			result.Declined = res.ExitCode == childExitIncomplete
+			return result, nil
+		}
+		// THE LAST CHECK, and the one a plausible answer gets past. A task granted
+		// write tools that emitted not one tool call cannot have written anything,
+		// whatever its output says. A real run produced exactly this: seventeen
+		// completion tokens reading "Creating notes.md now.", no tool call, and a
+		// plan reporting succeeded 1.
+		//
+		// Only for tasks that CAN write, because only there is the inference
+		// airtight — a file cannot appear without a tool call, while a read-only
+		// task answering from its own prompt is unusual rather than impossible.
+		// The task prompt already asks every task to start with a tool call; this
+		// makes the write half enforceable instead of merely requested.
+		if grantsPlanWriteTool(grantedTools) && toolCalls.Load() == 0 {
+			result.Outcome = TaskFailed
+			result.Err = "task " + task.ID + " was granted write tools and finished without calling a single one, " +
+				"so it changed nothing — its output describes work that did not happen. " +
+				"Re-run it, or state the change the task must make unambiguously."
 			return result, nil
 		}
 		result.Outcome = TaskSucceeded
 		return result, nil
 	}
+}
+
+// task_ID names the task for a message, tolerating an unnamed one.
+func task_ID(req PlanTaskRequest) string {
+	if id := strings.TrimSpace(req.Task.ID); id != "" {
+		return strconv.Quote(id)
+	}
+	return "(unnamed)"
+}
+
+// modelLookedUnusable reports that a task died without the assigned model ever
+// producing anything — the signature of a provider refusing the MODEL rather
+// than the work failing.
+//
+// A FLAG, not a message match, for the same reason Stalled is one: choosing to
+// spend another child by looking for a phrase in an error is the class of bug
+// that silently disabled every stall retry in the prototype. Providers word this
+// differently every time — "does not exist or your team does not have access to
+// it", "Multi Agent requests are not allowed on chat completions" — and the next
+// provider will word it a fourth way.
+//
+// The structural facts are provider-independent:
+//
+//   - A model was ASSIGNED. With none the task already ran on the parent's, so
+//     there is nothing to fall back to.
+//   - The child did NO WORK: no tool call, no token. This is what separates "the
+//     provider refused this model" from "the work failed": a task that reasoned,
+//     answered and got it wrong has spent tokens, and re-running it elsewhere
+//     would be a second opinion nobody asked for.
+//
+// MEASURED FROM THE CHILD, NOT FROM Result.Output, and that distinction is the
+// whole defect this signal was written to catch. On a failed child
+// BuildFinalResult returns a DIAGNOSTIC as the output — "Subagent failed (exit
+// 3)\nerrors: provider request error: ..." — so Output is never empty on exactly
+// the path that matters, and an emptiness test there can never fire. It did not:
+// two tasks died on a refused model with the fallback sitting right there. Tool
+// calls and tokens come from the child's own stream and describe the child.
+//
+// THE DECISION TO RETRY IS NOT MADE HERE, and that placement is the point. This
+// file's own retry loop lives in the executor because the executor owns the
+// budget, the wall deadline, cancellation and the record — a retry hidden in the
+// runner spends a child none of them can see, under-reports the plan's duration
+// and leaves Attempts saying one when two ran. This classifies; runTaskWithRetries
+// decides.
+func modelLookedUnusable(result TaskResult, task Task, toolCalls int64) bool {
+	if strings.TrimSpace(task.Model) == "" {
+		return false
+	}
+	return result.Tokens == 0 && toolCalls == 0
 }
 
 // planTaskCwd prefers the plan's own workspace over the parent's. An empty
@@ -150,15 +314,32 @@ func planTaskCwd(parentCwd, override string) string {
 // planTaskManifest builds the inline manifest a plan task runs under. The tool
 // list is the ALREADY-INTERSECTED grant ExecutePlan computed, so this cannot
 // widen it — it only carries it.
-func planTaskManifest(name string, grantedTools []string) Manifest {
+func planTaskManifest(name, model, reasoningEffort string, grantedTools []string) Manifest {
 	if strings.TrimSpace(name) == "" {
 		name = "explorer"
 	}
+	// DERIVED FROM THE GRANT, never carried beside it. The prompt below used to
+	// say "you have read-only tools … do not attempt to modify anything" for
+	// every task, including a write-capable plan the user had approved and the
+	// executor had isolated in a worktree. That task was handed write_file and
+	// told in the same sentence not to use it; a model that obeys produces a
+	// plan which reports success and changed nothing, and one that disobeys was
+	// never being steered in the first place.
+	//
+	// A writeCapable bool threaded down alongside grantedTools would be the same
+	// defect waiting: two statements of one fact, free to drift apart. The grant
+	// IS the fact, and it is already an argument.
+	description := "Read-only plan task."
+	if grantsPlanWriteTool(grantedTools) {
+		description = "Plan task with write access."
+	}
 	return Manifest{
 		Metadata: Metadata{
-			Name:        name,
-			Description: "Read-only plan task.",
-			Tools:       grantedTools,
+			Name:            name,
+			Description:     description,
+			Model:           model,
+			ReasoningEffort: reasoningEffort,
+			Tools:           grantedTools,
 		},
 		// IT MUST SAY "USE THEM". The first version said "You have read-only
 		// tools" and stopped there, which states a fact and asks for nothing. A
@@ -224,4 +405,57 @@ func grantsPlanWriteTool(grantedTools []string) bool {
 		}
 	}
 	return false
+}
+
+// planTaskReasoningEffort decides what effort a task runs at, and exists because
+// appendModelArgs inherits the parent's ONLY when the manifest names no model:
+//
+//	if reasoningEffort == "" && manifest.Metadata.Model == "" {
+//	    reasoningEffort = parentReasoningEffort
+//	}
+//
+// That rule is right in general — an effort tier is meaningful only against the
+// model it was chosen for — and it means naming a model on a task silently drops
+// the posture's raised effort, which is most of what the posture IS. A plan that
+// pointed its hardest task at a stronger model would get that model thinking
+// less than the tasks around it.
+//
+// So the effort is stated explicitly, and ONLY when the task names a model:
+// leaving it empty otherwise keeps the untouched path byte-identical to what it
+// was, which is what the additivity guarantee rests on.
+//
+// The parent's effort is the first choice because it is already clamped to the
+// parent's model and reflects any /effort the user set. It is EMPTY exactly when
+// the posture could not raise it — a model whose tiers the catalog cannot vouch
+// for — and that user is the one most likely to point a task somewhere else, so
+// falling through to the posture's own effort serves precisely the case that
+// would otherwise be served worst.
+//
+// FORWARDED ONLY FOR A MODEL THE REGISTRY KNOWS, and that qualifier was learned
+// the hard way. This used to reason "the child re-clamps via
+// forwardedReasoningEffort, so forwarding an unsupported tier is safe" — true
+// while every nameable model was curated. Once uncurated models were allowed
+// through, that clamp stopped applying to them:
+//
+//	entry, ok := registry.Get(modelID)
+//	if !ok { return requested }   // unknown model: forwarded verbatim
+//
+// so "high" went straight to the provider and a real run died three times over
+// with `Model grok-build-0.1 does not support parameter reasoningEffort`.
+//
+// For a model nobody can vouch for, the honest answer is to say nothing and let
+// the provider apply its own default. Sending a parameter it may not accept, to
+// buy an effort level we cannot confirm it has, trades a working task for a
+// guess.
+func planTaskReasoningEffort(model, parentReasoningEffort, postureReasoningEffort string) string {
+	if strings.TrimSpace(model) == "" {
+		return ""
+	}
+	if !modelTakesExplicitEffort(model) {
+		return ""
+	}
+	if effort := strings.TrimSpace(parentReasoningEffort); effort != "" {
+		return effort
+	}
+	return strings.TrimSpace(postureReasoningEffort)
 }

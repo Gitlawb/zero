@@ -2,9 +2,11 @@ package specialist
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -199,5 +201,242 @@ func TestOrchestrateRefusesAPersistentApproval(t *testing.T) {
 	}
 	if !granted {
 		t.Fatal("bash is not in the plan write set; the compositional argument no longer holds and this rule needs rethinking")
+	}
+}
+
+// THE PROMPT MUST NOT CONTRADICT THE GRANT. A write-capable plan is approved by
+// the user and isolated in a worktree, and its task was still told "you have
+// read-only tools … do not attempt to modify anything". Handed write_file and
+// instructed not to use it, a model that obeys produces a plan that reports
+// success and changed nothing.
+func TestTheTaskPromptMatchesTheToolsItWasGranted(t *testing.T) {
+	readOnly := planTaskManifest("explorer", "", "", []string{"read_file", "grep"})
+	if !strings.Contains(readOnly.SystemPrompt, "read-only tools") {
+		t.Errorf("a read-only task must still be told so:\n%s", readOnly.SystemPrompt)
+	}
+	if !strings.Contains(readOnly.SystemPrompt, "do not attempt to modify anything") {
+		t.Errorf("a read-only task must still be told not to modify:\n%s", readOnly.SystemPrompt)
+	}
+	if !strings.Contains(readOnly.Metadata.Description, "Read-only") {
+		t.Errorf("description = %q", readOnly.Metadata.Description)
+	}
+
+	writable := planTaskManifest("explorer", "", "", []string{"read_file", "write_file"})
+	if strings.Contains(writable.SystemPrompt, "read-only tools") {
+		t.Errorf("a task granted write_file must not be told its tools are read-only:\n%s", writable.SystemPrompt)
+	}
+	if strings.Contains(writable.SystemPrompt, "do not attempt to modify anything") {
+		t.Errorf("a task granted write_file must not be told not to modify:\n%s", writable.SystemPrompt)
+	}
+	// THE BOUNDARY, not one phrasing of it. The worktree bounds WHERE a task may
+	// write and cannot bound HOW MUCH, so the prompt has to — but asserting my
+	// own wording made this a test of the sentence rather than of the property,
+	// and it failed the moment the reviewed wording landed instead.
+	if !strings.Contains(writable.SystemPrompt, "nothing beyond it") {
+		t.Errorf("a write task still needs a boundary the worktree cannot enforce:\n%s", writable.SystemPrompt)
+	}
+	if strings.Contains(writable.Metadata.Description, "Read-only") {
+		t.Errorf("description = %q", writable.Metadata.Description)
+	}
+
+	// The obligation to go and look is shared: it is why plan tasks stopped
+	// answering from memory, and it applies to a task that writes just as much.
+	for name, manifest := range map[string]Manifest{"read-only": readOnly, "writable": writable} {
+		if !strings.Contains(manifest.SystemPrompt, "USE THEM") {
+			t.Errorf("%s: the prompt must still demand tool use:\n%s", name, manifest.SystemPrompt)
+		}
+		if !strings.Contains(manifest.SystemPrompt, "file:line") {
+			t.Errorf("%s: the prompt must still demand quoted evidence:\n%s", name, manifest.SystemPrompt)
+		}
+	}
+}
+
+// EVERY named write tool flips it, not just write_file — the grant is the fact.
+func TestEveryWriteToolFlipsTheTaskPrompt(t *testing.T) {
+	for _, name := range PlanWriteToolNames() {
+		manifest := planTaskManifest("explorer", "", "", []string{"read_file", name})
+		if strings.Contains(manifest.SystemPrompt, "read-only tools") {
+			t.Errorf("a task granted %q was told its tools are read-only", name)
+		}
+	}
+	if grantsPlanWriteTool([]string{"read_file", "grep", "glob"}) {
+		t.Error("a read-only grant must not read as writable")
+	}
+	if grantsPlanWriteTool(nil) {
+		t.Error("an empty grant must not read as writable")
+	}
+}
+
+// A WRITE TASK THAT CALLED NO TOOL MUST NOT REPORT SUCCESS.
+//
+// From a real run: the child emitted seventeen completion tokens reading
+// "Creating notes.md now.", made no tool call, wrote nothing — and the plan
+// recorded succeeded 1, status completed. A plan that reports work which did not
+// happen is worse than one that fails, because nothing downstream can tell.
+func TestAWriteTaskThatCalledNoToolIsNotASuccess(t *testing.T) {
+	silent := Executor{
+		RunChild: func(_ context.Context, _ string, _ []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			// Emits nothing at all — exactly the observed child.
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	run := NewPlanRunner(PlanTaskContext{Executor: silent, Cwd: t.TempDir(), SpecialistName: "explorer"})
+
+	result, err := run(context.Background(), PlanTaskRequest{
+		Task:  Task{ID: "w", Prompt: "create notes.md"},
+		Tools: []string{"read_file", "write_file"},
+	})
+	if err != nil {
+		t.Fatalf("runner error: %v", err)
+	}
+	if result.Outcome != TaskFailed {
+		t.Fatalf("outcome = %s, want failed: a write task that called no tool changed nothing", result.Outcome)
+	}
+	for _, want := range []string{"without calling a single one", "changed nothing"} {
+		if !strings.Contains(result.Err, want) {
+			t.Errorf("the failure must say what happened (missing %q): %s", want, result.Err)
+		}
+	}
+}
+
+// A write task that DID call a tool is unaffected, and a READ-ONLY task that
+// called none still succeeds — there the inference is not airtight, and failing
+// it would break every task that legitimately answers from its own prompt.
+func TestTheNoToolGuardOnlyCatchesSilentWriteTasks(t *testing.T) {
+	calling := Executor{
+		RunChild: func(_ context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			if progress != nil {
+				progress(streamjson.Event{Type: streamjson.EventToolCall, Name: "write_file"})
+			}
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	silent := Executor{
+		RunChild: func(_ context.Context, _ string, _ []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+
+	wrote := NewPlanRunner(PlanTaskContext{Executor: calling, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	res, _ := wrote(context.Background(), PlanTaskRequest{
+		Task: Task{ID: "w", Prompt: "write"}, Tools: []string{"write_file"},
+	})
+	if res.Outcome != TaskSucceeded {
+		t.Errorf("a write task that DID call a tool must succeed, got %s: %s", res.Outcome, res.Err)
+	}
+
+	readOnly := NewPlanRunner(PlanTaskContext{Executor: silent, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	res, _ = readOnly(context.Background(), PlanTaskRequest{
+		Task: Task{ID: "r", Prompt: "look"}, Tools: []string{"read_file", "grep"},
+	})
+	if res.Outcome != TaskSucceeded {
+		t.Errorf("a read-only task is not caught by this guard, got %s: %s", res.Outcome, res.Err)
+	}
+}
+
+// THE CHILD'S AUTONOMY MUST MATCH ITS GRANT, asserted on the argv the RUNNER
+// actually launches — not on a value the test computed for itself.
+//
+// specialistAutonomy maps every non-unsafe parent to "low" (read-only), so a
+// write-capable plan task was handed write_file in its manifest and launched at
+// an autonomy that never advertises it. From a real run: zero tool calls, no
+// file, and the child leaking tool-call fragments into its prose because it
+// wanted a tool it could not see.
+//
+// The first version of this test called BuildArgs with MemberAutonomy computed
+// in the test body. It passed with the production line reverted — it was
+// asserting the helper, not that the runner consults it.
+func TestAWriteTaskIsLaunchedAtARungThatAdvertisesWriting(t *testing.T) {
+	autonomyFor := func(granted []string) string {
+		t.Helper()
+		var captured []string
+		executor := Executor{
+			RunChild: func(_ context.Context, _ string, args []string, _ func(streamjson.Event)) (ChildRunResult, error) {
+				captured = args
+				return ChildRunResult{Started: true}, nil
+			},
+		}
+		run := NewPlanRunner(PlanTaskContext{
+			Executor:       executor,
+			Cwd:            t.TempDir(),
+			SpecialistName: "explorer",
+			PermissionMode: "ask",
+		})
+		if _, err := run(context.Background(), PlanTaskRequest{
+			Task:  Task{ID: "t", Prompt: "do the thing"},
+			Tools: granted,
+		}); err != nil {
+			t.Fatalf("runner: %v", err)
+		}
+		for i, arg := range captured {
+			if arg == "--auto" && i+1 < len(captured) {
+				return captured[i+1]
+			}
+		}
+		t.Fatalf("--auto missing from child argv %v", captured)
+		return ""
+	}
+
+	if got := autonomyFor([]string{"read_file", "write_file"}); got != "member" {
+		t.Errorf("a write-granted task launches at --auto %q; it must be a rung that advertises writing", got)
+	}
+	// A read-only task is unchanged, so an ordinary plan behaves exactly as before.
+	if got := autonomyFor([]string{"read_file", "grep"}); got != "low" {
+		t.Errorf("a read-only task launches at --auto %q, want low", got)
+	}
+}
+
+// A FAILED TASK'S TOKENS WERE BILLED, so the plan must count them.
+//
+// The error branch computed the usage summary and then returned an ExecResult
+// without it, so a child that spent tokens and crashed reported zero: the plan
+// budget was never decremented for it and the total under-counted every failure.
+func TestAFailedTaskStillReportsWhatItSpent(t *testing.T) {
+	executor := Executor{
+		RunChild: func(_ context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			if progress != nil {
+				progress(streamjson.Event{Type: streamjson.EventToolCall, Name: "read_file"})
+			}
+			// Usage arrives, THEN the child dies.
+			prompt, completion, total := 900, 100, 1000
+			return ChildRunResult{
+				Started: true,
+				Events: []streamjson.Event{{
+					Type:             streamjson.EventUsage,
+					PromptTokens:     &prompt,
+					CompletionTokens: &completion,
+					TotalTokens:      &total,
+				}},
+			}, fmt.Errorf("child exited unexpectedly")
+		},
+	}
+	run := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	result, _ := run(context.Background(), PlanTaskRequest{
+		Task: Task{ID: "a", Prompt: "look"}, Tools: []string{"read_file"},
+	})
+	if result.Outcome != TaskFailed {
+		t.Fatalf("outcome = %s, want failed", result.Outcome)
+	}
+	if result.Tokens == 0 {
+		t.Error("a task that spent tokens and then failed reported zero; its spend was real")
+	}
+}
+
+// USAGE IS PRICED AGAINST THE MODEL THAT DID THE WORK. resolvedChildModel is the
+// single rule the argv builder and the accounting both read, so the command line
+// and the bill cannot disagree about which model ran.
+func TestUsageIsAttributedToTheModelTheChildActuallyRan(t *testing.T) {
+	named := planTaskManifest("explorer", "claude-haiku-4.5", "", []string{"read_file"})
+	if got := resolvedChildModel(named, "gpt-4.1"); got != "claude-haiku-4.5" {
+		t.Errorf("a task naming a model must be priced against it, got %q", got)
+	}
+	inherit := planTaskManifest("explorer", "", "", []string{"read_file"})
+	if got := resolvedChildModel(inherit, "gpt-4.1"); got != "gpt-4.1" {
+		t.Errorf("an inheriting task is priced against the parent's model, got %q", got)
+	}
+	// The argv builder must agree, or the two drift.
+	argv := appendModelArgs(nil, named, "gpt-4.1", "")
+	if !containsArg(argv, "--model", resolvedChildModel(named, "gpt-4.1")) {
+		t.Errorf("argv and accounting disagree about the model: %v", argv)
 	}
 }

@@ -248,7 +248,7 @@ func TestTheRealRunnerLaunchesTheChildInThePlansWorkspace(t *testing.T) {
 // task from its own weights. The stall watchdog cannot catch that: it keys on
 // silence, and a model writing prose is not silent.
 func TestThePlanTaskPromptDemandsToolUse(t *testing.T) {
-	manifest := planTaskManifest("explorer", []string{"read_file", "grep"})
+	manifest := planTaskManifest("explorer", "", "", []string{"read_file", "grep"})
 	prompt := manifest.SystemPrompt
 
 	// The obligation, not just the offer.
