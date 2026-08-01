@@ -517,6 +517,41 @@ func TestClientDrainsAcceptedNotificationsAfterTransportEOF(t *testing.T) {
 	}
 }
 
+// TestReceiptStampedAtReadNotEnqueue is the regression test for the review gap
+// on #759 (pullrequestreview-4834747507): TestPublishBaselineRejectsFrameReadBeforeBaseline
+// calls stampReceipt itself and never drives readLoop, so it pins the seq
+// comparison but not WHERE the stamp is taken — a refactor that moved stamping
+// back to the enqueue call site (reverting the read-time fix) left that test
+// green.
+//
+// This test distinguishes the two call sites directly: a response frame is
+// read off the wire but never reaches enqueueNotification (see the `hasID`
+// branch in readLoop). Under read-time stamping every frame consumes a receipt
+// number — "gaps in it are fine", per stampReceipt's doc comment — so
+// ReceiptSeq must advance even though nothing was queued. Under enqueue-time
+// stamping it would not, since stampReceipt would never run for this frame.
+func TestReceiptStampedAtReadNotEnqueue(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	client := NewClient(clientReader, io.Discard)
+	defer serverWriter.Close()
+
+	// A plain response frame: has an id, no method, so it is delivered via
+	// c.deliver and never passed to enqueueNotification.
+	if err := writeMessage(serverWriter, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "result": nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for client.ReceiptSeq() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("ReceiptSeq did not advance for a frame that was read but never enqueued as a notification")
+		}
+		runtime.Gosched()
+	}
+}
+
 // TestReadMessageRejectsOversizedFrame covers jatmn's P3 finding on #759: the
 // notification byte budget was enforced only at enqueue, but readMessage
 // allocates the whole body before anything can tell a notification from a
