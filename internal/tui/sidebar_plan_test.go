@@ -13,11 +13,11 @@ func sidebarPlanModel(t *testing.T) model {
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(diamondAdmitted(), m.now())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", "k1", now)
+	m.orchestrate.markStarted("a", "root", "k1", "", now)
 	m.orchestrate.markDone("a", "succeeded", 100, 1, now)
-	m.orchestrate.markStarted("b", "left", "k2", now)
+	m.orchestrate.markStarted("b", "left", "k2", "", now)
 	m.orchestrate.markDone("b", "failed", 200, 1, now)
-	m.orchestrate.markStarted("c", "right", "k3", now)
+	m.orchestrate.markStarted("c", "right", "k3", "", now)
 	return m
 }
 

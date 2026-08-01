@@ -58,6 +58,14 @@ type orchestrateTask struct {
 	// the retry happens INSIDE the executor — one dispatch, one card — so
 	// without this the panel shows a task that silently took twice as long.
 	attempts int
+	// model is what the task runs on, empty when it inherits the session's. Shown
+	// only when set: a line saying "on <the model you are already using>" against
+	// every task buries the one that differs.
+	model string
+	// fellBackFrom names the model this task was assigned and could not run on.
+	// Empty for the overwhelming majority; set only after a provider refused the
+	// assigned model and the task was re-run on the session's.
+	fellBackFrom string
 	// cardKey links this task to its live agent state in the specialist
 	// tracker: the temporary key while it runs, the child's real session id
 	// once it finishes. The detail pane reads tool counts, the current tool and
@@ -148,7 +156,7 @@ func (s *orchestratePanelState) computeDepths() {
 	}
 }
 
-func (s *orchestratePanelState) markStarted(taskID, summary, cardKey string, now time.Time) {
+func (s *orchestratePanelState) markStarted(taskID, summary, cardKey, model string, now time.Time) {
 	index, ok := s.byID[taskID]
 	if !ok {
 		return
@@ -156,6 +164,9 @@ func (s *orchestratePanelState) markStarted(taskID, summary, cardKey string, now
 	s.tasks[index].status = orchestrateRunning
 	s.tasks[index].summary = summary
 	s.tasks[index].startedAt = now
+	if strings.TrimSpace(model) != "" {
+		s.tasks[index].model = model
+	}
 	if cardKey != "" {
 		s.tasks[index].cardKey = cardKey
 	}
@@ -170,6 +181,16 @@ func (s *orchestratePanelState) linkCard(taskID, cardKey string) {
 }
 
 func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempts int, now time.Time) {
+	s.markDoneOn(taskID, outcome, "", "", tokens, attempts, now)
+}
+
+// markDoneOn is markDone knowing WHICH MODEL ACTUALLY RAN.
+//
+// ranOn is the model the task finished on and is authoritative: empty means it
+// inherited the session's, which is exactly what a fallback produces. Correcting
+// it here is the difference between a row that names the model that worked and
+// one that names the model that was refused.
+func (s *orchestratePanelState) markDoneOn(taskID, outcome, ranOn, fellBackFrom string, tokens, attempts int, now time.Time) {
 	index, ok := s.byID[taskID]
 	if !ok {
 		return
@@ -183,6 +204,13 @@ func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempt
 	task := &s.tasks[index]
 	task.status = orchestrateStatusFromOutcome(outcome)
 	task.attempts = attempts
+	if strings.TrimSpace(fellBackFrom) != "" {
+		// Assigned one model, ran on another. Both facts are shown: the row must
+		// stop claiming the refused model, and must still name it — an unusable
+		// model stays in the provider's list and the next plan picks it again.
+		task.model = strings.TrimSpace(ranOn)
+		task.fellBackFrom = strings.TrimSpace(fellBackFrom)
+	}
 	task.endedAt = now
 	if task.startedAt.IsZero() {
 		// Never dispatched: it has no duration, and pretending otherwise would

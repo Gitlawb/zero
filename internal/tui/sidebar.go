@@ -649,6 +649,12 @@ func (m model) sidebarAgentExpansion(info specialistInfo, room int) []string {
 		// grouped digits — "3,400" does not fit beside the other segments here.
 		spent = append(spent, humanCount(info.tokenCount)+" tok")
 	}
+	// The MODEL goes on its own line rather than into the spend segments: names
+	// like grok-4.20-0309-non-reasoning are longer than everything else combined,
+	// and fitSegments would drop the elapsed and the spend to make room for it.
+	if model := strings.TrimSpace(info.model); model != "" {
+		out = append(out, indent+zeroTheme.accent.Render(truncateStep("on "+model, body)))
+	}
 	if info.toolCount > 0 {
 		spent = append(spent, fmt.Sprintf("%d tools", info.toolCount))
 	}

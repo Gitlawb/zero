@@ -175,6 +175,19 @@ func (m model) sidebarPlanDetailLines(width, budget int) []string {
 	}
 	lines = append(lines, " "+zeroTheme.muted.Render(truncateStep(head, room)))
 
+	// WHICH MODEL DID THIS. Shown only when the task named one, because a line
+	// against every task saying "on <the model you are already using>" buries
+	// the one that differs — and a mixed-model plan is the only reason to look.
+	if strings.TrimSpace(task.model) != "" {
+		lines = append(lines, " "+zeroTheme.accent.Render(truncateStep("on "+task.model, room)))
+	}
+	// A REFUSED MODEL IS WORTH A LINE. It stays in the provider's list, so the
+	// next plan chooses it again; without this the fallback is invisible here and
+	// the only record of it is in the report the model reads, not the person.
+	if fell := strings.TrimSpace(task.fellBackFrom); fell != "" {
+		lines = append(lines, " "+zeroTheme.muted.Render(truncateStep(fell+" would not run", room)))
+	}
+
 	info, hasCard := m.specialists.getBySessionID(task.cardKey)
 	if hasCard {
 		meta := fmt.Sprintf("%d tool calls", info.toolCount)

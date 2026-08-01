@@ -21,7 +21,7 @@ func longPlanModel(t *testing.T, n int) model {
 // progress.
 func TestTheWindowFollowsTheRunningTask(t *testing.T) {
 	m := longPlanModel(t, 40)
-	m.orchestrate.markStarted("t30", "working", "k30", m.now())
+	m.orchestrate.markStarted("t30", "working", "k30", "", m.now())
 
 	rendered := m.renderOrchestratePanel(100)
 	if !strings.Contains(rendered, "t30") {
@@ -63,7 +63,7 @@ func TestTheWindowFollowsTheSelectionWhenNothingRuns(t *testing.T) {
 func TestARunningTaskOutranksTheSelectionForTheWindow(t *testing.T) {
 	m := longPlanModel(t, 40)
 	m.orchestrateSelected = 1
-	m.orchestrate.markStarted("t30", "working", "k30", m.now())
+	m.orchestrate.markStarted("t30", "working", "k30", "", m.now())
 
 	rows, _, _ := m.orchestrateVisibleRows(6)
 	var sawRunning bool
@@ -97,7 +97,7 @@ func TestAShortPlanIsNotWindowed(t *testing.T) {
 // like before anyone notices.
 func TestTheSidebarListAndItsHitTableSeeTheSameTasks(t *testing.T) {
 	m := longPlanModel(t, 40)
-	m.orchestrate.markStarted("t30", "working", "k30", m.now())
+	m.orchestrate.markStarted("t30", "working", "k30", "", m.now())
 	m.width = 160
 
 	drawn, _, _ := m.orchestrateVisibleRows(maxSidebarOrchestrateLines)

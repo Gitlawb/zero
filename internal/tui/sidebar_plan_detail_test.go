@@ -14,9 +14,9 @@ func sidebarDetailModel(t *testing.T) model {
 	m := model{now: func() time.Time { return time.Unix(1000, 0) }}
 	m.orchestrate.admit(diamondAdmitted(), m.now())
 	now := m.now()
-	m.orchestrate.markStarted("a", "survey the packages", "k1", now)
+	m.orchestrate.markStarted("a", "survey the packages", "k1", "", now)
 	m.orchestrate.markDone("a", "succeeded", 9000, 1, now)
-	m.orchestrate.markStarted("b", "read the left branch", "k2", now)
+	m.orchestrate.markStarted("b", "read the left branch", "k2", "", now)
 	m.specialists.start("b", "read the left branch", "k2", now)
 	m.specialists.incrementToolCount("k2")
 	m.specialists.setCurrentTool("k2", "read_file", "internal/agent/loop.go")

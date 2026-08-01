@@ -47,6 +47,8 @@ type specialistInfo struct {
 	tokenCount     int // total tokens consumed
 	currentTool    string
 	currentDetail  string
+	// model is what this agent runs on, empty when it inherits the session's.
+	model string
 	// result is what the agent PRODUCED, bounded at the bridge. The sidebar
 	// shows the head of it when its row is expanded; the whole thing lives in
 	// the child's own session, which the card's drill-in opens.
@@ -110,6 +112,20 @@ func (t *specialistTracker) setTokens(childSessionID string, tokens int) {
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
 			t.specialists[index].tokenCount = tokens
+			return
+		}
+	}
+}
+
+// setModel records which model an agent runs on.
+//
+// Empty clears the field: that is what a model fallback produces (the task
+// finished on the session's model), and refusing to write empty left the AGENTS
+// row naming the refused model after the PLAN row had already corrected itself.
+func (t *specialistTracker) setModel(childSessionID, model string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].model = strings.TrimSpace(model)
 			return
 		}
 	}

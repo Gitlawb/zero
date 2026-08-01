@@ -2917,8 +2917,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, m.now())
+		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, msg.model, m.now())
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
+		m.specialists.setModel(msg.cardKey, msg.model)
 		return m, nil
 	case planTaskDoneMsg:
 		// A BACKGROUND plan outlives the run that launched it, so the
@@ -2928,7 +2929,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.background && msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.orchestrate.markDone(msg.taskID, msg.outcome, msg.tokens, msg.attempts, m.now())
+		m.orchestrate.markDoneOn(msg.taskID, msg.outcome, msg.model, msg.fellBackFrom, msg.tokens, msg.attempts, m.now())
 		cardKey := msg.cardKey
 		if !msg.dispatched {
 			// Never started, so it has no card. Give it its own key and open one
@@ -2940,6 +2941,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
 		m.specialists.setTokens(cardKey, msg.tokens)
 		m.specialists.setResult(cardKey, msg.output)
+		// WHAT IT RAN ON, not what it was dispatched with. set at start from the
+		// assigned model; a provider refusal re-runs on the session's and arrives
+		// here empty. Without this write the AGENTS row keeps naming the refused
+		// model after the PLAN row has already stopped claiming it.
+		if msg.fellBackFrom != "" || msg.model != "" {
+			m.specialists.setModel(cardKey, msg.model)
+		}
 		if msg.sessionID != "" && msg.sessionID != cardKey {
 			// The expansion follows the rename. It is keyed by the card id, and
 			// finishing swaps that for the child's real session id — so a row

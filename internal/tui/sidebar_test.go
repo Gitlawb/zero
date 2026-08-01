@@ -1139,3 +1139,49 @@ func TestOrchestrateTaskClicksLandWithBothPlansInTheSection(t *testing.T) {
 		}
 	}
 }
+
+// WHICH MODEL RAN THIS TASK, on screen rather than only in the tool result.
+//
+// The report said "on <model>" from the start; the terminal did not, so a
+// mixed-model plan looked identical to a single-model one while it ran. Driven
+// through the real message handler, because the model is carried on the START
+// message and a test that set the field directly would pass with the bridge
+// sending nothing.
+func TestTheModelATaskRunsOnIsVisibleInTheTerminal(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.plan = planPanelState{}
+	m.now = func() time.Time { return now }
+	m.activeRunID = 1
+	m.orchestrate.admit(planAdmittedMsg{runID: 1, name: "auto", taskCount: 2,
+		tasks: []planGraphTask{{id: "s"}, {id: "plain"}}}, now)
+
+	updated, _ := m.Update(planTaskStartMsg{runID: 1, taskID: "s",
+		summary: "scan", cardKey: "plantask_1", model: "grok-4.3"})
+	m = updated.(model)
+	updated, _ = m.Update(planTaskStartMsg{runID: 1, taskID: "plain",
+		summary: "inherits", cardKey: "plantask_2"})
+	m = updated.(model)
+
+	width := sidebarWidth(m.width)
+
+	// The TASK detail pane names it.
+	m.orchestrateSelected = 0
+	detail := plainRender(t, strings.Join(m.sidebarPlanDetailLines(width, 14), "\n"))
+	if !strings.Contains(detail, "on grok-4.3") {
+		t.Errorf("the TASK pane must say which model ran it:\n%s", detail)
+	}
+	// A task that inherited says nothing, or every task carries a line naming
+	// the model already on screen and the one that differs is buried.
+	m.orchestrateSelected = 1
+	if plain := plainRender(t, strings.Join(m.sidebarPlanDetailLines(width, 14), "\n")); strings.Contains(plain, " on ") {
+		t.Errorf("an inheriting task must not claim a model:\n%s", plain)
+	}
+
+	// And the expanded agent row names it too.
+	m.expandedAgent = "plantask_1"
+	agents := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if !strings.Contains(agents, "on grok-4.3") {
+		t.Errorf("the expanded agent row must say which model it ran on:\n%s", agents)
+	}
+}

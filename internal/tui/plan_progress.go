@@ -473,7 +473,6 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	name := plan.Name()
 	count := plan.TaskCount()
 	limit := plan.Budget().MaxTokens
-	workers := plan.Budget().MaxWorkers
 
 	// Copied into the message in EXECUTION ORDER, with the dependency edges, so
 	// the panel can draw the graph without reaching back into the plan — which
@@ -494,8 +493,14 @@ func (bridge *PlanProgressBridge) PlanAdmitted(plan specialist.Plan) {
 	}
 
 	bridge.send(func(runID int) tea.Msg {
+		// REMOVED: a workers count rode this message for planRunningCardKey, which
+		// attributed a plan's child progress to "whichever task was dispatched
+		// last". That was deleted when per-task progress arrived carrying its own
+		// task id — and the field outlived its only consumer, still pointing
+		// readers at a function that no longer exists. The panel gets the number
+		// it displays from the plan report.
 		return planAdmittedMsg{runID: runID, name: name, taskCount: count, tasks: graph, tokenLimit: limit,
-			workers: workers, background: bridge.isBackground()}
+			background: bridge.isBackground()}
 	})
 }
 
@@ -514,9 +519,10 @@ func (bridge *PlanProgressBridge) TaskDispatched(task specialist.Task) {
 	bridge.cardByTask[task.ID] = key
 	bridge.mu.Unlock()
 
-	id, summary := task.ID, planTaskSummary(task)
+	id, summary, model := task.ID, planTaskSummary(task), task.Model
 	bridge.send(func(runID int) tea.Msg {
-		return planTaskStartMsg{runID: runID, taskID: id, summary: summary, cardKey: key, background: bridge.isBackground()}
+		return planTaskStartMsg{runID: runID, taskID: id, summary: summary, cardKey: key,
+			model: model, background: bridge.isBackground()}
 	})
 }
 
@@ -566,21 +572,28 @@ func (bridge *PlanProgressBridge) finish(result specialist.TaskResult, status sp
 	// handler creates the card on demand.
 	taskID, sessionID, reason := result.ID, result.SessionID, result.Err
 	outcome, tokens, attempts := result.Outcome, result.Tokens, result.Attempts
+	// WHAT IT RAN ON, not what it was dispatched with. The card's model is set
+	// once at dispatch from the ASSIGNED model; a task whose model the provider
+	// refused then runs on the session's, and without this the row goes on
+	// naming a model that never executed it.
+	ranOn, fellBackFrom := result.Model, result.RetriedOnParentModel
 	output := boundTaskOutput(result.Output)
 	bridge.send(func(runID int) tea.Msg {
 		return planTaskDoneMsg{
-			runID:      runID,
-			taskID:     taskID,
-			cardKey:    key,
-			dispatched: dispatched,
-			sessionID:  sessionID,
-			status:     status,
-			outcome:    string(outcome),
-			reason:     reason,
-			tokens:     tokens,
-			attempts:   attempts,
-			output:     output,
-			background: bridge.isBackground(),
+			runID:        runID,
+			taskID:       taskID,
+			cardKey:      key,
+			dispatched:   dispatched,
+			sessionID:    sessionID,
+			status:       status,
+			outcome:      string(outcome),
+			reason:       reason,
+			tokens:       tokens,
+			attempts:     attempts,
+			output:       output,
+			model:        ranOn,
+			fellBackFrom: fellBackFrom,
+			background:   bridge.isBackground(),
 		}
 	})
 }

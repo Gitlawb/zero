@@ -400,7 +400,17 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	if _, err := specialist.SavePlan(dir, resumeName, remaining); err != nil {
 		return "", planControlNotice("warning", "Could not stage the remaining plan: "+err.Error()), false
 	}
+	// WHY there is work left, not just how much. A plan that RAN TO THE END with
+	// failures and one that was stopped partway both leave tasks behind, and
+	// they call for different decisions: the first means re-running things that
+	// already failed once, the second means finishing work that never started.
+	// PlanProgress.Complete is the only thing that distinguishes them, and it
+	// was recorded and never read.
+	why := "the plan was interrupted before it finished"
+	if progress.Complete {
+		why = "the plan ran to the end and these did not succeed"
+	}
 	return resumeName, planControlNotice("info", fmt.Sprintf(
-		"Resuming %q: %d of %d tasks already succeeded, %d left.\nSaved the remainder as %q — /plans show %s to read it first.",
-		stored.Name, len(progress.Succeeded), len(progress.Order), remaining.TaskCount(), resumeName, resumeName)), true
+		"Resuming %q: %d of %d tasks already succeeded, %d left — %s.\nSaved the remainder as %q — /plans show %s to read it first.",
+		stored.Name, len(progress.Succeeded), len(progress.Order), remaining.TaskCount(), why, resumeName, resumeName)), true
 }

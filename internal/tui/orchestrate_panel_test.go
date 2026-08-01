@@ -150,9 +150,9 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 
-	m.orchestrate.markStarted("a", "root", "", now)
+	m.orchestrate.markStarted("a", "root", "", "", now)
 	m.orchestrate.markDone("a", "succeeded", 0, 1, now.Add(time.Second))
-	m.orchestrate.markStarted("b", "left", "", now.Add(time.Second))
+	m.orchestrate.markStarted("b", "left", "", "", now.Add(time.Second))
 	m.orchestrate.markDone("b", "failed", 0, 1, now.Add(2*time.Second))
 	m.orchestrate.markDone("c", "cancelled", 0, 1, now.Add(2*time.Second))
 	m.orchestrate.markDone("d", "dependency_failed", 0, 1, now.Add(2*time.Second))
@@ -177,7 +177,7 @@ func TestPanelTracksEveryOutcome(t *testing.T) {
 func TestCancelledPlanIsNotShownAsFailures(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", "", now)
+	m.orchestrate.markStarted("a", "root", "", "", now)
 	m.orchestrate.markDone("a", "succeeded", 0, 1, now)
 	for _, id := range []string{"b", "c", "d"} {
 		m.orchestrate.markDone(id, "cancelled", 0, 1, now)
@@ -231,7 +231,7 @@ func TestALargePlanIsBoundedAndSaysWhatItHid(t *testing.T) {
 // Narrow terminals must not panic or produce garbage.
 func TestPanelSurvivesNarrowWidths(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", strings.Repeat("verbose ", 40), "", m.now())
+	m.orchestrate.markStarted("a", strings.Repeat("verbose ", 40), "", "", m.now())
 	for _, width := range []int{0, 1, 10, 24, 40, 200} {
 		rendered := m.renderOrchestratePanel(width)
 		if rendered == "" {
@@ -248,7 +248,7 @@ func TestPanelSurvivesNarrowWidths(t *testing.T) {
 // A task with no output must still render — the panel shows status, not results.
 func TestATaskWithNoSummaryStillRenders(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", "", "", m.now())
+	m.orchestrate.markStarted("a", "", "", "", m.now())
 	rendered := m.renderOrchestratePanel(100)
 	if !strings.Contains(rendered, " a ") {
 		t.Fatalf("a task with no summary vanished from the panel:\n%s", rendered)
@@ -260,7 +260,7 @@ func TestATaskWithNoSummaryStillRenders(t *testing.T) {
 // runes.
 func TestPanelTruncatesSummariesOnRuneBoundaries(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
-	m.orchestrate.markStarted("a", strings.Repeat("日", 300), "", m.now())
+	m.orchestrate.markStarted("a", strings.Repeat("日", 300), "", "", m.now())
 	rendered := m.renderOrchestratePanel(100)
 	for _, line := range strings.Split(rendered, "\n") {
 		if len([]rune(line)) > 140 {
@@ -310,7 +310,7 @@ func TestTheHeaderClockStopsWhenThePlanEnds(t *testing.T) {
 func TestAnInterruptedPlansClockFreezesWithTheRun(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
-	m.orchestrate.markStarted("a", "root", "", start)
+	m.orchestrate.markStarted("a", "root", "", "", start)
 	m.orchestrate.frozenAt = start.Add(5 * time.Second)
 	m.activeRunID = 0
 
@@ -563,9 +563,9 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
 
-	m.orchestrate.markStarted("a", "root", "", start)
+	m.orchestrate.markStarted("a", "root", "", "", start)
 	m.orchestrate.markDone("a", "succeeded", 0, 1, start)
-	m.orchestrate.markStarted("b", "left", "", start)
+	m.orchestrate.markStarted("b", "left", "", "", start)
 
 	// Immediately after finishing, a is still there — you have to be able to
 	// SEE it land.
@@ -590,7 +590,7 @@ func TestFinishedTasksFadeOutOfThePanel(t *testing.T) {
 func TestAFadedTaskIsStillCountedAndStillInPlans(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	start := m.now()
-	m.orchestrate.markStarted("a", "root", "", start)
+	m.orchestrate.markStarted("a", "root", "", "", start)
 	m.orchestrate.markDone("a", "succeeded", 0, 1, start)
 	m.now = func() time.Time { return start.Add(orchestrateTaskLinger + time.Second) }
 
@@ -630,12 +630,12 @@ func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
 
-	m.orchestrate.markStarted("a", "root", "", now)
+	m.orchestrate.markStarted("a", "root", "", "", now)
 	m.orchestrate.markDone("a", "succeeded", 16470, 1, now)
 	if m.orchestrate.tokensUsed != 16470 {
 		t.Fatalf("tokensUsed = %d after one task, want it counted as it finishes", m.orchestrate.tokensUsed)
 	}
-	m.orchestrate.markStarted("b", "left", "", now)
+	m.orchestrate.markStarted("b", "left", "", "", now)
 	m.orchestrate.markDone("b", "succeeded", 68483, 1, now)
 
 	rendered := m.renderOrchestratePanel(100)
@@ -650,7 +650,7 @@ func TestTheBudgetLineCountsDuringTheRun(t *testing.T) {
 func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", "", now)
+	m.orchestrate.markStarted("a", "root", "", "", now)
 	m.orchestrate.markDone("a", "succeeded", 100, 1, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "partial", tokensUsed: 379773}, now)
@@ -663,7 +663,7 @@ func TestThePlansOwnTotalWinsAtTheEnd(t *testing.T) {
 func TestAMissingFinalTotalDoesNotZeroTheCount(t *testing.T) {
 	m := admittedModel(t, diamondAdmitted())
 	now := m.now()
-	m.orchestrate.markStarted("a", "root", "", now)
+	m.orchestrate.markStarted("a", "root", "", "", now)
 	m.orchestrate.markDone("a", "succeeded", 4242, 1, now)
 
 	m.orchestrate.complete(planCompletedMsg{status: "completed"}, now)
@@ -866,7 +866,7 @@ func TestTheBarDoesNotCountRunningTasksAsProgress(t *testing.T) {
 
 	running := admit()
 	for i := 0; i < 4; i++ {
-		running.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", now)
+		running.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", "", now)
 	}
 	bar := plainRender(t, sidebarProgressBar(running.orchestrate, 36))
 	if strings.Contains(bar, "█") {
@@ -882,10 +882,10 @@ func TestTheBarDoesNotCountRunningTasksAsProgress(t *testing.T) {
 	// A finished task IS solid, so the two are told apart at a glance.
 	mixed := admit()
 	for i := 0; i < 3; i++ {
-		mixed.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", now)
+		mixed.orchestrate.markStarted(fmt.Sprintf("t%d", i), "s", "", "", now)
 		mixed.orchestrate.markDone(fmt.Sprintf("t%d", i), "succeeded", 0, 1, now)
 	}
-	mixed.orchestrate.markStarted("t3", "s", "", now)
+	mixed.orchestrate.markStarted("t3", "s", "", "", now)
 	bar = plainRender(t, sidebarProgressBar(mixed.orchestrate, 36))
 	if !strings.Contains(bar, "█") || !strings.Contains(bar, "▓") {
 		t.Errorf("three done and one running must show both marks: %q", bar)

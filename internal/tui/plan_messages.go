@@ -19,12 +19,9 @@ import (
 // the order — so sending it here means the panel is complete before the first
 // task starts rather than assembling itself as tasks finish.
 type planAdmittedMsg struct {
-	runID     int
-	name      string
-	taskCount int
-	// workers is how many tasks this plan may run at once. More than one means
-	// child progress CANNOT be attributed to a task — see planRunningCardKey.
-	workers    int
+	runID      int
+	name       string
+	taskCount  int
 	tasks      []planGraphTask
 	tokenLimit int
 	// background marks a plan that outlives the run that launched it, so the
@@ -46,6 +43,11 @@ type planTaskStartMsg struct {
 	taskID  string
 	summary string
 	cardKey string
+	// model is what this task will run on, empty when it inherits the session's.
+	// Known at DISPATCH, which is why it rides the start message rather than the
+	// done one: a task's model is worth seeing while it is running, not only in
+	// the report afterwards.
+	model string
 	// background marks a plan that outlives the run that launched it, so the
 	// stale-run guard must not drop its progress.
 	background bool
@@ -79,6 +81,14 @@ type planTaskDoneMsg struct {
 	// watchdog fired and the executor retried it. Carried so the detail can say
 	// why an apparently single run took twice as long as its siblings.
 	attempts int
+	// model is what the task ACTUALLY ran on, which is not always what it was
+	// dispatched with: a model the provider refuses is retried on the session's,
+	// and this arrives empty in that case because empty means "the session's".
+	model string
+	// fellBackFrom names the assigned model that could not run. Carried to the
+	// surface a PERSON reads, not only to the report the model reads — otherwise
+	// the card goes on claiming a model that never executed the task.
+	fellBackFrom string
 	// background marks a plan that outlives the run that launched it, so the
 	// stale-run guard must not drop its progress.
 	background bool

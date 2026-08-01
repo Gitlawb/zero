@@ -212,7 +212,7 @@ func TestARetriedTaskShowsItsAttemptCount(t *testing.T) {
 
 	state := &orchestratePanelState{}
 	state.admit(planAdmittedMsg{name: "p", taskCount: 1, tasks: []planGraphTask{{id: "a"}}}, time.Now())
-	state.markStarted("a", "look", "k", time.Now())
+	state.markStarted("a", "look", "k", "", time.Now())
 	state.markDone("a", done.outcome, done.tokens, done.attempts, time.Now())
 	if got := state.tasks[0].attempts; got != 3 {
 		t.Fatalf("panel attempts = %d; want 3", got)
@@ -224,7 +224,7 @@ func TestARetriedTaskShowsItsAttemptCount(t *testing.T) {
 func TestASingleAttemptAddsNoAttemptCount(t *testing.T) {
 	state := &orchestratePanelState{}
 	state.admit(planAdmittedMsg{name: "p", taskCount: 1, tasks: []planGraphTask{{id: "a"}}}, time.Now())
-	state.markStarted("a", "look", "k", time.Now())
+	state.markStarted("a", "look", "k", "", time.Now())
 	state.markDone("a", string(specialist.TaskSucceeded), 0, 1, time.Now())
 	if got := state.tasks[0].attempts; got != 1 {
 		t.Fatalf("attempts = %d; want 1", got)
@@ -461,10 +461,35 @@ func mustPlan(t *testing.T, name string) specialist.Plan {
 	plan, err := specialist.ParsePlan(map[string]any{
 		"name":   name,
 		"tasks":  []any{map[string]any{"id": "a", "prompt": "one"}},
-		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(1000)},
+		"budget": map[string]any{"max_workers": float64(1), "max_tokens": float64(500_000)},
 	}, specialist.Limits{ParentTools: []string{"read_file"}})
 	if err != nil {
 		t.Fatalf("building the fixture plan: %v", err)
 	}
 	return plan
+}
+
+// THE BRIDGE MUST CARRY THE MODEL, not just the message type having a field for
+// it. The terminal surfaces read planTaskStartMsg.model; a test that builds that
+// message by hand passes while the bridge sends "" and nothing is ever shown.
+func TestTheBridgeCarriesTheModelATaskWillRunOn(t *testing.T) {
+	var got []tea.Msg
+	bridge := NewPlanProgressBridge()
+	bridge.Attach(func(msg tea.Msg) { got = append(got, msg) }, 1, nil, "")
+
+	bridge.TaskDispatched(specialist.Task{ID: "s", Prompt: "scan", Model: "grok-4.3"})
+	bridge.TaskDispatched(specialist.Task{ID: "plain", Prompt: "inherits"})
+
+	models := map[string]string{}
+	for _, msg := range got {
+		if start, ok := msg.(planTaskStartMsg); ok {
+			models[start.taskID] = start.model
+		}
+	}
+	if models["s"] != "grok-4.3" {
+		t.Errorf("the dispatch message carried model %q, want the task's", models["s"])
+	}
+	if models["plain"] != "" {
+		t.Errorf("a task that named no model must carry none, got %q", models["plain"])
+	}
 }
