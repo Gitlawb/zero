@@ -205,7 +205,12 @@ func waitForDaemonReadiness(reachable func() bool, timeout time.Duration, pollIn
 		}
 		time.Sleep(min(pollInterval, remaining))
 	}
-	// Avoid killing a daemon that became reachable at the timeout boundary.
+	// The loop's last reachable() call already ran immediately before this one
+	// (right after the final Sleep, with the same deadline check separating
+	// them), so this adds no extra waiting time and is not a grace window for a
+	// slow-starting daemon — it only re-checks the same instant in case
+	// reachable() itself is non-deterministic. To tolerate a genuinely slow
+	// start, raise the timeout passed to startAndAwaitDaemonProcess instead.
 	return reachable()
 }
 
