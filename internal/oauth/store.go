@@ -117,19 +117,29 @@ type KeyringClient interface {
 // bytes; three or more logged-in providers routinely exceeds that. Splitting
 // by key bounds each write to one token, which stays well under the cap
 // regardless of how many providers are logged in.
+//
+// Coexistence with pre-per-key binaries: the legacy combined entry is a
+// read-only discovery source for new code. New writers never overwrite it
+// (they cannot share a lock with old writers on other config roots, so any
+// snapshot-then-Set would clobber unobserved updates or truncate oversized
+// Linux keyring maps). Indexed per-key entries are the sole writable
+// representation for new binaries. Durable deletion markers (tombstones)
+// prevent an uncoordinated old writer from resurrecting a logout via the
+// legacy blob.
 const (
 	keyringService = "zero"
 	// keyringLegacyAccount is the combined-blob entry used by pre-per-key
-	// binaries. New code dual-writes the reconciled token map here on every
-	// save so an old binary on another config root (which cannot share this
-	// process's legacy lock) still sees current credentials, and so a
-	// concurrent old-writer update is never permanently deleted just because
-	// this process could not observe it. The per-key index remains
-	// authoritative for new binaries.
+	// binaries. New code reads it for migration and for legacy-only logins,
+	// but never writes or deletes it: dual-write cannot be made safe across
+	// config roots that do not share legacyKeyringLockPath.
 	keyringLegacyAccount = "oauth-tokens"
 	// keyringIndexAccount holds a JSON array of the token keys that currently
 	// have their own keyring entry, since KeyringClient has no "list" operation.
 	keyringIndexAccount = "oauth-tokens-index"
+	// keyringTombstoneAccount holds the set of keys deliberately deleted by a
+	// new binary. Old writers cannot see this entry; new readers and writers
+	// honor it so a stale legacy rewrite cannot resurrect a logout.
+	keyringTombstoneAccount = "oauth-tokens-tombstones"
 )
 
 // Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
@@ -484,8 +494,9 @@ func (s *Store) readState() (storeFile, error) {
 }
 
 // writeState persists state. omitFromLegacy lists keys that must not be
-// re-merged from the keyring legacy blob during reconciliation (Delete intent).
-// File and encrypted-file backends ignore omitFromLegacy.
+// re-merged from the keyring legacy blob during reconciliation (Delete intent);
+// the keyring backend also records them as durable tombstones. File and
+// encrypted-file backends ignore omitFromLegacy.
 func (s *Store) writeState(state storeFile, omitFromLegacy map[string]bool) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -514,7 +525,8 @@ type blobStore interface {
 	read() (data []byte, ok bool, err error)
 	// write replaces the stored blob. omitFromLegacy is keyring-only: keys the
 	// caller deliberately removed that must not be re-merged from the legacy
-	// combined entry during mixed-version reconciliation. File backends ignore it.
+	// combined entry and that should be recorded as durable tombstones. File
+	// backends ignore it.
 	write(data []byte, omitFromLegacy map[string]bool) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; none for the keyring, which is the
@@ -628,7 +640,8 @@ type keyringBlob struct {
 	kr      KeyringClient
 	service string
 	// legacyAccount is the pre-migration whole-blob entry; read only, to pick up
-	// tokens saved by older versions the first time this runs.
+	// tokens saved by older versions and legacy-only logins from old binaries.
+	// New code never writes this account (see package comment on coexistence).
 	legacyAccount string
 	indexAccount  string
 	// lockPath, when set, is a cross-process lock file serializing the keyring's
@@ -636,10 +649,11 @@ type keyringBlob struct {
 	lockPath string
 	// legacyLockPath, when set, is the lock file a pre-PR binary acquires around
 	// its own read-modify-write of the legacy combined entry (see
-	// legacyKeyringLockPath). write() holds it too so, when the old binary shares
-	// this config root, it cannot race our dual-write. Binaries on other roots
-	// still cannot share this lock; dual-write (never delete) is what keeps their
-	// updates from being permanently destroyed.
+	// legacyKeyringLockPath). write() still holds it when the old binary shares
+	// this config root so concurrent legacy mutations serialize with our
+	// reconcile-and-index pass. Cross-root old writers cannot share that lock;
+	// safety there comes from never overwriting the legacy blob and from
+	// durable tombstones, not from dual-write.
 	legacyLockPath string
 }
 
@@ -650,6 +664,14 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	}
 	if !ok {
 		return b.readLegacy()
+	}
+	// Tombstones block resurrection of deliberately deleted keys from the
+	// legacy combined entry (an old binary may rewrite a stale snapshot into
+	// that account after logout). Fail closed on a corrupt tombstone set so a
+	// damaged marker cannot silently re-expose logged-out credentials.
+	tombstones, err := b.readTombstones()
+	if err != nil {
+		return nil, false, err
 	}
 	// The legacy combined entry is consulted when an indexed key's own entry is
 	// missing (torn write / migration) and for keys only present there (an old
@@ -664,8 +686,9 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 			return
 		}
 		// Best-effort on read: a transient failure must not fail Load/Status,
-		// only skip legacy recovery for this pass. write() still refuses to
-		// dual-write over a legacy blob it cannot read (see write()).
+		// only skip legacy recovery for this pass. write() still requires a
+		// successful legacy read before reconciling so it never mistakes a
+		// transient error for an empty blob.
 		if lt, lerr := b.readLegacyTokens(); lerr == nil {
 			legacyTokens = lt
 		}
@@ -679,9 +702,14 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 		}
 		if !ok {
 			// The index lists this key but its own entry is missing. Recover it
-			// from the dual-written legacy blob when present; otherwise skip
-			// rather than fail the whole read (the next Save/Delete prunes the
-			// phantom index key so it cannot permanently consume capacity).
+			// from the legacy blob when present and not tombstoned; otherwise
+			// skip rather than fail the whole read (the next Save/Delete prunes
+			// the phantom index key so it cannot permanently consume capacity).
+			// Tombstones do not hide a still-present indexed entry (in-flight
+			// delete): they only block resurrection from the legacy account.
+			if tombstones[key] {
+				continue
+			}
 			loadLegacy()
 			if token, has := legacyTokens[key]; has {
 				tokens[key] = token
@@ -701,9 +729,13 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 
 	// Keep legacy-only keys visible through the compatibility window:
 	// an old binary may have logged into a provider after the index was created.
+	// Tombstones suppress keys the user already logged out of.
 	loadLegacy()
 	for key, legacyToken := range legacyTokens {
 		if ValidateKey(key) != nil {
+			continue
+		}
+		if tombstones[key] {
 			continue
 		}
 		if _, has := tokens[key]; !has {
@@ -738,10 +770,9 @@ func (b keyringBlob) readLegacy() ([]byte, bool, error) {
 // returned ok=false, err=nil) — the one case callers may treat as "no tokens"
 // and proceed. Any other failure (a transient keyring read error, undecodable
 // base64, invalid JSON) is returned as err and must NOT be collapsed into "no
-// tokens": write() dual-writes the reconciled map over the legacy blob, so
-// mistaking a transient read failure for an empty blob would overwrite a
-// still-unread, still-live credential that belongs to an older, still-installed
-// zero binary.
+// tokens": write() merges legacy-only keys into the indexed representation,
+// and mistaking a transient read failure for an empty blob would skip
+// credentials that still live only in that account.
 func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 	data, ok, err := b.readLegacy()
 	if err != nil {
@@ -764,20 +795,20 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // written, entries are deleted before the index shrinks, and the index
 // header is only updated after the chunks it references exist. A crash at
 // any step therefore leaves either an index over-listing keys whose entries
-// are missing (read() recovers those from the dual-written legacy blob, or
-// skips them; the next write prunes phantom index keys so they cannot
+// are missing (read() recovers those from the legacy blob unless tombstoned,
+// or skips them; the next write prunes phantom index keys so they cannot
 // permanently consume capacity) or entries that a later read/write can still
 // see and reconcile, never an invisible credential stranded in the OS keychain.
 //
-// The legacy combined entry is dual-written with the reconciled map after
-// per-key entries succeed, never deleted: a pre-PR binary using another
-// config root cannot share this process's compatibility lock, so deleting
-// the blob would permanently drop an update that process wrote between our
-// reconcile read and a delete. Dual-write keeps old readers current and
-// leaves concurrent old-writer keys for the next reconcile pass.
-// omitFromLegacy lists keys the caller just deleted; they must not be
-// re-merged from the legacy blob even when they were never indexed (a
-// legacy-only old-binary login that the user logged out of).
+// The legacy combined entry is never written or deleted by this path. New
+// code cannot share a lock with old writers on other config roots, so any
+// snapshot-then-Set of that account can clobber an unobserved login or
+// truncate a valid oversized Linux keyring map. Legacy stays a read-only
+// discovery source; indexed entries are the sole writable representation.
+// omitFromLegacy lists keys the caller just deleted; they are recorded as
+// durable tombstones and must not be re-merged from the legacy blob even
+// when they were never indexed (a legacy-only old-binary login that the
+// user logged out of).
 func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -792,19 +823,33 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 		prior[key] = true
 	}
 
+	tombstones, err := b.readTombstones()
+	if err != nil {
+		return err
+	}
+	// Record durable deletion markers before mutating entries so a crash
+	// mid-write cannot leave a logged-out key importable from legacy alone.
+	for key := range omitFromLegacy {
+		tombstones[key] = true
+	}
+	// A re-login after logout clears the tombstone for that key.
+	for key := range state.Tokens {
+		delete(tombstones, key)
+	}
+
 	// An older binary running alongside this one still reads and writes only the
 	// legacy combined entry. Merge keys that entry holds which the indexed
-	// schema has never seen (fresh old-binary logins). Never overwrite a key
-	// already present in state: expiry and token strings are not causal order,
-	// so a "later" legacy expiry can replace an explicit new-binary Save with
-	// the wrong account. Keys in the prior index but absent from this write
-	// were deliberately removed (logout) and must not be resurrected.
+	// schema has never seen (fresh old-binary logins), unless tombstoned or
+	// omitted by this operation. Never overwrite a key already present in
+	// state: expiry and token strings are not causal order. Keys in the prior
+	// index but absent from this write were deliberately removed (logout) and
+	// must not be resurrected.
 	//
 	// Unlike read()'s best-effort fallback, a failure here must abort the whole
-	// write rather than proceed as though the legacy blob were empty: step 4
-	// dual-writes over it, and a transient read error must never be mistaken
-	// for "nothing to reconcile," or a still-live credential from an older,
-	// still-installed zero binary is destroyed irrecoverably.
+	// write rather than proceed as though the legacy blob were empty: skipping
+	// a still-live legacy-only credential would leave it unindexed until the
+	// next successful reconcile, and a concurrent old-writer update is only
+	// discoverable through this read.
 	legacyTokens, err := b.readLegacyTokens()
 	if err != nil {
 		return fmt.Errorf("oauth: read legacy keyring token blob for reconciliation: %w", err)
@@ -814,7 +859,7 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 			if ValidateKey(key) != nil {
 				continue
 			}
-			if omitFromLegacy[key] {
+			if omitFromLegacy[key] || tombstones[key] {
 				continue
 			}
 			if _, exists := state.Tokens[key]; exists {
@@ -868,7 +913,13 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 		}
 	}
 
-	// 1. Publish the union of the live prior and new key sets first, so every
+	// 1. Persist tombstones before removing entries so logout survives a crash
+	// between entry delete and a later reconcile (and survives an old binary
+	// rewriting the legacy blob with the deleted key still present).
+	if err := b.writeTombstones(tombstones); err != nil {
+		return err
+	}
+	// 2. Publish the union of the live prior and new key sets first, so every
 	// entry that exists at any point during this update is indexed.
 	union := keys
 	if len(livePrior) > 0 {
@@ -886,13 +937,13 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	// 2. Write each token entry (encodings preflighted above).
+	// 3. Write each token entry (encodings preflighted above).
 	for _, key := range keys {
 		if err := b.kr.Set(b.service, key, encoded[key]); err != nil {
 			return err
 		}
 	}
-	// 3. Delete removed entries while the union index still lists them, so a
+	// 4. Delete removed entries while the union index still lists them, so a
 	// failed Delete leaves a visible (re-deletable) entry, never an orphan.
 	for _, key := range livePrior {
 		if _, ok := state.Tokens[key]; !ok {
@@ -901,87 +952,77 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 			}
 		}
 	}
-	// 4. Dual-write the reconciled map to the legacy combined entry (never
-	// delete it). Old binaries on other config roots keep reading this account;
-	// logout correctness comes from updating the map, not from removing the
-	// entry. The combined entry is still subject to the single-keyring-item
-	// size cap that forced per-key storage, so full dual-write only happens
-	// when it fits; otherwise we patch the existing legacy map (drop logouts)
-	// without re-aggregating every provider token.
-	if err := b.dualWriteLegacy(state, omitFromLegacy, prior, legacyTokens); err != nil {
-		return err
-	}
-	// 5. Shrink the index to the exact new key set.
+	// 5. Shrink the index to the exact new key set. Legacy is left untouched.
 	if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
 		return err
 	}
 	return nil
 }
 
-// dualWriteLegacy updates the combined legacy keyring entry without ever
-// deleting it. Full dual-write of state is preferred when it fits under
-// maxKeyringSingleEntryBytes (so old readers see current tokens). When state
-// is too large (the multi-provider case that forced the per-key split), the
-// existing legacy map is patched to drop logged-out keys so they cannot be
-// resurrected, but is not expanded with every indexed token.
-func (b keyringBlob) dualWriteLegacy(state storeFile, omitFromLegacy, prior map[string]bool, legacyTokens map[string]Token) error {
-	full, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: state.Tokens})
-	if err != nil {
-		return err
-	}
-	fullEnc := base64.StdEncoding.EncodeToString(full)
-	if len(fullEnc) <= maxKeyringSingleEntryBytes {
-		return b.kr.Set(b.service, b.legacyAccount, fullEnc)
-	}
+// tombstoneBlob returns a keyringBlob that reuses the chunked index codec for
+// the durable deletion set. Tombstones can grow to the same key/chunk caps as
+// the live index (max-length keys after many logouts), so a single entry is
+// not enough under the macOS line bound.
+func (b keyringBlob) tombstoneBlob() keyringBlob {
+	return keyringBlob{kr: b.kr, service: b.service, indexAccount: keyringTombstoneAccount}
+}
 
-	// Oversize full map: never delete the legacy entry, and never write an
-	// oversized value the OS keyring / security -i would reject. Patch the
-	// previous legacy contents so explicit logouts stick.
-	next := make(map[string]Token, len(legacyTokens))
-	for key, token := range legacyTokens {
-		if omitFromLegacy[key] {
-			continue
-		}
-		if prior[key] {
-			if _, ok := state.Tokens[key]; !ok {
-				continue
-			}
-		}
-		next[key] = token
+// readTombstones returns the durable set of keys deleted by a new binary.
+// Missing account => empty set. Corrupt payloads fail closed.
+func (b keyringBlob) readTombstones() (map[string]bool, error) {
+	keys, ok, _, err := b.tombstoneBlob().readKeyIndex()
+	if err != nil {
+		return nil, fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
-	// Prefer indexed material for keys still present in both, when that keeps
-	// the patch under the single-entry bound (best-effort; skip keys that push
-	// it over rather than failing the whole Save).
-	patchTokens := make(map[string]Token, len(next))
-	for key, token := range next {
-		if current, ok := state.Tokens[key]; ok {
-			token = current
+	if !ok {
+		return map[string]bool{}, nil
+	}
+	out := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		out[key] = true
+	}
+	return out, nil
+}
+
+// writeTombstones persists the durable deletion set. An empty set removes every
+// tombstone account/chunk so a fully clean store does not leave leftover
+// markers. Errors from that cleanup are surfaced so interruption tests and
+// real keyring failures cannot be swallowed.
+func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
+	tb := b.tombstoneBlob()
+	_, existed, priorChunks, err := tb.readKeyIndex()
+	if err != nil {
+		return fmt.Errorf("oauth: read keyring token tombstones: %w", err)
+	}
+	if len(tombstones) == 0 {
+		if !existed {
+			return nil
 		}
-		candidate := make(map[string]Token, len(patchTokens)+1)
-		for k, v := range patchTokens {
-			candidate[k] = v
-		}
-		candidate[key] = token
-		raw, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: candidate})
-		if err != nil {
+		if _, err := tb.kr.Delete(tb.service, tb.indexAccount); err != nil {
 			return err
 		}
-		if len(base64.StdEncoding.EncodeToString(raw)) > maxKeyringSingleEntryBytes {
-			continue
+		for i := 1; i < priorChunks; i++ {
+			if _, err := tb.kr.Delete(tb.service, tb.chunkAccount(i)); err != nil {
+				return err
+			}
 		}
-		patchTokens[key] = token
-	}
-	raw, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: patchTokens})
-	if err != nil {
-		return err
-	}
-	enc := base64.StdEncoding.EncodeToString(raw)
-	if len(enc) > maxKeyringSingleEntryBytes {
-		// Pre-existing oversized legacy blob: leave it untouched rather than
-		// fail an otherwise successful indexed write.
 		return nil
 	}
-	return b.kr.Set(b.service, b.legacyAccount, enc)
+	if len(tombstones) > maxKeyringIndexKeys {
+		return errKeyringIndexTooManyKeys(len(tombstones))
+	}
+	keys := make([]string, 0, len(tombstones))
+	for key := range tombstones {
+		if ValidateKey(key) != nil {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if _, err := tb.writeKeyIndex(keys, priorChunks); err != nil {
+		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
+	}
+	return nil
 }
 
 // maxKeyringSingleEntryBytes bounds a single base64-encoded token secret so
@@ -1243,39 +1284,31 @@ func chunkIndexKeys(keys []string) [][]string {
 // exists to prevent. A var so tests can shorten it.
 var fileLockRefreshInterval = 10 * time.Second
 
-// withLeasedLocks acquires every non-empty path in order, refreshes all of
-// their mtimes on a ticker while fn runs (so a legitimately slow multi-entry
-// keyring pass never looks like a crashed holder to another process), and
-// releases them in reverse order once fn returns.
-func withLeasedLocks(paths []string, now func() time.Time, fn func() error) error {
-	var unlocks []func()
-	var held []string
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		unlock, err := acquireFileLock(p, now)
-		if err != nil {
-			for i := len(unlocks) - 1; i >= 0; i-- {
-				unlocks[i]()
-			}
-			return err
-		}
-		unlocks = append(unlocks, unlock)
-		held = append(held, p)
+// leasedPath is one acquired lock whose mtime is refreshed until stop is
+// closed. Lease ownership starts at acquisition, not after every path is
+// held: withLock acquires lockPath then may block on legacyLockPath, and a
+// peer must not be able to reclaim the first lock as stale during that wait.
+type leasedPath struct {
+	path   string
+	unlock func()
+	stop   chan struct{}
+	done   chan struct{}
+}
+
+func startLease(path string, unlock func()) *leasedPath {
+	l := &leasedPath{
+		path:   path,
+		unlock: unlock,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
-	if len(held) == 0 {
-		return fn()
-	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(l.done)
 		ticker := time.NewTicker(fileLockRefreshInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stop:
+			case <-l.stop:
 				return
 			case <-ticker.C:
 				// Lease with wall-clock time, never the injectable now: acquireFileLock
@@ -1284,18 +1317,48 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 				// another process would immediately reclaim, reviving the token-loss
 				// race these locks prevent.
 				at := time.Now()
-				for _, p := range held {
-					_ = os.Chtimes(p, at, at)
-				}
+				_ = os.Chtimes(path, at, at)
 			}
 		}
 	}()
-	err := fn()
-	close(stop)
-	<-done
-	for i := len(unlocks) - 1; i >= 0; i-- {
-		unlocks[i]()
+	return l
+}
+
+func (l *leasedPath) release() {
+	close(l.stop)
+	<-l.done
+	l.unlock()
+}
+
+// withLeasedLocks acquires every non-empty path in order. Each lock's mtime
+// lease starts immediately on acquisition (and keeps refreshing while later
+// paths are still being acquired and while fn runs), so a multi-lock wait
+// cannot leave an earlier lock looking abandoned. Locks are released in
+// reverse order once fn returns.
+func withLeasedLocks(paths []string, now func() time.Time, fn func() error) error {
+	var leases []*leasedPath
+	releaseAll := func() {
+		for i := len(leases) - 1; i >= 0; i-- {
+			leases[i].release()
+		}
 	}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		unlock, err := acquireFileLock(p, now)
+		if err != nil {
+			releaseAll()
+			return err
+		}
+		// Start refreshing this lock before blocking on the next path.
+		leases = append(leases, startLease(p, unlock))
+	}
+	if len(leases) == 0 {
+		return fn()
+	}
+	err := fn()
+	releaseAll()
 	return err
 }
 
@@ -1304,9 +1367,9 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 // binary's own instances so two of them can't both read the blob, modify,
 // and write — dropping a token. legacyLockPath is held for the same duration
 // so a live pre-PR binary that shares this config root (see
-// legacyKeyringLockPath) can't race our dual-write of the legacy combined
-// entry. Cross-root old writers cannot share that lock; dual-write without
-// delete is the remaining safety net for them.
+// legacyKeyringLockPath) serializes with our reconcile-and-index pass.
+// Cross-root old writers cannot share that lock; never overwriting the
+// legacy blob and durable tombstones are the remaining safety net for them.
 func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
 	return withLeasedLocks([]string{b.lockPath, b.legacyLockPath}, now, fn)
 }
