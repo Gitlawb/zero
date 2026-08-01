@@ -127,6 +127,16 @@ func SavePlan(dir, name string, plan Plan) (string, error) {
 	// Write-then-rename, so a crash mid-write leaves the previous plan intact
 	// rather than a truncated file that fails to parse on the next run.
 	temp := path + ".tmp"
+	// THE BYTES GO HERE, so this is the path that has to be safe.
+	//
+	// dir and path were both checked and the write went to neither: it goes to
+	// path + ".tmp", which nothing looked at. A repo shipping
+	// .zero/plans/<name>.json.tmp as a symlink turned "save my plan" into the
+	// file-overwrite primitive the two checks above exist to prevent — the guard
+	// was on the door and the wall was open.
+	if err := refuseSymlink(temp); err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(temp, append(body, '\n'), 0o600); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}

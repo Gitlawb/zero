@@ -425,6 +425,19 @@ func (tool *OrchestrateTool) resolveSavedPlan(args map[string]any) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	// EXECUTION DIRECTIVES SURVIVE THE SWAP; plan content does not.
+	//
+	// The refusal above exists because a half-overridden plan is not the plan
+	// that was saved. These two are not plan content: they say HOW to run it,
+	// not WHAT to run, and neither appears in a stored plan's args. Returning
+	// the stored map wholesale dropped them silently — `{"saved":"sweep",
+	// "background":true}` parsed, passed the refusal list, and then ran in the
+	// foreground because the flag was read from the map that had replaced it.
+	for _, directive := range []string{"background", "auto_assign"} {
+		if value, present := args[directive]; present {
+			stored.Args[directive] = value
+		}
+	}
 	return stored.Args, nil
 }
 

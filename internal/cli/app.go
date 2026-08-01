@@ -733,7 +733,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	defer cancelSession()
 	planLaunch := newPlanLauncher(sessionCtx, planProgress)
-	defer planLaunch.Close()
+	// ITS defer IS REGISTERED LAST, further down, and that is load-bearing —
+	// see the ordering note beside closeSpecialistRuntime.
 	// Saved plans, resolved ONCE and handed to both consumers: the orchestrate
 	// tool (which loads a plan named with `saved`) and the TUI (which saves,
 	// lists and shows them). Two computations of the same pair of directories
@@ -772,7 +773,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
+	// SHUTDOWN ORDER, and defers run LIFO so the registration order here is the
+	// REVERSE of what happens.
+	//
+	// Required: stop the plan, then close the runtime it was using, then cancel
+	// the session. It was the exact opposite. planLaunch.Close() was registered
+	// early (right where the launcher is built, which reads naturally), so it ran
+	// AFTER closeSpecialistRuntime — and Close "cancels AND WAITS", so a
+	// background plan was still being waited on with the specialist runtime it
+	// needs already torn down.
+	//
+	// Registering Close here, last, is what puts it first at shutdown. Anything
+	// added below this line runs BEFORE the plan is stopped; put it above.
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
+	defer planLaunch.Close()
 	// The TUI has no --worktree reassignment, so trustRoot == workspaceRoot here.
 	// Gate the project MCP layer behind the workspace-trust check (fail-closed): an
 	// untrusted workspace must not spawn its ./.zero/config.json stdio MCP servers.

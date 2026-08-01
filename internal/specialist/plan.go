@@ -173,7 +173,17 @@ func (p Plan) Budget() Budget      { return p.budget }
 // Tasks returns a copy so a caller cannot mutate a validated plan.
 func (p Plan) Tasks() []Task {
 	out := make([]Task, len(p.tasks))
-	copy(out, p.tasks)
+	for index, task := range p.tasks {
+		// DEEP, because copy() duplicates the structs and shares their slices.
+		// Task.Tools is the VALIDATED GRANT: with the backing array shared,
+		// plan.Tasks()[0].Tools[0] = "bash" rewrote the admitted plan in place,
+		// from outside, after every check had passed — the widening this whole
+		// file exists to make impossible. DependsOn is the same hazard aimed at
+		// execution order rather than authority.
+		task.DependsOn = append([]string(nil), task.DependsOn...)
+		task.Tools = append([]string(nil), task.Tools...)
+		out[index] = task
+	}
 	return out
 }
 
@@ -691,11 +701,26 @@ func planTask(raw any, index int) (Task, error) {
 	if !ok {
 		return Task{}, fmt.Errorf("task at position %d is not an object", index)
 	}
+	// STRICT for the two lists that carry AUTHORITY AND ORDER. planStrings drops
+	// an entry it cannot read, which is fine for a display label and wrong here:
+	// "depends_on": [42] decoded to no dependency at all, so the task was admitted
+	// as dependency-free and ran BEFORE the precondition it declared — silently,
+	// with nothing to notice. That defeats this file's own rule that an unknown
+	// edge is rejected and never skipped. The same argument covers "tools", where
+	// a dropped entry quietly narrows a grant the caller believed they asked for.
+	dependsOn, err := planStringsStrict(fields, "depends_on")
+	if err != nil {
+		return Task{}, fmt.Errorf("task at position %d: %w", index, err)
+	}
+	tools, err := planStringsStrict(fields, "tools")
+	if err != nil {
+		return Task{}, fmt.Errorf("task at position %d: %w", index, err)
+	}
 	task := Task{
 		ID:        planString(fields, "id"),
 		Prompt:    planString(fields, "prompt"),
-		DependsOn: planStrings(fields, "depends_on"),
-		Tools:     planStrings(fields, "tools"),
+		DependsOn: dependsOn,
+		Tools:     tools,
 		Phase:     planString(fields, "phase"),
 	}
 	// REFUSED AT ADMISSION, not degraded at dispatch. The manifest loader already
@@ -703,9 +728,9 @@ func planTask(raw any, index int) (Task, error) {
 	// would soften an existing rejection — and a plan that asked for a stronger
 	// model on its verify stage, silently ran on a weaker one, and still reported
 	// success is indistinguishable from one that worked.
-	model, err := resolveTaskModel(planString(fields, "model"))
-	if err != nil {
-		return Task{}, fmt.Errorf("task at position %d: %w", index, err)
+	model, modelErr := resolveTaskModel(planString(fields, "model"))
+	if modelErr != nil {
+		return Task{}, fmt.Errorf("task at position %d: %w", index, modelErr)
 	}
 	task.Model = model
 	if task.ID == "" {
@@ -738,6 +763,36 @@ func planString(args map[string]any, key string) string {
 	}
 	value, _ := args[key].(string)
 	return strings.TrimSpace(value)
+}
+
+// planStringsStrict is planStrings for lists whose entries MUST be readable.
+//
+// Its lenient twin skips what it cannot decode, which suits a label nobody acts
+// on. It does not suit a dependency edge or a tool name: a skipped entry there
+// is not a missing label, it is a precondition that stopped existing or an
+// authority the caller thinks they narrowed. Refused with the offending value
+// named, so the author can see WHICH entry was wrong rather than diffing what
+// they sent against what ran.
+func planStringsStrict(args map[string]any, key string) ([]string, error) {
+	raw, ok := args[key].([]any)
+	if !ok {
+		// Absent or not a list at all: left to the caller's own shape checks,
+		// exactly as the lenient version does.
+		return nil, nil
+	}
+	out := make([]string, 0, len(raw))
+	for index, item := range raw {
+		text, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a string, got %T", key, index, item)
+		}
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			return nil, fmt.Errorf("%s[%d] is empty", key, index)
+		}
+		out = append(out, trimmed)
+	}
+	return out, nil
 }
 
 func planStrings(args map[string]any, key string) []string {

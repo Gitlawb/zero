@@ -579,3 +579,38 @@ func TestBackgroundIsOptInOnly(t *testing.T) {
 		t.Fatal("an explicit true must be honoured")
 	}
 }
+
+// THE TEMP PATH IS WHERE THE BYTES GO, so it is the path that has to be safe.
+//
+// dir and <name>.json were both refused as symlinks and the write went to
+// neither: it goes to <name>.json.tmp, which nothing looked at. A repo shipping
+// that name as a symlink turned "save my plan" into the file-overwrite
+// primitive the other two checks exist to prevent — the guard was on the door
+// and the wall was open.
+func TestSavingRefusesToWriteThroughASymlinkedTempFile(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "precious")
+	if err := os.WriteFile(target, []byte("do not clobber"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "plans")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Only the TEMP name is planted; <name>.json itself is absent, so the two
+	// existing checks both pass and this is the only thing standing in the way.
+	if err := os.Symlink(target, filepath.Join(dir, "sweep"+planFileExt+".tmp")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err == nil {
+		t.Fatal("SavePlan wrote through a symlinked temp file")
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "do not clobber" {
+		t.Fatalf("the symlink target was overwritten through the temp path: %q", body)
+	}
+}
