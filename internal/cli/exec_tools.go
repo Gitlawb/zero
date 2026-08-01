@@ -88,7 +88,7 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 		case "unsafe", "high":
 			return agent.PermissionModeUnsafe, nil
 		default:
-			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, ask, or unsafe.", options.permissionMode)}
+			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, member, ask, or unsafe.", options.permissionMode)}
 		}
 	}
 	// Validate --auto first, regardless of --skip-permissions-unsafe, so an

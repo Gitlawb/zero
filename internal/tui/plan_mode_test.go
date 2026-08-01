@@ -218,6 +218,25 @@ func TestPlanModeBlocksSandboxSetupProcess(t *testing.T) {
 	}
 }
 
+// TestPlanModeBlocksInitCommand: /init's sole job is writing AGENTS.md, which
+// plan mode then denies at the tool gate. Block the command up front so the
+// operator gets a clear "exit plan mode first" instead of a failed turn.
+func TestPlanModeBlocksInitCommand(t *testing.T) {
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), PermissionMode: agent.PermissionModePlan})
+
+	updated, cmd := m.dispatchCommand(parseCommand("/init"))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /init to be blocked synchronously in plan mode")
+	}
+	if !transcriptContains(next.transcript, "unavailable in plan mode") {
+		t.Fatalf("expected plan-mode denial, got %#v", next.transcript)
+	}
+	if transcriptContains(next.transcript, "Generate an AGENTS.md") {
+		t.Fatalf("/init must not launch the bootstrap turn in plan mode, got %#v", next.transcript)
+	}
+}
+
 // TestPlanModeCommandGuardDoesNotBlockOutsideMode confirms the guard is
 // scoped to plan mode: the same commands must behave normally (not be
 // swallowed by the new check) once plan mode is off.

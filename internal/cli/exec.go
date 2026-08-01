@@ -591,8 +591,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// warned, so --auto high silently ran without notice.
 	if permissionMode == agent.PermissionModeUnsafe {
 		reason := "--auto high"
-		if options.skipPermissionsUnsafe {
+		switch {
+		case options.skipPermissionsUnsafe:
 			reason = "--skip-permissions-unsafe"
+		case strings.EqualFold(strings.TrimSpace(options.permissionMode), "unsafe"),
+			strings.EqualFold(strings.TrimSpace(options.permissionMode), "high"):
+			reason = "--permission-mode unsafe"
 		}
 		writer.warning(fmt.Sprintf("Unsafe permissions are active for this run because %s was passed.", reason))
 		if writer.err != nil {

@@ -1778,11 +1778,15 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
-// hooksSuppressed reports whether executable hooks must not run for this
-// run's permission mode. Plan mode promises a read-only turn, but hooks
-// execute configured host commands outside the advertised-tool and sandbox
-// gates, so dispatching them would let merely starting a plan session or
-// calling read_file mutate the workspace or spawn processes.
+// hooksSuppressed reports whether advisory (non-veto) hooks must not run for
+// this run's permission mode. Plan mode promises a read-only turn, but
+// sessionStart/sessionEnd/afterTool hooks execute configured host commands
+// outside the advertised-tool and sandbox gates, so dispatching them would let
+// merely starting a plan session or finishing a read mutate the workspace.
+//
+// beforeTool is intentionally NOT suppressed: a non-zero exit is a deny gate,
+// and skipping it fails open (operators who block secret-file reads via
+// beforeTool would lose that protection under /plan on). See dispatchBeforeTool.
 //
 // Spec-draft keeps the existing trust-gated hook model: project hooks still
 // fire when the workspace (or its worktree trust root) is trusted. That is
@@ -1795,8 +1799,12 @@ func hooksSuppressed(options Options) bool {
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
 // that exits non-zero vetoes the call: the returned bool is true and the tool
 // must not run. A nil dispatcher (no hooks wired) is a no-op.
+//
+// Unlike advisory hooks, beforeTool still runs under plan mode. Suppressing it
+// would fail open: a project policy that blocks reads of secrets via
+// beforeTool would silently stop applying the moment permission mode is plan.
 func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
-	if options.Hooks == nil || hooksSuppressed(options) {
+	if options.Hooks == nil {
 		return hooks.DispatchOutcome{}, false
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{

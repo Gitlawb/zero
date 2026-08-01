@@ -4129,13 +4129,12 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 }
 
-// TestRunSuppressesExecutableHooksInPlanMode: plan mode promises a read-only
-// turn, but hooks execute configured host commands outside the advertised-tool
-// and sandbox gates. Merely starting and finishing a plan run, and calling an
-// allowed read-only tool during it, must therefore launch no hook command at
-// all (a marker-writing sessionStart/sessionEnd/beforeTool/afterTool hook would
-// otherwise mutate the workspace from a "read-only" session).
-func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
+// TestRunSuppressesAdvisoryHooksInPlanMode: plan mode promises a read-only
+// turn for advisory hooks (sessionStart/sessionEnd/afterTool), which execute
+// configured host commands outside the advertised-tool and sandbox gates.
+// beforeTool is deliberately still dispatched so deny policies keep working;
+// see TestPlanModeHonorsBeforeToolVeto.
+func TestRunSuppressesAdvisoryHooksInPlanMode(t *testing.T) {
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
 		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
@@ -4152,16 +4151,16 @@ func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
 		t.Fatalf("NewAuditStore: %v", err)
 	}
 	sessionMarker := filepath.Join(t.TempDir(), "session-marker-dir")
-	beforeToolMarker := filepath.Join(t.TempDir(), "before-tool-marker-dir")
 	afterToolMarker := filepath.Join(t.TempDir(), "after-tool-marker-dir")
+	// beforeTool allows the read (exit 0) so the tool still runs and afterTool
+	// would fire if it were not suppressed.
 	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
 		Config: hooks.Config{
 			Enabled: true,
 			Hooks: []hooks.Definition{
-				// A hook that mutates the filesystem when executed.
 				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(sessionMarker, "go.mod"), "marker"}, Enabled: true},
 				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
-				{ID: "zero.before-tool", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(beforeToolMarker, "go.mod"), "marker"}, Enabled: true},
+				{ID: "zero.before-tool", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"version"}, Enabled: true},
 				{ID: "zero.after-tool", Event: hooks.EventAfterTool, Matcher: "read_file", Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(afterToolMarker, "go.mod"), "marker"}, Enabled: true},
 			},
 		},
@@ -4203,14 +4202,97 @@ func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents: %v", err)
 	}
+	sawBeforeTool := false
 	for _, event := range events {
-		if event.Type == "hook_execution_started" {
-			t.Fatalf("hook %q executed during a plan-mode run", event.Event)
+		if event.Type != "hook_execution_started" {
+			continue
+		}
+		switch event.Event {
+		case hooks.EventBeforeTool:
+			sawBeforeTool = true
+		case hooks.EventSessionStart, hooks.EventSessionEnd, hooks.EventAfterTool:
+			t.Fatalf("advisory hook %q executed during a plan-mode run", event.Event)
 		}
 	}
-	for _, marker := range []string{sessionMarker, beforeToolMarker, afterToolMarker} {
+	if !sawBeforeTool {
+		t.Fatal("expected beforeTool to still dispatch under plan mode (deny-gate must not fail open)")
+	}
+	for _, marker := range []string{sessionMarker, afterToolMarker} {
 		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-			t.Fatalf("plan-mode run let hook %q touch the filesystem: %v", marker, statErr)
+			t.Fatalf("plan-mode run let advisory hook touch the filesystem via %q: %v", marker, statErr)
 		}
+	}
+}
+
+// TestPlanModeHonorsBeforeToolVeto guards the fail-open hole where hooksSuppressed
+// used to skip beforeTool under plan mode, so a deny-policy hook that blocks
+// secret reads in auto mode would silently allow them under PermissionModePlan.
+func TestPlanModeHonorsBeforeToolVeto(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	// A non-zero exit from beforeTool is a veto. "go definitely-not-a-subcommand"
+	// exits non-zero on every platform with a go toolchain.
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.veto", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"definitely-not-a-go-subcommand"}, Enabled: true},
+			},
+		},
+	})
+	root := t.TempDir()
+	secret := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(secret, []byte("SUPERSECRET"), 0o644); err != nil {
+		t.Fatalf("write secret.txt: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	var toolOutputs []string
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"secret.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "blocked"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "read the secret", provider, Options{
+		SessionID:      "session-plan-veto",
+		Cwd:            root,
+		Registry:       registry,
+		ProviderName:   "test-provider",
+		Model:          "test-model",
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+		MaxTurns:       2,
+		OnToolResult: func(result ToolResult) {
+			toolOutputs = append(toolOutputs, result.Output)
+		},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(toolOutputs) == 0 {
+		t.Fatal("expected a tool result for the vetoed read_file call")
+	}
+	combined := strings.Join(toolOutputs, "\n")
+	if strings.Contains(combined, "SUPERSECRET") {
+		t.Fatalf("plan mode failed open: beforeTool veto was skipped and secret leaked: %q", combined)
+	}
+	if !strings.Contains(combined, "blocked") && !strings.Contains(combined, "zero.veto") && !strings.Contains(strings.ToLower(combined), "hook") {
+		t.Fatalf("expected tool result to mention the beforeTool veto, got %q", combined)
 	}
 }

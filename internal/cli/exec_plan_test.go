@@ -60,6 +60,38 @@ func TestParseExecArgsRejectsPlanWithNonPlanPermissionMode(t *testing.T) {
 	}
 }
 
+// TestParseExecArgsPermissionModePlanSharesCombinationGuards ensures the
+// combination rejects that key off --plan also fire for --permission-mode plan,
+// which reaches PermissionModePlan without setting options.plan.
+func TestParseExecArgsPermissionModePlanSharesCombinationGuards(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"worktree", []string{"--permission-mode", "plan", "--worktree", "draft a plan"}, "--worktree"},
+		{"use-spec", []string{"--permission-mode=plan", "--use-spec", "draft a plan"}, "not both"},
+		{"skip-permissions-unsafe", []string{"--permission-mode", "plan", "--skip-permissions-unsafe", "draft a plan"}, "not both"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseExecArgs(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected --permission-mode plan / %s validation containing %q, got %v", tc.name, tc.want, err)
+			}
+		})
+	}
+
+	// Bare --permission-mode plan (no conflicting flags) still parses.
+	options, _, err := parseExecArgs([]string{"--permission-mode", "plan", "draft a plan"})
+	if err != nil {
+		t.Fatalf("expected bare --permission-mode plan to succeed, got %v", err)
+	}
+	if options.permissionMode != "plan" || options.plan {
+		t.Fatalf("expected permissionMode=plan and plan=false, got mode=%q plan=%v", options.permissionMode, options.plan)
+	}
+}
+
 // TestRunExecPlanHidesWriteAndShellToolsFromListing drives the real --plan
 // flag through runExec (via --list-tools, so no provider is needed) and
 // confirms write_file and bash — advertised under every other mode covered by

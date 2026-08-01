@@ -1362,6 +1362,9 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --plan                         Read-only planning mode: write and shell tools are hidden
+      --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
+                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);

@@ -452,15 +452,20 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if !options.useSpec && options.specReasoningEffort != "" {
 		return options, false, execUsageError{"--spec-reasoning-effort requires --use-spec."}
 	}
-	if options.plan && options.useSpec {
+	// Plan mode may be entered via --plan or --permission-mode plan. Combination
+	// guards must key off both: otherwise --permission-mode plan bypasses the
+	// worktree/unsafe/use-spec rejects that --plan alone enforces, and worktree
+	// prep mutates the filesystem before the read-only mode is assigned.
+	planMode := options.plan || strings.EqualFold(strings.TrimSpace(options.permissionMode), "plan")
+	if planMode && options.useSpec {
 		return options, false, execUsageError{"Use either --plan or --use-spec, not both."}
 	}
-	if options.plan && options.skipPermissionsUnsafe {
+	if planMode && options.skipPermissionsUnsafe {
 		return options, false, execUsageError{"Use either --plan or --skip-permissions-unsafe, not both."}
 	}
-	if options.plan && options.worktree {
+	if planMode && options.worktree {
 		// Worktree prep (copying/branching the workspace) runs before the plan
-		// permission mode is assigned, so it would happen even under --plan's
+		// permission mode is assigned, so it would happen even under plan mode's
 		// read-only, no-side-effects promise. Reject the combination outright
 		// rather than let a mutation slip in ahead of the mode gate.
 		return options, false, execUsageError{"--plan cannot be combined with --worktree."}

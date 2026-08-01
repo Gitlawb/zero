@@ -383,6 +383,10 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 			return nil, err
 		}
 	case configIDMode:
+		// Same turnMu as handleSetMode so the two advertised mode doors (session
+		// set_mode and set_config_option) serialize mode flips consistently.
+		sess.turnMu.Lock()
+		defer sess.turnMu.Unlock()
 		mode := agent.PermissionMode(p.Value)
 		switch mode {
 		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:

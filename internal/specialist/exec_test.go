@@ -116,6 +116,11 @@ func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
 	if !containsSequence(res.Args, []string{"--auto", "member"}) {
 		t.Fatalf("non-unsafe member must yield --auto member, got %v", res.Args)
 	}
+	// --permission-mode auto would short-circuit resolveExecPermissionMode and
+	// strip the member rung; member children must rely on --auto alone.
+	if containsSequence(res.Args, []string{"--permission-mode"}) {
+		t.Fatalf("non-plan member must not emit --permission-mode (would override --auto member), got %v", res.Args)
+	}
 
 	// Without the member flag, the same parent stays --auto low (unchanged).
 	plain, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "auto"})
@@ -125,6 +130,9 @@ func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
 	if !containsSequence(plain.Args, []string{"--auto", "low"}) || containsSequence(plain.Args, []string{"--auto", "member"}) {
 		t.Fatalf("a plain specialist must stay --auto low, got %v", plain.Args)
 	}
+	if containsSequence(plain.Args, []string{"--permission-mode"}) {
+		t.Fatalf("auto parent must not emit --permission-mode, got %v", plain.Args)
+	}
 
 	// An unsafe member still runs --auto high, never downgraded to member.
 	unsafe, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "unsafe", MemberAutonomy: true})
@@ -133,6 +141,79 @@ func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
 	}
 	if !containsSequence(unsafe.Args, []string{"--auto", "high"}) {
 		t.Fatalf("unsafe member must yield --auto high, got %v", unsafe.Args)
+	}
+	if containsSequence(unsafe.Args, []string{"--permission-mode"}) {
+		t.Fatalf("unsafe parent must not emit --permission-mode, got %v", unsafe.Args)
+	}
+}
+
+// TestBuildArgsPropagatesPermissionModeOnlyForPlanAndSpecDraft pins that
+// --permission-mode is emitted only when --auto cannot express the mode
+// (plan/spec-draft). Emitting it for auto/ask/member would either strip swarm
+// member write tools or widen headless ask children past --auto low.
+func TestBuildArgsPropagatesPermissionModeOnlyForPlanAndSpecDraft(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+	manifest := Manifest{Metadata: Metadata{Name: "worker"}, SystemPrompt: "x", ResolvedTools: []string{"read_file", "write_file", "bash"}}
+
+	for _, mode := range []string{"auto", "ask", "unsafe", "member", ""} {
+		res, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: mode})
+		if err != nil {
+			t.Fatalf("BuildArgs(%q): %v", mode, err)
+		}
+		if containsSequence(res.Args, []string{"--permission-mode"}) {
+			t.Fatalf("mode %q must not emit --permission-mode, got %v", mode, res.Args)
+		}
+	}
+
+	for _, mode := range []string{"plan", "spec-draft"} {
+		res, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: mode})
+		if err != nil {
+			t.Fatalf("BuildArgs(%q): %v", mode, err)
+		}
+		if !containsSequence(res.Args, []string{"--permission-mode", mode}) {
+			t.Fatalf("mode %q must emit --permission-mode %s, got %v", mode, mode, res.Args)
+		}
+		if !containsSequence(res.Args, []string{"--auto", "low"}) {
+			t.Fatalf("mode %q must still emit --auto low, got %v", mode, res.Args)
+		}
+	}
+
+	// Resume path uses the same rule.
+	resume, err := executor.BuildResumeArgs(BuildResumeArgsInput{
+		SessionID: "child_session", Prompt: "p", Manifest: manifest, PermissionMode: "ask",
+	})
+	if err != nil {
+		t.Fatalf("BuildResumeArgs(ask): %v", err)
+	}
+	if containsSequence(resume.Args, []string{"--permission-mode"}) {
+		t.Fatalf("resume ask must not emit --permission-mode, got %v", resume.Args)
+	}
+	planResume, err := executor.BuildResumeArgs(BuildResumeArgsInput{
+		SessionID: "child_session", Prompt: "p", Manifest: manifest, PermissionMode: "plan",
+	})
+	if err != nil {
+		t.Fatalf("BuildResumeArgs(plan): %v", err)
+	}
+	if !containsSequence(planResume.Args, []string{"--permission-mode", "plan"}) {
+		t.Fatalf("resume plan must emit --permission-mode plan, got %v", planResume.Args)
+	}
+}
+
+func TestChildPermissionModeFlag(t *testing.T) {
+	cases := map[string]string{
+		"":           "",
+		"auto":       "",
+		"ask":        "",
+		"unsafe":     "",
+		"member":     "",
+		"plan":       "plan",
+		"spec-draft": "spec-draft",
+		"  plan  ":   "plan",
+	}
+	for in, want := range cases {
+		if got := childPermissionModeFlag(in); got != want {
+			t.Errorf("childPermissionModeFlag(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

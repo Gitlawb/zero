@@ -159,6 +159,20 @@ func memberAwareAutonomy(permissionMode string, member bool) string {
 	return autonomy
 }
 
+// childPermissionModeFlag returns the --permission-mode value to pass a child
+// process, or "" when the child's tool set must be driven by --auto alone.
+// Only plan and spec-draft require the flag: resolveExecPermissionMode prefers
+// --permission-mode over --auto, so forwarding auto/ask/member/unsafe would
+// discard the member rung and widen headless ask children.
+func childPermissionModeFlag(permissionMode string) string {
+	switch strings.TrimSpace(permissionMode) {
+	case "plan", "spec-draft":
+		return strings.TrimSpace(permissionMode)
+	default:
+		return ""
+	}
+}
+
 // permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
 // agent package (which would create an import cycle): exec resolves "--auto high"
 // to this mode.
@@ -267,7 +281,13 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	args = append(args, "--auto", memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy), "--output-format", "stream-json")
-	if permMode := strings.TrimSpace(input.PermissionMode); permMode != "" {
+	// Only plan/spec-draft need an explicit --permission-mode on the child.
+	// resolveExecPermissionMode short-circuits on --permission-mode and ignores
+	// --auto, so propagating auto/ask/member/unsafe would strip member write
+	// tools (member + --permission-mode auto) or widen headless ask children
+	// past the read-only --auto low tool set. Plan/spec-draft cannot be
+	// expressed via --auto alone, so they still require the flag.
+	if permMode := childPermissionModeFlag(input.PermissionMode); permMode != "" {
 		args = append(args, "--permission-mode", permMode)
 	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
@@ -322,7 +342,9 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
 	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
-	if permMode := strings.TrimSpace(input.PermissionMode); permMode != "" {
+	// See BuildArgs: only plan/spec-draft propagate --permission-mode so --auto
+	// remains the authority for member/auto/ask/unsafe child resolution.
+	if permMode := childPermissionModeFlag(input.PermissionMode); permMode != "" {
 		args = append(args, "--permission-mode", permMode)
 	}
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
