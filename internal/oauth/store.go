@@ -349,7 +349,7 @@ func (s *Store) Save(key string, token Token) error {
 			return err
 		}
 		state.Tokens[key] = token
-		return s.writeState(state)
+		return s.writeState(state, nil)
 	})
 }
 
@@ -398,7 +398,10 @@ func (s *Store) Delete(key string) (bool, error) {
 		}
 		delete(state.Tokens, key)
 		removed = true
-		return s.writeState(state)
+		// Exclude the deleted key from legacy reconciliation so a credential
+		// that was only present in the legacy blob (never indexed) is not
+		// reclassified as a fresh old-binary login and written back.
+		return s.writeState(state, map[string]bool{key: true})
 	})
 	return removed, err
 }
@@ -478,7 +481,10 @@ func (s *Store) readState() (storeFile, error) {
 	return state, nil
 }
 
-func (s *Store) writeState(state storeFile) error {
+// writeState persists state. omitFromLegacy lists keys that must not be
+// re-merged from the keyring legacy blob during reconciliation (Delete intent).
+// File and encrypted-file backends ignore omitFromLegacy.
+func (s *Store) writeState(state storeFile, omitFromLegacy map[string]bool) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -492,7 +498,7 @@ func (s *Store) writeState(state storeFile) error {
 			return err
 		}
 	}
-	return s.blob.write(payload)
+	return s.blob.write(payload, omitFromLegacy)
 }
 
 func emptyStoreFile() storeFile {
@@ -504,8 +510,10 @@ func emptyStoreFile() storeFile {
 type blobStore interface {
 	// read returns the stored blob; ok is false when nothing is stored yet.
 	read() (data []byte, ok bool, err error)
-	// write replaces the stored blob.
-	write(data []byte) error
+	// write replaces the stored blob. omitFromLegacy is keyring-only: keys the
+	// caller deliberately removed that must not be re-merged from the legacy
+	// combined entry during mixed-version reconciliation. File backends ignore it.
+	write(data []byte, omitFromLegacy map[string]bool) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; none for the keyring, which is the
 	// authoritative store and is serialized within the process by Store.mu).
@@ -536,7 +544,7 @@ func (b fileBlob) read() ([]byte, bool, error) {
 	return data, true, nil
 }
 
-func (b fileBlob) write(data []byte) error {
+func (b fileBlob) write(data []byte, _ map[string]bool) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
@@ -767,11 +775,24 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 
 // legacyIsFresher reports whether the legacy copy of an already-indexed key
 // should win over the indexed copy. An old binary running alongside the new one
-// refreshes tokens only in the legacy combined entry, and a refresh pushes the
-// expiry later (or updates token material when expires_in is omitted), so a
-// strictly later expiry or updated token material on the legacy side is the
-// signal that it holds a newer credential. Zero (unknown) expiries are valid.
+// refreshes tokens only in the legacy combined entry. When both sides carry a
+// nonzero expiry, the later expiry wins (a refresh normally pushes it forward).
+// When either side omits expiry (OAuth responses may omit expires_in, and
+// Refresh does not always carry the previous ExpiresAt), fall back to token
+// material: a changed access or refresh token on the legacy side is treated as
+// a concurrent old-binary refresh that must not be discarded.
 func legacyIsFresher(legacy, current Token) bool {
+	if !legacy.ExpiresAt.IsZero() && !current.ExpiresAt.IsZero() {
+		if legacy.ExpiresAt.After(current.ExpiresAt) {
+			return true
+		}
+		if current.ExpiresAt.After(legacy.ExpiresAt) {
+			return false
+		}
+		// Equal expiries: prefer legacy when material differs (concurrent refresh
+		// that happened to keep the same lifetime).
+		return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
+	}
 	return legacy.AccessToken != current.AccessToken || legacy.RefreshToken != current.RefreshToken
 }
 
@@ -789,7 +810,10 @@ func legacyIsFresher(legacy, current Token) bool {
 // and is deleted only after every per-key entry is written, while the union
 // index still lists removed keys; a failure of that delete is returned so a
 // logout is never reported successful with the stale blob still resident.
-func (b keyringBlob) write(data []byte) error {
+// omitFromLegacy lists keys the caller just deleted; they must not be
+// re-merged from the legacy blob even when they were never indexed (a
+// legacy-only old-binary login that the user logged out of).
+func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
@@ -809,9 +833,10 @@ func (b keyringBlob) write(data []byte) error {
 	// reconcile it into state before it is deleted below rather than blindly
 	// overwriting it:
 	//   - a key the indexed schema has never seen is a fresh old-binary login;
-	//     merge it so it is not lost;
-	//   - a key already present in state that the legacy blob refreshed (a
-	//     strictly later expiry) takes the legacy value, so a concurrent
+	//     merge it so it is not lost, unless the caller just deleted it
+	//     (omitFromLegacy) or it was already indexed and deliberately removed;
+	//   - a key already present in state that the legacy blob refreshed takes
+	//     the legacy value when legacyIsFresher says so, so a concurrent
 	//     old-binary refresh is not discarded in favor of the stale indexed one;
 	//   - a key that was in the prior index but is absent from this write was
 	//     deliberately removed (a logout); it is left removed, not resurrected.
@@ -828,6 +853,9 @@ func (b keyringBlob) write(data []byte) error {
 		}
 		for key, legacyToken := range legacyTokens {
 			if ValidateKey(key) != nil {
+				continue
+			}
+			if omitFromLegacy[key] {
 				continue
 			}
 			if current, exists := state.Tokens[key]; exists {

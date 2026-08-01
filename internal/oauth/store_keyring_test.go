@@ -1553,6 +1553,153 @@ func TestStoreKeyringDeleteNotResurrectedWhenLegacyDeleteFailsOrRewritten(t *tes
 	}
 }
 
+// TestStoreKeyringDeleteDoesNotResurrectLegacyOnlyKey is the regression for
+// [P1] Do not resurrect a token the caller just logged out: when an old binary
+// adds beta only to the legacy blob after the index already contains alpha,
+// read exposes beta, Delete(beta) removes it from state, and write must not
+// reclassify that same legacy value as a fresh old-binary login.
+func TestStoreKeyringDeleteDoesNotResurrectLegacyOnlyKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Old binary login: beta only in the legacy combined entry, not the index.
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("beta"): {AccessToken: "b-legacy", RefreshToken: "br"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// Delete must see beta via the legacy merge, then keep it gone after write.
+	removed, err := s.Delete(ProviderKey("beta"))
+	if err != nil || !removed {
+		t.Fatalf("Delete(beta): removed=%v err=%v", removed, err)
+	}
+	if _, ok, _ := s.Load(ProviderKey("beta")); ok {
+		t.Fatal("beta resurrected after Delete of legacy-only key")
+	}
+	// A later Save of another key must also not resurrect beta (legacy blob
+	// should already be gone; if a stale copy were re-seeded, omit only covers
+	// the Delete write itself — ensure the logout fully cleared it).
+	if err := s.Save(ProviderKey("gamma"), Token{AccessToken: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Load(ProviderKey("beta")); ok {
+		t.Fatal("beta resurrected after later Save")
+	}
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok {
+		t.Fatalf("alpha lost: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh ensures write-path
+// reconciliation does not discard a valid old-binary refresh that omitted
+// expires_in (zero ExpiresAt) when the indexed copy still has a nonzero expiry.
+func TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Now().Add(10 * time.Minute)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1}); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "new-a", RefreshToken: "new-r", ExpiresAt: time.Time{}},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// Save of a different key triggers write reconciliation of the legacy blob.
+	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Load(ProviderKey("alpha"))
+	if err != nil || !ok {
+		t.Fatalf("Load(alpha): ok=%v err=%v", ok, err)
+	}
+	if got.AccessToken != "new-a" || got.RefreshToken != "new-r" {
+		t.Fatalf("write reconciliation dropped zero-expiry legacy refresh: got %#v", got)
+	}
+}
+
+func TestLegacyIsFresher(t *testing.T) {
+	t1 := time.Now().Add(10 * time.Minute)
+	t2 := t1.Add(time.Hour)
+	cases := []struct {
+		name            string
+		legacy, current Token
+		want            bool
+	}{
+		{
+			name:    "later legacy expiry wins",
+			legacy:  Token{AccessToken: "a", ExpiresAt: t2},
+			current: Token{AccessToken: "a", ExpiresAt: t1},
+			want:    true,
+		},
+		{
+			name:    "later current expiry wins",
+			legacy:  Token{AccessToken: "old", ExpiresAt: t1},
+			current: Token{AccessToken: "new", ExpiresAt: t2},
+			want:    false,
+		},
+		{
+			name:    "zero-expiry legacy with new material wins",
+			legacy:  Token{AccessToken: "new-a", RefreshToken: "new-r"},
+			current: Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1},
+			want:    true,
+		},
+		{
+			name:    "identical tokens are not fresher",
+			legacy:  Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: t1},
+			current: Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: t1},
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := legacyIsFresher(tc.legacy, tc.current); got != tc.want {
+				t.Fatalf("legacyIsFresher = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLegacyKeyringLockPathHonorsConfiguredRoot ensures the pre-PR compatibility
+// lock is derived via ResolveStorePath (ZERO_OAUTH_TOKENS_PATH / XDG_CONFIG_HOME),
+// not a hard-coded home .config path.
+func TestLegacyKeyringLockPathHonorsConfiguredRoot(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "custom", "tokens.json")
+	env := map[string]string{"ZERO_OAUTH_TOKENS_PATH": override}
+	got := legacyKeyringLockPath(env)
+	want := filepath.Join(filepath.Dir(override), "oauth-keyring.lockfile")
+	if got != want {
+		t.Fatalf("legacyKeyringLockPath = %q, want %q (beside ResolveStorePath)", got, want)
+	}
+
+	xdg := filepath.Join(t.TempDir(), "xdg-config")
+	gotXDG := legacyKeyringLockPath(map[string]string{"XDG_CONFIG_HOME": xdg})
+	wantXDG := filepath.Join(xdg, "zero", "oauth-keyring.lockfile")
+	if gotXDG != wantXDG {
+		t.Fatalf("legacyKeyringLockPath(XDG) = %q, want %q", gotXDG, wantXDG)
+	}
+}
+
 func TestStoreKeyringRejectsOversizedSingleTokenPayload(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
