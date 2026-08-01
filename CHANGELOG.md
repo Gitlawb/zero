@@ -235,12 +235,12 @@ tagged. Until then, source builds report the version `dev`.
   GitHub issue/PR templates.
 - Interactive `/theme` picker: bare `/theme` opens a popup that live-previews each palette as you move
   and applies on select (Esc reverts).
-- Twelve built-in color themes alongside the `dark`/`light` built-ins — `dracula`, `nord`, `gruvbox`,
+- Thirteen built-in color themes alongside the `dark`/`light` built-ins — `dracula`, `nord`, `gruvbox`,
   `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`,
-  `solarized-light`, `dune`, and `neon` — selectable via `/theme <name>`, `--theme <name>`, or
+  `solarized-light`, `dune`, `dune-dark`, and `neon` — selectable via `/theme <name>`, `--theme <name>`, or
   `ZERO_THEME`. Every palette is contrast-audited to WCAG AA, and the new presets are additionally
-  audited after xterm-256 downsampling; see [docs/THEMES.md](docs/THEMES.md). The built-in light
-  theme was reworked for legibility.
+  audited after xterm-256 downsampling (Dune Dark also after 16-color ANSI conversion); see
+  [docs/THEMES.md](docs/THEMES.md). The built-in light theme was reworked for legibility.
 - `--theme <name>` flag for the TUI, accepting `auto` or any registered theme (previously only the
   `ZERO_THEME` env var existed).
 - "Accessibility / Appearance" section in the README documenting `NO_COLOR`, `ZERO_THEME`, `/theme`,

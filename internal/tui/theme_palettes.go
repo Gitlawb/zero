@@ -469,9 +469,16 @@ var dunePalette = palette{
 // (daltonized) dark mode. The base surface is near-black (Claude Code's true
 // dark canvas), with white ink and the brand-orange accent adjusted for
 // deuteranopia. Diff signals reuse the proven dark-theme structure so every
-// WCAG-AA invariant still holds; the accent and status colors (blue success,
-// red error, amber warning) follow Claude Code's daltonized palette so
-// additions stay distinguishable under color blindness.
+// WCAG-AA invariant still holds; the accent and status colors (cool success,
+// warm error, amber warning) follow a daltonized palette so additions stay
+// distinguishable under color blindness.
+//
+// 16-color terminals (TERM=xterm) force every token through ansi.Convert16.
+// Saturated cyan/blue success and bright red error both collapse onto ANSI
+// pairs that fail AA on the green/maroon diff bands (bright-blue-on-green
+// 1.67:1, bright-red-on-maroon 2.74:1). Soft periwinkle success and soft pink
+// error map to ANSI white, which clears AA on those bands while keeping a
+// cool/warm tint in truecolor and 256-color.
 var duneDarkPalette = palette{
 	panel:     "#0e0e10", // Claude Code dark canvas — near-black
 	promptBg:  "#262626", // submitted user-prompt bubble
@@ -480,22 +487,22 @@ var duneDarkPalette = palette{
 	ink:       "#ececee",
 	muted:     "#ccccd2", // secondary text — bright gray, top of the ramp
 	faint:     "#b8b8c0", // hints/metadata
-	faintest:  "#55c6cd", // line numbers/separators — a neutral gray at this brightness quantizes to xterm #005f00's near-neighbor at only 2.97:1 on the add-diff gutter; nudging toward cyan (still under the faint/faintest/panel ramp) keeps AA (4.62:1) once xterm-256 rounds it
+	faintest:  "#55c6cd", // line numbers/separators — a neutral gray at this brightness quantizes to xterm #005f00's near-neighbor at only 2.97:1 on the add-diff gutter; nudging toward cyan (still under the faint/faintest/panel ramp) keeps AA (4.62:1) once xterm-256 rounds it. On 16-color (bright cyan on green) the ratio is ~4.10:1 — short of AA but the best cyan that still sits under faint in the ramp
 	accent:    "#ff9628", // brand/claude rgb(255,150,40), adjusted for deuteranopia
-	green:     "#5eccfa", // success — brightened past Claude Code's rgb(51,153,255) so the add-diff sign text stays AA (4.80:1) against addBg once xterm-256 quantizes both to #5fd7ff/#005f00 (2.43:1 at the original value)
-	red:       "#ff6666", // error rgb(255,102,102)
+	green:     "#c8c8e9", // success — soft periwinkle (cool/daltonized). Maps to ANSI white so add-sign text stays AA (5.14:1) on the green add band under 16-color; saturated cyan/blue collapses to bright blue at 1.67:1
+	red:       "#ffc0c8", // error — soft pink. Maps to ANSI white so del-sign text stays AA (10.95:1) on the maroon del band under 16-color; bright red collapses to 2.74:1 on maroon
 	amber:     "#ffcc00", // warning rgb(255,204,0)
-	blue:      "#99ccff", // permission rgb(153,204,255)
-	gitAdd:    "#5eccfa", // daltonized green for colorblind visibility
-	gitDel:    "#ff6666", // daltonized red
-	addBg:     "#003500", // diff added band — quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals (previous #0a1f14/#240a0e both collapsed to #121212)
-	delBg:     "#350000", // diff removed band — quantizes to xterm red #5f0000 (see addBg)
+	blue:      "#cceeff", // permission — light sky. Maps to bright cyan so selected-row local-model dots stay AA on black selBg under 16-color (prior #99ccff -> bright blue at 2.44:1)
+	gitAdd:    "#c8c8e9", // matches green (daltonized cool success)
+	gitDel:    "#ffc0c8", // matches red (daltonized warm error)
+	addBg:     "#003500", // diff added band — quantizes to xterm green #005f00 instead of the same gray as delBg, keeping add/del rows distinct on 256-color terminals (previous #0a1f14/#240a0e both collapsed to #121212); 16-color maps to ANSI green
+	delBg:     "#350000", // diff removed band — quantizes to xterm red #5f0000 (see addBg); 16-color maps to ANSI maroon
 	addBgWord: "#007400", // word-level added span — quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
 	delBgWord: "#740000", // word-level removed span — quantizes to xterm red #870000 (see addBgWord)
 	permBg:    "#1c1915",
 	selBg:     "#262626", // selection — dark gray, distinct from panel (>= 1.10 contrast after xterm-256 quantization), AA with faint/faintest
-	addInk:    "#f0f5d2", // changed-word text — lightened so it still clears AA (4.60:1) against addBgWord's xterm-256 quantized #008700 (the original #bdeed7 fell to 4.06:1)
-	delInk:    "#f2c4c4",
+	addInk:    "#f0f5d2", // changed-word text — lightened so it still clears AA (4.60:1) against addBgWord's xterm-256 quantized #008700 (the original #bdeed7 fell to 4.06:1); 16-color maps to bright yellow (4.78:1 on ANSI green)
+	delInk:    "#fff0f0", // changed-word text — near-white pink maps to ANSI white so word spans stay AA on maroon under 16-color (prior #f2c4c4 -> bright red at 2.74:1)
 	onAccent:  "#000000",
 	cardRun:   "#3399ff", // success blue
 	cardErr:   "#ff6666", // error

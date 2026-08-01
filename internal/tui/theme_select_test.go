@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 func relLum(t *testing.T, hex string) float64 {
@@ -525,6 +526,80 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	}
 	if r := wcagRatio(t, q(neon.cardErr), q(neon.panel)); r < 3.0 {
 		t.Errorf("neon: cardErr border on panel = %.2f < 3.0 after quantization", r)
+	}
+}
+
+// ansi16Hex returns the hex of a color after colorprofile.ANSI conversion —
+// the same path lipgloss/bubbletea use on TERM=xterm-style 16-color terminals.
+func ansi16Hex(t *testing.T, hexColor string) string {
+	t.Helper()
+	c := colorprofile.ANSI.Convert(lipgloss.Color(hexColor))
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
+}
+
+// TERM=xterm (and other 16-color profiles) force every palette token through
+// ansi.Convert16. Saturated cyan/blue success and bright red error collapse
+// onto ANSI pairs that fail AA on the green/maroon diff bands. Guard the
+// rendered Dune Dark diff pairs — and the selected-row affordances that use
+// the same cool success/permission tokens — after the real ANSI conversion.
+func TestDuneDarkANSI16Contrast(t *testing.T) {
+	var pal palette
+	found := false
+	for _, entry := range themeRegistry {
+		if entry.Name == "dune-dark" {
+			pal = entry.Palette
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("theme 'dune-dark' is not registered")
+	}
+	q := func(hexColor string) string { return ansi16Hex(t, hexColor) }
+
+	// Diff sign text and changed-word text: the pairs users actually read on
+	// add/del rows under 16-color. Prior values were bright-blue-on-green
+	// (1.67:1) and bright-red-on-maroon (2.74:1).
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"green on addBg", pal.green, pal.addBg},
+		{"red on delBg", pal.red, pal.delBg},
+		{"addInk on addBgWord", pal.addInk, pal.addBgWord},
+		{"delInk on delBgWord", pal.delInk, pal.delBgWord},
+		{"faintest on delBg", pal.faintest, pal.delBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("dune-dark: %s = %.2f < 4.5 after ANSI 16-color conversion (%s on %s)",
+				pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	// Line numbers on the add band: bright cyan on ANSI green lands at ~4.10:1.
+	// That is the best cyan still under faint in the gray ramp; require it stay
+	// above 4.0 so a further regression is still caught.
+	if r := wcagRatio(t, q(pal.faintest), q(pal.addBg)); r < 4.0 {
+		t.Errorf("dune-dark: faintest on addBg = %.2f < 4.0 after ANSI 16-color conversion (%s on %s)",
+			r, q(pal.faintest), q(pal.addBg))
+	}
+
+	// Selected-row affordances that share the cool success/permission tokens.
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"accent on selBg", pal.accent, pal.selBg},
+		{"blue on selBg", pal.blue, pal.selBg},
+		{"faintest on selBg", pal.faintest, pal.selBg},
+		{"ink on selBg", pal.ink, pal.selBg},
+		{"green on panel", pal.green, pal.panel},
+		{"red on panel", pal.red, pal.panel},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 4.5 {
+			t.Errorf("dune-dark: %s = %.2f < 4.5 after ANSI 16-color conversion (%s on %s)",
+				pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+
+	// Add/del row bands must stay distinct under 16-color even when both are
+	// only the basic green/maroon pair (not the same ANSI slot).
+	if q(pal.addBg) == q(pal.delBg) {
+		t.Errorf("dune-dark: addBg and delBg collapse to the same ANSI 16-color (%s)", q(pal.addBg))
 	}
 }
 
