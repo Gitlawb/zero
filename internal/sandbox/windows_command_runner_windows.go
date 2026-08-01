@@ -92,7 +92,28 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	}
 	if ok {
 		defer principalToken.Close()
-		exitCode, err := runWindowsCommandAsUser(principalToken, config)
+		// The principal gets its own identity AND the write jail, not one or the
+		// other. Its ACEs confine reads; without the restricted token it would
+		// still hold every write its ambient memberships grant, so a profile
+		// permitting writes only to the workspace could still write anywhere
+		// BATCH or BUILTIN\Users may — C:\Users\Public\Documents, for one.
+		//
+		// The principal's own SID joins the capability SIDs because the ACL plan
+		// grants the workspace to that SID; leaving it out jails the principal
+		// out of the tree it is supposed to own.
+		principalUser, err := principalToken.GetTokenUser()
+		if err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": read sandbox principal SID: "+err.Error())
+			return 1
+		}
+		jailSIDs := append(append([]string{}, tokenSIDs...), principalUser.User.Sid.String())
+		jailedToken, err := restrictWindowsTokenForCapabilitySIDs(principalToken, jailSIDs, writeRestricted)
+		if err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+			return 1
+		}
+		defer jailedToken.Close()
+		exitCode, err := runWindowsCommandAsUser(jailedToken, config)
 		if err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 			return 1
