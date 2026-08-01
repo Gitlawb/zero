@@ -65,8 +65,10 @@ func TestStoreKeyringBackendRoundTrip(t *testing.T) {
 	if strings.Contains(raw, "access_token") {
 		t.Fatalf("keyring entry is not encoded: %s", raw)
 	}
-	if raw := kr.data[keyringService+"/"+keyringLegacyAccount]; raw != "" {
-		t.Fatalf("legacy combined entry should not be written by new code: %s", raw)
+	// New code dual-writes the reconciled map to the legacy account so pre-PR
+	// binaries (including those on other config roots) keep a current view.
+	if raw := kr.data[keyringService+"/"+keyringLegacyAccount]; raw == "" {
+		t.Fatal("legacy combined entry should be dual-written by new code")
 	}
 
 	removed, err := s.Delete(ProviderKey("demo"))
@@ -114,10 +116,17 @@ func TestStoreKeyringManyProvidersStayUnderEntryLimit(t *testing.T) {
 			t.Fatalf("Save(%s): %v", name, err)
 		}
 	}
-	// Each individual keyring value must stay small even with 5 providers
-	// logged in: no entry aggregates more than one provider's tokens.
+	// Each per-key token entry must stay small even with 5 providers logged
+	// in. The dual-written legacy combined entry is size-capped separately at
+	// maxKeyringSingleEntryBytes (and may be skipped/patched when oversize).
 	const singleTokenCeiling = 3000 // generous margin under the ~4095-byte line cap
 	for k, v := range kr.data {
+		if strings.HasSuffix(k, "/"+keyringLegacyAccount) {
+			if len(v) > maxKeyringSingleEntryBytes {
+				t.Fatalf("legacy dual-write %q is %d bytes, want <= %d", k, len(v), maxKeyringSingleEntryBytes)
+			}
+			continue
+		}
 		if len(v) > singleTokenCeiling {
 			t.Fatalf("keyring entry %q is %d bytes, want < %d (aggregation regression)", k, len(v), singleTokenCeiling)
 		}
@@ -161,17 +170,21 @@ func TestStoreKeyringMigratesLegacyCombinedEntry(t *testing.T) {
 		t.Fatalf("Load = %#v", got)
 	}
 
-	// Saving a second provider must migrate: the legacy entry is dropped, and
-	// both tokens end up as their own entries.
+	// Saving a second provider must migrate into per-key entries and dual-write
+	// the full map back to the legacy account (never delete it: other config
+	// roots cannot share the compatibility lock).
 	if err := s.Save(ProviderKey("other"), Token{AccessToken: "other-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy combined entry should be removed after migration")
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy combined entry should remain dual-written after migration")
 	}
 	for _, name := range []string{"demo", "other"} {
 		if _, ok, err := s.Load(ProviderKey(name)); err != nil || !ok {
 			t.Fatalf("Load(%s) after migration: ok=%v err=%v", name, ok, err)
+		}
+		if _, ok := kr.data[keyringService+"/"+ProviderKey(name)]; !ok {
+			t.Fatalf("per-key entry for %s missing after migration", name)
 		}
 	}
 }
@@ -361,12 +374,12 @@ func TestStoreKeyringIndexStaysUnderEntryLimit(t *testing.T) {
 			t.Fatalf("Save(%s): %v", name, err)
 		}
 	}
-	// Every keyring value, index entries included, must stay under the cap
-	// with generous framing margin.
+	// Every keyring value (index chunks, per-key tokens, dual-written legacy)
+	// must stay under the single-entry cap with generous framing margin.
 	const entryCeiling = 3800
 	for k, v := range kr.data {
 		if len(v) > entryCeiling {
-			t.Fatalf("keyring entry %q is %d bytes, want <= %d (index cap regression)", k, len(v), entryCeiling)
+			t.Fatalf("keyring entry %q is %d bytes, want <= %d (index/legacy cap regression)", k, len(v), entryCeiling)
 		}
 	}
 	// The index actually chunked (otherwise the ceiling check proves nothing).
@@ -449,7 +462,7 @@ func TestStoreKeyringWriteInterruptionsLeaveNoInvisibleTokens(t *testing.T) {
 			}
 		}
 		// Every mutating boundary of the write path now surfaces its failure,
-		// including the legacy-entry delete (a swallowed failure there could
+		// including the legacy dual-write (a swallowed failure there could
 		// let a later save resurrect logged-out credentials).
 		if opsUsed >= failAt && saveErr == nil {
 			t.Fatalf("failAt=%d: injected keyring failure was swallowed", failAt)
@@ -559,8 +572,8 @@ func TestStoreKeyringMergesFreshLegacyWriteFromOldBinary(t *testing.T) {
 	if got, _, err := s.Load(ProviderKey("carol")); err != nil || got.AccessToken != "c" || got.RefreshToken != "cr" {
 		t.Fatalf("Load(carol) = %#v, err=%v, want the legacy access/refresh tokens intact", got, err)
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy entry should be removed once its fresh writes are merged")
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy entry should remain dual-written after merge")
 	}
 }
 
@@ -733,9 +746,9 @@ func TestStoreKeyringMigrationInterruptionsPreserveLegacyTokens(t *testing.T) {
 		if got, ok, err := s.Load(ProviderKey("new")); err != nil || !ok || got.AccessToken != "new-c" {
 			t.Fatalf("failAt=%d: Load(new): ok=%v err=%v token=%#v", failAt, ok, err, got)
 		}
-		// The completed migration drops the legacy entry.
-		if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-			t.Fatalf("failAt=%d: legacy entry not removed after migration completed", failAt)
+		// Completed migration dual-writes the full map to the legacy entry.
+		if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+			t.Fatalf("failAt=%d: legacy entry missing after migration completed (want dual-write)", failAt)
 		}
 		if opsUsed < failAt {
 			break
@@ -743,28 +756,28 @@ func TestStoreKeyringMigrationInterruptionsPreserveLegacyTokens(t *testing.T) {
 	}
 }
 
-// TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey covers the mixed-version
-// window for a key that already exists in the index: an old binary refreshes
-// provider:alpha in the legacy combined entry (a strictly later expiry). The
-// next new-binary save must keep that fresher refresh instead of overwriting it
-// with the stale indexed value and then deleting the legacy entry.
-func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
+// TestStoreKeyringExplicitSaveWinsOverStaleLookingLegacy is the regression for
+// [P1] Do not use token contents or expiry as cross-version write order: a
+// longer legacy expiry (or different token material) must not replace an
+// explicit new-binary Save of the same key. Expiry is not causal order.
+func TestStoreKeyringExplicitSaveWinsOverStaleLookingLegacy(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale := time.Now().Add(1 * time.Hour)
-	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a-old", RefreshToken: "r-old", ExpiresAt: stale}); err != nil {
+	// Explicit new login as account B with a short lifetime.
+	explicit := time.Now().Add(1 * time.Hour)
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "account-b", RefreshToken: "rb", ExpiresAt: explicit, Account: "b@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 
-	// An old binary refreshes alpha through the legacy combined entry, pushing
-	// the expiry later than the indexed copy.
-	fresh := stale.Add(1 * time.Hour)
+	// A leftover legacy copy for the same key looks "fresher" by expiry and
+	// carries a different account — content-based ordering would wrongly win.
+	legacyLater := explicit.Add(24 * time.Hour)
 	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
-		ProviderKey("alpha"): {AccessToken: "a-new", RefreshToken: "r-new", ExpiresAt: fresh},
+		ProviderKey("alpha"): {AccessToken: "account-a", RefreshToken: "ra", ExpiresAt: legacyLater, Account: "a@example.com"},
 	}}
 	legacyData, err := json.Marshal(legacy)
 	if err != nil {
@@ -772,7 +785,7 @@ func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
 	}
 	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacyData)
 
-	// A new-binary save of an unrelated key must reconcile alpha, not clobber it.
+	// Unrelated save must not let legacy clobber the explicit alpha token.
 	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
 		t.Fatal(err)
 	}
@@ -780,14 +793,11 @@ func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load(alpha): ok=%v err=%v", ok, err)
 	}
-	if got.AccessToken != "a-new" || got.RefreshToken != "r-new" || !got.ExpiresAt.Equal(fresh) {
-		t.Fatalf("Load(alpha) = %#v, want the refreshed legacy value (tokens and expiry) with ExpiresAt=%v", got, fresh)
+	if got.AccessToken != "account-b" || got.Account != "b@example.com" {
+		t.Fatalf("Load(alpha) = %#v, want the explicit Save (account-b), not the longer-expiry legacy account-a", got)
 	}
 	if _, ok, _ := s.Load(ProviderKey("beta")); !ok {
 		t.Fatal("Load(beta): not stored")
-	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy entry should be removed once its refresh is merged")
 	}
 }
 
@@ -800,19 +810,84 @@ func TestStoreKeyringMergesFreshLegacyRefreshOfIndexedKey(t *testing.T) {
 // contested lock would retry forever instead of returning a timeout error.
 func TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "test.lockfile")
-	// A fresh (non-stale) lock held by someone else: acquireFileLock must not
-	// reclaim it, only wait out fileLockTimeout and report a timeout.
+	// A fresh (non-stale) lock held by someone else. With wait-while-healthy,
+	// that extends the idle deadline, so cap the absolute wait for the test.
 	if err := os.WriteFile(lockPath, []byte("someone-else"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	prevMax := fileLockMaxWait
+	fileLockMaxWait = 200 * time.Millisecond
+	defer func() { fileLockMaxWait = prevMax }()
+
 	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	start := time.Now()
 	_, err := acquireFileLock(lockPath, func() time.Time { return fixed })
 	if err == nil {
 		t.Fatal("expected a timeout error acquiring an already-held, non-stale lock")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("acquireFileLock took %v with a fixed clock; the deadline must use the wall clock, not now()", elapsed)
+	}
+}
+
+// TestAcquireFileLockWaitsWhileLeaseHealthy covers [P2] Let lock acquisition
+// cover a healthy keyring operation: a holder that keeps the lease fresh for
+// longer than the idle timeout must not cause contenders to fail; they wait
+// and acquire once the holder releases.
+func TestAcquireFileLockWaitsWhileLeaseHealthy(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "test.lockfile")
+	prevTimeout := fileLockTimeout
+	prevMax := fileLockMaxWait
+	fileLockTimeout = 80 * time.Millisecond
+	fileLockMaxWait = 3 * time.Second
+	defer func() {
+		fileLockTimeout = prevTimeout
+		fileLockMaxWait = prevMax
+	}()
+
+	unlock, err := acquireFileLock(lockPath, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Refresh the held lock past several idle-timeout intervals.
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				at := time.Now()
+				_ = os.Chtimes(lockPath, at, at)
+			}
+		}
+	}()
+
+	acquired := make(chan error, 1)
+	go func() {
+		u, err := acquireFileLock(lockPath, time.Now)
+		if err == nil {
+			u()
+		}
+		acquired <- err
+	}()
+
+	// Contender must still be waiting after > one idle timeout.
+	select {
+	case err := <-acquired:
+		close(stop)
+		unlock()
+		t.Fatalf("contender finished too early (err=%v); must wait while lease is healthy", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(stop)
+	unlock()
+	if err := <-acquired; err != nil {
+		t.Fatalf("contender failed after holder released: %v", err)
 	}
 }
 
@@ -1050,7 +1125,7 @@ func TestKeyringLockPathIndependentOfCacheAndTempRoots(t *testing.T) {
 //
 // This simulates a live old binary by holding the exact lock file
 // legacyKeyringLockPath computes (the same one a pre-PR binary's Save takes)
-// and asserting that Store.Save — which must reconcile and then drop the
+// and asserting that Store.Save — which must reconcile and dual-write the
 // legacy entry here, since one is seeded below — blocks until that lock is
 // released, and that the seeded legacy token survives the reconciliation.
 func TestStoreKeyringWriteWaitsForLegacyLockDuringReconciliation(t *testing.T) {
@@ -1142,28 +1217,28 @@ func TestKeyringLockPathDerivedFromKeyringIdentityNotFileConfig(t *testing.T) {
 	}
 }
 
-// legacyDeleteFailKR fails Delete for the legacy combined entry only, to
-// exercise the boundary where a logout has already rewritten the indexed
-// state but the stale legacy blob cannot be removed.
-type legacyDeleteFailKR struct {
+// legacyDualWriteFailKR fails Set for the legacy combined entry only, to
+// exercise the boundary where a logout has rewritten the indexed state but
+// the dual-write that clears the credential from the legacy blob cannot land.
+type legacyDualWriteFailKR struct {
 	*fakeKR
 	fail bool
 }
 
-func (f *legacyDeleteFailKR) Delete(service, account string) (bool, error) {
+func (f *legacyDualWriteFailKR) Set(service, account, secret string) error {
 	if f.fail && account == keyringLegacyAccount {
-		return false, errKRInjected
+		return errKRInjected
 	}
-	return f.fakeKR.Delete(service, account)
+	return f.fakeKR.Set(service, account, secret)
 }
 
-// TestStoreKeyringLogoutSurfacesLegacyBlobDeleteFailure: when the final
-// legacy-blob delete fails during a logout, the operation must report the
-// failure (not success with the secret still resident), and after a clean
-// retry the logged-out credential must not be resurrected by a later save.
-func TestStoreKeyringLogoutSurfacesLegacyBlobDeleteFailure(t *testing.T) {
+// TestStoreKeyringLogoutSurfacesLegacyDualWriteFailure: when the legacy
+// dual-write fails during a logout, the operation must report the failure
+// (not success while the secret may still be resident in the legacy blob),
+// and after a clean retry the logged-out credential must not be resurrected.
+func TestStoreKeyringLogoutSurfacesLegacyDualWriteFailure(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	kr := &legacyDeleteFailKR{fakeKR: newFakeKR()}
+	kr := &legacyDualWriteFailKR{fakeKR: newFakeKR()}
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
 		t.Fatal(err)
@@ -1184,7 +1259,7 @@ func TestStoreKeyringLogoutSurfacesLegacyBlobDeleteFailure(t *testing.T) {
 
 	kr.fail = true
 	if _, err := s.Delete(ProviderKey("alpha")); err == nil {
-		t.Fatal("Delete reported success although the stale legacy blob could not be removed")
+		t.Fatal("Delete reported success although the legacy dual-write failed")
 	}
 
 	// A clean retry succeeds, and a later save must not classify the stale
@@ -1251,7 +1326,9 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 	blob := keyringBlob{kr: ckr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
 
 	dup := ProviderKey("demo")
-	many := make([]string, 2000)
+	// Stay under maxKeyringIndexEncodedBytes so the byte-bound check does not
+	// fire first; this test is about dedupe after a valid-sized decode.
+	many := make([]string, 80)
 	for i := range many {
 		many[i] = dup
 	}
@@ -1259,7 +1336,11 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	encoded := base64.StdEncoding.EncodeToString(header)
+	if len(encoded) > maxKeyringIndexEncodedBytes {
+		t.Fatalf("test payload is %d bytes encoded; keep it under %d so the byte bound is not the thing under test", len(encoded), maxKeyringIndexEncodedBytes)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = encoded
 
 	keys, ok, _, err := blob.readKeyIndex()
 	if err != nil {
@@ -1269,7 +1350,7 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 		t.Fatal("readKeyIndex: expected an index to be found")
 	}
 	if len(keys) != 1 {
-		t.Fatalf("readKeyIndex returned %d keys for a 2000-duplicate index, want 1 (deduplicated)", len(keys))
+		t.Fatalf("readKeyIndex returned %d keys for an 80-duplicate index, want 1 (deduplicated)", len(keys))
 	}
 
 	// A malformed (non-ValidateKey-shaped) entry must also be dropped rather
@@ -1312,7 +1393,7 @@ func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+dup] = base64.StdEncoding.EncodeToString(raw)
 
-	many := make([]string, 3000)
+	many := make([]string, 80)
 	for i := range many {
 		many[i] = dup
 	}
@@ -1320,7 +1401,11 @@ func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	encoded := base64.StdEncoding.EncodeToString(header)
+	if len(encoded) > maxKeyringIndexEncodedBytes {
+		t.Fatalf("test payload is %d bytes encoded; keep it under %d so the byte bound is not the thing under test", len(encoded), maxKeyringIndexEncodedBytes)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = encoded
 
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: ckr})
 	if err != nil {
@@ -1333,13 +1418,13 @@ func TestStoreKeyringDuplicateIndexDoesNotFanOutPerEntry(t *testing.T) {
 		t.Fatalf("Status: %v", err)
 	}
 	if len(statuses) != 1 {
-		t.Fatalf("Status returned %d entries for a 3000-duplicate index of one key, want 1", len(statuses))
+		t.Fatalf("Status returned %d entries for an 80-duplicate index of one key, want 1", len(statuses))
 	}
 	// One Get for the index header, one Get for the single deduplicated key's
 	// own entry, and at most one extra Get for the legacy fallback lookup.
-	// The key regression is: not 3000 (one per duplicate entry).
+	// The key regression is: not one Get per duplicate entry.
 	if ckr.gets > 3 {
-		t.Fatalf("Status issued %d keyring gets for a 3000-entry duplicate index, want <= 3 (fan-out DoS regression)", ckr.gets)
+		t.Fatalf("Status issued %d keyring gets for an 80-entry duplicate index, want <= 3 (fan-out DoS regression)", ckr.gets)
 	}
 }
 
@@ -1358,14 +1443,14 @@ func (f *legacyGetFailKR) Get(service, account string) (string, bool, error) {
 	return f.fakeKR.Get(service, account)
 }
 
-// TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError is the
+// TestStoreKeyringWriteRefusesToOverwriteLegacyBlobOnTransientReadError is the
 // regression test for finding #2: during mixed-version reconciliation (an old
 // zero binary's legacy blob alongside the new keyring-based index), a
 // transient error reading the legacy blob must not be treated as "the legacy
-// blob is empty." write() must refuse to reconcile-and-delete it in that case,
-// or an unread credential belonging to an older, still-installed zero binary
-// is destroyed irrecoverably.
-func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testing.T) {
+// blob is empty." write() must refuse to dual-write over it in that case, or
+// an unread credential belonging to an older, still-installed zero binary is
+// destroyed irrecoverably.
+func TestStoreKeyringWriteRefusesToOverwriteLegacyBlobOnTransientReadError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := &legacyGetFailKR{fakeKR: newFakeKR()}
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
@@ -1396,10 +1481,12 @@ func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testi
 	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err == nil {
 		t.Fatal("Save succeeded despite a transient legacy-blob read failure; it must refuse rather than silently treat the blob as empty")
 	}
-	// The legacy blob must still be present, not deleted out from under a
-	// read failure.
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
-		t.Fatal("legacy blob was deleted despite a transient read failure (data loss)")
+	// The legacy blob must still be present with the old credential, not
+	// dual-written over under a read failure.
+	if raw, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy blob was removed despite a transient read failure (data loss)")
+	} else if !strings.Contains(string(mustDecode(t, raw)), "still-live") {
+		t.Fatal("legacy blob was overwritten despite a transient read failure (data loss)")
 	}
 	// Nothing else the aborted write touched should be visible either.
 	if _, ok, _ := s.Load(ProviderKey("beta")); ok {
@@ -1410,7 +1497,7 @@ func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testi
 	}
 
 	// Once the transient failure clears, the legacy credential is recovered
-	// and the blob is cleaned up normally.
+	// and dual-written back with the full reconciled map.
 	kr.fail = false
 	if err := s.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
 		t.Fatalf("retried Save: %v", err)
@@ -1418,9 +1505,18 @@ func TestStoreKeyringWriteRefusesToDeleteLegacyBlobOnTransientReadError(t *testi
 	if _, ok, err := s.Load(ProviderKey("stale-binary-login")); err != nil || !ok {
 		t.Fatalf("Load(stale-binary-login): ok=%v err=%v (legacy credential lost)", ok, err)
 	}
-	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; ok {
-		t.Fatal("legacy blob should be removed once it was actually read and reconciled")
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy blob should remain dual-written once it was actually read and reconciled")
 	}
+}
+
+func mustDecode(t *testing.T, enc string) []byte {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestStoreKeyringLockPathStableAcrossDifferentHomeEnvs(t *testing.T) {
@@ -1449,7 +1545,11 @@ func TestStoreKeyringLockPathStableAcrossDifferentHomeEnvs(t *testing.T) {
 	}
 }
 
-func TestStoreKeyringMergesFreshLegacyRefreshOnLoadWithoutSave(t *testing.T) {
+// TestStoreKeyringLoadPrefersIndexedOverLegacyLookingFresher: when both the
+// per-key entry and the legacy blob hold the same key, the indexed copy wins
+// even if legacy has a later expiry or different material. Content is not
+// causal order (see explicit-Save regression above).
+func TestStoreKeyringLoadPrefersIndexedOverLegacyLookingFresher(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
@@ -1457,13 +1557,13 @@ func TestStoreKeyringMergesFreshLegacyRefreshOnLoadWithoutSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	t1 := time.Now().Add(-10 * time.Minute)
-	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "stale-a", ExpiresAt: t1}); err != nil {
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "indexed-a", ExpiresAt: t1}); err != nil {
 		t.Fatal(err)
 	}
 
 	t2 := time.Now().Add(1 * time.Hour)
 	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
-		ProviderKey("alpha"): {AccessToken: "fresh-a", RefreshToken: "fresh-r", ExpiresAt: t2},
+		ProviderKey("alpha"): {AccessToken: "legacy-a", RefreshToken: "legacy-r", ExpiresAt: t2},
 	}}
 	data, err := json.Marshal(legacy)
 	if err != nil {
@@ -1475,12 +1575,15 @@ func TestStoreKeyringMergesFreshLegacyRefreshOnLoadWithoutSave(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load: ok=%v err=%v", ok, err)
 	}
-	if got.AccessToken != "fresh-a" {
-		t.Fatalf("Load returned stale token %#v, want fresh legacy token", got)
+	if got.AccessToken != "indexed-a" {
+		t.Fatalf("Load returned %#v, want indexed token (not later-expiry legacy)", got)
 	}
 }
 
-func TestStoreKeyringLegacyIsFresherHandlesZeroExpiryRefreshes(t *testing.T) {
+// TestStoreKeyringLoadDoesNotPreferZeroExpiryLegacyMaterial: OAuth may omit
+// expires_in; different token material alone must not make legacy win over an
+// indexed entry for the same key.
+func TestStoreKeyringLoadDoesNotPreferZeroExpiryLegacyMaterial(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
@@ -1488,12 +1591,12 @@ func TestStoreKeyringLegacyIsFresherHandlesZeroExpiryRefreshes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t1 := time.Now().Add(10 * time.Minute)
-	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1}); err != nil {
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "indexed-a", RefreshToken: "indexed-r", ExpiresAt: t1}); err != nil {
 		t.Fatal(err)
 	}
 
 	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
-		ProviderKey("alpha"): {AccessToken: "new-a", RefreshToken: "new-r", ExpiresAt: time.Time{}},
+		ProviderKey("alpha"): {AccessToken: "legacy-a", RefreshToken: "legacy-r", ExpiresAt: time.Time{}},
 	}}
 	data, err := json.Marshal(legacy)
 	if err != nil {
@@ -1505,8 +1608,8 @@ func TestStoreKeyringLegacyIsFresherHandlesZeroExpiryRefreshes(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load: ok=%v err=%v", ok, err)
 	}
-	if got.AccessToken != "new-a" || got.RefreshToken != "new-r" {
-		t.Fatalf("Load = %#v, want legacy zero-expiry refresh", got)
+	if got.AccessToken != "indexed-a" || got.RefreshToken != "indexed-r" {
+		t.Fatalf("Load = %#v, want indexed token (not zero-expiry legacy material)", got)
 	}
 }
 
@@ -1601,10 +1704,10 @@ func TestStoreKeyringDeleteDoesNotResurrectLegacyOnlyKey(t *testing.T) {
 	}
 }
 
-// TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh ensures write-path
-// reconciliation does not discard a valid old-binary refresh that omitted
-// expires_in (zero ExpiresAt) when the indexed copy still has a nonzero expiry.
-func TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh(t *testing.T) {
+// TestStoreKeyringWriteDoesNotMergeLegacyOverIndexedKey: write-path
+// reconciliation must not replace an indexed key with legacy material based
+// on expiry or token strings (not causal). Only legacy-only keys are merged.
+func TestStoreKeyringWriteDoesNotMergeLegacyOverIndexedKey(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
@@ -1612,12 +1715,12 @@ func TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	t1 := time.Now().Add(10 * time.Minute)
-	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1}); err != nil {
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "indexed-a", RefreshToken: "indexed-r", ExpiresAt: t1}); err != nil {
 		t.Fatal(err)
 	}
 
 	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
-		ProviderKey("alpha"): {AccessToken: "new-a", RefreshToken: "new-r", ExpiresAt: time.Time{}},
+		ProviderKey("alpha"): {AccessToken: "legacy-a", RefreshToken: "legacy-r", ExpiresAt: time.Time{}},
 	}}
 	data, err := json.Marshal(legacy)
 	if err != nil {
@@ -1633,51 +1736,71 @@ func TestStoreKeyringWriteMergesZeroExpiryLegacyRefresh(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load(alpha): ok=%v err=%v", ok, err)
 	}
-	if got.AccessToken != "new-a" || got.RefreshToken != "new-r" {
-		t.Fatalf("write reconciliation dropped zero-expiry legacy refresh: got %#v", got)
+	if got.AccessToken != "indexed-a" || got.RefreshToken != "indexed-r" {
+		t.Fatalf("write reconciliation overwrote indexed alpha with legacy material: got %#v", got)
 	}
 }
 
-func TestLegacyIsFresher(t *testing.T) {
-	t1 := time.Now().Add(10 * time.Minute)
-	t2 := t1.Add(time.Hour)
-	cases := []struct {
-		name            string
-		legacy, current Token
-		want            bool
-	}{
-		{
-			name:    "later legacy expiry wins",
-			legacy:  Token{AccessToken: "a", ExpiresAt: t2},
-			current: Token{AccessToken: "a", ExpiresAt: t1},
-			want:    true,
-		},
-		{
-			name:    "later current expiry wins",
-			legacy:  Token{AccessToken: "old", ExpiresAt: t1},
-			current: Token{AccessToken: "new", ExpiresAt: t2},
-			want:    false,
-		},
-		{
-			name:    "zero-expiry legacy with new material wins",
-			legacy:  Token{AccessToken: "new-a", RefreshToken: "new-r"},
-			current: Token{AccessToken: "old-a", RefreshToken: "old-r", ExpiresAt: t1},
-			want:    true,
-		},
-		{
-			name:    "identical tokens are not fresher",
-			legacy:  Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: t1},
-			current: Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: t1},
-			want:    false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := legacyIsFresher(tc.legacy, tc.current); got != tc.want {
-				t.Fatalf("legacyIsFresher = %v, want %v", got, tc.want)
-			}
-		})
-	}
+// TestStoreKeyringCompetingLoginOrders: explicit new-binary Save of account B
+// must survive a subsequent write even when legacy still holds account A's
+// longer-lived token for the same key (both write orders covered).
+func TestStoreKeyringCompetingLoginOrders(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	t.Run("explicit_then_legacy_noise", func(t *testing.T) {
+		kr := newFakeKR()
+		s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Save(ProviderKey("demo"), Token{AccessToken: "b-token", Account: "b", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		// Old writer noise: longer expiry, different account, same key.
+		legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+			ProviderKey("demo"): {AccessToken: "a-token", Account: "a", ExpiresAt: time.Now().Add(24 * time.Hour)},
+		}}
+		data, err := json.Marshal(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+		if err := s.Save(ProviderKey("other"), Token{AccessToken: "o"}); err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := s.Load(ProviderKey("demo"))
+		if err != nil || got.AccessToken != "b-token" || got.Account != "b" {
+			t.Fatalf("got %#v, want explicit b-token", got)
+		}
+	})
+
+	t.Run("legacy_only_then_explicit", func(t *testing.T) {
+		kr := newFakeKR()
+		s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Seed index with an unrelated key so write() takes the reconcile path.
+		if err := s.Save(ProviderKey("seed"), Token{AccessToken: "s"}); err != nil {
+			t.Fatal(err)
+		}
+		legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+			ProviderKey("demo"): {AccessToken: "a-token", Account: "a", ExpiresAt: time.Now().Add(24 * time.Hour)},
+		}}
+		data, err := json.Marshal(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+		// Explicit login as B for demo must become authoritative.
+		if err := s.Save(ProviderKey("demo"), Token{AccessToken: "b-token", Account: "b", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := s.Load(ProviderKey("demo"))
+		if err != nil || got.AccessToken != "b-token" || got.Account != "b" {
+			t.Fatalf("got %#v, want explicit b-token after Save", got)
+		}
+	})
 }
 
 // TestLegacyKeyringLockPathHonorsConfiguredRoot ensures the pre-PR compatibility
@@ -1707,6 +1830,9 @@ func TestStoreKeyringRejectsOversizedSingleTokenPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
 
 	huge := Token{
 		AccessToken: "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("A", 6000) + ".sig",
@@ -1717,5 +1843,127 @@ func TestStoreKeyringRejectsOversizedSingleTokenPayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exceeds single keyring entry bound") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+	// Preflight must reject before publishing the index key, or the store can
+	// accumulate phantom keys until the reader cap bricks every later Save.
+	if indexedKeysOf(t, kr)[ProviderKey("huge")] {
+		t.Fatal("oversized Save published provider:huge into the index without an entry")
+	}
+	if _, ok := kr.data[keyringService+"/"+ProviderKey("huge")]; ok {
+		t.Fatal("oversized Save wrote a token entry")
+	}
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok {
+		t.Fatalf("alpha lost after rejected Save: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestStoreKeyringPrunesPhantomIndexKeysAfterInterruptedSet: a Set failure
+// after the union index was published can leave a key listed without an entry.
+// The next successful write must drop that phantom so capacity recovers.
+func TestStoreKeyringPrunesPhantomIndexKeysAfterInterruptedSet(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	kr := newFakeKR()
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an interrupted write: index lists beta, but beta has no entry.
+	header := keyIndexHeader{Version: 1, Chunks: 1, Keys: []string{ProviderKey("alpha"), ProviderKey("beta")}}
+	headerData, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerData)
+
+	if err := s.Save(ProviderKey("gamma"), Token{AccessToken: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	indexed := indexedKeysOf(t, kr)
+	if indexed[ProviderKey("beta")] {
+		t.Fatal("phantom index key provider:beta was not pruned on the next write")
+	}
+	if !indexed[ProviderKey("alpha")] || !indexed[ProviderKey("gamma")] {
+		t.Fatalf("indexed keys = %v, want alpha and gamma", indexed)
+	}
+}
+
+// TestStoreKeyringDualWritePreservesCrossRootLegacyLogin: the compatibility
+// lock cannot span distinct config roots, so a new binary must never delete
+// the legacy combined entry. An old-style writer on root A can land a login
+// after root B reconciled; dual-write-without-delete keeps that login visible.
+func TestStoreKeyringDualWritePreservesCrossRootLegacyLogin(t *testing.T) {
+	rootA := filepath.Join(t.TempDir(), "cfg-a")
+	rootB := filepath.Join(t.TempDir(), "cfg-b")
+	kr := newFakeKR()
+
+	storeB, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr, Env: map[string]string{"XDG_CONFIG_HOME": rootB}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeB.Save(ProviderKey("alpha"), Token{AccessToken: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	blobB := storeB.blob.(keyringBlob)
+	blobAPath := legacyKeyringLockPath(map[string]string{"XDG_CONFIG_HOME": rootA})
+	if blobB.legacyLockPath == blobAPath {
+		t.Fatal("expected distinct legacy lock paths for distinct config roots")
+	}
+
+	// Old binary on root A writes only the legacy combined entry (no index update).
+	legacy := storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "a"},
+		ProviderKey("carol"): {AccessToken: "c", RefreshToken: "cr"},
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(data)
+
+	// New binary on root B saves again: must merge carol, not delete it away.
+	if err := storeB.Save(ProviderKey("beta"), Token{AccessToken: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha", "beta", "carol"} {
+		if _, ok, err := storeB.Load(ProviderKey(name)); err != nil || !ok {
+			t.Fatalf("Load(%s) after cross-root legacy login: ok=%v err=%v", name, ok, err)
+		}
+	}
+	if _, ok := kr.data[keyringService+"/"+keyringLegacyAccount]; !ok {
+		t.Fatal("legacy entry was deleted; cross-root old writers can no longer be observed")
+	}
+}
+
+// TestStoreKeyringReadIndexRejectsOversizedEncodedPayload: bound the base64
+// payload before DecodeString/Unmarshal so a damaged index cannot force
+// unbounded memory/CPU under the store lock.
+func TestStoreKeyringReadIndexRejectsOversizedEncodedPayload(t *testing.T) {
+	ckr := &countingKR{fakeKR: newFakeKR()}
+	blob := keyringBlob{kr: ckr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+
+	huge := strings.Repeat("A", maxKeyringIndexEncodedBytes+1)
+	ckr.data[keyringService+"/"+keyringIndexAccount] = huge
+	ckr.gets = 0
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected oversized encoded index payload to be rejected")
+	}
+	if ckr.gets != 1 {
+		t.Fatalf("readKeyIndex issued %d gets; want header lookup only", ckr.gets)
+	}
+
+	// Continuation chunks must use the same bound.
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 2, Keys: []string{ProviderKey("seed")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = huge
+	ckr.gets = 0
+	if _, _, _, err := blob.readKeyIndex(); err == nil {
+		t.Fatal("expected oversized encoded chunk payload to be rejected")
 	}
 }
