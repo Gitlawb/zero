@@ -86,9 +86,10 @@ func TestDictationNonAuthErrorDoesNotPrompt(t *testing.T) {
 
 func TestDictationStartedFailureResets(t *testing.T) {
 	m := model{}
+	m.dictation.sessionID = 1
 	m.dictation.phase = dictStarting
 	m.dictation.streaming = false
-	got, _ := m.handleDictationStarted(dictationStartedMsg{err: errors.New("mic busy")})
+	got, _ := m.handleDictationStarted(dictationStartedMsg{sessionID: 1, err: errors.New("mic busy")})
 	if got.dictation.active() {
 		t.Error("a start failure should reset to idle")
 	}
@@ -99,10 +100,45 @@ func TestDictationStartedFailureResets(t *testing.T) {
 
 func TestDictationStartedArmsRecording(t *testing.T) {
 	m := model{}
+	m.dictation.sessionID = 1
 	m.dictation.phase = dictStarting
-	got, _ := m.handleDictationStarted(dictationStartedMsg{})
+	got, _ := m.handleDictationStarted(dictationStartedMsg{sessionID: 1})
 	if got.dictation.phase != dictRecording {
 		t.Error("a successful start should advance to recording")
+	}
+}
+
+// TestStaleDictationStartedIgnoredWhileLive pins the session gate on batch
+// startup messages. A late Start() result after cancel must not reset() a
+// newer recording (success would leave dictStarting with no recorder; failure
+// would kill the live session).
+func TestStaleDictationStartedIgnoredWhileLive(t *testing.T) {
+	// Active recording on session 2.
+	m := model{}
+	m.dictation.sessionID = 2
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m.setComposerState(composerState{text: "live session text", cursor: len("live session text")})
+
+	// Stale failure from session 1 must not reset the live controller.
+	afterFail, _ := m.handleDictationStarted(dictationStartedMsg{
+		sessionID: 1,
+		err:       errors.New("mic busy from previous start"),
+	})
+	if afterFail.dictation.phase != dictRecording || afterFail.dictation.sessionID != 2 {
+		t.Fatalf("stale start failure: phase=%v session=%d, want recording/2", afterFail.dictation.phase, afterFail.dictation.sessionID)
+	}
+	if transcriptHasText(afterFail, "mic busy from previous start") {
+		t.Fatal("stale start failure must not post an error notice")
+	}
+
+	// Stale success from session 1 must not leave the live session stuck mid-start.
+	m2 := model{}
+	m2.dictation.sessionID = 2
+	m2.dictation.phase = dictRecording
+	afterOK, _ := m2.handleDictationStarted(dictationStartedMsg{sessionID: 1})
+	if afterOK.dictation.phase != dictRecording || afterOK.dictation.sessionID != 2 {
+		t.Fatalf("stale start success: phase=%v session=%d, want recording/2", afterOK.dictation.phase, afterOK.dictation.sessionID)
 	}
 }
 

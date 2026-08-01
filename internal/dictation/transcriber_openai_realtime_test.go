@@ -144,9 +144,9 @@ func TestOpenAIRealtimeStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) 
 	}
 }
 
-// After a server event the client selects writeErrCh. Cancel while the writer
-// is blocked on more chunks so that path observes a cancelled write and must
-// still return context.Canceled rather than a redacted flat string.
+// Cancel while the writer is blocked on more chunks. Whichever path observes
+// the cancellation first (the blocked conn.Read or the writeErrCh drain) must
+// return context.Canceled rather than a redacted flat string.
 func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 	sessionReceived := make(chan struct{})
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
@@ -190,13 +190,13 @@ func TestOpenAIRealtimeStreamTranscribeWriteCancelKeepsSentinel(t *testing.T) {
 	}
 }
 
-// jatmn (review, PR #710): Esc can race an incoming OpenAI error event.
-// conn.Read may already have the error frame in hand by the time the
-// cancellation lands. The server fires a delta immediately followed by
-// the error, back to back. Cancel from inside the delta callback (same
-// path the TUI uses when a partial triggers Esc handling) so the cancel
-// is observed before the next event is processed. The returned error
-// must still be context.Canceled, not the redacted OpenAI error.
+// Esc can race an incoming OpenAI error event. conn.Read may already have
+// the error frame in hand by the time the cancellation lands. The server
+// fires a delta immediately followed by the error, back to back. Cancel from
+// inside the delta callback (same path the TUI uses when a partial triggers
+// Esc handling) so the cancel is observed before the next event is processed.
+// The returned error must still be context.Canceled, not the redacted OpenAI
+// error.
 func TestOpenAIRealtimeStreamTranscribeErrorRaceKeepsSentinel(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
 		if _, _, err := c.Read(ctx); err != nil {

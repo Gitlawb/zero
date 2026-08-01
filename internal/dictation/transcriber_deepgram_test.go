@@ -151,7 +151,10 @@ func TestDeepgramStreamTranscribeStartupCancelKeepsSentinel(t *testing.T) {
 	}
 }
 
-func TestDeepgramCustomHeaderErrorRedaction(t *testing.T) {
+// TestDeepgramStreamErrorRedactsHeaderShapedKey exercises the same stream-error
+// redaction path as TestDeepgramStreamTranscribeErrorRedaction, with a close
+// reason that embeds the key next to an X-Api-Key-shaped header label.
+func TestDeepgramStreamErrorRedactsHeaderShapedKey(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
 		for {
 			typ, data, err := c.Read(ctx)

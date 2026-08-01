@@ -102,8 +102,11 @@ type dictationController struct {
 }
 
 // dictationStartedMsg reports the outcome of Recorder.Start().
+// sessionID must match the dictation controller's current session so a late
+// start result after cancel/reset cannot reset a newer recording.
 type dictationStartedMsg struct {
-	err error
+	sessionID int64
+	err       error
 }
 
 // dictationTranscribedMsg carries the final transcript of a batch (or a
@@ -265,7 +268,7 @@ func (m model) startDictation() (model, tea.Cmd) {
 	if streaming {
 		return m.startStreamingDictation()
 	}
-	return m, startBatchRecordingCmd(rec)
+	return m, startBatchRecordingCmd(m.dictation.sessionID, rec)
 }
 
 // stopDictation ends a recording. For batch it triggers Stop()+Transcribe(); for
@@ -330,9 +333,9 @@ func (d *dictationController) reset() {
 
 // startBatchRecordingCmd starts the record-to-file capture off the UI goroutine
 // (Start spawns a subprocess and may briefly block or fail on a missing tool).
-func startBatchRecordingCmd(rec Recorder) tea.Cmd {
+func startBatchRecordingCmd(sessionID int64, rec Recorder) tea.Cmd {
 	return func() tea.Msg {
-		return dictationStartedMsg{err: rec.Start()}
+		return dictationStartedMsg{sessionID: sessionID, err: rec.Start()}
 	}
 }
 
@@ -355,6 +358,11 @@ func transcribeBatchCmd(sessionID int64, ctx context.Context, rec Recorder, tran
 
 // handleDictationStarted transitions to recording (or reports a start failure).
 func (m model) handleDictationStarted(msg dictationStartedMsg) (model, tea.Cmd) {
+	if msg.sessionID != m.dictation.sessionID {
+		// Stale startup from a cancelled session must not reset or re-arm a
+		// newer recording that already owns the controller.
+		return m, nil
+	}
 	if msg.err != nil {
 		m = m.discardDictationRegion()
 		m.dictation.reset()
