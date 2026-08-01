@@ -198,8 +198,9 @@ func TestParseOpenRouterCatalogMapsLiveMetadata(t *testing.T) {
 	if strings.Join(claude.InputModalities, ",") != "text,image" || strings.Join(claude.OutputModalities, ",") != "text" {
 		t.Fatalf("claude modalities = %#v/%#v", claude.InputModalities, claude.OutputModalities)
 	}
-	if claude.InputCost != 0.000003 || claude.OutputCost != 0.000015 {
-		t.Fatalf("claude costs = %f/%f, want 0.000003/0.000015", claude.InputCost, claude.OutputCost)
+	// Live pricing.prompt is USD per token; Model costs are USD per million tokens.
+	if claude.InputCost != 3 || claude.OutputCost != 15 {
+		t.Fatalf("claude costs = %f/%f, want 3/15 (per-million, matching models.dev)", claude.InputCost, claude.OutputCost)
 	}
 	if claude.Source != "openrouter" {
 		t.Fatalf("source = %q, want openrouter", claude.Source)

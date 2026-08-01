@@ -69,11 +69,17 @@ func FetchOpenGateway(ctx context.Context, endpoint string, options FetchOptions
 
 // FetchOpenRouter loads OpenRouter's public live model list (GET /api/v1/models).
 // Auth is optional for listing; callers may still attach a key for account-scoped
-// probes via the live discovery path.
+// probes via the live discovery path. When the live host is unreachable, fall
+// back to models.dev so the picker still degrades instead of failing entirely
+// (both catalog and live probe hit openrouter.ai otherwise).
 func FetchOpenRouter(ctx context.Context, endpoint string, options FetchOptions) ([]Model, error) {
 	body, err := fetchJSON(ctx, endpoint, options.HTTPClient)
 	if err != nil {
-		return nil, err
+		fallback, fallbackErr := FetchModelsDev(ctx, "openrouter", options)
+		if fallbackErr == nil {
+			return fallback, nil
+		}
+		return nil, fmt.Errorf("%w (models.dev fallback: %v)", err, fallbackErr)
 	}
 	return ParseOpenRouterCatalog(body)
 }
@@ -452,12 +458,18 @@ func firstPositiveFloat(values ...float64) float64 {
 	return 0
 }
 
+// parsePricingString converts OpenRouter/OpenGateway pricing.prompt and
+// pricing.completion values (USD per token) into the Model.InputCost/OutputCost
+// unit used everywhere else (USD per million tokens, matching models.dev
+// cost.input / cost.output). Values <= 0, including OpenRouter's "-1"
+// variable/BYOK marker, map to 0 so the picker shows no price rather than a
+// bogus number.
 func parsePricingString(s string) float64 {
 	val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || val <= 0 {
 		return 0
 	}
-	return val
+	return val * 1e6
 }
 
 func cleanStrings(values []string) []string {
