@@ -1266,6 +1266,11 @@ func TestExtractBranchSlug(t *testing.T) {
 		{"Preamble", "Here is a suggested branch name:\nadd-login-page", "add-login-page"},
 		{"PreambleWithMultiWord", "Here is a suggested branch name:\nadd login page", "add login page"},
 		{"PreambleInlineWithColon", "Here is a suggested branch name: add login page", "add login page"},
+		{"InlineLabeledSlug", "Branch name: add-login-page", "add-login-page"},
+		// One-word acknowledgements match the slug regex; preamble filter must
+		// run before the early return so the real suggestion on the next line wins.
+		{"OneWordAckThenSpaced", "Sure\nadd login page", "add login page"},
+		{"OneWordAckThenKebab", "Certainly\nadd-login-page", "add-login-page"},
 		{"CodeFence", "```\nadd-login-page\n```", "add-login-page"},
 		{"FencedWithLanguage", "```text\nadd-login-page\n```", "add-login-page"},
 		{"QuotedPhrase", "\n\"add login page\"\n", "add login page"},
@@ -1939,6 +1944,12 @@ func TestRunChangesPushPreservesLeaseOnRetryAfterCollision(t *testing.T) {
 			// branch has no published upstream for origin/someone/readme-md.
 			return ""
 		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			// Concurrent creator may have published the name, but this case
+			// models the pure lease-reject path where the remote still lacks
+			// this branch under our identity; keep the nonexistence lease.
+			return false, nil
+		},
 		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
 			return true
 		},
@@ -2000,6 +2011,88 @@ func TestRunChangesPushDoesNotRequireLeaseForAlreadyPublishedBranch(t *testing.T
 	}
 }
 
+// TestRunChangesPushDropsLeaseWhenRemoteExistsWithoutLocalUpstream covers the
+// push -u config-write race: the first push published origin/<branch> but left
+// local upstream empty. A later push (after another commit) must not reassert
+// --force-with-lease=<branch>: against that existing remote ref.
+func TestRunChangesPushDropsLeaseWhenRemoteExistsWithoutLocalUpstream(t *testing.T) {
+	cwd := t.TempDir()
+	var requireNewRemoteBranch bool
+	var remoteProbed bool
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "someone/readme-md", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			// Local config write failed after the first push -u.
+			return ""
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			remoteProbed = true
+			if remote != "origin" || branch != "someone/readme-md" {
+				t.Fatalf("unexpected remote probe: %s/%s", remote, branch)
+			}
+			return true, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			requireNewRemoteBranch = options.RequireNewRemoteBranch
+			return zerogit.PushResult{Remote: options.Remote, Branch: options.Branch}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !remoteProbed {
+		t.Fatal("expected remoteHasBranch to be consulted when local upstream is missing")
+	}
+	if requireNewRemoteBranch {
+		t.Fatal("expected no nonexistence lease when the remote branch already exists")
+	}
+}
+
+// TestRunChangesPushKeepsLeaseWhenRemoteMissingAndLocalUpstreamEmpty is the
+// collision-retry companion: local upstream empty and remote has no branch
+// still needs the nonexistence lease.
+func TestRunChangesPushKeepsLeaseWhenRemoteMissingAndLocalUpstreamEmpty(t *testing.T) {
+	cwd := t.TempDir()
+	var requireNewRemoteBranch bool
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "push"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		isDefaultBranch: func(ctx context.Context, options zerogit.DefaultBranchOptions) (bool, string, string, error) {
+			return false, "someone/readme-md", "origin", nil
+		},
+		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
+			return true
+		},
+		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
+			return ""
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			return false, nil
+		},
+		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
+			requireNewRemoteBranch = options.RequireNewRemoteBranch
+			return zerogit.PushResult{Remote: options.Remote, Branch: options.Branch}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !requireNewRemoteBranch {
+		t.Fatal("expected nonexistence lease when remote branch is still missing")
+	}
+}
+
 // TestRunChangesPushPreservesLeaseWhenInheritedOriginRemoteConfig covers the
 // autoSetupMerge=inherit race: branch.remote equals origin before any push,
 // but the upstream ref is still origin/main. Lease must stay.
@@ -2022,6 +2115,10 @@ func TestRunChangesPushPreservesLeaseWhenInheritedOriginRemoteConfig(t *testing.
 		},
 		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
 			return "origin/main"
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			// Feature branch not published yet; only main exists remotely.
+			return false, nil
 		},
 		pushChanges: func(ctx context.Context, options zerogit.PushOptions) (zerogit.PushResult, error) {
 			requireNewRemoteBranch = options.RequireNewRemoteBranch

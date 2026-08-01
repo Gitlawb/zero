@@ -533,6 +533,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: "origin\n"},                                   // config branch.feat/some-feature.remote
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
+			{Stdout: "origin/feat/some-feature\n"}, // UpstreamRef after push -u
 		}}
 
 		result, err := Push(context.Background(), PushOptions{
@@ -560,6 +561,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: "origin\n"},                                   // config branch.feat/some-feature.remote
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
+			{Stdout: "origin/feat/some-feature\n"}, // UpstreamRef after push -u
 		}}
 
 		_, err := Push(context.Background(), PushOptions{
@@ -631,6 +633,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: "main\n"},
 			{Stdout: "origin\n"},
 			{Stdout: "Everything up-to-date\n"},
+			{Stdout: "origin/main\n"}, // UpstreamRef after push -u
 		}}
 
 		result, err := Push(context.Background(), PushOptions{
@@ -654,6 +657,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{ExitCode: 1, Stderr: "error: no such section"},        // config lookup fails
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
+			{Stdout: "origin/feat/some-feature\n"}, // UpstreamRef after push -u
 		}}
 
 		result, err := Push(context.Background(), PushOptions{
@@ -708,6 +712,7 @@ func TestPushBranchesToRemote(t *testing.T) {
 			{Stdout: "origin\n"},                                   // config branch.alice/fix-typo.remote
 			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"}, // ls-remote --symref: default is main
 			{Stdout: "Everything up-to-date\n"},
+			{Stdout: "origin/alice/fix-typo\n"}, // UpstreamRef after push -u
 		}}
 
 		_, err := Push(context.Background(), PushOptions{
@@ -720,6 +725,66 @@ func TestPushBranchesToRemote(t *testing.T) {
 		}
 		if got := runner.commandLine(4); got != "git push --force-with-lease=alice/fix-typo: -u -- origin alice/fix-typo" {
 			t.Fatalf("unexpected push command: %q", got)
+		}
+	})
+
+	t.Run("RecoversWhenPushUCannotWriteLocalUpstream", func(t *testing.T) {
+		// git push -u can exit 0 after publishing the remote branch while
+		// failing to write .git/config (config.lock). Push must recover via
+		// branch --set-upstream-to rather than reporting a full success with
+		// no local upstream.
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "user/slug\n"},
+			{Stdout: "origin\n"},
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"},
+			{Stdout: "To origin\n * [new branch] user/slug -> user/slug\n"},
+			{ExitCode: 128, Stderr: "fatal: no upstream configured for branch 'user/slug'"}, // UpstreamRef missing
+			{Stdout: ""},                   // branch --set-upstream-to=origin/user/slug user/slug
+			{Stdout: "origin/user/slug\n"}, // UpstreamRef after recovery
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err != nil {
+			t.Fatalf("Push returned error: %v", err)
+		}
+		if result.Remote != "origin" || result.Branch != "user/slug" {
+			t.Fatalf("unexpected push result: %#v", result)
+		}
+		if got := runner.commandLine(6); got != "git branch --set-upstream-to=origin/user/slug user/slug" {
+			t.Fatalf("expected set-upstream recovery, got %q", got)
+		}
+	})
+
+	t.Run("SurfacesUpstreamWriteFailureWhenRecoveryFails", func(t *testing.T) {
+		root := t.TempDir()
+		runner := &fakeRunner{results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "user/slug\n"},
+			{Stdout: "origin\n"},
+			{Stdout: "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"},
+			{Stdout: "To origin\n * [new branch] user/slug -> user/slug\n"},
+			{ExitCode: 128, Stderr: "fatal: no upstream configured"},
+			{ExitCode: 255, Stderr: "error: could not write config file .git/config: File exists"},
+		}}
+
+		result, err := Push(context.Background(), PushOptions{
+			Cwd:    root,
+			RunGit: runner.Run,
+		})
+		if err == nil {
+			t.Fatal("expected upstream-write failure after successful remote publish")
+		}
+		if !strings.Contains(err.Error(), "push published origin/user/slug") || !strings.Contains(err.Error(), "failed to configure local upstream") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Remote side did publish: result still carries remote/branch for callers.
+		if result.Remote != "origin" || result.Branch != "user/slug" {
+			t.Fatalf("expected partial result for published branch, got %#v", result)
 		}
 	})
 }
@@ -1415,6 +1480,54 @@ func TestCurrentBranchReturnsCheckedOutName(t *testing.T) {
 	runGitCommand(t, root, "checkout", "-b", "feature/work")
 	if got := CurrentBranch(context.Background(), root, nil); got != "feature/work" {
 		t.Fatalf("CurrentBranch = %q, want feature/work", got)
+	}
+}
+
+// TestRemoteHasBranchSeesPushWithoutLocalUpstream is the publication side of
+// the push -u config-write race: a plain `git push` (no -u) leaves local
+// upstream empty while the remote branch exists. ensureFeatureBranch must
+// probe this rather than reasserting the nonexistence lease.
+func TestRemoteHasBranchSeesPushWithoutLocalUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	tmp := t.TempDir()
+	bare := filepath.Join(tmp, "remote.git")
+	repo := filepath.Join(tmp, "repo")
+	runGitCommand(t, tmp, "init", "--bare", bare)
+	runGitCommand(t, tmp, "init", repo)
+	runGitCommand(t, repo, "config", "user.name", "Zero")
+	runGitCommand(t, repo, "config", "user.email", "zero@example.invalid")
+	runGitCommand(t, repo, "checkout", "-b", "main")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "initial\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "Initial commit")
+	runGitCommand(t, repo, "remote", "add", "origin", bare)
+	runGitCommand(t, repo, "push", "-u", "origin", "main")
+	runGitCommand(t, repo, "checkout", "-b", "user/slug")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "feature work\n")
+	runGitCommand(t, repo, "add", "README.md")
+	runGitCommand(t, repo, "commit", "-m", "feature")
+	// Publish without -u so local upstream stays unset (same observable state
+	// as push -u succeeding on the remote then failing to write .git/config).
+	runGitCommand(t, repo, "push", "origin", "user/slug")
+
+	if ref := UpstreamRef(context.Background(), repo, "user/slug", nil); ref != "" {
+		t.Fatalf("UpstreamRef after push without -u = %q, want empty", ref)
+	}
+	exists, err := RemoteHasBranch(context.Background(), repo, "origin", "user/slug", nil)
+	if err != nil {
+		t.Fatalf("RemoteHasBranch: %v", err)
+	}
+	if !exists {
+		t.Fatal("RemoteHasBranch must report the published branch even without local upstream")
+	}
+	missing, err := RemoteHasBranch(context.Background(), repo, "origin", "user/other", nil)
+	if err != nil {
+		t.Fatalf("RemoteHasBranch missing: %v", err)
+	}
+	if missing {
+		t.Fatal("RemoteHasBranch must be false for an unpublished name")
 	}
 }
 

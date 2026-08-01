@@ -1214,13 +1214,28 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 			// relationship was recorded by a successful push -u. Inherited
 			// origin/main (autoSetupMerge=inherit) and a push to a different
 			// remote both leave the lease in place.
+			//
+			// Local upstream config alone is not a remote nonexistence proof:
+			// git push -u can publish the branch and still fail to write
+			// .git/config. When local config is missing or wrong, probe the
+			// remote before reasserting --force-with-lease=<branch>:.
 			targetRemote := firstNonEmptyString(requestedRemote, remote)
 			publishedRef := targetRemote + "/" + currentBranch
 			upstreamRef := ""
 			if deps.branchUpstreamRef != nil {
 				upstreamRef = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
 			}
-			requireNewRemoteBranch = upstreamRef != publishedRef
+			if upstreamRef == publishedRef {
+				requireNewRemoteBranch = false
+			} else if deps.remoteHasBranch != nil {
+				exists, existsErr := deps.remoteHasBranch(ctx, workspaceRoot, targetRemote, currentBranch)
+				if existsErr != nil {
+					return "", "", false, fmt.Errorf("cannot check whether %s already exists on remote %s: %w", currentBranch, targetRemote, existsErr)
+				}
+				requireNewRemoteBranch = !exists
+			} else {
+				requireNewRemoteBranch = true
+			}
 		}
 		return currentBranch, remote, requireNewRemoteBranch, nil
 	}
@@ -1431,10 +1446,13 @@ func isPreambleText(s string) bool {
 // follow the "output only the raw slug" instruction exactly. It drops Markdown
 // code-fence lines, then prefers a line that already looks like a kebab-case
 // slug: that skips a leading preamble such as "Here is a suggested branch
-// name:" in favor of the "add-login-page" line that follows it. If no line is
-// strictly kebab-cased, it prefers a plausible non-preamble line (e.g. "add login
-// page" following "Here is a suggested branch name:"), so plain multi-word
-// replies still slugify correctly without taking the preamble text.
+// name:" in favor of the "add-login-page" line that follows it. One-word
+// acknowledgements that happen to match the slug regex ("Sure", "Certainly")
+// are filtered as preamble before the early return, so "Sure\nadd login page"
+// yields the real suggestion. Inline labeled forms ("Branch name: add-login-page")
+// still work: the preamble check runs on the extracted value after the label
+// is stripped. If no line is strictly kebab-cased, it prefers a plausible
+// non-preamble line so plain multi-word replies still slugify correctly.
 func extractBranchSlug(text string) string {
 	var firstLine string
 	var plausibleLine string
@@ -1457,11 +1475,15 @@ func extractBranchSlug(text string) string {
 			}
 		}
 
-		if slugLineRe.MatchString(candidate) {
+		// Preamble classification runs before accepting a slug-shaped line so
+		// "Sure" does not win over a later "add-login-page". The check is on
+		// candidate (post label-strip) so "Branch name: add-login-page" still
+		// returns the extracted slug.
+		if slugLineRe.MatchString(candidate) && !isPreambleText(candidate) {
 			return candidate
 		}
 
-		if firstLine == "" {
+		if firstLine == "" && !isPreambleText(candidate) {
 			firstLine = candidate
 		}
 

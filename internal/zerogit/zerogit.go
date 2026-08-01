@@ -618,6 +618,25 @@ func Push(ctx context.Context, options PushOptions) (PushResult, error) {
 		return PushResult{}, fmt.Errorf("push: %w", err)
 	}
 
+	// git push -u can create the remote branch and still exit 0 when it cannot
+	// write branch.<name>.remote/merge (for example .git/config.lock held by
+	// another process). Zero must not report that as a full success: without
+	// the local upstream, a later ensureFeatureBranch retry would reassert
+	// --force-with-lease=<branch>: against a branch that already exists.
+	expectedUpstream := remote + "/" + branch
+	if UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
+		if _, setErr := gitOutput(ctx, runGit, root, "branch", "--set-upstream-to="+expectedUpstream, branch); setErr != nil {
+			return PushResult{Remote: remote, Branch: branch, Output: output}, fmt.Errorf(
+				"push published %s but failed to configure local upstream %s: %w; run `git branch --set-upstream-to=%s %s` then retry",
+				expectedUpstream, expectedUpstream, setErr, expectedUpstream, branch)
+		}
+		if UpstreamRef(ctx, root, branch, runGit) != expectedUpstream {
+			return PushResult{Remote: remote, Branch: branch, Output: output}, fmt.Errorf(
+				"push published %s but local upstream is still not %s; run `git branch --set-upstream-to=%s %s` then retry",
+				expectedUpstream, expectedUpstream, expectedUpstream, branch)
+		}
+	}
+
 	return PushResult{
 		Remote: remote,
 		Branch: branch,
@@ -875,6 +894,38 @@ func RefreshTrackingRef(ctx context.Context, cwd, remote, branch string, runGit 
 	// (--upload-pack=/bin/echo) reaches Git as a positional argument.
 	_, err := gitOutput(ctx, runGit, cwd, "fetch", "--", remote, refspec)
 	return err
+}
+
+// RemoteHasBranch reports whether remote already has refs/heads/<branch>.
+// ensureFeatureBranch uses this when local upstream config is missing or
+// wrong: a prior push may have published the branch even when push -u failed
+// to write .git/config, and the nonexistence lease must not be reasserted
+// against a ref that already exists on the remote.
+func RemoteHasBranch(ctx context.Context, cwd, remote, branch string, runGit Runner) (bool, error) {
+	runGit, _ = resolveRunners(runGit, nil)
+	remote = strings.TrimSpace(remote)
+	branch = strings.TrimSpace(branch)
+	if remote == "" || branch == "" {
+		return false, nil
+	}
+	// Ask for the exact head ref rather than listing every branch. "--"
+	// terminates option parsing so a remote shaped like an option stays
+	// positional.
+	ref := "refs/heads/" + branch
+	out, err := gitOutput(ctx, runGit, cwd, "ls-remote", "--heads", "--", remote, ref)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, got, ok := strings.Cut(line, "\t"); ok && strings.TrimSpace(got) == ref {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // UpstreamRef returns the short remote-tracking name for branch's configured

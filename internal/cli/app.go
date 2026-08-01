@@ -101,6 +101,7 @@ type appDeps struct {
 	branchHasUpstream      func(context.Context, string, string) (bool, error)
 	branchUpstreamRemote   func(context.Context, string, string) string
 	branchUpstreamRef      func(context.Context, string, string) string
+	remoteHasBranch        func(context.Context, string, string, string) (bool, error)
 	currentGitBranch       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
 	resetBranchRef         func(context.Context, string, string, string) error
@@ -238,6 +239,9 @@ func defaultAppDeps() appDeps {
 		},
 		branchUpstreamRef: func(ctx context.Context, cwd, branch string) string {
 			return zerogit.UpstreamRef(ctx, cwd, branch, nil)
+		},
+		remoteHasBranch: func(ctx context.Context, cwd, remote, branch string) (bool, error) {
+			return zerogit.RemoteHasBranch(ctx, cwd, remote, branch, nil)
 		},
 		currentGitBranch: func(ctx context.Context, cwd string) string {
 			return zerogit.CurrentBranch(ctx, cwd, nil)
@@ -647,6 +651,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.branchUpstreamRef == nil {
 		deps.branchUpstreamRef = defaults.branchUpstreamRef
+	}
+	if deps.remoteHasBranch == nil {
+		deps.remoteHasBranch = defaults.remoteHasBranch
 	}
 	if deps.currentGitBranch == nil {
 		deps.currentGitBranch = defaults.currentGitBranch
