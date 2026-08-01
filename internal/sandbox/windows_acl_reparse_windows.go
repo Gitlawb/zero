@@ -66,3 +66,41 @@ func trimWindowsExtendedPathPrefix(path string) string {
 	}
 	return strings.TrimPrefix(path, devicePrefix)
 }
+
+// verifyWindowsACLPathComponentNotRedirected opens one path component no-follow
+// and refuses it if it is a reparse point or resolves anywhere other than its own
+// pathname. Because GetFinalPathNameByHandle answers for the WHOLE resolved path,
+// verifying a single existing component also clears every ancestor above it.
+//
+// A missing component surfaces as os.ErrNotExist so the caller can walk further
+// up. Only FILE_READ_ATTRIBUTES is requested: this inspects, it never writes, and
+// asking for more would fail on ancestors the setup process has no rights on.
+func verifyWindowsACLPathComponentNotRedirected(path string) error {
+	utf16Path, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return fmt.Errorf("encode windows ACL path component %s: %w", path, err)
+	}
+	handle, err := windows.CreateFile(
+		utf16Path,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		// syscall.Errno.Is maps ERROR_FILE_NOT_FOUND/ERROR_PATH_NOT_FOUND to
+		// os.ErrNotExist, so the caller's errors.Is check keeps working.
+		return fmt.Errorf("open windows ACL path component %s: %w", path, err)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect windows ACL path component %s: %w", path, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("refusing to materialize under reparse-point path component %s: possible path swap during elevated setup", path)
+	}
+	return verifyWindowsACLTargetNotRedirected(handle, path)
+}
