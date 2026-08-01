@@ -53,6 +53,16 @@ type planTaskStartMsg struct {
 	background bool
 }
 
+// planPreflightMsg reports work happening BEFORE a plan exists — listing the
+// provider's models, probing them, asking the router. Empty status clears it.
+//
+// NOT A PLAN ROW. There is no plan yet; admission may still refuse one. A row
+// would put a task on screen that never runs.
+type planPreflightMsg struct {
+	runID  int
+	status string
+}
+
 // planTaskDoneMsg closes a task's card.
 //
 // dispatched distinguishes a task that ran from one that never started

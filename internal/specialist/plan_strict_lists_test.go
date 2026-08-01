@@ -160,3 +160,37 @@ func TestASavedPlanStillRefusesInlineContent(t *testing.T) {
 		}
 	}
 }
+
+// THE VERIFY CONVENTION IS TAUGHT, because nothing enforces it.
+//
+// No verdict is parsed and no claim is filtered — a plan author adopts this
+// shape with the tasks they already write, or does not. So the only place it can
+// exist is the description the author reads.
+//
+// Earned by measurement: two runs of the same audit on this repo, one ending in
+// a verify task and one not. The verified run dropped five overclaims the other
+// passed through, including an inference the unverified run stated as fact.
+func TestTheToolTeachesTheFindVerifySynthesizeShape(t *testing.T) {
+	tasks, ok := (&OrchestrateTool{}).Parameters().Properties["tasks"]
+	if !ok {
+		t.Fatal("the tasks property is missing")
+	}
+	for _, required := range []string{
+		"end it in verification",
+		"A verify task depends on the finders",
+		"reports only what survived",
+		"try to REFUTE each claim",
+		"default to refuted when uncertain",
+		"judge each claim independently",
+		"a claim, not a trace",
+	} {
+		if !strings.Contains(tasks.Description, required) {
+			t.Errorf("the description does not teach %q", required)
+		}
+	}
+	// The task-authoring rules must survive alongside it — they are upstream of
+	// verification and a badly split plan cannot be verified into a good one.
+	if !strings.Contains(tasks.Description, "Split by SUBJECT") {
+		t.Error("the task-authoring guidance was displaced by the verify convention")
+	}
+}

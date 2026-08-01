@@ -105,6 +105,7 @@ var (
 	_ specialist.PlanController           = (*PlanProgressBridge)(nil)
 	_ specialist.PlanSurfaceBusy          = (*PlanProgressBridge)(nil)
 	_ specialist.PlanTaskProgressRecorder = (*PlanProgressBridge)(nil)
+	_ specialist.PlanPreflightReporter    = (*PlanProgressBridge)(nil)
 )
 
 // NewPlanProgressBridge returns a bridge that is inert until Attach is called.
@@ -159,6 +160,16 @@ func (bridge *PlanProgressBridge) record(eventType sessions.EventType, payload m
 // PlanRunning takes the cancel scoped to the plan that is starting. Any pause
 // left over from a previous plan is cleared here: a new plan must never begin
 // life suspended by a key the user pressed during the last one.
+// PlanPreflight surfaces what auto-assignment is doing before a plan exists.
+func (bridge *PlanProgressBridge) PlanPreflight(status string) {
+	if bridge == nil {
+		return
+	}
+	bridge.send(func(runID int) tea.Msg {
+		return planPreflightMsg{runID: runID, status: status}
+	})
+}
+
 func (bridge *PlanProgressBridge) PlanRunning(cancel context.CancelFunc) {
 	if bridge == nil {
 		return

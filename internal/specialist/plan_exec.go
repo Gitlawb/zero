@@ -1104,6 +1104,28 @@ func planTaskProgress(recorder PlanRecorder, taskID string, event streamjson.Eve
 	}
 }
 
+// PlanPreflightReporter is the optional half of a recorder that hears about work
+// happening BEFORE a plan exists.
+//
+// Auto-assignment runs ahead of admission: a /models call, a probe of each
+// candidate, and — when routing is on — a full child run on the strongest model.
+// Tens of seconds during which there is no plan, so no panel, no rows, and
+// nothing on screen: a foreground run looks frozen at exactly the moment it is
+// doing the most.
+//
+// A STATUS, NOT A PLAN ROW. The plan does not exist yet and inventing a row for
+// it would put a task on screen that admission may still refuse. Empty clears.
+type PlanPreflightReporter interface {
+	PlanPreflight(status string)
+}
+
+// planPreflight is best-effort and nil-safe, like every other recorder call.
+func planPreflight(recorder PlanRecorder, status string) {
+	if reporter, ok := recorder.(PlanPreflightReporter); ok && reporter != nil {
+		reporter.PlanPreflight(status)
+	}
+}
+
 // PlanController is the optional CONTROL half of a recorder.
 //
 // Stopping a plan meant stopping the whole turn: Ctrl-C cancels the run, and

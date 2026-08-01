@@ -172,7 +172,26 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 					"- Do not split one modest job into pieces to look thorough. Fewer, larger, genuinely independent tasks beat many small ones: " +
 					"each task pays for its own context.\n" +
 					"- Be honest about what a task can do. A task that reads and reports is not the same as one that decides; " +
-					"give the deciding work to a task that says it is deciding, and name a stronger model for it.",
+					"give the deciding work to a task that says it is deciding, and name a stronger model for it.\n\n" +
+					// A CONVENTION, NOT MACHINERY. Nothing here parses verdicts or
+					// filters claims — this teaches a shape the plan author can adopt
+					// with the tasks they already write.
+					//
+					// Earned by measurement rather than argument: two runs of the same
+					// audit on this repo, one ending in a verify task and one not. The
+					// verified run dropped FIVE overclaims the other passed through to
+					// its report, including an inference the unverified run stated as
+					// fact. Fan-out multiplies whatever a finder produces, including its
+					// mistakes; nothing else in this tool attacks a claim once made.
+					"If a plan produces CLAIMS, end it in verification:\n" +
+					"- Finder tasks gather claims with file:line evidence.\n" +
+					"- A verify task depends on the finders, so its briefing carries their claims, and attacks every one.\n" +
+					"- A synthesis task depends on the verifier and reports only what survived.\n\n" +
+					"A verify task's prompt must tell it to: try to REFUTE each claim from the code first, and confirm only " +
+					"when the code forces it; default to refuted when uncertain, but quote what the code actually says — a " +
+					"guessed refutation is worth no more than a guessed confirmation; judge each claim independently, treating " +
+					"the finder's confidence as no evidence at all; and re-read the cited locations itself, because the " +
+					"briefing carries a claim, not a trace.",
 			},
 			"saved": {
 				Type: "string",
@@ -684,6 +703,10 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 		// owns every message about task shape.
 		return nil, nil
 	}
+	// SAY WHAT IS HAPPENING. Everything from here to admission is invisible
+	// otherwise, and it is the slowest part of a plan's start.
+	planPreflight(tool.Recorder, "listing this provider's models…")
+	defer planPreflight(tool.Recorder, "")
 	models, err := tool.DiscoverModels(ctx)
 	if err != nil {
 		if !supplied {
@@ -696,6 +719,9 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	// router's candidate list are all derived from this slice, so a model that
 	// cannot run has to be gone before any of them exist — filtering later would
 	// leave it in the tiers it was already ranked into.
+	if tool.ProbeModel != nil {
+		planPreflight(tool.Recorder, "checking which models this provider will run…")
+	}
 	models, probeNotes := proveModels(ctx, models, tool.ProbeModel, &tool.probes)
 
 	tiers := buildModelTiers(models, tool.ModelPrefs)
@@ -742,6 +768,9 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	// none; it reads nothing. Parent identity is attached by runnerForCall.
 	routerGrant, _ := planToolGrant(Task{}, tool.ParentTools)
 	router := routerModel(tool.ModelPrefs, tiers, served, options.Model)
+	if strings.TrimSpace(router) != "" && len(routableTasks(raw)) >= routerMinimumTasks {
+		planPreflight(tool.Recorder, "asking "+router+" which model each task needs…")
+	}
 	routed, routerTokens, routeErr := routeTaskModels(ctx, tool.runnerForCall(options), PlanTaskRequest{Tools: routerGrant},
 		router, routableTasks(raw), eligibleForRouting(models, tool.ModelPrefs), tool.ModelPrefs.RouterGuidance)
 

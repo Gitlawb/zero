@@ -144,7 +144,10 @@ type model struct {
 	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
 	// for the same reason PostureGate is one: the TUI model is a value type
 	// copied on every update, so a closure over it would freeze the first run.
-	planProgress *PlanProgressBridge
+	// planPreflight is what auto-assignment is doing before a plan is admitted.
+	// Empty when nothing is pending, which is almost always.
+	planPreflight string
+	planProgress  *PlanProgressBridge
 	// orchestrate is the live view of the running orchestrate plan. Distinct
 	// from m.plan, which is the update_plan tool's TODO list — two different
 	// things called "plan", kept apart by name everywhere but the command.
@@ -2920,6 +2923,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, msg.model, m.now())
 		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
 		m.specialists.setModel(msg.cardKey, msg.model)
+		return m, nil
+	case planPreflightMsg:
+		// The stale-run guard applies as it does to every plan message: a status
+		// from a finished run must not linger over the next one.
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.planPreflight = msg.status
 		return m, nil
 	case planTaskDoneMsg:
 		// A BACKGROUND plan outlives the run that launched it, so the

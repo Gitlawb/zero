@@ -912,6 +912,14 @@ func (m model) renderContextSidebar(width, height int) []string {
 		add(sidebarHeader("ACTIVITY", width))
 		lines = append(lines, activityLines...)
 	}
+	// PREFLIGHT: what auto-assignment is doing before a plan exists. Rendered
+	// here, under ACTIVITY, because it IS activity — and as a line rather than a
+	// plan row, since admission may still refuse the plan it is preparing.
+	// Without it a foreground run looks frozen for the tens of seconds spent
+	// listing models, probing them and asking the router.
+	if status := strings.TrimSpace(m.planPreflight); status != "" {
+		add(" " + zeroTheme.muted.Render(truncateStep("· "+status, maxInt(6, width-2))))
+	}
 
 	// PLAN DETAIL: the selected task, drawn into the space that was otherwise
 	// padded with blank lines down to the token floor. Last, so it only ever
