@@ -65,11 +65,8 @@ func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("models = %#v, want 2", models)
 	}
-	if models[1].ID != "nvidia/nemotron-3-ultra:free" {
-		// sorted by id
-		if models[0].ID != "nvidia/nemotron-3-ultra:free" {
-			t.Fatalf("models = %#v", models)
-		}
+	if got, want := modelIDs(models), []string{"nvidia/nemotron-3-ultra:free", "xiaomi/mimo-v2.5-pro"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %#v, want %#v", got, want)
 	}
 	byID := map[string]Model{}
 	for _, model := range models {

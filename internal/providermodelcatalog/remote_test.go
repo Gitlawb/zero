@@ -148,6 +148,10 @@ func TestParseOpenRouterCatalogMapsLiveMetadata(t *testing.T) {
 				"name": "Anthropic: Claude Sonnet 4.5",
 				"description": "A long marketing blurb that should not win the picker label.",
 				"context_length": 200000,
+				"pricing": {
+					"prompt": "0.000003",
+					"completion": "0.000015"
+				},
 				"architecture": {
 					"input_modalities": ["text", "image"],
 					"output_modalities": ["text"]
@@ -193,6 +197,9 @@ func TestParseOpenRouterCatalogMapsLiveMetadata(t *testing.T) {
 	}
 	if strings.Join(claude.InputModalities, ",") != "text,image" || strings.Join(claude.OutputModalities, ",") != "text" {
 		t.Fatalf("claude modalities = %#v/%#v", claude.InputModalities, claude.OutputModalities)
+	}
+	if claude.InputCost != 0.000003 || claude.OutputCost != 0.000015 {
+		t.Fatalf("claude costs = %f/%f, want 0.000003/0.000015", claude.InputCost, claude.OutputCost)
 	}
 	if claude.Source != "openrouter" {
 		t.Fatalf("source = %q, want openrouter", claude.Source)

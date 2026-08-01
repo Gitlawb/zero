@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -225,8 +226,14 @@ type remoteModel struct {
 	SupportedParameters []string           `json:"supported_parameters"`
 	Limit               remoteLimit        `json:"limit"`
 	Cost                remoteCost         `json:"cost"`
+	Pricing             remotePricing      `json:"pricing"`
 	Modalities          remoteModalities   `json:"modalities"`
 	Architecture        remoteArchitecture `json:"architecture"`
+}
+
+type remotePricing struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
 }
 
 type remoteLimit struct {
@@ -267,8 +274,16 @@ func (model remoteModel) toModel(key string, source string) Model {
 		model.MaxContextLength,
 		model.Limit.Context,
 	)
-	inputCost := firstPositiveFloat(model.InputCost, model.Cost.Input)
-	outputCost := firstPositiveFloat(model.OutputCost, model.Cost.Output)
+	inputCost := firstPositiveFloat(
+		model.InputCost,
+		parsePricingString(model.Pricing.Prompt),
+		model.Cost.Input,
+	)
+	outputCost := firstPositiveFloat(
+		model.OutputCost,
+		parsePricingString(model.Pricing.Completion),
+		model.Cost.Output,
+	)
 	inputModalities := cleanStrings(model.Modalities.Input)
 	if len(inputModalities) == 0 {
 		inputModalities = cleanStrings(model.Architecture.InputModalities)
@@ -435,6 +450,14 @@ func firstPositiveFloat(values ...float64) float64 {
 		}
 	}
 	return 0
+}
+
+func parsePricingString(s string) float64 {
+	val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || val <= 0 {
+		return 0
+	}
+	return val
 }
 
 func cleanStrings(values []string) []string {
