@@ -344,6 +344,9 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 	if err := refuseImplausibleBudget(budget, len(plan.tasks), limits); err != nil {
 		return Plan{}, err
 	}
+	if err := refuseUnreachablePerTaskCap(budget, len(plan.tasks)); err != nil {
+		return Plan{}, err
+	}
 	plan.budget = budget
 	return plan, nil
 }
@@ -361,6 +364,106 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 // answering in two turns costs tens of thousands. 50k buys a very small task and
 // nothing more.
 const minimumPlausibleTaskTokens = 50_000
+
+// typicalHeavyTaskTokens is what a task that reads and traces a large repo
+// actually costs, measured across several runs: 510,017 for the cheapest that
+// finished, 1,017,177 for the dearest, and finders repeatedly cut short between
+// 700,000 and 790,000 while still working.
+//
+// SET AT THE TOP OF THAT RANGE, not the middle. This number only decides when to
+// WARN, and the two errors are not equal: warning on a plan that would have been
+// fine costs a sentence the author can ignore, while staying quiet on a plan
+// that cannot finish costs the entire run — which has now happened four times.
+//
+// It is NOT a floor and nothing is refused for being below it. It is the number
+// that tells a plan author their budget is an order of magnitude out while they
+// can still change it — the gap the floor deliberately cannot cover, because a
+// floor strict enough to catch this would refuse legitimate plans of small
+// tasks.
+const typicalHeavyTaskTokens = 1_000_000
+
+// typicalDownstreamTaskTokens is what a task that works from its dependencies'
+// findings costs, measured: 62,783 for a sweep and 86,986 for a verify in the
+// same plan whose finders were spending 136,000 to 200,000 apiece.
+//
+// AN ORDER OF MAGNITUDE CHEAPER, because it reads a briefing rather than a
+// repository. Estimating every task at the heavy figure warned on plans that
+// were correctly sized, which teaches an author to ignore the warning — the one
+// outcome worse than not having it.
+const typicalDownstreamTaskTokens = 150_000
+
+// refuseUnreachablePerTaskCap rejects a per-task cap the plan's own total can
+// never let a task reach.
+//
+// THE TWO NUMBERS FIGHT AND THE SMALLER ONE ALWAYS WINS, silently. A run asked
+// for 1,000,000 per task with a 500,000 total across seven tasks: every task was
+// bounded by its share of the total long before its own cap mattered, so the cap
+// the author set had no effect at all. Four finders were stopped between 6,688
+// and 219,698 tokens — nowhere near the million they had been given — and the
+// author reasonably concluded the per-task limit was broken. It was not; it was
+// unreachable.
+//
+// Refused rather than resolved, because either resolution would be a lie: taking
+// the total silently ignores the cap, and taking the cap silently spends past a
+// total the author set. Only they can say which they meant.
+func refuseUnreachablePerTaskCap(budget Budget, taskCount int) error {
+	if budget.MaxTokens <= 0 || budget.MaxTokensPerTask <= 0 || taskCount <= 0 {
+		return nil
+	}
+	needed := taskCount * budget.MaxTokensPerTask
+	if budget.MaxTokens >= needed {
+		return nil
+	}
+	return fmt.Errorf(
+		"budget.max_tokens is %d but max_tokens_per_task is %d across %d tasks, which needs %d — "+
+			"every task would be stopped by its share of the total long before its own cap applied, "+
+			"so the cap would do nothing. Raise max_tokens to at least %d, or OMIT it and let "+
+			"max_tokens_per_task bound each task on its own",
+		budget.MaxTokens, budget.MaxTokensPerTask, taskCount, needed, needed)
+}
+
+// likelyPlanTokens estimates a plan's cost, weighting each task by whether it
+// reads a repository or reads its dependencies' findings.
+func likelyPlanTokens(tasks []Task) int {
+	likely := 0
+	for _, task := range tasks {
+		if len(task.DependsOn) > 0 {
+			likely += typicalDownstreamTaskTokens
+			continue
+		}
+		likely += typicalHeavyTaskTokens
+	}
+	return likely
+}
+
+// warnBudgetLooksLow returns a warning when a plan's budget is far below what
+// its task count usually costs, or "" when it is not.
+//
+// THE FLOOR CATCHES THE IMPOSSIBLE; THIS CATCHES THE MERELY WRONG, and the band
+// between them is where every real failure has been. A seven-task audit was
+// admitted with 500,000 tokens — over the 350,000 floor, and about an eighth of
+// what those tasks went on to spend. Four finders consumed it between them, the
+// verify, sweep and synthesis tasks never ran, and the run produced no report at
+// all. Nothing anywhere told the author the number was wrong until it was.
+func warnBudgetLooksLow(budget Budget, tasks []Task) string {
+	taskCount := len(tasks)
+	if budget.MaxTokens <= 0 || taskCount <= 0 {
+		return ""
+	}
+	// WEIGHTED BY POSITION, via the same estimator the refusal uses: two
+	// estimates of one number would eventually disagree about whether a plan is
+	// tight or hopeless.
+	likely := likelyPlanTokens(tasks)
+	if budget.MaxTokens >= likely {
+		return ""
+	}
+	return fmt.Sprintf(
+		"budget.max_tokens is %d for %d tasks. A task that reads and traces a repo has measured 510k-1,017k, and one "+
+			"working from its dependencies' findings far less, so this plan may need nearer %d. Below that, tasks are "+
+			"stopped mid-run and later ones may never start — omit max_tokens to run unbounded within this run's own "+
+			"ceiling if you cannot estimate it",
+		budget.MaxTokens, taskCount, likely)
+}
 
 // refuseImplausibleBudget rejects a plan whose budget cannot cover its own tasks,
 // BEFORE anything is spent.

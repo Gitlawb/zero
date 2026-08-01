@@ -141,6 +141,9 @@ type PlanReport struct {
 	// 0 regardless and would decide nothing.
 	MaxSpeedup float64
 	TokensUsed int
+	// TokenLimit is what the plan asked to be bounded by, carried so the report
+	// can say 712222/500000 rather than a spend with nothing to read it against.
+	TokenLimit int
 	// Workers is how many tasks this plan ACTUALLY ran at once, and
 	// WorkersRequested is what it asked for. Both, because the machine's
 	// capacity may be lower than the request and a plan that asked for sixteen
@@ -205,6 +208,14 @@ type PlanTaskRequest struct {
 	// MaxTaskTokens bounds what THIS task may spend. 0 is unbounded, which is
 	// every plan that does not ask for a cap.
 	MaxTaskTokens int
+	// WaitsOnOtherTasks marks a task with dependencies, which decides WHICH POOL
+	// it draws from: work that waits draws from the reserve, so it cannot be
+	// starved by the work it waited for.
+	//
+	// The pool, not a precomputed ceiling. A number computed by the caller is one
+	// more thing a caller can forget to compute; the meter owns the arithmetic
+	// and a request only has to say which side of it this task is on.
+	WaitsOnOtherTasks bool
 	// SystemPrompt replaces the plan-task system prompt for this request. Empty
 	// keeps the plan-task prompt, which is every task of every plan.
 	//
@@ -293,10 +304,30 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	// unbounded: spend is metered and reported, not gated.
 	budgetLeft := plan.Budget().MaxTokens
 	bounded := budgetLeft > 0
-	budgetExhausted := false
+	// STICKY PER POOL, not per plan. One flag meant that the moment any task was
+	// skipped for budget, every task after it was skipped too — including work
+	// drawing from a pool that had not been touched. Upstream running out closed
+	// the door on the downstream work the reserve was holding open, which is the
+	// whole failure this reserve exists to prevent, arriving one flag later.
+	upstreamExhausted, downstreamExhausted := false, false
+	// Harvested spend per pool. The live meter stops a task MID-RUN; these decide
+	// whether the next one may start, and they are separated for the same reason:
+	// a feeder's overshoot must not close the door on the work it fed.
+	upstreamUsed, downstreamUsed := 0, 0
 	// The live meter, shared by every task in flight. Same limit, consulted from
 	// inside a running task rather than between two of them.
 	spend := &planSpend{limit: int64(plan.Budget().MaxTokens)}
+	// WHO IS DEPENDED ON. Computed once from the validated graph: a task others
+	// wait for stops earlier than one nothing waits for, so the work downstream
+	// of it is not starved by it.
+	waitsOnOthers := map[string]bool{}
+	for _, task := range plan.Tasks() {
+		if len(task.DependsOn) > 0 {
+			waitsOnOthers[task.ID] = true
+			spend.downstreamTasks++
+		}
+	}
+	spend.totalTasks = plan.TaskCount()
 
 	deadline := time.Time{}
 	if wall := planWallBudget(plan.Budget()); wall > 0 {
@@ -313,6 +344,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	workers := effectivePlanWorkers(plan.Budget().MaxWorkers)
 	report.Workers = workers
 	report.WorkersRequested = plan.Budget().MaxWorkers
+	report.TokenLimit = plan.Budget().MaxTokens
 	slots := newPlanSlots(workers)
 
 	// harvest applies one completed dispatch: its spend, its outcome, its
@@ -328,6 +360,15 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		}
 		report.SequentialTotal += result.Duration
 		budgetLeft -= result.Tokens
+		// HARVESTED PER POOL, for the same reason the live meter is: a dependent
+		// must not be refused dispatch because a feeder overspent. budgetLeft
+		// stays as the whole-plan figure the report reads; these decide who may
+		// still start.
+		if waitsOnOthers[id] {
+			downstreamUsed += result.Tokens
+		} else {
+			upstreamUsed += result.Tokens
+		}
 		report.TokensUsed += result.Tokens
 
 		if err != nil || result.Outcome == TaskFailed {
@@ -463,8 +504,30 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// A budget-exhausted or timed-out plan SKIPS the rest rather than
 		// aborting: independent work already done still counts, and the record
 		// must show what was not attempted.
-		if budgetExhausted || (bounded && budgetLeft <= 0) || (!deadline.IsZero() && time.Now().After(deadline)) {
-			budgetExhausted = true
+		// THE TASK'S OWN POOL, not the shared remainder. Checking budgetLeft
+		// meant a feeder that overshot its ceiling closed the door on every
+		// dependent — which is precisely what a reserve is supposed to prevent,
+		// and precisely what happened: feeders capped at 375,000 landed at
+		// 534,144 and the dependents were skipped for a budget that was never
+		// theirs to spend.
+		downstream := waitsOnOthers[id]
+		poolExhausted := downstreamExhausted
+		if !downstream {
+			poolExhausted = upstreamExhausted
+		}
+		if bounded && !poolExhausted {
+			if downstream {
+				poolExhausted = int64(downstreamUsed) >= spend.ceilingFor(true)
+			} else {
+				poolExhausted = int64(upstreamUsed) >= spend.ceilingFor(false)
+			}
+		}
+		if poolExhausted || (!deadline.IsZero() && time.Now().After(deadline)) {
+			if downstream {
+				downstreamExhausted = true
+			} else {
+				upstreamExhausted = true
+			}
 			result := TaskResult{
 				ID:      id,
 				Outcome: TaskSkippedBudget,
@@ -506,6 +569,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			stallTimeout:  stallTimeout,
 			spend:         spend,
 			maxTaskTokens: plan.Budget().MaxTokensPerTask,
+			waitsOnOthers: len(task.DependsOn) > 0,
 			maxRetries:    plan.Budget().MaxRetries,
 			deadline:      deadline,
 		}
@@ -554,6 +618,7 @@ type retryPolicy struct {
 	maxRetries    int
 	spend         *planSpend
 	maxTaskTokens int
+	waitsOnOthers bool
 	deadline      time.Time
 }
 
@@ -597,12 +662,13 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 	for attempt := 1; ; attempt++ {
 		started := time.Now()
 		result, err = run(ctx, PlanTaskRequest{
-			Task:          policy.task,
-			Tools:         policy.tools,
-			Cwd:           policy.cwd,
-			StallTimeout:  policy.stallTimeout,
-			Spend:         policy.spend,
-			MaxTaskTokens: policy.maxTaskTokens,
+			Task:              policy.task,
+			Tools:             policy.tools,
+			Cwd:               policy.cwd,
+			StallTimeout:      policy.stallTimeout,
+			Spend:             policy.spend,
+			MaxTaskTokens:     policy.maxTaskTokens,
+			WaitsOnOtherTasks: policy.waitsOnOthers,
 		})
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
@@ -727,18 +793,93 @@ func terminalStatus(report PlanReport) PlanStatus {
 // Both sum the same usage events, so they agree at the end; they differ only in
 // WHEN they can be consulted.
 type planSpend struct {
-	spent atomic.Int64
-	limit int64
+	// TWO POOLS, because one could not hold. A single shared counter meant the
+	// reserve was drawn from the same account it was capping: four feeders in
+	// flight each overshoot their ceiling by about one usage event, and with
+	// max_workers 4 that overshoot was the size of the reserve itself. A measured
+	// plan stopped its feeders at 375,000 as designed, landed at 534,144, and the
+	// dependents were then skipped for a budget the feeders had already spent —
+	// the exact failure the reserve existed to prevent, one layer along.
+	//
+	// Separating them is what makes the reserve real: a dependent's pool cannot
+	// be touched by a feeder, however far the feeder overshoots its own.
+	upstream   atomic.Int64
+	downstream atomic.Int64
+	limit      int64
+	// downstreamShare is the fraction of the budget held for work that waits on
+	// other work, as a count of tasks over the total. Zero means no later work
+	// exists and nothing is held back.
+	downstreamTasks int
+	totalTasks      int
+}
+
+// add records tokens against the pool this task draws from and returns that
+// pool's running total.
+func (spend *planSpend) add(tokens int, downstream bool) int64 {
+	if spend == nil || tokens <= 0 {
+		return 0
+	}
+	if downstream {
+		return spend.downstream.Add(int64(tokens))
+	}
+	return spend.upstream.Add(int64(tokens))
+}
+
+// ceilingFor is what a task drawing from this pool may spend.
+//
+// THE AXIS IS EARLIER VERSUS LATER, not "feeds others" versus "terminal". A
+// verify task in a find -> verify -> synthesize chain both depends on work and
+// is depended on; classifying it as a feeder put it in the pool its own finders
+// had already drained, and it was refused dispatch for their spend. Whether a
+// task WAITS on other work is what decides which side of the reserve it sits on.
+//
+// UPSTREAM IS CAPPED; DOWNSTREAM IS FLOORED. Work that waits on nothing stops at
+// three quarters so the last quarter survives for the work that waits on it.
+// Work that waits gets AT LEAST that quarter, and whatever upstream did not use
+// — frugal finders should not leave their synthesis artificially poor.
+func (spend *planSpend) ceilingFor(downstream bool) int64 {
+	if spend == nil || spend.limit <= 0 {
+		return 0
+	}
+	reserve := spend.reserve()
+	if reserve <= 0 {
+		// No later work exists to protect; holding anything back would waste it.
+		return spend.limit
+	}
+	if !downstream {
+		return spend.limit - reserve
+	}
+	if left := spend.limit - spend.upstream.Load(); left > reserve {
+		return left
+	}
+	return reserve
 }
 
 // add records tokens and reports whether the plan has now crossed its limit.
 // An unset limit never reports crossed — unbounded is a deliberate choice.
-func (spend *planSpend) add(tokens int) bool {
-	if spend == nil || tokens <= 0 {
-		return false
+// overPool reports whether a pool's running total has passed what that pool
+// allows. An unbounded plan never has.
+func (spend *planSpend) overPool(total int64, downstream bool) bool {
+	ceiling := spend.ceilingFor(downstream)
+	return ceiling > 0 && total > ceiling
+}
+
+// reserve is the share of the budget held for work that waits on other work.
+//
+// PROPORTIONAL TO HOW MUCH LATER WORK THERE IS, not a flat fraction. It was a
+// flat quarter, and a seven-task plan with three downstream tasks gave them
+// 125,000 between them: verify and sweep used 149,769 and synthesis was skipped.
+// The reserve was the right idea sized by the wrong thing — the budget's shape
+// rather than the plan's.
+//
+// Three of seven tasks downstream now reserves three sevenths. A plan that is
+// mostly synthesis keeps most of its budget for synthesis; a plan that is mostly
+// finding keeps little, which is correct in both directions.
+func (spend *planSpend) reserve() int64 {
+	if spend == nil || spend.limit <= 0 || spend.downstreamTasks <= 0 || spend.totalTasks <= 0 {
+		return 0
 	}
-	total := spend.spent.Add(int64(tokens))
-	return spend.limit > 0 && total > spend.limit
+	return spend.limit * int64(spend.downstreamTasks) / int64(spend.totalTasks)
 }
 
 // Per-dependency and whole-briefing caps on what a task is told about its
@@ -1126,8 +1267,24 @@ func (report PlanReport) Summary() string {
 		b.WriteString("spend could not be measured: this provider reported no token usage, " +
 			"so max_tokens cannot bound a plan here — use max_wall_seconds instead.\n")
 	}
-	if unrun := tasksCutForBudget(report.Tasks); len(unrun) > 0 {
-		fmt.Fprintf(&b, "%d task(s) never ran (budget exhausted): %s\n", len(unrun), strings.Join(unrun, ", "))
+	// WHAT THE BUDGET COST, in two separate numbers, because they mean different
+	// things to the reader. A task CUT SHORT wrote findings that are in this
+	// report; a task that NEVER RAN is a question nobody answered. Reporting
+	// them together as "skipped" hid the first behind the second, and a reader
+	// who cannot tell them apart cannot tell a partial report from an empty one.
+	cutShort, neverRan := tasksStoppedByBudget(report.Tasks)
+	if len(cutShort) > 0 || len(neverRan) > 0 {
+		if report.TokensUsed > 0 && report.TokenLimit > 0 {
+			fmt.Fprintf(&b, "budget exhausted at %d/%d tokens.\n", report.TokensUsed, report.TokenLimit)
+		}
+		if len(cutShort) > 0 {
+			fmt.Fprintf(&b, "%d task(s) cut short mid-run; any partial findings are below: %s\n",
+				len(cutShort), strings.Join(cutShort, ", "))
+		}
+		if len(neverRan) > 0 {
+			fmt.Fprintf(&b, "%d task(s) never ran, so their questions are unanswered: %s\n",
+				len(neverRan), strings.Join(neverRan, ", "))
+		}
 	}
 	// SAY WHEN THE REQUEST WAS NOT HONOURED. The struct promises both numbers —
 	// "a plan that asked for sixteen and ran six has not been given sixteen" —
@@ -1169,6 +1326,27 @@ func (report PlanReport) Summary() string {
 		}
 	}
 	return b.String()
+}
+
+// tasksStoppedByBudget separates the two ways a budget takes a task from you.
+//
+// CUT SHORT means the task ran, wrote something, and was stopped — its findings
+// are in the report. NEVER RAN means the question was never asked. Both used to
+// be called "skipped", which let a partial report read like an empty one and an
+// empty one read like a partial.
+func tasksStoppedByBudget(tasks []TaskResult) (cutShort, neverRan []string) {
+	for _, task := range tasks {
+		switch {
+		case task.Outcome == TaskSkippedBudget:
+			neverRan = append(neverRan, task.ID)
+		case task.Outcome == TaskCancelled && strings.Contains(task.Err, "token budget"):
+			// CUT SHORT whether or not it wrote anything. It ran and was stopped;
+			// calling a task that ran "never ran" because it happened to produce
+			// nothing would misreport what the budget actually cost.
+			cutShort = append(cutShort, task.ID)
+		}
+	}
+	return cutShort, neverRan
 }
 
 // tasksCutForBudget names the tasks a budget stopped — skipped before they ran,

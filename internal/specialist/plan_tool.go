@@ -153,7 +153,43 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 			"description": {Type: "string", Description: "What the plan is for."},
 			"tasks": {
 				Type: "array",
-				Description: "The plan's tasks. Each has an id, a prompt, optional depends_on ids, an optional read-only tool subset, and an optional phase label. " +
+				// THE SHAPE IS DECLARED, not described in prose.
+				//
+				// This was a bare array with a paragraph of English, so a model had
+				// to compose nested objects from a sentence — and did it wrong twice
+				// in one session. It read "an optional read-only tool subset", which
+				// names no tool at all, and wrote tools: ["read-only"], taking the
+				// adjective for a value. Admission then refused the plan and recited
+				// the legal names in the error: the right list, arriving after the
+				// failure instead of before it.
+				//
+				// The enum comes from PlanGrantableToolNames, which is the list
+				// admission itself validates against and was already exported so
+				// "the grant and the validator cannot come to disagree". The schema
+				// was the one caller not using it.
+				Items: &tools.PropertySchema{
+					Type: "object",
+					Properties: map[string]tools.PropertySchema{
+						"id":     {Type: "string", Description: "Short identifier, unique within the plan: letters, digits, hyphen, underscore."},
+						"prompt": {Type: "string", Description: "What this task must do, and what it must return."},
+						"depends_on": {
+							Type:        "array",
+							Description: "Ids of tasks that must finish first. A dependent receives their results in its prompt.",
+							Items:       &tools.PropertySchema{Type: "string"},
+						},
+						"tools": {
+							Type: "array",
+							Description: "Tools this task may use, narrowing the run's own grant — it can never widen it. " +
+								"Omit for the read-only default. Naming a write tool makes the plan write-capable, which " +
+								"runs it in an isolated worktree and asks for approval first.",
+							Items: &tools.PropertySchema{Type: "string", Enum: PlanGrantableToolNames()},
+						},
+						"model": {Type: "string", Description: "Model this task runs on. Omit to inherit the session's."},
+						"phase": {Type: "string", Description: "Display label only; it carries no execution meaning."},
+					},
+					Required: []string{"id", "prompt"},
+				},
+				Description: "The plan's tasks. Each has an id, a prompt, optional depends_on ids, an optional tool subset, and an optional phase label. " +
 					"A task may also name a model to run on — any model this provider serves, by id or alias; omit it to inherit " +
 					"this session's model. Use it to spend where it matters: a cheaper model for mechanical scanning, a stronger " +
 					"one for the tasks that judge or decide. A name the provider cannot serve fails when the task runs.\n\n" +
@@ -211,8 +247,20 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 					"Only available in the interactive TUI; a headless run exits when the turn ends, so it refuses this.",
 			},
 			"budget": {
-				Type:        "object",
-				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried. max_tokens_per_task bounds what ONE task may spend; without it a single task can spend many times the whole plan's budget. Sizing, from measured runs: a task that traces or audits a large repo cost 510k-1,017k tokens; one reasoning over what its dependencies already found costs far less. A cap BELOW what a task needs saves nothing — a plan capping tasks at 200k lost all six of them between 213k and 259k and still spent 1,437,049 tokens, finishing none. A capped task is told its budget and asked to write a partial answer before reaching it, so tight is survivable and too-tight is not. Budget from task count x expected depth, or omit max_tokens to run unbounded within this run's own ceiling. A budget too small for its task count is refused at admission rather than half-spent: when the plan runs out, tasks in flight are cancelled and the rest never run, so the answer comes back incomplete.",
+				Type: "object",
+				// DECLARED for the same reason tasks is: a model composing this from
+				// prose has to invent the field names, and inventing one is how a
+				// plan fails at admission instead of running.
+				Properties: map[string]tools.PropertySchema{
+					"max_workers":         {Type: "integer", Description: "How many tasks may run at once, 1 to 16. 1 is sequential."},
+					"max_tokens":          {Type: "integer", Description: "Bound on the WHOLE plan, shared by every task. DO NOT SET THIS unless the user asked for a spending limit. You cannot estimate what a plan costs, and a number guessed too low does not save money — it stops tasks mid-work and skips the ones that had not started, so the plan spends its budget and returns nothing. Omitted, the plan runs unbounded within this run's own ceiling with a wall-clock backstop, and spend is still metered and reported. If the user did ask for a limit, prefer max_tokens_per_task."},
+					"max_tokens_per_task": {Type: "integer", Description: "Optional bound on ONE task, and the right knob for budgeting per sub-agent. Use it ALONE: with max_tokens also set, each task is limited by its share of the total long before its own cap applies, so the cap does nothing and the plan is refused."},
+					"max_wall_seconds":    {Type: "integer", Description: "Optional wall-clock bound on the whole plan."},
+					"max_stall_seconds":   {Type: "integer", Description: "How long ONE task may emit nothing before it is stopped. Default 180."},
+					"max_retries":         {Type: "integer", Description: "Extra attempts a STALLED task gets, 0 to 3. Default 1."},
+				},
+				Required:    []string{"max_workers"},
+				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried. max_tokens_per_task bounds what ONE task may spend, and is the right knob for budgeting per sub-agent — use it ALONE, without max_tokens, or each task is limited by its share of the total instead and the plan is refused as incoherent. Sizing, from measured runs: a task that traces or audits a large repo costs 510k-1,017k tokens, so budget about 1M each; one reasoning over what its dependencies already found costs far less. max_tokens is the TOTAL across every task, not per task — max_tokens_per_task is the per-task one, and it may not exceed the total. A cap BELOW what a task needs saves nothing — a plan capping tasks at 200k lost all six of them between 213k and 259k and still spent 1,437,049 tokens, finishing none. A capped task is told its budget and asked to write a partial answer before reaching it, so tight is survivable and too-tight is not. Omit max_tokens unless the user asked for a spending limit: guessing it low is how a plan spends everything and returns nothing. A budget far below what its task count needs is warned about at admission and left to you. When a plan runs out, tasks in flight are STOPPED MID-RUN — they keep what they had already found, and it reaches both the report and any task depending on them — while tasks not yet started never run at all. So the cost of guessing low is the questions at the END of the plan, which is usually the synthesis you wanted. If you cannot estimate, omit max_tokens and use max_wall_seconds instead.",
 			},
 		},
 		// EMPTY, and the either/or lives in the DESCRIPTION instead.
@@ -635,12 +683,21 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	defer workspace.Release()
 
 	recordPlanAdmitted(tool.Recorder, plan)
+	// SAID BEFORE IT RUNS, not deduced from the wreckage afterwards.
+	budgetWarning := warnBudgetLooksLow(plan.Budget(), plan.Tasks())
+	// SAID BEFORE THE FIRST TASK, not only in the output afterwards. The estimate
+	// was computed correctly on five consecutive runs of the same plan and read
+	// by nobody, because it rode the result — which arrives once the run is
+	// already over. A warning delivered with the corpse is not a warning.
+	if budgetWarning != "" {
+		planPreflight(tool.Recorder, "budget may be too low: "+budgetWarning)
+	}
 	report := ExecutePlanIn(ctx, plan, workspace, tool.ParentTools, tool.runnerForCall(options), tool.Recorder)
 	recordPlanCompleted(tool.Recorder, plan, report)
 
 	result := tools.Result{
 		Status: tools.StatusOK,
-		Output: report.Summary() + planWorkspaceNote(workspace) + autoAssignSummary(assignNotes),
+		Output: report.Summary() + planBudgetWarning(budgetWarning) + planWorkspaceNote(workspace) + autoAssignSummary(assignNotes),
 		Meta: map[string]string{
 			"plan_status": string(report.Status),
 			"max_speedup": strconv.FormatFloat(report.MaxSpeedup, 'f', 2, 64),
@@ -820,6 +877,19 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 		}
 	}
 	return notes, nil
+}
+
+// planBudgetWarning surfaces a budget that looks an order of magnitude low.
+//
+// Carried to the OUTPUT rather than raised as an error: the plan may still be
+// exactly what the author wanted, and refusing a number that is merely unusual
+// would make the tool unusable on cheap plans of small tasks. It is said so the
+// next call can be different.
+func planBudgetWarning(warning string) string {
+	if strings.TrimSpace(warning) == "" {
+		return ""
+	}
+	return "\n\nNote: " + warning + ".\n"
 }
 
 // planWorkspaceNote says WHERE a write-capable plan did its work.

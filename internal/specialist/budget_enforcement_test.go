@@ -146,7 +146,7 @@ func TestThePlanBudgetStopsATaskThatCrossesItWhileRunning(t *testing.T) {
 		},
 	}
 	run := NewPlanRunner(PlanTaskContext{Executor: exec, Cwd: t.TempDir(), SpecialistName: "explorer"})
-	spend := &planSpend{limit: 120_000}
+	spend := &planSpend{limit: 120_000, downstreamTasks: 1, totalTasks: 4}
 	result, _ := run(context.Background(), PlanTaskRequest{
 		Task:  Task{ID: "solo", Prompt: "p"},
 		Tools: []string{"read_file"},
@@ -160,18 +160,25 @@ func TestThePlanBudgetStopsATaskThatCrossesItWhileRunning(t *testing.T) {
 		t.Errorf("the reason does not name the plan budget: %q", result.Err)
 	}
 	// Bounded overshoot: one usage event past the line, not five.
-	if spent := spend.spent.Load(); spent > 200_000 {
+	if spent := spend.upstream.Load(); spent > 200_000 {
 		t.Errorf("overshoot is unbounded: spent %d against a 120000 limit", spent)
 	}
 }
 
-// An unbounded plan must behave exactly as it always did.
+// An unbounded plan must behave exactly as it always did: the meter still
+// counts, and no pool exists to cross.
 func TestAnUnboundedPlanIsNeverStoppedByTheMeter(t *testing.T) {
-	spend := &planSpend{limit: 0}
+	spend := &planSpend{limit: 0, downstreamTasks: 1, totalTasks: 4}
 	for round := 0; round < 100; round++ {
-		if spend.add(1_000_000) {
+		if spend.overPool(spend.add(1_000_000, true), true) {
 			t.Fatal("an unset limit reported the plan over budget")
 		}
+	}
+	if got := spend.ceilingFor(true); got != 0 {
+		t.Errorf("an unbounded plan produced a feeder ceiling of %d", got)
+	}
+	if got := spend.ceilingFor(false); got != 0 {
+		t.Errorf("an unbounded plan produced a dependent ceiling of %d", got)
 	}
 }
 
@@ -187,7 +194,7 @@ func TestTheSummaryNamesTheTasksABudgetCutShort(t *testing.T) {
 			{ID: "skills-mcp-surface", Outcome: TaskSkippedBudget, Err: "skipped: the plan's budget was exhausted"},
 		},
 	}.Summary()
-	if !strings.Contains(summary, "2 task(s) never ran (budget exhausted)") {
+	if !strings.Contains(summary, "2 task(s) never ran") {
 		t.Fatalf("the headline hides the unanswered questions:\n%s", summary)
 	}
 	for _, id := range []string{"plan-inherit", "skills-mcp-surface"} {
@@ -244,7 +251,7 @@ func TestAPerTaskCapAboveThePlanBudgetIsRefused(t *testing.T) {
 // exists to prevent.
 func TestATaskCancelledForBudgetIsNeverCountedAsSucceeded(t *testing.T) {
 	budget := okBudget()
-	budget["max_tokens"] = float64(150_000)
+	budget["max_tokens"] = float64(1_500_000)
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")}, budget, readOnlyLimits())
 
 	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
@@ -253,7 +260,7 @@ func TestATaskCancelledForBudgetIsNeverCountedAsSucceeded(t *testing.T) {
 			return TaskResult{
 				ID:      req.Task.ID,
 				Outcome: TaskCancelled,
-				Tokens:  90_000,
+				Tokens:  900_000,
 				Err:     "task " + req.Task.ID + " stopped: the plan's token budget ran out while it was running",
 			}, nil
 		}, nil)
@@ -273,7 +280,9 @@ func TestATaskCancelledForBudgetIsNeverCountedAsSucceeded(t *testing.T) {
 		}
 	}
 	// And the headline must say so, since this is what makes the answer partial.
-	if summary := report.Summary(); !strings.Contains(summary, "never ran (budget exhausted)") {
+	// CUT SHORT, not "never ran": these tasks ran and were stopped, and the
+	// difference is what tells a partial report from an empty one.
+	if summary := report.Summary(); !strings.Contains(summary, "cut short mid-run") {
 		t.Errorf("the headline hides that the plan was cut short:\n%s", summary)
 	}
 }
@@ -282,7 +291,7 @@ func TestATaskCancelledForBudgetIsNeverCountedAsSucceeded(t *testing.T) {
 // waiting for, so running them on nothing would compound the loss.
 func TestDependentsOfACancelledTaskAreSkipped(t *testing.T) {
 	budget := okBudget()
-	budget["max_tokens"] = float64(150_000)
+	budget["max_tokens"] = float64(600_000)
 	plan := mustPlan(t, []any{task("trace", "x"), task("judge", "y", "trace")}, budget, readOnlyLimits())
 
 	dispatched := 0

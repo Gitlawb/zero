@@ -110,7 +110,10 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 						"task %s stopped after %d tokens: budget.max_tokens_per_task is %d",
 						task_ID(req), task, req.MaxTaskTokens))
 					cancelTask()
-				case req.Spend.add(spent):
+				case req.Spend.overPool(req.Spend.add(spent, req.WaitsOnOtherTasks), req.WaitsOnOtherTasks):
+					// THE CEILING IS THIS TASK'S, not the plan's. A task others
+					// depend on stops before the whole budget is gone, so their
+					// work still has something to run on — see planSpendCeiling.
 					overspent.Store(fmt.Sprintf(
 						"task %s stopped: the plan's token budget ran out while it was running",
 						task_ID(req)))
