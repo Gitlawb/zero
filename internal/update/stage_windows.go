@@ -433,10 +433,7 @@ var fileRenameInfoHeaderSize = func() uintptr {
 }()
 
 // renameFileByHandle renames the object file refers to, not the object its
-// current pathname resolves to. The destination is relative to an open handle
-// for targetPath's parent directory; this avoids Windows-version differences in
-// absolute FILE_RENAME_INFO path handling and binds destination resolution to
-// the directory opened for this operation.
+// current pathname resolves to. targetPath must be fully qualified.
 //
 // It is a package var, like stageBinary, so a test can simulate
 // SetFileInformationByHandle reporting success without the rename actually
@@ -444,35 +441,19 @@ var fileRenameInfoHeaderSize = func() uintptr {
 // against — without needing to reproduce whatever Windows-version-specific
 // condition triggers it for real.
 func renameOpenFile(file *os.File, targetPath string) error {
-	directoryPath, err := windows.UTF16PtrFromString(filepath.Dir(targetPath))
+	name, err := windows.UTF16FromString(targetPath)
 	if err != nil {
 		return err
 	}
-	directory, err := windows.CreateFile(
-		directoryPath,
-		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("open rename target directory %s: %w", filepath.Dir(targetPath), err)
-	}
-	defer func() { _ = windows.CloseHandle(directory) }()
-
-	name, err := windows.UTF16FromString(filepath.Base(targetPath))
-	if err != nil {
-		return err
-	}
-	// Keep room for the terminator even though FileNameLength excludes it.
+	// FILE_RENAME_INFO declares FileName as NUL-terminated even though
+	// FileNameLength excludes the terminator. Keep the terminator in the buffer:
+	// omitting it makes the ordinary rename fail with ERROR_PATH_NOT_FOUND on the
+	// supported Windows runner.
 	buffer := make([]byte, int(fileRenameInfoHeaderSize)+len(name)*2)
 	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
 	// ReplaceIfExists stays false: promote already renamed the running binary
 	// aside, so a target that exists again means something raced the update, and
 	// failing is better than clobbering whatever appeared there.
-	info.RootDirectory = directory
 	info.FileNameLength = uint32((len(name) - 1) * 2)
 	for index, unit := range name {
 		binary.LittleEndian.PutUint16(buffer[int(fileRenameInfoHeaderSize)+index*2:], unit)
