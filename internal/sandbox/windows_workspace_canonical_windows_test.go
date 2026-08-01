@@ -202,16 +202,58 @@ func TestTeardownPathDerivationCreatesNothing(t *testing.T) {
 		t.Errorf("temp directory gained %d entries; naming the paths must not create one", after-before)
 	}
 
-	// And the setup resolver, which is allowed to create, still does.
-	created, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
+	// Setup's resolver must agree with teardown's, and create nothing either.
+	//
+	// This used to assert the opposite — that setup falls back to a usable tree —
+	// on the reasoning that some runtime root beats none. That was wrong: the
+	// fallback is os.MkdirTemp memoized only in-process, so elevated setup would
+	// grant the principal an ACE on temp root A, the next command would derive
+	// root B and fail ACCESS_DENIED on ordinary cache writes, and teardown would
+	// clean a third. A root only setup can name is worse than no root, because
+	// the sandbox looks provisioned and is not.
+	beforeSetup := tempDirEntryCount(t)
+	setupRoot, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
 		WorkspaceRoots: []string{workspace},
 		CommandCWD:     workspace,
 	})
 	if err != nil {
 		t.Fatalf("windowsSandboxRuntimeRootPath: %v", err)
 	}
-	if created == "" {
-		t.Error("setup's resolver should still fall back to a usable tree")
+	if setupRoot != "" {
+		t.Errorf("setup named %q for a workspace whose runtime root is underivable; it must report none rather than invent one", setupRoot)
+	}
+	if after := tempDirEntryCount(t); after != beforeSetup {
+		t.Errorf("setup's resolver created %d temp entries; it must create nothing", after-beforeSetup)
+	}
+}
+
+// Setup and teardown must derive the SAME root in the ordinary case, since one
+// grants the ACE the other revokes. This is the case the fix above must not
+// break: reporting "no root" is only correct when the root is underivable.
+func TestSetupAndTeardownDeriveTheSameRuntimeRoot(t *testing.T) {
+	workspace := t.TempDir()
+	cacheRoot := t.TempDir() // outside the workspace, so the derivation is usable
+	previous := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+
+	setupRoot, err := windowsSandboxRuntimeRootPath(WindowsSandboxCommandConfig{
+		WorkspaceRoots: []string{workspace},
+		CommandCWD:     workspace,
+	})
+	if err != nil {
+		t.Fatalf("windowsSandboxRuntimeRootPath: %v", err)
+	}
+	if setupRoot == "" {
+		t.Fatal("setup named no runtime root for a derivable workspace")
+	}
+	teardownRoot, ok := deterministicSandboxRuntimeRoot(
+		canonicalSandboxWorkspaceRoot(workspace), canonicalSandboxWorkspaceRoot(cacheRoot))
+	if !ok {
+		t.Fatal("precondition: the deterministic root should be usable here")
+	}
+	if setupRoot != teardownRoot {
+		t.Errorf("setup grants on %q but teardown revokes %q", setupRoot, teardownRoot)
 	}
 }
 

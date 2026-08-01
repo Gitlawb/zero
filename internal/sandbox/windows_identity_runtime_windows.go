@@ -627,13 +627,31 @@ func windowsSandboxRuntimeRootPath(config WindowsSandboxCommandConfig) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache directory for sandbox runtime: %w", err)
 	}
-	// Same canonicalization as the workspace root above: sandboxRuntimeRootFor
-	// compares them, so they have to be the same spelling of the same path.
+	// Same canonicalization as the workspace root above: the derivation compares
+	// them, so they have to be the same spelling of the same path.
 	cacheRoot = canonicalSandboxWorkspaceRoot(cacheRoot)
 	if cacheRoot == "" || cacheRoot == "." {
 		return "", errors.New("user cache directory is unavailable for sandbox runtime")
 	}
-	return sandboxRuntimeRootFor(workspaceRoot, cacheRoot)
+	// Deliberately the deterministic derivation and NOT sandboxRuntimeRootFor.
+	//
+	// sandboxRuntimeRootFor falls back to os.MkdirTemp when the cache lives
+	// inside the workspace, and memoizes that only in-process. Elevated setup is
+	// its own process, so it would grant the principals an ACE on temp root A,
+	// and the next command — a new process — would derive temp root B and hit
+	// ACCESS_DENIED on ordinary cache writes with nothing pointing at the cause.
+	// Teardown, being a third process, would clean a third directory.
+	//
+	// When the deterministic root is unusable there is no name both sides can
+	// agree on, so this reports "no runtime root" rather than inventing one. The
+	// principal then simply gets no ACE here: it loses the runtime tree, which is
+	// a degraded sandbox rather than a broken one, and it is the same answer
+	// teardown already gives.
+	root, ok := deterministicSandboxRuntimeRoot(workspaceRoot, cacheRoot)
+	if !ok {
+		return "", nil
+	}
+	return root, nil
 }
 
 // setupWindowsSandboxRuntimeRoot resolves the runtime root AND creates it.
