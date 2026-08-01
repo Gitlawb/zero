@@ -247,10 +247,7 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 		processOptions,
 		policy.AllowRead,
 	)
-	processFinalFiles := append(
-		append([]string{}, processOptions.OAuthTokens...),
-		processOptions.MCPOAuthTokens...,
-	)
+	processFinalFiles := credentialFinalTokenFiles(processOptions)
 	allowRoots := normalizeProfilePaths(policy.AllowRead)
 	for _, file := range processFinalFiles {
 		// The token blob and encryption key are independently atomically replaced.
@@ -278,7 +275,7 @@ func credentialDenyReadPaths(policy Policy, commandDir string, commandEnv []stri
 		// the run publishes there readable. Recording them lets a backend that
 		// cannot hold them durably fail closed instead, exactly as it already
 		// does for the process-trusted stores.
-		for _, file := range append(append([]string{}, options.OAuthTokens...), options.MCPOAuthTokens...) {
+		for _, file := range credentialFinalTokenFiles(options) {
 			for _, final := range []string{file, file + ".secret"} {
 				candidate := normalizeCredentialFinalPath(final)
 				if candidate == "" || credentialPathReincluded(allowRoots, candidate) {
@@ -430,6 +427,7 @@ func credentialPathOptionsFromEnvironment(baseDirs []string, env []string) crede
 		DockerConfigDirs:   dedupeStrings(dockerConfigDirs),
 		KubeConfigs:        dedupeStrings(kubeConfigs),
 		OAuthTokens:        resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_OAUTH_TOKENS_PATH"), baseDirs),
+		OAuthStorage:       strings.TrimSpace(credentialEnvValue(env, "ZERO_OAUTH_STORAGE")),
 		MCPOAuthTokens:     resolveCredentialOverridePaths(credentialEnvValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"), baseDirs),
 	}
 }
@@ -456,7 +454,21 @@ type credentialPathOptions struct {
 	DockerConfigDirs   []string
 	KubeConfigs        []string
 	OAuthTokens        []string
+	OAuthStorage       string
 	MCPOAuthTokens     []string
+}
+
+// credentialFinalTokenFiles returns token pathnames whose selected backend
+// atomically replaces files on disk. ZERO_OAUTH_TOKENS_PATH still contributes
+// to the ordinary deny baseline when keyring storage is selected, but it must
+// not make bubblewrap fail closed: the keyring backend never publishes the
+// token blob or its encryption-key sibling at that path.
+func credentialFinalTokenFiles(options credentialPathOptions) []string {
+	files := append([]string{}, options.MCPOAuthTokens...)
+	if options.OAuthStorage != "keyring" {
+		files = append(files, options.OAuthTokens...)
+	}
+	return files
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,

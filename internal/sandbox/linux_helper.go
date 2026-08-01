@@ -222,7 +222,7 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 
 func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 	if files := profile.FileSystem.ProcessTrustedDenyReadFiles; len(files) > 0 {
-		return fmt.Errorf("bubblewrap cannot securely deny process-trusted credential file across atomic replacement: %s", strings.Join(files, ", "))
+		return fmt.Errorf("bubblewrap cannot securely deny credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
 	// The same limitation, for a token store named by the command's own
 	// environment. A /dev/null bind over the pathname is detached by the store's
@@ -233,7 +233,7 @@ func validateLinuxBwrapPermissionProfile(profile PermissionProfile) error {
 	// work: doing that for a command-supplied value would let a command steer
 	// Zero into creating host directories.
 	if files := profile.FileSystem.CommandDenyReadFinalFiles; len(files) > 0 {
-		return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential file across atomic replacement: %s", strings.Join(files, ", "))
+		return fmt.Errorf("bubblewrap cannot securely deny command-supplied credential files outside the Zero config directory across atomic replacement: %s; move the store under $XDG_CONFIG_HOME/zero or add its path to sandbox allowRead", strings.Join(files, ", "))
 	}
 	return nil
 }

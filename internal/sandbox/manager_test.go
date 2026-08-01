@@ -943,6 +943,148 @@ func TestCommandSuppliedTokenOverrideFailsClosedOnBubblewrap(t *testing.T) {
 	}
 }
 
+func TestKeyringOAuthOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	config := filepath.Join(home, "config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+	tokenPath := filepath.Join(t.TempDir(), "tokens.json")
+
+	t.Run("process environment", func(t *testing.T) {
+		t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokenPath)
+		t.Setenv("ZERO_OAUTH_STORAGE", "keyring")
+		profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+		fs := profile.FileSystem
+		if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(tokenPath)) {
+			t.Fatalf("DenyReadIfExists = %#v, want keyring override retained in ordinary deny baseline", fs.DenyReadIfExists)
+		}
+		if len(fs.ProcessTrustedDenyReadFiles) != 0 {
+			t.Fatalf("ProcessTrustedDenyReadFiles = %#v, keyring does not publish token files", fs.ProcessTrustedDenyReadFiles)
+		}
+		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+			t.Fatalf("keyring override must not make bubblewrap fail closed: %v", err)
+		}
+	})
+
+	t.Run("command environment", func(t *testing.T) {
+		t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+		t.Setenv("ZERO_OAUTH_STORAGE", "")
+		profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, []string{
+			"ZERO_OAUTH_TOKENS_PATH=" + tokenPath,
+			"ZERO_OAUTH_STORAGE=keyring",
+		})
+		fs := profile.FileSystem
+		if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(tokenPath)) {
+			t.Fatalf("DenyReadIfExists = %#v, want command keyring override retained in ordinary deny baseline", fs.DenyReadIfExists)
+		}
+		if len(fs.CommandDenyReadFinalFiles) != 0 {
+			t.Fatalf("CommandDenyReadFinalFiles = %#v, keyring does not publish token files", fs.CommandDenyReadFinalFiles)
+		}
+		if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+			t.Fatalf("command keyring override must not make bubblewrap fail closed: %v", err)
+		}
+	})
+}
+
+func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	workspace := t.TempDir()
+
+	tests := []struct {
+		name          string
+		processEnv    map[string]string
+		commandEnv    []string
+		wantTokenPath string
+		commandMarker bool
+	}{
+		{
+			name: "process encrypted OAuth store",
+			processEnv: map[string]string{
+				"ZERO_OAUTH_STORAGE":         "encrypted-file",
+				"ZERO_OAUTH_TOKENS_PATH":     filepath.Join(t.TempDir(), "oauth.json"),
+				"ZERO_MCP_OAUTH_TOKENS_PATH": "",
+			},
+		},
+		{
+			name: "process MCP store with OAuth keyring",
+			processEnv: map[string]string{
+				"ZERO_OAUTH_STORAGE":         "keyring",
+				"ZERO_OAUTH_TOKENS_PATH":     "",
+				"ZERO_MCP_OAUTH_TOKENS_PATH": filepath.Join(t.TempDir(), "mcp.json"),
+			},
+		},
+		{
+			name: "command encrypted OAuth store",
+			processEnv: map[string]string{
+				"ZERO_OAUTH_STORAGE":         "",
+				"ZERO_OAUTH_TOKENS_PATH":     "",
+				"ZERO_MCP_OAUTH_TOKENS_PATH": "",
+			},
+			commandEnv: []string{
+				"ZERO_OAUTH_STORAGE=encrypted-file",
+				"ZERO_OAUTH_TOKENS_PATH=" + filepath.Join(t.TempDir(), "command-oauth.json"),
+			},
+			commandMarker: true,
+		},
+		{
+			name: "command MCP store with OAuth keyring",
+			processEnv: map[string]string{
+				"ZERO_OAUTH_STORAGE":         "",
+				"ZERO_OAUTH_TOKENS_PATH":     "",
+				"ZERO_MCP_OAUTH_TOKENS_PATH": "",
+			},
+			commandEnv: []string{
+				"ZERO_OAUTH_STORAGE=keyring",
+				"ZERO_MCP_OAUTH_TOKENS_PATH=" + filepath.Join(t.TempDir(), "command-mcp.json"),
+			},
+			commandMarker: true,
+		},
+	}
+	for i := range tests {
+		test := &tests[i]
+		if len(test.commandEnv) > 0 {
+			_, test.wantTokenPath, _ = strings.Cut(test.commandEnv[len(test.commandEnv)-1], "=")
+		} else if test.processEnv["ZERO_OAUTH_TOKENS_PATH"] != "" {
+			test.wantTokenPath = test.processEnv["ZERO_OAUTH_TOKENS_PATH"]
+		} else {
+			test.wantTokenPath = test.processEnv["ZERO_MCP_OAUTH_TOKENS_PATH"]
+		}
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for key, value := range test.processEnv {
+				t.Setenv(key, value)
+			}
+			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, test.commandEnv)
+			markers := profile.FileSystem.ProcessTrustedDenyReadFiles
+			if test.commandMarker {
+				markers = profile.FileSystem.CommandDenyReadFinalFiles
+			}
+			for _, want := range []string{test.wantTokenPath, test.wantTokenPath + ".secret"} {
+				if !stringSliceContains(markers, normalizeProfilePath(want)) {
+					t.Fatalf("final-file markers = %#v, want %q", markers, want)
+				}
+			}
+			if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "atomic replacement") {
+				t.Fatalf("validateLinuxBwrapPermissionProfile error = %v, want atomic-replacement failure", err)
+			}
+		})
+	}
+}
+
 // TestProcessCredentialBaseDirDoesNotFollowWorkingDirectoryChanges covers
 // jatmn's #681 finding on rolling Getwd: the token stores resolve a relative
 // override once, when the store is opened, and write to that fixed path
