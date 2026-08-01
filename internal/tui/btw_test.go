@@ -9,7 +9,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func newBTWTestModel(t *testing.T) model {
@@ -471,5 +473,62 @@ func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
 	}
 	if !transcriptContains(got.transcript, "BTW response is still running") {
 		t.Fatalf("missing in-flight return guidance: %#v", got.transcript)
+	}
+}
+
+// Regression: entering plan mode then /btw used to copy permissionMode and the
+// shared update_plan state onto the side surface. Match /new and /resume: the
+// side conversation must exit plan mode and clear plan state, while the hidden
+// parent keeps plan mode for restore.
+func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "draft step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	side, _ := m.handleBTWCommand("")
+	if side.permissionMode == agent.PermissionModePlan {
+		t.Fatalf("BTW side kept plan mode: %s", side.permissionMode)
+	}
+	if side.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("BTW side permission mode = %s, want restored Ask", side.permissionMode)
+	}
+	if side.permissionModeBeforePlan != "" {
+		t.Fatalf("BTW side left permissionModeBeforePlan set: %q", side.permissionModeBeforePlan)
+	}
+	if !side.plan.isEmpty() {
+		t.Fatalf("BTW side leaked the parent plan panel: %+v", side.plan)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+	if side.btw.parent == nil {
+		t.Fatal("expected saved parent after /btw")
+	}
+	if side.btw.parent.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("hidden parent lost plan mode: %s", side.btw.parent.permissionMode)
+	}
+	if side.btw.parent.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("hidden parent lost permissionModeBeforePlan: %q", side.btw.parent.permissionModeBeforePlan)
+	}
+	if side.btw.parent.plan.isEmpty() {
+		t.Fatal("hidden parent lost its sticky plan panel")
+	}
+
+	returned, _ := side.leaveBTW()
+	if returned.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("returning from BTW lost parent plan mode: %s", returned.permissionMode)
+	}
+	if returned.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("returning from BTW lost permissionModeBeforePlan: %q", returned.permissionModeBeforePlan)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("returning from BTW lost the parent sticky plan panel")
 	}
 }
