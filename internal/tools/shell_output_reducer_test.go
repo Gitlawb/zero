@@ -154,7 +154,7 @@ func TestSelfManagedBudgetPreservesRawSpillWhenReducedOutputAlsoTruncates(t *tes
 
 func TestReduceCommandOutputCompactsRecognizedTestAndBuildNoise(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
-	for _, testCase := range commandReducerCorpus()[1:] {
+	for _, testCase := range commandReducerCorpus() {
 		t.Run(testCase.name, func(t *testing.T) {
 			result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": testCase.command}, Result{
 				Status: StatusOK,
@@ -204,6 +204,17 @@ func TestReduceCommandOutputPreservesFailureEvidence(t *testing.T) {
 	}
 	if result.Meta["command_output_reduced"] != "true" {
 		t.Fatalf("repetitive passing output was not reduced: %#v", result)
+	}
+	spillPath := result.Meta["spill_path"]
+	if spillPath == "" {
+		t.Fatal("reduced failure output did not retain a raw artifact")
+	}
+	spilled, err := os.ReadFile(spillPath)
+	if err != nil {
+		t.Fatalf("read raw artifact: %v", err)
+	}
+	if string(spilled) != original {
+		t.Fatal("raw artifact differs from original output")
 	}
 }
 

@@ -99,6 +99,9 @@ func TestCommandOutputReductionCorpusMetrics(t *testing.T) {
 	if totalRawTokens == 0 {
 		t.Fatal("empty reducer corpus")
 	}
+	if totalModelTokens >= totalRawTokens {
+		t.Fatalf("aggregate reducer output did not save tokens: raw=%d model=%d", totalRawTokens, totalModelTokens)
+	}
 	t.Logf("aggregate raw_tokens=%d model_tokens=%d reduction_pct=%d",
 		totalRawTokens, totalModelTokens, 100*(totalRawTokens-totalModelTokens)/totalRawTokens)
 }
