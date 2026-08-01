@@ -579,6 +579,16 @@ func TestDuneDarkANSI16Contrast(t *testing.T) {
 		}
 	}
 
+	// Selected-row band must stay distinct from the panel under 16-color
+	// (prior gray selBg collapsed to ANSI black with the panel).
+	if q(pal.selBg) == q(pal.panel) {
+		t.Errorf("dune-dark: selBg and panel collapse to the same ANSI 16-color (%s)", q(pal.selBg))
+	}
+	if sep := wcagRatio(t, q(pal.selBg), q(pal.panel)); sep < 1.10 {
+		t.Errorf("dune-dark: selBg vs panel separation %.2f < 1.10 after ANSI 16-color conversion (%s vs %s)",
+			sep, q(pal.selBg), q(pal.panel))
+	}
+
 	// Selected-row affordances that share the cool success/permission tokens.
 	for _, pair := range []struct{ name, fg, bg string }{
 		{"accent on selBg", pal.accent, pal.selBg},

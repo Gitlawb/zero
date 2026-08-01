@@ -480,19 +480,21 @@ var dunePalette = palette{
 // error map to ANSI white, which clears AA on those bands while keeping a
 // cool/warm tint in truecolor and 256-color.
 var duneDarkPalette = palette{
-	panel:     "#0e0e10", // Claude Code dark canvas — near-black
-	promptBg:  "#262626", // submitted user-prompt bubble
-	line:      "#242429", // borders/separators
-	line2:     "#414147",
-	ink:       "#ececee",
+	panel:    "#0e0e10", // Claude Code dark canvas — near-black
+	promptBg: "#262626", // submitted user-prompt bubble
+	line:     "#242429", // borders/separators
+	line2:    "#414147",
+	ink:      "#ececee",
 	// Gray ramp (ink > muted > faint > faintest > panel) is kept light enough
 	// that faintest maps to ANSI white / xterm #c6c6c6 and clears WCAG AA on the
 	// green add gutter under both 16-color and 256-color profiles. Prior cyan
 	// #55c6cd mapped to bright cyan at only 4.10:1 on ANSI green (short of AA).
-	muted:     "#e0e0e6", // secondary text
-	faint:     "#d4d4dc", // hints/metadata
-	faintest:  "#c8c8d0", // line numbers/separators (and diff gutters)
-	accent:    "#ff9628", // brand/claude rgb(255,150,40), adjusted for deuteranopia
+	muted:    "#e0e0e6", // secondary text
+	faint:    "#d4d4dc", // hints/metadata
+	faintest: "#c8c8d0", // line numbers/separators (and diff gutters)
+	// Warm sand-gold so TERM=xterm maps to ANSI yellow (brand #ff9628 maps to
+	// red at only 4.00:1 on the navy selection band under 16-color).
+	accent:    "#fff080",
 	green:     "#c8c8e9", // success — soft periwinkle (cool/daltonized). Maps to ANSI white so add-sign text stays AA (5.14:1) on the green add band under 16-color; saturated cyan/blue collapses to bright blue at 1.67:1
 	red:       "#ffc0c8", // error — soft pink. Maps to ANSI white so del-sign text stays AA (10.95:1) on the maroon del band under 16-color; bright red collapses to 2.74:1 on maroon
 	amber:     "#ffcc00", // warning rgb(255,204,0)
@@ -504,13 +506,16 @@ var duneDarkPalette = palette{
 	addBgWord: "#007400", // word-level added span — quantizes to xterm green #008700, distinct from both addBg's #005f00 and delBgWord's red
 	delBgWord: "#740000", // word-level removed span — quantizes to xterm red #870000 (see addBgWord)
 	permBg:    "#1c1915",
-	selBg:     "#262626", // selection — dark gray, distinct from panel (>= 1.10 contrast after xterm-256 quantization), AA with faint/faintest
-	addInk:    "#f0f5d2", // changed-word text — lightened so it still clears AA (4.60:1) against addBgWord's xterm-256 quantized #008700 (the original #bdeed7 fell to 4.06:1); 16-color maps to bright yellow (4.78:1 on ANSI green)
-	delInk:    "#fff0f0", // changed-word text — near-white pink maps to ANSI white so word spans stay AA on maroon under 16-color (prior #f2c4c4 -> bright red at 2.74:1)
-	onAccent:  "#000000",
-	cardRun:   "#3399ff", // success blue
-	cardErr:   "#ff6666", // error
-	cardPerm:  "#ffcc00", // warning
+	// Near-black grays collapse to ANSI black with panel under TERM=xterm,
+	// erasing the full-row highlight. Deep indigo maps to navy (#000080) in
+	// 16-color and #000087 in 256-color, staying distinct from panel.
+	selBg:    "#25257a",
+	addInk:   "#f0f5d2", // changed-word text — lightened so it still clears AA (4.60:1) against addBgWord's xterm-256 quantized #008700 (the original #bdeed7 fell to 4.06:1); 16-color maps to bright yellow (4.78:1 on ANSI green)
+	delInk:   "#fff0f0", // changed-word text — near-white pink maps to ANSI white so word spans stay AA on maroon under 16-color (prior #f2c4c4 -> bright red at 2.74:1)
+	onAccent: "#000000",
+	cardRun:  "#3399ff", // success blue
+	cardErr:  "#ff6666", // error
+	cardPerm: "#ffcc00", // warning
 }
 
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme
