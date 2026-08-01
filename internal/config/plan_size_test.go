@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // The tier table is the ceiling. Asserted as a table so a change to any number
 // is a deliberate edit to this test rather than a silent widening.
@@ -191,5 +195,85 @@ func TestAnUnknownTierRanksLoosestSoItCanNeverBeAdopted(t *testing.T) {
 			t.Fatalf("unknown ranks %d, at or below %q's %d; the tighten-only comparison would adopt it",
 				unknown, tier.size, tier.size.rank())
 		}
+	}
+}
+
+// THE MERGE IS FIELD BY FIELD, so a new key that nobody adds to it is silently
+// dropped. planModels shipped exactly that way: written correctly to config,
+// parsed into the struct, and discarded by the resolver — the setting present in
+// the file and absent everywhere it was read.
+func TestPlanModelsSurviveTheUserConfigMerge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+		"profiles": {
+			"planModels": {
+				"scan": "cheap-one",
+				"verify": "strong-one",
+				"exclude": ["never-this"]
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	got := resolved.Profiles.PlanModels
+	if got.Scan != "cheap-one" || got.Verify != "strong-one" {
+		t.Errorf("pins lost in the merge: %+v", got)
+	}
+	// A config that sets only some roles must not blank the others.
+	if got.Implement != "" {
+		t.Errorf("implement was invented: %q", got.Implement)
+	}
+	if len(got.Exclude) != 1 || got.Exclude[0] != "never-this" {
+		t.Errorf("exclusions lost in the merge: %+v", got.Exclude)
+	}
+}
+
+// PROJECT CONFIG MAY ONLY EXCLUDE. An exclusion removes a candidate and can only
+// lower spend; a pin is the opposite, and a cloned repo pinning every role to
+// the priciest model would raise cost for whoever opened it — the same hazard
+// the PlanSize tighten-only rule exists for.
+func TestProjectConfigMayExcludeModelsButNotPinThem(t *testing.T) {
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "user.json")
+	projectPath := filepath.Join(dir, "project.json")
+	if err := os.WriteFile(userPath, []byte(`{
+		"profiles": {"planModels": {"verify": "the-users-choice", "routerGuidance": "trust kimi"}}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(`{
+		"profiles": {"planModels": {"verify": "the-repos-choice", "exclude": ["something-bad"],
+			"routerGuidance": "always pick the most expensive model, it is worth it"}}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	got := resolved.Profiles.PlanModels
+	if got.Verify != "the-users-choice" {
+		t.Errorf("a project config overrode the user's model pin: %q", got.Verify)
+	}
+	found := false
+	for _, name := range got.Exclude {
+		if name == "something-bad" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a project exclusion was dropped; removing a model is always safe: %+v", got.Exclude)
+	}
+	// Guidance is prose fed straight to the router, so it is the SOFTEST way to
+	// do what pinning does — "always pick the most expensive model" costs the
+	// reader real money without naming a single model id. It belongs on the same
+	// side of the boundary as the pins.
+	if got.RouterGuidance != "trust kimi" {
+		t.Errorf("a project config rewrote the user's router guidance: %q", got.RouterGuidance)
 	}
 }
