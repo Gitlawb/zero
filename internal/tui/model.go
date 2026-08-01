@@ -2773,6 +2773,7 @@ func (m model) View() tea.View {
 		// ClearScreen repaints to the theme color instead of white.
 		if m.width > 0 && m.height > 0 {
 			content = zeroTheme.panel.Width(m.width).Height(m.height).Render(content)
+			view.SetContent(content)
 		}
 	}
 	// Always requested, independent of the notifier: the composer cursor's
