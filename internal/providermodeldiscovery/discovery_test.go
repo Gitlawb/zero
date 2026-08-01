@@ -52,6 +52,126 @@ func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{
+		"data": [
+			{"id": "xiaomi/mimo-v2.5-pro", "name": "MiMo V2.5-Pro", "context_window": 262144},
+			{"id": "nvidia/nemotron-3-ultra:free", "name": "Nemotron free", "context_length": 128000, "is_free": true}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %#v, want 2", models)
+	}
+	if models[1].ID != "nvidia/nemotron-3-ultra:free" {
+		// sorted by id
+		if models[0].ID != "nvidia/nemotron-3-ultra:free" {
+			t.Fatalf("models = %#v", models)
+		}
+	}
+	byID := map[string]Model{}
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+	if byID["xiaomi/mimo-v2.5-pro"].ContextWindow != 262144 {
+		t.Fatalf("mimo context = %d", byID["xiaomi/mimo-v2.5-pro"].ContextWindow)
+	}
+	if !strings.Contains(byID["nvidia/nemotron-3-ultra:free"].Description, "free") {
+		t.Fatalf("free model description = %q", byID["nvidia/nemotron-3-ultra:free"].Description)
+	}
+}
+
+func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"auto","name":"Auto (smart routing)"},
+			{"id":"xiaomi/mimo-v2.5-pro","name":"MiMo V2.5-Pro","context_window":262144},
+			{"id":"live-only-model","name":"Live Only","context_window":64000}
+		]}`))
+	}))
+	defer server.Close()
+
+	provider := providercatalog.Descriptor{
+		ID:             "gitlawb-opengateway",
+		Transport:      providercatalog.TransportOpenAICompat,
+		DefaultBaseURL: server.URL + "/v1",
+		RequiresAuth:   true,
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID:    "gitlawb-opengateway",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		// No API key: public live catalog must still load.
+	}, Options{
+		HTTPClient:     server.Client(),
+		OpenGatewayURL: server.URL + "/v1/models",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog: %v", err)
+	}
+	got := strings.Join(modelIDs(models), ",")
+	if !strings.Contains(got, "auto") || !strings.Contains(got, "xiaomi/mimo-v2.5-pro") || !strings.Contains(got, "live-only-model") {
+		t.Fatalf("models = %q, want auto + mimo + live-only", got)
+	}
+	for _, model := range models {
+		if model.ID == "xiaomi/mimo-v2.5-pro" && model.ContextWindow != 262144 {
+			t.Fatalf("mimo metadata = %#v", model)
+		}
+	}
+}
+
+func TestDiscoverCatalogOpenRouterKeepsLiveOnlyModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/models", "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"openai/gpt-4.1","name":"GPT-4.1","context_length":1048576,"supported_parameters":["tools"]},
+				{"id":"anthropic/claude-sonnet-4.5","name":"Claude Sonnet 4.5","context_length":200000,"supported_parameters":["tools","reasoning"]},
+				{"id":"text-embedding-3-large","name":"Embedding"}
+			]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := providercatalog.Descriptor{
+		ID:             "openrouter",
+		Transport:      providercatalog.TransportOpenAICompat,
+		DefaultBaseURL: server.URL + "/api/v1",
+		RequiresAuth:   true,
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID:    "openrouter",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/api/v1",
+		APIKey:       "sk-or-test",
+	}, Options{
+		HTTPClient:    server.Client(),
+		OpenRouterURL: server.URL + "/api/v1/models",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog: %v", err)
+	}
+	got := strings.Join(modelIDs(models), ",")
+	if !strings.Contains(got, "openai/gpt-4.1") || !strings.Contains(got, "anthropic/claude-sonnet-4.5") {
+		t.Fatalf("models = %q, want live openrouter coding models", got)
+	}
+	if strings.Contains(got, "text-embedding-3-large") {
+		t.Fatalf("models = %q, embedding model should be filtered", got)
+	}
+	for _, model := range models {
+		if model.ID == "openai/gpt-4.1" && model.ContextWindow != 1048576 {
+			t.Fatalf("gpt-4.1 metadata = %#v, want live context window", model)
+		}
+	}
+}
+
 func TestDiscoverChatGPTModelsUsesOAuthAndCodexHeaders(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package providermodelcatalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,24 +16,27 @@ import (
 )
 
 const (
-	DefaultModelsDevURL = "https://models.dev/api.json"
-	modelsDevSource     = "models.dev"
-	openGatewaySource   = "opengateway"
+	DefaultModelsDevURL   = "https://models.dev/api.json"
+	defaultOpenGatewayURL = "https://opengateway.gitlawb.com/v1/models"
+	defaultOpenRouterURL  = "https://openrouter.ai/api/v1/models"
+	modelsDevSource       = "models.dev"
+	openGatewaySource     = "opengateway"
+	openRouterSource      = "openrouter"
 )
 
 type FetchOptions struct {
 	HTTPClient     *http.Client
 	ModelsDevURL   string
 	OpenGatewayURL string
+	OpenRouterURL  string
 }
 
 func FetchRemote(ctx context.Context, provider providercatalog.Descriptor, options FetchOptions) ([]Model, error) {
-	if provider.ID == "gitlawb-opengateway" {
-		models, err := FetchOpenGateway(ctx, defaultedOpenGatewayURL(provider, options.OpenGatewayURL), options)
-		if err != nil {
-			return nil, err
-		}
-		return models, nil
+	switch providercatalog.NormalizeID(provider.ID) {
+	case "gitlawb-opengateway":
+		return FetchOpenGateway(ctx, defaultedOpenGatewayURL(provider, options.OpenGatewayURL), options)
+	case "openrouter":
+		return FetchOpenRouter(ctx, defaultedOpenRouterURL(provider, options.OpenRouterURL), options)
 	}
 
 	providerID := ModelsDevProviderID(provider)
@@ -62,6 +66,17 @@ func FetchOpenGateway(ctx context.Context, endpoint string, options FetchOptions
 	return ParseOpenGatewayCatalog(body)
 }
 
+// FetchOpenRouter loads OpenRouter's public live model list (GET /api/v1/models).
+// Auth is optional for listing; callers may still attach a key for account-scoped
+// probes via the live discovery path.
+func FetchOpenRouter(ctx context.Context, endpoint string, options FetchOptions) ([]Model, error) {
+	body, err := fetchJSON(ctx, endpoint, options.HTTPClient)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOpenRouterCatalog(body)
+}
+
 func ParseModelsDevProvider(body []byte, providerID string) ([]Model, error) {
 	var payload map[string]struct {
 		Models map[string]remoteModel `json:"models"`
@@ -89,24 +104,25 @@ func ParseModelsDevProvider(body []byte, providerID string) ([]Model, error) {
 	return models, nil
 }
 
+// ParseOpenGatewayCatalog parses OpenGateway's live GET /v1/models payload (or the
+// older {models:[...]} shape). The gateway already curates what it exposes, so
+// every non-empty id is accepted rather than applying the coding-model heuristic.
 func ParseOpenGatewayCatalog(body []byte) ([]Model, error) {
-	var payload struct {
-		Models []remoteModel `json:"models"`
-		Data   []remoteModel `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	items, err := parseOpenAIStyleModelList(body)
+	if err != nil {
 		return nil, fmt.Errorf("decode OpenGateway catalog: %w", err)
-	}
-	items := payload.Models
-	if len(items) == 0 {
-		items = payload.Data
 	}
 	models := make([]Model, 0, len(items))
 	for _, item := range items {
 		model := item.toModel("", openGatewaySource)
-		if model.ID == "" || !IsCodingModel(model) {
+		if model.ID == "" {
 			continue
 		}
+		// Drop only clearly non-coding ids if a gateway ever lists them.
+		if IsKnownNonCodingModelID(model.ID) {
+			continue
+		}
+		model = annotateFreeModel(model, item)
 		models = append(models, model)
 	}
 	sortModels(models)
@@ -114,6 +130,43 @@ func ParseOpenGatewayCatalog(body []byte) ([]Model, error) {
 		return nil, fmt.Errorf("OpenGateway catalog returned no models")
 	}
 	return models, nil
+}
+
+// ParseOpenRouterCatalog parses OpenRouter's public GET /api/v1/models list and
+// keeps coding-capable entries (tools, reasoning, or coding-like ids).
+func ParseOpenRouterCatalog(body []byte) ([]Model, error) {
+	items, err := parseOpenAIStyleModelList(body)
+	if err != nil {
+		return nil, fmt.Errorf("decode OpenRouter catalog: %w", err)
+	}
+	models := make([]Model, 0, len(items))
+	for _, item := range items {
+		model := item.toModel("", openRouterSource)
+		if model.ID == "" || !IsCodingModel(model) {
+			continue
+		}
+		model = annotateFreeModel(model, item)
+		models = append(models, model)
+	}
+	sortModels(models)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("OpenRouter catalog returned no models")
+	}
+	return models, nil
+}
+
+func parseOpenAIStyleModelList(body []byte) ([]remoteModel, error) {
+	var payload struct {
+		Models []remoteModel `json:"models"`
+		Data   []remoteModel `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Models) > 0 {
+		return payload.Models, nil
+	}
+	return payload.Data, nil
 }
 
 func ModelsDevProviderID(provider providercatalog.Descriptor) string {
@@ -139,22 +192,41 @@ func ModelsDevProviderID(provider providercatalog.Descriptor) string {
 	}
 }
 
+// PublicLiveCatalog reports whether the provider publishes a public live model
+// list that Zero should prefer over third-party catalogs (models.dev) and that
+// can be fetched without credentials.
+func PublicLiveCatalog(providerID string) bool {
+	switch providercatalog.NormalizeID(providerID) {
+	case "openrouter", "gitlawb-opengateway":
+		return true
+	default:
+		return false
+	}
+}
+
 type remoteModel struct {
-	ID                 string           `json:"id"`
-	Name               string           `json:"name"`
-	Description        string           `json:"description"`
-	ContextWindow      int              `json:"context_window"`
-	ContextWindowCamel int              `json:"contextWindow"`
-	ToolCall           bool             `json:"tool_call"`
-	ToolCallCamel      bool             `json:"toolCall"`
-	Tools              bool             `json:"tools"`
-	Reasoning          bool             `json:"reasoning"`
-	InputCost          float64          `json:"input_cost"`
-	OutputCost         float64          `json:"output_cost"`
-	Tags               []string         `json:"tags"`
-	Limit              remoteLimit      `json:"limit"`
-	Cost               remoteCost       `json:"cost"`
-	Modalities         remoteModalities `json:"modalities"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	ContextWindow      int    `json:"context_window"`
+	ContextWindowCamel int    `json:"contextWindow"`
+	ContextLength      int    `json:"context_length"`
+	MaxContextLength   int    `json:"max_context_length"`
+	ToolCall           bool   `json:"tool_call"`
+	ToolCallCamel      bool   `json:"toolCall"`
+	Tools              bool   `json:"tools"`
+	// ReasoningRaw accepts both a boolean (models.dev) and OpenRouter's object form.
+	ReasoningRaw        json.RawMessage    `json:"reasoning"`
+	Free                bool               `json:"free"`
+	IsFree              bool               `json:"is_free"`
+	InputCost           float64            `json:"input_cost"`
+	OutputCost          float64            `json:"output_cost"`
+	Tags                []string           `json:"tags"`
+	SupportedParameters []string           `json:"supported_parameters"`
+	Limit               remoteLimit        `json:"limit"`
+	Cost                remoteCost         `json:"cost"`
+	Modalities          remoteModalities   `json:"modalities"`
+	Architecture        remoteArchitecture `json:"architecture"`
 }
 
 type remoteLimit struct {
@@ -174,24 +246,93 @@ type remoteModalities struct {
 	Output []string `json:"output"`
 }
 
+// OpenRouter nests modalities under architecture; OpenGateway uses flat fields.
+type remoteArchitecture struct {
+	InputModalities  []string `json:"input_modalities"`
+	OutputModalities []string `json:"output_modalities"`
+}
+
+type remoteReasoningInfo struct {
+	Mandatory      bool     `json:"mandatory"`
+	DefaultEnabled bool     `json:"default_enabled"`
+	Supported      []string `json:"supported_efforts"`
+}
+
 func (model remoteModel) toModel(key string, source string) Model {
 	id := firstNonEmpty(model.ID, key)
-	contextWindow := firstPositive(model.ContextWindow, model.ContextWindowCamel, model.Limit.Context)
+	contextWindow := firstPositive(
+		model.ContextWindow,
+		model.ContextWindowCamel,
+		model.ContextLength,
+		model.MaxContextLength,
+		model.Limit.Context,
+	)
 	inputCost := firstPositiveFloat(model.InputCost, model.Cost.Input)
 	outputCost := firstPositiveFloat(model.OutputCost, model.Cost.Output)
+	inputModalities := cleanStrings(model.Modalities.Input)
+	if len(inputModalities) == 0 {
+		inputModalities = cleanStrings(model.Architecture.InputModalities)
+	}
+	outputModalities := cleanStrings(model.Modalities.Output)
+	if len(outputModalities) == 0 {
+		outputModalities = cleanStrings(model.Architecture.OutputModalities)
+	}
+	toolCall := model.ToolCall || model.ToolCallCamel || model.Tools || containsFold(model.SupportedParameters, "tools")
+	reasoning := model.supportsReasoning() ||
+		containsFold(model.SupportedParameters, "reasoning") ||
+		containsFold(model.SupportedParameters, "reasoning_effort") ||
+		containsFold(model.SupportedParameters, "include_reasoning")
+
+	// Prefer the short display name for aggregator catalogs (OpenRouter's
+	// description field is multi-sentence marketing copy). models.dev and
+	// OpenGateway still prefer an explicit description when present.
+	description := firstNonEmpty(model.Description, model.Name)
+	if source == openRouterSource {
+		description = firstNonEmpty(model.Name, model.Description)
+	}
+
 	return Model{
 		ID:               strings.TrimSpace(id),
-		Description:      firstNonEmpty(model.Description, model.Name),
+		Description:      description,
 		ContextWindow:    contextWindow,
-		ToolCall:         model.ToolCall || model.ToolCallCamel || model.Tools,
-		Reasoning:        model.Reasoning,
-		InputModalities:  cleanStrings(model.Modalities.Input),
-		OutputModalities: cleanStrings(model.Modalities.Output),
+		ToolCall:         toolCall,
+		Reasoning:        reasoning,
+		InputModalities:  inputModalities,
+		OutputModalities: outputModalities,
 		InputCost:        inputCost,
 		OutputCost:       outputCost,
 		Tags:             cleanStrings(model.Tags),
 		Source:           source,
 	}
+}
+
+func (model remoteModel) supportsReasoning() bool {
+	raw := bytes.TrimSpace(model.ReasoningRaw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var flag bool
+	if err := json.Unmarshal(raw, &flag); err == nil {
+		return flag
+	}
+	var info remoteReasoningInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return false
+	}
+	return info.Mandatory || info.DefaultEnabled || len(info.Supported) > 0
+}
+
+func annotateFreeModel(model Model, raw remoteModel) Model {
+	if !raw.Free && !raw.IsFree && !strings.HasSuffix(strings.ToLower(model.ID), ":free") {
+		return model
+	}
+	if !containsFold(model.Tags, "free") {
+		model.Tags = append(append([]string{}, model.Tags...), "free")
+	}
+	if model.Description != "" && !strings.Contains(strings.ToLower(model.Description), "free") {
+		model.Description = model.Description + " (free)"
+	}
+	return model
 }
 
 func fetchJSON(ctx context.Context, endpoint string, client *http.Client) ([]byte, error) {
@@ -213,6 +354,7 @@ func fetchJSON(ctx context.Context, endpoint string, client *http.Client) ([]byt
 		return nil, err
 	}
 	defer response.Body.Close()
+	// OpenRouter's full catalog is ~0.5MB today; keep headroom for growth.
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
 		return nil, err
@@ -227,11 +369,27 @@ func defaultedOpenGatewayURL(provider providercatalog.Descriptor, override strin
 	if override = strings.TrimSpace(override); override != "" {
 		return override
 	}
-	parsed, err := url.Parse(provider.DefaultBaseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "https://opengateway.gitlawb.com/zero/models.json"
+	return defaultedOpenAIModelsURL(provider.DefaultBaseURL, defaultOpenGatewayURL)
+}
+
+func defaultedOpenRouterURL(provider providercatalog.Descriptor, override string) string {
+	if override = strings.TrimSpace(override); override != "" {
+		return override
 	}
-	return parsed.Scheme + "://" + parsed.Host + "/zero/models.json"
+	return defaultedOpenAIModelsURL(provider.DefaultBaseURL, defaultOpenRouterURL)
+}
+
+// defaultedOpenAIModelsURL appends /models to an OpenAI-compatible base URL
+// (e.g. https://host/v1 → https://host/v1/models).
+func defaultedOpenAIModelsURL(baseURL string, fallback string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fallback
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/models"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func sortModels(models []Model) {

@@ -48,13 +48,25 @@ func TestModelMatchesProvider(t *testing.T) {
 }
 
 func TestDefaultedOpenGatewayURL(t *testing.T) {
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{}, " https://x/models.json "); got != "https://x/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{}, " https://x/v1/models "); got != "https://x/v1/models" {
 		t.Fatalf("explicit override = %q, want trimmed override", got)
 	}
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://gw.example.com/v1"}, ""); got != "https://gw.example.com/zero/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://gw.example.com/v1"}, ""); got != "https://gw.example.com/v1/models" {
 		t.Fatalf("derived = %q", got)
 	}
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://opengateway.gitlawb.com/zero/models.json" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://opengateway.gitlawb.com/v1/models" {
+		t.Fatalf("fallback = %q", got)
+	}
+}
+
+func TestDefaultedOpenRouterURL(t *testing.T) {
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{}, " https://or.example/api/v1/models "); got != "https://or.example/api/v1/models" {
+		t.Fatalf("explicit override = %q, want trimmed override", got)
+	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "https://openrouter.ai/api/v1"}, ""); got != "https://openrouter.ai/api/v1/models" {
+		t.Fatalf("derived = %q", got)
+	}
+	if got := defaultedOpenRouterURL(providercatalog.Descriptor{DefaultBaseURL: "bad"}, ""); got != "https://openrouter.ai/api/v1/models" {
 		t.Fatalf("fallback = %q", got)
 	}
 }
@@ -131,6 +143,25 @@ func TestFetchModelsDevAndOpenGatewayOverHTTP(t *testing.T) {
 	}
 	if !containsModelID(routed, "claude-coder") {
 		t.Fatalf("FetchRemote models = %#v, want claude-coder", routed)
+	}
+
+	openrouter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-4o","name":"GPT-4o","context_length":128000,"supported_parameters":["tools"]}]}`))
+	}))
+	defer openrouter.Close()
+	orModels, err := FetchOpenRouter(context.Background(), openrouter.URL, FetchOptions{HTTPClient: openrouter.Client()})
+	if err != nil {
+		t.Fatalf("FetchOpenRouter error: %v", err)
+	}
+	if !containsModelID(orModels, "openai/gpt-4o") {
+		t.Fatalf("FetchOpenRouter models = %#v, want openai/gpt-4o", orModels)
+	}
+	routedOR, err := FetchRemote(context.Background(), providercatalog.Descriptor{ID: "openrouter"}, FetchOptions{HTTPClient: openrouter.Client(), OpenRouterURL: openrouter.URL})
+	if err != nil {
+		t.Fatalf("FetchRemote openrouter error: %v", err)
+	}
+	if !containsModelID(routedOR, "openai/gpt-4o") {
+		t.Fatalf("FetchRemote openrouter models = %#v, want openai/gpt-4o", routedOR)
 	}
 }
 

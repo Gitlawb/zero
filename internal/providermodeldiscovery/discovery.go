@@ -39,6 +39,7 @@ type Options struct {
 	HTTPClient           *http.Client
 	ModelsDevURL         string
 	OpenGatewayURL       string
+	OpenRouterURL        string
 	OAuthResolver        providerio.TokenResolver
 	CodexAccountResolver openai.CodexAccountResolver
 	UserAgent            string
@@ -46,7 +47,11 @@ type Options struct {
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
 	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
-	canProbeProvider := modelDiscoveryAllowed(profile) && (!provider.RequiresAuth || discoveryHasCredential(profile))
+	// OpenRouter and OpenGateway publish public live model lists. Probe them even
+	// without credentials so the picker stays current before a key is entered.
+	canProbeProvider := modelDiscoveryAllowed(profile) && (!provider.RequiresAuth ||
+		discoveryHasCredential(profile) ||
+		publicLiveCatalogProvider(provider, profile))
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
@@ -68,6 +73,11 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 		return nil, catalogErr
 	}
 	return nil, fmt.Errorf("no provider models discovered")
+}
+
+func publicLiveCatalogProvider(provider providercatalog.Descriptor, profile config.ProviderProfile) bool {
+	return providermodelcatalog.PublicLiveCatalog(provider.ID) ||
+		providermodelcatalog.PublicLiveCatalog(profile.CatalogID)
 }
 
 // discoveryHasCredential reports whether the profile carries a usable credential
@@ -248,7 +258,8 @@ func fetchProviderModels(ctx context.Context, endpoint string, profile config.Pr
 	}
 	defer response.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	// OpenRouter's full catalog is ~0.5MB today; keep headroom for growth.
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
 		return nil, redactDiscoveryError(err, profile)
 	}
@@ -317,9 +328,16 @@ func anthropicModelsEndpoint(baseURL string) (string, error) {
 
 type modelsResponse struct {
 	Data []struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-		Name        string `json:"name"`
+		ID               string `json:"id"`
+		DisplayName      string `json:"display_name"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		ContextWindow    int    `json:"context_window"`
+		ContextWindowAlt int    `json:"contextWindow"`
+		ContextLength    int    `json:"context_length"`
+		MaxContextLength int    `json:"max_context_length"`
+		Free             bool   `json:"free"`
+		IsFree           bool   `json:"is_free"`
 	} `json:"data"`
 }
 
@@ -336,11 +354,28 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			continue
 		}
 		seen[id] = true
-		description := strings.TrimSpace(item.DisplayName)
-		if description == "" {
-			description = strings.TrimSpace(item.Name)
+		description := firstNonEmptyDiscovery(
+			item.DisplayName,
+			item.Name,
+			item.Description,
+		)
+		if (item.Free || item.IsFree || strings.HasSuffix(strings.ToLower(id), ":free")) &&
+			description != "" &&
+			!strings.Contains(strings.ToLower(description), "free") {
+			description = description + " (free)"
 		}
-		models = append(models, Model{ID: id, Description: description})
+		contextWindow := firstPositiveDiscovery(
+			item.ContextWindow,
+			item.ContextWindowAlt,
+			item.ContextLength,
+			item.MaxContextLength,
+		)
+		models = append(models, Model{
+			ID:            id,
+			Description:   description,
+			ContextWindow: contextWindow,
+			Source:        "live",
+		})
 	}
 	sort.SliceStable(models, func(i, j int) bool {
 		return models[i].ID < models[j].ID
@@ -356,6 +391,7 @@ func fetchCatalogModels(ctx context.Context, provider providercatalog.Descriptor
 		HTTPClient:     options.HTTPClient,
 		ModelsDevURL:   options.ModelsDevURL,
 		OpenGatewayURL: options.OpenGatewayURL,
+		OpenRouterURL:  options.OpenRouterURL,
 	})
 	if err != nil {
 		return nil, err
@@ -389,26 +425,68 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 		byID[model.ID] = model
 	}
 	hasCatalog := len(byID) > 0
+	// Aggregators publish the live list as the source of truth. Keep live-only
+	// ids even when a remote catalog also loaded, instead of intersecting.
+	preferLive := providermodelcatalog.PublicLiveCatalog(provider.ID)
 	result := make([]Model, 0, len(liveModels))
 	for _, live := range liveModels {
 		if catalog, ok := byID[live.ID]; ok {
-			if !providermodelcatalog.IsCodingModel(catalogModelFromDiscovery(catalog)) {
+			if preferLive {
+				if providermodelcatalog.IsKnownNonCodingModelID(catalog.ID) {
+					continue
+				}
+			} else if !providermodelcatalog.IsCodingModel(catalogModelFromDiscovery(catalog)) {
 				continue
+			}
+			// Prefer catalog metadata (tools, cost) but fill gaps from live.
+			if catalog.ContextWindow == 0 && live.ContextWindow > 0 {
+				catalog.ContextWindow = live.ContextWindow
+			}
+			if strings.TrimSpace(catalog.Description) == "" && strings.TrimSpace(live.Description) != "" {
+				catalog.Description = live.Description
 			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")
 			result = append(result, catalog)
 			continue
 		}
-		if hasCatalog {
+		if hasCatalog && !preferLive {
 			continue
 		}
-		if !liveModelAllowedWithoutCatalog(provider, live.ID) {
+		if preferLive {
+			if providermodelcatalog.IsKnownNonCodingModelID(live.ID) {
+				continue
+			}
+			// OpenRouter still applies the coding heuristic; OpenGateway trusts
+			// whatever the gateway lists (small, operator-curated set).
+			if providercatalog.NormalizeID(provider.ID) == "openrouter" &&
+				!liveModelAllowedWithoutCatalog(provider, live.ID) {
+				continue
+			}
+		} else if !liveModelAllowedWithoutCatalog(provider, live.ID) {
 			continue
 		}
 		live.Source = firstDiscoverySource(live.Source, "live")
 		result = append(result, live)
 	}
 	return result
+}
+
+func firstNonEmptyDiscovery(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstPositiveDiscovery(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func liveModelAllowedWithoutCatalog(provider providercatalog.Descriptor, id string) bool {
