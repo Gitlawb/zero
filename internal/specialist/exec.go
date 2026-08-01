@@ -750,7 +750,25 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		// work that was billed: a plan's budget was never decremented for a failed
 		// task and its total under-counted every one. Spend does not become
 		// hypothetical because the task failed.
+		// AND WHAT IT WROTE BEFORE IT DIED. summary.Text holds everything the
+		// child emitted, and this branch returned an empty Result — so a task
+		// stopped at its token budget handed on NOTHING, however much it had
+		// already found.
+		//
+		// That is what turned a cut-short task into a lost one: four finders were
+		// stopped on budget with real partial findings, and every dependent was
+		// skipped because there was nothing to pass along. The work was done and
+		// paid for; discarding it at this boundary is the only reason it was lost.
+		//
+		// Status stays StatusError — the task did not succeed, and a caller must
+		// not read this as a finished answer. It is evidence, labelled as partial
+		// by whoever passes it on.
+		partial := strings.TrimSpace(summary.Text)
 		return ExecResult{
+			Result: tools.Result{
+				Status: tools.StatusError,
+				Output: partial,
+			},
 			SessionID:   built.SessionID,
 			TotalTokens: summary.Usage.EffectiveTotalTokens(),
 			ExitCode:    summary.ExitCode,

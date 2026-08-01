@@ -446,11 +446,12 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			continue
 		}
 
-		if blocker, blocked := firstFailedDependency(task, failed); blocked {
+		if missing, skip := unusableDependencies(task, results); skip {
 			result := TaskResult{
 				ID:      id,
 				Outcome: TaskSkippedDependency,
-				Err:     fmt.Sprintf("skipped: dependency %q did not succeed", blocker),
+				Err: fmt.Sprintf("skipped: no dependency produced anything to work from (%s)",
+					strings.Join(missing, ", ")),
 			}
 			results[id] = result
 			failed[id] = true // its own dependents are blocked too
@@ -785,15 +786,37 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 		return task.Prompt
 	}
 	var brief strings.Builder
+	var unfinished []string
 	remaining := dependencyBriefingTotal
 	for _, id := range task.DependsOn {
 		result, ok := results[id]
-		if !ok || result.Outcome != TaskSucceeded {
+		if !ok {
+			continue
+		}
+		// PARTIAL WORK IS STILL WORK. A dependency cut short at its budget was
+		// investigating right up to the moment it stopped, and what it wrote
+		// before then is real evidence. Discarding it is how four cancelled
+		// finders took a whole plan down with them while their findings sat
+		// unread in the results map.
+		//
+		// LABELLED, though, and that is not optional: a reader handed an
+		// incomplete answer as if it were finished will treat its silences as
+		// findings. Nothing was said about X becomes X is fine.
+		// CANCELLED, NOT MERELY UNSUCCESSFUL. A cancelled task was investigating
+		// when it was stopped, so what it wrote is evidence. A FAILED task ran
+		// and did not deliver: its output is a harness diagnostic or an answer
+		// already judged wrong, and passing that on as a finding would launder a
+		// failure into a source.
+		partial := result.Outcome == TaskCancelled
+		if result.Outcome != TaskSucceeded && !partial {
 			continue
 		}
 		output := strings.TrimSpace(result.Output)
 		if output == "" || remaining <= 0 {
 			continue
+		}
+		if partial {
+			unfinished = append(unfinished, id)
 		}
 		budget := dependencyBriefingPerTask
 		if budget > remaining {
@@ -804,7 +827,11 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 			output, truncated = output[:budget], true
 		}
 		remaining -= len(output)
-		fmt.Fprintf(&brief, "### Result of task %q\n%s\n", id, output)
+		heading := fmt.Sprintf("### Result of task %q", id)
+		if partial {
+			heading += " — INCOMPLETE, this task was stopped before it finished"
+		}
+		fmt.Fprintf(&brief, "%s\n%s\n", heading, output)
 		if truncated {
 			// SAID, not silent. A reader that cannot tell it was given part of an
 			// answer will treat the part as the whole.
@@ -815,11 +842,19 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 	if brief.Len() == 0 {
 		return task.Prompt
 	}
-	return "## What the tasks you depend on already found\n\n" +
-		brief.String() +
-		"Use this instead of rediscovering it. Verify anything you are about to rely on — " +
-		"a claim above is a previous task's conclusion, not established fact.\n\n" +
-		"## Your task\n\n" + task.Prompt
+	preamble := "## What the tasks you depend on already found\n\n"
+	closing := "Use this instead of rediscovering it. Verify anything you are about to rely on — " +
+		"a claim above is a previous task's conclusion, not established fact.\n\n"
+	if len(unfinished) > 0 {
+		// SAY IT TWICE, at the top and at the bottom, because this is the sentence
+		// that stops a partial answer being reported as a complete one.
+		preamble += "Some of these tasks were STOPPED BEFORE THEY FINISHED (" +
+			strings.Join(unfinished, ", ") + "). What they wrote is real, and what they did not " +
+			"reach is unknown — not absent.\n\n"
+		closing += "Say plainly in your answer which inputs were incomplete and what that leaves " +
+			"uncovered. An unfinished input's silence is not evidence of anything.\n\n"
+	}
+	return preamble + brief.String() + closing + "## Your task\n\n" + task.Prompt
 }
 
 // unmeteredWallBudget is the wall bound applied to a plan that asked for NO
@@ -915,6 +950,48 @@ func firstFailedDependency(task Task, failed map[string]bool) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// unusableDependencies reports the dependencies that produced NOTHING a
+// dependent could work from, and whether the task should be skipped entirely.
+//
+// SKIPPED ONLY WHEN EVERY DEPENDENCY CAME BACK EMPTY. It used to be skipped when
+// ANY did, and that cost a real run everything: four finder tasks were cut short
+// on budget, three of them holding substantial partial findings, and the verify,
+// sweep and synthesis tasks that depended on them were all skipped. Two runs,
+// 3.6 million tokens, and no report — while the evidence to write one sat in the
+// results map.
+//
+// A task with SOME evidence can still do useful work and say what it lacked; a
+// task with NONE cannot, and running it would produce a confident answer drawn
+// from nothing, which is worse than the gap. That is the line.
+//
+// Partial output from a cancelled dependency counts as evidence. A task stopped
+// at its budget was working right up to the moment it stopped, and what it wrote
+// before then is real — see withDependencyBriefing, which labels it as
+// incomplete so nobody mistakes it for a finished answer.
+func unusableDependencies(task Task, results map[string]TaskResult) (missing []string, skip bool) {
+	if len(task.DependsOn) == 0 {
+		return nil, false
+	}
+	usable := 0
+	for _, dep := range task.DependsOn {
+		result, ran := results[dep]
+		if ran && result.Outcome == TaskSucceeded {
+			usable++
+			continue
+		}
+		if ran && result.Outcome == TaskCancelled && strings.TrimSpace(result.Output) != "" {
+			// Cut short, but it wrote something before it was. A FAILED
+			// dependency does not count: it ran and did not deliver, and its
+			// output is a diagnostic rather than a finding.
+			usable++
+			continue
+		}
+		missing = append(missing, dep)
+	}
+	sort.Strings(missing)
+	return missing, usable == 0
 }
 
 // planToolGrant intersects a task's requested tools with the parent's grant.
