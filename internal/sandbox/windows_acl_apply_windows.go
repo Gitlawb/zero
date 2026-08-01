@@ -314,9 +314,9 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 // directory would break the tool that owns it rather than just mis-ACL it.
 func materializeWindowsACLTarget(path string, asFile bool) error {
 	if !asFile {
-		return os.MkdirAll(path, 0o700)
+		return makeWindowsACLDirChainNoFollow(path)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := makeWindowsACLDirChainNoFollow(filepath.Dir(path)); err != nil {
 		return err
 	}
 	handle, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -329,4 +329,50 @@ func materializeWindowsACLTarget(path string, asFile bool) error {
 		return err
 	}
 	return handle.Close()
+}
+
+// makeWindowsACLDirChainNoFollow is a reparse-safe os.MkdirAll. It walks up to
+// the deepest ancestor that already exists and verifies it no-follow; because
+// GetFinalPathNameByHandle answers for the whole resolved path, that one check
+// clears every ancestor above it too. Only then does it create the missing
+// components, one level at a time, re-verifying each immediately after creating
+// it so a component swapped for a junction mid-walk is caught before anything is
+// created underneath it.
+//
+// os.MkdirAll cannot be used here: it resolves ancestors, so a workspace owner
+// who turned .git into a junction before elevated setup ran got the target
+// CREATED outside the approved tree, and openWindowsACLTarget's reparse check
+// only rejected it afterwards — too late to un-create it, and the error path
+// removes only the final component, leaving every intermediate directory behind.
+func makeWindowsACLDirChainNoFollow(dir string) error {
+	cleaned := filepath.Clean(strings.TrimSpace(dir))
+	if cleaned == "" || cleaned == "." {
+		return fmt.Errorf("materialize windows ACL target: empty directory path %q", dir)
+	}
+	var missing []string
+	current := cleaned
+	for {
+		err := verifyWindowsACLPathComponentNotRedirected(current)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("materialize windows ACL target %s: no existing ancestor to anchor on", dir)
+		}
+		current = parent
+	}
+	for index := len(missing) - 1; index >= 0; index-- {
+		if err := os.Mkdir(missing[index], 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if err := verifyWindowsACLPathComponentNotRedirected(missing[index]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
