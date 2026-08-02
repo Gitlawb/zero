@@ -20,31 +20,52 @@ import (
 // stage_promote_windows_test.go, which exercise it through the staging handle the
 // production code uses rather than a loose pathname.
 
-func TestRenameWithRetrySucceedsImmediately(t *testing.T) {
+func TestRenameOpenFileWithRetrySucceedsImmediately(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
 	dst := filepath.Join(dir, "dst")
 	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
 		t.Fatalf("WriteFile src: %v", err)
 	}
+	file, err := openRecoveryCopy(src)
+	if err != nil {
+		t.Fatalf("openRecoveryCopy: %v", err)
+	}
+	defer func() { _ = file.Close() }()
 
-	if err := renameWithRetry(src, dst); err != nil {
-		t.Fatalf("renameWithRetry: %v", err)
+	if err := renameOpenFileWithRetry(file, dst); err != nil {
+		t.Fatalf("renameOpenFileWithRetry: %v", err)
 	}
 	if _, err := os.Stat(dst); err != nil {
 		t.Fatalf("expected dst to exist after rename: %v", err)
 	}
 }
 
-// A permanently-failing rename (source never appears) must exhaust its
-// retries and surface the underlying error, rather than retrying forever.
-func TestRenameWithRetryFailsAfterExhaustingAttempts(t *testing.T) {
+// A permanently-failing rename (the destination is held by a conflicting
+// exclusive handle for good) must exhaust its retries and surface the
+// underlying error, rather than retrying forever.
+func TestRenameOpenFileWithRetryFailsAfterExhaustingAttempts(t *testing.T) {
 	dir := t.TempDir()
-	missing := filepath.Join(dir, "does-not-exist")
+	src := filepath.Join(dir, "src")
 	dst := filepath.Join(dir, "dst")
+	for _, path := range []string{src, dst} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", path, err)
+		}
+	}
+	file, err := openRecoveryCopy(src)
+	if err != nil {
+		t.Fatalf("openRecoveryCopy: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+	blocker, err := openWithoutSharing(dst)
+	if err != nil {
+		t.Skipf("cannot hold the destination exclusively on this filesystem: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
 
-	if err := renameWithRetry(missing, dst); err == nil {
-		t.Fatal("expected renameWithRetry to fail for a source that never appears")
+	if err := renameOpenFileWithRetry(file, dst); err == nil {
+		t.Fatal("expected renameOpenFileWithRetry to fail against a permanently blocked destination")
 	}
 }
 
@@ -76,7 +97,7 @@ func TestRestoreOriginalBinaryFlagsPossibleTamperingWhenRestoreFails(t *testing.
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
 
-	restoreErr := restoreOriginalBinary(oldPath, targetPath)
+	restoreErr := restoreOriginalBinary(openRecoveryHandle(t, oldPath), oldPath, targetPath)
 	if restoreErr == nil {
 		t.Fatal("restoreOriginalBinary succeeded despite a conflicting exclusive lock on targetPath, want an error")
 	}
@@ -106,7 +127,11 @@ func TestRestoreOriginalBinaryMarksPreservedCopy(t *testing.T) {
 	}
 	defer func() { _ = blocker.Close() }()
 
-	err = restoreOriginalBinary(oldPath, targetPath)
+	recovery := openRecoveryHandle(t, oldPath)
+	err = restoreOriginalBinary(recovery, oldPath, targetPath)
+	// Release the handle promote would hold, so these assertions can read the
+	// files it was keeping unsubstitutable.
+	_ = recovery.Close()
 	if !errors.Is(err, ErrTargetPossiblyTampered) {
 		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
 	}
@@ -193,7 +218,11 @@ func TestMarkOldBinaryPreservedRemovesPartialMarkerBeforeRelocation(t *testing.T
 	t.Cleanup(func() { writeRecoveryMarker = originalWrite })
 	stubRandomStagingSuffix(t, "deadbeef")
 
-	err = restoreOriginalBinary(oldPath, targetPath)
+	recovery := openRecoveryHandle(t, oldPath)
+	err = restoreOriginalBinary(recovery, oldPath, targetPath)
+	// Release the handle promote would hold, so these assertions can read the
+	// files it was keeping unsubstitutable.
+	_ = recovery.Close()
 	if !errors.Is(err, ErrTargetPossiblyTampered) {
 		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
 	}
@@ -238,7 +267,11 @@ func TestRestoreOriginalBinaryKeepsRecoveryCopyWhenMarkingFails(t *testing.T) {
 	t.Cleanup(func() { markOldBinaryPreserved = originalMark })
 	stubRandomStagingSuffix(t, "deadbeef")
 
-	err = restoreOriginalBinary(oldPath, targetPath)
+	recovery := openRecoveryHandle(t, oldPath)
+	err = restoreOriginalBinary(recovery, oldPath, targetPath)
+	// Release the handle promote would hold, so these assertions can read the
+	// files it was keeping unsubstitutable.
+	_ = recovery.Close()
 	if !errors.Is(err, ErrTargetPossiblyTampered) {
 		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
 	}
@@ -287,11 +320,22 @@ func TestRestoreOriginalBinarySurfacesMarkerWriteFailure(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
 		t.Fatalf("WriteFile target: %v", err)
 	}
-	// An oldPath under a directory that does not exist: the restore rename fails
-	// (nothing to move) and so does the marker creation beside it.
-	oldPath := filepath.Join(dir, "missing-dir", "zero.exe.old")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	file := openRecoveryHandle(t, oldPath)
+	// Neither the restore nor the marker nor the relocation can succeed, so the
+	// recovery copy stays at oldPath and the operator must be pointed there.
+	originalMark := markOldBinaryPreserved
+	markOldBinaryPreserved = func(string) error { return errors.New("injected marker failure") }
+	t.Cleanup(func() { markOldBinaryPreserved = originalMark })
+	originalRename := renameRecoveryFileByHandle
+	renameRecoveryFileByHandle = func(*os.File, string) error { return errors.New("injected rename failure") }
+	t.Cleanup(func() { renameRecoveryFileByHandle = originalRename })
 
-	err := restoreOriginalBinary(oldPath, targetPath)
+	err := restoreOriginalBinary(file, oldPath, targetPath)
+	_ = file.Close()
 	if !errors.Is(err, ErrTargetPossiblyTampered) {
 		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
 	}
@@ -303,6 +347,9 @@ func TestRestoreOriginalBinarySurfacesMarkerWriteFailure(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "later update") {
 		t.Fatalf("error = %v, must not promise cleanup that no longer exists", err)
+	}
+	if got, readErr := os.ReadFile(oldPath); readErr != nil || string(got) != "known-good" {
+		t.Fatalf("recovery copy at %s = %q err=%v, want the last verified binary", oldPath, got, readErr)
 	}
 }
 
@@ -330,13 +377,74 @@ func TestKeepUnmarkedRecoveryCopyMovesTheOpenedObject(t *testing.T) {
 	}
 	t.Cleanup(func() { renameRecoveryFileByHandle = originalRename })
 
-	kept, err := keepUnmarkedRecoveryCopy(oldPath)
+	recovery := openRecoveryHandle(t, oldPath)
+	kept, err := keepUnmarkedRecoveryCopy(recovery, oldPath)
+	_ = recovery.Close()
 	if err != nil {
 		t.Fatalf("keepUnmarkedRecoveryCopy: %v", err)
 	}
 	if got, err := os.ReadFile(kept); err != nil || string(got) != "known-good" {
 		t.Fatalf("kept recovery = %q err=%v, want the verified object", got, err)
 	}
+}
+
+// TestRestoreOriginalBinaryNamesTheRelocationItCouldNotVerify covers the gap
+// jatmn flagged on the pathname restore and that the handle restore inherited:
+// when the relocation rename succeeds but the post-move verification does not,
+// oldPath has already been vacated, so an error naming oldPath sends the
+// operator to a path that no longer holds anything.
+func TestRestoreOriginalBinaryNamesTheRelocationItCouldNotVerify(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	oldPath := targetPath + ".old"
+	if err := os.WriteFile(targetPath, []byte("unverified"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatalf("WriteFile old binary: %v", err)
+	}
+	file := openRecoveryHandle(t, oldPath)
+	stubRandomStagingSuffix(t, "deadbeef")
+	originalMark := markOldBinaryPreserved
+	markOldBinaryPreserved = func(string) error { return errors.New("injected marker failure") }
+	t.Cleanup(func() { markOldBinaryPreserved = originalMark })
+
+	kept := oldPath + ".deadbeef.recovery"
+	elsewhere := oldPath + ".deadbeef.elsewhere"
+	originalRename := renameRecoveryFileByHandle
+	renameRecoveryFileByHandle = func(handle *os.File, destination string) error {
+		if destination != kept {
+			return errors.New("injected restore failure")
+		}
+		// The rename reports success but lands somewhere else, so kept is
+		// vacated and verification there fails.
+		return renameOpenFile(handle, elsewhere)
+	}
+	t.Cleanup(func() { renameRecoveryFileByHandle = originalRename })
+
+	err := restoreOriginalBinary(file, oldPath, targetPath)
+	if !errors.Is(err, ErrTargetPossiblyTampered) {
+		t.Fatalf("restore error = %v, want ErrTargetPossiblyTampered", err)
+	}
+	if !strings.Contains(err.Error(), kept) {
+		t.Fatalf("error = %v, want it to name the relocation path %s", err, kept)
+	}
+	if _, statErr := os.Lstat(oldPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("oldPath still exists after the relocation rename: %v", statErr)
+	}
+}
+
+// openRecoveryHandle opens path the way promote holds the binary it moved
+// aside: with delete access and no delete sharing, so the object cannot be
+// substituted while the restore path works with it.
+func openRecoveryHandle(t *testing.T, path string) *os.File {
+	t.Helper()
+	file, err := openRecoveryCopy(path)
+	if err != nil {
+		t.Fatalf("openRecoveryCopy %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file
 }
 
 // openWithoutSharing opens an existing file denying every share mode, so a

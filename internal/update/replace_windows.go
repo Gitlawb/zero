@@ -22,10 +22,16 @@ const (
 	restoreRenameRetryDelay    = 100 * time.Millisecond
 )
 
-func renameWithRetry(oldPath string, newPath string) error {
+// renameOpenFileWithRetry renames the object file refers to onto newPath,
+// retrying while something transient (an on-access scanner, a stale handle from
+// the previous process image) still occupies the destination. The retry is on
+// the handle-bound rename rather than a pathname rename: the destination is in a
+// directory the threat principal can write, so re-resolving the SOURCE pathname
+// between attempts would let a substitute be restored instead.
+func renameOpenFileWithRetry(file *os.File, newPath string) error {
 	var lastErr error
 	for attempt := 0; attempt < restoreRenameRetryAttempts; attempt++ {
-		if err := os.Rename(oldPath, newPath); err == nil {
+		if err := renameRecoveryFileByHandle(file, newPath); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -51,12 +57,19 @@ func renameWithRetry(oldPath string, newPath string) error {
 // It is also returned by promote when a PREVIOUS run left that state behind and
 // nobody has resolved it yet — see the refusal there.
 
-// restoreOriginalBinary moves the preserved original at oldPath back onto
-// targetPath after a failed promotion. A failed immediate restore is surfaced;
-// oldPath must not be queued as a reboot source because its pathname can be
-// replaced before reboot under the writable-directory threat model.
-func restoreOriginalBinary(oldPath string, targetPath string) error {
-	err := renameWithRetry(oldPath, targetPath)
+// restoreOriginalBinary moves the object file refers to — the binary promote
+// moved aside from targetPath, held open since before that rename — back onto
+// targetPath after a failed promotion. Everything here is bound to that handle:
+// oldPath is only ever used to NAME the object for the operator and to site the
+// recovery marker, never re-resolved to decide what gets restored. A failed
+// immediate restore is surfaced; the aside copy must not be queued as a reboot
+// source because its pathname can be replaced before reboot under the
+// writable-directory threat model.
+func restoreOriginalBinary(file *os.File, oldPath string, targetPath string) error {
+	err := renameOpenFileWithRetry(file, targetPath)
+	if err == nil {
+		err = verifyPromotedTarget(file, targetPath)
+	}
 	if err == nil {
 		return nil
 	}
@@ -67,7 +80,7 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 		// The marker could not be established, so nothing on disk identifies
 		// oldPath as the recovery copy. Move it to a distinct name and report that
 		// authoritative location to the operator.
-		if kept, keepErr := keepUnmarkedRecoveryCopy(oldPath); keepErr == nil {
+		if kept, keepErr := keepUnmarkedRecoveryCopy(file, oldPath); keepErr == nil {
 			return fmt.Errorf(
 				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)",
 				ErrTargetPossiblyTampered, err, markErr, kept,
@@ -75,17 +88,17 @@ func restoreOriginalBinary(oldPath string, targetPath string) error {
 		} else if kept != "" {
 			// The move succeeded but the post-move verification did not, so
 			// oldPath is already vacated — point at kept, the path the
-			// (possibly substituted) bytes actually landed at, not the
-			// path that no longer holds them.
+			// bytes actually landed at, not the path that no longer holds them.
 			return fmt.Errorf(
 				"%w: %v (the recovery marker could not be written: %v; the last binary this updater verified was moved to %s but could not be verified there: %v)",
 				ErrTargetPossiblyTampered, err, markErr, kept, keepErr,
 			)
+		} else {
+			return fmt.Errorf(
+				"%w: %v (the recovery marker could not be written: %v — manually copy %s somewhere safe now)",
+				ErrTargetPossiblyTampered, err, markErr, oldPath,
+			)
 		}
-		return fmt.Errorf(
-			"%w: %v (the recovery marker could not be written: %v — manually copy %s somewhere safe now)",
-			ErrTargetPossiblyTampered, err, markErr, oldPath,
-		)
 	}
 	return fmt.Errorf("%w: %v", ErrTargetPossiblyTampered, err)
 }
@@ -192,13 +205,7 @@ var writeRecoveryMarker = func(marker *os.File) error {
 // recovery name could be pre-created there to make this rename fail or land
 // somewhere chosen by someone else. Being unpredictable also means being opaque,
 // which is why the caller's error names the path.
-func keepUnmarkedRecoveryCopy(oldPath string) (string, error) {
-	file, err := openRecoveryCopy(oldPath)
-	if err != nil {
-		return "", fmt.Errorf("%w: open recovery copy %s: %v", ErrTargetPossiblyTampered, oldPath, err)
-	}
-	defer func() { _ = file.Close() }()
-
+func keepUnmarkedRecoveryCopy(file *os.File, oldPath string) (string, error) {
 	suffix, err := randomStagingSuffix()
 	if err != nil {
 		return "", fmt.Errorf("%w: choose recovery path: %v", ErrTargetPossiblyTampered, err)
@@ -273,6 +280,10 @@ type recoveryCleanupRecord struct {
 	FileIndexLow  uint32 `json:"fileIndexLow"`
 }
 
+type recoveryCleanupQueue struct {
+	Records []recoveryCleanupRecord `json:"records"`
+}
+
 var recoveryCleanupStateDir = func() (string, error) {
 	root, err := config.UserConfigDir()
 	if err != nil {
@@ -319,31 +330,69 @@ func validUpdaterRecoveryPath(targetPath string, recoveryPath string) bool {
 // per-user state from the previous successful promotion. Recovery discovery is
 // intentionally broad and filename-based so suspicious state fails closed, but
 // destructive cleanup never treats an install-directory name as provenance.
-func prepareRecoveryCleanup(targetPath string) []*os.File {
+type recoveryCleanupCandidate struct {
+	file   *os.File
+	record recoveryCleanupRecord
+}
+
+func loadRecoveryCleanupQueue(targetPath string) recoveryCleanupQueue {
 	recordPath, err := recoveryCleanupRecordPath(targetPath)
 	if err != nil {
-		return nil
+		return recoveryCleanupQueue{}
 	}
 	data, err := os.ReadFile(recordPath)
 	if err != nil {
-		return nil
+		return recoveryCleanupQueue{}
 	}
-	var record recoveryCleanupRecord
-	if json.Unmarshal(data, &record) != nil ||
-		!validUpdaterRecoveryPath(targetPath, record.Path) || oldBinaryPreserved(record.Path) {
-		return nil
+	var queue recoveryCleanupQueue
+	if json.Unmarshal(data, &queue) != nil || queue.Records == nil {
+		var legacy recoveryCleanupRecord
+		if json.Unmarshal(data, &legacy) == nil && legacy.Path != "" {
+			queue.Records = []recoveryCleanupRecord{legacy}
+		}
 	}
-	file, err := openRecoveryCopy(record.Path)
-	if err != nil {
-		return nil
+	return queue
+}
+
+func prepareRecoveryCleanup(targetPath string) []recoveryCleanupCandidate {
+	queue := loadRecoveryCleanupQueue(targetPath)
+	var candidates []recoveryCleanupCandidate
+	// Records outlive a single attempt so a temporarily locked copy is still
+	// deleted on a later run, but a record that can never become actionable has
+	// to be retired here or the backlog grows without bound.
+	retained := queue.Records[:0]
+	for _, record := range queue.Records {
+		// Not a name this updater could have produced: unusable as provenance
+		// no matter what appears at it later.
+		if !validUpdaterRecoveryPath(targetPath, record.Path) {
+			continue
+		}
+		// Definitively gone — an operator removed it, or a delete this updater
+		// requested completed once the last handle closed.
+		if _, err := os.Lstat(record.Path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		retained = append(retained, record)
+		if oldBinaryPreserved(record.Path) {
+			continue
+		}
+		file, err := openRecoveryCopy(record.Path)
+		if err != nil {
+			continue
+		}
+		identity, err := recoveryFileIdentity(file)
+		if err != nil || identity.VolumeSerial != record.VolumeSerial ||
+			identity.FileIndexHigh != record.FileIndexHigh || identity.FileIndexLow != record.FileIndexLow {
+			_ = file.Close()
+			continue
+		}
+		candidates = append(candidates, recoveryCleanupCandidate{file: file, record: record})
 	}
-	identity, err := recoveryFileIdentity(file)
-	if err != nil || identity.VolumeSerial != record.VolumeSerial ||
-		identity.FileIndexHigh != record.FileIndexHigh || identity.FileIndexLow != record.FileIndexLow {
-		_ = file.Close()
-		return nil
+	if len(retained) != len(queue.Records) {
+		queue.Records = retained
+		_ = writeRecoveryCleanupQueue(targetPath, queue)
 	}
-	return []*os.File{file}
+	return candidates
 }
 
 type recoveryIdentity struct {
@@ -364,45 +413,14 @@ func recoveryFileIdentity(file *os.File) (recoveryIdentity, error) {
 	}, nil
 }
 
-func openIdentityFile(path string) (*os.File, error) {
-	pathPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := verifyFreshRegularFile(handle, path); err != nil {
-		_ = windows.CloseHandle(handle)
-		return nil, err
-	}
-	return os.NewFile(uintptr(handle), path), nil
-}
-
-func recordRecoveryCleanup(targetPath string, recoveryPath string, expected recoveryIdentity) error {
+// appendRecoveryCleanupRecord adds the copy this promotion moved aside to the
+// per-user cleanup backlog. The identity comes from the handle the caller held
+// across the aside rename, so a pathname substituted afterwards can never be
+// recorded as updater-owned: the next run reopens recoveryPath and only deletes
+// it if it is still that same object.
+func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identity recoveryIdentity) error {
 	if !validUpdaterRecoveryPath(targetPath, recoveryPath) {
 		return fmt.Errorf("invalid updater recovery path %s", recoveryPath)
-	}
-	file, err := openRecoveryCopy(recoveryPath)
-	if err != nil {
-		return err
-	}
-	identity, err := recoveryFileIdentity(file)
-	_ = file.Close()
-	if err != nil {
-		return err
-	}
-	if identity != expected {
-		return fmt.Errorf("recovery path %s does not name the moved-aside binary", recoveryPath)
 	}
 	record := recoveryCleanupRecord{
 		Path:          recoveryPath,
@@ -410,7 +428,13 @@ func recordRecoveryCleanup(targetPath string, recoveryPath string, expected reco
 		FileIndexHigh: identity.FileIndexHigh,
 		FileIndexLow:  identity.FileIndexLow,
 	}
-	data, err := json.Marshal(record)
+	queue := loadRecoveryCleanupQueue(targetPath)
+	queue.Records = append(queue.Records, record)
+	return writeRecoveryCleanupQueue(targetPath, queue)
+}
+
+func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) error {
+	data, err := json.Marshal(queue)
 	if err != nil {
 		return err
 	}
@@ -459,17 +483,47 @@ func deleteFileByHandle(file *os.File) error {
 	)
 }
 
-func closeRecoveryCleanupCandidates(candidates []*os.File) {
-	for _, file := range candidates {
-		_ = file.Close()
+func closeRecoveryCleanupCandidates(candidates []recoveryCleanupCandidate) {
+	for index := range candidates {
+		if candidates[index].file == nil {
+			continue
+		}
+		_ = candidates[index].file.Close()
+		candidates[index].file = nil
 	}
 }
 
 // cleanupSupersededRecoveryCopies marks the exact pre-promotion objects for
 // deletion only after the replacement has been verified. The handles deny
 // delete sharing, so their entries cannot be substituted in the meantime.
-func cleanupSupersededRecoveryCopies(candidates []*os.File) {
-	for _, file := range candidates {
-		_ = deleteFileByHandle(file)
+//
+// A record is only retired once its object is actually gone. A copy another
+// process holds open (an on-access scanner, an operator's editor) stays in the
+// backlog and is retried by a later promotion, so transient locks cannot leak
+// full binaries.
+func cleanupSupersededRecoveryCopies(targetPath string, candidates []recoveryCleanupCandidate) {
+	defer closeRecoveryCleanupCandidates(candidates)
+	queue := loadRecoveryCleanupQueue(targetPath)
+	deleted := make(map[recoveryCleanupRecord]bool)
+	for index := range candidates {
+		candidate := &candidates[index]
+		if err := deleteFileByHandle(candidate.file); err != nil {
+			continue
+		}
+		// FileDispositionInfo removes the entry when the last handle closes, so
+		// releasing ours is what makes the deletion observable.
+		_ = candidate.file.Close()
+		candidate.file = nil
+		if _, err := os.Lstat(candidate.record.Path); errors.Is(err, os.ErrNotExist) {
+			deleted[candidate.record] = true
+		}
 	}
+	remaining := queue.Records[:0]
+	for _, record := range queue.Records {
+		if !deleted[record] {
+			remaining = append(remaining, record)
+		}
+	}
+	queue.Records = remaining
+	_ = writeRecoveryCleanupQueue(targetPath, queue)
 }

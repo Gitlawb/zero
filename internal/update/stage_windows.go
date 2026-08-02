@@ -113,6 +113,70 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	}
 	defer releasePromotionLock()
 
+	if err := preflightRecoveryStateLocked(targetPath); err != nil {
+		return err
+	}
+	// Always use a namespaced unpredictable aside path. Besides avoiding any
+	// existing recovery copy, this gives trusted cleanup state a narrow path
+	// format to validate instead of accepting arbitrary *.old files.
+	suffix, suffixErr := randomStagingSuffix()
+	if suffixErr != nil {
+		return fmt.Errorf("choose recovery path: %w", suffixErr)
+	}
+	asidePath := targetPath + ".zero-update-" + suffix + ".old"
+	cleanupCandidates := prepareRecoveryCleanup(targetPath)
+	cleanedCandidates := false
+	defer func() {
+		if !cleanedCandidates {
+			closeRecoveryCleanupCandidates(cleanupCandidates)
+		}
+	}()
+	original, openErr := openRecoveryCopy(targetPath)
+	if openErr != nil {
+		return fmt.Errorf("open running binary for recovery: %w", openErr)
+	}
+	defer func() { _ = original.Close() }()
+	originalIdentity, identityErr := recoveryFileIdentity(original)
+	if identityErr != nil {
+		return fmt.Errorf("capture running binary identity: %w", identityErr)
+	}
+	if err := renameRecoveryFileByHandle(original, asidePath); err != nil {
+		return fmt.Errorf("rename running binary aside: %w", err)
+	}
+	if err := verifyPromotedTarget(original, asidePath); err != nil {
+		return fmt.Errorf("verify running binary aside: %w", err)
+	}
+	renameErr := renameFileByHandle(staged.file, targetPath)
+	if renameErr == nil {
+		if verifyErr := verifyPromotedTarget(staged.file, targetPath); verifyErr != nil {
+			renameErr = fmt.Errorf("promoted object unreachable at %s: %w", targetPath, verifyErr)
+		}
+	}
+	if renameErr != nil {
+		if restoreErr := restoreOriginalBinary(original, asidePath, targetPath); restoreErr != nil {
+			return fmt.Errorf("install new binary: %v; additionally failed to restore the original binary: %w", renameErr, restoreErr)
+		}
+		return fmt.Errorf("install new binary: %w", renameErr)
+	}
+	if err := appendRecoveryCleanupRecord(targetPath, asidePath, originalIdentity); err == nil {
+		cleanupSupersededRecoveryCopies(targetPath, cleanupCandidates)
+		cleanedCandidates = true
+	}
+	staged.path = targetPath
+	staged.promoted = true
+	return nil
+}
+
+func preflightRecoveryState(targetPath string) error {
+	release, err := acquirePromotionLock(targetPath)
+	if err != nil {
+		return fmt.Errorf("lock binary recovery preflight: %w", err)
+	}
+	defer release()
+	return preflightRecoveryStateLocked(targetPath)
+}
+
+func preflightRecoveryStateLocked(targetPath string) error {
 	relocatedRecoveries, recoveryErr := relocatedRecoveryPaths(targetPath)
 	if recoveryErr != nil {
 		return fmt.Errorf("%w: inspect relocated recovery state for %s: %v", ErrTargetPossiblyTampered, targetPath, recoveryErr)
@@ -173,64 +237,6 @@ func (staged *stagedBinary) promote(targetPath string) error {
 			)
 		}
 	}
-	// Always use a namespaced unpredictable aside path. Besides avoiding any
-	// existing recovery copy, this gives trusted cleanup state a narrow path
-	// format to validate instead of accepting arbitrary *.old files.
-	suffix, suffixErr := randomStagingSuffix()
-	if suffixErr != nil {
-		return fmt.Errorf("choose recovery path: %w", suffixErr)
-	}
-	asidePath := targetPath + ".zero-update-" + suffix + ".old"
-	// Bind cleanup candidates before opening the promotion gap. A fresh scan
-	// after promotion could capture an aside concurrently created by another
-	// updater and erase the copy it needs to restore on failure.
-	cleanupCandidates := prepareRecoveryCleanup(targetPath)
-	defer closeRecoveryCleanupCandidates(cleanupCandidates)
-	// Retain the identity of the object being moved aside. The aside pathname is
-	// writable by the threat principal after os.Rename, so state written later
-	// must be bound to this pre-rename object rather than whichever object a
-	// pathname reopen happens to find.
-	var originalIdentity *recoveryIdentity
-	if original, openErr := openIdentityFile(targetPath); openErr == nil {
-		defer func() { _ = original.Close() }()
-		if identity, identityErr := recoveryFileIdentity(original); identityErr == nil {
-			originalIdentity = &identity
-		}
-	}
-	if err := os.Rename(targetPath, asidePath); err != nil {
-		return fmt.Errorf("rename running binary aside: %w", err)
-	}
-	renameErr := renameFileByHandle(staged.file, targetPath)
-	if renameErr == nil {
-		// SetFileInformationByHandle reporting success is not, on its own, proof
-		// that targetPath now holds the promoted object: a substituted staging
-		// entry can leave the object this handle refers to in a delete-pending
-		// state that some Windows versions accept the rename call against
-		// without actually completing it, which would otherwise let promote
-		// return nil while targetPath is left missing entirely. Confirm the
-		// object is actually reachable there before trusting the rename.
-		if verifyErr := verifyPromotedTarget(staged.file, targetPath); verifyErr != nil {
-			renameErr = fmt.Errorf("promoted object unreachable at %s: %w", targetPath, verifyErr)
-		}
-	}
-	if renameErr != nil {
-		if restoreErr := restoreOriginalBinary(asidePath, targetPath); restoreErr != nil {
-			return fmt.Errorf("install new binary: %v; additionally failed to restore the original binary: %w", renameErr, restoreErr)
-		}
-		return fmt.Errorf("install new binary: %w", renameErr)
-	}
-	// targetPath now names the staged object this updater verified, so older
-	// unmarked aside copies are no longer the only known-good binaries. Retire
-	// them through handles only after recording the copy created by this
-	// promotion in trusted per-user state. If recording fails, preserve every
-	// copy rather than falling back to an install-directory filename as proof.
-	if originalIdentity != nil {
-		if err := recordRecoveryCleanup(targetPath, asidePath, *originalIdentity); err == nil {
-			cleanupSupersededRecoveryCopies(cleanupCandidates)
-		}
-	}
-	staged.path = targetPath
-	staged.promoted = true
 	return nil
 }
 

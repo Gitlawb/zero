@@ -515,21 +515,28 @@ func TestInstallBinaryPreservesArbitraryOldFilesDuringCleanup(t *testing.T) {
 	}
 }
 
-func TestRecordRecoveryCleanupRejectsSubstitutedAside(t *testing.T) {
+// TestRecoveryCleanupRefusesSubstitutedAside pins the provenance rule that
+// makes handle-bound cleanup safe: a recorded recovery path whose object has
+// been swapped out underneath the record is never opened as a cleanup
+// candidate, so the substitute is not deleted on the next promotion.
+func TestRecoveryCleanupRefusesSubstitutedAside(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "zero.exe")
 	recoveryPath := targetPath + ".zero-update-0123456789abcdef0123456789abcdef.old"
 	if err := os.WriteFile(recoveryPath, []byte("moved-aside-binary"), 0o755); err != nil {
 		t.Fatalf("WriteFile recovery: %v", err)
 	}
-	original, err := openIdentityFile(recoveryPath)
+	original, err := openRecoveryCopy(recoveryPath)
 	if err != nil {
-		t.Fatalf("openIdentityFile: %v", err)
+		t.Fatalf("openRecoveryCopy: %v", err)
 	}
-	expected, err := recoveryFileIdentity(original)
+	identity, err := recoveryFileIdentity(original)
 	_ = original.Close()
 	if err != nil {
 		t.Fatalf("recoveryFileIdentity: %v", err)
+	}
+	if err := appendRecoveryCleanupRecord(targetPath, recoveryPath, identity); err != nil {
+		t.Fatalf("appendRecoveryCleanupRecord: %v", err)
 	}
 	if err := os.Rename(recoveryPath, recoveryPath+".displaced"); err != nil {
 		t.Fatalf("Rename recovery: %v", err)
@@ -538,16 +545,77 @@ func TestRecordRecoveryCleanupRejectsSubstitutedAside(t *testing.T) {
 		t.Fatalf("WriteFile substitute: %v", err)
 	}
 
-	if err := recordRecoveryCleanup(targetPath, recoveryPath, expected); err == nil {
-		t.Fatal("recordRecoveryCleanup authenticated a substituted aside")
+	candidates := prepareRecoveryCleanup(targetPath)
+	if len(candidates) != 0 {
+		t.Fatalf("cleanup candidates = %d, want the substituted aside to be refused", len(candidates))
+	}
+	cleanupSupersededRecoveryCopies(targetPath, candidates)
+	if got, err := os.ReadFile(recoveryPath); err != nil || string(got) != "substituted-file" {
+		t.Fatalf("substituted file = %q err=%v, want it left untouched", got, err)
+	}
+}
+
+// TestAppendRecoveryCleanupRecordRejectsForeignPath keeps the trusted record
+// from ever vouching for a name this updater could not have created, which is
+// what stops cleanup from deleting an operator's own backup.
+func TestAppendRecoveryCleanupRecordRejectsForeignPath(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	foreign := targetPath + ".before-manual-patch.old"
+	if err := os.WriteFile(foreign, []byte("operator-backup"), 0o755); err != nil {
+		t.Fatalf("WriteFile backup: %v", err)
+	}
+	if err := appendRecoveryCleanupRecord(targetPath, foreign, recoveryIdentity{}); err == nil {
+		t.Fatal("appendRecoveryCleanupRecord accepted a path this updater never created")
 	}
 	recordPath, err := recoveryCleanupRecordPath(targetPath)
 	if err != nil {
 		t.Fatalf("recoveryCleanupRecordPath: %v", err)
 	}
 	if _, err := os.Lstat(recordPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("trusted cleanup record was written for a substituted aside: %v", err)
+		t.Fatalf("trusted cleanup record was written for a foreign backup: %v", err)
 	}
+}
+
+// TestRecoveryCleanupRetiresRecordsForVanishedCopies keeps the backlog that
+// makes transient-lock retries possible from becoming its own unbounded growth:
+// a record whose object an operator already removed can never become
+// actionable, so it must not be carried forever.
+func TestRecoveryCleanupRetiresRecordsForVanishedCopies(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("version-0"), 0o755); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	source := filepath.Join(t.TempDir(), "new-binary")
+	if err := os.WriteFile(source, []byte("version-1"), 0o755); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	if err := installBinary(source, targetPath); err != nil {
+		t.Fatalf("installBinary: %v", err)
+	}
+	recoveries, err := existingRecoveryPaths(targetPath)
+	if err != nil || len(recoveries) != 1 {
+		t.Fatalf("recovery paths = %v err=%v, want exactly one", recoveries, err)
+	}
+	if got := recordedRecoveryCleanupCount(t, targetPath); got != 1 {
+		t.Fatalf("recorded cleanup entries = %d, want 1", got)
+	}
+	// The operator removes the recovery copy themselves.
+	if err := os.Remove(recoveries[0]); err != nil {
+		t.Fatalf("Remove recovery copy: %v", err)
+	}
+
+	closeRecoveryCleanupCandidates(prepareRecoveryCleanup(targetPath))
+
+	if got := recordedRecoveryCleanupCount(t, targetPath); got != 0 {
+		t.Fatalf("recorded cleanup entries = %d after the copy vanished, want the record retired", got)
+	}
+}
+
+func recordedRecoveryCleanupCount(t *testing.T, targetPath string) int {
+	t.Helper()
+	return len(loadRecoveryCleanupQueue(targetPath).Records)
 }
 
 func TestInstallBinaryBoundsRecoveryCopiesAcrossRepeatedUpgrades(t *testing.T) {
@@ -581,6 +649,87 @@ func TestInstallBinaryBoundsRecoveryCopiesAcrossRepeatedUpgrades(t *testing.T) {
 		if string(previous) != wantPrevious {
 			t.Fatalf("recovery after version %d = %q, want %q", version, previous, wantPrevious)
 		}
+	}
+}
+
+func TestInstallBinaryRetainsLockedCleanupRecordUntilLaterRetry(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("version-0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	install := func(version string) {
+		source := filepath.Join(t.TempDir(), "new-binary")
+		if err := os.WriteFile(source, []byte(version), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := installBinary(source, targetPath); err != nil {
+			t.Fatalf("install %s: %v", version, err)
+		}
+	}
+	install("version-1")
+	recoveries, _ := existingRecoveryPaths(targetPath)
+	lockedPath, err := windows.UTF16PtrFromString(recoveries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := windows.CreateFile(lockedPath, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	install("version-2")
+	_ = windows.CloseHandle(locked)
+	install("version-3")
+	recoveries, _ = existingRecoveryPaths(targetPath)
+	if len(recoveries) != 1 {
+		t.Fatalf("recovery backlog after lock clears = %v, want only newest recovery", recoveries)
+	}
+}
+
+func TestPromoteRestoresOriginalObjectWhenAsidePathIsSubstituted(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "zero.exe")
+	if err := os.WriteFile(targetPath, []byte("known-good"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := createStagedBinary(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staged.discard()
+	if _, err := staged.file.WriteString("new"); err != nil {
+		t.Fatal(err)
+	}
+	originalRename := renameFileByHandle
+	originalRecoveryRename := renameRecoveryFileByHandle
+	var substitutionErr error
+	call := 0
+	renameRecoveryFileByHandle = func(file *os.File, path string) error {
+		call++
+		if err := originalRecoveryRename(file, path); err != nil {
+			return err
+		}
+		if call == 1 {
+			substitutionErr = os.Rename(path, path+".stolen")
+		}
+		return nil
+	}
+	renameFileByHandle = func(_ *os.File, _ string) error {
+		return errors.New("injected promotion failure")
+	}
+	defer func() {
+		renameFileByHandle = originalRename
+		renameRecoveryFileByHandle = originalRecoveryRename
+	}()
+	if err := staged.promote(targetPath); err == nil {
+		t.Fatal("promote succeeded despite injected failure")
+	}
+	contents, err := os.ReadFile(targetPath)
+	if err != nil || string(contents) != "known-good" {
+		t.Fatalf("restored target = %q, %v; want original object", contents, err)
+	}
+	if substitutionErr == nil {
+		t.Fatal("aside pathname substitution succeeded while recovery handle was retained")
 	}
 }
 

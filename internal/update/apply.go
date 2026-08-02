@@ -46,6 +46,7 @@ type ApplyResult struct {
 var (
 	windowsOptionalBinaries = []string{"zero-windows-command-runner.exe", "zero-windows-sandbox-setup.exe"}
 	linuxOptionalBinaries   = []string{"zero-linux-sandbox", "zero-seccomp"}
+	currentExecutable       = os.Executable
 )
 
 // Apply checks for an update and, if one is available, installs it: via
@@ -57,18 +58,23 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 
-	executablePath, err := os.Executable()
+	executablePath, err := currentExecutable()
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("resolve current executable: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(executablePath); err == nil {
 		executablePath = resolved
 	}
+	method := DetectInstallMethod(executablePath)
+	if method != InstallMethodNpm {
+		if err := preflightRecoveryState(executablePath); err != nil {
+			return ApplyResult{}, err
+		}
+	}
 	if !checkResult.UpdateAvailable {
 		return ApplyResult{Result: checkResult, Message: "already up to date"}, nil
 	}
 
-	method := DetectInstallMethod(executablePath)
 	switch method {
 	case InstallMethodNpm:
 		if err := applyNpmUpdate(ctx); err != nil {

@@ -71,14 +71,22 @@ Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
 instead of reinstalling.
 
-## Recovery state (standalone installs)
+## Windows recovery state (standalone installs)
 
-When a standalone update replaces the executable, the previous binary is moved
-aside to `<binary>.zero-update-<random>.old` in the same directory. The updater
+This section describes Windows only. On Linux and macOS a standalone update
+renames the staged file directly over the executable path through the
+installation directory's file descriptor, so the replacement is atomic and no
+aside copy, marker, or recovery record is ever created — a failed update leaves
+the previous binary in place and nothing to resolve.
+
+On Windows, a running executable cannot be replaced in place, so the previous
+binary is moved aside to `<binary>.zero-update-<random>.old` first. The updater
 records that exact file — bound to its filesystem identity, in per-user state
 outside the installation directory — and deletes only that recorded copy after
 the next update is verified in place. Backups it did not create are never
-removed, so a file such as `zero.exe.before-manual-patch.old` is left alone.
+removed, so a file such as `zero.exe.before-manual-patch.old` is left alone. A
+recorded copy that something else holds open (an on-access scanner, an editor)
+stays recorded and is removed by a later update instead.
 
 An update **refuses to run** while unresolved recovery state exists beside the
 binary:
