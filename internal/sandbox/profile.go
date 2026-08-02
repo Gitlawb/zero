@@ -483,13 +483,14 @@ type credentialPathOptions struct {
 // atomically replaces files on disk. ZERO_OAUTH_TOKENS_PATH still contributes
 // to the ordinary deny baseline when keyring storage is selected, but it must
 // not make bubblewrap fail closed: the keyring backend never publishes the
-// token blob or its encryption-key sibling at that path.
+// token blob or its encryption-key sibling at that path. The MCP override is a
+// legacy migration input, not an output; the unified store writes through the
+// OAuth path instead.
 func credentialFinalTokenFiles(options credentialPathOptions) []string {
-	files := append([]string{}, options.MCPOAuthTokens...)
-	if options.OAuthStorage != "keyring" {
-		files = append(files, options.OAuthTokens...)
+	if options.OAuthStorage == "keyring" {
+		return nil
 	}
-	return files
+	return append([]string{}, options.OAuthTokens...)
 }
 
 // credentialDenyReadPathsIn is the pure core of credentialDenyReadPaths,
@@ -588,13 +589,11 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		}
 	}
 	for _, tokenPath := range options.MCPOAuthTokens {
-		candidates = append(candidates, credentialTokenStorePaths(tokenPath)...)
-		// The legacy store renames itself aside after importing into the unified
-		// store, leaving a readable copy of the same tokens behind.
-		candidates = append(candidates, tokenPath+".migrated")
-		publicationDirs := credentialPublicationDirs(tokenPath)
-		dirs = append(dirs, publicationDirs...)
-		ensureDirs = append(ensureDirs, publicationDirs...)
+		// This is a legacy migration input. MCP reads it and renames it aside;
+		// normal writes go to the separately resolved unified OAuth store.
+		// Protect both token-bearing names, but do not classify the source as an
+		// atomic writer or create publication directories it never uses.
+		candidates = append(candidates, tokenPath, tokenPath+".migrated")
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -800,6 +799,7 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 		credentials.ProcessTrustedFinalFiles,
 		userDenyRead,
 		credentials.EnsureDirs,
+		credentials.Carveouts,
 	)
 	// Same retention for the command-derived finals: a file already inside a
 	// user deny or a directory Zero will actually mask is durably covered, so it
@@ -809,6 +809,7 @@ func finalizeCredentialDenyPaths(credentials credentialDenyPaths, userDenyRead [
 		credentials.CommandFinalFiles,
 		userDenyRead,
 		credentials.EnsureDirs,
+		credentials.Carveouts,
 	)
 	// A command environment is also resolved against the process base dir, so an
 	// absolute override in Zero's own environment lands in both lists. Report it
@@ -839,8 +840,10 @@ func pathsExcluding(paths, excluded []string) []string {
 // credentialRetainedFiles drops fail-closed file markers only when a durable
 // directory mask strictly contains the file. Exact file mounts are vulnerable
 // to atomic replacement, and Dirs may include command-controlled candidates;
-// only user directory ancestors and retained trusted EnsureDirs qualify.
-func credentialRetainedFiles(files, userDenied, trustedDeniedDirs []string) []string {
+// only user directory ancestors and retained trusted EnsureDirs qualify. A
+// trusted directory does not cover a final file that is re-exposed through a
+// readable carveout below it.
+func credentialRetainedFiles(files, userDenied, trustedDeniedDirs, carveouts []string) []string {
 	var out []string
 	for _, file := range files {
 		covered := false
@@ -852,7 +855,7 @@ func credentialRetainedFiles(files, userDenied, trustedDeniedDirs []string) []st
 		}
 		if !covered {
 			for _, dir := range trustedDeniedDirs {
-				if file != dir && pathWithinRoot(dir, file) {
+				if file != dir && pathWithinRoot(dir, file) && !credentialFileReincludedByCarveout(dir, file, carveouts) {
 					covered = true
 					break
 				}
@@ -863,6 +866,15 @@ func credentialRetainedFiles(files, userDenied, trustedDeniedDirs []string) []st
 		}
 	}
 	return dedupeStrings(out)
+}
+
+func credentialFileReincludedByCarveout(deniedDir, file string, carveouts []string) bool {
+	for _, carveout := range carveouts {
+		if pathWithinRoot(deniedDir, carveout) && pathWithinRoot(carveout, file) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveCredentialOverridePaths mirrors the token stores' own override

@@ -430,11 +430,6 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		oauthOverride + ".secret.tmp",
 		oauthOverride + ".secret.lock",
 		mcpOverride,
-		mcpOverride + ".tmp",
-		mcpOverride + ".lockfile",
-		mcpOverride + ".secret",
-		mcpOverride + ".secret.tmp",
-		mcpOverride + ".secret.lock",
 		mcpOverride + ".migrated",
 	}
 	// The migrated legacy MCP token backup and the atomic-write temp siblings
@@ -494,17 +489,20 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	// The store publishes through a per-store directory whose name is derived
 	// from the store path, so it can be denied even though the random file name
 	// inside it cannot be.
-	for _, want := range normalizeProfilePaths([]string{oauthOverride + ".publish", mcpOverride + ".publish"}) {
+	for _, want := range normalizeProfilePaths([]string{oauthOverride + ".publish"}) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want publication directory %q included", paths, want)
 		}
 	}
 	// Zero owns its config directory and the publication directories, so the
 	// mount-based backend may create them to guarantee a mask exists.
-	for _, want := range normalizeProfilePaths([]string{zeroDir, oauthOverride + ".publish", mcpOverride + ".publish"}) {
+	for _, want := range normalizeProfilePaths([]string{zeroDir, oauthOverride + ".publish"}) {
 		if !stringSliceContains(credentials.EnsureDirs, want) {
 			t.Errorf("credential ensure dirs = %#v, want %q", credentials.EnsureDirs, want)
 		}
+	}
+	if stringSliceContains(credentials.EnsureDirs, normalizeProfilePath(mcpOverride+".publish")) {
+		t.Errorf("credential ensure dirs = %#v, legacy MCP input must not create publication directories", credentials.EnsureDirs)
 	}
 	if stringSliceContains(credentials.EnsureDirs, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential ensure dirs = %#v, must not create third-party stores", credentials.EnsureDirs)
@@ -599,11 +597,6 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 		filepath.Join(commandDir, override) + ".lockfile",
 		filepath.Join(commandDir, override) + ".secret.lock",
 		filepath.Join(commandDir, "mcp", "tokens.json"),
-		filepath.Join(commandDir, "mcp", "tokens.json.tmp"),
-		filepath.Join(commandDir, "mcp", "tokens.json.lockfile"),
-		filepath.Join(commandDir, "mcp", "tokens.json.secret"),
-		filepath.Join(commandDir, "mcp", "tokens.json.secret.tmp"),
-		filepath.Join(commandDir, "mcp", "tokens.json.secret.lock"),
 		filepath.Join(commandDir, "mcp", "tokens.json.migrated"),
 	} {
 		if !stringSliceContains(paths, normalizeProfilePath(want)) {
@@ -1127,14 +1120,6 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 			},
 		},
 		{
-			name: "process MCP store with OAuth keyring",
-			processEnv: map[string]string{
-				"ZERO_OAUTH_STORAGE":         "keyring",
-				"ZERO_OAUTH_TOKENS_PATH":     "",
-				"ZERO_MCP_OAUTH_TOKENS_PATH": filepath.Join(t.TempDir(), "mcp.json"),
-			},
-		},
-		{
 			name: "command encrypted OAuth store",
 			processEnv: map[string]string{
 				"ZERO_OAUTH_STORAGE":         "",
@@ -1144,19 +1129,6 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 			commandEnv: []string{
 				"ZERO_OAUTH_STORAGE=encrypted-file",
 				"ZERO_OAUTH_TOKENS_PATH=" + filepath.Join(tempDirOutsideDefaultTemp(t), "command-oauth.json"),
-			},
-			commandMarker: true,
-		},
-		{
-			name: "command MCP store with OAuth keyring",
-			processEnv: map[string]string{
-				"ZERO_OAUTH_STORAGE":         "",
-				"ZERO_OAUTH_TOKENS_PATH":     "",
-				"ZERO_MCP_OAUTH_TOKENS_PATH": "",
-			},
-			commandEnv: []string{
-				"ZERO_OAUTH_STORAGE=keyring",
-				"ZERO_MCP_OAUTH_TOKENS_PATH=" + filepath.Join(tempDirOutsideDefaultTemp(t), "command-mcp.json"),
 			},
 			commandMarker: true,
 		},
@@ -1185,6 +1157,104 @@ func TestKeyringExceptionKeepsFileBackedTokenStoresFailClosed(t *testing.T) {
 			for _, want := range []string{test.wantTokenPath, test.wantTokenPath + ".secret"} {
 				if !stringSliceContains(markers, normalizeProfilePath(want)) {
 					t.Fatalf("final-file markers = %#v, want %q", markers, want)
+				}
+			}
+			if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "atomic replacement") {
+				t.Fatalf("validateLinuxBwrapPermissionProfile error = %v, want atomic-replacement failure", err)
+			}
+		})
+	}
+}
+
+func TestLegacyMCPOverrideDoesNotFailClosedOnBubblewrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", "")
+	legacy := filepath.Join(tempDirOutsideDefaultTemp(t), "mcp-tokens.json")
+	if err := os.WriteFile(legacy, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+	tests := []struct {
+		name       string
+		processMCP string
+		commandEnv []string
+	}{
+		{name: "process override", processMCP: legacy},
+		{name: "command override", commandEnv: []string{"ZERO_MCP_OAUTH_TOKENS_PATH=" + legacy}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", test.processMCP)
+			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, test.commandEnv)
+			fs := profile.FileSystem
+			for _, want := range []string{legacy, legacy + ".migrated"} {
+				if !stringSliceContains(fs.DenyReadIfExists, normalizeProfilePath(want)) {
+					t.Fatalf("DenyReadIfExists = %#v, want legacy path %q", fs.DenyReadIfExists, want)
+				}
+			}
+			if len(fs.ProcessTrustedDenyReadFiles) != 0 || len(fs.CommandDenyReadFinalFiles) != 0 {
+				t.Fatalf("legacy source must not be an atomic writer: process=%#v command=%#v", fs.ProcessTrustedDenyReadFiles, fs.CommandDenyReadFinalFiles)
+			}
+			for _, unwanted := range []string{
+				legacy + ".tmp", legacy + ".lockfile", legacy + ".secret",
+				legacy + ".secret.tmp", legacy + ".secret.lock",
+				legacy + ".publish", legacy + ".secret.publish",
+			} {
+				for field, paths := range map[string][]string{
+					"DenyReadIfExists":    fs.DenyReadIfExists,
+					"EnsureDenyReadDirs":  fs.EnsureDenyReadDirs,
+					"CommandDenyReadDirs": fs.CommandDenyReadDirs,
+				} {
+					if stringSliceContains(paths, normalizeProfilePath(unwanted)) {
+						t.Fatalf("%s = %#v, legacy source must not derive %q", field, paths, unwanted)
+					}
+				}
+			}
+			if err := validateLinuxBwrapPermissionProfile(profile); err != nil {
+				t.Fatalf("legacy MCP migration input must not make Bubblewrap fail closed: %v", err)
+			}
+			args := buildLinuxBwrapFilesystemPlan(profile).Args
+			foundMask := false
+			for i := 0; i+2 < len(args); i++ {
+				if args[i] == "--ro-bind" && args[i+1] == "/dev/null" && args[i+2] == normalizeProfilePath(legacy) {
+					foundMask = true
+					break
+				}
+			}
+			if !foundMask {
+				t.Fatalf("Bubblewrap plan does not exactly mask existing legacy source %q: %#v", legacy, args)
+			}
+		})
+	}
+}
+
+func TestOAuthOverridesInsideCredentialCarveoutsRemainFailClosedOnBubblewrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	home := t.TempDir()
+	configDir := filepath.Join(home, "config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", "")
+	workspace := t.TempDir()
+
+	for _, name := range []string{"plugins", "specialists", "commands"} {
+		t.Run(name, func(t *testing.T) {
+			token := filepath.Join(configDir, "zero", name, "tokens.json")
+			t.Setenv("ZERO_OAUTH_TOKENS_PATH", token)
+			profile := permissionProfileFromPolicy(workspace, DefaultPolicy(), nil, workspace, nil)
+			for _, want := range []string{token, token + ".secret"} {
+				if !stringSliceContains(profile.FileSystem.ProcessTrustedDenyReadFiles, normalizeCredentialFinalPath(want)) {
+					t.Fatalf("ProcessTrustedDenyReadFiles = %#v, carveout must retain final-file marker %q", profile.FileSystem.ProcessTrustedDenyReadFiles, want)
 				}
 			}
 			if err := validateLinuxBwrapPermissionProfile(profile); err == nil || !strings.Contains(err.Error(), "atomic replacement") {

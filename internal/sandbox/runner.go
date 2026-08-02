@@ -673,6 +673,11 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 	// they re-include the supported non-secret subtrees of a directory-level
 	// credential deny (Zero's user plugin/specialist/command roots).
 	rules = append(rules, denyReadCarveoutRules(profile.FileSystem)...)
+	// A token override may live below a carveout. Reapply only those nested
+	// denies after the broad allow so credentials remain protected under
+	// Seatbelt's last-match-wins evaluation without hiding ordinary extension
+	// files.
+	rules = append(rules, denyReadRulesInsideCarveouts(profile.FileSystem)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -840,6 +845,26 @@ func denyReadCarveoutRules(fs FileSystemPolicy) []string {
 		out = append(out, ancestors)
 	}
 	return out
+}
+
+func denyReadRulesInsideCarveouts(fs FileSystemPolicy) []string {
+	denied := dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...))
+	carveouts := credentialCarveoutPaths(denied, fs.DenyReadCarveouts)
+	if len(carveouts) == 0 {
+		return nil
+	}
+	inside := func(paths []string) []string {
+		var out []string
+		for _, path := range paths {
+			if credentialPathReincluded(carveouts, path) {
+				out = append(out, path)
+			}
+		}
+		return out
+	}
+	rules := denySeatbeltNormalizedPathRules("file-read*", inside(normalizeProfilePaths(denied)))
+	finals := dedupeStrings(append(append([]string{}, fs.ProcessTrustedDenyReadFiles...), fs.CommandDenyReadFinalFiles...))
+	return dedupeStrings(append(rules, denySeatbeltNormalizedPathRules("file-read*", inside(finals))...))
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {

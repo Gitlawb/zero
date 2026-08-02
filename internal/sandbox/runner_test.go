@@ -547,6 +547,54 @@ func TestSeatbeltProfileRendersCredentialBaselineAndCarveouts(t *testing.T) {
 	}
 }
 
+func TestSeatbeltProfileReappliesCredentialDeniesInsideCarveouts(t *testing.T) {
+	credentialDir := filepath.Join(t.TempDir(), "zero")
+	var carveouts []string
+	var denied []string
+	for _, name := range []string{"plugins", "specialists", "commands"} {
+		root := filepath.Join(credentialDir, name)
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		carveouts = append(carveouts, root)
+		for _, path := range []string{filepath.Join(root, "tokens.json"), filepath.Join(root, "tokens.json.secret")} {
+			if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			denied = append(denied, path)
+		}
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                        FileSystemRestricted,
+			ReadRoots:                   []string{"/"},
+			DenyReadIfExists:            append([]string{credentialDir}, denied...),
+			DenyReadCarveouts:           carveouts,
+			ProcessTrustedDenyReadFiles: denied,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	for _, root := range carveouts {
+		allowRule := `(allow file-read* file-test-existence (subpath "` + sandboxProfileString(normalizeProfilePath(root)) + `"))`
+		allowIdx := strings.Index(sbpl, allowRule)
+		if allowIdx < 0 {
+			t.Fatalf("Seatbelt profile missing carveout allow %q:\n%s", allowRule, sbpl)
+		}
+		for _, path := range []string{filepath.Join(root, "tokens.json"), filepath.Join(root, "tokens.json.secret")} {
+			denyRule := `(deny file-read* (literal "` + sandboxProfileString(normalizeProfilePath(path)) + `"))`
+			if denyIdx := strings.LastIndex(sbpl, denyRule); denyIdx < allowIdx {
+				t.Fatalf("nested credential deny %q must follow carveout allow (deny=%d allow=%d):\n%s", denyRule, denyIdx, allowIdx, sbpl)
+			}
+		}
+		ordinary := filepath.Join(root, "extension.json")
+		if strings.Contains(sbpl, `(deny file-read* (literal "`+sandboxProfileString(normalizeProfilePath(ordinary))+`"))`) {
+			t.Fatalf("ordinary extension file under %q must remain readable:\n%s", root, sbpl)
+		}
+	}
+}
+
 func TestSeatbeltProfileDoesNotRenderSymlinkCarveout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation is not reliably available on Windows CI")
@@ -663,11 +711,6 @@ func TestSeatbeltCompatibilityProfileUsesCredentialEnvironment(t *testing.T) {
 	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, DefaultPolicy())
 	for _, want := range []string{
 		override,
-		override + ".tmp",
-		override + ".lockfile",
-		override + ".secret",
-		override + ".secret.tmp",
-		override + ".secret.lock",
 		override + ".migrated",
 	} {
 		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
