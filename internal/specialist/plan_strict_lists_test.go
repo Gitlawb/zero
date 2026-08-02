@@ -151,12 +151,34 @@ func TestASavedPlanKeepsTheCallersExecutionDirectives(t *testing.T) {
 
 // Supplying plan CONTENT alongside `saved` is still refused — the directive
 // carve-out must not become a way to half-override a saved plan.
+//
+// THE PLAN IS SEEDED FIRST, and that is the whole difference between this test
+// and a tautology. Against an empty directory resolveSavedPlan fails because
+// "sweep" does not exist, so every case here returned a non-nil error and passed
+// whether or not the override policy existed at all. With the plan present, the
+// only thing left that can refuse is the policy — which is why the reason is
+// asserted too, not just the failure.
 func TestASavedPlanStillRefusesInlineContent(t *testing.T) {
-	tool := &OrchestrateTool{Plans: PlanPaths{UserDir: t.TempDir()}}
+	dir := t.TempDir()
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatalf("seed the saved plan: %v", err)
+	}
+	tool := &OrchestrateTool{Plans: PlanPaths{UserDir: dir}}
+
+	// The control: the seeded plan resolves cleanly on its own, so a failure
+	// below cannot be blamed on the fixture.
+	if _, err := tool.resolveSavedPlan(map[string]any{"saved": "sweep"}); err != nil {
+		t.Fatalf("the seeded plan does not resolve, so nothing below proves anything: %v", err)
+	}
+
 	for _, field := range []string{"tasks", "budget", "name", "description"} {
 		_, err := tool.resolveSavedPlan(map[string]any{"saved": "sweep", field: "anything"})
 		if err == nil {
 			t.Errorf("%q was accepted alongside a saved plan", field)
+			continue
+		}
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("%q was refused for a reason that does not name it, so the refusal may not be the override policy: %v", field, err)
 		}
 	}
 }
@@ -192,5 +214,37 @@ func TestTheToolTeachesTheFindVerifySynthesizeShape(t *testing.T) {
 	// verification and a badly split plan cannot be verified into a good one.
 	if !strings.Contains(tasks.Description, "Split by SUBJECT") {
 		t.Error("the task-authoring guidance was displaced by the verify convention")
+	}
+}
+
+// THE TOOL TEACHES THE CONFLICT/RELAXATION SPLIT, because merging them is how a
+// relaxation stops being reported.
+//
+// A measured run built to a specification, listed its requirement conflicts
+// cleanly, and filed no relaxation at all — while having lowered a one-million
+// bound to ten thousand, cut a sixty-second soak to five, and excluded a latency
+// class from its own numbers. Each reached the reader as a cell in a results
+// table. Nothing here parses or enforces the split; the tool description is the
+// only place a plan author reads it, so its absence is the whole regression.
+func TestTheToolTeachesConflictsAndRelaxationsApart(t *testing.T) {
+	tasks, ok := (&OrchestrateTool{}).Parameters().Properties["tasks"]
+	if !ok {
+		t.Fatal("the tasks property is missing")
+	}
+	for _, required := range []string{
+		// Both names, so an author can tell which they are looking at.
+		"CONFLICT",
+		"RELAXATION",
+		// What separates them.
+		"spec disagreeing with itself",
+		"work coming in under the spec",
+		// The reporting rule that was actually violated.
+		"never only a cell in a results table",
+		// ...and that a defensible relaxation is still reported.
+		"even when it was the right call",
+	} {
+		if !strings.Contains(tasks.Description, required) {
+			t.Errorf("the tasks description no longer teaches %q", required)
+		}
 	}
 }

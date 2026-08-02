@@ -17,8 +17,8 @@ func TestZeromaxingReminderSchedule(t *testing.T) {
 		want    []string
 	}{
 		// (i) enter fires exactly once, on the first turn of the entering run.
-		{"entering turn 1 announces and states the budget", ZeromaxingEntering, 1,
-			[]string{ZeromaxingEnterNotice, ZeromaxingBudgetNotice}},
+		{"entering turn 1 announces, states the budget and the evidence contract", ZeromaxingEntering, 1,
+			[]string{ZeromaxingEnterNotice, ZeromaxingBudgetNotice, ZeromaxingEvidenceNotice}},
 		// (j) still-on from turn 2, and it is the ONLY thing from turn 2 on —
 		// no second enter, no repeated budget notice.
 		{"entering turn 2 continues", ZeromaxingEntering, 2, []string{ZeromaxingStillOnNotice}},
@@ -27,7 +27,11 @@ func TestZeromaxingReminderSchedule(t *testing.T) {
 
 		// (j) a run that began with the posture already on gets still-on even on
 		// turn 1 — re-announcing entry every run would be wrong.
-		{"active turn 1 does not re-announce", ZeromaxingActive, 1, []string{ZeromaxingStillOnNotice}},
+		// The evidence contract is per-RUN, not per-posture-change: turn 1 is
+		// where the user's message sits, so it is where a claim about the code
+		// arrives and where a report gets written.
+		{"active turn 1 does not re-announce but restates the evidence contract", ZeromaxingActive, 1,
+			[]string{ZeromaxingStillOnNotice, ZeromaxingEvidenceNotice}},
 		{"active turn 2 continues", ZeromaxingActive, 2, []string{ZeromaxingStillOnNotice}},
 
 		// (k) exit fires exactly once, then silence — the posture is off, so a
@@ -156,6 +160,66 @@ func TestOrchestrateIsNamedOnlyWhenItExists(t *testing.T) {
 	for _, posture := range []Zeromaxing{ZeromaxingOff, ZeromaxingActive, ZeromaxingExiting} {
 		if strings.Contains(joined(zeromaxingReminders(posture, 1, true)), "orchestrate") {
 			t.Fatalf("posture %v must not name the tool", posture)
+		}
+	}
+}
+
+// THE EVIDENCE CONTRACT FIRES ONCE PER RUN, on the turn the user's message sits
+// on — not once per posture change, and not on every tool turn.
+//
+// Once per posture change would leave every later run of a long session without
+// it, and the long sessions are the ones that produce reports. Every tool turn
+// would pay hundreds of copies to say something that only bears on the
+// boundaries of a run.
+func TestTheEvidenceContractFiresOnceOnTheFirstTurnOfEveryRun(t *testing.T) {
+	for _, posture := range []Zeromaxing{ZeromaxingEntering, ZeromaxingActive} {
+		fired := 0
+		for turn := 1; turn <= 50; turn++ {
+			for _, line := range zeromaxingReminders(posture, turn, false) {
+				if line == ZeromaxingEvidenceNotice {
+					fired++
+					if turn != 1 {
+						t.Errorf("posture %v repeated the evidence contract on turn %d; it belongs on turn 1 only", posture, turn)
+					}
+				}
+			}
+		}
+		if fired != 1 {
+			t.Errorf("posture %v fired the evidence contract %d times across 50 turns, want exactly 1", posture, fired)
+		}
+	}
+
+	// A posture that is OFF or on its way out says nothing: a contract about how
+	// to weigh evidence is part of the posture, and claiming it after the posture
+	// ended would be as wrong as the still-on notice would be.
+	for _, posture := range []Zeromaxing{ZeromaxingOff, ZeromaxingExiting} {
+		for turn := 1; turn <= 5; turn++ {
+			for _, line := range zeromaxingReminders(posture, turn, true) {
+				if line == ZeromaxingEvidenceNotice {
+					t.Errorf("posture %v emitted the evidence contract on turn %d", posture, turn)
+				}
+			}
+		}
+	}
+}
+
+// The contract has to actually carry all three rules it exists for. Asserted on
+// the substance, not the wording, so a rewrite is free but a DELETION is not:
+// each of these went missing in a measured run and cost a different thing.
+func TestTheEvidenceContractCoversAllThreeFailures(t *testing.T) {
+	for _, required := range []string{
+		// A passing test treated as proof of the property.
+		"passing test is not proof",
+		"what it would still pass with",
+		// Numbers reported that no command in the session produced.
+		"must come from a command you ran in this session",
+		"show both",
+		// Folding to whoever asserts a defect most confidently.
+		"prove or refute it from the code before you agree",
+		"even when the claim turns out to be right",
+	} {
+		if !strings.Contains(ZeromaxingEvidenceNotice, required) {
+			t.Errorf("the evidence contract no longer says %q:\n%s", required, ZeromaxingEvidenceNotice)
 		}
 	}
 }

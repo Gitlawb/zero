@@ -227,7 +227,32 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 					"when the code forces it; default to refuted when uncertain, but quote what the code actually says — a " +
 					"guessed refutation is worth no more than a guessed confirmation; judge each claim independently, treating " +
 					"the finder's confidence as no evidence at all; and re-read the cited locations itself, because the " +
-					"briefing carries a claim, not a trace.",
+					"briefing carries a claim, not a trace.\n\n" +
+					// TWO GAPS THAT LOOK ALIKE AND ARE NOT, and merging them is how the
+					// second one disappears.
+					//
+					// A measured run built against a specification and reported a clean
+					// list of requirement conflicts while filing NOT ONE relaxation —
+					// though it had lowered a one-million-record bound to ten thousand,
+					// cut a sixty-second soak to five, and excluded a latency class from
+					// its own measurements. All three were real, all three were
+					// defensible, and all three reached the reader as cells inside a
+					// results table rather than as gaps. A reader who trusted the report
+					// never learned what had not been built.
+					//
+					// The distinction is not stylistic: a conflict is a question the
+					// spec failed to answer, and a relaxation is an answer the work
+					// failed to reach. One is resolved by deciding; the other is
+					// outstanding until someone builds it.
+					"If a plan BUILDS to a specification, keep two kinds of gap apart and report them separately:\n" +
+					"- A CONFLICT is the spec disagreeing with itself — two requirements that cannot both hold. " +
+					"It is resolved by choosing a reading, and the report names the reading chosen.\n" +
+					"- A RELAXATION is the work coming in under the spec — a bound lowered, a case left unhandled, " +
+					"a measurement taken under easier conditions than were asked for. Nothing disagreed; less was built.\n" +
+					"Give relaxations a task or a section of their own, and never only a cell in a results table. " +
+					"Listed beside conflicts they read as questions already settled rather than as work still owed, " +
+					"and a relaxation nobody wrote down is indistinguishable from a requirement nobody noticed. " +
+					"Report each one even when it was the right call: the judgement is the reader's to make, and they can only make it if they are told.",
 			},
 			"saved": {
 				Type: "string",

@@ -75,6 +75,36 @@ const (
 		"For long-running commands, prefer Bash with run_in_background. " +
 		"Work alone only on conversational turns or trivial single-file edits."
 
+	// ZeromaxingEvidenceNotice states what counts as evidence. It fires on the
+	// FIRST TURN OF EVERY RUN while the posture is on — once per user message,
+	// which is when a claim arrives and when a report is written. Repeating it on
+	// every tool turn would cost hundreds of copies to say something that only
+	// bears on the boundaries of a run.
+	//
+	// EARNED BY A MEASURED RUN, three failure classes in one submission:
+	//
+	//   A property was scored top marks in five places on the strength of "the
+	//   test passes" — while the test consumed the lazy iterator it was meant to
+	//   prove lazy, discarded the value whose absence was the bug, and reported
+	//   avg × 2.5 as a p99. Passing was treated as proof without once asking what
+	//   the test would still pass with.
+	//
+	//   A table of benchmark timings was reported that no command in the session
+	//   had produced. The same test read 0.86s in one paste and 4.20s in the
+	//   next with nothing said about the difference, and the column summed to an
+	//   exact total no real transcript lands on. That is the most serious of the
+	//   three, because it is not an oversight.
+	//
+	//   Told its code had a defect, it agreed — and the claim was wrong. It
+	//   revised a correct answer down and wrote a proof that contradicted its own
+	//   preceding step. An agent that folds to whoever asserts most confidently
+	//   follows the user rather than the evidence, and is worth less the more it
+	//   is trusted.
+	ZeromaxingEvidenceNotice = "Evidence discipline under zeromaxing. " +
+		"A passing test is not proof that a property holds: whenever you rest a claim on one, name the test AND say in one sentence what it would still pass with. " +
+		"Every measurement you report must come from a command you ran in this session — if a number differs from one you gave earlier, show both and account for the difference rather than quietly replacing it. " +
+		"And when someone tells you your code has a defect, prove or refute it from the code before you agree: agreeing without a line-level trace is a wrong answer even when the claim turns out to be right."
+
 	// ZeromaxingStillOnNotice repeats on every continuing turn.
 	//
 	// It is intentionally short and FIXED. Do not add a turn number, a
@@ -107,11 +137,22 @@ func zeromaxingReminders(posture Zeromaxing, turn int, orchestrateAvailable bool
 			if orchestrateAvailable {
 				notices = append(notices, ZeromaxingOrchestrateNotice)
 			}
-			return notices
+			// LAST, so it is the nearest instruction to the user's message.
+			return append(notices, ZeromaxingEvidenceNotice)
 		}
 		return []string{ZeromaxingStillOnNotice}
 	case ZeromaxingActive:
 		// Already on when the run started: no enter notice, not even on turn 1.
+		//
+		// The evidence contract still repeats, because it is per-RUN rather than
+		// per-posture-change: turn 1 is where the user's message sits, so it is
+		// where a claim about the code arrives and where a report gets written.
+		// Announcing it only when the posture flipped would leave every later run
+		// of a long session without it — and the long sessions are the ones that
+		// produce reports.
+		if turn == 1 {
+			return []string{ZeromaxingStillOnNotice, ZeromaxingEvidenceNotice}
+		}
 		return []string{ZeromaxingStillOnNotice}
 	case ZeromaxingExiting:
 		// One notice on the way out, then silence — the posture is off, so a

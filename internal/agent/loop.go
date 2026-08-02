@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/measurements"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -241,6 +242,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// nudge before the NEXT request (see async_diagnostics.go). nil when no
 	// FileDiagnostics callback is wired; every method no-ops on nil.
 	postEditDiagnostics := newAsyncDiagnostics(options.FileDiagnostics, options.Cwd)
+
+	// THE RUN'S OWN TIMINGS, so a final answer cannot report a number no command
+	// here produced. Every tool result is read for `go test` durations; the final
+	// answer is checked against them once before it is returned.
+	//
+	// POSTURE-GATED, and nil when the posture is off — every method no-ops on
+	// nil, so a run that never heard of zeromaxing takes exactly the path it took
+	// before this existed. See internal/measurements for the failure it is for.
+	var measured *measurements.Ledger
+	if options.Zeromaxing != ZeromaxingOff {
+		measured = measurements.NewLedger()
+	}
 
 	// loaded tracks deferred-eligible tools the model has pulled via tool_search
 	// during THIS run. It is consulted by partitionTools each turn to expose a
@@ -629,6 +642,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				})
 				continue
 			}
+			// THE ANSWER IS CHECKED AGAINST THE TRANSCRIPT before it is returned.
+			// Same channel and the same gate as the diagnostics drain above, and
+			// for the same reason: a final answer means there is no later turn, so
+			// a number that contradicts what actually ran has to be raised now or
+			// never. Each name is raised at most once by the ledger, so an answer
+			// that comes back unchanged is returned rather than asked again.
+			if nudge := measurements.Nudge(measured.Conflicts(collected.Text)); nudge != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: nudge,
+				})
+				continue
+			}
 			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
 			return result, nil
@@ -701,6 +727,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
+			// Read before anything can truncate or summarize it: this is the only
+			// place the command's own words are in hand.
+			measured.Record(toolResult.Output)
 			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
