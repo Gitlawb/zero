@@ -200,6 +200,17 @@ type PlanTaskRequest struct {
 	// ExecutePlan from the plan's budget so every task in a plan shares one
 	// answer, rather than each runner re-deriving it.
 	StallTimeout time.Duration
+	// StallPoll is how often the watchdog checks for silence. Zero means the
+	// production rule — a sixth of StallTimeout, floored at one second.
+	//
+	// TESTS ONLY, and it exists because without it they cannot reach the
+	// watchdog at all: the floor means a 60ms StallTimeout still polls once a
+	// second, so a child living 300ms gets ZERO ticks and a test asserting "the
+	// chatty child survived" passes identically whether or not its events are
+	// wired to the clock. That test was the only cover for the wiring, and it
+	// could not fail. The alternative was a child that runs for several seconds
+	// in every suite run, to observe something that takes milliseconds.
+	StallPoll time.Duration
 	// Spend is the plan's live token meter, shared by every task in flight. A
 	// task that crosses the plan's limit while running is stopped by it — the
 	// dispatch-time check cannot, because it only sees numbers that have already
@@ -275,15 +286,20 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	// A deadline on the plan context fixes that with the machinery a user stop
 	// already proves works, and the walk keeps its skip-the-rest behaviour for
 	// tasks not yet dispatched.
-	// ONE SOURCE FOR THE WALL, read here and at the deadline below. Two sites
-	// reading the budget differently is how they drift: this one bounds the
-	// children through the context, that one skips tasks not yet dispatched, and
-	// a plan whose backstop reached only one of them would kill work in flight
-	// while still dispatching more, or the reverse.
-	if wall := planWallBudget(plan.Budget()); wall > 0 {
+	// ONE SOURCE FOR THE WALL: this clock, read by the backstop that cancels
+	// children and by the walk that skips tasks not yet dispatched. Two sites
+	// reading the budget differently is how they drift — a plan whose backstop
+	// reached only one of them would kill work in flight while still dispatching
+	// more, or the reverse.
+	//
+	// A CLOCK RATHER THAN context.WithTimeout, because the budget has to be able
+	// to move: a plan the user paused is not spending it. See planWallClock.
+	wallClock := newPlanWallClock(planWallBudget(plan.Budget()), nil)
+	if wallClock != nil {
 		var cancelWall context.CancelFunc
-		ctx, cancelWall = context.WithTimeout(ctx, wall)
+		ctx, cancelWall = context.WithCancel(ctx)
 		defer cancelWall()
+		wallClock.watch(ctx, cancelWall)
 	}
 	planRunning(recorder, cancelPlan)
 
@@ -329,10 +345,6 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	}
 	spend.totalTasks = plan.TaskCount()
 
-	deadline := time.Time{}
-	if wall := planWallBudget(plan.Budget()); wall > 0 {
-		deadline = time.Now().Add(wall)
-	}
 	// One stall timeout for the whole plan, resolved once.
 	stallTimeout := stallTimeoutFor(plan.Budget())
 
@@ -375,7 +387,33 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			// A task cut short by cancellation is CANCELLED, not failed. The
 			// distinction survives all the way to the terminal status, so a
 			// stopped plan never reports as a broken one.
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			//
+			// IT MUST BE THIS TASK THAT WAS CUT SHORT, not merely this task being
+			// harvested after someone stopped the plan. A bare ctx.Err() check
+			// relabelled a task that had already failed on its own — a real
+			// compile error, reported and complete — the moment the user pressed
+			// stop, erasing the one result worth reading and reporting the plan as
+			// "stopped" when something in it was genuinely broken.
+			//
+			// THE TASK DID NOT CONCLUDE is the thing being detected, and two
+			// structural signals say so — never the message text, invariant 9:
+			//
+			//   err != nil. The executor returns the process-level error
+			//   alongside its result (exec.go's post-start failure path), so a
+			//   task the context killed always carries one.
+			//
+			//   result.Stalled. The watchdog's own path returns err nil
+			//   deliberately, because a stall is a decision this side of the
+			//   boundary made. A stall that coincides with a Ctrl-C is still a
+			//   cancellation, which is what TestACancelledRunIsNotRetried pins.
+			//
+			// Neither is true of a child that ran to the end and reported a
+			// failure of its own — err nil, not stalled, its reason in
+			// result.Err — and that is the case a bare ctx.Err() swallowed.
+			concluded := err == nil && !result.Stalled
+			cutShort := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+				(ctx.Err() != nil && !concluded)
+			if cutShort {
 				cancelled = true
 				result.Outcome = TaskCancelled
 				if result.Err == "" {
@@ -383,7 +421,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 					// plan spending what it was allowed, a cancel is a person
 					// deciding. Reporting both as "the run was stopped" left a
 					// user looking for who stopped it.
-					if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+					if wallClock.wallExpired() || errors.Is(err, context.DeadlineExceeded) {
 						result.Err = "cancelled: the plan's max_wall_seconds elapsed while this task was running"
 					} else {
 						result.Err = "cancelled: the run was stopped while this task was running"
@@ -462,7 +500,16 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// who stops a paused plan is not left waiting for a resume that will
 		// never come. WaitWhilePaused returns on ctx, and the check below then
 		// turns it into a cancellation exactly as if the plan had been running.
+		//
+		// AND THE TIME IS GIVEN BACK. max_wall_seconds bounds what a plan spends,
+		// and a paused plan spends nothing: without this, pausing for twenty
+		// minutes took twenty minutes off a thirty-minute budget, and pausing for
+		// longer than the budget meant the plan was already dead when the user
+		// resumed it — stopped, and told its wall budget elapsed, by time in
+		// which no task ran.
+		pausedAt := time.Now()
 		waitWhilePaused(recorder, ctx)
+		wallClock.addPaused(time.Since(pausedAt))
 
 		// Cancellation is checked FIRST and recorded as its own outcome. Once
 		// the run is cancelled every remaining task is cancelled too — they are
@@ -472,7 +519,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			// Same distinction the in-flight path draws: a wall-budget expiry is
 			// the plan spending what it was allowed, not a person stopping it.
 			reason := "cancelled: the run was stopped before this task ran"
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if wallClock.wallExpired() {
 				reason = "cancelled: the plan's max_wall_seconds elapsed before this task ran"
 			}
 			result := TaskResult{
@@ -522,7 +569,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 				poolExhausted = int64(upstreamUsed) >= spend.ceilingFor(false)
 			}
 		}
-		if poolExhausted || (!deadline.IsZero() && time.Now().After(deadline)) {
+		if poolExhausted || wallClock.exhausted() {
 			if downstream {
 				downstreamExhausted = true
 			} else {
@@ -571,7 +618,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			maxTaskTokens: plan.Budget().MaxTokensPerTask,
 			waitsOnOthers: len(task.DependsOn) > 0,
 			maxRetries:    plan.Budget().MaxRetries,
-			deadline:      deadline,
+			wallClock:     wallClock,
 		}
 		slots.take()
 		started := time.Now()
@@ -619,7 +666,10 @@ type retryPolicy struct {
 	spend         *planSpend
 	maxTaskTokens int
 	waitsOnOthers bool
-	deadline      time.Time
+	// wallClock is the plan's running-time budget, nil when unbounded. Read
+	// rather than a fixed deadline so time the user spent paused does not
+	// count against it.
+	wallClock *planWallClock
 }
 
 // childExitIncomplete is the child's exit code for "stopped with work clearly
@@ -703,7 +753,7 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			if ctx.Err() != nil {
 				return result, err
 			}
-			if !policy.deadline.IsZero() && time.Now().After(policy.deadline) {
+			if policy.wallClock.exhausted() {
 				return result, err
 			}
 			fellBackFrom = strings.TrimSpace(policy.task.Model)
@@ -727,7 +777,7 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			if ctx.Err() != nil {
 				return result, err
 			}
-			if !policy.deadline.IsZero() && time.Now().After(policy.deadline) {
+			if policy.wallClock.exhausted() {
 				return result, err
 			}
 			retriedAfterDecline = true
@@ -753,7 +803,7 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			// The run was stopped. NOT retried, and not relabelled either — the
 			// executor's own cancellation handling turns this into TaskCancelled.
 			return result, err
-		case !policy.deadline.IsZero() && time.Now().After(policy.deadline):
+		case policy.wallClock.exhausted():
 			// The plan's wall budget is gone. Another attempt would overrun it
 			// on behalf of the task that already exhausted it.
 			result.Err = stallError(policy.task.ID, policy.stallTimeout, attempt).Error()
@@ -915,9 +965,10 @@ const (
 //     task had walked the scrubbing path, and the task that wrote the finding
 //     could not see it.
 //
-// SUCCEEDED DEPENDENCIES ONLY. A failed dependency skips its dependents
-// entirely (firstFailedDependency), so anything reaching here succeeded; a
-// cancelled or empty result contributes nothing rather than an empty heading.
+// SUCCEEDED DEPENDENCIES ONLY. A dependency that produced nothing skips its
+// dependents entirely (unusableDependencies), so anything reaching here has
+// something to say; a cancelled or empty result contributes nothing rather than
+// an empty heading.
 //
 // Deterministic order, following DependsOn as the plan declared it, so the same
 // plan produces the same prompt — a resumed plan must not differ from its first
@@ -1078,19 +1129,6 @@ func withTokenBudgetNotice(prompt string, maxTaskTokens int) string {
 			"mid-investigation, which returns nothing at all. If you run short, say plainly what you did not "+
 			"get to rather than guessing at it.",
 		announced, calls)
-}
-
-// firstFailedDependency names the dependency that blocked a task, so the record
-// says WHICH one rather than just that something upstream broke.
-func firstFailedDependency(task Task, failed map[string]bool) (string, bool) {
-	deps := append([]string(nil), task.DependsOn...)
-	sort.Strings(deps)
-	for _, dep := range deps {
-		if failed[dep] {
-			return dep, true
-		}
-	}
-	return "", false
 }
 
 // unusableDependencies reports the dependencies that produced NOTHING a
@@ -1347,21 +1385,6 @@ func tasksStoppedByBudget(tasks []TaskResult) (cutShort, neverRan []string) {
 		}
 	}
 	return cutShort, neverRan
-}
-
-// tasksCutForBudget names the tasks a budget stopped — skipped before they ran,
-// or cancelled while running. Both are questions the plan did not answer.
-func tasksCutForBudget(tasks []TaskResult) []string {
-	var out []string
-	for _, task := range tasks {
-		switch {
-		case task.Outcome == TaskSkippedBudget:
-			out = append(out, task.ID)
-		case task.Outcome == TaskCancelled && strings.Contains(task.Err, "token budget"):
-			out = append(out, task.ID)
-		}
-	}
-	return out
 }
 
 func recordDispatched(recorder PlanRecorder, task Task) {

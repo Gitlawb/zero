@@ -56,8 +56,14 @@ func TestOrchestrateHeaderIgnoresClicksBehindAModal(t *testing.T) {
 	click := tea.MouseClickMsg{X: x, Y: headerRow, Button: tea.MouseLeft}
 
 	// Sanity: the click lands on the header when nothing is in the way.
+	//
+	// FATAL, NOT SKIP. This is the precondition for everything below — if the
+	// row arithmetic above stops matching the layout, the click lands somewhere
+	// else, orchestrateHeaderAtMouse returns false for the boring reason, and a
+	// skip would report the modal guard as covered while testing nothing at all.
+	// A test that cannot reach its subject has failed, not been excused.
 	if !base.orchestrateHeaderAtMouse(click) {
-		t.Skip("the header is not where this test thinks it is")
+		t.Fatalf("the computed click (%d,%d) does not resolve to the PLAN header, so the modal guard below is never exercised: fix the row arithmetic in this test", click.X, click.Y)
 	}
 
 	// The `/` palette specifically. sidebarAvailable deliberately does NOT

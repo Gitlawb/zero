@@ -168,8 +168,13 @@ func (m model) zeromaxingSpectrumOffset() int {
 
 // zeromaxingChipWidth is the chip's rendered cell width, used to hit-test it.
 // Derived from the same string the renderer builds, so the two cannot drift.
+// zeromaxingChipLeadColumns is the " ● " that precedes the label inside the
+// badge, measured in COLUMNS. Three columns, five bytes — the distinction that
+// put the chip's clickable span in the wrong place.
+const zeromaxingChipLeadColumns = 3
+
 func zeromaxingChipWidth() int {
-	return len([]rune(" ● " + zeromaxingChipLabel + " "))
+	return lipgloss.Width(" ● " + zeromaxingChipLabel + " ")
 }
 
 // zeromaxingChipAtMouse reports whether the cursor is over the footer chip.
@@ -217,8 +222,16 @@ func (m model) zeromaxingChipSpan() (int, int, bool) {
 		if index < 0 {
 			continue
 		}
-		// The label is preceded by " ● " inside the badge.
-		start := maxInt(0, index-3)
+		// COLUMNS, NOT BYTES. strings.Index returns a byte offset, and this is a
+		// screen coordinate: every multi-byte rune earlier on the footer row —
+		// the "●" in the permission chip, an em dash, a non-ASCII branch or
+		// directory name — pushed the byte offset past the real column and moved
+		// the whole span right, so clicks landed beside the chip while the hover
+		// highlight sat on it. lipgloss.Width measures what the terminal draws.
+		//
+		// The label is preceded by " ● " inside the badge: three COLUMNS, five
+		// bytes, which is the same confusion in miniature.
+		start := maxInt(0, lipgloss.Width(plain[:index])-zeromaxingChipLeadColumns)
 		return start, start + zeromaxingChipWidth(), true
 	}
 	return 0, 0, false

@@ -52,9 +52,17 @@ type PlanProgress struct {
 }
 
 // Done reports whether there is anything left to run.
+//
+// DERIVED FROM Remaining, never counted alongside it. The two are read by the
+// same caller — orchestrate_saved asks Done first and then calls RemainingPlan —
+// so they must agree by construction. Comparing len(Succeeded) to len(Order)
+// instead made agreement depend on Succeeded holding each of Order's ids exactly
+// once, and Succeeded is an append of whatever task_completed carried: an id that
+// is not in Order, or one recorded twice, made the count reach len(Order) while
+// a task that never ran was still in Remaining. That direction is the harmful
+// one — the resume reports "nothing left to do" and silently drops the work.
 func (progress PlanProgress) Done() bool {
-	return len(progress.Unfinished) == 0 && len(progress.Failed) == 0 &&
-		len(progress.Succeeded) == len(progress.Order)
+	return len(progress.Remaining()) == 0
 }
 
 // Remaining lists the ids that still need to run, in the recorded execution

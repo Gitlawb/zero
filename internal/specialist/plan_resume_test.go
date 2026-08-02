@@ -223,3 +223,48 @@ func TestAMalformedAdmissionAbandonsTheReduction(t *testing.T) {
 		t.Fatal("a malformed admission was skipped and the previous plan's state survived")
 	}
 }
+
+// DONE AND REMAINING ARE ONE ANSWER, not two that happen to line up.
+//
+// orchestrate_saved asks Done first and calls RemainingPlan only when it is
+// false, so a Done that says "finished" while Remaining still lists work makes
+// the resume drop that work silently. Done used to compare len(Succeeded) to
+// len(Order), which agrees with Remaining ONLY when Succeeded holds each of
+// Order's ids exactly once — and Succeeded is an append of whatever id a
+// task_completed carried, checked against nothing.
+func TestDoneNeverDisagreesWithRemaining(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		progress PlanProgress
+	}{
+		{
+			// The count reaches len(Order) without "b" ever running.
+			name:     "an id recorded twice",
+			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "a"}},
+		},
+		{
+			// A stray completion for a task this plan never declared.
+			name:     "an id that is not in the order",
+			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "elsewhere"}},
+		},
+		{
+			name:     "a task that failed and then succeeded",
+			progress: PlanProgress{Order: []string{"a"}, Succeeded: []string{"a"}, Failed: []string{"a"}},
+		},
+		{
+			name:     "everything ran",
+			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "b"}},
+		},
+		{
+			name:     "nothing ran",
+			progress: PlanProgress{Order: []string{"a", "b"}},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			remaining := testCase.progress.Remaining()
+			if done := testCase.progress.Done(); done != (len(remaining) == 0) {
+				t.Fatalf("Done() = %v but Remaining() = %v: the resume path trusts Done and then runs Remaining", done, remaining)
+			}
+		})
+	}
+}

@@ -2476,7 +2476,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A resumed/idle session may already hold sidebar agents now that geometry
 		// (and thus sidebarActive) is known; kick the ripple tick loop if so. No-op
 		// when the loop is already running or there is nothing to animate.
-		return m, m.ensureSpinnerTick()
+		// Sequenced: see the note in provider_wizard.go — the pointer receiver
+		// must run before m is copied into the return.
+		tick := m.ensureSpinnerTick()
+		return m, tick
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
 		// decision callback, so every branch below must resolve it exactly once —

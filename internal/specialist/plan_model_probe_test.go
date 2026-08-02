@@ -3,9 +3,12 @@ package specialist
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -264,5 +267,54 @@ func TestATaskThatFailedWithARealErrorIsStillNotRetried(t *testing.T) {
 
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("a genuine failure was retried %d times", got)
+	}
+}
+
+// THE FAN-OUT IS BOUNDED IN WIDTH, not only in time.
+//
+// The comment said "CONCURRENT AND BOUNDED" while the loop started one goroutine
+// and one provider request per unproven model with no limit. A provider listing
+// hundreds of models answered the burst with 429s, which classify as
+// ProbeUnknown — so the probe paid for every request, learned nothing, and left
+// the plan's real tasks throttled behind it.
+func TestProbingManyModelsStaysUnderTheConcurrencyCap(t *testing.T) {
+	models := make([]DiscoveredModel, 200)
+	for i := range models {
+		models[i] = DiscoveredModel{ID: fmt.Sprintf("model-%03d", i)}
+	}
+
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	probe := func(context.Context, string) ModelProbeResult {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		// Long enough that a genuinely unbounded fan-out overlaps here.
+		time.Sleep(2 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return ModelProbeResult{Verdict: ProbeServes}
+	}
+
+	kept, notes := proveModels(context.Background(), models, probe, &probeCache{})
+
+	mu.Lock()
+	got := peak
+	mu.Unlock()
+	if got > maxProbesInFlight {
+		t.Fatalf("peak concurrent probes = %d, cap is %d: %d models produced a burst on the session's own key", got, maxProbesInFlight, len(models))
+	}
+	if got < 2 {
+		t.Fatalf("peak concurrent probes = %d: the probe serialised, so proving a catalogue costs one round trip per model", got)
+	}
+	if len(kept) != len(models) {
+		t.Fatalf("kept %d of %d models that all answered", len(kept), len(models))
+	}
+	if len(notes) != 0 {
+		t.Fatalf("models that answered produced removal notes: %v", notes)
 	}
 }

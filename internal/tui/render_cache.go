@@ -175,8 +175,15 @@ func appendRenderCacheField(b *strings.Builder, value string) {
 
 // specialistCacheFingerprint covers every field of a specialist card that can
 // change what it renders. A field added to specialistInfo and not added here is
-// the same defect returning, which is why the test asserts on distinctness
-// across cards rather than on this string's shape.
+// the same defect returning, which is why TestSpecialistFingerprintCoversEvery
+// Field walks the struct by reflection instead of listing fields by hand.
+//
+// THE THREE THAT WERE MISSING all share one shape: they are written AFTER the
+// card's first render — setTokens, setModel and setResult each mutate an entry
+// that has already been drawn and cached. So the key was unchanged, the stale
+// render was served, and a finished plan task kept showing no tokens, no model
+// and no output. A field that only ever arrives at start() would have hidden
+// the bug; these arrive late, which is exactly when a cache key has to move.
 func specialistCacheFingerprint(info *specialistInfo) string {
 	if info == nil {
 		return ""
@@ -189,8 +196,11 @@ func specialistCacheFingerprint(info *specialistInfo) string {
 		strconv.Itoa(info.exitCode),
 		info.errorMsg,
 		strconv.Itoa(info.toolCount),
+		strconv.Itoa(info.tokenCount),
 		info.currentTool,
 		info.currentDetail,
+		info.model,
+		info.result,
 		strconv.FormatInt(info.startedAt.UnixNano(), 10),
 		strconv.FormatInt(info.completedAt.UnixNano(), 10),
 	}

@@ -43,6 +43,16 @@ const (
 	ProbeRefuses
 )
 
+// maxProbesInFlight caps how many models are probed at once.
+//
+// Sized for the round trip, not for the catalogue: eight requests overlap enough
+// that proving a typical nineteen-model list still costs about three round trips
+// rather than nineteen, while a provider advertising hundreds of models no longer
+// sees a burst it answers with 429. A 429 classifies as ProbeUnknown, so an
+// unbounded fan-out was the worst of both — it paid for every request, learned
+// nothing from any of them, and left the plan's own tasks throttled behind it.
+const maxProbesInFlight = 8
+
 // ModelProbeResult is one model's verdict and the provider's own words for it.
 type ModelProbeResult struct {
 	Verdict ModelProbeVerdict
@@ -133,10 +143,14 @@ func ClassifyProbeError(err error) ModelProbeResult {
 
 // proveModels removes candidates the provider will not actually run.
 //
-// CONCURRENT AND BOUNDED. One trivial request per unproven model, all in flight
-// together, so the wait is one round trip rather than nineteen. The caller's
-// context bounds it; a probe that outlives its plan's patience simply returns
-// ProbeUnknown and the model keeps its place.
+// CONCURRENT AND BOUNDED, in width as well as in time. The point is to pay one
+// round trip instead of nineteen, not to open one connection per model: a
+// provider listing hundreds of models answered a burst of hundreds of
+// simultaneous requests on the session's own key with 429s, which classify as
+// ProbeUnknown — so the probe paid for the burst, learned nothing, and left the
+// plan's real tasks throttled behind it. maxProbesInFlight is the cap; the
+// caller's context still bounds the time, and a probe that outlives its plan's
+// patience simply returns ProbeUnknown and the model keeps its place.
 //
 // Returns the survivors and a note per model removed. The note matters as much
 // as the removal: a model vanishing from routing with no explanation is
@@ -149,6 +163,10 @@ func proveModels(ctx context.Context, models []DiscoveredModel, probe ModelProbe
 
 	verdicts := make([]ModelProbeResult, len(models))
 	var wait sync.WaitGroup
+	// A counting semaphore, not a worker pool: the number of models is usually
+	// under the cap, and this way that common case still starts every probe at
+	// once with no queue to hand work through.
+	inFlight := make(chan struct{}, maxProbesInFlight)
 	for index, model := range models {
 		if cached, ok := cache.get(model.ID); ok {
 			verdicts[index] = cached
@@ -160,6 +178,15 @@ func proveModels(ctx context.Context, models []DiscoveredModel, probe ModelProbe
 			// A panicking prober must not take the plan with it: the worst it can
 			// do is leave this model unproven, which keeps it.
 			defer func() { _ = recover() }()
+			select {
+			case inFlight <- struct{}{}:
+				defer func() { <-inFlight }()
+			case <-ctx.Done():
+				// Queued behind the cap when the caller gave up. Unknown keeps
+				// the model, which is what every other giving-up path does.
+				verdicts[index] = ModelProbeResult{Verdict: ProbeUnknown, Reason: ctx.Err().Error()}
+				return
+			}
 			verdicts[index] = probe(ctx, id)
 		}(index, model.ID)
 	}

@@ -313,24 +313,49 @@ func parseProviderModelsArgs(args []string) (providerModelsOptions, bool, error)
 // translation and hands over the four facts a plan actually chooses between.
 func planModelDiscoverer(workspaceRoot string, profile config.ProviderProfile) specialist.ModelDiscoverer {
 	return func(ctx context.Context) ([]specialist.DiscoveredModel, error) {
-		found, err := defaultDiscoverProviderModels(ctx, discoveryCredentialProfile(livePlanProvider(workspaceRoot, profile)))
+		live := livePlanProvider(workspaceRoot, profile)
+		found, err := defaultDiscoverProviderModels(ctx, discoveryCredentialProfile(live))
 		if err != nil {
 			return nil, err
 		}
-		out := make([]specialist.DiscoveredModel, 0, len(found))
-		for _, model := range found {
-			out = append(out, specialist.DiscoveredModel{
-				ID:               model.ID,
-				Description:      model.Description,
-				ToolCall:         model.ToolCall,
-				Reasoning:        model.Reasoning,
-				InputCost:        model.InputCost,
-				OutputCost:       model.OutputCost,
-				OutputModalities: model.OutputModalities,
-			})
-		}
-		return out, nil
+		// The LIVE profile's catalog id, not the captured one: discovery already
+		// follows an in-session provider switch, and filtering against the
+		// launch-time provider would reintroduce the disagreement
+		// livePlanProvider exists to remove.
+		return planModelsFromDiscovered(live.CatalogID, found), nil
 	}
+}
+
+// planModelsFromDiscovered narrows a provider's list to the models a plan may
+// actually be assigned, and translates them into specialist's own type.
+//
+// FILTERED THROUGH THE SAME ALLOW-LIST THE CLIENT WILL APPLY.
+// defaultDiscoverProviderModels deliberately returns a provider's whole list —
+// right for `providers models`, which exists to show what is there, and which
+// applies this same filter itself before printing. A plan does not display these,
+// it RUNS them, and providers.New refuses a model outside its provider's scope
+// (validateModelAllowedForProvider). So the unfiltered list handed the router
+// candidates that could never be dispatched, and every task assigned one died at
+// client creation — the same shape as assigning from the wrong provider's list
+// entirely, and just as invisible until dispatch.
+func planModelsFromDiscovered(catalogID string, found []providermodeldiscovery.Model) []specialist.DiscoveredModel {
+	catalogID = strings.TrimSpace(catalogID)
+	out := make([]specialist.DiscoveredModel, 0, len(found))
+	for _, model := range found {
+		if !providermodelcatalog.ModelIDAllowedForProvider(catalogID, model.ID) {
+			continue
+		}
+		out = append(out, specialist.DiscoveredModel{
+			ID:               model.ID,
+			Description:      model.Description,
+			ToolCall:         model.ToolCall,
+			Reasoning:        model.Reasoning,
+			InputCost:        model.InputCost,
+			OutputCost:       model.OutputCost,
+			OutputModalities: model.OutputModalities,
+		})
+	}
+	return out
 }
 
 // planModelPreferences carries the configured per-role pins and exclusions into

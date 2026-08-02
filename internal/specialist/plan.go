@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -701,6 +702,9 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		if seconds < 0 {
 			return Budget{}, fmt.Errorf("budget.max_wall_seconds must not be negative; %d was requested", seconds)
 		}
+		if err := refuseUnrepresentableSeconds("max_wall_seconds", seconds); err != nil {
+			return Budget{}, err
+		}
 		if seconds > 0 {
 			budget.MaxWall = time.Duration(seconds) * time.Second
 		}
@@ -708,6 +712,9 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	if seconds, set := planIntSet(raw, "max_stall_seconds"); set {
 		if seconds < 0 {
 			return Budget{}, fmt.Errorf("budget.max_stall_seconds must not be negative; %d was requested", seconds)
+		}
+		if err := refuseUnrepresentableSeconds("max_stall_seconds", seconds); err != nil {
+			return Budget{}, err
 		}
 		stall := time.Duration(seconds) * time.Second
 		if seconds > 0 && stall < minStallTimeout {
@@ -951,4 +958,27 @@ func planIntSet(args map[string]any, key string) (int, bool) {
 func planBool(args map[string]any, key string) bool {
 	value, _ := args[key].(bool)
 	return value
+}
+
+// maxRepresentableSeconds is the largest whole number of seconds that survives
+// conversion to a time.Duration, which counts NANOSECONDS in an int64.
+const maxRepresentableSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+// refuseUnrepresentableSeconds rejects a timeout too large to express as a
+// time.Duration.
+//
+// SILENTLY WRAPPING IS THE HAZARD, and it fails OPEN. seconds * time.Second
+// overflows int64 past ~292 years and comes back NEGATIVE, and a negative wall
+// budget reads as "no bound at all" at the dispatch check — so a plan asking for
+// an absurdly long timeout got an unlimited one instead, which is the opposite
+// of what every other bound in this file does with a value it cannot honour.
+// The negative and the zero cases are already refused above; this closes the
+// third way a number stops meaning what it says.
+func refuseUnrepresentableSeconds(field string, seconds int) error {
+	if int64(seconds) > maxRepresentableSeconds {
+		return fmt.Errorf(
+			"budget.%s must be at most %d seconds; %d cannot be represented as a duration and would wrap to a negative timeout, which reads as no timeout at all",
+			field, maxRepresentableSeconds, seconds)
+	}
+	return nil
 }

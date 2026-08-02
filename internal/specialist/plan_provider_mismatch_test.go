@@ -3,6 +3,7 @@ package specialist
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
@@ -29,10 +30,23 @@ func TestADiscoveredListMissingTheSessionModelIsRefusedAsTheWrongProvider(t *tes
 		{ID: "glm-5.2", ToolCall: true, InputCost: 5},
 		{ID: "qwen3.5:397b", ToolCall: true, InputCost: 9},
 	}
+	// WIRED, or the assertion below tests nothing: with no RunTask, runnerForCall
+	// returns nil and routeTaskModels leaves on its first guard, so `dispatched`
+	// stayed false however badly the provider check behaved. It has to be
+	// possible for the router to run before "the router did not run" means
+	// anything.
+	var mu sync.Mutex
 	dispatched := false
 	tool := &OrchestrateTool{
 		DiscoverModels: func(context.Context) ([]DiscoveredModel, error) { return elsewhere, nil },
 		ModelPrefs:     ModelPreferences{AutoAssign: true},
+		ParentTools:    []string{"read_file"},
+		RunTask: func(context.Context, PlanTaskRequest) (TaskResult, error) {
+			mu.Lock()
+			dispatched = true
+			mu.Unlock()
+			return TaskResult{Outcome: TaskSucceeded, Output: "{}"}, nil
+		},
 	}
 	args := map[string]any{"tasks": []any{
 		map[string]any{"id": "a", "prompt": "list the files"},
@@ -44,7 +58,10 @@ func TestADiscoveredListMissingTheSessionModelIsRefusedAsTheWrongProvider(t *tes
 	if err != nil {
 		t.Fatalf("a configured default must degrade, not fail the plan: %v", err)
 	}
-	if dispatched {
+	mu.Lock()
+	ran := dispatched
+	mu.Unlock()
+	if ran {
 		t.Error("the router was called against a provider that cannot serve it")
 	}
 

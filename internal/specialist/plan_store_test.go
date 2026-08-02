@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -583,11 +584,17 @@ func TestBackgroundIsOptInOnly(t *testing.T) {
 // THE TEMP PATH IS WHERE THE BYTES GO, so it is the path that has to be safe.
 //
 // dir and <name>.json were both refused as symlinks and the write went to
-// neither: it goes to <name>.json.tmp, which nothing looked at. A repo shipping
-// that name as a symlink turned "save my plan" into the file-overwrite
+// neither: it went to <name>.json.tmp, a fixed name nothing looked at. A repo
+// shipping that name as a symlink turned "save my plan" into the file-overwrite
 // primitive the other two checks exist to prevent — the guard was on the door
 // and the wall was open.
-func TestSavingRefusesToWriteThroughASymlinkedTempFile(t *testing.T) {
+//
+// The requirement is that the target is NOT overwritten. SavePlan is free to
+// succeed while satisfying it, and now does: os.CreateTemp picks a name nobody
+// can predict and opens it O_EXCL, so the planted link is never opened at all.
+// That is stronger than refusing a symlink at a fixed name, which still leaves
+// the window between the check and the open.
+func TestSavingNeverWritesThroughASymlinkedTempFile(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "precious")
 	if err := os.WriteFile(target, []byte("do not clobber"), 0o600); err != nil {
@@ -597,14 +604,14 @@ func TestSavingRefusesToWriteThroughASymlinkedTempFile(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Only the TEMP name is planted; <name>.json itself is absent, so the two
-	// existing checks both pass and this is the only thing standing in the way.
-	if err := os.Symlink(target, filepath.Join(dir, "sweep"+planFileExt+".tmp")); err != nil {
+	// The old fixed temp name, planted. <name>.json itself is absent, so the two
+	// existing checks both pass and this is the only thing in the way.
+	if err := os.Symlink(target, filepath.Join(dir, "sweep"+planFileExt+planTempExt)); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err == nil {
-		t.Fatal("SavePlan wrote through a symlinked temp file")
+	if _, err := SavePlan(dir, "sweep", savedPlanFixture(t)); err != nil {
+		t.Fatalf("SavePlan: %v", err)
 	}
 	body, err := os.ReadFile(target)
 	if err != nil {
@@ -612,5 +619,45 @@ func TestSavingRefusesToWriteThroughASymlinkedTempFile(t *testing.T) {
 	}
 	if string(body) != "do not clobber" {
 		t.Fatalf("the symlink target was overwritten through the temp path: %q", body)
+	}
+}
+
+// TWO SAVES OF ONE PLAN MUST NOT STOMP EACH OTHER'S BYTES.
+//
+// The temp file used to be a fixed <name>.json.tmp, so concurrent saves wrote
+// into the same file and whichever renamed second published a plan the other had
+// half-written. Every save must land a parseable plan, and nothing may be left
+// behind in the directory but the plan itself.
+func TestConcurrentSavesOfOnePlanDoNotCorruptIt(t *testing.T) {
+	dir := t.TempDir()
+	plan := savedPlanFixture(t)
+
+	var wait sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wait.Add(1)
+		go func(i int) {
+			defer wait.Done()
+			_, errs[i] = SavePlan(dir, "sweep", plan)
+		}(i)
+	}
+	wait.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	if _, err := FindSavedPlan(PlanPaths{UserDir: dir}, "sweep"); err != nil {
+		t.Fatalf("the saved plan does not parse after concurrent saves: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == planTempExt {
+			t.Errorf("a temporary file survived a successful save: %s", entry.Name())
+		}
 	}
 }

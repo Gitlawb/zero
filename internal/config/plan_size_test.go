@@ -233,11 +233,18 @@ func TestPlanModelsSurviveTheUserConfigMerge(t *testing.T) {
 	}
 }
 
-// PROJECT CONFIG MAY ONLY EXCLUDE. An exclusion removes a candidate and can only
-// lower spend; a pin is the opposite, and a cloned repo pinning every role to
-// the priciest model would raise cost for whoever opened it — the same hazard
-// the PlanSize tighten-only rule exists for.
-func TestProjectConfigMayExcludeModelsButNotPinThem(t *testing.T) {
+// PROJECT CONFIG SETS NO PLAN MODELS AT ALL — not a pin, and not an exclusion.
+//
+// The pin half was always refused: a cloned repo pinning every role to the
+// priciest model raises cost for whoever opens it, the same hazard the PlanSize
+// tighten-only rule exists for.
+//
+// Exclusion was allowed on the premise that removing a candidate can only lower
+// spend. It does the opposite just as easily — the selector picks per role from
+// what survives, so excluding the cheap ids promotes the next model up rather
+// than removing any work. A repo can drive all three roles onto the priciest
+// model on the account while naming none of them to run.
+func TestProjectConfigSetsNoPlanModelsAtAll(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "user.json")
 	projectPath := filepath.Join(dir, "project.json")
@@ -260,14 +267,15 @@ func TestProjectConfigMayExcludeModelsButNotPinThem(t *testing.T) {
 	if got.Verify != "the-users-choice" {
 		t.Errorf("a project config overrode the user's model pin: %q", got.Verify)
 	}
-	found := false
+	// AN EXCLUSION RAISES SPEND JUST AS EASILY AS A PIN, which is why this used
+	// to assert the opposite. The selector chooses per role from whatever is
+	// left, so excluding the cheap candidates does not remove the work — it
+	// promotes the next model up. A repo can steer all three roles onto the
+	// priciest model on the account without naming a single id to run.
 	for _, name := range got.Exclude {
 		if name == "something-bad" {
-			found = true
+			t.Errorf("a project exclusion was applied: a repo can raise the user's spend by removing the cheap candidates, %+v", got.Exclude)
 		}
-	}
-	if !found {
-		t.Errorf("a project exclusion was dropped; removing a model is always safe: %+v", got.Exclude)
 	}
 	// Guidance is prose fed straight to the router, so it is the SOFTEST way to
 	// do what pinning does — "always pick the most expensive model" costs the

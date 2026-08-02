@@ -38,6 +38,11 @@ import (
 // would have needed an evaluator.
 const planFileExt = ".json"
 
+// planTempExt is the extension SavePlan's in-progress file carries. Deliberately
+// NOT planFileExt: ListPlans matches that exactly, so a temp file a crash left
+// behind is never offered as a saved plan.
+const planTempExt = ".tmp"
+
 // PlanPaths are the directories scanned for saved plans, project first.
 type PlanPaths struct {
 	ProjectDir string
@@ -126,19 +131,48 @@ func SavePlan(dir, name string, plan Plan) (string, error) {
 	}
 	// Write-then-rename, so a crash mid-write leaves the previous plan intact
 	// rather than a truncated file that fails to parse on the next run.
-	temp := path + ".tmp"
-	// THE BYTES GO HERE, so this is the path that has to be safe.
 	//
-	// dir and path were both checked and the write went to neither: it goes to
-	// path + ".tmp", which nothing looked at. A repo shipping
-	// .zero/plans/<name>.json.tmp as a symlink turned "save my plan" into the
-	// file-overwrite primitive the two checks above exist to prevent — the guard
-	// was on the door and the wall was open.
-	if err := refuseSymlink(temp); err != nil {
-		return "", err
+	// THE BYTES GO TO THE TEMP FILE, so that is the path that has to be safe —
+	// dir and path were both checked and the write went to neither. Creating it
+	// with os.CreateTemp rather than checking a fixed <name>.json.tmp buys two
+	// things a check could not:
+	//
+	//   O_EXCL. Lstat-then-write leaves a window: a symlink planted between the
+	//   check and the write is followed, and "save my plan" becomes the
+	//   file-overwrite primitive the checks above exist to prevent. O_EXCL
+	//   refuses to open anything that already exists, symlink or not, so there
+	//   is no window to hit.
+	//
+	//   A unique name. Two saves of the same plan shared one <name>.json.tmp and
+	//   stomped each other's bytes; whichever renamed second won with a file the
+	//   other had half-written.
+	//
+	// The random suffix keeps the ".tmp" extension, and ListPlans matches
+	// planFileExt exactly, so a temp file left by a crash is never listed as a
+	// plan.
+	file, err := os.CreateTemp(dir, name+".*"+planTempExt)
+	if err != nil {
+		return "", fmt.Errorf("create a temporary file in %s: %w", dir, err)
 	}
-	if err := os.WriteFile(temp, append(body, '\n'), 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	temp := file.Name()
+	// Named before any early return: every failure below has to remove it.
+	writeErr := func() error {
+		if _, err := file.Write(append(body, '\n')); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		return file.Close()
+	}()
+	if writeErr != nil {
+		_ = file.Close()
+		_ = os.Remove(temp)
+		return "", writeErr
+	}
+	// CreateTemp makes the file 0600 already; this is belt-and-braces against a
+	// umask-sensitive platform, and it runs before the rename so the plan is
+	// never briefly world-readable under its real name.
+	if err := os.Chmod(temp, 0o600); err != nil {
+		_ = os.Remove(temp)
+		return "", fmt.Errorf("set permissions on %s: %w", path, err)
 	}
 	if err := os.Rename(temp, path); err != nil {
 		_ = os.Remove(temp)

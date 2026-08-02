@@ -296,6 +296,13 @@ func TestPlanPassesTheStallTimeoutToEveryTask(t *testing.T) {
 // A CHILD THAT IS TALKING MUST SURVIVE, however long it runs. This is the
 // watchdog's whole premise, and the wedged-child test cannot check it: a child
 // that emits nothing stalls whether or not its events are wired to the clock.
+//
+// STALLPOLL IS WHAT MAKES THIS TEST ABLE TO FAIL. watch() floors its interval at
+// one second, so a 60ms StallTimeout still polled once a second and a child
+// living 300ms got zero ticks — the watcher never looked, and the test passed
+// identically with watchedProgress unwired, which is the one thing it claims to
+// cover. Driving the poll in milliseconds makes the goroutine actually run
+// several times inside the child's life.
 func TestAChattyChildOutlivesItsStallTimeout(t *testing.T) {
 	emitted := 0
 	executor := Executor{
@@ -331,6 +338,9 @@ func TestAChattyChildOutlivesItsStallTimeout(t *testing.T) {
 		Tools: []string{"read_file"},
 		// Far shorter than the child's runtime: only silence may stop it.
 		StallTimeout: 60 * time.Millisecond,
+		// Roughly thirty checks inside the child's 300ms, each one a real chance
+		// to declare it stalled. Without this the watcher ticks zero times.
+		StallPoll: 10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("a working task must not error: %v", err)

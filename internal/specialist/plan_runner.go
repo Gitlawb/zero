@@ -76,6 +76,8 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// silence counts. The context it cancels is this task's alone, so a
 		// wedged task does not take the plan with it.
 		watchdog := newStallWatchdog(req.StallTimeout, nil)
+		// Zero leaves the production rule in place; only a test sets it.
+		watchdog.poll = req.StallPoll
 		taskCtx, cancelTask := context.WithCancel(ctx)
 		defer cancelTask()
 		stopWatchdog := watchdog.watch(taskCtx, cancelTask)

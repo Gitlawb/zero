@@ -268,7 +268,15 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// cursor rests. Bounded by zeromaxingChipAnimating: it runs only while
 		// the chip is actually hovered and stops the moment the cursor leaves,
 		// so an idle session still schedules nothing.
-		return hovered, hovered.ensureSpinnerTick()
+		//
+		// Sequenced, never `return hovered, hovered.ensureSpinnerTick()`: the
+		// method takes a POINTER receiver and sets spinnerTicking, and Go does
+		// not specify whether the plain operand is copied before or after the
+		// call operand. Copied first, the returned model still says false and
+		// every later hover issues another Tick — the exact double-issue the
+		// flag exists to prevent.
+		cmd := hovered.ensureSpinnerTick()
+		return hovered, cmd
 	}
 
 	switch {

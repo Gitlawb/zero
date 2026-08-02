@@ -488,7 +488,14 @@ func (m model) renderOrchestrateTaskLine(task orchestrateTask, now time.Time, wi
 	// The summary is what is left after the fixed parts, and it is a SUMMARY:
 	// the task's full result stays in the tool output. A display formatter on
 	// the data path is how a 583-rune work product became 200 mangled runes.
-	remaining := width - len([]rune(head)) - len([]rune(meta)) - 3
+	//
+	// MEASURED IN COLUMNS, NOT RUNES. head carries the styled glyph, so its
+	// escape sequences counted as visible characters — around a dozen columns
+	// of phantom width per row. remaining came out short, the `> 8` guard
+	// suppressed summaries that fit comfortably, and the wider the terminal the
+	// more often a finished task rendered with nothing to say. lipgloss.Width
+	// ignores the escapes and counts wide runes properly.
+	remaining := width - lipgloss.Width(head) - lipgloss.Width(meta) - 3
 	line := head + " " + zeroTheme.faint.Render(meta)
 	if remaining > 8 && strings.TrimSpace(task.summary) != "" {
 		limit := remaining

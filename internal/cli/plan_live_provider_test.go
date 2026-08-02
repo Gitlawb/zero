@@ -3,15 +3,49 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
 
-func writeTwoProviderConfig(t *testing.T, active string) string {
+// pointConfigHomeAtATempDir redirects config.UserConfigDir at a scratch directory
+// and returns it.
+//
+// The variable that does the redirecting IS NOT THE SAME ON EVERY PLATFORM:
+// os.UserConfigDir reads %AppData% on Windows and $XDG_CONFIG_HOME elsewhere, and
+// config.UserConfigDir lets XDG win on macOS too. Setting only XDG_CONFIG_HOME
+// left Windows resolving against the real %AppData%, where this file was never
+// written — so every case below silently exercised the resolve-failed fallback
+// and the switch-following test could not fail on Windows for the right reason.
+// Mirrors internal/config/paths_test.go's setUserConfigRoot.
+func pointConfigHomeAtATempDir(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	dir := filepath.Join(home, "zero")
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+	base, err := config.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolve user config dir: %v", err)
+	}
+	// The redirect must have LANDED. Without this, setting the wrong variable
+	// for the platform resolves back to the developer's real config directory:
+	// the helper writes a provider file into it and the tests pass for the
+	// wrong reason — which is exactly how this went unnoticed on Windows.
+	if !strings.HasPrefix(base, root) {
+		t.Fatalf("config home resolved to %q, outside the temp root %q: this test would read and write the real user config", base, root)
+	}
+	return base
+}
+
+func writeTwoProviderConfig(t *testing.T, active string) {
+	t.Helper()
+	dir := filepath.Join(pointConfigHomeAtATempDir(t), "zero")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +66,6 @@ func writeTwoProviderConfig(t *testing.T, active string) string {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_CONFIG_HOME", home)
-	return home
 }
 
 // DISCOVERY MUST FOLLOW AN IN-SESSION PROVIDER SWITCH, because child execution
@@ -75,7 +107,9 @@ func TestPlanDiscoveryKeepsFlagOverridesWhenTheProviderDidNotChange(t *testing.T
 		Model:   "grok-4.5",
 		APIKey:  "flag-only-key",
 	}
-	os.Unsetenv(config.ActiveProviderEnv)
+	// Empty reads as unset (applyEnv TrimSpaces it) and t.Setenv restores the
+	// real value afterwards — os.Unsetenv here would leak into sibling tests.
+	t.Setenv(config.ActiveProviderEnv, "")
 
 	got := livePlanProvider(t.TempDir(), captured)
 	if got.BaseURL != "https://gateway.internal/v1" || got.APIKey != "flag-only-key" {
@@ -86,8 +120,9 @@ func TestPlanDiscoveryKeepsFlagOverridesWhenTheProviderDidNotChange(t *testing.T
 // An unreadable or absent config must not blank the profile discovery probes
 // with. Falling back to the captured one leaves behaviour exactly as it was.
 func TestPlanDiscoveryFallsBackToTheCapturedProfileWhenResolutionFails(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "does-not-exist"))
-	os.Unsetenv(config.ActiveProviderEnv)
+	// A config home with no zero/config.json in it: resolution finds nothing.
+	pointConfigHomeAtATempDir(t)
+	t.Setenv(config.ActiveProviderEnv, "")
 	captured := config.ProviderProfile{Name: "xai", BaseURL: "https://api.x.ai/v1", Model: "grok-4.5"}
 
 	if got := livePlanProvider(t.TempDir(), captured); got.Name != "xai" || got.BaseURL != captured.BaseURL {
