@@ -33,6 +33,8 @@ const (
 // so a key can never traverse or collide with store internals.
 var keyPattern = regexp.MustCompile(`^(provider|mcp):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+var currentOSUser = user.Current
+
 // ValidateKey reports whether key is a well-formed namespaced token key.
 func ValidateKey(key string) error {
 	if !keyPattern.MatchString(key) {
@@ -287,13 +289,20 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 // OS user would take different lock files while writing to the same OS keychain.
 func keyringLockPath(env map[string]string, service, account string) string {
 	name := keyringLockFileName(service, account)
-	if u, err := user.Current(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
+	if u, err := currentOSUser(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
 		return filepath.Join(u.HomeDir, ".cache", "zero", name)
 	}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".cache", "zero", name)
+	// Do not fall back to os.UserHomeDir: it reads ambient HOME/USERPROFILE, so
+	// two same-user processes can choose different locks for one keyring. The
+	// temporary name is UID-scoped where UIDs exist.
+	return filepath.Join(keyringFallbackLockDir(), keyringTempLockName(service, account))
+}
+
+func keyringFallbackLockDir() string {
+	if runtime.GOOS == "windows" {
+		return os.TempDir()
 	}
-	return filepath.Join(os.TempDir(), keyringTempLockName(service, account))
+	return "/tmp"
 }
 
 // legacyKeyringLockPath returns the lock file a pre-PR binary acquires around
@@ -361,7 +370,7 @@ func (s *Store) Save(key string, token Token) error {
 			return err
 		}
 		state.Tokens[key] = token
-		return s.writeState(state, nil)
+		return s.writeState(state, map[string]bool{key: false})
 	})
 }
 
@@ -493,11 +502,10 @@ func (s *Store) readState() (storeFile, error) {
 	return state, nil
 }
 
-// writeState persists state. omitFromLegacy lists keys that must not be
-// re-merged from the keyring legacy blob during reconciliation (Delete intent);
-// the keyring backend also records them as durable tombstones. File and
-// encrypted-file backends ignore omitFromLegacy.
-func (s *Store) writeState(state storeFile, omitFromLegacy map[string]bool) error {
+// writeState persists state. mutations identifies explicitly saved (false) and
+// deleted (true) keys. The keyring backend uses it to order durable tombstone
+// transitions; file and encrypted-file backends ignore it.
+func (s *Store) writeState(state storeFile, mutations map[string]bool) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -511,7 +519,7 @@ func (s *Store) writeState(state storeFile, omitFromLegacy map[string]bool) erro
 			return err
 		}
 	}
-	return s.blob.write(payload, omitFromLegacy)
+	return s.blob.write(payload, mutations)
 }
 
 func emptyStoreFile() storeFile {
@@ -523,11 +531,10 @@ func emptyStoreFile() storeFile {
 type blobStore interface {
 	// read returns the stored blob; ok is false when nothing is stored yet.
 	read() (data []byte, ok bool, err error)
-	// write replaces the stored blob. omitFromLegacy is keyring-only: keys the
-	// caller deliberately removed that must not be re-merged from the legacy
-	// combined entry and that should be recorded as durable tombstones. File
-	// backends ignore it.
-	write(data []byte, omitFromLegacy map[string]bool) error
+	// write replaces the stored blob. mutations is keyring-only and identifies
+	// explicit saves (false) and deletes (true) for durable tombstone ordering.
+	// File backends ignore it.
+	write(data []byte, mutations map[string]bool) error
 	// withLock runs fn under whatever cross-process exclusion the backend offers
 	// (a lock file for the file backend; none for the keyring, which is the
 	// authoritative store and is serialized within the process by Store.mu).
@@ -655,6 +662,9 @@ type keyringBlob struct {
 	// safety there comes from never overwriting the legacy blob and from
 	// durable tombstones, not from dual-write.
 	legacyLockPath string
+	// maxIndexKeys overrides the live credential cap for bounded metadata
+	// indexes, such as tombstones, that do not fan out into per-key reads.
+	maxIndexKeys int
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
@@ -662,17 +672,32 @@ func (b keyringBlob) read() ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	// Tombstones are authoritative even before the first index commits. A
+	// delete can persist its marker and then be interrupted while publishing the
+	// initial index; returning the untouched legacy blob here would resurrect it.
+	tombstones, err := b.readTombstones()
+	if err != nil {
+		return nil, false, err
+	}
 	if !ok {
-		return b.readLegacy()
+		data, legacyOK, err := b.readLegacy()
+		if err != nil || !legacyOK || len(tombstones) == 0 {
+			return data, legacyOK, err
+		}
+		var state storeFile
+		if err := json.Unmarshal(data, &state); err != nil {
+			return nil, false, fmt.Errorf("oauth: invalid legacy keyring token blob: %w", err)
+		}
+		for key := range tombstones {
+			delete(state.Tokens, key)
+		}
+		filtered, err := json.Marshal(state)
+		return filtered, true, err
 	}
 	// Tombstones block resurrection of deliberately deleted keys from the
 	// legacy combined entry (an old binary may rewrite a stale snapshot into
 	// that account after logout). Fail closed on a corrupt tombstone set so a
 	// damaged marker cannot silently re-expose logged-out credentials.
-	tombstones, err := b.readTombstones()
-	if err != nil {
-		return nil, false, err
-	}
 	// The legacy combined entry is consulted when an indexed key's own entry is
 	// missing (torn write / migration) and for keys only present there (an old
 	// binary logged into a provider this process has never indexed). Indexed
@@ -809,7 +834,7 @@ func (b keyringBlob) readLegacyTokens() (map[string]Token, error) {
 // durable tombstones and must not be re-merged from the legacy blob even
 // when they were never indexed (a legacy-only old-binary login that the
 // user logged out of).
-func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
+func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
@@ -829,12 +854,10 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 	}
 	// Record durable deletion markers before mutating entries so a crash
 	// mid-write cannot leave a logged-out key importable from legacy alone.
-	for key := range omitFromLegacy {
-		tombstones[key] = true
-	}
-	// A re-login after logout clears the tombstone for that key.
-	for key := range state.Tokens {
-		delete(tombstones, key)
+	for key, deleted := range mutations {
+		if deleted {
+			tombstones[key] = true
+		}
 	}
 
 	// An older binary running alongside this one still reads and writes only the
@@ -859,7 +882,7 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 			if ValidateKey(key) != nil {
 				continue
 			}
-			if omitFromLegacy[key] || tombstones[key] {
+			if mutations[key] || tombstones[key] {
 				continue
 			}
 			if _, exists := state.Tokens[key]; exists {
@@ -956,6 +979,21 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 	if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
 		return err
 	}
+	// A re-login clears its tombstone only after the replacement entry and exact
+	// index are durable. If any earlier step fails, legacy fallback remains
+	// suppressed instead of restoring the revoked credential.
+	tombstonesChanged := false
+	for key, deleted := range mutations {
+		if !deleted && tombstones[key] {
+			delete(tombstones, key)
+			tombstonesChanged = true
+		}
+	}
+	if tombstonesChanged {
+		if err := b.writeTombstones(tombstones); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -964,7 +1002,7 @@ func (b keyringBlob) write(data []byte, omitFromLegacy map[string]bool) error {
 // the live index (max-length keys after many logouts), so a single entry is
 // not enough under the macOS line bound.
 func (b keyringBlob) tombstoneBlob() keyringBlob {
-	return keyringBlob{kr: b.kr, service: b.service, indexAccount: keyringTombstoneAccount}
+	return keyringBlob{kr: b.kr, service: b.service, indexAccount: keyringTombstoneAccount, maxIndexKeys: maxKeyringTombstoneKeys}
 }
 
 // readTombstones returns the durable set of keys deleted by a new binary.
@@ -1008,8 +1046,8 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		}
 		return nil
 	}
-	if len(tombstones) > maxKeyringIndexKeys {
-		return errKeyringIndexTooManyKeys(len(tombstones))
+	if len(tombstones) > maxKeyringTombstoneKeys {
+		return errKeyringIndexTooManyKeys(len(tombstones), maxKeyringTombstoneKeys)
 	}
 	keys := make([]string, 0, len(tombstones))
 	for key := range tombstones {
@@ -1067,15 +1105,19 @@ const maxKeyringIndexChunks = 128
 // maxKeyringIndexChunks) while still rejecting a damaged index promptly.
 const maxKeyringIndexKeys = 512
 
+// Tombstones do not fan out into per-key keyring reads, so they can use the
+// codec's bounded raw capacity without imposing the live credential cap.
+const maxKeyringTombstoneKeys = maxRawKeyringIndexKeys
+
 // maxRawKeyringIndexKeys bounds the raw decoded element count before
 // deduplication or map preallocation, guarding against DoS from duplicate keys.
 const maxRawKeyringIndexKeys = 16384
 
 // errKeyringIndexTooManyKeys is returned when a decoded index (or one of its
 // chunks) claims more keys than maxKeyringIndexKeys.
-func errKeyringIndexTooManyKeys(count int) error {
-	log.Printf("warning: oauth: keyring token index lists %d keys, over the %d-key cap", count, maxKeyringIndexKeys)
-	return fmt.Errorf("oauth: keyring token index lists %d keys, over the %d-key cap", count, maxKeyringIndexKeys)
+func errKeyringIndexTooManyKeys(count, limit int) error {
+	log.Printf("warning: oauth: keyring token index lists %d keys, over the %d-key cap", count, limit)
+	return fmt.Errorf("oauth: keyring token index lists %d keys, over the %d-key cap", count, limit)
 }
 
 // keyIndexHeader is chunk 0 of the key index. Chunks 1..Chunks-1 live under
@@ -1085,6 +1127,13 @@ type keyIndexHeader struct {
 	Version int      `json:"v"`
 	Chunks  int      `json:"chunks"`
 	Keys    []string `json:"keys"`
+}
+
+func (b keyringBlob) indexKeyLimit() int {
+	if b.maxIndexKeys > 0 {
+		return b.maxIndexKeys
+	}
+	return maxKeyringIndexKeys
 }
 
 func (b keyringBlob) chunkAccount(index int) string {
@@ -1134,11 +1183,11 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
 		if len(rawKeys) > maxRawKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys))
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 		}
 		keys := dedupeValidKeys(rawKeys)
-		if len(keys) > maxKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
+		if len(keys) > b.indexKeyLimit() {
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 		}
 		return keys, true, 1, nil
 	}
@@ -1158,7 +1207,7 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 	}
 	rawKeys := header.Keys
 	if len(rawKeys) > maxRawKeyringIndexKeys {
-		return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys))
+		return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 	}
 	for i := 1; i < header.Chunks; i++ {
 		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
@@ -1177,13 +1226,13 @@ func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
 			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
 		}
 		if len(rawKeys)+len(more) > maxRawKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys) + len(more))
+			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
 		}
 		rawKeys = append(rawKeys, more...)
 	}
 	keys := dedupeValidKeys(rawKeys)
-	if len(keys) > maxKeyringIndexKeys {
-		return nil, false, 0, errKeyringIndexTooManyKeys(len(keys))
+	if len(keys) > b.indexKeyLimit() {
+		return nil, false, 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
 	return keys, true, header.Chunks, nil
 }
@@ -1227,8 +1276,8 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) 
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
 	// count before chunking so a large set of short keys that still fit under
 	// maxKeyringIndexChunks cannot strand the store unreadable.
-	if len(keys) > maxKeyringIndexKeys {
-		return 0, errKeyringIndexTooManyKeys(len(keys))
+	if len(keys) > b.indexKeyLimit() {
+		return 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
 	chunks := chunkIndexKeys(keys)
 	if len(chunks) > maxKeyringIndexChunks {

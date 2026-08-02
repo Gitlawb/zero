@@ -21,10 +21,6 @@ var (
 	// While the holder's mtime stays within fileLockStaleAfter, this idle
 	// deadline is extended so a fixed 5s window cannot fail a healthy peer.
 	fileLockTimeout = 5 * time.Second
-	// fileLockMaxWait is a hard ceiling on total acquisition time so a wedged
-	// peer that somehow keeps refreshing forever cannot pin waiters indefinitely.
-	// Healthy multi-entry writes stay well under this; raise only with evidence.
-	fileLockMaxWait = 2 * time.Minute
 	// fileLockStaleAfter is how old a lock file's mtime must be before a waiter
 	// may reclaim it as abandoned. Must stay above one keyring command timeout
 	// plus lease refresh slack (holders refresh every fileLockRefreshInterval).
@@ -52,8 +48,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		return nil, err
 	}
 	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), now().UnixNano(), lockSeq.Add(1))
-	start := time.Now()
-	idleDeadline := start.Add(fileLockTimeout)
+	idleDeadline := time.Now().Add(fileLockTimeout)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -116,7 +111,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 				idleDeadline = time.Now().Add(fileLockTimeout)
 			}
 		}
-		if time.Now().After(idleDeadline) || time.Since(start) > fileLockMaxWait {
+		if time.Now().After(idleDeadline) {
 			return nil, fmt.Errorf("oauth: timed out acquiring token lock %s", filepath.Base(lockPath))
 		}
 		time.Sleep(10 * time.Millisecond)

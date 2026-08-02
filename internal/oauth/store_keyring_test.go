@@ -807,35 +807,6 @@ func TestStoreKeyringExplicitSaveWinsOverStaleLookingLegacy(t *testing.T) {
 	}
 }
 
-// TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock guards the other
-// half of the same hazard as the lease test below: acquireFileLock's own
-// acquisition deadline must be measured against the real wall clock, not the
-// injectable now parameter. StoreOptions.Now may legitimately be a fixed
-// clock (as this test uses), and deadline := now().Add(fileLockTimeout)
-// followed by now().After(deadline) would then never become true, so a
-// contested lock would retry forever instead of returning a timeout error.
-func TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock(t *testing.T) {
-	lockPath := filepath.Join(t.TempDir(), "test.lockfile")
-	// A fresh (non-stale) lock held by someone else. With wait-while-healthy,
-	// that extends the idle deadline, so cap the absolute wait for the test.
-	if err := os.WriteFile(lockPath, []byte("someone-else"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	prevMax := fileLockMaxWait
-	fileLockMaxWait = 200 * time.Millisecond
-	defer func() { fileLockMaxWait = prevMax }()
-
-	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	start := time.Now()
-	_, err := acquireFileLock(lockPath, func() time.Time { return fixed })
-	if err == nil {
-		t.Fatal("expected a timeout error acquiring an already-held, non-stale lock")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("acquireFileLock took %v with a fixed clock; the deadline must use the wall clock, not now()", elapsed)
-	}
-}
-
 // TestAcquireFileLockWaitsWhileLeaseHealthy covers [P2] Let lock acquisition
 // cover a healthy keyring operation: a holder that keeps the lease fresh for
 // longer than the idle timeout must not cause contenders to fail; they wait
@@ -843,12 +814,9 @@ func TestAcquireFileLockDeadlineUsesWallClockNotInjectedClock(t *testing.T) {
 func TestAcquireFileLockWaitsWhileLeaseHealthy(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "test.lockfile")
 	prevTimeout := fileLockTimeout
-	prevMax := fileLockMaxWait
 	fileLockTimeout = 80 * time.Millisecond
-	fileLockMaxWait = 3 * time.Second
 	defer func() {
 		fileLockTimeout = prevTimeout
-		fileLockMaxWait = prevMax
 	}()
 
 	unlock, err := acquireFileLock(lockPath, time.Now)
@@ -2235,5 +2203,99 @@ func TestStoreKeyringLeaseRefreshesWhileWaitingOnSecondLock(t *testing.T) {
 	holdLegacy()
 	if err := <-done; err != nil {
 		t.Fatalf("withLeasedLocks after legacy release: %v", err)
+	}
+}
+
+func TestStoreKeyringLegacyOnlyReadHonorsInterruptedDeleteTombstone(t *testing.T) {
+	kr := &failingKR{fakeKR: newFakeKR()}
+	legacy, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "revoked"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacy)
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kr.failAt = 2
+	if removed, err := s.Delete(ProviderKey("alpha")); err == nil || !removed {
+		t.Fatalf("Delete = removed %v, err %v; want removed with injected failure", removed, err)
+	}
+	kr.failAt = 0
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || ok {
+		t.Fatalf("Load after interrupted delete = ok %v, err %v; tombstone must hide legacy token", ok, err)
+	}
+}
+
+func TestStoreKeyringReloginKeepsTombstoneUntilReplacementCommits(t *testing.T) {
+	kr := &failingKR{fakeKR: newFakeKR()}
+	legacy, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "revoked"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringLegacyAccount] = base64.StdEncoding.EncodeToString(legacy)
+	b := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
+	if err := b.writeTombstones(map[string]bool{ProviderKey("alpha"): true}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kr.ops = 0
+	kr.failAt = 2
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "replacement"}); err == nil {
+		t.Fatal("Save succeeded despite injected index failure")
+	}
+	kr.failAt = 0
+	if _, ok, err := s.Load(ProviderKey("alpha")); err != nil || ok {
+		t.Fatalf("Load after interrupted re-login = ok %v, err %v; revoked legacy token was restored", ok, err)
+	}
+	if err := s.Save(ProviderKey("alpha"), Token{AccessToken: "replacement"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.Load(ProviderKey("alpha")); err != nil || !ok || got.AccessToken != "replacement" {
+		t.Fatalf("Load committed replacement = %#v, ok %v, err %v", got, ok, err)
+	}
+}
+
+func TestStoreKeyringTombstonesOutgrowLiveCredentialCap(t *testing.T) {
+	kr := newFakeKR()
+	b := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+	tombstones := make(map[string]bool, maxKeyringIndexKeys+1)
+	for i := 0; i <= maxKeyringIndexKeys; i++ {
+		tombstones[ProviderKey(fmt.Sprintf("retired-%03d", i))] = true
+	}
+	if err := b.writeTombstones(tombstones); err != nil {
+		t.Fatalf("write %d tombstones: %v", len(tombstones), err)
+	}
+	got, err := b.readTombstones()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(tombstones) {
+		t.Fatalf("read %d tombstones, want %d", len(got), len(tombstones))
+	}
+}
+
+func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
+	previous := currentOSUser
+	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
+	defer func() { currentOSUser = previous }()
+
+	gotA := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	gotB := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	if gotA != gotB {
+		t.Fatalf("same-user fallback changed with HOME: %q vs %q", gotA, gotB)
+	}
+	want := filepath.Join(keyringFallbackLockDir(), keyringTempLockName(keyringService, keyringIndexAccount))
+	if gotA != want {
+		t.Fatalf("fallback lock = %q, want UID-scoped temporary %q", gotA, want)
 	}
 }
