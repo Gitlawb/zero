@@ -140,7 +140,6 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult(fileUnseenMessage(relativePath))
 	}
 
-	previouslySeenWhole := options.FileTracker.SeenWhole(absolutePath)
 	updated := strings.Replace(content, oldString, newString, 1)
 	replacedCount := 1
 	if replaceAll {
@@ -165,15 +164,21 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
-	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
 	if updated == modelKnownContent {
-		if previouslySeenWhole {
-			options.FileTracker.RecordSeenRange(absolutePath, 1, lineCount(updated), lineCount(updated))
-		} else {
-			for _, span := range editedSpans {
-				options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))
-			}
+		// OUR edit, so we know precisely which lines moved: RecordEdit carries
+		// across the reads this edit did not disturb instead of dropping them.
+		//
+		// Record would drop all of them, and did — a file read in three pieces
+		// lost every piece to a single two-line edit, and the next six edits into
+		// regions that had been read were refused as unseen. See RecordEdit.
+		options.FileTracker.RecordEdit(absolutePath, []byte(content), []byte(updated), newInfo)
+		for _, span := range editedSpans {
+			options.FileTracker.RecordSeenBytes(absolutePath, span.start, span.end, len(updated))
 		}
+	} else {
+		// A formatter rewrote the file after us. We no longer know which line
+		// holds what was read, so the conservative drop is the right answer here.
+		options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
 	}
 
 	suffix := ""
