@@ -253,7 +253,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	if _, err := store.Grant(sandbox.GrantInput{
 		ToolName: "bash",
 		Decision: sandbox.GrantAllow,
-		Reason:   "sk-proj-sensitive approved shell",
+		Reason:   "sk-proj-sensitive-credential-value approved shell",
 	}); err != nil {
 		t.Fatalf("Grant returned error: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	} {
 		assertContains(t, permissionText, want)
 	}
-	assertNotContains(t, permissionText, "sk-proj-sensitive")
+	assertNotContains(t, permissionText, "sk-proj-sensitive-credential-value")
 	assertNotContains(t, permissionText, "status: ok")
 	assertNotContains(t, permissionText, "Permission mode:")
 }

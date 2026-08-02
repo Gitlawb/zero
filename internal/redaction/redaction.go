@@ -70,7 +70,8 @@ var sensitiveKeys = map[string]struct{}{
 
 // openaiKeyPattern mirrors secrets.Scan's broad sk- body. Known OpenAI
 // prefixes (sk-proj-/sk-svcacct-/sk-admin-) are always redacted; other sk-
-// matches without a digit are left alone (kebab-case false positives).
+// digit-free matches with an interior hyphen are left alone (kebab-case false
+// positives), while digit-free legacy sk- credentials are still redacted.
 // Applied via ReplaceAllStringFunc rather than the plain list below.
 var openaiKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)
 
@@ -226,7 +227,8 @@ func RedactString(value string, options Options) string {
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) {
+		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
+			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
 			return match
 		}
 		return replacement
@@ -245,8 +247,7 @@ func knownOpenAIKeyPrefix(match string) bool {
 		strings.HasPrefix(match, "sk-admin-")
 }
 
-// secretMatchHasDigit is the redaction-side twin of secrets.containsDigit:
-// unknown sk- vendor keys always embed a digit; pure letter/hyphen kebab phrases do not.
+// secretMatchHasDigit is the redaction-side twin of secrets.containsDigit.
 func secretMatchHasDigit(s string) bool {
 	for _, r := range s {
 		if r >= '0' && r <= '9' {

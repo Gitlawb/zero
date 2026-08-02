@@ -403,6 +403,8 @@ func TestPrepareRejectsWorktreeLockedByAnotherRun(t *testing.T) {
 			{Stdout: sourceGit + "\n"},
 			{Stdout: sourceGit + "\n"},
 			{ExitCode: 128, Stderr: "fatal: '" + existing + "' is already locked, reason: zero: active task worktree"},
+			// reclaimDeadOwnerLease must preserve a lease owned by a live PID.
+			{Stdout: "worktree " + root + "\nworktree " + existing + "\nlocked " + leaseReason(os.Getpid()) + "\n"},
 		},
 	}
 
@@ -414,6 +416,11 @@ func TestPrepareRejectsWorktreeLockedByAnotherRun(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "locked by another active run") {
 		t.Fatalf("Prepare must reject an in-use lease, got %v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[0] == "worktree" && call.args[1] == "unlock" {
+			t.Fatalf("Prepare unlocked a live owner's lease: %#v", runner.calls)
+		}
 	}
 }
 

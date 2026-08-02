@@ -24,9 +24,9 @@ func TestScan_NoOverRedactionOnKebabWords(t *testing.T) {
 // the \b is satisfied by all of those, so the fix loses no real coverage.
 func TestScan_RealSecretsStillCaught(t *testing.T) {
 	cases := []string{
-		"export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx0",
-		`token: "sk-abcdefghijklmnopqrstuvwxyz0"`,
-		"key is sk-svcacct-abcdefghijklmnopqrstuvwx0 at the end",
+		"export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx",
+		`token: "sk-abcdefghijklmnopqrstuvwxyz"`,
+		"key is sk-svcacct-abcdefghijklmnopqrstuvwx at the end",
 		"github_pat_11ABCDEFG0abcdefghijklmnopqrst",
 		"creds AKIAIOSFODNN7EXAMPLE here",
 	}

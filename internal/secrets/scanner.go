@@ -47,9 +47,9 @@ var patterns = []pattern{
 	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35,}`)},
 	{"anthropic_key", regexp.MustCompile(`\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}`)},
 	// Broad body (allows - and _) so sk-proj-…, sk-or-v1-…, sk-fw-…, and
-	// legacy sk-<alnum> all match. Scan drops matches with no digit so
-	// kebab-case false positives like sk-learn-machine-learning-model stay
-	// un-redacted (real keys always carry digits).
+	// legacy sk-<alnum> all match. Scan drops digit-free matches only when
+	// the body contains an interior hyphen, which preserves kebab-case false
+	// positives without excluding digit-free legacy credentials.
 	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)},
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
@@ -73,7 +73,8 @@ func Scan(text string) []Finding {
 			// Drop pure kebab FPs (sk-learn-…) unless the match is a known
 			// OpenAI-issued prefix form (sk-proj-/sk-svcacct-/sk-admin-), which
 			// we always treat as credentials even when the body has no digit.
-			if p.typ == "openai_key" && !knownOpenAIKeyPrefix(m) && !containsDigit(m) {
+			if p.typ == "openai_key" && !knownOpenAIKeyPrefix(m) && !containsDigit(m) &&
+				strings.Contains(strings.TrimPrefix(m, "sk-"), "-") {
 				continue
 			}
 			if _, ok := seen[m]; !ok {
@@ -97,9 +98,9 @@ func Scan(text string) []Finding {
 	return out
 }
 
-// containsDigit reports whether s has at least one ASCII digit. Used to drop
-// openai_key regex hits that are pure kebab-case words (no digit) while still
-// accepting vendor keys that always embed digits.
+// containsDigit reports whether s has at least one ASCII digit. Together with
+// an interior-hyphen check, it distinguishes kebab-case false positives from
+// digit-free legacy sk- credentials.
 func containsDigit(s string) bool {
 	for _, r := range s {
 		if r >= '0' && r <= '9' {

@@ -135,12 +135,12 @@ func TestRedactString_MultiPartAuthSchemes(t *testing.T) {
 // redacted (by the token-format patterns), never the file:line prefix.
 func TestRedactString_PreservesFileLineColons(t *testing.T) {
 	o := Options{}
-	in := "    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz0"
+	in := "    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz"
 	out := RedactString(in, o)
 	if !strings.Contains(out, "secret_test.go:12:") {
 		t.Errorf("file:line prefix mangled: %q", out)
 	}
-	if strings.Contains(out, "sk-proj-abcdefghijklmnopqrstuvwxyz0") {
+	if strings.Contains(out, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
 		t.Errorf("secret leaked: %q", out)
 	}
 	if !strings.Contains(out, RedactedSecret) {
