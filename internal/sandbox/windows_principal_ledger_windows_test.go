@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -281,9 +280,26 @@ func guestsSID(t *testing.T) *windows.SID {
 	return sid
 }
 
+// containsPathFold compares the way the ACL plans do, which is the only
+// comparison that means anything here.
+//
+// Comparing the raw spellings passed CI on nothing and failed on Windows: the
+// plan builder runs every root through normalizeProfilePath, whose EvalSymlinks
+// expands the 8.3 short name GitHub's runners hand out for TEMP, so the record
+// holds C:\Users\runneradmin\... while t.TempDir() returned C:\Users\RUNNER~1\...
+// and EqualFold called two spellings of one directory different paths. A
+// developer whose TEMP has no short name never sees it.
+//
+// Production is self-consistent — both the recorded and the newly planned paths
+// go through the same normalization — so this was only ever the test being
+// naive about what "same path" means on Windows.
 func containsPathFold(paths []string, want string) bool {
+	wanted := windowsCapabilityPathKey(normalizeProfilePath(want))
+	if wanted == "" {
+		return false
+	}
 	for _, path := range paths {
-		if strings.EqualFold(filepath.Clean(path), filepath.Clean(want)) {
+		if windowsCapabilityPathKey(normalizeProfilePath(path)) == wanted {
 			return true
 		}
 	}
