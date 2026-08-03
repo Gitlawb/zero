@@ -219,18 +219,25 @@ func TestReduceCommandOutputPreservesFailureEvidence(t *testing.T) {
 }
 
 func TestReduceCommandOutputPassesThroughUnsupportedAndCompoundCommands(t *testing.T) {
-	original := strings.Repeat("PASS src/example.test.ts\n", commandReducerMinPassingLines+2) + "exit_code: 0"
-	for _, command := range []string{
-		"npm test | tee test.log",
-		"cargo test && echo done",
-		"pytest; notify-send done",
-		"cargo test 1>test.log",
-		"cargo test 2>>errors.log",
-		"git status --short",
-	} {
-		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": command}, Result{Status: StatusOK, Output: original})
-		if result.Output != original || result.Meta != nil {
-			t.Fatalf("command %q should pass through exactly, got %#v", command, result)
+	outputs := make(map[string]string)
+	for _, fixture := range commandReducerCorpus() {
+		outputs[fixture.name] = fixture.output
+	}
+	testCases := []struct {
+		command string
+		output  string
+	}{
+		{command: "npm test | tee test.log", output: outputs["npm_vitest"]},
+		{command: "cargo test && echo done", output: outputs["cargo_test"]},
+		{command: "pytest; notify-send done", output: outputs["pytest"]},
+		{command: "cargo test 1>test.log", output: outputs["cargo_test"]},
+		{command: "cargo test 2>>errors.log", output: outputs["cargo_test"]},
+		{command: "git status --short", output: outputs["npm_vitest"]},
+	}
+	for _, testCase := range testCases {
+		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": testCase.command}, Result{Status: StatusOK, Output: testCase.output})
+		if result.Output != testCase.output || result.Meta != nil {
+			t.Fatalf("command %q should pass through exactly, got %#v", testCase.command, result)
 		}
 	}
 }
@@ -259,6 +266,26 @@ func TestReduceCommandOutputRequiresAuthoritativeRunnerSummary(t *testing.T) {
 		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": command}, Result{Status: StatusOK, Output: original})
 		if result.Output != original || result.Meta != nil {
 			t.Fatalf("summary-free output for %q should pass through, got %#v", command, result)
+		}
+	}
+}
+
+func TestReduceCommandOutputRejectsLookalikeRunnerSummaries(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	testCases := []struct {
+		command string
+		line    string
+		summary string
+	}{
+		{command: "cargo check", line: "Compiling dependency v1.0.0", summary: "Finished generating bindings"},
+		{command: "pytest", line: "tests/test_module.py ........ [100%]", summary: "application log: 14 passed validation in staging"},
+		{command: "npm test", line: "PASS src/example.test.ts", summary: "Test Files discovered: 14"},
+	}
+	for _, testCase := range testCases {
+		original := strings.Repeat(testCase.line+"\n", commandReducerMinPassingLines+2) + testCase.summary + "\nexit_code: 1"
+		result := reduceCommandOutput(ExecCommandToolName, map[string]any{"cmd": testCase.command}, Result{Status: StatusError, Output: original})
+		if result.Output != original || result.Meta != nil {
+			t.Fatalf("lookalike summary for %q should pass through exactly, got %#v", testCase.command, result)
 		}
 	}
 }

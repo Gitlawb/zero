@@ -150,7 +150,7 @@ func reduceCargoTestPassingLines(output string) (string, int) {
 }
 
 func reduceCargoBuildProgressLines(output string) (string, int) {
-	if !outputHasTrimmedPrefix(output, "Finished ") {
+	if !outputHasCargoFinishedSummary(output) {
 		return output, 0
 	}
 	return reduceRepeatedOutputLines(output, "successful Rust build progress lines", func(line string) bool {
@@ -160,7 +160,7 @@ func reduceCargoBuildProgressLines(output string) (string, int) {
 }
 
 func reducePytestPassingLines(output string) (string, int) {
-	if !strings.Contains(output, " passed") {
+	if !outputHasPytestSummary(output) {
 		return output, 0
 	}
 	return reduceRepeatedOutputLines(output, "passing pytest progress lines", isPassingPytestProgressLine)
@@ -182,7 +182,7 @@ func isPassingPytestProgressLine(line string) bool {
 }
 
 func reduceJavaScriptTestPassingLines(output string) (string, int) {
-	if !outputHasTrimmedPrefix(output, "Test Suites:") && !outputHasTrimmedPrefix(output, "Test Files ") {
+	if !outputHasJavaScriptTestSummary(output) {
 		return output, 0
 	}
 	return reduceRepeatedOutputLines(output, "passing JavaScript test-file lines", func(line string) bool {
@@ -191,9 +191,69 @@ func reduceJavaScriptTestPassingLines(output string) (string, int) {
 	})
 }
 
-func outputHasTrimmedPrefix(output string, prefix string) bool {
+func outputHasCargoFinishedSummary(output string) bool {
 	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Finished `") && strings.Contains(trimmed, "` profile ") &&
+			strings.Contains(trimmed, " target(s) in ") {
+			return true
+		}
+	}
+	return false
+}
+
+func outputHasPytestSummary(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		summary := strings.Trim(strings.TrimSpace(line), "= ")
+		if summary == "short test summary info" || isPytestResultSummary(summary) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPytestResultSummary(summary string) bool {
+	fields := strings.Fields(summary)
+	if len(fields) < 4 {
+		return false
+	}
+	first := strings.Trim(fields[0], ",;:()")
+	if _, err := strconv.Atoi(first); err != nil || !summaryHasCountedStatus(summary, "passed") {
+		return false
+	}
+	for index := 1; index+1 < len(fields); index++ {
+		if fields[index] != "in" {
+			continue
+		}
+		duration := strings.TrimSuffix(strings.Trim(fields[index+1], ",;:()"), "s")
+		if _, err := strconv.ParseFloat(duration, 64); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func outputHasJavaScriptTestSummary(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Test Suites:") && summaryHasCountedStatus(trimmed, "passed") {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "Test Files ") && summaryHasCountedStatus(trimmed, "passed") {
+			return true
+		}
+	}
+	return false
+}
+
+func summaryHasCountedStatus(summary string, status string) bool {
+	fields := strings.Fields(summary)
+	for index := 1; index < len(fields); index++ {
+		if strings.Trim(fields[index], ",;:()") != status {
+			continue
+		}
+		count := strings.Trim(fields[index-1], ",;:()")
+		if _, err := strconv.Atoi(count); err == nil {
 			return true
 		}
 	}
