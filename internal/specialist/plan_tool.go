@@ -254,6 +254,15 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 					"and a relaxation nobody wrote down is indistinguishable from a requirement nobody noticed. " +
 					"Report each one even when it was the right call: the judgement is the reader's to make, and they can only make it if they are told.",
 			},
+			"params": {
+				Type: "object",
+				Description: "Values for a saved plan's ${placeholders}, as name/value pairs. Only usable with `saved`. " +
+					"A plan's prompts may contain ${name} where the target varies — a scope, a directory, a release — and these fill them in, " +
+					"so one reviewed plan runs against many targets instead of being copied and edited per target. " +
+					"Substituted into task prompts and the plan description only: never into tools, ids, depends_on, model or budget, " +
+					"which are authority and graph and stay as they were saved. " +
+					"A placeholder with no value is refused, and so is a value matching no placeholder.",
+			},
 			"saved": {
 				Type: "string",
 				Description: "Run a plan saved earlier, by name, instead of supplying tasks. " +
@@ -510,6 +519,13 @@ func (tool *OrchestrateTool) resolveSavedPlan(args map[string]any) (map[string]a
 				"a saved plan is run as it was saved: remove %q, or supply the plan inline instead of naming one", field)
 		}
 	}
+	// params is NOT in that list, and must not be: it does not override the
+	// stored plan, it fills the holes the plan itself declared. A plan with no
+	// ${placeholder} takes none, and supplying one is refused below.
+	params, err := planParamsFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
 	if tool.Plans.ProjectDir == "" && tool.Plans.UserDir == "" {
 		return nil, fmt.Errorf("saved plans are not available in this run")
 	}
@@ -530,7 +546,11 @@ func (tool *OrchestrateTool) resolveSavedPlan(args map[string]any) (map[string]a
 			stored.Args[directive] = value
 		}
 	}
-	return stored.Args, nil
+	// EXPANDED BEFORE ParsePlan, so admission validates the plan that will run
+	// rather than a template of it: a substituted prompt still faces the same
+	// tool-grant narrowing, depth cap and budget checks. Returns a copy, so the
+	// stored plan is unchanged for the next run.
+	return expandPlanParams(stored.Args, params)
 }
 
 // limits supplies the hard caps a plan must fit inside, DERIVED — there is no
