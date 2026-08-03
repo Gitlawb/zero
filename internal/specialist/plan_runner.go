@@ -384,12 +384,31 @@ func planTaskManifest(name, model, reasoningEffort string, grantedTools []string
 // The read-only wording stays exactly as it was for the read-only case, which
 // is the overwhelming majority and the one whose phrasing was tuned.
 func planTaskSystemPrompt(grantedTools []string) string {
+	// The two rules below are the plan-task half of the posture's evidence
+	// contract (agent.ZeromaxingEvidenceNotice), which a plan task does NOT
+	// receive: the contract rides the loop's posture reminders, and a task runs as
+	// a child process that is never handed --exec-profile, so it starts with the
+	// posture off. The rest of that contract was already here in substance —
+	// claims backed by what was read, quoted file:line, an honest "not found" —
+	// and these are what was missing.
+	//
+	// Stated here rather than shared with that constant, because this package
+	// CANNOT import agent: agent's own test binary imports specialist, so the
+	// reference would compile and then break `go test ./internal/agent` with a
+	// cycle — the same trap PostureReasoningEffort above exists to avoid. The
+	// framing differs anyway: that notice addresses an agent being pushed back on
+	// by a person, this addresses a task writing into a report nobody re-derives.
+	// TestAPlanTaskCarriesTheEvidenceRules pins the rules, not the wording.
 	const investigate = "USE THEM. Search and read the actual files before you answer — do not rely on memory or " +
 		"inference about what the code probably says. Start with a tool call, not with prose. " +
 		"Every claim you make must be backed by something you read in this run, quoted with its " +
 		"file:line. If you cannot find something, say so plainly; an honest \"not found\" is worth " +
 		"more than a plausible guess, and a guess is indistinguishable from a finding once it " +
-		"reaches the plan's report. "
+		"reaches the plan's report. A passing test is not proof that a property holds: when you " +
+		"rest a claim on one, name the test and say in one sentence what it would still pass with. " +
+		"Any number you report — a timing, a count, a percentage — must come from a command you ran " +
+		"in this run; if you did not run it, say so rather than stating a figure the plan's report " +
+		"will carry as measured. "
 	if !grantsPlanWriteTool(grantedTools) {
 		return "You are executing one task of a larger plan. You have read-only tools: " + investigate +
 			"Complete exactly the task described and report what you found; do not attempt to modify anything."
