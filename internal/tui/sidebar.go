@@ -845,6 +845,19 @@ func shortTaskName(task string) string {
 	return strings.Join(picked, " ")
 }
 
+// hiddenAgentsPlaceholder is what the AGENTS section says when it has no lines
+// to show, which is not always because nothing ran.
+func hiddenAgentsPlaceholder(done int) string {
+	switch {
+	case done == 1:
+		return "1 finished — click to show"
+	case done > 1:
+		return fmt.Sprintf("%d finished — click to show", done)
+	default:
+		return "no agents spawned"
+	}
+}
+
 // nameFillerWords are skipped (after the first word) when condensing a task into
 // a short agent name, so "Review the current branch" → "Review current".
 var nameFillerWords = map[string]bool{
@@ -871,7 +884,14 @@ func (m model) renderContextSidebar(width, height int) []string {
 	add(m.sidebarAgentHeader(width))
 	agentLines := m.sidebarAgentLines(width)
 	if len(agentLines) == 0 {
-		add(sidebarPlaceholder("no agents spawned", width))
+		// "no agents spawned" IS ONLY TRUE WHEN NONE WERE. sidebarSpecialists drops
+		// a finished agent once it is past its linger, while doneAgentCount counts
+		// exactly those — so a completed two-task plan rendered "AGENTS ▸2 done"
+		// above "no agents spawned", a header and a body contradicting each other
+		// about the same run. The count is the true one; the placeholder was
+		// reporting the emptiness of a filtered list as the emptiness of the
+		// session, and it names the toggle that brings them back.
+		add(sidebarPlaceholder(hiddenAgentsPlaceholder(m.doneAgentCount()), width))
 	} else {
 		lines = append(lines, agentLines...)
 	}
