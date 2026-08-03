@@ -3,11 +3,14 @@ package specialist
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/measurements"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -97,9 +100,29 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// after all four were done.
 		taskTokens := &atomic.Int64{}
 		overspent := &atomic.Value{}
+		// THE TASK'S OWN NUMBERS, read from the commands it actually ran. Every
+		// tool result a child emits streams through here, which is the only place
+		// the parent ever sees what a task's commands printed.
+		measured := measurements.NewLedger()
+		// WHAT THIS TASK ACTUALLY CHANGED, accumulated from the child's own tool
+		// results. The handoff below is built from this rather than from prose,
+		// which matters twice: it costs nothing, and it cannot be invented — a
+		// file is on this list because a tool reported changing it.
+		var changedMu sync.Mutex
+		changedFiles := map[string]bool{}
 		counted := func(event streamjson.Event) {
 			if event.Type == streamjson.EventToolCall {
 				toolCalls.Add(1)
+			}
+			if event.Type == streamjson.EventToolResult {
+				measured.Record(event.Output)
+				if len(event.ChangedFiles) > 0 {
+					changedMu.Lock()
+					for _, file := range event.ChangedFiles {
+						changedFiles[file] = true
+					}
+					changedMu.Unlock()
+				}
 			}
 			if event.Type == streamjson.EventUsage && event.TotalTokens != nil {
 				spent := *event.TotalTokens
@@ -198,9 +221,35 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// stopped for budget looks exactly like a stalled one from the outside —
 		// and a stall is RETRYABLE. Retrying a task that was stopped for spending
 		// too much is the worst possible response to it.
+		// CHECKED AFTER THE CHILD HAS FINISHED, against the output it is handing
+		// back. Only conflicts are recorded, so an honest task carries nothing.
+		for _, conflict := range measured.Conflicts(result.Output) {
+			result.MeasurementConflicts = append(result.MeasurementConflicts,
+				fmt.Sprintf("%s: reported %s, but this task's own commands printed %s",
+					conflict.Name, formatConflictSeconds(conflict.Claimed), formatRecorded(conflict.Recorded)))
+		}
 		if reason, ok := overspent.Load().(string); ok && reason != "" {
 			result.Outcome = TaskCancelled
 			result.Err = reason
+			// A CUT-SHORT TASK MUST HAND SOMETHING ON.
+			//
+			// withDependencyBriefing already carries a cancelled task's output to
+			// its dependents, labelled INCOMPLETE — so the machinery for a
+			// follow-up task to pick this work up exists. It was fed nothing: a
+			// task killed mid-edit-loop has written no prose, so Output was empty
+			// and a measured run lost 858,231 tokens of real work with no record
+			// of what it had touched.
+			//
+			// NOT A MODEL CALL. The child's process is already gone by the time the
+			// meter trips, so a summary turn would mean resuming a task that just
+			// overspent — paying more for the report than the report is worth, and
+			// asking for prose from an agent whose last act was being stopped. The
+			// file list is free, exact, and is the thing a continuation actually
+			// needs: where the work got to.
+			changedMu.Lock()
+			handoff := planTaskHandoff(changedFiles, result.Output)
+			changedMu.Unlock()
+			result.Output = handoff
 			return result, nil
 		}
 		if watchdog.didFire() {
@@ -482,4 +531,50 @@ func planTaskReasoningEffort(model, parentReasoningEffort, postureReasoningEffor
 		return effort
 	}
 	return strings.TrimSpace(postureReasoningEffort)
+}
+
+// formatConflictSeconds and formatRecorded render a measurement for a reader of
+// the plan's report, where the numbers sit beside prose rather than in a table.
+func formatConflictSeconds(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64) + "s"
+}
+
+func formatRecorded(values []float64) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, formatConflictSeconds(value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// planTaskHandoff describes where a cut-short task got to, so a follow-up task
+// does not start blind.
+//
+// APPENDED TO WHATEVER THE TASK DID SAY, never replacing it: a task that wrote
+// prose before it was stopped has already said something worth keeping, and the
+// file list is an addition to that rather than a substitute for it.
+func planTaskHandoff(changed map[string]bool, existing string) string {
+	if len(changed) == 0 {
+		return existing
+	}
+	files := make([]string, 0, len(changed))
+	for file := range changed {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+
+	var b strings.Builder
+	if trimmed := strings.TrimSpace(existing); trimmed != "" {
+		b.WriteString(trimmed)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("This task was stopped before it finished. It had already changed these files:\n")
+	for _, file := range files {
+		b.WriteString("- ")
+		b.WriteString(file)
+		b.WriteString("\n")
+	}
+	b.WriteString("Their contents on disk are where the work got to — read them before continuing, " +
+		"because they may be mid-change and need not compile.")
+	return b.String()
 }

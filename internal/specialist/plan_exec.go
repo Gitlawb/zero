@@ -73,6 +73,22 @@ type TaskResult struct {
 	// of errors.Is, which is what silently disabled every stall retry in the
 	// prototype.
 	Stalled bool
+	// MeasurementConflicts are numbers this task reported that its OWN commands
+	// contradict — a timing stated as 4.20s where every `go test` it ran printed
+	// 0.86s. Empty for the overwhelming majority of tasks.
+	//
+	// THE PARENT'S TRIPWIRE CANNOT SEE THIS. It checks the parent's answer against
+	// the parent's tool output, and a plan task's commands run in the child's own
+	// session — so a number a task invents was caught by neither. The child's
+	// tool results do stream to the parent, which is what makes the check
+	// possible here at all.
+	//
+	// REPORTED, NOT RETRIED. The parent's version sends an answer back for one
+	// more turn; doing that here would spend another whole task to re-ask a
+	// question the report can simply carry the answer to. A reader told "this
+	// figure disagrees with the command that produced it" can weigh it; a reader
+	// told nothing cannot.
+	MeasurementConflicts []string
 	// Model is what the task actually ran on, empty when it inherited the
 	// parent's. Reported so a per-task model is OBSERVABLE: the feature changes
 	// which model does the work and what it costs, and a change nobody can see
@@ -1304,6 +1320,20 @@ func (report PlanReport) Summary() string {
 	if report.TokensUsed == 0 && report.Succeeded > 0 {
 		b.WriteString("spend could not be measured: this provider reported no token usage, " +
 			"so max_tokens cannot bound a plan here — use max_wall_seconds instead.\n")
+	}
+	// A NUMBER A TASK REPORTED THAT ITS OWN COMMANDS CONTRADICT.
+	//
+	// Above the fold, because this is the one kind of finding a reader cannot
+	// check for themselves: the command ran inside a child's session and its
+	// output is not in this report. A measured submission stated a table of
+	// timings no command had produced, the same test reading 0.86s in one place
+	// and 4.20s in another; nothing in the harness noticed, and nothing said so.
+	//
+	// Silent when there are none, which is almost every plan.
+	for _, task := range report.Tasks {
+		for _, conflict := range task.MeasurementConflicts {
+			fmt.Fprintf(&b, "unverified figure in %s — %s\n", task.ID, conflict)
+		}
 	}
 	// WHAT THE BUDGET COST, in two separate numbers, because they mean different
 	// things to the reader. A task CUT SHORT wrote findings that are in this
