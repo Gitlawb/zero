@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -472,23 +473,39 @@ func TestWindowsRestrictedTokenDeniesWritesToEveryoneWritablePaths(t *testing.T)
 	// Control: an ordinary directory outside every granted root. This is the
 	// behaviour the Everyone case must match.
 	controlMarker := filepath.Join(outside, "control-denied.txt")
-	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
-		"cmd.exe", "/d", "/s", "/c", "echo leaked>" + controlMarker,
-	}, 1)
+	runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(controlMarker), deniedWriteExitCode)
 	if _, err := os.Stat(controlMarker); err == nil {
 		t.Fatal("precondition: the sandbox allowed a write to an ordinary path outside every granted root, so this test cannot measure the Everyone case")
 	}
 
 	// The assertion. Same as the control in every respect except the DACL.
 	everyoneMarker := filepath.Join(everyoneDir, "everyone-denied.txt")
-	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
-		"cmd.exe", "/d", "/s", "/c", "echo leaked>" + everyoneMarker,
-	}, 1)
+	runWindowsRealSmokeCommand(t, runnerExe, config, deniedWriteCommand(everyoneMarker), deniedWriteExitCode)
 	if _, err := os.Stat(everyoneMarker); err == nil {
 		t.Error("the sandbox wrote outside every granted root because the path grants Everyone write; the restricted-SID list is satisfied by a SID every principal carries")
 	} else if !os.IsNotExist(err) {
 		t.Errorf("stat the Everyone-writable marker: %v", err)
 	}
+}
+
+// deniedWriteExitCode is chosen so a denial cannot be confused with the runner
+// failing to start the command at all.
+//
+// The obvious spelling of these assertions is `echo leaked>path` expecting exit
+// 1, but the runner itself exits 1 for its own errors — a failed marker
+// validation, a bad argument, a token it could not build. A test written that
+// way passes both when the sandbox denies the write and when nothing ever ran,
+// and the second case proves nothing while looking identical to success. On a
+// test whose whole job is catching a confinement regression, that is a failure
+// mode to design out rather than hope about.
+//
+// 77 is arbitrary beyond being outside the range the runner produces for itself.
+const deniedWriteExitCode = 77
+
+// deniedWriteCommand attempts a write and reports deniedWriteExitCode when the
+// redirect is refused, so the exit code also proves cmd.exe actually ran.
+func deniedWriteCommand(marker string) []string {
+	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + marker + " || exit " + strconv.Itoa(deniedWriteExitCode)}
 }
 
 func powershellSingleQuote(value string) string {
