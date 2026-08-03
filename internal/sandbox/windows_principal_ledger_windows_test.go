@@ -126,6 +126,7 @@ func TestPrincipalACLRecordCoversTheGrantBeforeItIsMade(t *testing.T) {
 // it is the fail-open: revocation would then cover only what the new plan
 // happens to name. Retiring the account instead makes every ACE that cannot be
 // found name a SID Windows never reuses.
+//
 // The record is per role because the principals are: seeding one role's record
 // must retire the other and only the other. Retiring both would destroy an
 // account there is nothing wrong with, and retiring neither is the fail-open.
