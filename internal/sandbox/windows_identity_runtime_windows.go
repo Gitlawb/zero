@@ -305,6 +305,28 @@ func provisionWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig
 // naming a SID that no longer resolves, which is the orphaned-entry residue this
 // model exists to avoid.
 func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() error, error) {
+	username := windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	// Retire a principal whose grants were never recorded, BEFORE provisioning
+	// adopts it.
+	//
+	// This is the one case where the prior grant set is not empty but unknowable:
+	// an account from an earlier setup exists, and nothing on Windows can
+	// enumerate the paths whose DACL names its SID. Carrying on would revoke only
+	// what the new plan happens to name and leave the rest — the fail-open this
+	// record exists to close, reached on the single path where it cannot be ruled
+	// out.
+	//
+	// Retiring is a real fix rather than a gesture because Windows never reuses a
+	// deleted local account's RID: whatever ACEs survive name a principal that no
+	// longer exists and grant access to nobody, and the SID minted below is one
+	// no DACL on this machine can already carry. It also needs no new operator
+	// action, which matters — there is no `zero sandbox teardown` to send anyone
+	// to, so refusing here would strand the workspace instead of fixing it.
+	if _, recorded := readWindowsPrincipalACLLedger(config.SandboxHome, username); !recorded {
+		if err := retireUnrecordedWindowsSandboxPrincipal(config); err != nil {
+			return nil, err
+		}
+	}
 	identity, created, err := provisionWindowsSandboxPrincipalForSetup(config)
 	if err != nil {
 		return nil, err
@@ -345,7 +367,7 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 	} else if runtimeRoot != "" {
 		writeRoots = append(append([]WritableRoot{}, writeRoots...), WritableRoot{Root: runtimeRoot})
 	}
-	revertACL, err := applyWindowsPrincipalACLs(identity.SID.String(), filesystem, writeRoots)
+	revertACL, err := applyWindowsPrincipalACLs(config.SandboxHome, username, identity.SID.String(), filesystem, writeRoots)
 	if err != nil {
 		_ = removePrincipal()
 		return nil, err
@@ -361,6 +383,23 @@ func setupWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) (func() er
 		}
 		return removeErr
 	}, nil
+}
+
+// retireUnrecordedWindowsSandboxPrincipal removes this workspace's principal
+// when one exists, and does nothing when one does not.
+//
+// The absent case is the ordinary one and is not a problem: with no account
+// there is nothing that could be holding an ACE, so a missing record is simply
+// a machine where setup has not run yet.
+func retireUnrecordedWindowsSandboxPrincipal(config WindowsSandboxCommandConfig) error {
+	_, err := lookupWindowsSandboxIdentityFn(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	if err != nil {
+		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
+			return nil
+		}
+		return err
+	}
+	return removeWindowsSandboxPrincipalForSetupFn(config)
 }
 
 // removeWindowsSandboxPrincipalForSetup retires a workspace's principal in the
@@ -397,7 +436,7 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 		// The rollback is discarded here on purpose, unlike at setup: this is
 		// teardown, the account is about to be deleted, and putting its ACEs back
 		// is the opposite of what the caller asked for.
-		if paths, pathsErr := windowsPrincipalTeardownPaths(config, identity.SID.String()); pathsErr == nil {
+		if paths, pathsErr := windowsPrincipalRevocationPaths(config, identity.SID.String()); pathsErr == nil {
 			_, _ = revokeWindowsPrincipalACEs(identity.SID.String(), paths)
 		}
 		if err := revokeWindowsSandboxLogonRights(identity.SID); err != nil {
@@ -406,7 +445,18 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig) e
 	} else if !errors.Is(err, errWindowsSandboxIdentityUnavailable) {
 		return err
 	}
-	return removeWindowsSandboxIdentity(username)
+	if err := removeWindowsSandboxIdentity(username); err != nil {
+		return err
+	}
+	// Last, and only once the account is actually gone, so a failure anywhere
+	// above leaves the record describing a principal that still exists.
+	//
+	// It describes grants for a SID that no longer resolves, and leaving it would
+	// have the next setup revoke those paths on behalf of a freshly minted SID
+	// that never held them. That is a harmless no-op rather than a hole — the
+	// deleted account's RID is never reused — but a record that outlives its
+	// principal is a lie the next reader has no way to detect.
+	return removeWindowsPrincipalACLLedger(config.SandboxHome, username)
 }
 
 // setupWindowsSandboxRuntimeRoot resolves this workspace's runtime root and
@@ -509,8 +559,8 @@ func revokeWindowsPrincipalACEs(principalSID string, paths []string) (func() err
 }
 
 // applyWindowsPrincipalACLs writes the principal's ACEs for one policy: it
-// revokes whatever this trustee already had on the paths the plan touches, then
-// applies the plan.
+// revokes whatever this trustee already had on the paths the new plan touches
+// AND on the paths an earlier setup recorded, then applies the plan.
 //
 // The order is the whole point. applyWindowsACLPlan MERGES into the existing
 // DACL, so without the revocation first a re-run after narrowing a write root
@@ -520,12 +570,16 @@ func revokeWindowsPrincipalACEs(principalSID string, paths []string) (func() err
 // chance to notice: marker validation refuses commands with "permission roots
 // or deny lists changed" until setup runs again.
 //
+// The recorded paths are what makes that revocation complete. Revoking only the
+// new plan's paths could never reach a root that had LEFT the policy, which is
+// precisely the root whose ACE has to go: absent from the new plan, it was
+// skipped, so the re-setup that was supposed to resolve the widening preserved
+// it instead.
+//
 // Revocation is by TRUSTEE, so it drops every ACE naming this principal on
-// these paths whatever an older version of Zero granted. Its rollback is
-// discarded on purpose: the only failure path from here removes the principal
-// outright, and restoring stale ACEs for an account about to be deleted is the
-// residue this exists to prevent.
-func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy, writeRoots []WritableRoot) (func() error, error) {
+// these paths whatever an older version of Zero granted, and a recorded path
+// that no longer exists or never held an ACE costs nothing.
+func applyWindowsPrincipalACLs(sandboxHome string, username string, principalSID string, filesystem FileSystemPolicy, writeRoots []WritableRoot) (func() error, error) {
 	plan, err := buildWindowsPrincipalACLPlan(windowsPrincipalACLInput{
 		PrincipalSID: principalSID,
 		WriteRoots:   writeRoots,
@@ -536,6 +590,25 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 	if err != nil {
 		return nil, err
 	}
+	granted := windowsACLPlanPaths(plan)
+	// An unreadable record arrives here as an empty prior set, which taken alone
+	// would be the fail-open. It cannot be reached: setupWindowsSandboxPrincipal
+	// retires any principal whose record is missing BEFORE provisioning, so by
+	// this point either the record is trustworthy or principalSID is one that no
+	// DACL on this machine has ever been able to name.
+	recorded, _ := readWindowsPrincipalACLLedger(sandboxHome, username)
+	stale := unionWindowsPrincipalACLPaths(recorded, granted)
+
+	// Recorded BEFORE a single DACL changes, and as the union rather than the new
+	// set. A crash between the grant below and the narrowing write would otherwise
+	// leave a record that omits paths this run granted, and the next policy change
+	// would strand them in exactly the way this fix exists to prevent. A superset
+	// is the safe direction to be wrong in: revoking a path that holds no ACE for
+	// this trustee is a no-op.
+	if err := writeWindowsPrincipalACLLedger(sandboxHome, username, stale); err != nil {
+		return nil, err
+	}
+
 	// The revocation's own rollback matters, and discarding it was a real bug.
 	//
 	// It was discarded on the reasoning that the only failure path from here
@@ -549,7 +622,7 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 	//
 	// Restoring the pre-revocation DACL first, then the grant, unwinds in the
 	// reverse order they were applied.
-	restoreRevoked, err := revokeWindowsPrincipalACEs(principalSID, windowsACLPlanPaths(plan))
+	restoreRevoked, err := revokeWindowsPrincipalACEs(principalSID, stale)
 	if err != nil {
 		return nil, err
 	}
@@ -557,6 +630,26 @@ func applyWindowsPrincipalACLs(principalSID string, filesystem FileSystemPolicy,
 	if err != nil {
 		if restoreRevoked != nil {
 			_ = restoreRevoked()
+		}
+		return nil, err
+	}
+	// Narrow the record to what is granted now, so it tracks the policy instead
+	// of accumulating every root the workspace has ever had.
+	//
+	// A failure here fails the setup rather than being shrugged off. The same
+	// file was written successfully moments ago, so failing now means the sandbox
+	// home has stopped being writable, and reporting a provisioned sandbox on a
+	// sandbox home that cannot hold its own state is the kind of quiet this
+	// backend must not have. Unwinding leaves the union recorded, which is the
+	// safe direction.
+	if err := writeWindowsPrincipalACLLedger(sandboxHome, username, granted); err != nil {
+		if revertErr := revertGrant(); revertErr != nil {
+			err = errors.Join(err, revertErr)
+		}
+		if restoreRevoked != nil {
+			if restoreErr := restoreRevoked(); restoreErr != nil {
+				err = errors.Join(err, restoreErr)
+			}
 		}
 		return nil, err
 	}
@@ -608,10 +701,37 @@ func windowsPrincipalTeardownPaths(config WindowsSandboxCommandConfig, principal
 	return windowsACLPlanPaths(plan), nil
 }
 
+// windowsPrincipalRevocationPaths is what teardown actually has to revoke: the
+// paths the CURRENT policy describes, plus every path an earlier setup recorded.
+//
+// Teardown used the current policy alone, which reproduced the setup-side bug on
+// the way out. A root the user removed from their policy is missing from today's
+// plan, so retiring the principal revoked every ACE except the one that was
+// widening the sandbox — and then deleted the account, leaving that ACE naming a
+// SID nothing could resolve to clean it up later.
+func windowsPrincipalRevocationPaths(config WindowsSandboxCommandConfig, principalSID string) ([]string, error) {
+	current, err := windowsPrincipalTeardownPaths(config, principalSID)
+	if err != nil {
+		return nil, err
+	}
+	recorded, _ := readWindowsPrincipalACLLedger(
+		config.SandboxHome, windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots)))
+	return unionWindowsPrincipalACLPaths(recorded, current), nil
+}
+
 // Seams for the two elevated calls the provisioning rollback depends on, so the
 // stale-secret recovery path is reachable in tests without an elevated machine.
 var (
 	provisionWindowsSandboxIdentityFn = provisionWindowsSandboxIdentity
 	removeWindowsSandboxSecretFn      = removeWindowsSandboxSecret
 	writeWindowsSandboxSecretFn       = writeWindowsSandboxSecret
+)
+
+// Seams for the two elevated calls the unrecorded-principal retirement depends
+// on, so the decision to retire is observable in a test without a provisioned
+// machine — on which the lookup declines for its own reasons and would report
+// success whether or not the guard existed.
+var (
+	lookupWindowsSandboxIdentityFn          = lookupWindowsSandboxIdentity
+	removeWindowsSandboxPrincipalForSetupFn = removeWindowsSandboxPrincipalForSetup
 )
