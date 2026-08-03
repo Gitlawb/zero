@@ -22,6 +22,7 @@ import (
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/localcontrol"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/memory"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/peermsg"
@@ -695,6 +696,14 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
+	// OPT-IN, and the default matters: registering these changes the advertised
+	// tool set for EVERY run, which is exactly what this branch guarantees the
+	// posture does not do when it is off. Off by default keeps that guarantee
+	// true; a user who wants durable notes says so in their own config.
+	if resolved.Profiles.Memory {
+		registry.Register(tools.NewMemoryTool(memory.DefaultPaths(workspaceRoot)))
+		registry.Register(tools.NewMemoryWriteTool(memory.DefaultPaths(workspaceRoot)))
+	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	executionRunner := execution.NewRunner(nil)
 	sandboxStore, err := deps.newSandboxStore()
@@ -749,10 +758,21 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			DiscoverModels: planModelDiscoverer(workspaceRoot, resolved.Provider),
 			// The LIVE scope, not a snapshot of it. A request_permissions grant
 			// lands mid-session and must reach the children dispatched after it.
-			ExtraWriteRoots: scope.Roots,
+			// ExtraRoots, not Roots: this is what the run holds BEYOND its
+			// workspace, which is what the field means and what a child needs.
+			// Roots() also returns the workspace root itself, and for a plan task
+			// running in an isolated worktree that arrived as --add-dir <parent
+			// tree> — re-opening everything --cwd had just narrowed. A measured
+			// run wrote ten times into the user's real tree that way, each write
+			// allowed with the reason "workspace write is allowed", because by
+			// then it genuinely was inside the child's write roots.
+			ExtraWriteRoots: scope.ExtraRoots,
 			ProbeModel:      planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
 			ModelPrefs:      planModelPreferences(resolved.Profiles.PlanModels),
-			Gate:            zeromaxingGate,
+			// Off unless the user's own config asks for it: on by default would
+			// refuse a plan for everyone whose phrasing does not happen to match.
+			RequirePlanKeyword: resolved.Profiles.RequirePlanKeyword,
+			Gate:               zeromaxingGate,
 			// Depth stays 0: the TUI is always a root session — it has no
 			// --depth and is never launched as a child — so zero is the
 			// measured value here, not an unset one.
@@ -1170,6 +1190,8 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 // plan tool. A zero value leaves the tool registered but permanently off, which
 // is the posture-off behaviour every existing caller already gets.
 type orchestrateWiring struct {
+	// RequirePlanKeyword carries Profiles.RequirePlanKeyword to the tool.
+	RequirePlanKeyword bool
 	// Gate is the shared posture flag. A POINTER, not a closure over caller
 	// state: the TUI model is a value type copied on every update, so a closure
 	// would freeze the posture as it was at registration.
@@ -1244,8 +1266,13 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	if err != nil {
 		return nil, err
 	}
+	// One budget for the whole session, shared by every run and every plan in it
+	// — which is the point: a per-run counter would reset on each message and
+	// bound nothing a conversation does over time.
+	sessionBudget := specialist.NewSessionBudget(specialist.DefaultSessionSubagents)
 	executor := specialist.Executor{
-		Paths: paths,
+		SessionBudget: sessionBudget,
+		Paths:         paths,
 		// The run's own roots, read at every launch. Without this a child is
 		// confined more tightly than its parent: a run granted a directory
 		// outside its workspace could create and populate it, then watch every
@@ -1285,18 +1312,22 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		planContext.SpecialistName = "explorer"
 	}
 	registry.Register(&specialist.OrchestrateTool{
-		PostureActive:  wiring.Gate.Active,
-		RunTask:        specialist.NewPlanRunner(planContext),
-		Recorder:       recorder,
-		ParentTools:    planParentTools(registry, enabledTools, disabledTools),
-		Depth:          planContext.Depth,
-		Size:           wiring.Size,
-		Plans:          wiring.Plans,
-		Launch:         wiring.Launch,
-		Isolate:        wiring.Isolate,
-		DiscoverModels: wiring.DiscoverModels,
-		ProbeModel:     wiring.ProbeModel,
-		ModelPrefs:     wiring.ModelPrefs,
+		PostureActive: wiring.Gate.Active,
+		RunTask:       specialist.NewPlanRunner(planContext),
+		Recorder:      recorder,
+		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
+		Depth:         planContext.Depth,
+		Size:          wiring.Size,
+		// Refuse a plan the user's own turn did not ask for, when this session
+		// asks to be protected that way. Off unless configured — see
+		// ProfilesConfig.RequirePlanKeyword.
+		RequirePlanKeyword: wiring.RequirePlanKeyword,
+		Plans:              wiring.Plans,
+		Launch:             wiring.Launch,
+		Isolate:            wiring.Isolate,
+		DiscoverModels:     wiring.DiscoverModels,
+		ProbeModel:         wiring.ProbeModel,
+		ModelPrefs:         wiring.ModelPrefs,
 	})
 	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
 }
