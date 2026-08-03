@@ -210,7 +210,13 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			Model:     task.Model,
 			Duration:  time.Since(started),
 			SessionID: res.SessionID,
-			Output:    res.Result.Output,
+			// The id travels in SessionID, not in the prose. See
+			// WithoutSessionIDLine: a plan task's output is quoted into the
+			// report, into the dependency briefing every downstream task reads,
+			// and into the panel — so the line BuildFinalResult prepends for a
+			// Task caller surfaces a raw child session id inside a user-facing
+			// answer, three times over.
+			Output: WithoutSessionIDLine(res.Result.Output, res.SessionID),
 			// The meter the plan budget is spent from. A task whose stream
 			// reported no usage costs 0 here, which is honest — but it means a
 			// provider that never reports usage cannot be budget-bounded by
