@@ -324,13 +324,24 @@ type Options struct {
 	SessionTitle     string
 	ProviderName     string
 	Model            string
-	ReasoningEffort  string
-	ServiceTier      string
-	Cwd              string
-	SystemPrompt     string
+	// ModelFamily is the family the PROVIDER declares it serves, from the
+	// provider catalog — "openai", "anthropic", "gemini", or "" when the provider
+	// is a gateway serving several and cannot answer. Empty falls back to
+	// classifying the model id, which is a guess that matches nothing for most of
+	// the catalog. Prompt tuning only; it selects the family addendum and nothing
+	// else.
+	ModelFamily     string
+	ReasoningEffort string
+	ServiceTier     string
+	Cwd             string
+	SystemPrompt    string
 	// TransientSystemPrompt adds trusted runtime guidance for this run only.
 	// Empty preserves the ordinary system prompt byte-for-byte.
 	TransientSystemPrompt string
+	// userMessage is this turn's raw user text, set by Run from its prompt
+	// argument and forwarded to tools. Unexported: it is not a knob a caller
+	// sets, it is what the caller already passed as `prompt`.
+	userMessage string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
@@ -340,6 +351,19 @@ type Options struct {
 	// nil for text-only runs (the seeded message then carries no images, exactly
 	// as before).
 	Images []zeroruntime.ImageBlock
+	// MaxTokens bounds what a whole run may SPEND, in provider-reported tokens.
+	// 0 is unbounded, which is every caller that does not set it.
+	//
+	// MaxTurns IS NOT A COST BOUND, and treating it as one is how a run ends at
+	// an arbitrary place. A cheap run reaches 320 turns having spent ~3M tokens; a
+	// measured heavy run reached the same 320 having spent 35,781,390. The turn
+	// count bounds round trips, not spend, and the two diverge by an order of
+	// magnitude on exactly the runs worth bounding.
+	//
+	// Crossing it ends the run the same way MaxTurns does — one final call asking
+	// for a summary — so a budget expiry produces a written report of what was
+	// done rather than a run that simply stops.
+	MaxTokens int
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test

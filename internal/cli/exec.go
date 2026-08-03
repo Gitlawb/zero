@@ -791,6 +791,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Depth:                options.depth,
 		SessionTitle:         sessionTitle,
 		ProviderName:         resolved.Provider.Name,
+		ModelFamily:          providercatalog.ModelFamilyFor(resolved.Provider.CatalogID),
 		Model:                resolved.Provider.Model,
 		ModelSwitcher:        modelSwitcher,
 		TurnSessionProvider:  turnSessions,

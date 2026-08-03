@@ -164,7 +164,7 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	if transient := strings.TrimSpace(options.TransientSystemPrompt); transient != "" {
 		sections = append(sections, transient)
 	}
-	if addendum := modelPromptAddendum(options.Model); addendum != "" {
+	if addendum := modelPromptAddendum(options.ModelFamily, options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
 	if session := sessionRuntimeContext(options); session != "" {
