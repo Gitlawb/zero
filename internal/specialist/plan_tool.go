@@ -105,6 +105,12 @@ const (
 	defaultPlanMaxTokens = 0
 )
 
+// planSchemaBound is a schema minimum/maximum. tools.PropertySchema takes *int
+// so that "unbounded" and "bounded at zero" stay different things — a plain int
+// would make max_retries: 0, which is a real and meaningful setting, mean the
+// same as declaring no bound at all.
+func planSchemaBound(n int) *int { return &n }
+
 func (tool *OrchestrateTool) Name() string { return OrchestrateToolName }
 
 func (tool *OrchestrateTool) Description() string {
@@ -290,12 +296,22 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 				// prose has to invent the field names, and inventing one is how a
 				// plan fails at admission instead of running.
 				Properties: map[string]tools.PropertySchema{
-					"max_workers":         {Type: "integer", Description: "How many tasks may run at once, 1 to 16. 1 is sequential."},
-					"max_tokens":          {Type: "integer", Description: "Bound on the WHOLE plan, shared by every task. DO NOT SET THIS unless the user asked for a spending limit. You cannot estimate what a plan costs, and a number guessed too low does not save money — it stops tasks mid-work and skips the ones that had not started, so the plan spends its budget and returns nothing. Omitted, the plan runs unbounded within this run's own ceiling with a wall-clock backstop, and spend is still metered and reported. If the user did ask for a limit, prefer max_tokens_per_task."},
-					"max_tokens_per_task": {Type: "integer", Description: "Optional bound on ONE task, and the right knob for budgeting per sub-agent. Use it ALONE: with max_tokens also set, each task is limited by its share of the total long before its own cap applies, so the cap does nothing and the plan is refused."},
-					"max_wall_seconds":    {Type: "integer", Description: "Optional wall-clock bound on the whole plan."},
-					"max_stall_seconds":   {Type: "integer", Description: "How long ONE task may emit nothing before it is stopped. Default 180."},
-					"max_retries":         {Type: "integer", Description: "Extra attempts a STALLED task gets, 0 to 3. Default 1."},
+					// DECLARED BOUNDS, not merely described ones. Every number here is
+					// already enforced at admission, and prose saying "1 to 16" is
+					// advice to the same model that has to guess the field names — so
+					// a run emitted max_tokens_per_task: 5000, was refused for being
+					// below the floor, and spent a whole turn learning a rule the
+					// schema could have carried. A bound in the schema is checked by
+					// the provider before the call is ever made.
+					//
+					// EACH ONE MIRRORS ITS ENFORCEMENT CONSTANT rather than repeating
+					// the literal, because two spellings of one limit drift.
+					"max_workers":         {Type: "integer", Minimum: planSchemaBound(1), Maximum: planSchemaBound(maxPlanWorkers), Description: "How many tasks may run at once, 1 to 16. 1 is sequential."},
+					"max_tokens":          {Type: "integer", Minimum: planSchemaBound(minimumPlausibleTaskTokens), Description: "Bound on the WHOLE plan, shared by every task. DO NOT SET THIS unless the user asked for a spending limit. You cannot estimate what a plan costs, and a number guessed too low does not save money — it stops tasks mid-work and skips the ones that had not started, so the plan spends its budget and returns nothing. Omitted, the plan runs unbounded within this run's own ceiling with a wall-clock backstop, and spend is still metered and reported. If the user did ask for a limit, prefer max_tokens_per_task."},
+					"max_tokens_per_task": {Type: "integer", Minimum: planSchemaBound(minimumPlausibleTaskTokens), Description: "Optional bound on ONE task, and the right knob for budgeting per sub-agent. Use it ALONE: with max_tokens also set, each task is limited by its share of the total long before its own cap applies, so the cap does nothing and the plan is refused."},
+					"max_wall_seconds":    {Type: "integer", Minimum: planSchemaBound(1), Description: "Optional wall-clock bound on the whole plan."},
+					"max_stall_seconds":   {Type: "integer", Minimum: planSchemaBound(int(minStallTimeout.Seconds())), Description: "How long ONE task may emit nothing before it is stopped. Default 180."},
+					"max_retries":         {Type: "integer", Minimum: planSchemaBound(0), Maximum: planSchemaBound(maxPlanRetries), Description: "Extra attempts a STALLED task gets, 0 to 3. Default 1."},
 				},
 				Required:    []string{"max_workers"},
 				Description: "Required. max_workers (1-16) is how many tasks may run at once; 1 is sequential and is the right answer unless the tasks are genuinely independent. The machine's own capacity may be lower and the report says which number applied. max_tokens and max_wall_seconds are optional bounds; omit them to run unbounded — spend is reported either way. max_stall_seconds bounds how long ONE task may emit nothing (default 180); it resets on every event, so a slow-but-working task is never stopped. max_retries (0-3, default 1) is how many extra attempts a STALLED task gets; a task that failed with a real error is never retried. max_tokens_per_task bounds what ONE task may spend, and is the right knob for budgeting per sub-agent — use it ALONE, without max_tokens, or each task is limited by its share of the total instead and the plan is refused as incoherent. Sizing, from measured runs: a task that traces or audits a large repo costs 510k-1,017k tokens, so budget about 1M each; one reasoning over what its dependencies already found costs far less. max_tokens is the TOTAL across every task, not per task — max_tokens_per_task is the per-task one, and it may not exceed the total. A cap BELOW what a task needs saves nothing — a plan capping tasks at 200k lost all six of them between 213k and 259k and still spent 1,437,049 tokens, finishing none. A capped task is told its budget and asked to write a partial answer before reaching it, so tight is survivable and too-tight is not. Omit max_tokens unless the user asked for a spending limit: guessing it low is how a plan spends everything and returns nothing. A budget far below what its task count needs is warned about at admission and left to you. When a plan runs out, tasks in flight are STOPPED MID-RUN — they keep what they had already found, and it reaches both the report and any task depending on them — while tasks not yet started never run at all. So the cost of guessing low is the questions at the END of the plan, which is usually the synthesis you wanted. If you cannot estimate, omit max_tokens and use max_wall_seconds instead.",
