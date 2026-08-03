@@ -23,7 +23,15 @@ import (
 )
 
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
+const maxTokensAnswer = "Agent reached its token budget without a final answer."
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
+
+// maxTokensFinalAnswerPrompt is the same ending for a different reason, and it
+// says which. A run stopped for spend and a run stopped for round trips call for
+// the same next action from the model and a different explanation to the reader,
+// who otherwise reaches for the wrong lever — raising a turn count that was never
+// what ran out.
+const maxTokensFinalAnswerPrompt = "You have reached this run's token budget. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
 // WITH NO OUTPUT yet is re-issued on a fresh connection before giving up. Only
@@ -270,6 +278,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// doesn't re-run the recursive schema→map conversion for every tool every turn.
 	toolDefCache := map[string]zeroruntime.ToolDefinition{}
 
+	// SPEND, accumulated from what the provider actually reported rather than
+	// estimated. Only read when options.MaxTokens > 0, so an unbounded run adds
+	// one integer and changes nothing else.
+	spentTokens := 0
+	stoppedOnTokens := false
+
 	result = Result{Messages: copyMessages(messages)}
 	dispatchSessionStart(ctx, options)
 	defer func() {
@@ -281,6 +295,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	}()
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
+
+		// CHECKED HERE, at the top of a turn, for the same reason the turn count
+		// is: the previous turn's tool calls have run and their results are in
+		// hand. Stopping mid-turn would discard work already paid for.
+		if options.MaxTokens > 0 && spentTokens >= options.MaxTokens {
+			stoppedOnTokens = true
+			break
+		}
 
 		// The zeromaxing posture's reminders. Appended to the CONVERSATION tail
 		// as user-role messages — the same channel as the diagnostics nudge
@@ -543,6 +565,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// assistant reply is appended below, after this, so `messages` is still the
 		// sent request.
 		compactor.calibrate(estimateTokens(messages)+estimateToolDefTokens(exposed), collected.Usage.InputTokens)
+		// Accumulated at the same point the estimator is calibrated: past error
+		// recovery, and past any reactive compaction that re-sent the request, so
+		// this counts the exchange that actually happened rather than one that was
+		// abandoned and replaced.
+		spentTokens += collected.Usage.TotalTokens()
 
 		// Carry the turn's terminal stop reason so a final answer cut off at the
 		// output token cap (or by a content filter) is reported as truncated. A
@@ -959,22 +986,31 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		})
 	}
 	finalExposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
-	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
+	// WHICH BOUND FIRED reaches the reader, because the two call for different
+	// responses: a turn-count stop is a round-trip problem, a token stop is a
+	// spend one, and reporting the first for the second sends someone to raise a
+	// limit that was never what ran out.
+	finalPrompt, exhaustedAnswer, limitName := maxTurnsFinalAnswerPrompt, maxTurnsAnswer, "max-turns limit"
+	if stoppedOnTokens {
+		finalPrompt, exhaustedAnswer, limitName = maxTokensFinalAnswerPrompt, maxTokensAnswer, "token budget"
+	}
+
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options, finalPrompt); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
 		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
 		if options.RequireCompletionSignal {
 			result.Incomplete = true
-			result.IncompleteReason = "reached the max-turns limit without completing"
+			result.IncompleteReason = "reached the " + limitName + " without completing"
 		}
 		return result, nil
 	}
 
-	result.FinalAnswer = maxTurnsAnswer
+	result.FinalAnswer = exhaustedAnswer
 	result.Messages = copyMessages(messages)
 	if options.RequireCompletionSignal {
 		result.Incomplete = true
-		result.IncompleteReason = "reached the max-turns limit without a final answer"
+		result.IncompleteReason = "reached the " + limitName + " without a final answer"
 	}
 	return result, nil
 }
@@ -1041,11 +1077,11 @@ func recordContextPlanTrace(recorder *trace.Recorder, plan contextPlan) {
 	})
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options, prompt string) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
-		Content: maxTurnsFinalAnswerPrompt,
+		Content: prompt,
 	})
 	// The max-turns final-answer call is a pre-content connect, often after a long
 	// autonomous/cron run — route it through the reconnect helper so a single
