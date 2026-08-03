@@ -79,6 +79,18 @@ func expandPlanParams(args map[string]any, params map[string]string) (map[string
 	return substitutePlanParams(args, params), nil
 }
 
+// PlanParams lists the parameters a stored plan declares.
+//
+// Exported so a caller that runs a saved plan BY NAME — the /plans command — can
+// ask what it needs before dispatching a turn. Without it the only way to learn
+// a plan takes a subject is to run it: expandPlanParams refuses at admission,
+// which is correct but arrives one turn and one model call too late, and the
+// bundled research plan otherwise spends five child agents researching the
+// literal placeholder.
+func PlanParams(args map[string]any) []string {
+	return planParamPlaceholders(args)
+}
+
 // planParamPlaceholders lists every ${name} the plan uses, deduplicated and
 // sorted so an error message reads the same way twice.
 //

@@ -244,18 +244,27 @@ func planTaskSummaryLine(prompt string) string {
 // a command that called the tool directly would be a second execution path.
 //
 // resume narrows the plan to the work the session log says has not succeeded.
-func (m model) runSavedPlan(name string, resume bool) (tea.Model, tea.Cmd) {
+func (m model) runSavedPlan(args string, resume bool) (tea.Model, tea.Cmd) {
 	verb := "run"
 	if resume {
 		verb = "resume"
 	}
-	name = strings.TrimSpace(name)
+	name, values := splitPlanTarget(args)
 	if name == "" {
 		return m.appendPlansNotice(planControlNotice("warning", "Name it: /plans "+verb+" <name>")), nil
 	}
 	// Resolved HERE so an unknown name is a plain refusal rather than a turn
 	// spent discovering the plan does not exist.
 	stored, err := specialist.FindSavedPlan(m.planPaths, name)
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", err.Error())), nil
+	}
+	// A PARAMETERISED PLAN IS REFUSED HERE, for the same reason an unknown name
+	// is: expandPlanParams would refuse it too, but only after a turn and a model
+	// call have been spent reaching admission. The bundled research plan is five
+	// child agents, so the difference between refusing here and refusing there is
+	// five sub-agent runs against a placeholder.
+	paramsArg, err := savedPlanParamsArg(stored, values, verb)
 	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", err.Error())), nil
 	}
@@ -276,10 +285,90 @@ func (m model) runSavedPlan(name string, resume bool) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
 	}
+	// CONCATENATED, never interpolated. paramsArg carries the user's own words,
+	// and a subject containing a percent sign would be read as a verb by Sprintf
+	// and rewritten into the instruction as "%!s(MISSING)".
+	text := fmt.Sprintf(instruction, string(encoded))
+	if paramsArg != "" {
+		text += " " + paramsArg
+	}
 	return m.dispatchCommand(parsedCommand{
 		kind: commandPrompt,
-		text: fmt.Sprintf(instruction, string(encoded)),
+		text: text,
 	})
+}
+
+// splitPlanTarget separates a saved plan's name from the text that follows it.
+//
+// NOT splitPlansArgs: that lowercases its first field so a verb matches whatever
+// case it was typed in, and a plan name is compared exactly — lowercasing one
+// would make /plans run Sweep report that no plan named "sweep" exists.
+func splitPlanTarget(args string) (name, rest string) {
+	trimmed := strings.TrimSpace(args)
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	return fields[0], strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
+}
+
+// savedPlanParamsArg turns the words after a plan's name into the `params`
+// object the orchestrate tool takes, or refuses.
+//
+// FAILS CLOSED IN BOTH DIRECTIONS, matching expandPlanParams: a plan that
+// declares a parameter will not run without one, and words supplied to a plan
+// that declares none are refused rather than dropped — a user who typed them
+// meant them, and silently ignoring them runs a different plan than the one they
+// asked for while reporting success.
+func savedPlanParamsArg(stored specialist.SavedPlan, values, verb string) (string, error) {
+	declared := specialist.PlanParams(stored.Args)
+	values = strings.TrimSpace(values)
+	switch {
+	case len(declared) == 0 && values == "":
+		return "", nil
+	case len(declared) == 0:
+		return "", fmt.Errorf("%q takes no parameters, so %q would be ignored. Run it as /plans %s %s",
+			stored.Name, values, verb, stored.Name)
+	case values == "":
+		return "", fmt.Errorf("%q takes %s. Run it as /plans %s %s <%s>",
+			stored.Name, describePlanParams(declared), verb, stored.Name, strings.Join(declared, "> <"))
+	}
+	// ONE PARAMETER IS RESOLVED HERE, not by the model. The mapping is total —
+	// everything after the name is the value — so deciding it in the UI makes the
+	// substituted plan a function of what was typed rather than of what a model
+	// inferred from it.
+	if len(declared) == 1 {
+		encoded, err := json.Marshal(map[string]string{declared[0]: values})
+		if err != nil {
+			return "", fmt.Errorf("could not read that parameter: %w", err)
+		}
+		return "Set the `params` argument to exactly " + string(encoded) + ".", nil
+	}
+	// SEVERAL PARAMETERS HAVE NO TOTAL MAPPING from one line of prose, so the
+	// model splits it — and is told the exact key set, so it fills those and
+	// invents none.
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("could not read those parameters: %w", err)
+	}
+	return "Set the `params` argument to an object whose keys are exactly " +
+		strings.Join(quotePlanParams(declared), ", ") +
+		", taking the values from this text: " + string(encoded) + ".", nil
+}
+
+func describePlanParams(declared []string) string {
+	if len(declared) == 1 {
+		return "a parameter: " + declared[0]
+	}
+	return "parameters: " + strings.Join(declared, ", ")
+}
+
+func quotePlanParams(declared []string) []string {
+	out := make([]string, 0, len(declared))
+	for _, name := range declared {
+		out = append(out, `"`+name+`"`)
+	}
+	return out
 }
 
 // restartLastPlan runs the plan that last ran, from the beginning.
