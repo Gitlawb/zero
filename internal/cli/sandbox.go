@@ -174,10 +174,17 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if !setupHelper.Available() {
 		return writeAppError(stderr, "Windows sandbox setup helper is not available", exitProvider)
 	}
+	// Resolved here, in the shell the user typed `zero sandbox setup` into, and
+	// carried in the args. The helper may be launched elevated, and an elevated
+	// process does not inherit this shell's environment. Stated explicitly rather
+	// than left nil (which resolves the same way) because this is the call site
+	// the opt-in is about.
+	principalOptIn := zeroSandbox.WindowsSandboxPrincipalOptIn(nil)
 	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
 		PermissionProfile: profile,
+		PrincipalOptIn:    &principalOptIn,
 	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
