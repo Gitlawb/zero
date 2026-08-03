@@ -4,8 +4,106 @@ package sandbox
 
 import (
 	"os"
+	"strings"
+	"sync"
 	"testing"
 )
+
+// An opted-in command that ends up on the restricted token anyway must say so.
+// Both cases below are correct fallbacks, not errors — but silence leaves the
+// operator believing an account boundary is isolating them when it is not, which
+// is the same failure the setup-protocol opt-in check exists to prevent, reached
+// from the other side. The deny case matters most: deny is the DEFAULT network
+// mode, so a fully provisioned, fully agreeing setup still never uses the
+// principal for an ordinary command.
+func TestWindowsSandboxPrincipalFallbackIsAnnounced(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mode   NetworkMode
+		reason string
+	}{
+		// The network-deny case is deliberately absent. It used to warn here, but
+		// this runner is re-exec'd per command, so the sync.Once guarding the notice
+		// is once per COMMAND — and deny is the default mode, so the warning landed
+		// on nearly every tool call. That fact belongs to `zero doctor` now, which is
+		// read once. The deny-mode BEHAVIOUR is still pinned, by
+		// TestPrincipalBackendDefersToRestrictedTokenWhenNetworkDenied below.
+		{name: "no principal provisioned on this machine", mode: NetworkAllow, reason: "no sandbox principal is provisioned"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var warned []string
+			originalWarn := warnWindowsSandboxPrincipalNotUsed
+			warnWindowsSandboxPrincipalNotUsed = func(reason string) { warned = append(warned, reason) }
+			windowsSandboxPrincipalNotUsedWarnOnce = sync.Once{}
+			t.Cleanup(func() {
+				warnWindowsSandboxPrincipalNotUsed = originalWarn
+				windowsSandboxPrincipalNotUsedWarnOnce = sync.Once{}
+			})
+
+			config := WindowsSandboxCommandConfig{
+				SandboxHome:    t.TempDir(),
+				CommandCWD:     `C:\workspace`,
+				WorkspaceRoots: []string{`C:\workspace`},
+				PermissionProfile: PermissionProfile{
+					FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+					Network:    NetworkPolicy{Mode: testCase.mode},
+				},
+				Env:          map[string]string{windowsSandboxIdentityEnv: "1"},
+				SandboxLevel: WindowsSandboxLevelRestrictedToken,
+				Command:      []string{"cmd.exe", "/c", "echo"},
+			}
+			// Assert the precondition rather than assume it: this must be the quiet
+			// fallback path, not a token this host actually minted and not an error.
+			token, ok, err := windowsSandboxPrincipalToken(config)
+			if ok {
+				token.Close()
+				t.Fatalf("host unexpectedly provisioned a principal; this test cannot measure the fallback")
+			}
+			if err != nil {
+				t.Fatalf("windowsSandboxPrincipalToken error = %v, want the quiet fallback", err)
+			}
+			if len(warned) != 1 {
+				t.Fatalf("opted-in fallback warnings = %v, want exactly one naming %q", warned, testCase.reason)
+			}
+			if !strings.Contains(warned[0], testCase.reason) {
+				t.Fatalf("warning = %q, want it to name %q", warned[0], testCase.reason)
+			}
+		})
+	}
+}
+
+// The opt-out must stay silent, or the warning becomes noise every user learns
+// to ignore.
+func TestWindowsSandboxPrincipalFallbackIsSilentWhenOptedOut(t *testing.T) {
+	var warned []string
+	originalWarn := warnWindowsSandboxPrincipalNotUsed
+	warnWindowsSandboxPrincipalNotUsed = func(reason string) { warned = append(warned, reason) }
+	windowsSandboxPrincipalNotUsedWarnOnce = sync.Once{}
+	t.Cleanup(func() {
+		warnWindowsSandboxPrincipalNotUsed = originalWarn
+		windowsSandboxPrincipalNotUsedWarnOnce = sync.Once{}
+	})
+
+	config := WindowsSandboxCommandConfig{
+		SandboxHome:    t.TempDir(),
+		CommandCWD:     `C:\workspace`,
+		WorkspaceRoots: []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+			Network:    NetworkPolicy{Mode: NetworkDeny},
+		},
+		Env:          map[string]string{windowsSandboxIdentityEnv: "0"},
+		SandboxLevel: WindowsSandboxLevelRestrictedToken,
+		Command:      []string{"cmd.exe", "/c", "echo"},
+	}
+	if _, ok, err := windowsSandboxPrincipalToken(config); ok || err != nil {
+		t.Fatalf("windowsSandboxPrincipalToken ok=%v err=%v, want the quiet opted-out fallback", ok, err)
+	}
+	if len(warned) != 0 {
+		t.Fatalf("opted-out command warned %v, want silence", warned)
+	}
+}
 
 // Setup must stay inert unless the principal backend is explicitly opted into.
 // This is the property that makes the branch safe to merge while the privileged
