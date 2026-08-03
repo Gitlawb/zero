@@ -82,6 +82,10 @@ type OrchestrateTool struct {
 	// per-role pins and an exclusion list. Empty leaves the automatic choice
 	// alone, which is the behaviour for anyone who never configures it.
 	ModelPrefs ModelPreferences
+	// RequirePlanKeyword makes a plan refusable unless the turn's own user text
+	// asks for one. Default false: enabling it silently would start refusing
+	// plans for everyone whose phrasing does not match. See plan_keyword.go.
+	RequirePlanKeyword bool
 	// Plans locates saved plans. Both directories empty means saved plans are
 	// simply unavailable — the tool refuses a `saved` reference with a reason
 	// rather than searching nothing and reporting "not found", which would read
@@ -593,6 +597,13 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 			Status: tools.StatusError,
 			Output: "Error: orchestrate is only available under the zeromaxing posture. Turn it on with /effort zeromaxing.",
 		}
+	}
+	// THE USER MUST HAVE ASKED, when this session requires it. Checked BEFORE the
+	// saved-plan lookup and before auto-assignment: both touch the disk or the
+	// provider, and a refused plan must cost neither. See plan_keyword.go for why
+	// this is an admission check rather than a line in the prompt.
+	if tool.RequirePlanKeyword && !planRequestedByUser(options.UserMessage) {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + planKeywordRefusal().Error()}
 	}
 	// A SAVED plan is loaded into the same argument shape and then validated by
 	// the same constructor. It is not a second way to run a plan: by the time

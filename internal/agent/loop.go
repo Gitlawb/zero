@@ -173,6 +173,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// this local, so no signatures change anywhere downstream.
 	provider = sessionProvider{session: session}
 
+	// The turn's raw user text, carried to tools so a gate can tell "the user
+	// asked for this" from "the model read a sentence that said to".
+	options.userMessage = prompt
+
 	maxTurns := options.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 12
@@ -1499,6 +1503,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
+		UserMessage:       options.userMessage,
 		// Per-session file version tracker so write_file/edit_file refuse to clobber
 		// a file that changed on disk outside Zero since it was last read.
 		FileTracker:                options.FileTracker,

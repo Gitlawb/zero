@@ -38,15 +38,19 @@ type LaunchBackgroundFunc func(binaryPath string, args []string, outputFile stri
 type BackgroundManagerFunc func() (*background.Manager, error)
 
 type Executor struct {
-	NewSessionID          NewSessionIDFunc
-	WritePromptFile       WritePromptFileFunc
-	PromptFileMaxSize     int
-	Load                  LoadFunc
-	RunChild              RunChildFunc
-	LaunchBackground      LaunchBackgroundFunc
-	BinaryPath            string
-	Paths                 Paths
-	SessionStore          *sessions.Store
+	NewSessionID      NewSessionIDFunc
+	WritePromptFile   WritePromptFileFunc
+	PromptFileMaxSize int
+	Load              LoadFunc
+	RunChild          RunChildFunc
+	LaunchBackground  LaunchBackgroundFunc
+	BinaryPath        string
+	Paths             Paths
+	SessionStore      *sessions.Store
+	// SessionBudget bounds how many sub-agents this SESSION may start, across
+	// every run and every plan in it. nil is unbounded, which is every caller
+	// that does not wire one.
+	SessionBudget         *SessionBudget
 	BackgroundManager     *background.Manager
 	BackgroundManagerFunc BackgroundManagerFunc
 	BackgroundRuntime     *Runtime
@@ -298,6 +302,12 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 	// the guard.
 	if options.CurrentDepth >= maxSpecialistDepth {
 		return ExecResult{}, fmt.Errorf("spawning a specialist at depth %d would exceed maximum nesting depth %d", options.CurrentDepth+1, maxSpecialistDepth)
+	}
+	// COUNTED HERE, beside the depth check and before any work: both answer
+	// "may this child start at all", and a budget consulted after the prompt is
+	// written or the session is created would already have spent something.
+	if err := executor.SessionBudget.admit(); err != nil {
+		return ExecResult{}, err
 	}
 	if strings.TrimSpace(params.Prompt) == "" {
 		return ExecResult{}, fmt.Errorf("specialist prompt is required")

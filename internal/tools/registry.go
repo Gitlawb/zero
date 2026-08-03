@@ -26,6 +26,14 @@ type RunOptions struct {
 	ReasoningEffort   string
 	Depth             int
 	Cwd               string
+	// UserMessage is the RAW text the user typed for this turn, before any tool
+	// output, file content or previous assistant turn joined the context.
+	//
+	// It exists so a tool that costs real money can require the USER to have
+	// asked for it, rather than firing because an imperative sentence appeared in
+	// something the model read. Empty when the caller does not supply it, and a
+	// gate reading it must decide what empty means for itself.
+	UserMessage string
 	// FileTracker, when set, records the version of each file read or written this
 	// session so write_file/edit_file can refuse to clobber a file that changed on
 	// disk outside Zero since it was last read. nil disables the feature entirely

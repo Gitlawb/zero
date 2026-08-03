@@ -59,6 +59,19 @@ func (s *Scope) WorkspaceRoot() string {
 }
 
 // Roots returns the workspace root first, then the extra roots, as a copy.
+// ExtraRoots returns ONLY the roots granted beyond the workspace, as a copy.
+//
+// Roots() includes the workspace root as well, which is right for a caller
+// asking "everything this run may write". It is wrong for a caller asking "what
+// does this run hold BEYOND its workspace" — and one such caller launches child
+// agents in an isolated worktree, where handing back the parent's workspace root
+// re-opens the very tree the worktree exists to protect.
+func (s *Scope) ExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.extraRoots...)
+}
+
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
