@@ -156,6 +156,170 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	}
 }
 
+// The principal opt-in has to travel in the setup args, because the elevated
+// half runs in its own process: a UAC-elevated helper does not inherit the
+// environment of the shell that asked for setup. Sampling the ambient
+// environment there let the two halves disagree, so the serialized value must
+// win over the environment in BOTH directions.
+func TestWindowsSandboxSetupPrincipalOptInSurvivesElevatedEnvironment(t *testing.T) {
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+		Network:    NetworkPolicy{Mode: NetworkAllow},
+	}
+	testCases := []struct {
+		name       string
+		optIn      bool
+		ambientEnv string
+	}{
+		// The reported case: the caller's shell opted in, the elevated helper's
+		// environment has nothing. Without the serialized value setup provisions no
+		// principal and every later command silently falls back.
+		{name: "opted in, elevated environment empty", optIn: true, ambientEnv: ""},
+		// The mirror: the elevated helper happens to have a machine-wide opt-in the
+		// caller did not ask for. Setup must not create an account on its own say-so.
+		{name: "opted out, elevated environment opted in", optIn: false, ambientEnv: "1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv(windowsSandboxIdentityEnv, testCase.ambientEnv)
+			optIn := testCase.optIn
+			args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+				SandboxHome:       t.TempDir(),
+				CommandCWD:        `C:\workspace`,
+				WorkspaceRoots:    []string{`C:\workspace`},
+				PermissionProfile: profile,
+				PrincipalOptIn:    &optIn,
+			})
+			if err != nil {
+				t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+			}
+			config, err := ParseWindowsSandboxSetupArgs(args)
+			if err != nil {
+				t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+			}
+			if config.PrincipalOptIn != testCase.optIn {
+				t.Fatalf("parsed PrincipalOptIn = %v, want %v", config.PrincipalOptIn, testCase.optIn)
+			}
+			// This is the value the elevated setup gate actually reads before it
+			// decides to provision an account.
+			if got := windowsSandboxIdentityEnabled(config.commandConfig().Env); got != testCase.optIn {
+				t.Fatalf("elevated setup opt-in = %v, want %v (ambient %s=%q must not decide)",
+					got, testCase.optIn, windowsSandboxIdentityEnv, testCase.ambientEnv)
+			}
+		})
+	}
+}
+
+// A setup helper that cannot read the opt-in must refuse rather than default to
+// "no principal": provisioning less than the caller asked for and reporting
+// success is the silent downgrade this protocol exists to prevent.
+func TestParseWindowsSandboxSetupArgsRejectsUnreadablePrincipalOptIn(t *testing.T) {
+	optIn := true
+	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		SandboxHome:       t.TempDir(),
+		CommandCWD:        `C:\workspace`,
+		WorkspaceRoots:    []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemRestricted}, Network: NetworkPolicy{Mode: NetworkDeny}},
+		PrincipalOptIn:    &optIn,
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+	}
+	for index, arg := range args {
+		if arg == "--sandbox-principal" {
+			args[index+1] = "yes"
+		}
+	}
+	if _, err := ParseWindowsSandboxSetupArgs(args); err == nil || !strings.Contains(err.Error(), "--sandbox-principal") {
+		t.Fatalf("ParseWindowsSandboxSetupArgs error = %v, want rejection of the unreadable opt-in", err)
+	}
+}
+
+// Setup and the commands that follow it run in separate processes, so they can
+// disagree about the opt-in. The marker records what setup provisioned and the
+// command refuses on a mismatch — most of all when the command opted in and
+// setup did not, because the runtime's principal lookup declines with a nil
+// error and the command would otherwise run on the read-unconfined
+// restricted-token backend while the operator believes a principal is isolating
+// it.
+func TestWindowsSandboxSetupMarkerRejectsPrincipalOptInMismatch(t *testing.T) {
+	// Neutral ambient environment: the disagreement under test is between the two
+	// recorded intents, not between either of them and this process.
+	t.Setenv(windowsSandboxIdentityEnv, "")
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+		Network:    NetworkPolicy{Mode: NetworkAllow},
+	}
+	command := func(home string, env map[string]string) WindowsSandboxCommandConfig {
+		return WindowsSandboxCommandConfig{
+			SandboxHome:       home,
+			CommandCWD:        `C:\workspace`,
+			WorkspaceRoots:    []string{`C:\workspace`},
+			PermissionProfile: profile,
+			Env:               env,
+			SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+			Command:           []string{"cmd.exe", "/c", "echo"},
+		}
+	}
+	testCases := []struct {
+		name       string
+		setupOptIn bool
+		commandEnv map[string]string
+		wantError  string
+	}{
+		{
+			name:       "command opts in, setup provisioned no principal",
+			setupOptIn: false,
+			commandEnv: map[string]string{windowsSandboxIdentityEnv: "1"},
+			wantError:  "asks for a sandbox principal, but setup provisioned none",
+		},
+		{
+			name:       "setup provisioned a principal, command opts out",
+			setupOptIn: true,
+			commandEnv: map[string]string{windowsSandboxIdentityEnv: "0"},
+			wantError:  "setup provisioned a sandbox principal",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			setupConfig := WindowsSandboxSetupConfig{
+				SandboxHome:       home,
+				CommandCWD:        `C:\workspace`,
+				WorkspaceRoots:    []string{`C:\workspace`},
+				PermissionProfile: profile,
+				PrincipalOptIn:    testCase.setupOptIn,
+			}
+			marker, err := WriteWindowsSandboxSetupMarker(setupConfig)
+			if err != nil {
+				t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
+			}
+			// Assert the setup half recorded what it was told before trusting what
+			// the command half makes of it.
+			if marker.PrincipalOptIn != testCase.setupOptIn {
+				t.Fatalf("marker PrincipalOptIn = %v, want %v", marker.PrincipalOptIn, testCase.setupOptIn)
+			}
+			// An agreeing command still validates, so the refusal below is about the
+			// disagreement and not about the marker being unusable.
+			agreeing := command(home, map[string]string{windowsSandboxIdentityEnv: windowsSandboxPrincipalOptInValue(testCase.setupOptIn)})
+			if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(agreeing)); err != nil {
+				t.Fatalf("agreeing command must validate against its own setup: %v", err)
+			}
+
+			err = ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(command(home, testCase.commandEnv)))
+			if err == nil {
+				t.Fatalf("disagreeing command validated the marker, want refusal")
+			}
+			if !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("validate error = %v, want it to contain %q", err, testCase.wantError)
+			}
+			if !strings.Contains(err.Error(), "zero sandbox setup") {
+				t.Fatalf("validate error = %v, want the remedy to name `zero sandbox setup`", err)
+			}
+		})
+	}
+}
+
 func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T) {
 	command := WindowsSandboxCommandConfig{
 		SandboxHome:    t.TempDir(),
@@ -178,6 +342,105 @@ func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T
 	}
 	if setup.PermissionProfile.FileSystem.Kind != FileSystemRestricted || len(setup.PermissionProfile.FileSystem.DenyRead) != 1 {
 		t.Fatalf("setup profile = %#v, want command permission profile", setup.PermissionProfile)
+	}
+}
+
+// Serializing the opt-in makes it a field every caller of
+// BuildWindowsSandboxSetupArgs could get wrong, so the field is a tri-state and
+// its unset meaning is load-bearing: "consult the environment", never "opted
+// out". The command half still resolves the opt-in from the process environment
+// when its own Env carries no explicit entry, so if an unset setup caller
+// asserted false instead, the two halves would disagree under a machine-wide
+// opt-in and marker validation would refuse every command — safe, but it bricks
+// the caller, and it re-creates the very disagreement this flag removes. That is
+// exactly what the existing smoke callers
+// (runner_windows_integration_test.go:43 and :52) do: they never set the field.
+//
+// This test runs on every GOOS and pins the unset default in both ambient
+// states, so getting it backwards is a test failure here rather than a surprise
+// on a real elevated machine.
+func TestWindowsSandboxSetupArgsUnsetPrincipalOptInConsultsEnvironment(t *testing.T) {
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, WriteRoots: []WritableRoot{{Root: `C:\workspace`}}},
+		Network:    NetworkPolicy{Mode: NetworkAllow},
+	}
+	// The command half as an ambient caller declares it: no explicit entry in Env,
+	// so it resolves the opt-in from the environment.
+	command := func(home string) WindowsSandboxCommandConfig {
+		return WindowsSandboxCommandConfig{
+			SandboxHome:       home,
+			CommandCWD:        `C:\workspace`,
+			WorkspaceRoots:    []string{`C:\workspace`},
+			PermissionProfile: profile,
+			SandboxLevel:      WindowsSandboxLevelRestrictedToken,
+			Command:           []string{"cmd.exe", "/c", "echo"},
+		}
+	}
+	// setupMarkerFor runs the full caller path — build args, cross the (simulated)
+	// UAC boundary by re-parsing them, write the marker — so what is asserted is
+	// what an elevated helper would actually have provisioned.
+	setupMarkerFor := func(t *testing.T, home string, optIn *bool) WindowsSandboxSetupMarker {
+		t.Helper()
+		args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+			SandboxHome:       home,
+			CommandCWD:        `C:\workspace`,
+			WorkspaceRoots:    []string{`C:\workspace`},
+			PermissionProfile: profile,
+			PrincipalOptIn:    optIn,
+		})
+		if err != nil {
+			t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+		}
+		config, err := ParseWindowsSandboxSetupArgs(args)
+		if err != nil {
+			t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+		}
+		marker, err := WriteWindowsSandboxSetupMarker(config)
+		if err != nil {
+			t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
+		}
+		return marker
+	}
+
+	for _, ambient := range []string{"1", ""} {
+		name := "machine-wide opt-in"
+		if ambient == "" {
+			name = "no opt-in"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(windowsSandboxIdentityEnv, ambient)
+			want := ambient == "1"
+
+			// An unset caller must provision what the environment says. Assert the
+			// setup half recorded that before trusting the agreement below: a marker
+			// that recorded the wrong thing could still "agree" if the command half
+			// were broken in the same direction.
+			home := t.TempDir()
+			marker := setupMarkerFor(t, home, nil)
+			if marker.PrincipalOptIn != want {
+				t.Fatalf("unset caller recorded PrincipalOptIn = %v, want %v (ambient %s=%q decides)",
+					marker.PrincipalOptIn, want, windowsSandboxIdentityEnv, ambient)
+			}
+			if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(command(home))); err != nil {
+				t.Fatalf("an unset caller must agree with the ambient command half: %v", err)
+			}
+
+			// And an explicit value still overrides the environment in both
+			// directions, or the tri-state would have no third state.
+			override := !want
+			overrideHome := t.TempDir()
+			overrideMarker := setupMarkerFor(t, overrideHome, &override)
+			if overrideMarker.PrincipalOptIn != override {
+				t.Fatalf("explicit caller recorded PrincipalOptIn = %v, want %v", overrideMarker.PrincipalOptIn, override)
+			}
+			err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(command(overrideHome)))
+			if err == nil {
+				t.Fatalf("an explicit opt-in of %v validated against an ambient command half of %v, want refusal", override, want)
+			}
+			if !strings.Contains(err.Error(), windowsSandboxIdentityEnv) {
+				t.Fatalf("validate error = %v, want it to name %s", err, windowsSandboxIdentityEnv)
+			}
+		})
 	}
 }
 
