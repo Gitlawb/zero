@@ -780,6 +780,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:             resolved.MaxTurns,
+		MaxTokens:            execProfile.MaxTokens,
 		ContextWindow:        resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
 		DeferThreshold:       effectiveDeferThreshold,
 		Specialists:          specialistRuntime.specialistInfos(),

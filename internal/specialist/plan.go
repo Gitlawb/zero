@@ -747,7 +747,7 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	// executor changed, so the bound moved rather than dissolved.
 	//
 	// The ceiling is absolute and small. A plan is one tool call, and every task
-	// it runs is a child process inheriting a 320-turn budget under this
+	// it runs is a child process inheriting a 480-turn budget under this
 	// posture; sixteen of those at once is already a great deal of machine and
 	// a great deal of money. A plan asking for more is refused, not trimmed,
 	// because a trimmed number is a number nobody can reason about afterwards.

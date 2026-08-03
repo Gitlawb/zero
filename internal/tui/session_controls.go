@@ -769,6 +769,16 @@ func (m model) handleProfileCommand(args string) (model, string) {
 		m.execProfileDisplacedMaxTurns = displacedMaxTurns
 		config.SetMaxTurnsEnv(profile.MaxTurns)
 	}
+	// Spend budget. Deliberately NOT exported to the environment the way the turn
+	// budget is: a child inheriting the parent's ceiling would be handed the whole
+	// budget each, so a plan of ten tasks could spend ten times it. The parent's
+	// bound is the parent's.
+	//
+	// No displacement bookkeeping either, because nothing else sets this — there
+	// is no /tokens command to preserve, so revert simply clears it.
+	if profile.MaxTokens > 0 {
+		m.agentOptions.MaxTokens = profile.MaxTokens
+	}
 	// Reasoning effort: fill only when the session is on auto AND the active
 	// model supports the profile's level, mirroring exec's supported-effort
 	// gating. An explicit user choice always wins over the profile.
@@ -816,6 +826,9 @@ func (m model) revertExecProfile() model {
 	if m.execProfileName == "" {
 		return m
 	}
+	// The spend budget comes only from the profile, so removing the profile
+	// removes it. Unconditional because nothing else can have set it.
+	m.agentOptions.MaxTokens = 0
 	if !m.execProfileTurnsTouched && m.execProfileAppliedMaxTurns > 0 && m.agentOptions.MaxTurns == m.execProfileAppliedMaxTurns {
 		m.agentOptions.MaxTurns = m.execProfileDisplacedMaxTurns
 		if m.execProfileDisplacedMaxTurns > 0 {

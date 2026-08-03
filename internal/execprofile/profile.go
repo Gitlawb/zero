@@ -35,6 +35,14 @@ type Profile struct {
 	// user did not pass an explicit --max-turns. The displaced resolved value
 	// becomes the escalation target (see Policy).
 	MaxTurns int
+	// MaxTokens bounds what a run may SPEND, in provider-reported tokens. 0 is
+	// unbounded, which is every profile that does not set it.
+	//
+	// A TURN COUNT IS NOT A COST BOUND. A measured heavy run reached the 320-turn
+	// ceiling having spent 35,781,390 tokens; a lighter one reached it at a tenth
+	// of that. Raising the turn budget without this would double the worst case
+	// while still ending runs at an arbitrary place, so the two move together.
+	MaxTokens int
 	// ReasoningEffort fills the run's effort when the user left it unset. It
 	// still flows through the model-supported gating at the call site, so an
 	// unsupported level degrades exactly like an explicit flag would.
@@ -96,9 +104,14 @@ var (
 		SelfCorrect:     true,
 	}
 
-	// Zeromaxing is the top posture: thorough's knobs with double the turn
-	// budget again, plus the loop-posture reminders the agent injects while it
-	// is active (see agent.Zeromaxing).
+	// Zeromaxing is the top posture: thorough's knobs with TRIPLE the turn
+	// budget, plus the loop-posture reminders the agent injects while it is
+	// active (see agent.Zeromaxing).
+	//
+	// It was double, and 320 turns was cutting real work short — a measured run
+	// spent every one of them on legitimate sequential work and was forced into a
+	// summary before it could report what it had found. The multiple stays exact
+	// so the relationship remains something a reader can check.
 	//
 	// HONEST DELTA over thorough: the turn budget, and nothing else. Effort is
 	// already at the ceiling and self-correction is already armed. Delta states
@@ -115,8 +128,29 @@ var (
 	// a downgrade wearing an upgrade's name. Raising the real ceiling means
 	// teaching the providers those tiers first.
 	Zeromaxing = Profile{
-		Name:            "zeromaxing",
-		MaxTurns:        320,
+		Name: "zeromaxing",
+		// 480, raised from 320 because 320 was cutting real work short: a measured
+		// run spent all of it on legitimate sequential edit-verify work and was
+		// forced into a summary before it could write up what it had found.
+		//
+		// NOT HIGHER, and the reason is the token curve rather than caution. In
+		// that run the prompt grew monotonically from 35k to 186k tokens per turn
+		// and had not flattened, so turns near the end cost five times what early
+		// ones did. 640 would land around 360k per turn and push the run into
+		// compaction — which is where "paste the actual terminal output" quietly
+		// becomes a summary of the output, the exact failure the evidence contract
+		// exists to prevent.
+		MaxTurns: 480,
+		// The bound that is meant to actually fire. Anchored on measurement, not
+		// preference: the largest observed legitimate run spent 35.8M and needed
+		// roughly 45M to finish, so this lets that work complete while stopping a
+		// run that has stopped making progress — which at 480 turns and a growing
+		// prompt would otherwise reach well over 100M.
+		//
+		// TWO RUNS IS A THIN BASIS. Revisit it once more heavy runs have been
+		// measured; the mechanism is what matters here, and the number is the part
+		// most likely to be wrong.
+		MaxTokens:       50_000_000,
 		ReasoningEffort: "high",
 		SelfCorrect:     true,
 	}

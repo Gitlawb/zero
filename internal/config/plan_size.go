@@ -16,7 +16,7 @@ import (
 //
 // IT REMAINS A HARD CAP, not an advisory warning. The reference implementation
 // warns and proceeds; here a plan over the tier is REJECTED, because under this
-// posture every plan task is a child inheriting a 320-turn ceiling — fifty tasks
+// posture every plan task is a child inheriting a 480-turn ceiling — fifty tasks
 // authorise 16,000 child turns from one tool call. A warning the model emits to
 // itself is not a bound on that. The rejection names the tier and the setting,
 // so the ceiling is discoverable at the moment it is hit rather than being a

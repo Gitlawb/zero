@@ -105,8 +105,8 @@ func TestZeromaxingDoesNotOverrideExplicitEffortTUI(t *testing.T) {
 func TestZeromaxingDoesNotOverrideExplicitTurnsTUI(t *testing.T) {
 	m := zeromaxingTestModel(t, false)
 	m, _ = m.handleEffortCommand(execprofile.Name)
-	if m.agentOptions.MaxTurns != 320 {
-		t.Fatalf("the posture must raise the budget to 320, got %d", m.agentOptions.MaxTurns)
+	if m.agentOptions.MaxTurns != 480 {
+		t.Fatalf("the posture must raise the budget to 480, got %d", m.agentOptions.MaxTurns)
 	}
 	m, _ = m.handleTurnsCommand("50")
 	if m.agentOptions.MaxTurns != 50 {
@@ -127,7 +127,7 @@ func TestRevertRestoresAllFourKnobs(t *testing.T) {
 	baseSelfCorrect := m.selfCorrectTests
 
 	m, _ = m.handleEffortCommand(execprofile.Name)
-	if m.agentOptions.MaxTurns != 320 || m.reasoningEffort != "high" || !m.selfCorrectTests {
+	if m.agentOptions.MaxTurns != 480 || m.reasoningEffort != "high" || !m.selfCorrectTests {
 		t.Fatalf("setup: knobs not applied: turns=%d effort=%q sc=%v",
 			m.agentOptions.MaxTurns, m.reasoningEffort, m.selfCorrectTests)
 	}
@@ -311,7 +311,7 @@ func TestZeromaxingOnUnsupportedModelStatesWhatItCouldNotRaise(t *testing.T) {
 	if m.execProfileName != execprofile.Name {
 		t.Fatalf("must still WORK on a model that cannot take the effort, got %q", m.execProfileName)
 	}
-	if m.agentOptions.MaxTurns != 320 {
+	if m.agentOptions.MaxTurns != 480 {
 		t.Fatalf("the rest of the posture must still apply: turns = %d", m.agentOptions.MaxTurns)
 	}
 	if m.reasoningEffort != "" {
@@ -384,7 +384,7 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 		SelfCorrect:     m.selfCorrectTransition(),
 	})
 	for surface, text := range map[string]string{"/effort": effortStatus, "/profile status": profileStatus} {
-		for _, want := range []string{"effort: high", "profile: " + execprofile.Name, "turns: 320"} {
+		for _, want := range []string{"effort: high", "profile: " + execprofile.Name, "turns: 480"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s must show %q in its resolved state line:\n%s", surface, want, text)
 			}
@@ -392,7 +392,7 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 		if !strings.Contains(text, "turn budget:") {
 			t.Fatalf("%s must state the real delta:\n%s", surface, text)
 		}
-		for _, want := range []string{"320", "sub-agents", "reasoning effort:", "self-correct:"} {
+		for _, want := range []string{"480", "sub-agents", "reasoning effort:", "self-correct:"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s must mention %q:\n%s", surface, want, text)
 			}
@@ -560,7 +560,7 @@ func TestProfileEffortFillAgreesWithTheHeadlessPath(t *testing.T) {
 			}
 			// The rest of the posture applies either way — a declined effort
 			// must never cost the user the turn budget.
-			if m.agentOptions.MaxTurns != 320 {
+			if m.agentOptions.MaxTurns != 480 {
 				t.Fatalf("%s: the turn budget must apply regardless of the effort, got %d",
 					tc.model, m.agentOptions.MaxTurns)
 			}
@@ -878,4 +878,22 @@ func TestGateIsSafeUnderConcurrentAccess(t *testing.T) {
 		_ = tool.Safety().Permission
 	}
 	<-done
+}
+
+// THE POSTURE'S SPEND BUDGET MUST REACH THE RUN, and leave when it does.
+//
+// Asserted on agentOptions — the struct a run is actually launched with —
+// because a profile field nothing carries is the defect this codebase has hit
+// repeatedly: a value that exists at one layer, is read at another, and is
+// carried by neither.
+func TestThePostureSpendBudgetReachesAndLeavesTheRun(t *testing.T) {
+	m := zeromaxingTestModel(t, false)
+	m, _ = m.handleEffortCommand(execprofile.Name)
+	if got := m.agentOptions.MaxTokens; got != execprofile.Zeromaxing.MaxTokens {
+		t.Fatalf("agentOptions.MaxTokens = %d, want the posture's %d", got, execprofile.Zeromaxing.MaxTokens)
+	}
+	reverted := m.revertExecProfile()
+	if got := reverted.agentOptions.MaxTokens; got != 0 {
+		t.Errorf("removing the posture left a spend budget of %d behind", got)
+	}
 }

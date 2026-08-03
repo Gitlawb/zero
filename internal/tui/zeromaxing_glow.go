@@ -11,7 +11,7 @@ import (
 
 // The zeromaxing posture is a LIVE WORD, not a filled box.
 //
-// It raises a cost multiplier — 320 turns per run, inherited by every sub-agent
+// It raises a cost multiplier — 480 turns per run, inherited by every sub-agent
 // — so "is it on?" must be answerable from across the room. A badge did that by
 // being a solid slab; this does it by MOVING, which the eye catches at least as
 // well and which costs the footer none of its calm. There is no background

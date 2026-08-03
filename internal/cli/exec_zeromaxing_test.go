@@ -76,8 +76,8 @@ func TestZeromaxingFillsOnlyUnsetCLI(t *testing.T) {
 	if !options.selfCorrect {
 		t.Fatal("must arm self-correction when it was unset")
 	}
-	if effective, displaced := applyProfileTurnBudget(profile, 0, 80); effective != 320 || displaced != 80 {
-		t.Fatalf("over resolved 80 = (%d, %d), want (320, 80)", effective, displaced)
+	if effective, displaced := applyProfileTurnBudget(profile, 0, 80); effective != 480 || displaced != 80 {
+		t.Fatalf("over resolved 80 = (%d, %d), want (480, 80)", effective, displaced)
 	}
 	if effective, displaced := applyProfileTurnBudget(profile, 50, 50); effective != 50 || displaced != 0 {
 		t.Fatalf("with explicit --max-turns 50 = (%d, %d), want (50, 0)", effective, displaced)
@@ -206,7 +206,7 @@ func TestZeromaxingUnsupportedEffortIsReportedCLI(t *testing.T) {
 	}
 	// ...and the rest of the posture still applies: the budget is unaffected.
 	profile, _ := execprofile.Lookup(execprofile.Name)
-	if effective, _ := applyProfileTurnBudget(profile, 0, 80); effective != 320 {
+	if effective, _ := applyProfileTurnBudget(profile, 0, 80); effective != 480 {
 		t.Fatalf("the turn budget must still apply on an unsupported model, got %d", effective)
 	}
 }
@@ -229,8 +229,8 @@ func TestZeromaxingSelectionRefusalCLI(t *testing.T) {
 func TestZeromaxingTurnBudgetPropagatesToChildren(t *testing.T) {
 	profile, _ := execprofile.Lookup(execprofile.Name)
 	effective, _ := applyProfileTurnBudget(profile, 0, 80)
-	if effective != 320 {
-		t.Fatalf("effective budget = %d, want 320", effective)
+	if effective != 480 {
+		t.Fatalf("effective budget = %d, want 480", effective)
 	}
 	if effective > config.MaxTurnsCeiling {
 		t.Fatalf("the budget %d exceeds the shared ceiling %d", effective, config.MaxTurnsCeiling)
@@ -399,12 +399,12 @@ func TestExecDeltaShowsTheCallersOwnTurnBudget(t *testing.T) {
 	// a fixture value, and pinning it here would test the fixture rather than
 	// the behaviour. What matters is that the origin is the caller's own
 	// resolved budget and the destination is the posture's.
-	transition := regexp.MustCompile(`turn budget: (\d+) → 320`)
+	transition := regexp.MustCompile(`turn budget: (\d+) → 480`)
 	match := transition.FindStringSubmatch(stderr)
 	if match == nil {
 		t.Fatalf("the delta must state a caller-relative budget transition:\n%s", stderr)
 	}
-	if match[1] == "320" {
+	if match[1] == "480" {
 		t.Fatalf("origin and destination are the same; the clause should read \"unchanged\":\n%s", stderr)
 	}
 	if strings.Contains(stderr, "160") {

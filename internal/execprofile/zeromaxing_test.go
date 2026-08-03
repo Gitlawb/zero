@@ -68,11 +68,11 @@ func TestZeromaxingHasExactlyOneSpelling(t *testing.T) {
 // thorough — Delta says exactly that to the user, so if these drift apart the
 // user-facing claim becomes false.
 func TestZeromaxingKnobsMatchTheDeltaItAdvertises(t *testing.T) {
-	if Zeromaxing.MaxTurns != 320 {
-		t.Fatalf("Zeromaxing.MaxTurns = %d, want 320", Zeromaxing.MaxTurns)
+	if Zeromaxing.MaxTurns != 480 {
+		t.Fatalf("Zeromaxing.MaxTurns = %d, want 480", Zeromaxing.MaxTurns)
 	}
-	if Zeromaxing.MaxTurns != Thorough.MaxTurns*2 {
-		t.Fatalf("budget %d is not double thorough's %d", Zeromaxing.MaxTurns, Thorough.MaxTurns)
+	if Zeromaxing.MaxTurns != Thorough.MaxTurns*3 {
+		t.Fatalf("budget %d is not triple thorough's %d", Zeromaxing.MaxTurns, Thorough.MaxTurns)
 	}
 	if !Zeromaxing.SelfCorrect || !Thorough.SelfCorrect {
 		t.Fatalf("Delta claims self-correction is already armed at thorough: zeromaxing=%v thorough=%v",
@@ -85,7 +85,7 @@ func TestZeromaxingKnobsMatchTheDeltaItAdvertises(t *testing.T) {
 	}
 	// The budget clause states the CALLER's transition, not another profile's.
 	got := Delta(DeltaState{CurrentMaxTurns: 80})
-	for _, want := range []string{"turn budget: 80 → 320", "sub-agents"} {
+	for _, want := range []string{"turn budget: 80 → 480", "sub-agents"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Delta must state %q:\n%s", want, got)
 		}
@@ -98,7 +98,7 @@ func TestZeromaxingKnobsMatchTheDeltaItAdvertises(t *testing.T) {
 }
 
 // (3) The budget clause is caller-relative in every case, including the two
-// edges where a plain "X -> 320" would be wrong.
+// edges where a plain "X -> 480" would be wrong.
 func TestDeltaBudgetLineIsCallerRelative(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -106,10 +106,10 @@ func TestDeltaBudgetLineIsCallerRelative(t *testing.T) {
 		want    string
 		absent  string
 	}{
-		{"balanced default", 80, "turn budget: 80 → 320", "160"},
-		{"already at the posture budget", 320, "turn budget: unchanged (320)", "→"},
-		{"unknown current budget", 0, "turn budget: 320", "→"},
-		{"a pinned lower budget", 30, "turn budget: 30 → 320", "160"},
+		{"balanced default", 80, "turn budget: 80 → 480", "160"},
+		{"already at the posture budget", 480, "turn budget: unchanged (480)", "→"},
+		{"unknown current budget", 0, "turn budget: 480", "→"},
+		{"a pinned lower budget", 30, "turn budget: 30 → 480", "160"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,6 +221,29 @@ func TestSelectionRefusalDisablesOnlyZeromaxingAndOnlyWhenDisabled(t *testing.T)
 	for _, other := range []Profile{Balanced, Fast, Thorough} {
 		if refusal := SelectionRefusal(other, true); refusal != "" {
 			t.Fatalf("disableZeromaxing must not refuse %q: %q", other.Name, refusal)
+		}
+	}
+}
+
+// THE SPEND BUDGET AND THE TURN BUDGET MOVE TOGETHER.
+//
+// Raising the turn ceiling without bounding spend doubles the worst case while
+// still ending runs at an arbitrary place: the measured run that forced this
+// change spent 35,781,390 tokens reaching 320 turns, and 480 turns on the same
+// growing prompt would reach well over 100M. The number is anchored on that
+// measurement — above what the largest legitimate run needed, below a runaway.
+func TestZeromaxingBoundsSpendNotOnlyTurns(t *testing.T) {
+	if Zeromaxing.MaxTokens <= 0 {
+		t.Fatal("the posture raises the turn ceiling and bounds no spend at all")
+	}
+	if Zeromaxing.MaxTokens != 50_000_000 {
+		t.Fatalf("Zeromaxing.MaxTokens = %d, want 50000000", Zeromaxing.MaxTokens)
+	}
+	// Every other profile leaves it unbounded, so nothing outside the posture
+	// gains a ceiling nobody chose.
+	for _, profile := range []Profile{Balanced, Thorough, Fast} {
+		if profile.MaxTokens != 0 {
+			t.Errorf("%s bounds spend at %d; only the posture should", profile.Name, profile.MaxTokens)
 		}
 	}
 }
