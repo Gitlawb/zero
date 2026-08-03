@@ -24,20 +24,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// windowsSandboxIdentityEnv opts a machine into the principal backend while it
-// is still experimental. Provisioning is inert without it, so an existing
-// install keeps the restricted-token behaviour until someone turns this on.
-const windowsSandboxIdentityEnv = "ZERO_WINDOWS_SANDBOX_IDENTITY"
-
-// windowsSandboxIdentityEnabled reports whether the principal backend is opted
-// into. Kept as a function so the check reads the environment at call time,
-// which is what lets a test or an elevated setup run flip it.
-func windowsSandboxIdentityEnabled(env map[string]string) bool {
-	if value, ok := env[windowsSandboxIdentityEnv]; ok {
-		return strings.TrimSpace(value) == "1"
-	}
-	return strings.TrimSpace(os.Getenv(windowsSandboxIdentityEnv)) == "1"
-}
+// The opt-in itself (windowsSandboxIdentityEnv and windowsSandboxIdentityEnabled)
+// lives in windows_setup.go: it is part of the setup protocol, which the elevated
+// half and the command half both have to read the same way, so it cannot be
+// Windows-only.
 
 // windowsSandboxWorkspaceKey derives the per-workspace key a principal is named
 // after. It hashes the workspace root the same way the sandbox runtime keys its
@@ -88,13 +78,34 @@ func windowsSandboxPrincipalEligible(config WindowsSandboxCommandConfig) bool {
 // rather than downgrading around.
 func windowsSandboxPrincipalToken(config WindowsSandboxCommandConfig) (windows.Token, bool, error) {
 	if !windowsSandboxPrincipalEligible(config) {
+		// Deliberately silent, and this is a change of mind worth recording.
+		//
+		// Announcing it looks right: deny is the DEFAULT network mode, so an
+		// operator who opted in never gets a principal for ordinary commands, and
+		// that is worth knowing. But the warning cannot be delivered here. This
+		// runner is re-exec'd per command as `zero __windows-command-runner`, so the
+		// sync.Once below is once per COMMAND, not once per session — the notice
+		// would land on the stderr of essentially every sandboxed tool call. Noise
+		// that repeats gets filtered by the reader rather than acted on, which is
+		// the exact failure the helper's own comment warns about.
+		//
+		// It is also not actionable per command: windowsSandboxPrincipalEligible
+		// prefers network enforcement over read confinement on purpose, so there is
+		// nothing to do differently. A standing configuration fact belongs on a
+		// surface read once — `zero doctor`, which carries the opt-in now.
 		return 0, false, nil
 	}
 	key := windowsSandboxWorkspaceKey(config.WorkspaceRoots)
 	identity, err := lookupWindowsSandboxPrincipalForCommand(key)
 	if err != nil {
 		if errors.Is(err, errWindowsSandboxIdentityUnavailable) {
-			// Not provisioned: fall back quietly, this is the default state.
+			// Not provisioned. On the restricted-token tier the marker check has
+			// already refused a command whose opt-in disagrees with setup, so reaching
+			// here means the unelevated tier, which validates no marker at all and
+			// cannot provision an account (that needs Administrator). Falling back is
+			// right — refusing would break every machine-wide opt-in that relies on
+			// the unelevated tier — but it must not be silent.
+			warnWindowsSandboxPrincipalNotUsed("no sandbox principal is provisioned for this workspace; `zero sandbox setup` from an elevated (Administrator) terminal provisions one")
 			return 0, false, nil
 		}
 		// The name resolves to something that is not a usable principal, most
@@ -150,6 +161,26 @@ var warnWindowsSandboxPrincipalUnavailable = func(username string) {
 }
 
 var windowsSandboxPrincipalWarnOnce sync.Once
+
+// warnWindowsSandboxPrincipalNotUsed covers the other ways an opted-in command
+// ends up on the restricted token: the principal is ineligible for this
+// command's policy, or none is provisioned on a tier that validates no marker.
+// Neither is an error — both are correct fallbacks — but both leave the operator
+// believing an account boundary is isolating them when it is not, which is the
+// one thing this backend must never do quietly.
+//
+// Once per process and behind its own sync.Once, so it neither silences nor is
+// silenced by the provisioned-but-secretless warning above.
+var warnWindowsSandboxPrincipalNotUsed = func(reason string) {
+	windowsSandboxPrincipalNotUsedWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr,
+			"[zero] %s is set, but this command is not running as a sandbox principal: %s. "+
+				"Falling back to the restricted-token sandbox, which does not confine reads.\n",
+			windowsSandboxIdentityEnv, reason)
+	})
+}
+
+var windowsSandboxPrincipalNotUsedWarnOnce sync.Once
 
 // provisionWindowsSandboxPrincipalForSetup does the elevated half: create the
 // account, grant it the batch logon right, and store its password locked to the

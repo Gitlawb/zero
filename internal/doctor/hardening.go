@@ -104,6 +104,10 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
 		PermissionProfile: profile,
+		// Same opt-in a command would resolve, so doctor reports the principal
+		// mismatch as out-of-date setup instead of passing a check the next command
+		// will fail.
+		PrincipalOptIn: sandbox.WindowsSandboxPrincipalOptIn(nil),
 	}
 	if err := sandbox.ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
 		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but Windows sandbox setup is missing or out of date: %v.", backend.Name, err), map[string]any{
