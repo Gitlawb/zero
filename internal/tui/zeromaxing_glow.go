@@ -201,13 +201,38 @@ func (m model) zeromaxingChipAtMouse(msg tea.MouseMsg) bool {
 	return x >= start && x < end
 }
 
-// zeromaxingChipRow is the footer row the chip renders on.
+// zeromaxingStatusRows returns the footer rows the STATUS LINE occupies, and the
+// screen row the first of them sits on.
+//
+// THE SEARCH IS NARROWED TO THE STATUS LINE because the label is a word, and the
+// footer is not only chips. footerView also renders the plan panel, the idle
+// hints, a queued-message preview and THE COMPOSER — so scanning every footer row
+// for "zeromaxing" meant typing the word into the composer put the composer's own
+// row ahead of the chip's, and the hit test then answered with a row the chip is
+// not on. A task prompt containing the word did the same through the plan panel.
+// The chip renders in statusLine and nowhere else, so that is the only row range
+// a hit test may consider.
+//
+// Derived from the SAME footer string the screen shows, and located by rendering
+// the status line separately and taking that many rows off the end — the status
+// line is the last thing footerView writes, on every branch.
+func (m model) zeromaxingStatusRows() ([]string, int) {
+	width := m.chatColumnWidth()
+	footer := viewLines(m.footerView(width))
+	status := viewLines(m.statusLine(width))
+	if len(status) == 0 || len(status) > len(footer) {
+		return nil, 0
+	}
+	return footer[len(footer)-len(status):], m.height - len(status)
+}
+
+// zeromaxingChipRow is the status row the chip renders on.
 func (m model) zeromaxingChipRow() (int, bool) {
-	footer := viewLines(m.footerView(m.chatColumnWidth()))
-	for index, line := range footer {
+	rows, top := m.zeromaxingStatusRows()
+	for index, line := range rows {
 		if strings.Contains(ansiStripLine(line), zeromaxingChipLabel) {
-			// Footer rows sit at the bottom of the screen.
-			return m.height - len(footer) + index, true
+			// Status rows sit at the bottom of the screen.
+			return top + index, true
 		}
 	}
 	return 0, false
@@ -215,8 +240,8 @@ func (m model) zeromaxingChipRow() (int, bool) {
 
 // zeromaxingChipSpan is the chip's [start,end) column range on its row.
 func (m model) zeromaxingChipSpan() (int, int, bool) {
-	footer := viewLines(m.footerView(m.chatColumnWidth()))
-	for _, line := range footer {
+	rows, _ := m.zeromaxingStatusRows()
+	for _, line := range rows {
 		plain := ansiStripLine(line)
 		index := strings.Index(plain, zeromaxingChipLabel)
 		if index < 0 {
