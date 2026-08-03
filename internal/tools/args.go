@@ -149,10 +149,11 @@ func intPtr(value int) *int {
 // These ride on every turn's exec_command schema, so they are kept close to the
 // length of the text they replaced; TestEagerToolSchemaTokenBudget is the ratchet.
 const (
-	sandboxPermissionsDescription = "Per-command sandbox override. Omit it for ordinary commands, including every " +
-		"read-only one; use `with_additional_permissions` with a non-empty `additional_permissions` for sandboxed " +
-		"file/network access, or `require_escalated` only when the command must run outside the sandbox, such as " +
-		"host/global process, socket, service, or desktop state hidden by sandbox namespaces."
+	sandboxPermissionsDescription = "Per-command sandbox override. Omit it unless the command needs access the " +
+		"sandbox does not already give it; use `with_additional_permissions` with a non-empty " +
+		"`additional_permissions` for sandboxed file/network access, or `require_escalated` only when the command " +
+		"must run outside the sandbox, such as host/global process, socket, service, or desktop state hidden by " +
+		"sandbox namespaces."
 
 	additionalPermissionsDescription = "Extra sandbox access. Omit this field entirely unless `sandbox_permissions` " +
 		"is `with_additional_permissions`; sending it with any other mode is rejected, as is an empty or all-false " +

@@ -27,8 +27,14 @@ func TestShellToolsAdvertiseOmittingSandboxPermissionFields(t *testing.T) {
 		if !strings.Contains(mode.Description, "Omit it") {
 			t.Errorf("%s: sandbox_permissions description = %q, want it to lead with omitting the field", shell.name, mode.Description)
 		}
-		if !strings.Contains(mode.Description, "read-only") {
-			t.Errorf("%s: sandbox_permissions description = %q, want it to say read-only commands need no override", shell.name, mode.Description)
+		// Deliberately NOT "read-only". An earlier revision said every read-only
+		// command could omit the override, and that is false: `curl` and `gh` are
+		// read-only and still need sandboxed network. Conditioning omission on
+		// whether the command needs access it does not already have is the claim
+		// that is actually true, and the one a model can act on without first
+		// having to decide what counts as read-only.
+		if !strings.Contains(mode.Description, "unless the command needs access") {
+			t.Errorf("%s: sandbox_permissions description = %q, want omission conditioned on needing extra access", shell.name, mode.Description)
 		}
 
 		extra, ok := properties["additional_permissions"]
