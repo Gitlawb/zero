@@ -6,6 +6,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -217,5 +218,83 @@ func TestRunMCPCheckNormalizeError(t *testing.T) {
 	}
 	if got := errBuf.String(); !strings.Contains(got, "requires command") {
 		t.Fatalf("want normalize error, got %q", got)
+	}
+}
+
+// TestRunMCPCheckReportsUnreachableServer covers the case the command exists
+// for: a server that fails to start.
+//
+// RegisterTools is best-effort by design, so a connect failure is recorded on
+// the runtime and registration returns nil. runMCPCheck used to inspect only
+// that nil error and then print "is reachable", which told the user their
+// broken server was fine. The command is spawned for real here rather than
+// stubbed, because the whole failure mode was a mismatch between what
+// registration returns and what it records.
+func TestRunMCPCheckReportsUnreachableServer(t *testing.T) {
+	setTrustConfigRoot(t)
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveMCPConfig: func(_ string, _ bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"broken": {Type: "stdio", Command: "zero-definitely-not-a-real-binary-xyz"},
+			}}, nil
+		},
+	}
+	var out, errBuf bytes.Buffer
+	if code := runWithDeps([]string{"mcp", "check", "broken"}, &out, &errBuf, deps); code == exitSuccess {
+		t.Fatalf("mcp check must fail for a server that did not start; stdout=%q stderr=%q", out.String(), errBuf.String())
+	}
+	if got := out.String(); strings.Contains(got, "is reachable") {
+		t.Fatalf("mcp check reported a failed server as reachable: %q", got)
+	}
+	if got := errBuf.String(); !strings.Contains(got, "not reachable") {
+		t.Fatalf("want an unreachable error naming the server, got %q", got)
+	}
+}
+
+// The --json contract for an unreachable server, which the text case above does
+// not touch.
+//
+// The JSON branch is a separate return path with its own payload, so a caller
+// parsing it would otherwise be relying on a shape nothing pins: reverting the
+// check leaves it emitting status "ok" with a tool count, which is valid JSON
+// and completely wrong.
+func TestRunMCPCheckReportsUnreachableServerJSON(t *testing.T) {
+	setTrustConfigRoot(t)
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveMCPConfig: func(_ string, _ bool) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"broken": {Type: "stdio", Command: "zero-definitely-not-a-real-binary-xyz"},
+			}}, nil
+		},
+	}
+	var out, errBuf bytes.Buffer
+	if code := runWithDeps([]string{"mcp", "check", "broken", "--json"}, &out, &errBuf, deps); code == exitSuccess {
+		t.Fatalf("mcp check --json must fail for a server that did not start; stdout=%q stderr=%q", out.String(), errBuf.String())
+	}
+	var payload struct {
+		ServerName string `json:"serverName"`
+		Status     string `json:"status"`
+		Error      string `json:"error"`
+		ToolCount  int    `json:"toolCount"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode mcp check --json output %q: %v", out.String(), err)
+	}
+	if payload.ServerName != "broken" {
+		t.Fatalf("serverName = %q, want the server that was checked", payload.ServerName)
+	}
+	if payload.Status != "unreachable" {
+		t.Fatalf("status = %q, want %q", payload.Status, "unreachable")
+	}
+	if !strings.Contains(payload.Error, "not reachable") {
+		t.Fatalf("error = %q, want it to say the server is not reachable", payload.Error)
+	}
+	// A reachable payload carries a tool count; an unreachable one must not
+	// imply zero tools were found, which reads as a server that simply exposes
+	// none.
+	if payload.ToolCount != 0 {
+		t.Fatalf("toolCount = %d, want it absent from an unreachable payload", payload.ToolCount)
 	}
 }

@@ -308,6 +308,34 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
 
+	// A connect failure does not come back as err. RegisterTools is deliberately
+	// best-effort so one unreachable server cannot stop Zero launching: it records
+	// the failure on the runtime and returns nil. That is right for startup and
+	// wrong to ignore here, because this is the command a user runs precisely when
+	// a server is misbehaving, and reporting "is reachable" for a server that never
+	// started sends them looking somewhere else.
+	for _, skipped := range mcpRuntime.Skipped() {
+		if skipped.Name != serverName {
+			continue
+		}
+		message := fmt.Sprintf("MCP server %s is not reachable", serverName)
+		if skipped.Err != nil {
+			message = fmt.Sprintf("%s: %s", message, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
+		}
+		if options.json {
+			payload := struct {
+				ServerName string `json:"serverName"`
+				Status     string `json:"status"`
+				Error      string `json:"error,omitempty"`
+			}{ServerName: serverName, Status: "unreachable", Error: message}
+			if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+				return exitCrash
+			}
+			return exitCrash
+		}
+		return writeAppError(stderr, message, exitCrash)
+	}
+
 	items := mcpToolList(registry)
 	if options.json {
 		payload := struct {
