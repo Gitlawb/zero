@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -642,10 +643,30 @@ func TestConcurrentSavesOfOnePlanDoNotCorruptIt(t *testing.T) {
 		}(i)
 	}
 	wait.Wait()
+
+	// WHAT IS ASSERTED IS NON-CORRUPTION, not that every racer wins.
+	//
+	// Publishing is os.Rename, which on Windows is MoveFileEx with
+	// REPLACE_EXISTING; concurrent replaces of one destination can come back as a
+	// sharing violation there. That is a platform property this test cannot
+	// verify from any other OS, so asserting all eight succeed would be claiming
+	// something unchecked — and would turn into an intermittent failure on the
+	// one job that cannot be reproduced locally.
+	//
+	// Elsewhere every save must succeed: nothing should be able to lose.
+	landed := 0
 	for i, err := range errs {
-		if err != nil {
+		switch {
+		case err == nil:
+			landed++
+		case runtime.GOOS == "windows":
+			t.Logf("save %d lost the rename race: %v", i, err)
+		default:
 			t.Fatalf("save %d: %v", i, err)
 		}
+	}
+	if landed == 0 {
+		t.Fatal("no concurrent save landed at all")
 	}
 
 	if _, err := FindSavedPlan(PlanPaths{UserDir: dir}, "sweep"); err != nil {
