@@ -3,8 +3,8 @@
   "sessionId": "local-de382f5f-b4c9-4728-bdda-508ea72d3047",
   "model": "claude-opus-5",
   "startedAt": "2026-08-15T08:11:59.474Z",
-  "endedAt": "2026-08-15T10:00:30.188Z",
-  "durationMs": 6510694,
+  "endedAt": "2026-08-15T10:00:36.666Z",
+  "durationMs": 6517171,
   "status": "running",
   "tokens": {
     "total": 20061,
@@ -16,18 +16,28 @@
   },
   "toolCalls": 36,
   "lines": {
-    "added": 22,
-    "removed": 1
+    "added": 547,
+    "removed": 17
   },
   "filesChanged": [
-    "internal/specialist/plan_store_test.go"
+    "internal/acp/agent.go",
+    "internal/agent/model_family_test.go",
+    "internal/agent/system_prompt.go",
+    "internal/agent/system_prompt_models.go",
+    "internal/agent/system_prompt_models_test.go",
+    "internal/agent/types.go",
+    "internal/cli/exec.go",
+    "internal/cli/exec_spec.go",
+    "internal/providercatalog/catalog.go",
+    "internal/providercatalog/model_family_test.go",
+    "internal/tui/model.go"
   ],
   "git": {
     "branch": "HEAD",
     "headBefore": "ce1c5b229bacc971f1c532882ae6820dcbf5bc12",
-    "headAfter": "732537db69f4fd9bf58d6ba7a8b48b3ecc59afad",
+    "headAfter": "f42ff721ee3d501e57c8bb56b64a047f0ea4b0a3",
     "commitShas": [
-      "732537db69f4fd9bf58d6ba7a8b48b3ecc59afad"
+      "f42ff721ee3d501e57c8bb56b64a047f0ea4b0a3"
     ]
   },
   "summary": "80/131. Let me wait for it to complete:",
