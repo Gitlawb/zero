@@ -1,0 +1,291 @@
+//go:build windows
+
+package sandbox
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+// The finding this record exists for, end to end and against real DACLs: setup
+// grants two roots, the user removes one from their policy, setup runs again,
+// and the removed root must not still name the principal.
+//
+// Both halves go through the PRODUCTION applyWindowsPrincipalACLs rather than
+// the revoke helper, because the mechanism already worked — what did not was the
+// call site's idea of which paths to revoke. It could only name the paths of the
+// plan it was about to apply, and the dropped root is by definition absent from
+// that plan, so the re-setup marker validation forces preserved the very ACE it
+// was supposed to clear.
+func TestReSetupRevokesARootTheNarrowedPolicyDropped(t *testing.T) {
+	home := t.TempDir()
+	username := "zerosbxregression"
+	root := t.TempDir()
+	kept := filepath.Join(root, "kept")
+	dropped := filepath.Join(root, "dropped")
+	for _, dir := range []string{kept, dropped} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	// Guests: a real, resolvable trustee this process is not a member of, so the
+	// ACEs below are observable without affecting the test process.
+	principal := "S-1-5-32-546"
+
+	wide := FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: kept}, {Root: dropped}},
+	}
+	if _, err := applyWindowsPrincipalACLs(home, username, principal, wide, wide.WriteRoots); err != nil {
+		t.Fatalf("first setup: %v", err)
+	}
+	if !hasACEForTrustee(t, dropped, principal) {
+		t.Fatal("precondition: the first setup should have granted the root that is about to leave the policy")
+	}
+
+	// The user narrows their policy and re-runs setup. Nothing in this call
+	// mentions the dropped root; only the record does.
+	narrow := FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: kept}},
+	}
+	if _, err := applyWindowsPrincipalACLs(home, username, principal, narrow, narrow.WriteRoots); err != nil {
+		t.Fatalf("re-setup: %v", err)
+	}
+
+	if hasACEForTrustee(t, dropped, principal) {
+		t.Error("the principal kept its grant on a root the narrowed policy removed")
+	}
+	if !hasACEForTrustee(t, kept, principal) {
+		t.Error("revoking over the recorded paths also dropped the grant the narrowed policy still wants")
+	}
+	// And the record narrows with the policy, or it would accumulate every root
+	// the workspace has ever had.
+	recorded, ok := readWindowsPrincipalACLLedger(home, username)
+	if !ok {
+		t.Fatal("no record survived the re-setup")
+	}
+	if containsPathFold(recorded, dropped) {
+		t.Errorf("the record still names %q after the policy dropped it", dropped)
+	}
+}
+
+// The record is written BEFORE any DACL changes and as the union, not after and
+// as the new set. A crash between the grant and a post-hoc write would otherwise
+// leave a record missing paths this run granted, stranding them at the next
+// policy change — the same bug, one interruption away.
+func TestPrincipalACLRecordCoversTheGrantBeforeItIsMade(t *testing.T) {
+	prevApply := applyWindowsACLPlanFn
+	t.Cleanup(func() { applyWindowsACLPlanFn = prevApply })
+
+	home := t.TempDir()
+	username := "zerosbxtwophase"
+	workspace := t.TempDir()
+	stale := filepath.Join(t.TempDir(), "left-the-policy")
+	if err := writeWindowsPrincipalACLLedger(home, username, []string{stale}); err != nil {
+		t.Fatalf("seed the record: %v", err)
+	}
+
+	var atGrant []string
+	applyWindowsACLPlanFn = func(plan WindowsACLPlan) (func() error, error) {
+		if len(plan.Entries) > 0 && plan.Entries[0].Action != windowsACLRevoke {
+			atGrant, _ = readWindowsPrincipalACLLedger(home, username)
+		}
+		return func() error { return nil }, nil
+	}
+
+	filesystem := FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: workspace}},
+	}
+	if _, err := applyWindowsPrincipalACLs(home, username, "S-1-5-32-546", filesystem, filesystem.WriteRoots); err != nil {
+		t.Fatalf("applyWindowsPrincipalACLs: %v", err)
+	}
+
+	if !containsPathFold(atGrant, stale) || !containsPathFold(atGrant, workspace) {
+		t.Errorf("record at grant time = %v, want the union of the recorded and newly granted paths", atGrant)
+	}
+	after, ok := readWindowsPrincipalACLLedger(home, username)
+	if !ok {
+		t.Fatal("no record after a successful setup")
+	}
+	if containsPathFold(after, stale) {
+		t.Errorf("record after = %v, want it narrowed to what is granted now", after)
+	}
+	if !containsPathFold(after, workspace) {
+		t.Errorf("record after = %v, want the granted workspace root", after)
+	}
+}
+
+// A principal from an earlier setup whose grants were never recorded is the one
+// case where the prior set is not empty but unenumerable, and carrying on with
+// it is the fail-open: revocation would then cover only what the new plan
+// happens to name. Retiring the account instead makes every ACE that cannot be
+// found name a SID Windows never reuses.
+func TestSetupRetiresAPrincipalWithNoRecordOfItsGrants(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		seedRecord    bool
+		identityFound bool
+		wantRetired   int
+	}{
+		"no record and a principal from an earlier setup": {identityFound: true, wantRetired: 1},
+		"no record and nothing provisioned":               {identityFound: false, wantRetired: 0},
+		"a record to reconcile against":                   {seedRecord: true, identityFound: true, wantRetired: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := stubWindowsPrincipalSetup(t)
+			username := windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+			if testCase.seedRecord {
+				if err := writeWindowsPrincipalACLLedger(config.SandboxHome, username, []string{`C:\ws\recorded`}); err != nil {
+					t.Fatalf("seed the record: %v", err)
+				}
+			}
+
+			lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+				if testCase.identityFound {
+					return windowsSandboxIdentity{Username: username, SID: guestsSID(t)}, nil
+				}
+				return windowsSandboxIdentity{}, errWindowsSandboxIdentityUnavailable
+			}
+			retired := 0
+			removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
+				retired++
+				return nil
+			}
+
+			if _, err := setupWindowsSandboxPrincipal(config); err != nil {
+				t.Fatalf("setupWindowsSandboxPrincipal: %v", err)
+			}
+			if retired != testCase.wantRetired {
+				t.Errorf("retired the principal %d times, want %d", retired, testCase.wantRetired)
+			}
+		})
+	}
+}
+
+// A failure to retire has to fail the setup. Reporting success would leave the
+// operator believing the sandbox is provisioned while a principal whose grants
+// nobody can enumerate is still holding them.
+func TestSetupFailsWhenAnUnrecordedPrincipalCannotBeRetired(t *testing.T) {
+	config := stubWindowsPrincipalSetup(t)
+	lookupWindowsSandboxIdentityFn = func(string) (windowsSandboxIdentity, error) {
+		return windowsSandboxIdentity{Username: "zerosbx", SID: guestsSID(t)}, nil
+	}
+	removeWindowsSandboxPrincipalForSetupFn = func(WindowsSandboxCommandConfig) error {
+		return errors.New("account is in use")
+	}
+	if _, err := setupWindowsSandboxPrincipal(config); err == nil {
+		t.Fatal("setup reported success after failing to retire a principal it cannot reconcile")
+	}
+}
+
+// Teardown had the same blind spot as setup: it computed the paths to revoke
+// from the CURRENT policy, so retiring a principal cleared every ACE except the
+// one on the root that had left the policy — and then deleted the account, which
+// left that ACE naming a SID nothing could resolve to clean up later.
+func TestTeardownRevokesRecordedPathsTheCurrentPolicyNoLongerNames(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dropped := filepath.Join(t.TempDir(), "left-the-policy")
+	config := WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		CommandCWD:     workspace,
+		WorkspaceRoots: []string{workspace},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: workspace}},
+			},
+		},
+	}
+	username := windowsSandboxUserName(windowsSandboxWorkspaceKey(config.WorkspaceRoots))
+	if err := writeWindowsPrincipalACLLedger(home, username, []string{dropped}); err != nil {
+		t.Fatalf("seed the record: %v", err)
+	}
+
+	paths, err := windowsPrincipalRevocationPaths(config, "S-1-5-32-546")
+	if err != nil {
+		t.Fatalf("windowsPrincipalRevocationPaths: %v", err)
+	}
+	if !containsPathFold(paths, dropped) {
+		t.Errorf("teardown would revoke %v, missing the recorded root %q the policy no longer names", paths, dropped)
+	}
+	if !containsPathFold(paths, workspace) {
+		t.Errorf("teardown would revoke %v, missing the workspace the current policy grants", paths)
+	}
+}
+
+// stubWindowsPrincipalSetup replaces every elevated call
+// setupWindowsSandboxPrincipal makes, so the decision under test is reachable on
+// a machine with nothing provisioned.
+func stubWindowsPrincipalSetup(t *testing.T) WindowsSandboxCommandConfig {
+	t.Helper()
+	home := t.TempDir()
+	workspace := t.TempDir()
+
+	prevLookup := lookupWindowsSandboxIdentityFn
+	prevRemove := removeWindowsSandboxPrincipalForSetupFn
+	prevProvision := provisionWindowsSandboxIdentityFn
+	prevGrant := grantWindowsSandboxLogonRightsFn
+	prevReset := resetWindowsSandboxUserPasswordFn
+	prevSecret := writeWindowsSandboxSecretFn
+	prevApply := applyWindowsACLPlanFn
+	prevCache := sandboxUserCacheDir
+	t.Cleanup(func() {
+		lookupWindowsSandboxIdentityFn = prevLookup
+		removeWindowsSandboxPrincipalForSetupFn = prevRemove
+		provisionWindowsSandboxIdentityFn = prevProvision
+		grantWindowsSandboxLogonRightsFn = prevGrant
+		resetWindowsSandboxUserPasswordFn = prevReset
+		writeWindowsSandboxSecretFn = prevSecret
+		applyWindowsACLPlanFn = prevApply
+		sandboxUserCacheDir = prevCache
+	})
+
+	provisionWindowsSandboxIdentityFn = func(key string) (windowsSandboxIdentity, string, bool, error) {
+		return windowsSandboxIdentity{Username: windowsSandboxUserName(key), SID: guestsSID(t)}, "pw", true, nil
+	}
+	grantWindowsSandboxLogonRightsFn = func(*windows.SID) error { return nil }
+	resetWindowsSandboxUserPasswordFn = func(string, string) error { return nil }
+	writeWindowsSandboxSecretFn = func(string, string) error { return nil }
+	applyWindowsACLPlanFn = func(WindowsACLPlan) (func() error, error) {
+		return func() error { return nil }, nil
+	}
+	cache := t.TempDir()
+	sandboxUserCacheDir = func() (string, error) { return cache, nil }
+
+	return WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		CommandCWD:     workspace,
+		WorkspaceRoots: []string{workspace},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: workspace}},
+			},
+		},
+	}
+}
+
+func guestsSID(t *testing.T) *windows.SID {
+	t.Helper()
+	sid, err := windows.StringToSid("S-1-5-32-546")
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+	return sid
+}
+
+func containsPathFold(paths []string, want string) bool {
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Clean(path), filepath.Clean(want)) {
+			return true
+		}
+	}
+	return false
+}

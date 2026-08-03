@@ -135,7 +135,7 @@ func TestApplyPrincipalACLsRevokesBeforeApplying(t *testing.T) {
 		Kind:       FileSystemRestricted,
 		WriteRoots: []WritableRoot{{Root: workspace}},
 	}
-	if _, err := applyWindowsPrincipalACLs("S-1-5-32-546", filesystem, filesystem.WriteRoots); err != nil {
+	if _, err := applyWindowsPrincipalACLs(t.TempDir(), "zero-sbx-test", "S-1-5-32-546", filesystem, filesystem.WriteRoots); err != nil {
 		t.Fatalf("applyWindowsPrincipalACLs: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestApplyPrincipalACLsRollbackRestoresTheRevokedACEs(t *testing.T) {
 		Kind:       FileSystemRestricted,
 		WriteRoots: []WritableRoot{{Root: workspace}},
 	}
-	rollback, err := applyWindowsPrincipalACLs("S-1-5-32-546", filesystem, filesystem.WriteRoots)
+	rollback, err := applyWindowsPrincipalACLs(t.TempDir(), "zero-sbx-test", "S-1-5-32-546", filesystem, filesystem.WriteRoots)
 	if err != nil {
 		t.Fatalf("applyWindowsPrincipalACLs: %v", err)
 	}
