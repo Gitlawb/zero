@@ -745,7 +745,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
+			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
 			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
