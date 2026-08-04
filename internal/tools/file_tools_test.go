@@ -38,6 +38,70 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	}
 }
 
+func TestReadFileToolReadsCanonicalLineRange(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path":   "notes.txt",
+		"offset": 2,
+		"limit":  2,
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+		t.Fatalf("canonical range returned the wrong lines: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
+		t.Fatalf("canonical range leaked outside requested slice: %q", result.Output)
+	}
+}
+
+func TestReadFileToolMixedLegacyRangesPreferLines(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path":        "notes.txt",
+		"start_line":  2,
+		"end_line":    3,
+		"max_lines":   2,
+		"byte_offset": 0,
+		"byte_limit":  readFileByteChunkMax,
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("mixed legacy range should recover, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+		t.Fatalf("mixed legacy range did not prefer lines: %q", result.Output)
+	}
+}
+
+func TestFileToolSchemasExposeOnlyCanonicalArguments(t *testing.T) {
+	readProperties := NewScopedReadFileTool(t.TempDir(), nil).Parameters().Properties
+	for _, want := range []string{"path", "offset", "limit"} {
+		if _, ok := readProperties[want]; !ok {
+			t.Fatalf("read_file schema missing %q", want)
+		}
+	}
+	for _, legacy := range []string{"start_line", "end_line", "max_lines", "byte_offset", "byte_limit"} {
+		if _, ok := readProperties[legacy]; ok {
+			t.Fatalf("read_file schema must not expose legacy argument %q", legacy)
+		}
+	}
+
+	grepProperties := NewScopedGrepTool(t.TempDir(), nil).Parameters().Properties
+	if _, ok := grepProperties["case_insensitive"]; !ok {
+		t.Fatal("grep schema missing case_insensitive")
+	}
+	if _, ok := grepProperties["-i"]; ok {
+		t.Fatal("grep schema must not expose the -i alias")
+	}
+}
+
 func TestReadFileToolMarksTruncation(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "a\nb\nc\nd\ne")
@@ -52,7 +116,7 @@ func TestReadFileToolMarksTruncation(t *testing.T) {
 	}
 	// The cut must be visible in the rendered output, not just the Truncated flag,
 	// and must tell the model where to continue.
-	if !strings.Contains(result.Output, "[truncated:") || !strings.Contains(result.Output, "start_line=3") {
+	if !strings.Contains(result.Output, "[truncated:") || !strings.Contains(result.Output, "offset=3") {
 		t.Fatalf("expected truncation marker pointing to the next line, got %q", result.Output)
 	}
 }
@@ -68,7 +132,7 @@ func TestReadFileToolAppliesByteBudget(t *testing.T) {
 	if result.Status != StatusOK || !result.Truncated {
 		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", result.Status, result.Truncated)
 	}
-	if !strings.Contains(result.Output, "output exceeded") || !strings.Contains(result.Output, "start_line") {
+	if !strings.Contains(result.Output, "output exceeded") || !strings.Contains(result.Output, "offset/limit") {
 		t.Fatalf("expected byte-budget continuation hint, got %q", result.Output[len(result.Output)-200:])
 	}
 	if result.Meta["raw_bytes"] == "" || result.Meta["emitted_bytes"] == "" {

@@ -377,5 +377,5 @@ func fileConflictMessage(relativePath string) string {
 }
 
 func fileUnseenMessage(relativePath string) string {
-	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file, or use byte_offset/byte_limit for an oversized single line, then retry the edit."
+	return "Error writing " + relativePath + ": the intended change depends on content that has not been read exactly in this session. Read the affected lines with read_file using offset/limit, then retry the edit."
 }

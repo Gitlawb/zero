@@ -39,17 +39,47 @@ func Greet(name string) string {
 	}
 }
 
-func TestMinifyGoFallsBackOnUnparsableGo(t *testing.T) {
-	// A snippet (no package clause) cannot parse as a file -> safe generic path.
+func TestMinifyGoStatementFragment(t *testing.T) {
 	r := File("snippet.go", []byte("x := 1   \n\n\n// keep me\ny := 2\n"))
-	if r.Applied {
-		t.Fatalf("expected fallback for unparsable Go, got %+v", r)
+	if !r.Applied || r.Language != "go-fragment" {
+		t.Fatalf("expected parsed Go fragment, got %+v", r)
 	}
 	if strings.Contains(r.Content, "\n\n\n") {
-		t.Errorf("generic should collapse blank runs:\n%q", r.Content)
+		t.Errorf("fragment should collapse blank runs:\n%q", r.Content)
 	}
-	if !strings.Contains(r.Content, "// keep me") {
-		t.Errorf("generic must NOT strip comments (unsafe without a parser): %q", r.Content)
+	if strings.Contains(r.Content, "keep me") || !strings.Contains(r.Content, "y := 2") {
+		t.Errorf("fragment was not compacted safely: %q", r.Content)
+	}
+}
+
+func TestMinifyGoDeclarationPrefixPreservesIncompleteTail(t *testing.T) {
+	src := `func Handle737(n int) (int, error) {
+	if n%2 == 1 {
+		return 0, errBad
+	}
+	return n + 737, nil
+}
+
+// Handle738 begins outside the requested range.
+func Handle738(n int) (int, error) {
+	if n%2 == 1 {`
+	r := File("range.go", []byte(src))
+	if !r.Applied || r.Language != "go-fragment" {
+		t.Fatalf("expected declaration-prefix compaction, got %+v", r)
+	}
+	if strings.Contains(r.Content, "Handle737 returns") || !strings.Contains(r.Content, "return n + 737") {
+		t.Fatalf("complete declaration was not compacted correctly:\n%s", r.Content)
+	}
+	if !strings.Contains(r.Content, "func Handle738") || !strings.Contains(r.Content, "if n%2 == 1 {") {
+		t.Fatalf("incomplete tail was not preserved:\n%s", r.Content)
+	}
+}
+
+func TestMinifyGoLargeInvalidInputFallsBackConservatively(t *testing.T) {
+	src := strings.Repeat("x := 1 // keep\n", 513)
+	r := File("broken.go", []byte(src))
+	if r.Applied || !strings.Contains(r.Content, "// keep") {
+		t.Fatalf("large invalid input must retain conservative fallback: %+v", r)
 	}
 }
 

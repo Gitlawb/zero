@@ -71,5 +71,6 @@ const geminiPromptAddendum = `<model_guidance>
   equivalent shell commands; they are safer and produce cleaner diffs.
 - Be concise and concrete. When you run a shell command with side effects, state
   in one short clause why it is needed.
-- Use update_plan for any multi-step task and keep it current.
+- Use update_plan only for work with at least three meaningful dependent steps;
+  skip it for simple lookups and never create one after the work is complete.
 </model_guidance>`

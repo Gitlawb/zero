@@ -45,6 +45,20 @@ func TestReadMinifiedFileRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestReadMinifiedFileSelectsSourceLineRangeBeforeMinifying(t *testing.T) {
+	dir := t.TempDir()
+	src := "package demo\n\nfunc One() int { return 1 }\n\nfunc Two() int { return 2 }\n"
+	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+		"path": "f.go", "offset": 5, "limit": 1,
+	})
+	if res.Status != StatusOK || !strings.Contains(res.Output, "func Two") || strings.Contains(res.Output, "func One") {
+		t.Fatalf("unexpected ranged compact read: status=%s\n%s", res.Status, res.Output)
+	}
+}
+
 func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "large.txt"), []byte(strings.Repeat("0123456789abcdef\n", 9000)), 0o644); err != nil {

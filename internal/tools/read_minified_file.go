@@ -28,12 +28,13 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readMinifiedFileTool{
 		baseTool: baseTool{
 			name:        "read_minified_file",
-			description: "Read a source file in a dense, token-cheap form: comments and redundant whitespace removed, no line numbers. Use it to scan or understand code for far fewer tokens than read_file. For exact text, comments, line numbers, or before editing, use read_file instead.",
-			deferred:    true,
+			description: "Read source code in a safe, token-efficient form using language-aware compaction when available. Use this first to understand code; use read_file when exact text or line numbers are required.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path": {Type: "string", Description: "Path of the file to read in minified form."},
+					"path":   {Type: "string", Description: "Path of the file to read in minified form."},
+					"offset": {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
+					"limit":  {Type: "integer", Description: "Optional maximum number of source lines to minify.", Minimum: intPtr(1)},
 				},
 				Required:             []string{"path"},
 				AdditionalProperties: false,
@@ -59,6 +60,14 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
 	}
+	offset, err := intArg(args, "offset", 1, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
+	}
+	limit, err := intArg(args, "limit", 0, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_minified_file: " + err.Error())
+	}
 
 	absolutePath, relativePath, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
@@ -75,11 +84,12 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	info, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, content, info)
 
-	result := minify.File(relativePath, content)
-	rawLines := lineCount(string(content))
+	selected := selectSourceLines(content, offset, limit)
+	result := minify.File(relativePath, selected)
+	rawLines := lineCount(string(selected))
 	minLines := lineCount(result.Content)
 	pct := 0
-	if rawBytes := len(content); rawBytes > 0 {
+	if rawBytes := len(selected); rawBytes > 0 {
 		if saved := rawBytes - len(result.Content); saved > 0 {
 			pct = saved * 100 / rawBytes
 		}
@@ -94,7 +104,7 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 			relativePath, rawLines, minLines)
 	}
 
-	rawBytes := len(content)
+	rawBytes := len(selected)
 	compactBytes := len(result.Content)
 	savedTokens := 0
 	if savedBytes := rawBytes - compactBytes; savedBytes > 0 {
@@ -113,9 +123,25 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
 	toolResult := Result{Status: StatusOK, Output: output, Meta: meta}
 	if directBudget {
-		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for normal files, or byte_offset/byte_limit for an oversized single line")
+		return applyLegacyByteBudgetToResult(toolResult, readOutputBudgetBytes, "use offset/limit to request a smaller source range, or read_file when exact text is required")
 	}
 	return toolResult
+}
+
+func selectSourceLines(content []byte, offset, limit int) []byte {
+	if offset <= 1 && limit == 0 {
+		return content
+	}
+	lines := strings.Split(string(content), "\n")
+	start := offset - 1
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := len(lines)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	return []byte(strings.Join(lines[start:end], "\n"))
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string
