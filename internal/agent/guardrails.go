@@ -55,6 +55,22 @@ const (
 	// error, so this only affects true same-error loops.
 	toolFailureStopAt = 6
 
+	// toolFailureAnyErrorStopAt halts a tool that keeps failing with DIFFERENT
+	// errors. The streak above cannot see that case by construction: a changed
+	// signature rebuilds the record at 1, so a tool whose error text varies every
+	// call never reaches toolFailureStopAt however long it loops.
+	//
+	// That is not hypothetical. A headless run made 384 denied calls over 26
+	// minutes without tripping a halt set to 6, because each denial named a
+	// different path. Keying denials on their category (see observeToolResult)
+	// fixes that case; this bound covers every error with no category to key on.
+	//
+	// Deliberately well above toolFailureStopAt. A model iterating on a genuinely
+	// tricky edit legitimately fails several times with different errors while it
+	// converges, and this must not cut those runs short — the same reasoning that
+	// moved toolFailureStopAt from 4 to 6. Both counters reset on success.
+	toolFailureAnyErrorStopAt = 12
+
 	// maxContinueNudges bounds how many times the headless completion gate
 	// (Options.RequireCompletionSignal) re-prompts a model that stopped without a
 	// tool call while work clearly remained. Once spent, the run finalizes as
@@ -327,6 +343,11 @@ type toolFailureRecord struct {
 	count     int
 	errSig    string
 	hintShown bool
+	// anyErrorCount counts consecutive failures of this tool REGARDLESS of the
+	// error, and is cleared only by a success. count above restarts whenever the
+	// signature changes, which is exactly what a varying error message defeats;
+	// this one cannot be reset by changing the text.
+	anyErrorCount int
 }
 
 type toolFailureOutcome struct {
@@ -472,24 +493,41 @@ func newGuardState() *guardState {
 // observeToolResult tracks repeated identical failures of a tool. A successful
 // result clears that tool's failure streak. Returns whether to inject a one-shot
 // corrective hint and/or stop the run.
-func (state *guardState) observeToolResult(name string, failed bool, output string) toolFailureOutcome {
+func (state *guardState) observeToolResult(name string, failed bool, output string, denial DenialCategory) toolFailureOutcome {
 	if state.toolFailures == nil {
 		state.toolFailures = map[string]*toolFailureRecord{}
 	}
 	if !failed {
-		delete(state.toolFailures, name) // success resets the streak
+		delete(state.toolFailures, name) // success resets both counters
 		return toolFailureOutcome{}
 	}
+	// A denial keys on its CATEGORY, not its prose. The message embeds the path
+	// or command that was refused, so it differs on every call while describing
+	// the same unchanging refusal — which rebuilt the record at 1 each time and
+	// let a denied tool loop indefinitely under a halt set to 6. The category is
+	// a small closed enum the loop already sets on the result.
 	sig := errorSignature(output)
+	if denial != "" {
+		sig = "denial:" + string(denial)
+	}
 	record := state.toolFailures[name]
-	if record == nil || record.errSig != sig {
-		record = &toolFailureRecord{count: 1, errSig: sig}
+	if record == nil {
+		record = &toolFailureRecord{errSig: sig}
 		state.toolFailures[name] = record
+	}
+	if record.errSig != sig {
+		// A different error restarts the same-error streak but NOT the
+		// content-blind one: changing how a tool fails is not progress.
+		record.count = 1
+		record.errSig = sig
+		record.hintShown = false
 	} else {
 		record.count++
 	}
+	record.anyErrorCount++
+
 	outcome := toolFailureOutcome{Count: record.count}
-	if record.count >= toolFailureStopAt {
+	if record.count >= toolFailureStopAt || record.anyErrorCount >= toolFailureAnyErrorStopAt {
 		outcome.Stop = true
 		return outcome
 	}
