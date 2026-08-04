@@ -59,6 +59,22 @@ func TestReadFileToolReadsCanonicalLineRange(t *testing.T) {
 	}
 }
 
+func TestReadFileToolCanonicalOffsetPastEnd(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "notes.txt", "offset": 10,
+	})
+
+	if result.Status != StatusOK || !strings.Contains(result.Output, "offset 10 is past the end") {
+		t.Fatalf("expected canonical out-of-range message, got status=%s output=%q", result.Status, result.Output)
+	}
+	if strings.Contains(result.Output, "start_line") {
+		t.Fatalf("out-of-range message exposed legacy argument: %q", result.Output)
+	}
+}
+
 func TestReadFileToolMixedLegacyRangesPreferLines(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")

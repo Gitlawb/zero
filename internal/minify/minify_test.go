@@ -52,6 +52,17 @@ func TestMinifyGoStatementFragment(t *testing.T) {
 	}
 }
 
+func TestMinifyGoFragmentAccepts512LinesWithFinalNewline(t *testing.T) {
+	src := strings.Repeat("x++\n", 512)
+	r := File("snippet.go", []byte(src))
+	if !r.Applied || r.Language != "go-fragment" {
+		t.Fatalf("expected 512-line fragment to remain eligible, got %+v", r)
+	}
+	if got := strings.Count(r.Content, "x++"); got != 512 {
+		t.Fatalf("compacted statement count = %d, want 512", got)
+	}
+}
+
 func TestMinifyGoDeclarationPrefixPreservesIncompleteTail(t *testing.T) {
 	src := `func Handle737(n int) (int, error) {
 	if n%2 == 1 {

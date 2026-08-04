@@ -85,7 +85,11 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	options.FileTracker.Record(absolutePath, content, info)
 
 	selected := selectSourceLines(content, offset, limit)
+	ranged := offset > 1 || limit > 0
 	result := minify.File(relativePath, selected)
+	if ranged {
+		result = minify.Fragment(relativePath, selected)
+	}
 	rawLines := lineCount(string(selected))
 	minLines := lineCount(result.Content)
 	pct := 0
@@ -99,6 +103,9 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	if result.Applied {
 		header = fmt.Sprintf("File: %s — minified %s view (comments stripped, no line numbers; %d→%d lines, ~%d%% fewer bytes). For exact text/comments or before editing, use read_file.",
 			relativePath, result.Language, rawLines, minLines, pct)
+	} else if ranged {
+		header = fmt.Sprintf("File: %s — safe ranged view (whitespace normalized, no line numbers; %d→%d lines; context-sensitive stripping disabled because the range may begin inside a multiline construct). For exact text, use read_file.",
+			relativePath, rawLines, minLines)
 	} else {
 		header = fmt.Sprintf("File: %s — whitespace-normalized view (no line numbers; %d→%d lines; full minification not available for this file type). For exact text, use read_file.",
 			relativePath, rawLines, minLines)

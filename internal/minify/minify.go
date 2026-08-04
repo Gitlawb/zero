@@ -50,6 +50,22 @@ func File(path string, content []byte) Result {
 	return Result{Content: minifyGeneric(content), Language: "text", Applied: false}
 }
 
+// Fragment minifies a bounded source range without assuming lexical state from
+// text outside the range. Go remains parser-validated; other languages use the
+// conservative whitespace-only transform because a range may begin inside a
+// multiline string or block comment.
+func Fragment(path string, content []byte) Result {
+	if strings.EqualFold(filepath.Ext(path), ".go") {
+		if out, ok := minifyGo(content); ok {
+			return Result{Content: out, Language: "go", Applied: true}
+		}
+		if out, ok := minifyGoFragment(content); ok {
+			return Result{Content: out, Language: "go-fragment", Applied: true}
+		}
+	}
+	return Result{Content: minifyGeneric(content), Language: "text", Applied: false}
+}
+
 // minifyGoFragment handles bounded reads that do not contain a package clause.
 // It finds the longest complete declaration or statement prefix that the real
 // Go parser accepts, prints that prefix without comments, and preserves any
@@ -57,6 +73,9 @@ func File(path string, content []byte) Result {
 // parsing a large broken file would otherwise turn a cheap read into O(n²) work.
 func minifyGoFragment(content []byte) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 	if len(lines) > 512 {
 		return "", false
 	}

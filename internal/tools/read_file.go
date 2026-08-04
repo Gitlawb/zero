@@ -185,7 +185,7 @@ func renderedReadRange(total, start, end, maxLines int) (int, int) {
 
 func renderReadFileRange(absolutePath string, relativePath string, total int, startLine int, endLine int, maxLines int, maxBytes int) Result {
 	if startLine > total {
-		return okResult(fmt.Sprintf("File: %s\n(start_line %d is past the end of the file, which has %d lines)", relativePath, startLine, total))
+		return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, startLine, total))
 	}
 	if endLine == 0 || endLine > total {
 		endLine = total

@@ -59,6 +59,54 @@ func TestReadMinifiedFileSelectsSourceLineRangeBeforeMinifying(t *testing.T) {
 	}
 }
 
+func TestReadMinifiedFileRangesPreserveUnknownLexicalContext(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		src  string
+		want []string
+	}{
+		{
+			name: "multiline string",
+			path: "snippet.py",
+			src:  "value = \"\"\"\n# literal text\nstill literal\n\"\"\"\nprint(value)\n",
+			want: []string{"# literal text", "still literal"},
+		},
+		{
+			name: "template literal",
+			path: "snippet.js",
+			src:  "const value = `\n// literal text\nstill literal\n`;\n",
+			want: []string{"// literal text", "still literal"},
+		},
+		{
+			name: "block comment",
+			path: "snippet.c",
+			src:  "/* open\ncomment body\n*/\nint live;\n",
+			want: []string{"comment body", "*/"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, tc.path), []byte(tc.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+				"path": tc.path, "offset": 2, "limit": 2,
+			})
+			if res.Status != StatusOK || res.Meta["compacted"] != "false" {
+				t.Fatalf("ranged read must use conservative normalization: status=%s meta=%#v\n%s", res.Status, res.Meta, res.Output)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(res.Output, want) {
+					t.Fatalf("ranged read lost lexical content %q:\n%s", want, res.Output)
+				}
+			}
+		})
+	}
+}
+
 func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "large.txt"), []byte(strings.Repeat("0123456789abcdef\n", 9000)), 0o644); err != nil {
