@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/providers"
@@ -150,6 +151,12 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 	var serves, refuses, unreachable int
 	for _, model := range models {
 		line := strings.TrimSpace(model.ID)
+		// The size where the id names one, so the directory reads as light/medium/
+		// heavy at a glance — the classification routing uses, made visible. Absent
+		// for a cloud id that carries none.
+		if label := specialist.ModelSizeLabel(model.ID); label != "" {
+			line += " [" + label + "]"
+		}
 		if verdict, ok := verdicts[model.ID]; ok {
 			// The VERDICT LEADS, because it is the reason to run this at all: a
 			// reader scanning for what is wrong should not have to reach the end
@@ -369,5 +376,40 @@ func planModelPreferences(cfg config.PlanModelsConfig) specialist.ModelPreferenc
 		Router:         cfg.Router,
 		RouterGuidance: cfg.RouterGuidance,
 		AutoAssign:     cfg.AutoAssign,
+		MinSize:        cfg.MinSize,
+	}
+}
+
+// planContextWindows reports the context window of the model a plan task will
+// run on, 0 when unknown.
+//
+// FROM THE CATALOGUE, NOT FROM DISCOVERY. The window is static metadata about a
+// model, so asking the provider for it over the network per task would pay a
+// round trip for an answer that cannot change — and most of this catalogue's
+// gateways do not report a window at all, in which case 0 is the honest answer
+// and the plan keeps its fixed briefing caps.
+//
+// AN EMPTY MODEL ID MEANS "the model this run is using". A plan task that names
+// no model inherits the parent's, and only this side of the seam knows what that
+// is — internal/specialist deliberately does not.
+func planContextWindows(profile config.ProviderProfile, sessionModel string) specialist.ContextWindowFunc {
+	var once sync.Once
+	windows := map[string]int{}
+	return func(modelID string) int {
+		once.Do(func() {
+			descriptor, err := providercatalog.Require(profile.CatalogID)
+			if err != nil {
+				return
+			}
+			for _, model := range providermodelcatalog.Models(descriptor) {
+				if model.ContextWindow > 0 {
+					windows[model.ID] = model.ContextWindow
+				}
+			}
+		})
+		if strings.TrimSpace(modelID) == "" {
+			modelID = sessionModel
+		}
+		return windows[strings.TrimSpace(modelID)]
 	}
 }

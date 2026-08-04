@@ -9,6 +9,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/Gitlawb/zero/internal/config"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,35 @@ func (t *specialistTracker) complete(childSessionID string, status specialistSta
 // setTokens records a child's token spend against its card. Plan tasks know
 // theirs (TaskResult.Tokens); the Task tool does not bridge usage yet, so its
 // cards stay at zero and the display omits the segment rather than showing one.
+// addTokens ADDS to a child's running total, for live per-turn usage events.
+// Unknown children are ignored, like every other setter here.
+func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].tokenCount += tokens
+			return
+		}
+	}
+}
+
+// setToolCount sets a child's tool-call count to an absolute value, for a
+// background child whose count arrives whole from a TaskOutput poll rather than
+// one increment at a time. Never lowers it: a late poll must not undo a higher
+// live count. Unknown children ignored.
+func (t *specialistTracker) setToolCount(childSessionID string, count int) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			if count > t.specialists[index].toolCount {
+				t.specialists[index].toolCount = count
+			}
+			return
+		}
+	}
+}
+
 func (t *specialistTracker) setTokens(childSessionID string, tokens int) {
 	if tokens <= 0 {
 		return
@@ -311,12 +341,22 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 
 	// Elapsed: live while running, frozen at completion once the specialist is
 	// done.
+	// A ZERO START MEANS UNKNOWN, NOT THE YEAR 1.
+	//
+	// Subtracting the zero time overflows int64 nanoseconds, and Go clamps to
+	// its largest Duration — which rendered as "153722867m16s" on every card in
+	// a resumed session, because the restore path rebuilt rows without a
+	// timestamp. sidebar.go has always guarded this; the card did not, so the
+	// same data read correctly in one panel and absurdly in the other.
 	var elapsed time.Duration
-	if info.status == specialistRunning {
+	switch {
+	case info.startedAt.IsZero():
+		elapsed = 0
+	case info.status == specialistRunning:
 		elapsed = m.now().Sub(info.startedAt)
-	} else if !info.completedAt.IsZero() {
+	case !info.completedAt.IsZero():
 		elapsed = info.completedAt.Sub(info.startedAt)
-	} else {
+	default:
 		elapsed = m.now().Sub(info.startedAt)
 	}
 	elapsedStr := formatSpecialistElapsed(elapsed)
@@ -549,4 +589,14 @@ func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) s
 	// rune and losing the indent.
 	tailStart := 2 + len(spinnerView)
 	return zeroTheme.accent.Render(spinnerView) + zeroTheme.muted.Render(summary[tailStart:])
+}
+
+// persistKeepFinishedAgents writes the finished-agents preference to user
+// config, mirroring persistRecapsEnabled: a UI toggle that survives restart.
+func (m model) persistKeepFinishedAgents() error {
+	if strings.TrimSpace(m.userConfigPath) == "" {
+		return nil
+	}
+	_, err := config.SetKeepFinishedAgents(m.userConfigPath, m.showDoneAgents)
+	return err
 }

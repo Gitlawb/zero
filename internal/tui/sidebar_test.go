@@ -336,11 +336,13 @@ func TestSidebarShowsSpawnedAgents(t *testing.T) {
 
 	width := sidebarWidth(m.width)
 	plain := stripSidebar(m.sidebarAgentLines(width))
-	if !strings.Contains(plain, "explorer") {
-		t.Fatalf("running subagent name missing:\n%s", plain)
+	// The row shows the assigned JOB (condensed description), not the specialist
+	// type — see specialistJobName. "map the codebase" -> "map codebase".
+	if !strings.Contains(plain, "map codebase") {
+		t.Fatalf("running subagent job name missing:\n%s", plain)
 	}
-	if !strings.Contains(plain, "reviewer") {
-		t.Fatalf("completed subagent name missing:\n%s", plain)
+	if !strings.Contains(plain, "review diff") {
+		t.Fatalf("completed subagent job name missing:\n%s", plain)
 	}
 	// The running subagent surfaces its live working detail (current tool).
 	if !strings.Contains(plain, "grep") {
@@ -570,10 +572,12 @@ func TestSidebarHidesNotFoundSpecialistMisroutes(t *testing.T) {
 		t.Fatalf("not-found misroute should be filtered; want only worker, got %+v", got)
 	}
 	plain := stripSidebar(m.sidebarAgentLines(sidebarWidth(m.width)))
-	if strings.Contains(plain, "swarm_send") {
+	if strings.Contains(plain, "coordinate") {
 		t.Fatalf("bogus swarm_send specialist should not appear:\n%s", plain)
 	}
-	if !strings.Contains(plain, "worker") {
+	// The row shows the job ("build frontend"), not the specialist type; the
+	// data-level name assertion above still pins the filtering.
+	if !strings.Contains(plain, "build frontend") {
 		t.Fatalf("real worker specialist should still appear:\n%s", plain)
 	}
 }
@@ -986,7 +990,10 @@ func TestTheDoneToggleRevealsFinishedAgents(t *testing.T) {
 		t.Fatalf("the click must open the finished list: handled=%v shown=%v", handled, opened.showDoneAgents)
 	}
 	shown := plainRender(t, strings.Join(opened.sidebarAgentLines(width), "\n"))
-	for _, want := range []string{"a-reltime", "a-fsutil", "d-report"} {
+	// The two finished agents have sentence descriptions ("You are auditing
+	// package X"), so they fall back to their names; the running one has a label
+	// description ("producing the report") and shows the job.
+	for _, want := range []string{"a-reltime", "a-fsutil", "producing report"} {
 		if !strings.Contains(shown, want) {
 			t.Errorf("expected %q in the opened list:\n%s", want, shown)
 		}

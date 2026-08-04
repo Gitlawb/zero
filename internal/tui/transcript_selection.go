@@ -1358,6 +1358,12 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		if hit, ok := m.sidebarLineAtMouse(msg); ok {
 			if hit.toggleDone {
 				m.showDoneAgents = !m.showDoneAgents
+				// PERSISTED, so a click becomes the standing preference — the same
+				// way /recaps persists. A user who wants finished agents to stay
+				// clicks once and they stay every session, not just this one.
+				if err := m.persistKeepFinishedAgents(); err != nil {
+					m = m.appendPlansNotice(planControlNotice("warning", "Could not save the finished-agents preference: "+err.Error()))
+				}
 				return m, nil, true
 			}
 			if hit.expands {

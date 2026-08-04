@@ -188,16 +188,8 @@ func renderSelectableList(options selectableListOptions) string {
 	return strings.Join(lines, "\n")
 }
 
-// addTokens adds tokens to the running total for the specialist with
-// childSessionID. Unknown specialists are ignored.
-func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
-	for index := range t.specialists {
-		if t.specialists[index].childSessionID == childSessionID {
-			t.specialists[index].tokenCount += tokens
-			return
-		}
-	}
-}
+// addTokens now lives in specialist_card.go — it moved from here (test-only,
+// so production never called it) to the OnToolProgress usage bridge.
 
 // hasRunning reports whether any tracked specialist is still running.
 func (t *specialistTracker) hasRunning() bool {

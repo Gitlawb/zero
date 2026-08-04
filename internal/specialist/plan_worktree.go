@@ -99,5 +99,26 @@ func resolvePlanWorkspace(ctx context.Context, plan Plan, isolate PlanIsolator) 
 	if workspace.Release == nil {
 		workspace.Release = func() {}
 	}
+	// AND THE WORKTREE MUST BE ABLE TO SERVE THE PLAN. The two refusals above
+	// cover isolation being unavailable or dishonest; this covers it being
+	// available, honest, and useless — a worktree of the wrong tree, which a
+	// six-task plan discovered one failed task at a time. See
+	// unreachablePlanPaths for the evidence bar this holds itself to.
+	//
+	// RELEASED BEFORE RETURNING. A refusal that left the worktree on disk would
+	// leak one directory per attempt, and the caller has no handle to clean up
+	// something it was never given.
+	if unreachable := unreachablePlanPaths(plan, workspace); len(unreachable) > 0 {
+		workspace.Release()
+		return PlanWorkspace{}, refuseUnreachableWorkspace(plan, workspace, unreachable)
+	}
+	// THE SAME FAILURE NAMED RELATIVELY. The check above sees only absolute
+	// paths, and a measured run that named its targets as "internal/specialist/"
+	// carried none — so six tasks searched an empty worktree and the guard said
+	// nothing. See planNamesNothingPresent for the conjunction this holds to.
+	if named, bare := planNamesNothingPresent(plan, workspace); bare {
+		workspace.Release()
+		return PlanWorkspace{}, refuseBareWorkspace(plan, workspace, named)
+	}
 	return workspace, nil
 }

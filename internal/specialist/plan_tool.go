@@ -86,6 +86,17 @@ type OrchestrateTool struct {
 	// asks for one. Default false: enabling it silently would start refusing
 	// plans for everyone whose phrasing does not match. See plan_keyword.go.
 	RequirePlanKeyword bool
+	// ContextWindows reports the window of the model a task will run on, so its
+	// dependency briefing can be sized to what it can actually read. nil keeps
+	// the fixed caps, which is the behaviour every plan had before it existed —
+	// and the honest default for a provider that reports no window.
+	ContextWindows ContextWindowFunc
+	// ExtraReadRoots reports the paths the parent may read BEYOND its workspace —
+	// its request_permissions grants — at DISPATCH time, so a grant that landed
+	// mid-turn reaches the tasks dispatched after it. Every task gets read access
+	// to these, so a plan can audit a granted external path. nil hands tasks
+	// nothing beyond their workspace, the behaviour before this existed.
+	ExtraReadRoots func() []string
 	// Plans locates saved plans. Both directories empty means saved plans are
 	// simply unavailable — the tool refuses a `saved` reference with a reason
 	// rather than searching nothing and reporting "not found", which would read
@@ -272,6 +283,16 @@ func (tool *OrchestrateTool) Parameters() tools.Schema {
 					"Substituted into task prompts and the plan description only: never into tools, ids, depends_on, model or budget, " +
 					"which are authority and graph and stay as they were saved. " +
 					"A placeholder with no value is refused, and so is a value matching no placeholder.",
+			},
+			"template": {
+				Type: "string",
+				Description: "Build the plan from a named SHAPE instead of writing tasks by hand: " +
+					"audit (examine one subject from several independent angles, then verify the findings), " +
+					"compare (describe two things separately, then contrast them), " +
+					"sweep (ask one question of several targets, then combine the answers — it emits one task per target plus a synthesis, so keep the target list inside this run's plan-size tier). " +
+					"Supply its values in params. Mutually exclusive with tasks and saved. " +
+					"Prefer this when the shape fits: the graph, the ids, the dependencies and the budget all come out valid, " +
+					"so the call is not refused and retried.",
 			},
 			"saved": {
 				Type: "string",
@@ -626,7 +647,16 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	// ParsePlan sees it, a stored plan and a model-supplied one are
 	// indistinguishable, so the tier, the depth check, the read-only rule and
 	// the parent-grant intersection all apply to it unchanged.
-	args, err := tool.resolveSavedPlan(args)
+	// A TEMPLATE IS RESOLVED FIRST, and its output then travels the ordinary
+	// path: ParsePlan validates it, the grant is intersected, the budget is
+	// checked. It is a way to WRITE the arguments, never a second admission
+	// route — which is the rule every part of this feature follows, because its
+	// whole defect history is second call paths carrying less than the first.
+	args, err := resolveTemplatePlan(args)
+	if err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	args, err = tool.resolveSavedPlan(args)
 	if err != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
 	}
@@ -655,7 +685,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	if _, err := ParsePlan(args, tool.limits(options)); err != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
 	}
-	assignNotes, autoErr := tool.autoAssignModels(ctx, args, options)
+	assignNotes, routerTokens, autoErr := tool.autoAssignModelsCosting(ctx, args, options)
 	if autoErr != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + autoErr.Error()}
 	}
@@ -720,7 +750,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 		launched := tool.Launch(func(backgroundCtx context.Context) {
 			defer workspace.Release()
 			recordPlanAdmitted(recorder, plan)
-			report := ExecutePlanIn(backgroundCtx, plan, workspace, parentTools, run, recorder)
+			report := ExecutePlanIn(backgroundCtx, plan, workspace, parentTools, run, recorder, tool.execOptionsFor(plan, routerTokens)...)
 			recordPlanCompleted(recorder, plan, report)
 		})
 		if !launched {
@@ -764,7 +794,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	if budgetWarning != "" {
 		planPreflight(tool.Recorder, "budget may be too low: "+budgetWarning)
 	}
-	report := ExecutePlanIn(ctx, plan, workspace, tool.ParentTools, tool.runnerForCall(options), tool.Recorder)
+	report := ExecutePlanIn(ctx, plan, workspace, tool.ParentTools, tool.runnerForCall(options), tool.Recorder, tool.execOptionsFor(plan, routerTokens)...)
 	recordPlanCompleted(tool.Recorder, plan, report)
 
 	result := tools.Result{
@@ -796,7 +826,25 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 // running without it is the thing the user asked not to happen. A provider that
 // answers but offers nothing usable is NOT an error: every task simply inherits,
 // which is exactly the behaviour before this existed.
+// autoAssignModels assigns per-task models and reports what it did.
+//
+// Kept at two returns for the seven call sites that only care about the notes.
+// The production path needs a third thing — what routing COST — and gets it from
+// autoAssignModelsCosting below; editing seven tests to thread a value they do
+// not assert on would be seven tests changed to keep compiling.
 func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[string]any, options tools.RunOptions) ([]string, error) {
+	notes, _, err := tool.autoAssignModelsCosting(ctx, args, options)
+	return notes, err
+}
+
+// autoAssignModelsCosting is autoAssignModels, also reporting the tokens the
+// routing call spent — which no task performed and which therefore reached
+// neither the plan's budget nor its reported total.
+func (tool *OrchestrateTool) autoAssignModelsCosting(ctx context.Context, args map[string]any, options tools.RunOptions) ([]string, int, error) {
+	// DECLARED UP HERE so every early return can report it. Each of those
+	// returns precedes the routing call, so they honestly report 0: nothing was
+	// spent because nothing was routed.
+	var routerTokens int
 	// THE ARGUMENT WINS IN BOTH DIRECTIONS. A plan that supplies auto_assign is
 	// believed — true or false — and only a plan that says nothing falls back to
 	// what the user configured. Without the presence check a configured default
@@ -807,7 +855,7 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 		requested = tool.ModelPrefs.AutoAssign
 	}
 	if !requested {
-		return nil, nil
+		return nil, routerTokens, nil
 	}
 	// ASKED FOR vs CONFIGURED, and they must fail differently.
 	//
@@ -820,9 +868,9 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	// exactly as it did before the setting existed.
 	if tool.DiscoverModels == nil {
 		if !supplied {
-			return []string{"none — this run cannot list the provider's models, so every task kept this session's model"}, nil
+			return []string{"none — this run cannot list the provider's models, so every task kept this session's model"}, routerTokens, nil
 		}
-		return nil, fmt.Errorf(
+		return nil, routerTokens, fmt.Errorf(
 			"auto_assign is not available in this run — it needs a provider that can list its models. " +
 				"Name a model per task instead, or omit auto_assign to inherit this session's model")
 	}
@@ -830,7 +878,7 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	if !ok {
 		// A saved plan or a malformed one: leave it entirely to ParsePlan, which
 		// owns every message about task shape.
-		return nil, nil
+		return nil, routerTokens, nil
 	}
 	// SAY WHAT IS HAPPENING. Everything from here to admission is invisible
 	// otherwise, and it is the slowest part of a plan's start.
@@ -840,9 +888,9 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	if err != nil {
 		if !supplied {
 			return []string{"none — could not list the provider's models (" + err.Error() +
-				"), so every task kept this session's model"}, nil
+				"), so every task kept this session's model"}, routerTokens, nil
 		}
-		return nil, fmt.Errorf("auto_assign could not list the provider's models: %w", err)
+		return nil, routerTokens, fmt.Errorf("auto_assign could not list the provider's models: %w", err)
 	}
 	// PROVED BEFORE ANYTHING IS BUILT FROM IT. Tiers, the served set and the
 	// router's candidate list are all derived from this slice, so a model that
@@ -882,11 +930,11 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 				"so that list belongs to a different provider and was ignored "+
 				"(every task kept this session's model)", parent, len(models))
 		if !supplied {
-			return []string{mismatch}, nil
+			return []string{mismatch}, routerTokens, nil
 		}
 		// Asked for explicitly: the same evidence, raised rather than reported,
 		// because a plan that demanded auto-assignment must not quietly not get it.
-		return nil, fmt.Errorf("auto_assign refused: %s", mismatch)
+		return nil, routerTokens, fmt.Errorf("auto_assign refused: %s", mismatch)
 	}
 
 	// THE ROUTER READS THE TASKS; the classifier only reads their verbs. It runs
@@ -900,8 +948,12 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 	if strings.TrimSpace(router) != "" && len(routableTasks(raw)) >= routerMinimumTasks {
 		planPreflight(tool.Recorder, "asking "+router+" which model each task needs…")
 	}
-	routed, routerTokens, routeErr := routeTaskModels(ctx, tool.runnerForCall(options), PlanTaskRequest{Tools: routerGrant},
+	routed, routerSpent, routeErr := routeTaskModels(ctx, tool.runnerForCall(options), PlanTaskRequest{Tools: routerGrant},
 		router, routableTasks(raw), eligibleForRouting(models, tool.ModelPrefs), tool.ModelPrefs.RouterGuidance)
+	// THE HOISTED COUNTER, so the number the plan is CHARGED is the same one the
+	// headline PRINTS. Two spellings of one quantity is how a report and a budget
+	// drift apart — and this one already drifted once, silently, every run.
+	routerTokens = routerSpent
 
 	tasks, notes := assignModelsToTaskArgs(raw, tiers, tool.ModelPrefs, served, routed)
 	// SAID, NOT SILENT. A model disappearing from routing with no explanation is
@@ -948,7 +1000,7 @@ func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[stri
 					"(every task kept this session's model)", len(models)))
 		}
 	}
-	return notes, nil
+	return notes, routerTokens, nil
 }
 
 // planBudgetWarning surfaces a budget that looks an order of magnitude low.
@@ -1001,4 +1053,80 @@ func autoAssignSummary(notes []string) string {
 		return ""
 	}
 	return "\n\nModels assigned automatically:\n  " + strings.Join(notes, "\n  ")
+}
+
+// resolveTemplatePlan swaps a `template` reference for the arguments it builds.
+//
+// REFUSED ALONGSIDE tasks OR saved, rather than merged. A template plus
+// hand-written tasks is neither the template nor the tasks, and picking one
+// silently would run something the caller did not describe — the same reasoning
+// that makes resolveSavedPlan refuse a half-overridden saved plan.
+func resolveTemplatePlan(args map[string]any) (map[string]any, error) {
+	name := planString(args, "template")
+	if name == "" {
+		return args, nil
+	}
+	for _, field := range []string{"tasks", "saved"} {
+		if _, present := args[field]; present {
+			return nil, fmt.Errorf(
+				"a template builds the plan for you: remove %q, or drop `template` and supply the plan yourself", field)
+		}
+	}
+	params, err := planParamsFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	built, err := BuildTemplatePlan(name, params)
+	if err != nil {
+		return nil, err
+	}
+	// EXECUTION DIRECTIVES SURVIVE, plan content does not — the same two the
+	// saved-plan path carries across, for the same reason: they say HOW to run
+	// it, not WHAT to run, and dropping them silently ran a background plan in
+	// the foreground once already.
+	for _, directive := range []string{"background", "auto_assign"} {
+		if value, present := args[directive]; present {
+			built[directive] = value
+		}
+	}
+	return built, nil
+}
+
+// execOptionsFor builds the execution options for one plan.
+//
+// ONE BUILDER FOR BOTH CALL SITES. A plan runs in the foreground or the
+// background from two different places, and an option wired to one of them makes
+// a feature that works or not depending on which the caller happened to pick —
+// the shape TestBothExecutionPathsChargeRouterSpend already pins for spend.
+func (tool *OrchestrateTool) execOptionsFor(plan Plan, routerTokens int) []ExecOption {
+	options := []ExecOption{WithPreSpentTokens(routerTokens)}
+	if tool.ContextWindows != nil {
+		options = append(options, WithContextWindows(tool.ContextWindows))
+	}
+	// Called HERE, at dispatch — not captured at construction — so a
+	// request_permissions grant that landed earlier this turn is included. Empty
+	// is fine: WithReadRoots adds nothing, and the tasks keep their workspace-only
+	// reads.
+	if tool.ExtraReadRoots != nil {
+		if roots := tool.ExtraReadRoots(); len(roots) > 0 {
+			options = append(options, WithReadRoots(roots))
+		}
+	}
+	// ONLY WHEN A BRIEFING CAN EXIST. The scratchpad's whole job is to make a
+	// TRUNCATED dependency briefing reachable, and a plan whose tasks depend on
+	// nothing never writes one — so a directory would be created, populated and
+	// deleted for no reader.
+	if planHasDependencies(plan) {
+		options = append(options, WithScratchpad())
+	}
+	return options
+}
+
+func planHasDependencies(plan Plan) bool {
+	for _, task := range plan.Tasks() {
+		if len(task.DependsOn) > 0 {
+			return true
+		}
+	}
+	return false
 }

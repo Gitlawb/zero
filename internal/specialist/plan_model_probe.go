@@ -133,6 +133,28 @@ func ClassifyProbeError(err error) ModelProbeResult {
 		"no such model",
 		"unsupported model",
 		"not supported for this",
+		// BILLED SEPARATELY AND UNAFFORDABLE IS ALSO A REFUSAL. Ollama lists
+		// models that its plan does not cover and answers a request for one with
+		// "this model uses extra usage only (not included plan usage) and your
+		// extra usage balance is empty". The model exists, discovery reports it,
+		// and it ranks HIGHEST because ranking is by price — so auto-assign picks
+		// it and every task assigned to it dies in seconds having done nothing.
+		//
+		// Measured on one account: kimi-k3 was picked on four separate days
+		// across eight plan tasks, each dying in ~7 seconds with 0 tokens and 0
+		// tool calls, and each costing the plan a dispatch and a retry cycle.
+		//
+		// "EXTRA USAGE ONLY", not bare "extra usage": the same words appear in
+		// "add extra usage" inside this very message and would appear in any
+		// balance notice that is not a refusal — and this function's rule is that
+		// being wrong here silently removes a model the user paid for.
+		//
+		// SELF-CORRECTING. This is "you cannot afford it right now", not "it does
+		// not exist", and the probe cache lives only for the process — so adding
+		// balance makes the next session probe again and keep the model.
+		"extra usage only",
+		"not included plan usage",
+		"usage balance is empty",
 	} {
 		if strings.Contains(lower, marker) {
 			return ModelProbeResult{Verdict: ProbeRefuses, Reason: strings.TrimSpace(message)}

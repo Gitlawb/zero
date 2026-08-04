@@ -130,6 +130,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.addDirs = append(options.addDirs, value)
+		case arg == "--add-read-dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.readDirs = append(options.readDirs, value)
+			index = next
+		case strings.HasPrefix(arg, "--add-read-dir="):
+			value, err := requiredInlineFlagValue(arg, "--add-read-dir")
+			if err != nil {
+				return options, false, err
+			}
+			options.readDirs = append(options.readDirs, value)
 		case arg == "--mode":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {

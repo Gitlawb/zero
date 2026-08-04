@@ -68,9 +68,11 @@ func routerModel(prefs ModelPreferences, tiers modelTiers, served map[string]boo
 
 // routerPrompt asks for a model per task and nothing else.
 //
-// The candidate list carries PRICE ORDER rather than prices: what matters is
-// which model is cheaper than which, and a router given raw numbers starts
-// optimising cost against a budget it cannot see.
+// The candidate list carries CAPABILITY ORDER (least to most capable) rather than
+// prices: what matters is which model is stronger than which, and a router given
+// raw prices starts optimising cost against a budget it cannot see. Size is shown
+// where the id names it — "20B" vs "120B" is a capability signal the router
+// should weigh, not a budget one — but prices are still withheld for that reason.
 func routerPrompt(tasks []routableTask, candidates []DiscoveredModel, guidance string) string {
 	var b strings.Builder
 	b.WriteString("You are choosing which model should run each task of a plan. ")
@@ -107,11 +109,17 @@ func routerPrompt(tasks []routableTask, candidates []DiscoveredModel, guidance s
 		b.WriteString("  " + advice + "\n\n")
 	}
 
-	b.WriteString("Available models, cheapest first:\n")
+	b.WriteString("Available models, least to most capable:\n")
 	for index, model := range candidates {
 		fmt.Fprintf(&b, "  %d. %s", index+1, model.ID)
 		if desc := strings.TrimSpace(model.Description); desc != "" {
 			fmt.Fprintf(&b, " — %s", desc)
+		}
+		// The size when the id names one: a router can read "20B" vs "120B" and
+		// match the light model to a scan, the heavy one to a judgement. Absent
+		// for a cloud id that carries no size — never invented.
+		if label := ModelSizeLabel(model.ID); label != "" {
+			fmt.Fprintf(&b, " [%s]", label)
 		}
 		if model.Reasoning {
 			b.WriteString(" [reasoning]")

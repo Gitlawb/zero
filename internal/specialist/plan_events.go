@@ -1,6 +1,10 @@
 package specialist
 
-import "github.com/Gitlawb/zero/internal/sessions"
+import (
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/sessions"
+)
 
 // The plan lifecycle's session-event payloads, built in ONE place.
 //
@@ -46,7 +50,7 @@ func TaskDispatchedEvent(task Task) (sessions.EventType, map[string]any) {
 // so it stays drillable, and its spend so the per-task records add up to the
 // plan's total.
 func TaskCompletedEvent(result TaskResult) (sessions.EventType, map[string]any) {
-	return sessions.EventTaskCompleted, map[string]any{
+	payload := map[string]any{
 		"id":          result.ID,
 		"duration_ms": result.Duration.Milliseconds(),
 		"session_id":  result.SessionID,
@@ -56,6 +60,41 @@ func TaskCompletedEvent(result TaskResult) (sessions.EventType, map[string]any) 
 		// totals look like one very expensive attempt.
 		"attempts": result.Attempts,
 	}
+	// A BOUNDED OUTPUT, so a RESUMED dependent can be briefed on what this task
+	// found even in a NEW process.
+	//
+	// The whole output is deliberately NOT stored — a large plan's on-disk size
+	// would multiply, and the live transcript already carries it. But at resume
+	// the transcript's in-memory results are gone, the scratchpad has been
+	// released, and RemainingPlan strips the completed dependency entirely — so
+	// a dependent that resumes loses the finding it was supposed to build on.
+	// Storing the HEAD of the output, capped at the same per-task briefing
+	// budget a dependent would ever see, closes that with a bounded cost.
+	if brief := boundedResumeOutput(result.Output); brief != "" {
+		payload["output"] = brief
+	}
+	// The task's fingerprint, so a resume can tell this completed task apart from
+	// an edited one with the same id. Absent on pre-identity events, which resume
+	// treats as "unknown identity" — matched by id alone, exactly as before.
+	if result.Identity != "" {
+		payload["identity"] = result.Identity
+	}
+	return sessions.EventTaskCompleted, payload
+}
+
+// resumeOutputCap bounds the output stored per completed task for resume. Equal
+// to the per-task briefing budget: a dependent never sees more than this of any
+// one dependency, so storing more would be paid for and never read.
+const resumeOutputCap = dependencyBriefingPerTask
+
+// boundedResumeOutput is the head of a task's output, capped for durable
+// storage. Empty in, empty out — a task that produced nothing stores nothing.
+func boundedResumeOutput(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if len(trimmed) <= resumeOutputCap {
+		return trimmed
+	}
+	return trimmed[:resumeOutputCap]
 }
 
 // TaskFailedEvent records a task that failed, was skipped or was cancelled.

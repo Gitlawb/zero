@@ -2,7 +2,6 @@ package specialist
 
 import (
 	"context"
-	"sort"
 	"strings"
 )
 
@@ -49,6 +48,12 @@ type ModelPreferences struct {
 	// RouterGuidance is the operator's own advice to the router, added to the
 	// built-in guidance. Empty changes nothing.
 	RouterGuidance string
+	// MinSize is the smallest model, in billions of parameters, worth routing a
+	// task to. A model KNOWN to be smaller (its id names a size below this) is
+	// dropped from every tier, so a task lands on a decent model rather than a
+	// toy. A model of unknown size is kept; 0 is no floor. Named to match the
+	// config field it carries from (see the prefs-carry guard test).
+	MinSize float64
 }
 
 func (prefs ModelPreferences) excluded(id string) bool {
@@ -144,15 +149,14 @@ func rankedEligibleModels(models []DiscoveredModel, prefs ModelPreferences) []Di
 		model.ID = canonical
 		eligible = append(eligible, model)
 	}
-	sort.SliceStable(eligible, func(i, j int) bool {
-		if eligible[i].InputCost != eligible[j].InputCost {
-			return eligible[i].InputCost < eligible[j].InputCost
-		}
-		if eligible[i].OutputCost != eligible[j].OutputCost {
-			return eligible[i].OutputCost < eligible[j].OutputCost
-		}
-		return eligible[i].ID < eligible[j].ID
-	})
+	// Drop models KNOWN to be below the decency floor, so a task lands on a decent
+	// model rather than a toy. Fail-open: never leaves a plan with no models.
+	eligible = applyMinSizeFloor(eligible, prefs.MinSize)
+
+	// Least-to-most capable, so buildModelTiers reads cheap/balanced/strong off
+	// the ends. Priced providers rank by cost exactly as before; a free provider
+	// ranks by the size in the id instead of falling through to alphabetical.
+	sortModelsByCapability(eligible)
 	return eligible
 }
 

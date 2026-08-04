@@ -49,6 +49,14 @@ type PlanTaskContext struct {
 	PostureReasoningEffort string
 }
 
+// planTaskDescriptionPrefix labels a plan task's child session.
+//
+// ONE SPELLING, because worker_view reads it back to tell a plan task from a
+// plain Task call. Two copies of a magic string is invariant 5 — the writer
+// would be free to change without the reader noticing, and the only symptom
+// would be every plan task quietly re-labelled as a direct delegation.
+const planTaskDescriptionPrefix = "plan task "
+
 // NewPlanRunner adapts Executor.Run into a PlanRunner.
 //
 // LIFETIME, deliberately: the returned closure captures only run-INVARIANT
@@ -160,7 +168,7 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		res, err := planCtx.Executor.Run(taskCtx, TaskParameters{
 			Name:        planCtx.SpecialistName,
 			Prompt:      task.Prompt,
-			Description: "plan task " + task.ID,
+			Description: planTaskDescriptionPrefix + task.ID,
 			Manifest:    &manifest,
 		}, TaskRunOptions{
 			// Per-call, from the tool's RunOptions — see PlanTaskRequest.
@@ -174,6 +182,14 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// the line that puts its children there.
 			Cwd:            planTaskCwd(planCtx.Cwd, req.Cwd),
 			PermissionMode: planCtx.PermissionMode,
+			// THE PLAN'S SCRATCHPAD, so a task handed a truncated excerpt can
+			// open the whole answer its dependency wrote. Read-only: the
+			// executor is the sole writer there.
+			ExtraReadRoots: req.ReadRoots,
+			// The parent's request_permissions READ grants, on their own read-only
+			// flag, so a plan auditing a granted external path can read it without
+			// gaining write access (ExtraReadRoots above is emitted as --add-dir).
+			ReadOnlyRoots: req.ReadOnlyRoots,
 			// THE SECOND HALF of the same defect. The Task tool forwards its
 			// caller's progress callback here (task_tool.go); this path built
 			// the same struct and omitted the field, so a plan task's child
@@ -210,6 +226,9 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			Model:     task.Model,
 			Duration:  time.Since(started),
 			SessionID: res.SessionID,
+			// Carried so the executor can tell a task IT killed from one the OS
+			// killed — see TaskResult.Signal.
+			Signal: res.Signal,
 			// The id travels in SessionID, not in the prose. See
 			// WithoutSessionIDLine: a plan task's output is quoted into the
 			// report, into the dependency briefing every downstream task reads,

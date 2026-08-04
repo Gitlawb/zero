@@ -99,6 +99,13 @@ type BuildArgsInput struct {
 	// read-only "--auto low". Off by default, so the Task tool's specialists are
 	// unchanged. The sandbox still confines writes to the workspace root.
 	MemberAutonomy bool
+	// ExtraReadRoots are directories this child may read beyond its workspace,
+	// emitted as --add-dir. A plan task's scratchpad arrives here.
+	ExtraReadRoots []string
+	// ReadOnlyRoots are directories this child may READ but not write, emitted as
+	// --add-read-dir (scope.AddRead). The parent's request_permissions read grants
+	// arrive here — separate from ExtraReadRoots because --add-dir grants write.
+	ReadOnlyRoots []string
 }
 
 type BuildResumeArgsInput struct {
@@ -133,6 +140,13 @@ type TaskParameters struct {
 	Description     string
 	RunInBackground bool
 	Resume          string
+	// Model, when set, runs THIS sub-agent on a specific model rather than the
+	// parent's. It is the standalone-Task equivalent of a plan task's per-task
+	// model: it lets a caller send one worker to a cheap model and another to a
+	// strong one without an orchestrate plan. Resolved through the registry
+	// (aliases and deprecated ids redirected); a provider is the final authority
+	// on whether it will run.
+	Model string
 	// Manifest, when non-nil, supplies the specialist definition inline instead
 	// of resolving Name against the specialist registry. It is validated before
 	// use. The swarm launcher sets this so a swarm member can run from its own
@@ -157,6 +171,12 @@ type TaskRunOptions struct {
 	// sandboxed shell in the workspace (see BuildArgsInput.MemberAutonomy). Off
 	// for Task-tool specialists.
 	MemberAutonomy bool
+	// ExtraReadRoots are directories this child may read beyond its workspace.
+	// Emitted as --add-dir, the same flag the run's own extra roots use.
+	ExtraReadRoots []string
+	// ReadOnlyRoots are directories this child may READ but not write, emitted as
+	// --add-read-dir. The parent's request_permissions read grants arrive here.
+	ReadOnlyRoots []string
 	// Progress, when set, is called with each stream-json event emitted by the
 	// child process while it runs. nil is a no-op.
 	Progress func(streamjson.Event)
@@ -276,6 +296,23 @@ type ExecResult struct {
 	// means "stopped with work unfinished", which a plan treats differently from a
 	// wrong answer.
 	ExitCode int
+	// Model is what the child ACTUALLY ran on — the manifest's model when it
+	// names one, the parent's otherwise (resolvedChildModel).
+	//
+	// CARRIED BACK, because the caller cannot recompute it: only this side has
+	// the resolved manifest. The AGENTS sidebar already renders "on <model>" for
+	// a plan task and showed nothing for a Task sub-agent, because nothing ever
+	// told it which model the child used.
+	Model string
+	// Signal describes the signal that terminated the child, empty when it exited
+	// normally.
+	//
+	// STRUCTURAL, because the caller has to BRANCH on it. BuildFinalResult already
+	// writes the signal into the result prose, and a caller that needed the fact
+	// had to match that prose — invariant 9, the rule this package keeps
+	// relearning. The plan executor needs it to tell "the plan killed this task"
+	// from "something outside killed it", and those call for opposite reports.
+	Signal string
 }
 
 type ChildRunResult struct {
@@ -389,6 +426,16 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	// progress callback the Task path carried. The executor knows its own run;
 	// asking it directly is the only version with no seam to forget.
 	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd)
+	// PER-CALL ROOTS, after the run's own. A plan task's scratchpad belongs to
+	// ONE plan, so it cannot come from executor.extraWriteRoots — that is read at
+	// every launch and would leak one plan's directory into every other child the
+	// session starts.
+	args = appendExtraWriteRootArgs(args, input.ExtraReadRoots, input.Cwd)
+	// READ-ONLY roots on their own flag: the parent's request_permissions read
+	// grants, so a plan can audit a granted external path. --add-read-dir, never
+	// --add-dir, so the child can read but not write — a read grant must not
+	// become a write.
+	args = appendReadOnlyRootArgs(args, input.ReadOnlyRoots, input.Cwd)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 
@@ -407,6 +454,21 @@ func appendExtraWriteRootArgs(args []string, roots []string, cwd string) []strin
 			continue
 		}
 		args = append(args, "--add-dir", root)
+	}
+	return args
+}
+
+// appendReadOnlyRootArgs emits one --add-read-dir per root — READ access only, the
+// read counterpart of appendExtraWriteRootArgs. Same skips (the child's own
+// workspace, blank entries) for the same reasons.
+func appendReadOnlyRootArgs(args []string, roots []string, cwd string) []string {
+	workspace := strings.TrimSpace(cwd)
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" || root == workspace {
+			continue
+		}
+		args = append(args, "--add-read-dir", root)
 	}
 	return args
 }
@@ -478,6 +540,9 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 	if err != nil {
 		return ExecResult{}, err
 	}
+	if err := applyTaskModel(&manifest, params.Model, options.ParentReasoningEffort); err != nil {
+		return ExecResult{}, err
+	}
 	built, err := executor.BuildArgs(BuildArgsInput{
 		Manifest:              manifest,
 		Prompt:                params.Prompt,
@@ -490,6 +555,8 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 		Cwd:                   options.Cwd,
 		PermissionMode:        options.PermissionMode,
 		MemberAutonomy:        options.MemberAutonomy,
+		ExtraReadRoots:        options.ExtraReadRoots,
+		ReadOnlyRoots:         options.ReadOnlyRoots,
 	})
 	if err != nil {
 		return ExecResult{}, err
@@ -782,6 +849,8 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 			SessionID:   built.SessionID,
 			TotalTokens: summary.Usage.EffectiveTotalTokens(),
 			ExitCode:    summary.ExitCode,
+			Signal:      run.Signal,
+			Model:       resolvedChildModel(manifest, options.ParentModel),
 		}, err
 	}
 	summary := SummarizeStream(run.Events, run.ExitCode)
@@ -792,6 +861,8 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		SessionID:   built.SessionID,
 		TotalTokens: summary.Usage.EffectiveTotalTokens(),
 		ExitCode:    summary.ExitCode,
+		Signal:      run.Signal,
+		Model:       resolvedChildModel(manifest, options.ParentModel),
 	}, nil
 }
 
@@ -1100,4 +1171,33 @@ func launchBackgroundProcess(binaryPath string, args []string, outputFile string
 		}
 	}()
 	return pid, nil
+}
+
+// applyTaskModel sets a per-Task model on the manifest it will run under.
+//
+// A MANIFEST MODEL OVERRIDES THE PARENT'S — resolvedChildModel prefers it — so
+// setting it here is all it takes for a standalone Task to run on a different
+// model. An empty request changes nothing, keeping every existing spawn on the
+// inherited model exactly as before.
+//
+// AND IT FORWARDS THE PARENT'S EFFORT. appendModelArgs inherits the parent's
+// reasoning effort ONLY when no model is named, so naming a model would
+// otherwise drop the zeromaxing posture's raised effort. Setting the effort
+// explicitly here keeps it — the child re-clamps against the named model, so
+// forwarding a tier it does not support is safe. A manifest that already names
+// its own effort is left alone.
+func applyTaskModel(manifest *Manifest, requested, parentEffort string) error {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil
+	}
+	resolved, err := resolveTaskModel(requested)
+	if err != nil {
+		return err
+	}
+	manifest.Metadata.Model = resolved
+	if strings.TrimSpace(manifest.Metadata.ReasoningEffort) == "" {
+		manifest.Metadata.ReasoningEffort = strings.TrimSpace(parentEffort)
+	}
+	return nil
 }

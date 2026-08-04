@@ -58,6 +58,13 @@ type TaskResult struct {
 	ID       string
 	Outcome  TaskOutcome
 	Duration time.Duration
+	// Identity is the fingerprint of the task that produced this result — see
+	// taskIdentity. The executor stamps it on a succeeded result so a resume can
+	// tell a completed task that is UNCHANGED (skip it) from one whose prompt,
+	// model, tools or dependencies were edited since (re-run it, and its
+	// dependents with it). Empty on a result that did not complete, and on any
+	// event recorded before resume became identity-aware.
+	Identity string
 	// Output is the task's FULL result, verbatim. Not truncated here: the tool
 	// boundary budgets and redacts it exactly like any other tool output.
 	Output    string
@@ -89,6 +96,22 @@ type TaskResult struct {
 	// figure disagrees with the command that produced it" can weigh it; a reader
 	// told nothing cannot.
 	MeasurementConflicts []string
+	// Signal describes the signal that killed this task's child, empty when it
+	// exited normally.
+	//
+	// A FLAG, NOT A MESSAGE MATCH, for the same reason Stalled is one. A child
+	// killed by its own context looks identical in prose to one killed by the OS,
+	// and the executor has to tell them apart: it cancelled the first and knows
+	// why, and knows nothing at all about the second.
+	Signal string
+	// ScratchpadPath is where the executor persisted this task's FULL output, so
+	// a dependent handed a truncated excerpt can read the rest. Empty when the
+	// plan kept no scratchpad, which is the pre-existing behaviour.
+	//
+	// WRITTEN BY THE EXECUTOR, never by the task. A read-only plan task has no
+	// write tool at all, and granting it one would flip RequiresIsolation() and
+	// demand a git worktree for every plan that used this.
+	ScratchpadPath string
 	// Model is what the task actually ran on, empty when it inherited the
 	// parent's. Reported so a per-task model is OBSERVABLE: the feature changes
 	// which model does the work and what it costs, and a change nobody can see
@@ -183,6 +206,14 @@ type PlanTaskRequest struct {
 	Task Task
 	// Tools is the already-intersected grant. Never widened downstream.
 	Tools []string
+	// ReadRoots are directories this task may read beyond its workspace — the
+	// plan's scratchpad, when it has one. Empty for every plan that does not,
+	// which is the pre-existing behaviour. Emitted as --add-dir (grants write).
+	ReadRoots []string
+	// ReadOnlyRoots are directories this task may READ but not write — the
+	// parent's request_permissions grants, so a plan can audit a granted external
+	// path. Emitted as --add-read-dir (scope.AddRead), never the write channel.
+	ReadOnlyRoots []string
 	// Progress, when set, receives each stream-json event the task's child
 	// emits. nil is a no-op — the behaviour for every caller that does not wire
 	// live progress.
@@ -273,14 +304,130 @@ type PlanRecorder interface {
 //
 // The order comes from the same Kahn pass that proved the graph acyclic, so
 // admission and execution cannot disagree about it.
-func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder) PlanReport {
-	return ExecutePlanIn(ctx, plan, PlanWorkspace{}, parentTools, run, recorder)
+func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder, opts ...ExecOption) PlanReport {
+	return ExecutePlanIn(ctx, plan, PlanWorkspace{}, parentTools, run, recorder, opts...)
+}
+
+// ExecOption tunes one plan execution.
+//
+// VARIADIC because ExecutePlanIn has seventy-five call sites, seventy-three of
+// them tests. A seventh positional parameter would rewrite every one of them to
+// pass a value they do not care about, and a test that had to be edited to keep
+// compiling is a test nobody re-read. An option they omit means "as before",
+// which is exactly what those tests are asserting.
+type ExecOption func(*execOptions)
+
+// WithScratchpad keeps each task's FULL output on disk for the life of the plan
+// and points truncated excerpts at it.
+//
+// OPT-IN. It writes files and adds a read root to every task, and neither should
+// happen to a caller that did not ask.
+func WithScratchpad() ExecOption {
+	return func(o *execOptions) { o.scratchpad = true }
+}
+
+// WithReadRoots grants every task READ access to directories the parent holds
+// BEYOND its workspace — the paths a request_permissions grant added to the
+// parent's scope. Without it a plan that audits a granted external path fails
+// "outside the workspace" in every task, because a task inherits its workspace
+// but not the parent's dynamic read grants.
+//
+// READ ONLY, and merged with the scratchpad grant rather than replacing it: these
+// are the parent's already-approved paths, handed down unchanged, never widened.
+func WithReadRoots(roots []string) ExecOption {
+	return func(o *execOptions) {
+		o.parentReadRoots = append(o.parentReadRoots, roots...)
+	}
+}
+
+// WithPreSpentTokens charges work the PLAN caused but no task performed.
+//
+// Today that is exactly one thing: the routing call auto_assign makes before any
+// task runs. It happens outside the executor, so its tokens reached neither the
+// budget nor the report — and the report is what a person reads to decide
+// whether a plan was worth what it cost.
+func WithPreSpentTokens(tokens int) ExecOption {
+	return func(o *execOptions) {
+		if tokens > 0 {
+			o.preSpent = tokens
+		}
+	}
+}
+
+type execOptions struct {
+	// scratchpad asks for a per-plan directory of task outputs.
+	scratchpad bool
+	// preSpent is tokens the plan owes before its first task starts.
+	preSpent int
+	// contextWindow reports the window of the model a TASK will run on, 0 when
+	// unknown. Called with the task's own model id, or "" when the task named
+	// none — the supplier knows what the run itself is using, and this package
+	// deliberately does not.
+	contextWindow ContextWindowFunc
+	// parentReadRoots are directories the parent may read beyond its workspace —
+	// its request_permissions grants — handed to every task so a plan can audit a
+	// granted external path. Empty for a run that wired none, which is every
+	// existing caller.
+	parentReadRoots []string
+}
+
+// ContextWindowFunc reports a model's context window in tokens, 0 when unknown.
+//
+// A HOOK, not an import: this package runs on the child-execution path and must
+// not drag the provider stack in behind it. The surface that owns the catalogue
+// supplies it — see planContextWindows in internal/cli — and nil means no window
+// is knowable here, which is the honest default for a run that never wired one.
+//
+// 0 MEANS UNKNOWN, the same spelling and the same meaning as
+// agent.ContextMeasurement.ContextWindow, so the two cannot drift into
+// disagreeing about what 0 means. Unknown disables the adjustment rather than
+// guessing at it.
+//
+// AN EMPTY MODEL ID means "whatever this run is using". A plan task that names
+// no model inherits the parent's, and only the supplying side knows what that is.
+type ContextWindowFunc func(modelID string) int
+
+// WithContextWindows sizes each task's dependency briefing to the context window
+// of the model that will READ it. Omitted, or supplied nil, every briefing keeps
+// the fixed caps it had before.
+func WithContextWindows(window ContextWindowFunc) ExecOption {
+	return func(o *execOptions) { o.contextWindow = window }
+}
+
+// windowFor is the resolved window for one task, and the nil-safe path that
+// makes every existing caller behave as it did.
+func (o execOptions) windowFor(task Task) int {
+	if o.contextWindow == nil {
+		return 0
+	}
+	return o.contextWindow(task.Model)
 }
 
 // ExecutePlanIn is ExecutePlan with the plan's WORKSPACE named. ExecutePlan is
 // the read-only case — the workspace a plan does not need — kept as the name
 // every existing caller and test already uses.
-func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, parentTools []string, run PlanRunner, recorder PlanRecorder) PlanReport {
+func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, parentTools []string, run PlanRunner, recorder PlanRecorder, opts ...ExecOption) PlanReport {
+	var options execOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	// THE PLAN'S SCRATCHPAD. Off unless asked for, so every existing caller —
+	// and the additivity guarantee — is untouched: with no scratchpad, Record
+	// returns "", scratchpadPointer renders nothing, and the briefing is the
+	// sentence it always was.
+	//
+	// A scratchpad that cannot be created is NOT a reason to refuse the plan.
+	// It only makes truncated excerpts reachable; without it they are exactly as
+	// reachable as they were before, which is to say the plan still works.
+	var scratchpad *Scratchpad
+	if options.scratchpad {
+		if pad, err := NewScratchpad(plan.Name()); err == nil {
+			scratchpad = pad
+			defer scratchpad.Release()
+		}
+	}
 	// THE PLAN'S OWN CONTEXT, derived here rather than by the caller.
 	//
 	// Cancelling it abandons the PLAN and leaves the TURN alive; cancelling the
@@ -348,7 +495,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	upstreamUsed, downstreamUsed := 0, 0
 	// The live meter, shared by every task in flight. Same limit, consulted from
 	// inside a running task rather than between two of them.
-	spend := &planSpend{limit: int64(plan.Budget().MaxTokens)}
+	spend := &planSpend{limit: planSpendLimit(plan.Budget().MaxTokens, options.preSpent)}
 	// WHO IS DEPENDED ON. Computed once from the validated graph: a task others
 	// wait for stops earlier than one nothing waits for, so the work downstream
 	// of it is not starved by it.
@@ -373,6 +520,11 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	report.Workers = workers
 	report.WorkersRequested = plan.Budget().MaxWorkers
 	report.TokenLimit = plan.Budget().MaxTokens
+	// SEEDED, NOT ADDED AT THE END. report.TokensUsed accumulates per task from
+	// here on, and every early return between here and the end reports whatever
+	// it holds — so a total corrected only on the success path would be wrong on
+	// exactly the runs a reader most wants the truth about.
+	report.TokensUsed = options.preSpent
 	slots := newPlanSlots(workers)
 
 	// harvest applies one completed dispatch: its spend, its outcome, its
@@ -382,6 +534,18 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	harvest := func(completion taskCompletion) {
 		slots.release()
 		id, result, err := completion.id, completion.result, completion.err
+		// PERSISTED HERE, at the one point every completion passes through,
+		// whatever its outcome. A cancelled task's partial findings are evidence
+		// — plan_exec already says so where it briefs dependents — so they are
+		// worth keeping for the same reason a successful task's are, and putting
+		// this at the single chokepoint means no later outcome branch can forget.
+		//
+		// A FAILURE TO RECORD IS NOT A FAILURE OF THE TASK. The scratchpad is an
+		// optimisation over the excerpt the dependent gets anyway; losing the
+		// disk copy must never turn a task that ran into a task that failed.
+		if path, recordErr := scratchpad.Record(id, strings.TrimSpace(result.Output)); recordErr == nil {
+			result.ScratchpadPath = path
+		}
 		result.ID = id
 		if result.Duration == 0 {
 			result.Duration = time.Since(completion.started)
@@ -426,13 +590,28 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			// Neither is true of a child that ran to the end and reported a
 			// failure of its own — err nil, not stalled, its reason in
 			// result.Err — and that is the case a bare ctx.Err() swallowed.
-			concluded := err == nil && !result.Stalled
+			//   result.Signal. A child killed by its own context is SIGKILLed —
+			//   osexec.CommandContext does that with no WaitDelay — and the
+			//   executor returns that as a StatusError result with a NIL error.
+			//   So "concluded" was true for a task the plan had just killed, and
+			//   two tasks stopped at exactly 300.0s were reported as ordinary
+			//   FAILURES carrying a guess list: "Common causes: an out-of-memory
+			//   kill, a timeout, or cancellation; check the signal to tell
+			//   which." The plan knew which. It shrugged, and a reader
+			//   reasonably concluded their machine had run out of memory and
+			//   went to raise limits that were never involved.
+			concluded := err == nil && !result.Stalled && result.Signal == ""
 			cutShort := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
 				(ctx.Err() != nil && !concluded)
 			if cutShort {
 				cancelled = true
 				result.Outcome = TaskCancelled
-				if result.Err == "" {
+				// NAMED, NOT GUESSED. The prose the child came back with is the
+				// signal diagnostic, which for a task the plan itself stopped is
+				// a guess about our own decision — so it is replaced here rather
+				// than preserved. A signal is still reported, as a detail of a
+				// reason we can state, not in place of one.
+				if result.Err == "" || result.Signal != "" {
 					// Which one matters to the reader: a wall-budget stop is the
 					// plan spending what it was allowed, a cancel is a person
 					// deciding. Reporting both as "the run was stopped" left a
@@ -441,6 +620,9 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 						result.Err = "cancelled: the plan's max_wall_seconds elapsed while this task was running"
 					} else {
 						result.Err = "cancelled: the run was stopped while this task was running"
+					}
+					if result.Signal != "" {
+						result.Err += " (the child was terminated by " + result.Signal + ")"
 					}
 				}
 				results[id] = result
@@ -481,6 +663,13 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			return
 		}
 		result.Outcome = TaskSucceeded
+		// STAMPED HERE, ON THE ONE SUCCESS PATH BOTH SURFACES FLOW THROUGH.
+		// recordCompleted feeds the CLI recorder and the TUI bridge the same
+		// result, and both write it verbatim into task_completed — so setting the
+		// identity once, before recording, is what puts it in the log for resume
+		// to match against. Only a succeeded task is matched by identity; a failed
+		// one re-runs regardless, so its result carries none.
+		result.Identity = taskIdentity(tasks[id])
 		results[id] = result
 		report.Succeeded++
 		recordCompleted(recorder, result)
@@ -620,7 +809,8 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 
 		// WHAT ITS DEPENDENCIES FOUND, handed to it rather than left for it to
 		// rediscover. See dependencyBriefing.
-		task.Prompt = withDependencyBriefing(task, results)
+		perTask, totalBrief := dependencyBriefingBudget(options.windowFor(task))
+		task.Prompt = withDependencyBriefingBudget(task, results, perTask, totalBrief)
 		// AND WHAT IT MAY SPEND, so it can land instead of being shot down.
 		task.Prompt = withTokenBudgetNotice(task.Prompt, plan.Budget().MaxTokensPerTask)
 
@@ -633,6 +823,13 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			spend:         spend,
 			maxTaskTokens: plan.Budget().MaxTokensPerTask,
 			waitsOnOthers: len(task.DependsOn) > 0,
+			// readRoots is emitted to the child as --add-dir, which grants WRITE, so
+			// only the scratchpad (a dir the executor owns) travels it. The parent's
+			// request_permissions READ grants must NOT: routing a read grant through
+			// the write channel would escalate it. They travel readOnlyRoots, emitted
+			// as --add-read-dir (scope.AddRead) so the child can read but not write.
+			readRoots:     scratchpadReadRoots(scratchpad),
+			readOnlyRoots: options.parentReadRoots,
 			maxRetries:    plan.Budget().MaxRetries,
 			wallClock:     wallClock,
 		}
@@ -682,6 +879,17 @@ type retryPolicy struct {
 	spend         *planSpend
 	maxTaskTokens int
 	waitsOnOthers bool
+	// readRoots are directories a task may READ beyond its workspace — today
+	// only the plan's scratchpad. Never write roots: the executor is the sole
+	// writer there, which is what makes contention impossible rather than
+	// merely unlikely.
+	readRoots []string
+	// readOnlyRoots are the parent's request_permissions READ grants, handed to
+	// the task READ-ONLY (emitted as --add-read-dir, applied via scope.AddRead) so
+	// a plan can audit a granted external path without the task gaining write
+	// access to it. Kept SEPARATE from readRoots because readRoots is emitted as
+	// --add-dir, which grants write.
+	readOnlyRoots []string
 	// wallClock is the plan's running-time budget, nil when unbounded. Read
 	// rather than a fixed deadline so time the user spent paused does not
 	// count against it.
@@ -735,6 +943,8 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			Spend:             policy.spend,
 			MaxTaskTokens:     policy.maxTaskTokens,
 			WaitsOnOtherTasks: policy.waitsOnOthers,
+			ReadRoots:         policy.readRoots,
+			ReadOnlyRoots:     policy.readOnlyRoots,
 		})
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
@@ -965,6 +1175,64 @@ const (
 	dependencyBriefingTotal   = 12000
 )
 
+// SIZED TO THE READER'S CONTEXT WINDOW when one is known.
+//
+// The constants above are provider-blind, and this catalogue is not: its models
+// run from an 8k local Ollama to a 1M-context gateway. 12,000 characters is
+// most of a small model's context and a rounding error in a large one's. A
+// measured case: a code-review child produced 18,349 characters and a dependent
+// task would have seen 4,000 of them — 78% discarded — whether it had room for
+// the rest or not.
+//
+// THE BUDGET BELONGS TO THE TASK THAT READS THE BRIEFING, never the one that
+// wrote it. With per-task models a 1M-context synthesiser routinely depends on a
+// 32k finder, and sizing by the producer would starve the reader for no reason.
+//
+// UNKNOWN KEEPS TODAY'S NUMBERS EXACTLY. A window of 0 means nothing reported
+// one — the majority case in this catalogue — and returns the two constants
+// unchanged, so every provider that describes nothing behaves byte-identically
+// to before this existed. Same contract as agent.ContextMeasurement: unknown
+// disables the adjustment rather than guessing at it.
+const (
+	// briefingWindowFraction is how much of a reader's context the inherited
+	// findings may occupy. A tenth leaves the task its own prompt, its tools and
+	// room to actually work — the briefing is an input to the job, not the job.
+	briefingWindowFraction = 0.10
+	// briefingCharsPerToken converts the window (tokens) to the budget
+	// (characters). Four is the usual English approximation and it only has to be
+	// the right order of magnitude: this decides a budget, not an invoice.
+	briefingCharsPerToken = 4
+	// briefingFloorTotal keeps a briefing worth reading on a very small model.
+	// Below this a dependent learns nothing and re-derives everything, which
+	// costs more than the characters saved.
+	briefingFloorTotal = 4000
+	// briefingCeilingTotal stops a 1M-context model from inheriting an entire
+	// plan. The bound the original constants existed for does not go away just
+	// because the window is large: a twenty-task chain still must not accumulate.
+	briefingCeilingTotal = 96_000
+	// briefingPerTaskShare is the total divided among dependencies. Three,
+	// because 12,000/4,000 is exactly the ratio the constants above already
+	// chose; deriving it keeps a 30k-window model on today's numbers rather than
+	// silently re-tuning every existing plan.
+	briefingPerTaskShare = 3
+)
+
+// dependencyBriefingBudget returns the per-dependency and whole-briefing caps
+// for a reader with the given context window, 0 meaning unknown.
+func dependencyBriefingBudget(contextWindow int) (perTask, total int) {
+	if contextWindow <= 0 {
+		return dependencyBriefingPerTask, dependencyBriefingTotal
+	}
+	total = int(float64(contextWindow) * briefingCharsPerToken * briefingWindowFraction)
+	if total < briefingFloorTotal {
+		total = briefingFloorTotal
+	}
+	if total > briefingCeilingTotal {
+		total = briefingCeilingTotal
+	}
+	return total / briefingPerTaskShare, total
+}
+
 // withDependencyBriefing prefixes a task's prompt with what its dependencies
 // found, and returns the prompt unchanged when it has none.
 //
@@ -989,13 +1257,25 @@ const (
 // Deterministic order, following DependsOn as the plan declared it, so the same
 // plan produces the same prompt — a resumed plan must not differ from its first
 // run because a map iterated differently.
+// withDependencyBriefing briefs a task at the FIXED caps.
+//
+// Kept as the two-argument function every existing caller and test already
+// uses. Editing six test call sites to pass budgets they do not care about
+// would have been six tests changed to keep compiling — and a test edited for
+// that reason is one nobody re-reads. They assert briefing CONTENT, which the
+// fixed caps still produce exactly as before.
 func withDependencyBriefing(task Task, results map[string]TaskResult) string {
+	return withDependencyBriefingBudget(task, results, dependencyBriefingPerTask, dependencyBriefingTotal)
+}
+
+// withDependencyBriefingBudget is the same briefing sized to the reading task.
+func withDependencyBriefingBudget(task Task, results map[string]TaskResult, perTaskBudget, totalBudget int) string {
 	if len(task.DependsOn) == 0 {
 		return task.Prompt
 	}
 	var brief strings.Builder
 	var unfinished []string
-	remaining := dependencyBriefingTotal
+	remaining := totalBudget
 	for _, id := range task.DependsOn {
 		result, ok := results[id]
 		if !ok {
@@ -1026,7 +1306,7 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 		if partial {
 			unfinished = append(unfinished, id)
 		}
-		budget := dependencyBriefingPerTask
+		budget := perTaskBudget
 		if budget > remaining {
 			budget = remaining
 		}
@@ -1043,7 +1323,16 @@ func withDependencyBriefing(task Task, results map[string]TaskResult) string {
 		if truncated {
 			// SAID, not silent. A reader that cannot tell it was given part of an
 			// answer will treat the part as the whole.
-			brief.WriteString("[truncated — re-read the files named above if you need more]\n")
+			//
+			// AND NOW REACHABLE. When the plan kept a scratchpad, the whole answer
+			// is on disk and the dependent is told where — so a truncated excerpt
+			// stops being a loss and becomes a summary with the rest one read_file
+			// behind it. Without a scratchpad this is exactly the old sentence.
+			if pointer := scratchpadPointer(result.ScratchpadPath, len(strings.TrimSpace(result.Output))); pointer != "" {
+				brief.WriteString(pointer + "\n")
+			} else {
+				brief.WriteString("[truncated — re-read the files named above if you need more]\n")
+			}
 		}
 		brief.WriteString("\n")
 	}
@@ -1572,4 +1861,37 @@ func recordPlanCompleted(recorder PlanRecorder, plan Plan, report PlanReport) {
 	if full, ok := recorder.(PlanLifecycleRecorder); ok && full != nil {
 		full.PlanCompleted(plan, report)
 	}
+}
+
+// scratchpadReadRoots is the read grant a task needs to open its dependencies'
+// full outputs, and nothing else.
+func scratchpadReadRoots(pad *Scratchpad) []string {
+	if root := pad.Root(); root != "" {
+		return []string{root}
+	}
+	return nil
+}
+
+// planSpendLimit reduces a plan's budget by what it already owes.
+//
+// A POSITIVE BUDGET NEVER BECOMES UNBOUNDED. Throughout planSpend, limit <= 0
+// means "no bound at all" — ceilingFor returns 0 and overPool never fires. So a
+// pre-spend at or above the whole budget must floor at 1, not at 0: a plan that
+// has already overspent needs its very next task refused, and turning its bound
+// off would do the exact opposite.
+//
+// An UNBOUNDED plan stays unbounded. Subtracting from 0 would invent a ceiling
+// the caller never asked for, and max_tokens is optional precisely because
+// guessing it low is how a plan spends everything and returns nothing.
+func planSpendLimit(maxTokens, preSpent int) int64 {
+	if maxTokens <= 0 {
+		return 0
+	}
+	if preSpent <= 0 {
+		return int64(maxTokens)
+	}
+	if remaining := int64(maxTokens) - int64(preSpent); remaining > 0 {
+		return remaining
+	}
+	return 1
 }

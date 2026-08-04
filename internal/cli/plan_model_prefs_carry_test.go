@@ -30,6 +30,7 @@ func TestEveryPlanModelPreferenceSurvivesTheCarryIntoSpecialist(t *testing.T) {
 		RouterGuidance: "prefer kimi for judgement",
 		AutoAssign:     true,
 		Exclude:        []string{"never-this"},
+		MinSize:        7,
 	}
 	carried := planModelPreferences(source)
 

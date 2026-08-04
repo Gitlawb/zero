@@ -47,10 +47,18 @@ func (m model) handlePlansCommand(args string) (tea.Model, tea.Cmd) {
 		//   /plans resume <name>  → pick up a saved plan where its last run
 		//                           stopped
 		//
-		// Bare resume keeps the meaning it already had, so the pause control
-		// shipped before this does not change under anyone.
+		// Bare resume keeps un-pausing a LIVE plan; with no plan running it now
+		// resumes the last one from where it stopped — the pause control shipped
+		// before this still fires whenever a plan is actually in flight.
 		if strings.TrimSpace(rest) == "" {
-			return m.appendPlansNotice(m.orchestrateControlText(args)), nil
+			// A LIVE plan un-pauses; a plan that was CANCELLED resumes from where
+			// it stopped. Both are "continue what was interrupted", and which one
+			// applies is decided by whether a plan is actually running now — not
+			// by the user having to remember two spellings.
+			if m.planProgress.PlanRunningNow() {
+				return m.appendPlansNotice(m.orchestrateControlText(args)), nil
+			}
+			return m.resumeLastPlan()
 		}
 		return m.runSavedPlan(rest, true)
 	default:
@@ -383,6 +391,101 @@ func quotePlanParams(declared []string) []string {
 // A FIXED name, overwritten each time, for the same reason the resume staging
 // uses one: a directory of last_run_1, _2, _3 is a directory nobody can tell
 // apart, and only the newest is ever the right one.
+// resumeLastPlan runs the plan that last ran, from WHERE IT STOPPED — the
+// completed tasks are skipped and their findings are folded into the tasks that
+// remain (RemainingPlan). It is bare "/plans resume" when no plan is live to
+// un-pause: the one-command "continue what I cancelled" the pause/restart pair
+// did not cover.
+//
+// SAME-SESSION, because the progress comes from this session's event log. A new
+// session has no record of what already ran, so there is nothing to resume from
+// and the message says so rather than silently restarting.
+func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
+	args, planName, ok := m.planProgress.LastPlan()
+	if !ok {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"No plan has run this session, so there is nothing to resume. "+
+				"/plans list shows what is saved, and /plans run <name> starts one.")), nil
+	}
+	if m.planProgress.PlanRunningNow() {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"A plan is still running. Pause it with /plans pause, or stop it with /plans stop.")), nil
+	}
+	if m.sessionStore == nil || m.activeSession.SessionID == "" {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"This session has no event log, so there is no record of what already ran.")), nil
+	}
+	events, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", "Could not read this session's events: "+err.Error())), nil
+	}
+	progress, found := specialist.ReducePlanEvents(events)
+	if !found {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"No plan has run in this session, so there is nothing to resume.")), nil
+	}
+	plan, err := specialist.ParsePlan(args, m.savedPlanLimits())
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning",
+			"That plan no longer validates, so it was not resumed: "+err.Error())), nil
+	}
+	remaining, err := specialist.RemainingPlan(plan, progress, m.savedPlanLimits())
+	if err != nil {
+		// The only error here is "everything already succeeded" — which is not a
+		// failure, it is the plan being done. Say so plainly.
+		return m.appendPlansNotice(planControlNotice("info", err.Error())), nil
+	}
+	dir := m.planPaths.ProjectDir
+	if dir == "" {
+		dir = m.planPaths.UserDir
+	}
+	if dir == "" {
+		return m.appendPlansNotice(planControlNotice("warning", "There is nowhere to stage the plan in this run.")), nil
+	}
+	if _, err := specialist.SavePlan(dir, resumePlanName, remaining); err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the remaining plan: "+err.Error())), nil
+	}
+	label := planName
+	if label == "" {
+		label = "the last plan"
+	}
+	m = m.appendPlansNotice(planControlNotice("info",
+		resumeNotice(label, plan, remaining, progress, resumePlanName)))
+	encoded, err := json.Marshal(resumePlanName)
+	if err != nil {
+		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
+	}
+	return m.dispatchCommand(parsedCommand{
+		kind: commandPrompt,
+		text: "Run the saved plan " + string(encoded) + " by calling the orchestrate tool with the `saved` argument set to that name. Do not restate its tasks.",
+	})
+}
+
+// resumeNotice describes a staged resume: how much is left, how much is already
+// done, and — when an edit brought a completed task back — which tasks re-run.
+//
+// The changed clause is the recovery diagnostic. Without it a user who edited a
+// saved plan between runs sees a task they believe finished reappear in the
+// remainder with no explanation; naming it, and saying it changed, is what makes
+// identity-aware resume legible rather than surprising. "Already done" counts
+// only the tasks that stay done, so an edited task is not both done and left.
+func resumeNotice(label string, plan, remaining specialist.Plan, progress specialist.PlanProgress, stagedName string) string {
+	changed := specialist.ResumeChangedTasks(plan, progress)
+	doneCount := len(progress.Succeeded) - len(changed)
+	if doneCount < 0 {
+		doneCount = 0
+	}
+	msg := fmt.Sprintf("Resuming %s from where it stopped: %d task(s) left, %d already done.",
+		label, remaining.TaskCount(), doneCount)
+	if len(changed) > 0 {
+		msg += fmt.Sprintf(" Re-running %s because they or an input changed since the last run.",
+			strings.Join(changed, ", "))
+	}
+	msg += fmt.Sprintf(" Staged as %q — /plans show %s to read it first.", stagedName, stagedName)
+	return msg
+}
+
+// restartLastPlan runs the plan that last ran, from the beginning.
 func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 	args, planName, ok := m.planProgress.LastPlan()
 	if !ok {
@@ -431,8 +534,12 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 	})
 }
 
-// restartPlanName is where a restart stages the last plan.
+// restartPlanName is where a restart stages the last plan; resumePlanName is
+// where a resume-from-stop stages the remainder. A FIXED name each, overwritten
+// each time: a directory of last_run_1, _2, _3 is one nobody can tell apart, and
+// only the newest is ever the right one.
 const restartPlanName = "last_run"
+const resumePlanName = "last_run_resume"
 
 // resumeSavedPlan narrows a stored plan by the CURRENT session's plan events and
 // saves the remainder under its own name.
@@ -499,7 +606,17 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	if progress.Complete {
 		why = "the plan ran to the end and these did not succeed"
 	}
-	return resumeName, planControlNotice("info", fmt.Sprintf(
-		"Resuming %q: %d of %d tasks already succeeded, %d left — %s.\nSaved the remainder as %q — /plans show %s to read it first.",
-		stored.Name, len(progress.Succeeded), len(progress.Order), remaining.TaskCount(), why, resumeName, resumeName)), true
+	notice = fmt.Sprintf(
+		"Resuming %q: %d of %d tasks already succeeded, %d left — %s.",
+		stored.Name, len(progress.Succeeded), len(progress.Order), remaining.TaskCount(), why)
+	// A completed task that reappears in the remainder was EDITED since it ran
+	// (or depends on one that was). Naming it is what keeps an identity-aware
+	// resume legible: the file changed between runs, so the fingerprint no longer
+	// matches and the task is not resumed as done.
+	if changed := specialist.ResumeChangedTasks(plan, progress); len(changed) > 0 {
+		notice += fmt.Sprintf("\n%s changed since the last run and will re-run (with anything that depends on them).",
+			strings.Join(changed, ", "))
+	}
+	notice += fmt.Sprintf("\nSaved the remainder as %q — /plans show %s to read it first.", resumeName, resumeName)
+	return resumeName, planControlNotice("info", notice), true
 }

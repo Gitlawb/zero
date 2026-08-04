@@ -143,6 +143,11 @@ type execOptions struct {
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
 	addDirs []string
+	// readDirs holds directories passed via --add-read-dir: READ-ONLY roots added
+	// with scope.AddRead after construction. This is how a specialist child
+	// inherits the parent's request_permissions read grants without gaining write
+	// access to them — a plan auditing a granted external path reads it here.
+	readDirs []string
 	// tracePath, when set, writes a per-turn NDJSON trace (agenteval-compatible)
 	// to the given file path — or to stderr when the value is "-". Falls back to
 	// the ZERO_TRACE env var when the flag is absent. Off by default: a run
@@ -319,6 +324,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 					}
 					return execScope.Roots()
 				},
+				// The read counterpart: a request_permissions READ grant lands in a
+				// separate scope list the write roots above do not cover, so without
+				// this a plan auditing a granted path fails "outside the workspace" in
+				// every task. Same live-scope closure, same reason.
+				ExtraReadRoots: func() []string {
+					if execScope == nil {
+						return nil
+					}
+					return execScope.ExtraReadRoots()
+				},
 				// Proves a model will actually run before a task is assigned it,
 				// so the plan never dispatches onto something the provider only
 				// advertises.
@@ -437,6 +452,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	execScope, err = sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	// READ-ONLY roots from --add-read-dir, added after construction so they never
+	// become write roots: this is how a specialist child reads the parent's
+	// request_permissions grants without gaining write access. A bad path fails
+	// closed (the run stops) rather than silently dropping the grant.
+	for _, dir := range options.readDirs {
+		if _, err := execScope.AddRead(dir); err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", fmt.Sprintf("--add-read-dir %q: %v", dir, err))
+		}
 	}
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
 		registry.Register(tool)

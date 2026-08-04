@@ -318,3 +318,88 @@ func TestProbingManyModelsStaysUnderTheConcurrencyCap(t *testing.T) {
 		t.Fatalf("models that answered produced removal notes: %v", notes)
 	}
 }
+
+// A MODEL BILLED SEPARATELY AND UNAFFORDABLE IS A REFUSAL TOO.
+//
+// The message is verbatim from a real session (2026-08-03, ollama-cloud). The
+// model EXISTS and discovery reports it, so nothing structural distinguishes it
+// — and because ranking is by price it ranks highest, so auto-assign chose it on
+// four separate days across eight plan tasks. Each died in about seven seconds
+// with zero tokens and zero tool calls, costing the plan a dispatch and a retry
+// cycle every time.
+//
+// Classified here, before assignment, the model is dropped instead of assigned.
+func TestAModelTheAccountCannotAffordIsRefusedBeforeItIsAssigned(t *testing.T) {
+	const verbatim = `provider request error: {"error":"this model uses extra usage only (not included plan usage) and your extra usage balance is empty, add extra usage or turn on auto reload at https://ollama.com/settings (ref: d62a7217-60fb-48ad-b9c1-766b717ec5eb)"}`
+
+	got := ClassifyProbeError(errors.New(verbatim))
+	if got.Verdict != ProbeRefuses {
+		t.Fatalf("the billing refusal was not recognised: %v", got.Verdict)
+	}
+	// The reason must survive: a model vanishing from routing with no
+	// explanation is indistinguishable from a bug, which is why proveModels
+	// reports one per removal.
+	if !strings.Contains(got.Reason, "extra usage") {
+		t.Fatalf("the refusal kept no usable reason: %q", got.Reason)
+	}
+
+	// Each marker on its own, so a provider rewording part of the sentence still
+	// trips at least one.
+	for _, message := range []string{
+		"this model uses extra usage only",
+		"not included plan usage",
+		"your extra usage balance is empty",
+	} {
+		if verdict := ClassifyProbeError(errors.New(message)).Verdict; verdict != ProbeRefuses {
+			t.Errorf("marker not matched: %q -> %v", message, verdict)
+		}
+	}
+
+	// STILL FAILING TOWARD KEEPING THE MODEL. A balance NOTICE is not a refusal:
+	// the request succeeded and the model works, so removing it would drop a
+	// model the user is paying for. This is why the marker is "extra usage only"
+	// rather than a bare "extra usage".
+	for _, message := range []string{
+		"you have $5.00 of extra usage remaining",
+		"add extra usage to raise your limit",
+		"extra usage enabled for this account",
+	} {
+		if verdict := ClassifyProbeError(errors.New(message)).Verdict; verdict != ProbeUnknown {
+			t.Errorf("a balance notice was read as a refusal: %q -> %v", message, verdict)
+		}
+	}
+}
+
+// AND THE REFUSAL MUST REACH THE ASSIGNER, not merely the classifier. A verdict
+// nothing consults leaves the model in the ranking and the plan assigns it
+// anyway — the "layer B does not carry it" defect this package keeps producing.
+func TestAnUnaffordableModelIsRemovedFromTheCandidatesEntirely(t *testing.T) {
+	const billing = `{"error":"this model uses extra usage only (not included plan usage) and your extra usage balance is empty"}`
+	models := []DiscoveredModel{
+		// Ranked highest by price, which is exactly why auto-assign reached for it.
+		{ID: "kimi-k3", ToolCall: true, InputCost: 90, OutputCost: 900, OutputModalities: []string{"text"}},
+		{ID: "glm-5.2", ToolCall: true, InputCost: 1, OutputCost: 3, OutputModalities: []string{"text"}},
+	}
+	probe := func(_ context.Context, id string) ModelProbeResult {
+		if id == "kimi-k3" {
+			return ClassifyProbeError(errors.New(billing))
+		}
+		return ModelProbeResult{Verdict: ProbeServes}
+	}
+
+	survivors, notes := proveModels(context.Background(), models, probe, &probeCache{})
+	for _, model := range survivors {
+		if model.ID == "kimi-k3" {
+			t.Fatal("the unaffordable model survived probing and is still assignable")
+		}
+	}
+	if len(survivors) != 1 || survivors[0].ID != "glm-5.2" {
+		t.Fatalf("probing removed the wrong models: %+v", survivors)
+	}
+	if len(notes) == 0 {
+		t.Fatal("a model vanished from routing with no note: indistinguishable from a bug")
+	}
+	if !strings.Contains(strings.Join(notes, " "), "kimi-k3") {
+		t.Fatalf("the note does not name the model that was removed: %v", notes)
+	}
+}

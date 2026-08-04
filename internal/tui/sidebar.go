@@ -488,10 +488,8 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 		default: // completed
 			icon = zeroTheme.green.Render("✓")
 		}
-		name := strings.TrimSpace(a.name)
-		if name == "" {
-			name = "agent"
-		}
+		// THE ASSIGNED JOB, not the generic specialist type. See specialistJobName.
+		name := specialistJobName(a.name, a.description)
 		nameStyle := zeroTheme.ink
 		// As a finished specialist nears the end of its linger, dim the whole row
 		// toward faint so its removal reads as a fade-out rather than a pop.
@@ -508,6 +506,12 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 			hits = append(hits, sidebarAgentHit{lineOffset: len(lines), sessionID: a.childSessionID, title: name, expands: true})
 		}
 		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
+		// ALWAYS-VISIBLE SPEND: tokens then the model, per sub-agent, so the
+		// panel answers "what did each one cost, and on what" without a click.
+		// Order is deliberate — token consumption first, model after it.
+		if spend := specialistSpendLine(a); spend != "" {
+			lines = append(lines, "   "+zeroTheme.faint.Render(truncateStep(spend, maxInt(2, room-2))))
+		}
 		if a.status == specialistRunning {
 			// Live working detail for a running subagent: current tool + arg hint,
 			// falling back to the running tool count.
@@ -817,9 +821,98 @@ func swarmPulseStyles() []lipgloss.Style {
 	return out
 }
 
+// specialistSpendLine is the always-visible per-agent cost: token consumption
+// first, then the specific model it ran on. Empty when neither is known yet, so
+// a just-spawned row shows only its name rather than a line of zeros.
+//
+// TOKENS BEFORE MODEL, deliberately: "how much did this cost" is the more
+// wanted number, and the model is the qualifier after it.
+func specialistSpendLine(info specialistInfo) string {
+	var parts []string
+	if info.tokenCount > 0 {
+		parts = append(parts, humanCount(info.tokenCount)+" tok")
+	}
+	if model := strings.TrimSpace(info.model); model != "" {
+		parts = append(parts, model)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// specialistJobName is the 1-2 word name a specialist row shows: the ASSIGNED
+// JOB, not the generic specialist type.
+//
+// The row used to render info.name, which for a Task sub-agent is the specialist
+// TYPE — so four workers all read "worker" and the panel could not tell them
+// apart. The job lives in the description ("W1: HTML link extractor"), so this
+// condenses THAT: strip a leading worker label like "W1:" or the "plan task "
+// prefix, then take the first two significant words — "HTML link", "HTTP
+// checker", "Concurrency pool". Falls back to the name when there is no
+// description to condense, so a bare Task keeps its type.
+func specialistJobName(name, description string) string {
+	job := stripSpecialistLabel(strings.TrimSpace(description))
+	condensed := shortTaskName(job)
+	// A description that reads as a SENTENCE — "You are auditing package X" — is
+	// a prompt, not a label, and its first words are conversational. The agent's
+	// own name is the better identifier there, so prefer it. A short job label
+	// ("HTML link extractor") has no such opener and wins.
+	if condensed != "" && !startsWithConversationalWord(condensed) {
+		return condensed
+	}
+	if n := strings.TrimSpace(name); n != "" {
+		return n
+	}
+	return "agent"
+}
+
+// startsWithConversationalWord reports whether a condensed name opens with a
+// pronoun or filler that marks it as prose rather than a job label.
+func startsWithConversationalWord(condensed string) bool {
+	fields := strings.Fields(condensed)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.Trim(fields[0], ".,:;!?\"'`")) {
+	case "you", "your", "i", "i'll", "i'm", "we", "we'll", "it", "they",
+		"he", "she", "let", "let's", "here", "now", "please", "this", "the":
+		return true
+	default:
+		return false
+	}
+}
+
+// stripSpecialistLabel removes a leading bookkeeping prefix that is not part of
+// the job: a worker tag like "W1:" / "W12 -" and the "plan task " prefix that
+// plan_runner stamps on every plan child.
+func stripSpecialistLabel(description string) string {
+	trimmed := strings.TrimSpace(description)
+	// "plan task " is the prefix plan_runner stamps (internal/specialist); a
+	// literal here rather than an import, since one string does not justify one.
+	const planTaskPrefix = "plan task "
+	if len(trimmed) >= len(planTaskPrefix) && strings.EqualFold(trimmed[:len(planTaskPrefix)], planTaskPrefix) {
+		return strings.TrimSpace(trimmed[len(planTaskPrefix):])
+	}
+	// A worker label: one or two letters, some digits, then a separator.
+	if m := workerLabelRe.FindString(trimmed); m != "" {
+		return strings.TrimSpace(trimmed[len(m):])
+	}
+	return trimmed
+}
+
+// workerLabelRe matches a leading "W1:", "W12 -", "S3 —" style tag.
+var workerLabelRe = regexp.MustCompile(`^[A-Za-z]{1,2}[0-9]{1,3}\s*[:.)\-\x{2014}]\s*`)
+
 // shortTaskName condenses a task briefing into a 1-2 word agent name: the first
 // significant word (usually the verb) plus the next non-filler word, so a member
 // reads as e.g. "Explore repository" instead of the full one-line briefing.
+func hasNameLetter(token string) bool {
+	for _, r := range token {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return true
+		}
+	}
+	return false
+}
+
 func shortTaskName(task string) string {
 	task = strings.TrimSpace(task)
 	if task == "" {
@@ -828,7 +921,10 @@ func shortTaskName(task string) string {
 	picked := make([]string, 0, 2)
 	for _, w := range strings.Fields(task) {
 		clean := strings.Trim(w, ".,:;!?\"'`()[]{}")
-		if clean == "" {
+		// A token that is ALL punctuation ("+", "&", "->") is not a word: it left
+		// "CLI + report" reading as "CLI +". Skip it rather than spend a name
+		// slot on it.
+		if clean == "" || !hasNameLetter(clean) {
 			continue
 		}
 		if len(picked) > 0 && nameFillerWords[strings.ToLower(clean)] {

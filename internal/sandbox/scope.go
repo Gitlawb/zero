@@ -94,6 +94,27 @@ func (s *Scope) ReadRoots() []string {
 	return dedupeScopeRoots(roots)
 }
 
+// ExtraReadRoots returns every path the run may READ BEYOND its workspace — the
+// write grants AND the read-only grants, deduped, as a copy. It is ReadRoots()
+// without the workspace root.
+//
+// It exists for the same caller ExtraRoots() does: a child agent dispatched into
+// its own workspace, which the parent must be able to hand its beyond-workspace
+// access without also handing back the parent workspace root (see ExtraRoots).
+// ExtraRoots() alone is not enough for that child, because a read grant from
+// request_permissions lands in readRoots, not extraRoots — so a child given only
+// ExtraRoots() can read what the parent may WRITE beyond its workspace but not
+// what it was granted to READ, and a read-only audit of a granted path fails
+// "outside the workspace" for want of exactly this list.
+func (s *Scope) ExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
+	roots = append(roots, s.extraRoots...)
+	roots = append(roots, s.readRoots...)
+	return dedupeScopeRoots(roots)
+}
+
 // Add grants write access under path. The path must be an existing directory;
 // it is home-expanded, made absolute, and symlink-resolved before being
 // trusted, and the filesystem root is rejected outright. Adding a path already

@@ -51,6 +51,31 @@ func TestAChildIsLaunchedWithTheRunsExtraRoots(t *testing.T) {
 	}
 }
 
+// A READ GRANT REACHES THE CHILD AS --add-read-dir, NEVER --add-dir. Routing a
+// path the parent may only READ through the write flag would make it writable in
+// the child — a read grant escalated to write. This is the launch-side half of
+// the anti-escalation guarantee (the scope-side half is in internal/sandbox).
+func TestAReadOnlyRootIsLaunchedAsReadNotWrite(t *testing.T) {
+	executor := Executor{
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+	}
+	built, err := executor.BuildArgs(BuildArgsInput{
+		Manifest:      Manifest{Metadata: Metadata{Name: "explorer"}},
+		Prompt:        "audit the repo",
+		Cwd:           "/Users/kratos/zero-p7-demo",
+		ReadOnlyRoots: []string{"/Users/kratos/dev/zero"},
+	})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if !argsContainPair(built.Args, "--add-read-dir", "/Users/kratos/dev/zero") {
+		t.Fatalf("the read grant never reached the child as --add-read-dir:\n%s", strings.Join(built.Args, " "))
+	}
+	if argsContainPair(built.Args, "--add-dir", "/Users/kratos/dev/zero") {
+		t.Fatalf("the read grant was emitted as --add-dir (write) — a read grant escalated to write:\n%s", strings.Join(built.Args, " "))
+	}
+}
+
 // READ AT LAUNCH, NOT AT WIRING. The case this exists for is a permission
 // granted MID-SESSION; a value captured when the tool was registered would miss
 // exactly that, which is the staleness that made model discovery probe the

@@ -286,6 +286,31 @@ func TestTheRouterIsToldToUseTheWholeRangeNotJustTheEnds(t *testing.T) {
 	}
 }
 
+// The router is shown each model's SIZE when the id names one, so it can match a
+// light model to a scan and a heavy one to a judgement rather than infer
+// capability from list position alone. A cloud id that names no size gets no
+// invented label.
+func TestRouterPromptShowsModelSizeWhenNamed(t *testing.T) {
+	candidates := []DiscoveredModel{
+		{ID: "gpt-oss:20b"},
+		{ID: "qwen3.5:397b", Reasoning: true},
+		{ID: "gpt-4o"}, // cloud: no size in the id
+	}
+	prompt := routerPrompt(routerTasks(), candidates, "")
+	if !strings.Contains(prompt, "gpt-oss:20b [20B]") {
+		t.Errorf("the router prompt did not label the 20B model:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "qwen3.5:397b [397B]") {
+		t.Errorf("the router prompt did not label the 397B model:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "gpt-4o [") {
+		t.Errorf("the router prompt invented a size for a cloud model:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "least to most capable") {
+		t.Errorf("the candidate header no longer states capability order:\n%s", prompt)
+	}
+}
+
 // The operator's own words must reach the router, and must ADD to the built-in
 // guidance rather than replace it.
 //

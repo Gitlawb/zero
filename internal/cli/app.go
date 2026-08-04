@@ -756,6 +756,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil, planProgress,
 		orchestrateWiring{
 			DiscoverModels: planModelDiscoverer(workspaceRoot, resolved.Provider),
+			// Sizes each task's dependency briefing to the window of the model
+			// that will READ it. Wired here because only this side knows the
+			// provider profile and the session's own model.
+			ContextWindows: planContextWindows(resolved.Provider, resolved.Provider.Model),
 			// The LIVE scope, not a snapshot of it. A request_permissions grant
 			// lands mid-session and must reach the children dispatched after it.
 			// ExtraRoots, not Roots: this is what the run holds BEYOND its
@@ -767,8 +771,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// allowed with the reason "workspace write is allowed", because by
 			// then it genuinely was inside the child's write roots.
 			ExtraWriteRoots: scope.ExtraRoots,
-			ProbeModel:      planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
-			ModelPrefs:      planModelPreferences(resolved.Profiles.PlanModels),
+			// The read counterpart: a request_permissions READ grant lands in the
+			// scope's readRoots, which ExtraRoots (write grants) does not return, so
+			// without this a plan auditing a granted path failed "outside the
+			// workspace" in every task. LIVE scope, read at dispatch, same as above.
+			ExtraReadRoots: scope.ExtraReadRoots,
+			ProbeModel:     planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
+			ModelPrefs:     planModelPreferences(resolved.Profiles.PlanModels),
 			// Off unless the user's own config asks for it: on by default would
 			// refuse a plan for everyone whose phrasing does not happen to match.
 			RequirePlanKeyword: resolved.Profiles.RequirePlanKeyword,
@@ -940,6 +949,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
 		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
+		KeepFinishedAgents:   resolved.Preferences.KeepsFinishedAgents(),
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
 		ProbeProviderHealth:  deps.probeProviderHealth,
@@ -1198,10 +1208,19 @@ type orchestrateWiring struct {
 	Gate *specialist.PostureGate
 	// PlanContext supplies the run-invariant state a plan task inherits.
 	PlanContext specialist.PlanTaskContext
+	// ContextWindows sizes a task's dependency briefing to the model that will
+	// read it. nil keeps the fixed caps.
+	ContextWindows specialist.ContextWindowFunc
 	// ExtraWriteRoots reports the run's non-workspace roots at LAUNCH time, so a
 	// child's sandbox covers the same ground its parent's does. nil means the
 	// workspace only, which is what every child got before this existed.
 	ExtraWriteRoots func() []string
+	// ExtraReadRoots reports the paths the run may READ beyond its workspace — its
+	// request_permissions grants — at DISPATCH time, so a plan's tasks can read a
+	// granted external path instead of failing "outside the workspace". The read
+	// counterpart of ExtraWriteRoots: a read grant lands in a separate scope list
+	// that ExtraWriteRoots does not cover. nil means workspace-only reads.
+	ExtraReadRoots func() []string
 	// ProbeModel proves a model will actually run before any task is assigned it.
 	// nil skips proving, which is what every plan did before this existed.
 	ProbeModel specialist.ModelProber
@@ -1326,6 +1345,8 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		Launch:             wiring.Launch,
 		Isolate:            wiring.Isolate,
 		DiscoverModels:     wiring.DiscoverModels,
+		ContextWindows:     wiring.ContextWindows,
+		ExtraReadRoots:     wiring.ExtraReadRoots,
 		ProbeModel:         wiring.ProbeModel,
 		ModelPrefs:         wiring.ModelPrefs,
 	})

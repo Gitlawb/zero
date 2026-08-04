@@ -11,12 +11,22 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 )
 
-// ZeroMaxing Phase 2: plan capture, executed SEQUENTIALLY.
+// ZeroMaxing plan capture: a validated dependency graph, executed CONCURRENTLY.
 //
-// The deliverable is DATA. A plan declares a dependency graph, Zero runs it in
-// topological order one task at a time, and records how long each task took. If
-// the recorded max_speedup says fan-out would not have paid for itself, Phase 3
-// is not built — see PlanReport.MaxSpeedup.
+// A plan declares a dependency graph and the executor runs it in topological
+// order, up to budget.max_workers tasks at a time (maxPlanWorkers = 16). Tasks
+// may be granted write tools by name, in which case the plan runs in an isolated
+// git worktree — see RequiresIsolation and resolvePlanWorkspace.
+//
+// THE MEASUREMENT SURVIVED THE GATE IT WAS BUILT FOR. This header used to read
+// "executed SEQUENTIALLY … one task at a time … if the recorded max_speedup says
+// fan-out would not have paid for itself, Phase 3 is not built". That was a
+// genuine evidence gate, and it was PASSED: a five-task diamond measured 40.0s
+// at one worker against 27.0s at four (4643666), so concurrency was built —
+// the gate did its job and opened. PlanReport.MaxSpeedup is still
+// recorded and still reported — the number that justified fan-out is the same
+// number that now says whether any given plan was worth fanning out — but it is
+// no longer deciding whether to build it.
 //
 // Fan-out, pipeline and phase are ONE structure: fan-out is tasks with no
 // dependencies, a pipeline is a chain, a phase is a label plus a barrier. The
