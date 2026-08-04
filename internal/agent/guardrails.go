@@ -354,6 +354,11 @@ type toolFailureOutcome struct {
 	InjectHint bool
 	Stop       bool
 	Count      int
+	// Varied reports that the stop came from the content-blind bound, i.e. Count
+	// failures with DIFFERENT errors rather than the same one repeated. The final
+	// answer says so, because "failed 12 times with the same error" would be a
+	// plainly false description of a tool that failed 12 different ways.
+	Varied bool
 }
 
 // errorSignature normalizes a tool error to a short, comparable signature so
@@ -379,9 +384,13 @@ func toolFailureHint(toolName, schemaJSON, errOutput string) string {
 
 // toolFailureStopAnswer is the final answer when the repeated-failure guard halts
 // a run.
-func toolFailureStopAnswer(toolName string, count int) string {
+func toolFailureStopAnswer(toolName string, count int, varied bool) string {
+	cause := " times in a row with the same error, "
+	if varied {
+		cause = " times in a row, each with a different error, "
+	}
 	return "Agent stopped: the `" + toolName + "` tool failed " + strconv.Itoa(count) +
-		" times in a row with the same error, so I halted instead of looping further. " +
+		cause + "so I halted instead of looping further. " +
 		"Please check the request or adjust the tool arguments."
 }
 
@@ -493,7 +502,12 @@ func newGuardState() *guardState {
 // observeToolResult tracks repeated identical failures of a tool. A successful
 // result clears that tool's failure streak. Returns whether to inject a one-shot
 // corrective hint and/or stop the run.
-func (state *guardState) observeToolResult(name string, failed bool, output string, denial DenialCategory) toolFailureOutcome {
+// hintable is separate from failed on purpose. A categorized denial MUST count
+// toward the streaks — that is the whole point of keying on the category — but a
+// schema hint is the wrong response to a policy refusal: the call shape is fine,
+// the answer was no. Collapsing the two is what made the earlier version of this
+// fix a no-op, since the caller could only pass a flag that excluded denials.
+func (state *guardState) observeToolResult(name string, failed bool, hintable bool, output string, denial DenialCategory) toolFailureOutcome {
 	if state.toolFailures == nil {
 		state.toolFailures = map[string]*toolFailureRecord{}
 	}
@@ -507,7 +521,7 @@ func (state *guardState) observeToolResult(name string, failed bool, output stri
 	// let a denied tool loop indefinitely under a halt set to 6. The category is
 	// a small closed enum the loop already sets on the result.
 	sig := errorSignature(output)
-	if denial != "" {
+	if denial != DenialNone {
 		sig = "denial:" + string(denial)
 	}
 	record := state.toolFailures[name]
@@ -527,11 +541,20 @@ func (state *guardState) observeToolResult(name string, failed bool, output stri
 	record.anyErrorCount++
 
 	outcome := toolFailureOutcome{Count: record.count}
-	if record.count >= toolFailureStopAt || record.anyErrorCount >= toolFailureAnyErrorStopAt {
+	switch {
+	case record.count >= toolFailureStopAt:
 		outcome.Stop = true
 		return outcome
+	case record.anyErrorCount >= toolFailureAnyErrorStopAt:
+		// Report the counter that actually tripped. record.count is the
+		// same-signature streak and is often 1 here, which would describe a tool
+		// that failed a dozen different ways as having failed once.
+		outcome.Stop = true
+		outcome.Count = record.anyErrorCount
+		outcome.Varied = true
+		return outcome
 	}
-	if record.count >= toolFailureHintAt && !record.hintShown {
+	if hintable && record.count >= toolFailureHintAt && !record.hintShown {
 		record.hintShown = true
 		outcome.InjectHint = true
 	}

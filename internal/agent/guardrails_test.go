@@ -191,7 +191,7 @@ func TestUnknownExecSessionProbingTripsFailureHalt(t *testing.T) {
 	var state guardState
 	var stoppedAt int
 	for i := 1; i <= toolFailureStopAt; i++ {
-		out := state.observeToolResult(tools.WriteStdinToolName, true, tools.UnknownExecSessionError(i), "")
+		out := state.observeToolResult(tools.WriteStdinToolName, true, true, tools.UnknownExecSessionError(i), "")
 		if out.Stop {
 			stoppedAt = i
 			break
@@ -222,7 +222,7 @@ func TestPermissionDenialStreakSurvivesVaryingReasonText(t *testing.T) {
 		// different path every time.
 		output := "Error: Permission denied for write_file: cannot write " +
 			filepath.Join("C:", "ws", "pkg", "file"+strconv.Itoa(i)+".go")
-		out := state.observeToolResult("write_file", true, output, DenialPermissionDenied)
+		out := state.observeToolResult("write_file", true, true, output, DenialPermissionDenied)
 		if out.Stop {
 			stoppedAt = i
 			break
@@ -245,7 +245,7 @@ func TestToolFailingWithDifferentErrorsEveryTimeStillStops(t *testing.T) {
 	var state guardState
 	stoppedAt := 0
 	for i := 1; i <= toolFailureAnyErrorStopAt; i++ {
-		out := state.observeToolResult("bash", true, "distinct failure "+strconv.Itoa(i), "")
+		out := state.observeToolResult("bash", true, true, "distinct failure "+strconv.Itoa(i), "")
 		if out.Stop {
 			stoppedAt = i
 			break
@@ -262,17 +262,17 @@ func TestToolFailingWithDifferentErrorsEveryTimeStillStops(t *testing.T) {
 func TestSuccessResetsBothFailureCounters(t *testing.T) {
 	var state guardState
 	for i := 1; i < toolFailureAnyErrorStopAt; i++ {
-		if out := state.observeToolResult("bash", true, "distinct failure "+strconv.Itoa(i), ""); out.Stop {
+		if out := state.observeToolResult("bash", true, true, "distinct failure "+strconv.Itoa(i), ""); out.Stop {
 			t.Fatalf("stopped at %d before the success that should reset it", i)
 		}
 	}
-	state.observeToolResult("bash", false, "ok", "")
+	state.observeToolResult("bash", false, false, "ok", "")
 
 	// Same again from zero. Reaching the bound a second time proves the counter
 	// restarted rather than merely paused.
 	stoppedAt := 0
 	for i := 1; i <= toolFailureAnyErrorStopAt; i++ {
-		if out := state.observeToolResult("bash", true, "later failure "+strconv.Itoa(i), ""); out.Stop {
+		if out := state.observeToolResult("bash", true, true, "later failure "+strconv.Itoa(i), ""); out.Stop {
 			stoppedAt = i
 			break
 		}
@@ -294,8 +294,8 @@ func TestAnotherToolSucceedingDoesNotClearAFailingToolsStreak(t *testing.T) {
 	var state guardState
 	stoppedAt := 0
 	for i := 1; i <= toolFailureStopAt; i++ {
-		state.observeToolResult("read_file", false, "ok", "")
-		out := state.observeToolResult("write_file", true,
+		state.observeToolResult("read_file", false, false, "ok", "")
+		out := state.observeToolResult("write_file", true, false,
 			"Error: Permission denied for write_file: "+strconv.Itoa(i), DenialPermissionDenied)
 		if out.Stop {
 			stoppedAt = i
@@ -304,6 +304,118 @@ func TestAnotherToolSucceedingDoesNotClearAFailingToolsStreak(t *testing.T) {
 	}
 	if stoppedAt != toolFailureStopAt {
 		t.Fatalf("denials interleaved with another tool's successes stopped at %d, want %d", stoppedAt, toolFailureStopAt)
+	}
+}
+
+// alwaysPromptingTool is never allowed to run: it exists so a Run-level test can
+// drive real permission denials through the loop.
+type alwaysPromptingTool struct{ ran int }
+
+func (tool *alwaysPromptingTool) Name() string        { return "bash" }
+func (tool *alwaysPromptingTool) Description() string { return "test shell tool" }
+func (tool *alwaysPromptingTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type:                 "object",
+		Properties:           map[string]tools.PropertySchema{"command": {Type: "string"}},
+		Required:             []string{"command"},
+		AdditionalProperties: false,
+	}
+}
+func (tool *alwaysPromptingTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
+}
+func (tool *alwaysPromptingTool) Run(context.Context, map[string]any) tools.Result {
+	tool.ran++
+	return tools.Result{Status: tools.StatusOK, Output: "should never run"}
+}
+
+// The regression for the gap this whole change existed to close, driven through
+// Run rather than through the guard helper.
+//
+// The first version of this fix was a no-op in production and every one of its
+// unit tests passed, because they called observeToolResult directly with
+// failed=true. The loop passes isRetriableToolError, which returns false for a
+// categorized denial, so the guard took its success branch and deleted the
+// record before it could key on the category. A denied tool still looped to the
+// turn limit.
+//
+// This drives the real path: a tool that always prompts, an approver that always
+// denies, and a different command each turn so the denial REASON — and therefore
+// the error text — varies exactly as it does in a real run.
+func TestRunStopsARepeatedlyDeniedToolAtTheFailureBound(t *testing.T) {
+	tool := &alwaysPromptingTool{}
+	registry := tools.NewRegistry()
+	registry.Register(tool)
+
+	// Comfortably more turns than the bound, so reaching the bound is what stops
+	// the run rather than exhausting the provider or MaxTurns.
+	turns := make([][]zeroruntime.StreamEvent, 0, toolFailureStopAt+4)
+	for i := range toolFailureStopAt + 4 {
+		turns = append(turns, toolTurn("call-"+strconv.Itoa(i), "bash",
+			`{"command":"touch /etc/file`+strconv.Itoa(i)+`"}`))
+	}
+	provider := &mockProvider{turns: turns}
+
+	denials := 0
+	result, err := Run(context.Background(), "do the thing", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		MaxTurns:       len(turns) + 5,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			denials++
+			// The varying half. In production this is the refused path or command;
+			// here it is the command, which lands in the denial message the guard
+			// used to key on.
+			return PermissionDecision{
+				Action: PermissionDecisionDeny,
+				Reason: "refused " + request.ToolName + " call " + strconv.Itoa(denials),
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if denials != toolFailureStopAt {
+		t.Errorf("the run made %d denied calls, want it halted at %d", denials, toolFailureStopAt)
+	}
+	if tool.ran != 0 {
+		t.Errorf("the denied tool executed %d times; the denial must precede execution", tool.ran)
+	}
+	want := toolFailureStopAnswer("bash", toolFailureStopAt, false)
+	if result.FinalAnswer != want {
+		t.Errorf("final answer =\n  %q\nwant\n  %q", result.FinalAnswer, want)
+	}
+}
+
+// The stop message must describe the bound that actually tripped. When the
+// content-blind counter is what halts the run, the same-signature streak is
+// usually 1, and reporting that would tell the user a tool failed once after it
+// failed a dozen different ways.
+func TestVariedFailureStopAnswerReportsTheRightCounter(t *testing.T) {
+	var state guardState
+	var outcome toolFailureOutcome
+	for i := 1; i <= toolFailureAnyErrorStopAt; i++ {
+		outcome = state.observeToolResult("bash", true, true, "distinct failure "+strconv.Itoa(i), "")
+		if outcome.Stop {
+			break
+		}
+	}
+	if !outcome.Stop {
+		t.Fatal("never stopped")
+	}
+	if !outcome.Varied {
+		t.Error("Varied = false for a stop driven by the content-blind counter")
+	}
+	if outcome.Count != toolFailureAnyErrorStopAt {
+		t.Errorf("Count = %d, want the counter that tripped (%d)", outcome.Count, toolFailureAnyErrorStopAt)
+	}
+	answer := toolFailureStopAnswer("bash", outcome.Count, outcome.Varied)
+	if !strings.Contains(answer, "each with a different error") {
+		t.Errorf("stop answer describes the wrong cause: %q", answer)
+	}
+	if strings.Contains(answer, "with the same error") {
+		t.Errorf("stop answer claims a same-error loop after distinct failures: %q", answer)
 	}
 }
 
