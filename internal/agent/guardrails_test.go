@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -189,7 +191,7 @@ func TestUnknownExecSessionProbingTripsFailureHalt(t *testing.T) {
 	var state guardState
 	var stoppedAt int
 	for i := 1; i <= toolFailureStopAt; i++ {
-		out := state.observeToolResult(tools.WriteStdinToolName, true, tools.UnknownExecSessionError(i))
+		out := state.observeToolResult(tools.WriteStdinToolName, true, tools.UnknownExecSessionError(i), "")
 		if out.Stop {
 			stoppedAt = i
 			break
@@ -197,6 +199,111 @@ func TestUnknownExecSessionProbingTripsFailureHalt(t *testing.T) {
 	}
 	if stoppedAt != toolFailureStopAt {
 		t.Fatalf("probing distinct unknown ids stopped at %d, want %d", stoppedAt, toolFailureStopAt)
+	}
+}
+
+// A permission denial repeats forever when the streak is keyed on the error
+// TEXT, because the denial message embeds the path or command that varies per
+// call.
+//
+// Observed, not theorised: a headless run made 384 denied calls over 26 minutes
+// without tripping a halt that stops at 6. Every denial carried the same typed
+// category and a different reason string, so errorSignature differed each time
+// and the record was rebuilt at count 1 on every call.
+//
+// TestUnknownExecSessionErrorSignatureIsIDInvariant fixed one message this way.
+// Keying on the category fixes the class, without needing every future denial
+// message to remember to be invariant.
+func TestPermissionDenialStreakSurvivesVaryingReasonText(t *testing.T) {
+	var state guardState
+	stoppedAt := 0
+	for i := 1; i <= toolFailureStopAt; i++ {
+		// The shape the loop actually produces: same tool, same category, a
+		// different path every time.
+		output := "Error: Permission denied for write_file: cannot write " +
+			filepath.Join("C:", "ws", "pkg", "file"+strconv.Itoa(i)+".go")
+		out := state.observeToolResult("write_file", true, output, DenialPermissionDenied)
+		if out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureStopAt {
+		t.Fatalf("denials with varying reason text stopped at %d, want %d", stoppedAt, toolFailureStopAt)
+	}
+}
+
+// The content-blind bound. A tool failing over and over with genuinely
+// DIFFERENT errors and no denial category is still a tool that is not working,
+// and the same-signature streak can never see it.
+//
+// Bounded well above toolFailureStopAt on purpose: a model iterating on a
+// tricky edit legitimately fails a few times with different errors while it
+// converges, and cutting that short is the regression
+// TestSuccessResetsBothFailureCounters guards.
+func TestToolFailingWithDifferentErrorsEveryTimeStillStops(t *testing.T) {
+	var state guardState
+	stoppedAt := 0
+	for i := 1; i <= toolFailureAnyErrorStopAt; i++ {
+		out := state.observeToolResult("bash", true, "distinct failure "+strconv.Itoa(i), "")
+		if out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureAnyErrorStopAt {
+		t.Fatalf("a tool failing with a new error each call stopped at %d, want %d", stoppedAt, toolFailureAnyErrorStopAt)
+	}
+}
+
+// Neither counter may outlive a success, or a long run that fails occasionally
+// and recovers would eventually halt for no reason. This is the property that
+// keeps the content-blind bound safe to add.
+func TestSuccessResetsBothFailureCounters(t *testing.T) {
+	var state guardState
+	for i := 1; i < toolFailureAnyErrorStopAt; i++ {
+		if out := state.observeToolResult("bash", true, "distinct failure "+strconv.Itoa(i), ""); out.Stop {
+			t.Fatalf("stopped at %d before the success that should reset it", i)
+		}
+	}
+	state.observeToolResult("bash", false, "ok", "")
+
+	// Same again from zero. Reaching the bound a second time proves the counter
+	// restarted rather than merely paused.
+	stoppedAt := 0
+	for i := 1; i <= toolFailureAnyErrorStopAt; i++ {
+		if out := state.observeToolResult("bash", true, "later failure "+strconv.Itoa(i), ""); out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureAnyErrorStopAt {
+		t.Fatalf("after a success the tool stopped at %d, want a full fresh %d", stoppedAt, toolFailureAnyErrorStopAt)
+	}
+}
+
+// Records are keyed per tool, so ANOTHER tool succeeding in between must not
+// clear the failing tool's streak.
+//
+// This is the realistic shape of the run that motivated the fix: the model kept
+// making progress elsewhere — reading files, updating its plan — while one tool
+// was refused over and over. A reset keyed on "something succeeded" rather than
+// "this tool succeeded" would make the halt unreachable in exactly the runs that
+// need it.
+func TestAnotherToolSucceedingDoesNotClearAFailingToolsStreak(t *testing.T) {
+	var state guardState
+	stoppedAt := 0
+	for i := 1; i <= toolFailureStopAt; i++ {
+		state.observeToolResult("read_file", false, "ok", "")
+		out := state.observeToolResult("write_file", true,
+			"Error: Permission denied for write_file: "+strconv.Itoa(i), DenialPermissionDenied)
+		if out.Stop {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != toolFailureStopAt {
+		t.Fatalf("denials interleaved with another tool's successes stopped at %d, want %d", stoppedAt, toolFailureStopAt)
 	}
 }
 
