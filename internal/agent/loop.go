@@ -743,7 +743,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
+			// A categorized denial is NOT retriable — retrying it verbatim is
+			// pointless — but it is still a failure the streaks must count, or a
+			// refused tool loops until the turn limit. Passing retriableFailure for
+			// both is what let that happen: observeToolResult took its success
+			// branch and deleted the record before it could key on the category.
+			countedFailure := retriableFailure || toolResult.DenialReason != DenialNone
+			outcome := guards.observeToolResult(call.Name, countedFailure, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
 			posture.observeToolOutcome(outcome, toolResult)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
@@ -754,7 +760,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Varied)
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
