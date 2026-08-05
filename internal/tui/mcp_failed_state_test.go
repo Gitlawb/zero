@@ -185,3 +185,42 @@ func TestMCPFailureReasonIsLengthCapped(t *testing.T) {
 		}
 	}
 }
+
+// The display cap alone cannot stop the walk: escape sequences are consumed
+// without producing any visible output, so a server can spend unbounded input
+// against a budget that never fills. Only a bound on the raw input ends it, and
+// the panel re-renders this string on every redraw.
+func TestMCPFailureReasonBoundsRawInput(t *testing.T) {
+	raw := strings.Repeat("\x1b[2J", maxMCPReasonRawLen) + "TAIL"
+	got := sanitizeTerminalReason(raw)
+	if strings.Contains(got, "TAIL") {
+		t.Fatalf("sanitizeTerminalReason walked past the raw bound and reached byte %d: %q", len(raw)-4, got)
+	}
+	if got != "" {
+		t.Fatalf("sanitizeTerminalReason(escape sequences only) = %q, want it to render nothing", got)
+	}
+}
+
+// Cutting the raw input must not leave half of a multi-byte character behind:
+// the panel would show a replacement character it invented itself. Escape
+// sequences render as nothing, so they carry the cut far past what the display
+// cap would have removed and leave the split character as the visible tail.
+func TestMCPFailureReasonRawBoundKeepsRunesWhole(t *testing.T) {
+	const invisible = "\x1b[2J"
+	// The last character starts two bytes before the bound, so the cut keeps two
+	// of its three bytes.
+	prefix := strings.Repeat(invisible, (maxMCPReasonRawLen-2)/len(invisible))
+	prefix += strings.Repeat("a", maxMCPReasonRawLen-2-len(prefix))
+	raw := prefix + "\u203a"
+	if len(raw) <= maxMCPReasonRawLen {
+		t.Fatalf("test setup: raw input is %d bytes, it must straddle the %d byte bound", len(raw), maxMCPReasonRawLen)
+	}
+
+	got := sanitizeTerminalReason(raw)
+	if strings.ContainsRune(got, '\ufffd') {
+		t.Fatalf("the raw bound split a rune: %q", got)
+	}
+	if got != "aa" {
+		t.Fatalf("sanitizeTerminalReason(...) = %q, want the whole characters before the cut", got)
+	}
+}
