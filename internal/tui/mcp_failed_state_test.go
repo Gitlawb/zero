@@ -137,3 +137,51 @@ func TestModelMCPPanelReportsStartupFailures(t *testing.T) {
 		t.Errorf("/mcp panel did not carry the startup failure through:\n%s", panel)
 	}
 }
+
+// The failure reason is the one string on this panel an MCP server writes
+// itself, and it lands in a terminal. redaction.ErrorMessage removes
+// credentials, not control bytes, so a hostile handshake error can clear the
+// screen, move the cursor, or forge a row that looks like another server.
+//
+// Payload is anandh8x's from the #835 review: an escape sequence and a newline
+// carrying a line shaped exactly like a real entry.
+func TestMCPFailureReasonCannotInjectTerminalControl(t *testing.T) {
+	hostile := "connection refused\x1b[2J\n\u203a forged \u00b7 enabled"
+	lines := mcpManagerServerLines([]MCPServerView{
+		{Name: "evil", Transport: "http", State: "failed", Error: hostile},
+	})
+
+	joined := strings.Join(lines, "\n")
+	if strings.ContainsRune(joined, '\x1b') {
+		t.Errorf("escape byte survived into the rendered panel:\n%q", joined)
+	}
+	for _, line := range lines {
+		if strings.ContainsAny(line, "\r\n") {
+			t.Errorf("a rendered line carries its own newline, so it occupies rows the panel did not count:\n%q", line)
+		}
+	}
+	// The forged text may appear as inert characters, but never as its own row:
+	// that is what makes it read as a second server.
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "\u203a forged") {
+			t.Errorf("hostile reason forged a server row: %q", line)
+		}
+	}
+	// The real reason must still reach the user; sanitizing must not blank it.
+	if !strings.Contains(joined, "connection refused") {
+		t.Errorf("the actual failure reason was lost:\n%q", joined)
+	}
+}
+
+// A server that returns megabytes of error text must not push the rest of the
+// panel off screen.
+func TestMCPFailureReasonIsLengthCapped(t *testing.T) {
+	lines := mcpManagerServerLines([]MCPServerView{
+		{Name: "verbose", Transport: "http", State: "failed", Error: strings.Repeat("x", 5000)},
+	})
+	for _, line := range lines {
+		if len(line) > 512 {
+			t.Errorf("rendered line is %d bytes, want it capped", len(line))
+		}
+	}
+}
