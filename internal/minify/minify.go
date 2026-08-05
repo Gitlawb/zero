@@ -16,6 +16,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/printer"
+	"go/scanner"
 	"go/token"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,40 @@ func Fragment(path string, content []byte) Result {
 		}
 	}
 	return Result{Content: minifyGeneric(content), Language: "text", Applied: false}
+}
+
+// ContextualFragment minifies a bounded fragment after checking its starting
+// position against the complete source. A Go range that begins inside a string
+// or comment must remain verbatim apart from whitespace normalization: parsing
+// that fragment by itself would mistake literal text for Go syntax.
+func ContextualFragment(path string, source, content []byte, startOffset int) Result {
+	if strings.EqualFold(filepath.Ext(path), ".go") && goFragmentStartsInsideToken(source, startOffset) {
+		return Result{Content: minifyGeneric(content), Language: "text", Applied: false}
+	}
+	return Fragment(path, content)
+}
+
+func goFragmentStartsInsideToken(source []byte, startOffset int) bool {
+	if startOffset <= 0 || startOffset >= len(source) {
+		return false
+	}
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(source))
+	var lexer scanner.Scanner
+	lexer.Init(file, source, nil, scanner.ScanComments)
+	for {
+		position, kind, literal := lexer.Scan()
+		if kind == token.EOF {
+			return false
+		}
+		if kind != token.STRING && kind != token.COMMENT {
+			continue
+		}
+		start := file.Offset(position)
+		if startOffset > start && startOffset < start+len(literal) {
+			return true
+		}
+	}
 }
 
 // minifyGoFragment handles bounded reads that do not contain a package clause.

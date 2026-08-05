@@ -35,9 +35,11 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path":   {Type: "string", Description: "Path of the file to read."},
-					"offset": {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
-					"limit":  {Type: "integer", Description: "Optional maximum number of source lines to return.", Minimum: intPtr(1)},
+					"path":        {Type: "string", Description: "Path of the file to read."},
+					"offset":      {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
+					"limit":       {Type: "integer", Description: "Optional number of source lines to return.", Minimum: intPtr(1)},
+					"byte_offset": {Type: "integer", Description: "Optional zero-based byte offset for exact reads of files with very long lines.", Minimum: intPtr(0)},
+					"byte_limit":  {Type: "integer", Description: "Optional byte count for an exact byte read; use with byte_offset.", Minimum: intPtr(1), Maximum: intPtr(readFileByteChunkMax)},
 				},
 				Required:             []string{"path"},
 				AdditionalProperties: false,
@@ -66,36 +68,43 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
-	startLine, err := intArg(args, "offset", 1, 1, 0)
-	if err != nil {
-		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-	}
-	maxLines, err := intArg(args, "limit", 0, 1, 0)
-	if err != nil {
-		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-	}
 	_, hasOffset := args["offset"]
 	_, hasLimit := args["limit"]
-	hasCanonicalRange := hasOffset || hasLimit
-	endLine := 0
-	if !hasCanonicalRange {
-		startLine, err = intArg(args, "start_line", 1, 1, 0)
-		if err != nil {
-			return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-		}
-		endLine, err = intArg(args, "end_line", 0, 1, 0)
-		if err != nil {
-			return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-		}
-		maxLines, err = intArg(args, "max_lines", 0, 1, 0)
-		if err != nil {
-			return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-		}
-	}
 	_, hasStartLine := args["start_line"]
 	_, hasEndLine := args["end_line"]
 	_, hasMaxLines := args["max_lines"]
-	hasLineRange := hasCanonicalRange || hasStartLine || hasEndLine || hasMaxLines
+	if hasOffset && hasStartLine {
+		return errorResult("Error: Invalid arguments for read_file: use either offset or start_line, not both")
+	}
+	if hasLimit && (hasEndLine || hasMaxLines) {
+		return errorResult("Error: Invalid arguments for read_file: use limit instead of end_line or max_lines, not both")
+	}
+
+	startKey := "offset"
+	if !hasOffset && hasStartLine {
+		startKey = "start_line"
+	}
+	startLine, err := intArg(args, startKey, 1, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+	}
+	limit, err := intArg(args, "limit", 0, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+	}
+	endLine, err := intArg(args, "end_line", 0, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+	}
+	maxLines, err := intArg(args, "max_lines", 0, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+	}
+	if hasLimit {
+		const maxInt = int(^uint(0) >> 1)
+		endLine = startLine + min(limit-1, maxInt-startLine)
+	}
+	hasLineRange := hasOffset || hasLimit || hasStartLine || hasEndLine || hasMaxLines
 	_, hasByteOffset := args["byte_offset"]
 	_, hasByteLimit := args["byte_limit"]
 	byteMode := (hasByteOffset || hasByteLimit) && !hasLineRange

@@ -107,6 +107,43 @@ func TestReadMinifiedFileRangesPreserveUnknownLexicalContext(t *testing.T) {
 	}
 }
 
+func TestReadMinifiedFileRangeInsideGoRawStringIsConservative(t *testing.T) {
+	dir := t.TempDir()
+	src := "package demo\nvar value = `first\nSECRET-MARKER-ONE\n// literal line\nlast`\n"
+	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+		"path": "f.go", "offset": 3, "limit": 2,
+	})
+	if res.Status != StatusOK || res.Meta["compacted"] != "false" {
+		t.Fatalf("raw-string range must use conservative normalization: status=%s meta=%#v\n%s", res.Status, res.Meta, res.Output)
+	}
+	for _, want := range []string{"SECRET-MARKER-ONE", "// literal line"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("raw-string range lost or rewrote %q:\n%s", want, res.Output)
+		}
+	}
+	if strings.Contains(res.Output, "SECRET - MARKER - ONE") {
+		t.Fatalf("raw-string contents were parsed as Go code:\n%s", res.Output)
+	}
+}
+
+func TestReadMinifiedFileCanonicalOffsetPastEnd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte("package demo\nvar value = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+		"path": "f.go", "offset": 10,
+	})
+	if res.Status != StatusOK || !strings.Contains(res.Output, "offset 10 is past the end") {
+		t.Fatalf("expected canonical out-of-range response, got status=%s output=%q", res.Status, res.Output)
+	}
+}
+
 func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "large.txt"), []byte(strings.Repeat("0123456789abcdef\n", 9000)), 0o644); err != nil {

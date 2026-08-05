@@ -51,6 +51,9 @@ func TestReadFileToolReadsCanonicalLineRange(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
 	}
+	if result.Truncated {
+		t.Fatalf("canonical limit defines the requested range and must not mark it truncated: %#v", result.Meta)
+	}
 	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
 		t.Fatalf("canonical range returned the wrong lines: %q", result.Output)
 	}
@@ -96,14 +99,33 @@ func TestReadFileToolMixedLegacyRangesPreferLines(t *testing.T) {
 	}
 }
 
+func TestReadFileToolCombinesLegacyStartWithCanonicalLimit(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\ngamma\ndelta")
+
+	result := NewScopedReadFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "notes.txt", "start_line": 2, "limit": 2,
+	})
+
+	if result.Status != StatusOK || result.Truncated {
+		t.Fatalf("mixed compatible range should be exact, got status=%s truncated=%v: %s", result.Status, result.Truncated, result.Output)
+	}
+	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+		t.Fatalf("mixed compatible range returned the wrong lines: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
+		t.Fatalf("mixed compatible range leaked outside requested slice: %q", result.Output)
+	}
+}
+
 func TestFileToolSchemasExposeOnlyCanonicalArguments(t *testing.T) {
 	readProperties := NewScopedReadFileTool(t.TempDir(), nil).Parameters().Properties
-	for _, want := range []string{"path", "offset", "limit"} {
+	for _, want := range []string{"path", "offset", "limit", "byte_offset", "byte_limit"} {
 		if _, ok := readProperties[want]; !ok {
 			t.Fatalf("read_file schema missing %q", want)
 		}
 	}
-	for _, legacy := range []string{"start_line", "end_line", "max_lines", "byte_offset", "byte_limit"} {
+	for _, legacy := range []string{"start_line", "end_line", "max_lines"} {
 		if _, ok := readProperties[legacy]; ok {
 			t.Fatalf("read_file schema must not expose legacy argument %q", legacy)
 		}

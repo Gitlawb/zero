@@ -85,15 +85,18 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	options.FileTracker.Record(absolutePath, content, info)
 
 	selected := selectSourceLines(content, offset, limit)
-	ranged := offset > 1 || limit > 0
-	result := minify.File(relativePath, selected)
-	if ranged {
-		result = minify.Fragment(relativePath, selected)
+	if selected.pastEnd {
+		return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, offset, selected.totalLines))
 	}
-	rawLines := lineCount(string(selected))
+	ranged := offset > 1 || limit > 0
+	result := minify.File(relativePath, selected.content)
+	if ranged {
+		result = minify.ContextualFragment(relativePath, content, selected.content, selected.startByte)
+	}
+	rawLines := lineCount(string(selected.content))
 	minLines := lineCount(result.Content)
 	pct := 0
-	if rawBytes := len(selected); rawBytes > 0 {
+	if rawBytes := len(selected.content); rawBytes > 0 {
 		if saved := rawBytes - len(result.Content); saved > 0 {
 			pct = saved * 100 / rawBytes
 		}
@@ -111,7 +114,7 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 			relativePath, rawLines, minLines)
 	}
 
-	rawBytes := len(selected)
+	rawBytes := len(selected.content)
 	compactBytes := len(result.Content)
 	savedTokens := 0
 	if savedBytes := rawBytes - compactBytes; savedBytes > 0 {
@@ -135,20 +138,47 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 	return toolResult
 }
 
-func selectSourceLines(content []byte, offset, limit int) []byte {
+type sourceSelection struct {
+	content    []byte
+	startByte  int
+	totalLines int
+	pastEnd    bool
+}
+
+func selectSourceLines(content []byte, offset, limit int) sourceSelection {
 	if offset <= 1 && limit == 0 {
-		return content
+		return sourceSelection{content: content, totalLines: sourceLineCount(content)}
 	}
 	lines := strings.Split(string(content), "\n")
+	totalLines := sourceLineCount(content)
 	start := offset - 1
-	if start > len(lines) {
-		start = len(lines)
+	if start >= totalLines {
+		return sourceSelection{startByte: len(content), totalLines: totalLines, pastEnd: true}
 	}
-	end := len(lines)
+	startByte := 0
+	for index := 0; index < start; index++ {
+		startByte += len(lines[index]) + 1
+	}
+	end := totalLines
 	if limit > 0 && start+limit < end {
 		end = start + limit
 	}
-	return []byte(strings.Join(lines[start:end], "\n"))
+	return sourceSelection{
+		content:    []byte(strings.Join(lines[start:end], "\n")),
+		startByte:  startByte,
+		totalLines: totalLines,
+	}
+}
+
+func sourceLineCount(content []byte) int {
+	if len(content) == 0 {
+		return 1
+	}
+	lines := strings.Count(string(content), "\n")
+	if content[len(content)-1] != '\n' {
+		lines++
+	}
+	return lines
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string
