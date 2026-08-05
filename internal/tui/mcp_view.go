@@ -159,7 +159,7 @@ func mcpManagerServerLines(servers []MCPServerView) []string {
 		// line, because "failed" on its own sends the reader to check their
 		// config when the answer is usually in the error: a missing binary, a
 		// refused connection, a bad token.
-		if reason := strings.TrimSpace(server.Error); reason != "" {
+		if reason := sanitizeTerminalReason(server.Error); reason != "" {
 			lines = append(lines, "  "+reason)
 		}
 		if target := strings.TrimSpace(server.Target); target != "" {
@@ -170,6 +170,74 @@ func mcpManagerServerLines(servers []MCPServerView) []string {
 		}
 	}
 	return lines
+}
+
+// maxMCPReasonLen bounds the failure reason so one verbose server cannot push
+// the rest of the panel off screen.
+const maxMCPReasonLen = 400
+
+// sanitizeTerminalReason turns a server-authored string into one safe terminal
+// line.
+//
+// The failure reason is the only value on this panel that the MCP server writes
+// itself, and it goes straight to a terminal. redaction.ErrorMessage removes
+// credentials, not control bytes, so without this a hostile handshake error can
+// clear the screen, reposition the cursor, or embed a newline followed by text
+// shaped like a real entry and forge a row for a server that does not exist.
+//
+// Escape sequences are consumed whole rather than dropping ESC alone: removing
+// the ESC and leaving "[2J" behind would print visible junk, and an abandoned
+// OSC payload can still smuggle a title-set or a hyperlink.
+func sanitizeTerminalReason(value string) string {
+	var out strings.Builder
+	runes := []rune(value)
+	for index := 0; index < len(runes); index++ {
+		current := runes[index]
+		if current == 0x1b {
+			index++
+			if index >= len(runes) {
+				break
+			}
+			switch runes[index] {
+			case '[': // CSI: parameters, then a final byte in @ to ~
+				index++
+				for index < len(runes) && (runes[index] < '@' || runes[index] > '~') {
+					index++
+				}
+			case ']': // OSC: runs until BEL or ST
+				index++
+				for index < len(runes) {
+					if runes[index] == 0x07 {
+						break
+					}
+					if runes[index] == 0x1b && index+1 < len(runes) && runes[index+1] == '\\' {
+						index++
+						break
+					}
+					index++
+				}
+			}
+			continue
+		}
+		// Newlines and tabs become spaces so the reason stays on the single row
+		// the panel counted for it. Every other control byte is dropped: none
+		// carries a display meaning worth preserving here.
+		if current == '\n' || current == '\r' || current == '\t' {
+			out.WriteRune(' ')
+			continue
+		}
+		if current < 0x20 || current == 0x7f || (current >= 0x80 && current <= 0x9f) {
+			continue
+		}
+		out.WriteRune(current)
+	}
+	// Fields also collapses the runs of spaces the substitutions above create.
+	collapsed := strings.Join(strings.Fields(out.String()), " ")
+	if trimmed := []rune(collapsed); len(trimmed) > maxMCPReasonLen {
+		// Truncate by rune so a multi-byte character is never cut in half.
+		collapsed = string(trimmed[:maxMCPReasonLen]) + "..."
+	}
+	return collapsed
 }
 
 func mcpToolLines(tools []MCPToolView) []string {
