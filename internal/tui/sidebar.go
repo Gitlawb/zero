@@ -278,9 +278,9 @@ func (m model) sidebarAgentHeader(width int) string {
 		}
 	}
 	if count == "" {
-		return sidebarHeader("AGENTS", width)
+		return m.postureHeader("AGENTS", width)
 	}
-	return sidebarHeaderWithCount("AGENTS", count, zeroTheme.muted, width)
+	return m.postureHeaderWithCount("AGENTS", count, zeroTheme.muted, width)
 }
 
 // swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
@@ -1019,13 +1019,22 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, fileLines...)
 	}
 
+	// MODELS section: the live mix of models the fleet runs on (models_panel.go).
+	// Absent until an agent runs on a known model, so a plain session's layout is
+	// untouched. Below FILES for the same click-offset reason: nothing hit-tested
+	// sits beneath it.
+	if modelLines := m.sidebarModelLines(width); len(modelLines) > 0 {
+		add("")
+		lines = append(lines, modelLines...)
+	}
+
 	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
 	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
 	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
 	// rather than letting the end-truncation eat into the plan. Absent when empty.
 	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
 		add("")
-		add(sidebarHeader("ACTIVITY", width))
+		add(m.postureHeader("ACTIVITY", width))
 		lines = append(lines, activityLines...)
 	}
 	// PREFLIGHT: what auto-assignment is doing before a plan exists. Rendered
@@ -1130,7 +1139,12 @@ func sidebarHeader(label string, _ int) string {
 // count (e.g. "PLAN   2/5") rendered in countStyle, so a section can colour its
 // count by state — accent while in-flight, green when complete.
 func sidebarHeaderWithCount(label, count string, countStyle lipgloss.Style, width int) string {
-	left := zeroTheme.muted.Bold(true).Render(strings.ToUpper(label))
+	return sidebarHeaderAlign(zeroTheme.muted.Bold(true).Render(strings.ToUpper(label)), count, countStyle, width)
+}
+
+// sidebarHeaderAlign right-aligns a rendered count beside an already-rendered
+// label — the shared core of the plain and posture-painted header variants.
+func sidebarHeaderAlign(left, count string, countStyle lipgloss.Style, width int) string {
 	right := countStyle.Render(count)
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -1156,10 +1170,10 @@ func (m model) sidebarPlanHeader(width int) string {
 			} else if done == len(orchestrate.tasks) {
 				style = zeroTheme.green
 			}
-			return sidebarHeaderWithCount("PLAN",
+			return m.postureHeaderWithCount("PLAN",
 				fmt.Sprintf("%d/%d", done, len(orchestrate.tasks)), style, width)
 		}
-		return sidebarHeader("PLAN", width)
+		return m.postureHeader("PLAN", width)
 	}
 	total := len(state.steps)
 	done := 0
@@ -1173,7 +1187,7 @@ func (m model) sidebarPlanHeader(width int) string {
 	if done == total {
 		countStyle = zeroTheme.green
 	}
-	return sidebarHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), countStyle, width)
+	return m.postureHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), countStyle, width)
 }
 
 // sidebarPlanLines renders the plan step list for the sidebar using the same
@@ -1203,7 +1217,15 @@ func (m model) updatePlanStepLines(width int) []string {
 		return nil
 	}
 	room := maxInt(4, width-3)
-	lines := make([]string, 0, len(state.steps))
+	lines := make([]string, 0, len(state.steps)+1)
+	// The zeromaxing bar, when the posture wears one — INSIDE this list, so
+	// everything measured off this renderer (sidebarOrchestrateSelectables'
+	// prefix math) stays correct without a hand-written correction term.
+	// sidebarPlanSelectables carries the one remaining correction, beside its
+	// own base formula.
+	if bar := m.todoPlanBar(width); bar != "" {
+		lines = append(lines, bar)
+	}
 	for _, step := range state.steps {
 		var icon, body string
 		switch step.status {
@@ -1398,15 +1420,24 @@ func (m model) sidebarTokenText() string {
 // to their column widths and to the same row count first, so every joined row
 // is exactly chatWidth + 1 + sidebarWidth cells and the columns stay aligned.
 func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
-	rows := len(chat)
-	if len(sidebar) > rows {
-		rows = len(sidebar)
-	}
 	// A cell of air on each side of the rule (" │ ") so the columns don't butt
 	// flush against it. The chat side gets its gutter from the leading space; the
 	// sidebar side from the trailing space (plus items' own leading inset, which
 	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
-	divider := " " + zeroTheme.line.Render("│") + " "
+	return joinColumnsWith(chat, sidebar, chatW, sidebarW, func(int, int) string {
+		return " " + zeroTheme.line.Render("│") + " "
+	})
+}
+
+// joinColumnsWith is joinColumns with a caller-supplied divider painter, so a
+// skin can colour the rule per row (the zeromaxing rail) without this function
+// knowing about postures. The painter receives (row, rows) and must return the
+// same three cells every plain divider renders.
+func joinColumnsWith(chat []string, sidebar []string, chatW, sidebarW int, divider func(row, rows int) string) []string {
+	rows := len(chat)
+	if len(sidebar) > rows {
+		rows = len(sidebar)
+	}
 	out := make([]string, rows)
 	for i := 0; i < rows; i++ {
 		left := ""
@@ -1419,7 +1450,7 @@ func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string 
 		}
 		left = padStyledLine(left, chatW)
 		right = padStyledLine(right, sidebarW)
-		out[i] = left + divider + right
+		out[i] = left + divider(i, rows) + right
 	}
 	return out
 }

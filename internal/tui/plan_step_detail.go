@@ -113,6 +113,11 @@ func (m model) sidebarPlanSelectables(width int) []planStepHit {
 		agentBody = 1 // the "no agents spawned" placeholder occupies one line
 	}
 	base := 1 + agentBody + 2 // AGENTS header + body + (blank line + PLAN header)
+	if m.todoPlanBar(width) != "" {
+		// The zeromaxing bar renders as the checklist's first line; the step
+		// rows sit one below it.
+		base++
+	}
 	hits := make([]planStepHit, 0, len(m.plan.steps))
 	for i := range m.plan.steps {
 		if offset := base + i; m.sidebarRowOnScreen(offset) {

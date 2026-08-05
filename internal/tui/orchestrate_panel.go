@@ -172,6 +172,20 @@ func (s *orchestratePanelState) markStarted(taskID, summary, cardKey, model stri
 	}
 }
 
+// cancelRunning marks every still-running task cancelled. Called when the USER
+// cancels the run: the children are killed by the run context, so a task left
+// orchestrateRunning would spin in the sidebar forever over a process that no
+// longer exists. Cancelled, not failed — the user stopping a run is not a
+// defect (the same distinction sidebarOrchestrateStyle already draws).
+func (s *orchestratePanelState) cancelRunning(now time.Time) {
+	for index := range s.tasks {
+		if s.tasks[index].status == orchestrateRunning {
+			s.tasks[index].status = orchestrateCancelled
+			s.tasks[index].endedAt = now
+		}
+	}
+}
+
 // linkCard repoints a task at its child's real session id, so the detail pane
 // keeps finding it after the tracker reconciles the temporary key.
 func (s *orchestratePanelState) linkCard(taskID, cardKey string) {
@@ -672,6 +686,31 @@ func (s orchestratePanelState) dependents(taskID string) []string {
 // Proportional to the COLUMN, not to a fixed width — a 26-cell sidebar and a
 // 40-cell one both get a bar that fills their space.
 func sidebarProgressBar(state orchestratePanelState, width int) string {
+	return sidebarProgressBarWith(state, width, progressBarSkin{
+		settled: "█",
+		running: "▓",
+		pending: func(_, n, _ int) string {
+			return zeroTheme.faint.Render(strings.Repeat("░", n))
+		},
+	})
+}
+
+// progressBarSkin is the glyph-and-track dress a progress bar renders in. The
+// plain skin above is the historical bar byte-for-byte; the zeromaxing skin
+// (posturePlanProgressBar) swaps the language, never the layout or the counts.
+type progressBarSkin struct {
+	settled string
+	running string
+	// pending renders the unfilled track: (startCell, cellCount, totalCells).
+	pending func(startCell, n, cells int) string
+	// paint, when non-nil, renders a filled segment instead of the semantic
+	// block colours — (kind, startCell, cellCount, totalCells) with kind one of
+	// "done", "failed", "skipped", "running". nil keeps the historical styles,
+	// which is what makes the plain bar byte-identical.
+	paint func(kind string, startCell, n, cells int) string
+}
+
+func sidebarProgressBarWith(state orchestratePanelState, width int, skin progressBarSkin) string {
 	total := len(state.tasks)
 	if total == 0 || width < 12 {
 		return ""
@@ -695,13 +734,14 @@ func sidebarProgressBar(state orchestratePanelState, width int) string {
 	// the settled blocks and the pending track, and cannot be misread as either.
 	segments := []struct {
 		count int
+		kind  string
 		mark  string
 		style lipgloss.Style
 	}{
-		{done, "█", zeroTheme.green},
-		{failed, "█", zeroTheme.red},
-		{skipped + cancelled, "█", zeroTheme.muted},
-		{running, "▓", zeroTheme.accent},
+		{done, "done", skin.settled, zeroTheme.green},
+		{failed, "failed", skin.settled, zeroTheme.red},
+		{skipped + cancelled, "skipped", skin.settled, zeroTheme.muted},
+		{running, "running", skin.running, zeroTheme.accent},
 	}
 
 	var b strings.Builder
@@ -714,11 +754,15 @@ func sidebarProgressBar(state orchestratePanelState, width int) string {
 		if n <= 0 {
 			continue
 		}
-		b.WriteString(segment.style.Render(strings.Repeat(segment.mark, n)))
+		if skin.paint != nil {
+			b.WriteString(skin.paint(segment.kind, used, n, cells))
+		} else {
+			b.WriteString(segment.style.Render(strings.Repeat(segment.mark, n)))
+		}
 		used += n
 	}
 	if used < cells {
-		b.WriteString(zeroTheme.faint.Render(strings.Repeat("░", cells-used)))
+		b.WriteString(skin.pending(used, cells-used, cells))
 	}
 	return " " + b.String() + zeroTheme.faint.Render(fmt.Sprintf(" %d/%d", done, total))
 }

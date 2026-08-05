@@ -4596,18 +4596,20 @@ func (m model) composerBox(width int) string {
 	rightPad := strings.Repeat(" ", reserved)
 
 	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, m.postureComposerTop(width))
+	// postureComposerTop draws the box within boxWidth (#887 reserves the rest for
+	// the pet); rightPad holds those reserved columns.
+	rendered = append(rendered, m.postureComposerTop(boxWidth)+rightPad)
 	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
 	// instead of as a separate row above the box.
 	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
 		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true))
+		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 	}
 	for _, line := range lines {
 		fitted := fitStyledLine(line, innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true))
+		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 	}
 	rendered = append(rendered, m.composerDividerLine(width))
 	return strings.Join(rendered, "\n")

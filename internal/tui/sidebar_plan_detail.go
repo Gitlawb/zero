@@ -161,7 +161,7 @@ func (m model) sidebarPlanDetailLines(width, budget int) []string {
 
 	lines := []string{
 		"",
-		sidebarHeaderWithCount("TASK", task.id, orchestrateStatusStyle(task.status), width),
+		m.postureHeaderWithCount("TASK", task.id, orchestrateStatusStyle(task.status), width),
 	}
 
 	head := task.status.label()
@@ -298,5 +298,5 @@ func (m model) orchestratePlanBar(width int) string {
 	if m.orchestrate.isEmpty() || m.orchestrate.sidebarCollapsed {
 		return ""
 	}
-	return sidebarProgressBar(m.orchestrate, width)
+	return m.posturePlanProgressBar(m.orchestrate, width)
 }

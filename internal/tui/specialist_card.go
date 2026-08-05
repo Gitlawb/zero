@@ -101,6 +101,22 @@ func (t *specialistTracker) complete(childSessionID string, status specialistSta
 	}
 }
 
+// cancelRunning marks every still-running specialist cancelled. Called when
+// the USER cancels the run: the children die with the run context, so a row
+// left specialistRunning would keep its spinner, its ticking clock and its
+// "live" mark in MODELS over a process that no longer exists. The current-tool
+// line is cleared for the same reason — nothing is running it.
+func (t *specialistTracker) cancelRunning(now time.Time) {
+	for index := range t.specialists {
+		if t.specialists[index].status == specialistRunning {
+			t.specialists[index].status = specialistCancelled
+			t.specialists[index].completedAt = now
+			t.specialists[index].currentTool = ""
+			t.specialists[index].currentDetail = ""
+		}
+	}
+}
+
 // incrementToolCount bumps the tool-call counter for the specialist with
 // childSessionID. Unknown specialists are ignored.
 // setTokens records a child's token spend against its card. Plan tasks know
