@@ -1208,36 +1208,27 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 		return "", "", false, err
 	}
 	if !isDefault {
-		requireNewRemoteBranch := false
-		if deps.isGeneratedBranch != nil && deps.isGeneratedBranch(ctx, workspaceRoot, currentBranch) {
-			// Keep the zero-value lease unless this exact <remote>/<branch>
-			// relationship was recorded by a successful push -u. Inherited
-			// origin/main (autoSetupMerge=inherit) and a push to a different
-			// remote both leave the lease in place.
-			//
-			// Local upstream config alone is not a remote nonexistence proof:
-			// git push -u can publish the branch and still fail to write
-			// .git/config. When local config is missing or wrong, probe the
-			// remote before reasserting --force-with-lease=<branch>:.
-			targetRemote := firstNonEmptyString(requestedRemote, remote)
-			publishedRef := targetRemote + "/" + currentBranch
-			upstreamRef := ""
-			if deps.branchUpstreamRef != nil {
-				upstreamRef = deps.branchUpstreamRef(ctx, workspaceRoot, currentBranch)
-			}
-			if upstreamRef == publishedRef {
-				requireNewRemoteBranch = false
-			} else if deps.remoteHasBranch != nil {
-				exists, existsErr := deps.remoteHasBranch(ctx, workspaceRoot, targetRemote, currentBranch)
-				if existsErr != nil {
-					return "", "", false, fmt.Errorf("cannot check whether %s already exists on remote %s: %w", currentBranch, targetRemote, existsErr)
-				}
-				requireNewRemoteBranch = !exists
-			} else {
-				requireNewRemoteBranch = true
-			}
+		// Whether this push needs the nonexistence lease is decided by one
+		// live check against the destination remote, not by inference from
+		// local git state (upstream config, a generated-branch marker):
+		// every local signal that stood in for that check turned out to be
+		// wrong in some ordering (inherited config from checkout -b, a
+		// config write that failed after a successful push, a push aimed at
+		// a different remote than the one local config describes). A branch
+		// missing on the remote gets the nonexistence lease, protecting a
+		// concurrent creator of the same name; a branch already there gets a
+		// plain push, and git's own fast-forward check is the safety net —
+		// if the remote history isn't ours, the push fails with a clear
+		// non-fast-forward error instead of an attempted silent recovery.
+		if deps.remoteHasBranch == nil {
+			return currentBranch, remote, true, nil
 		}
-		return currentBranch, remote, requireNewRemoteBranch, nil
+		targetRemote := firstNonEmptyString(requestedRemote, remote)
+		exists, existsErr := deps.remoteHasBranch(ctx, workspaceRoot, targetRemote, currentBranch)
+		if existsErr != nil {
+			return "", "", false, fmt.Errorf("cannot check whether %s already exists on remote %s: %w", currentBranch, targetRemote, existsErr)
+		}
+		return currentBranch, remote, !exists, nil
 	}
 
 	// CreateBranch and Push publish commits only. A dirty working tree would
@@ -1343,14 +1334,6 @@ func ensureFeatureBranch(ctx context.Context, stdout io.Writer, jsonMode bool, w
 	result, err := deps.createBranch(ctx, zerogit.BranchOptions{Cwd: workspaceRoot, Name: name, Remote: remote})
 	if err != nil {
 		return "", "", false, fmt.Errorf("failed to create branch: %w", err)
-	}
-	if deps.markGeneratedBranch != nil {
-		if err := deps.markGeneratedBranch(ctx, workspaceRoot, result.Branch); err != nil {
-			if deps.deleteBranch != nil {
-				_ = deps.deleteBranch(ctx, workspaceRoot, currentBranch, result.Branch)
-			}
-			return "", "", false, fmt.Errorf("failed to mark generated branch: %w", err)
-		}
 	}
 	// The normal flow commits on the default branch first, then creates the
 	// feature branch at the same HEAD. Without moving the original default

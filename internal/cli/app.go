@@ -105,8 +105,6 @@ type appDeps struct {
 	currentGitBranch       func(context.Context, string) string
 	deleteBranch           func(context.Context, string, string, string) error
 	resetBranchRef         func(context.Context, string, string, string) error
-	markGeneratedBranch    func(context.Context, string, string) error
-	isGeneratedBranch      func(context.Context, string, string) bool
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
@@ -251,12 +249,6 @@ func defaultAppDeps() appDeps {
 		},
 		resetBranchRef: func(ctx context.Context, cwd, branch, newTip string) error {
 			return zerogit.ResetBranchRef(ctx, cwd, branch, newTip, nil)
-		},
-		markGeneratedBranch: func(ctx context.Context, cwd, branch string) error {
-			return zerogit.MarkGeneratedBranch(ctx, cwd, branch, nil)
-		},
-		isGeneratedBranch: func(ctx context.Context, cwd, branch string) bool {
-			return zerogit.IsGeneratedBranch(ctx, cwd, branch, nil)
 		},
 		runTUI:      tui.Run,
 		runEditor:   openEditor,
@@ -660,16 +652,6 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	// deleteBranch and resetBranchRef stay nil when unset so unit tests that
 	// mock createBranch without a real git tree do not hit real restore/delete.
-	if deps.markGeneratedBranch == nil {
-		if deps.createBranch != nil {
-			deps.markGeneratedBranch = func(context.Context, string, string) error { return nil }
-		} else {
-			deps.markGeneratedBranch = defaults.markGeneratedBranch
-		}
-	}
-	if deps.isGeneratedBranch == nil {
-		deps.isGeneratedBranch = defaults.isGeneratedBranch
-	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
 	}
