@@ -160,7 +160,7 @@ func selectSourceLines(content []byte, offset, limit int) sourceSelection {
 		startByte += len(lines[index]) + 1
 	}
 	end := totalLines
-	if limit > 0 && start+limit < end {
+	if limit > 0 && limit < end-start {
 		end = start + limit
 	}
 	return sourceSelection{

@@ -144,6 +144,24 @@ func TestReadMinifiedFileCanonicalOffsetPastEnd(t *testing.T) {
 	}
 }
 
+func TestReadMinifiedFileMaximumLimitDoesNotOverflow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const maxInt = int(^uint(0) >> 1)
+
+	res := NewScopedReadMinifiedFileTool(dir, nil).Run(context.Background(), map[string]any{
+		"path": "notes.txt", "offset": 2, "limit": maxInt,
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("maximum limit should return the remaining range without panicking: status=%s output=%q", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "beta") || !strings.Contains(res.Output, "gamma") || strings.Contains(res.Output, "alpha") {
+		t.Fatalf("maximum limit returned the wrong range: %q", res.Output)
+	}
+}
+
 func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "large.txt"), []byte(strings.Repeat("0123456789abcdef\n", 9000)), 0o644); err != nil {
