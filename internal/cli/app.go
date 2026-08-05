@@ -1297,6 +1297,16 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		// outside its workspace could create and populate it, then watch every
 		// plan task be refused at that same directory.
 		ExtraWriteRoots: wiring.ExtraWriteRoots,
+		// So a delegated Task that names no model is routed to a role-appropriate
+		// pin under the zeromaxing posture, the same way a plan task is. Off unless
+		// the posture is active and auto-assign is configured. The discoverer is
+		// the same one the plan tool uses: a pin fires only when the provider's
+		// own listing carries it, so a stale pin after a provider switch degrades
+		// to inherit instead of a child dead at spawn.
+		ModelPrefs:     wiring.ModelPrefs,
+		PostureActive:  wiring.Gate.Active,
+		DiscoverModels: wiring.DiscoverModels,
+		ServeCache:     &specialist.ModelServeCache{},
 	}
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {

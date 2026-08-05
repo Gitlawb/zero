@@ -57,13 +57,19 @@ func TestATaskModelReachesTheChildsArgv(t *testing.T) {
 // the parent's effort only when NO model is named, so a Task naming a model
 // would otherwise lose the raised zeromaxing effort. applyTaskModel forwards it.
 func TestATaskModelStillForwardsTheParentEffort(t *testing.T) {
+	// A CURATED model: the child can clamp a forwarded effort only for models
+	// the registry knows. This test originally named kimi-k2.6 — uncurated —
+	// and so pinned in the exact behaviour that killed real spawns: the raised
+	// zeromaxing effort forwarded verbatim to a provider that rejects the
+	// parameter. Effort now forwards only where the registry can vouch
+	// (TestEffortIsNotForwardedToUncuratedTaskModels holds the other side).
 	var manifest Manifest
 	manifest.Metadata.Name = "worker"
-	if err := applyTaskModel(&manifest, "kimi-k2.6", "high"); err != nil {
+	if err := applyTaskModel(&manifest, "claude-sonnet-4.5", "high"); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Metadata.Model != "kimi-k2.6" {
-		t.Fatalf("model = %q, want kimi-k2.6", manifest.Metadata.Model)
+	if manifest.Metadata.Model != "claude-sonnet-4.5" {
+		t.Fatalf("model = %q, want claude-sonnet-4.5", manifest.Metadata.Model)
 	}
 	if manifest.Metadata.ReasoningEffort != "high" {
 		t.Fatalf("naming a model dropped the parent effort: got %q, want high", manifest.Metadata.ReasoningEffort)

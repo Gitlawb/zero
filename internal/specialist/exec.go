@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -76,6 +78,75 @@ type Executor struct {
 	// holds; a child still cannot ask for more, and the sandbox it builds is its
 	// own.
 	ExtraWriteRoots func() []string
+	// ModelPrefs carries the user's per-role model pins and the auto-assign
+	// default. A Task that names no model can then be routed to a role-appropriate
+	// pin — exactly as the same work would be inside a plan — instead of always
+	// inheriting the parent's model. The zero value assigns nothing.
+	ModelPrefs ModelPreferences
+	// PostureActive reports the zeromaxing gate, read at every spawn because the
+	// posture can flip mid-session — a captured bool would carry the value the run
+	// started with. Per-task model auto-assignment is off unless this returns true
+	// AND ModelPrefs.AutoAssign is configured, so a posture-off spawn never
+	// consults a pin and is byte-identical to before this existed. nil is off.
+	PostureActive func() bool
+	// DiscoverModels lists what the active provider can serve, for checking a
+	// role pin before it is applied to a spawn. A pin the provider does not
+	// serve is not a pin, it is a leftover — applied blind, three real children
+	// died at spawn with `"not-found": The model kimi-k2.6 does not exist`
+	// because the session had moved to xai while the pins named Ollama models.
+	// nil disables auto-assignment entirely (the honest default for a headless
+	// executor), exactly as it does on the plan tool.
+	DiscoverModels ModelDiscoverer
+	// ServeCache memoizes DiscoverModels for a short window, shared across the
+	// copies of this value-typed Executor. Per-spawn discovery would add a
+	// provider round-trip to every delegation in a fan-out; a short TTL keeps
+	// that to one. Safe across a mid-session provider switch because the
+	// session-model guard in autoTaskModel rejects a list the current session's
+	// model is not on, whether the list is stale or fresh. nil discovers on
+	// every call.
+	ServeCache *ModelServeCache
+}
+
+// ModelServeCache memoizes one provider model listing for a short window.
+type ModelServeCache struct {
+	mu     sync.Mutex
+	at     time.Time
+	served map[string]bool
+	valid  bool
+}
+
+// modelServeCacheTTL bounds staleness. Short: a pin check is advisory routing,
+// and two minutes is long enough to cover a five-agent fan-out with one probe.
+const modelServeCacheTTL = 2 * time.Minute
+
+// servedModelSet answers "what does the provider serve right now", through the
+// cache when one is wired. ok is false when discovery is unavailable or failed
+// — the caller inherits rather than guessing.
+func (executor Executor) servedModelSet(ctx context.Context) (map[string]bool, bool) {
+	if executor.DiscoverModels == nil {
+		return nil, false
+	}
+	cache := executor.ServeCache
+	if cache != nil {
+		cache.mu.Lock()
+		if cache.valid && time.Since(cache.at) < modelServeCacheTTL {
+			served := cache.served
+			cache.mu.Unlock()
+			return served, true
+		}
+		cache.mu.Unlock()
+	}
+	models, err := executor.DiscoverModels(ctx)
+	if err != nil {
+		return nil, false
+	}
+	served := servedModels(models)
+	if cache != nil {
+		cache.mu.Lock()
+		cache.at, cache.served, cache.valid = time.Now(), served, true
+		cache.mu.Unlock()
+	}
+	return served, true
 }
 
 type BuildArgsInput struct {
@@ -540,7 +611,17 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 	if err != nil {
 		return ExecResult{}, err
 	}
-	if err := applyTaskModel(&manifest, params.Model, options.ParentReasoningEffort); err != nil {
+	// A Task that named no model inherits the parent's — unless the zeromaxing
+	// posture is on and auto-assignment is configured, in which case it is routed
+	// to the pin for its role, just as a plan task would be. An explicit model on
+	// the call always wins, and a specialist that DECLARES its own model keeps it:
+	// autoTaskModel is consulted only when neither the call nor the manifest named
+	// one, so it never overrides a choice already made.
+	requested := params.Model
+	if strings.TrimSpace(requested) == "" && strings.TrimSpace(manifest.Metadata.Model) == "" {
+		requested = executor.autoTaskModel(ctx, manifest, params.Prompt, options.ParentModel)
+	}
+	if err := applyTaskModel(&manifest, requested, options.ParentReasoningEffort); err != nil {
 		return ExecResult{}, err
 	}
 	built, err := executor.BuildArgs(BuildArgsInput{
@@ -615,6 +696,25 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 	}
 	manifest, err := executor.resolveManifest(resumeParams)
 	if err != nil {
+		return ExecResult{}, err
+	}
+	// THE MODEL THE SESSION ACTUALLY RAN ON. BuildResumeArgs falls back to the
+	// parent's model when the manifest names none, so a task launched on an
+	// explicit or auto-assigned model came back from a resume on a different one
+	// — the drift BuildResumeArgsInput's own comment records, reintroduced one
+	// layer up. The child recorded its resolved model in the session store at
+	// launch; prefer it when neither the resume call nor the manifest names one.
+	//
+	// An explicit model on the resume call wins, exactly as on a fresh launch —
+	// it was silently ignored here before, and the two doors must not disagree.
+	// Auto-assignment is deliberately NOT re-run: a resume prompt is a follow-up
+	// ("now verify it"), and re-classifying it would flip a session's model
+	// midway through its own conversation.
+	requested := params.Model
+	if strings.TrimSpace(requested) == "" && strings.TrimSpace(manifest.Metadata.Model) == "" {
+		requested = session.ModelID
+	}
+	if err := applyTaskModel(&manifest, requested, options.ParentReasoningEffort); err != nil {
 		return ExecResult{}, err
 	}
 	built, err := executor.BuildResumeArgs(BuildResumeArgsInput{
@@ -1186,6 +1286,67 @@ func launchBackgroundProcess(binaryPath string, args []string, outputFile string
 // explicitly here keeps it — the child re-clamps against the named model, so
 // forwarding a tier it does not support is safe. A manifest that already names
 // its own effort is left alone.
+// autoTaskModel picks a per-role model for a Task that named none, but only
+// under the zeromaxing posture with auto-assignment configured.
+//
+// It reuses the plan path's own classifier and role pins, so a delegated
+// sub-agent is routed EXACTLY as the same work would be inside a plan: the grant
+// outranks the prose (a write-capable Task is "implement"), and an unclassifiable
+// task, or one whose role has no pin, returns "" and inherits the parent's model.
+//
+// OFF UNLESS ASKED FOR. Both the posture and the configured auto-assign default
+// must be set; otherwise this returns "" before touching the classifier, so a
+// posture-off spawn never reaches resolveTaskModel and stays byte-identical to
+// before this existed. The classifier reads the tools the child will actually
+// hold (resolvedToolAllowlist), and a resolution error there degrades to "" —
+// a routing hint is never worth failing a spawn over.
+func (executor Executor) autoTaskModel(ctx context.Context, manifest Manifest, prompt, parentModel string) string {
+	if executor.PostureActive == nil || !executor.PostureActive() || !executor.ModelPrefs.AutoAssign {
+		return ""
+	}
+	// A PLAN-AUTHORED MANIFEST ALREADY WENT THROUGH ASSIGNMENT. The plan tool
+	// runs the router, the pins, the served-check and the probes, reports every
+	// decision in its notes, and honours a per-plan auto_assign override — so a
+	// plan task arriving here with no model is a DECISION (inherit), not an
+	// absence. Second-guessing it would contradict the plan's own report, defeat
+	// an explicit auto_assign:false, and re-apply a pin the plan level passed
+	// over as not served. Provenance is already on the manifest; derived, never
+	// carried as a second flag.
+	if manifest.FilePath == planManifestFilePath {
+		return ""
+	}
+	granted, err := resolvedToolAllowlist(manifest)
+	if err != nil {
+		return ""
+	}
+	pin := executor.ModelPrefs.pinned(classifyTaskRole(Task{Tools: granted, Prompt: prompt}))
+	if pin == "" {
+		return ""
+	}
+	// PROVED SERVED BEFORE IT IS APPLIED, fail-safe in every other case. The
+	// plan path checks pins against discovery when discovery answers; this path
+	// applied them blind, and a session that had moved to xai spawned three
+	// children onto Ollama pins — each died with `"not-found"`. So the pin fires
+	// only when the provider's own list carries BOTH the pin and the session's
+	// model; the second check is the plan path's provider-mismatch guard, which
+	// catches discovery answering for a different provider than the session is
+	// actually on (including a stale cache across a provider switch). Anything
+	// short of that — no discoverer, a failed listing, a mismatched list — is
+	// an inherit, never a guess: a sub-agent on the session's model is slower
+	// routing; a sub-agent dead at spawn is a failed task.
+	served, ok := executor.servedModelSet(ctx)
+	if !ok || len(served) == 0 {
+		return ""
+	}
+	if parent := strings.TrimSpace(parentModel); parent != "" && !servedContains(served, parent) {
+		return ""
+	}
+	if !servedContains(served, pin) {
+		return ""
+	}
+	return pin
+}
+
 func applyTaskModel(manifest *Manifest, requested, parentEffort string) error {
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
@@ -1196,7 +1357,17 @@ func applyTaskModel(manifest *Manifest, requested, parentEffort string) error {
 		return err
 	}
 	manifest.Metadata.Model = resolved
-	if strings.TrimSpace(manifest.Metadata.ReasoningEffort) == "" {
+	// ONLY FOR MODELS THE REGISTRY CAN VOUCH FOR — the same gate the plan path
+	// applies (planTaskReasoningEffort). The child clamps a forwarded effort
+	// only for models it can look up; for anything else it passes the value to
+	// the provider untouched, and a provider that does not take the parameter
+	// rejects the whole request. Under zeromaxing the parent's effort is always
+	// raised, so forwarding it unconditionally made EVERY Task that named an
+	// uncurated model on such a provider die at spawn — a real orchestrator hit
+	// exactly that, gave up, and ran all five sub-agents on the session's model.
+	// An unknown model runs at the provider's default effort instead, which is
+	// what it did before per-task models existed.
+	if strings.TrimSpace(manifest.Metadata.ReasoningEffort) == "" && modelTakesExplicitEffort(resolved) {
 		manifest.Metadata.ReasoningEffort = strings.TrimSpace(parentEffort)
 	}
 	return nil

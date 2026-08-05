@@ -393,6 +393,11 @@ func planTaskCwd(parentCwd, override string) string {
 // planTaskManifest builds the inline manifest a plan task runs under. The tool
 // list is the ALREADY-INTERSECTED grant ExecutePlan computed, so this cannot
 // widen it — it only carries it.
+// planManifestFilePath marks a manifest authored by the plan path. It is the
+// provenance autoTaskModel keys on: a plan task's model was already decided by
+// the plan tool's own assignment, and must not be re-decided at dispatch.
+const planManifestFilePath = "(plan)"
+
 func planTaskManifest(name, model, reasoningEffort string, grantedTools []string) Manifest {
 	if strings.TrimSpace(name) == "" {
 		name = "explorer"
@@ -435,7 +440,7 @@ func planTaskManifest(name, model, reasoningEffort string, grantedTools []string
 		// reads exactly like the one that looked.
 		SystemPrompt: planTaskSystemPrompt(grantedTools),
 		Location:     LocationBuiltin,
-		FilePath:     "(plan)",
+		FilePath:     planManifestFilePath,
 		// AUTHORITATIVE, not a hint: this is the already-intersected grant, and
 		// an empty one must refuse the child rather than expand to the default
 		// read-only category. ExecutePlan refuses before reaching here, so this
