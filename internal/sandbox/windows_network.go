@@ -119,6 +119,44 @@ func WindowsNetworkPlanCoversPrincipals(plan WindowsNetworkPlan, offlineGroupSID
 	return false
 }
 
+// assertWindowsNetworkPlanCoversOfflineGroup is the post-provisioning check that
+// setup runs before it installs filters and reports success.
+//
+// It fails closed on every answer that is not a definite yes, because the thing
+// it guards is invisible when it goes wrong: filters that do not name the
+// offline group leave every offline principal with an open network on a machine
+// whose setup marker says it is protected. Nobody sees an error, and the sandbox
+// looks correctly installed.
+//
+// Two answers other than "the plan omits the group" also mean the check did not
+// happen and must not be treated as a pass:
+//
+//   - The lookup failed. Whether the group is covered is then unknown, and the
+//     Win32 reason is worth surfacing: an operator seeing "access is denied"
+//     knows to re-run elevated.
+//   - The lookup succeeded and found nothing. ("", nil) means the group does not
+//     exist, which is the ordinary state BEFORE provisioning and an impossible
+//     one after it, so here it means the group vanished or was never created.
+//     WindowsNetworkPlanCoversPrincipals answers true for an empty SID, correctly
+//     for the pre-provisioning callers that ask it, so the emptiness has to be
+//     rejected here rather than delegated to it.
+func assertWindowsNetworkPlanCoversOfflineGroup(plan WindowsNetworkPlan, resolve func() (string, error)) error {
+	if resolve == nil {
+		return errors.New("sandbox offline group resolver is not wired up, so filter coverage cannot be verified")
+	}
+	groupSID, err := resolve()
+	if err != nil {
+		return fmt.Errorf("resolve the sandbox offline group after provisioning, so filter coverage cannot be verified: %w", err)
+	}
+	if strings.TrimSpace(groupSID) == "" {
+		return errors.New("the sandbox offline group does not exist after provisioning, so the block filters would not apply to any sandbox principal")
+	}
+	if !WindowsNetworkPlanCoversPrincipals(plan, groupSID) {
+		return errors.New("network block filters do not name the sandbox offline group, so they would not apply to any sandbox principal; the network plan must be built after principals are provisioned")
+	}
+	return nil
+}
+
 // resolveWindowsSandboxOfflineGroupSIDHook resolves the local group that
 // network-denied principals belong to. It is wired up on Windows only, so this
 // file stays free of Win32 calls and the plan on other platforms is unchanged.
