@@ -513,9 +513,17 @@ var duneDarkPalette = palette{
 	addInk:   "#f0f5d2", // changed-word text — lightened so it still clears AA (4.60:1) against addBgWord's xterm-256 quantized #008700 (the original #bdeed7 fell to 4.06:1); 16-color maps to bright yellow (4.78:1 on ANSI green)
 	delInk:   "#fff0f0", // changed-word text — near-white pink maps to ANSI white so word spans stay AA on maroon under 16-color (prior #f2c4c4 -> bright red at 2.74:1)
 	onAccent: "#000000",
-	cardRun:  "#3399ff", // success blue
-	cardErr:  "#ff6666", // error
-	cardPerm: "#ffcc00", // warning
+	// Status-card borders are non-text UI (WCAG 1.4.11: >=3:1 against panel).
+	// Prior cardRun #3399ff mapped to ANSI bright blue at only 2.44:1 on the
+	// black panel under 16-color. #cceeff (same as blue) maps to bright cyan
+	// and clears 3:1 in truecolor, xterm-256, and ANSI-16.
+	// cardPerm must stay distinguishable from cardErr after ANSI conversion:
+	// #ffcc00 collapsed to the same ANSI red as #ff6666; pure yellow maps to
+	// ANSI yellow so running (cyan) / error (red) / permission (yellow) stay
+	// three distinct roles under 16-color and 256-color.
+	cardRun:  "#cceeff", // running tool border: light sky / ANSI bright cyan
+	cardErr:  "#ff6666", // failed tool border: warm red / ANSI red
+	cardPerm: "#fff200", // permission border: pure yellow / ANSI yellow (was #ffcc00 -> ANSI red)
 }
 
 // themeEntry is one registered theme: Name is the /theme value + ZERO_THEME/--theme

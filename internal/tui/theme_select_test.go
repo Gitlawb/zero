@@ -370,6 +370,22 @@ func TestExtendedThemeContrastInvariants(t *testing.T) {
 		if r := wcagRatio(t, pal.red, pal.delBg); r < 4.5 {
 			t.Errorf("%s: red on delBg contrast %.2f < 4.5", name, r)
 		}
+
+		// Dune Dark status-card borders (running / error / permission) are
+		// non-text UI: WCAG 1.4.11 requires >=3:1 against the panel. cardPerm
+		// also frames filled permission cards, so it must clear 3:1 on permBg.
+		if name == "dune-dark" {
+			for _, pair := range []struct{ name, fg, bg string }{
+				{"cardRun on panel", pal.cardRun, pal.panel},
+				{"cardErr on panel", pal.cardErr, pal.panel},
+				{"cardPerm on panel", pal.cardPerm, pal.panel},
+				{"cardPerm on permBg", pal.cardPerm, pal.permBg},
+			} {
+				if r := wcagRatio(t, pair.fg, pair.bg); r < 3.0 {
+					t.Errorf("%s: %s = %.2f < 3.0", name, pair.name, r)
+				}
+			}
+		}
 	}
 }
 
@@ -527,6 +543,28 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	if r := wcagRatio(t, q(neon.cardErr), q(neon.panel)); r < 3.0 {
 		t.Errorf("neon: cardErr border on panel = %.2f < 3.0 after quantization", r)
 	}
+
+	// Dune Dark: full status-border family after xterm-256 quantization.
+	// Prior cardRun #3399ff was only audited in truecolor/16-color elsewhere;
+	// cardErr/cardPerm were never checked here. Keep running/error/permission
+	// borders distinct so state identity survives quantization.
+	duneDark := palettes["dune-dark"]
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"cardRun on panel", duneDark.cardRun, duneDark.panel},
+		{"cardErr on panel", duneDark.cardErr, duneDark.panel},
+		{"cardPerm on panel", duneDark.cardPerm, duneDark.panel},
+		{"cardPerm on permBg", duneDark.cardPerm, duneDark.permBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 3.0 {
+			t.Errorf("dune-dark: %s = %.2f < 3.0 after xterm-256 quantization (%s on %s)",
+				pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	run256, err256, perm256 := q(duneDark.cardRun), q(duneDark.cardErr), q(duneDark.cardPerm)
+	if run256 == err256 || run256 == perm256 || err256 == perm256 {
+		t.Errorf("dune-dark: status borders collapse under xterm-256: cardRun=%s cardErr=%s cardPerm=%s",
+			run256, err256, perm256)
+	}
 }
 
 // ansi16Hex returns the hex of a color after colorprofile.ANSI conversion —
@@ -608,6 +646,27 @@ func TestDuneDarkANSI16Contrast(t *testing.T) {
 	// only the basic green/maroon pair (not the same ANSI slot).
 	if q(pal.addBg) == q(pal.delBg) {
 		t.Errorf("dune-dark: addBg and delBg collapse to the same ANSI 16-color (%s)", q(pal.addBg))
+	}
+
+	// Status-card borders (running / error / permission): non-text 3:1 against
+	// panel, and cardPerm against permBg. Prior cardRun #3399ff was 2.44:1
+	// after ANSI conversion; prior cardPerm #ffcc00 collapsed to the same
+	// ANSI red as cardErr, losing permission-state identity under 16-color.
+	for _, pair := range []struct{ name, fg, bg string }{
+		{"cardRun on panel", pal.cardRun, pal.panel},
+		{"cardErr on panel", pal.cardErr, pal.panel},
+		{"cardPerm on panel", pal.cardPerm, pal.panel},
+		{"cardPerm on permBg", pal.cardPerm, pal.permBg},
+	} {
+		if r := wcagRatio(t, q(pair.fg), q(pair.bg)); r < 3.0 {
+			t.Errorf("dune-dark: %s = %.2f < 3.0 after ANSI 16-color conversion (%s on %s)",
+				pair.name, r, q(pair.fg), q(pair.bg))
+		}
+	}
+	run16, err16, perm16 := q(pal.cardRun), q(pal.cardErr), q(pal.cardPerm)
+	if run16 == err16 || run16 == perm16 || err16 == perm16 {
+		t.Errorf("dune-dark: status borders collapse under ANSI 16-color: cardRun=%s cardErr=%s cardPerm=%s",
+			run16, err16, perm16)
 	}
 }
 
