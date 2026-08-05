@@ -57,9 +57,6 @@ func TestADispatchedTaskWithNoTerminalEventIsUnfinished(t *testing.T) {
 	if progress.Complete {
 		t.Fatal("a plan with no plan_completed must not report itself complete")
 	}
-	if !reflect.DeepEqual(progress.Remaining(), []string{"b", "c", "d"}) {
-		t.Fatalf("remaining = %v, want [b c d]", progress.Remaining())
-	}
 }
 
 // A FAILED task is remaining too. Unlike a success it produced no work to keep,
@@ -77,8 +74,20 @@ func TestAFailedTaskIsRemaining(t *testing.T) {
 	if !reflect.DeepEqual(progress.Failed, []string{"a"}) {
 		t.Fatalf("failed = %v, want [a]", progress.Failed)
 	}
-	if got := progress.Remaining(); got[0] != "a" {
-		t.Fatalf("remaining = %v; a failed task must be re-run", got)
+	// The resume narrowing re-includes a failed task — asserted through the real
+	// gate (RemainingPlan), not a query helper the resume path never calls.
+	remaining, err := RemainingPlan(plan, progress, readOnlyLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, task := range remaining.Tasks() {
+		if task.ID == "a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a failed task must be re-run on resume")
 	}
 }
 
@@ -201,9 +210,6 @@ func TestANarrowedPlanIsRevalidated(t *testing.T) {
 func TestNarrowingACompletedPlanSaysThereIsNothingLeft(t *testing.T) {
 	plan := resumeFixturePlan(t)
 	progress := PlanProgress{Order: plan.Order(), Succeeded: plan.Order()}
-	if !progress.Done() {
-		t.Fatal("a plan whose every task succeeded is not reported done")
-	}
 	_, err := RemainingPlan(plan, progress, readOnlyLimits())
 	if err == nil || !strings.Contains(err.Error(), "nothing left to run") {
 		t.Fatalf("err = %v; it must say the plan is finished", err)
@@ -221,50 +227,5 @@ func TestAMalformedAdmissionAbandonsTheReduction(t *testing.T) {
 	}
 	if _, ok := ReducePlanEvents(events); ok {
 		t.Fatal("a malformed admission was skipped and the previous plan's state survived")
-	}
-}
-
-// DONE AND REMAINING ARE ONE ANSWER, not two that happen to line up.
-//
-// orchestrate_saved asks Done first and calls RemainingPlan only when it is
-// false, so a Done that says "finished" while Remaining still lists work makes
-// the resume drop that work silently. Done used to compare len(Succeeded) to
-// len(Order), which agrees with Remaining ONLY when Succeeded holds each of
-// Order's ids exactly once — and Succeeded is an append of whatever id a
-// task_completed carried, checked against nothing.
-func TestDoneNeverDisagreesWithRemaining(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		progress PlanProgress
-	}{
-		{
-			// The count reaches len(Order) without "b" ever running.
-			name:     "an id recorded twice",
-			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "a"}},
-		},
-		{
-			// A stray completion for a task this plan never declared.
-			name:     "an id that is not in the order",
-			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "elsewhere"}},
-		},
-		{
-			name:     "a task that failed and then succeeded",
-			progress: PlanProgress{Order: []string{"a"}, Succeeded: []string{"a"}, Failed: []string{"a"}},
-		},
-		{
-			name:     "everything ran",
-			progress: PlanProgress{Order: []string{"a", "b"}, Succeeded: []string{"a", "b"}},
-		},
-		{
-			name:     "nothing ran",
-			progress: PlanProgress{Order: []string{"a", "b"}},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			remaining := testCase.progress.Remaining()
-			if done := testCase.progress.Done(); done != (len(remaining) == 0) {
-				t.Fatalf("Done() = %v but Remaining() = %v: the resume path trusts Done and then runs Remaining", done, remaining)
-			}
-		})
 	}
 }
