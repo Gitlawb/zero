@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type MCPViewState struct {
@@ -176,6 +177,14 @@ func mcpManagerServerLines(servers []MCPServerView) []string {
 // the rest of the panel off screen.
 const maxMCPReasonLen = 400
 
+// maxMCPReasonRawLen bounds the input the sanitizer walks. Nothing upstream caps
+// the handshake error a server hands back, and maxMCPReasonLen alone cannot end
+// the walk: escape sequences are consumed without producing output, so they
+// spend input against a budget that never fills. The bound sits far above the
+// visible cap so a genuinely long error is still truncated by display rules
+// rather than by this.
+const maxMCPReasonRawLen = 16 * 1024
+
 // sanitizeTerminalReason turns a server-authored string into one safe terminal
 // line.
 //
@@ -189,6 +198,18 @@ const maxMCPReasonLen = 400
 // the ESC and leaving "[2J" behind would print visible junk, and an abandoned
 // OSC payload can still smuggle a title-set or a hyperlink.
 func sanitizeTerminalReason(value string) string {
+	if len(value) > maxMCPReasonRawLen {
+		value = value[:maxMCPReasonRawLen]
+		// The cut lands on an arbitrary byte. Drop a rune the bound split so the
+		// panel never shows a replacement character it produced itself.
+		for len(value) > 0 {
+			decoded, width := utf8.DecodeLastRuneInString(value)
+			if decoded != utf8.RuneError || width > 1 {
+				break
+			}
+			value = value[:len(value)-1]
+		}
+	}
 	var out strings.Builder
 	runes := []rune(value)
 	for index := 0; index < len(runes); index++ {
