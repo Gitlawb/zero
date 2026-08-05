@@ -383,16 +383,24 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 		Effort:          m.effortTransition(),
 		SelfCorrect:     m.selfCorrectTransition(),
 	})
+	// THE SAME FACTS, EACH SURFACE'S OWN GRAMMAR. /effort keeps the shared
+	// resolved-state line + the delta sentence; /profile renders key-value rows
+	// with the transition as a clause on the row it qualifies ("raised by the
+	// posture") — the stacked three-renderer card said every fact three times
+	// and was called irritating to its face. What both must still guarantee:
+	// the resolved values, the real delta facts, and exactly one effort
+	// transition claim with no contradictions.
+	resolved := map[string][]string{
+		"/effort":         {"effort: high", "profile: " + execprofile.Name, "turns: 480", "turn budget:", "reasoning effort:", "self-correct:"},
+		"/profile status": {"profile", execprofile.Name, "high", "480", "raised by the posture", "verify"},
+	}
 	for surface, text := range map[string]string{"/effort": effortStatus, "/profile status": profileStatus} {
-		for _, want := range []string{"effort: high", "profile: " + execprofile.Name, "turns: 480"} {
+		for _, want := range resolved[surface] {
 			if !strings.Contains(text, want) {
-				t.Fatalf("%s must show %q in its resolved state line:\n%s", surface, want, text)
+				t.Fatalf("%s must show %q in its resolved state:\n%s", surface, want, text)
 			}
 		}
-		if !strings.Contains(text, "turn budget:") {
-			t.Fatalf("%s must state the real delta:\n%s", surface, text)
-		}
-		for _, want := range []string{"480", "sub-agents", "reasoning effort:", "self-correct:"} {
+		for _, want := range []string{"480", "sub-agents"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s must mention %q:\n%s", surface, want, text)
 			}
@@ -402,27 +410,19 @@ func TestBothStatusSurfacesShowResolvedState(t *testing.T) {
 		if strings.Contains(text, "160") {
 			t.Fatalf("%s must not compare against thorough's budget:\n%s", surface, text)
 		}
-		// (2) EXACTLY ONE effort TRANSITION statement.
-		//
-		// Counted over the delta, not the whole card: /profile legitimately
-		// shows current state ("reasoning effort: high") alongside the delta's
-		// transition ("reasoning effort: raised to high"), and those are
-		// different claims. What must never happen twice is the transition —
-		// that duplication is what let "unchanged" and "NOT raised" coexist.
-		if n := strings.Count(text, delta); n != 1 {
-			t.Fatalf("%s must carry the delta exactly once, found %d:\n%s", surface, n, text)
+		// (2) EXACTLY ONE effort TRANSITION statement, on either surface's
+		// grammar — that duplication is what let "unchanged" and "NOT raised"
+		// coexist.
+		transitions := strings.Count(text, "raised to") + strings.Count(text, "raised by the posture") +
+			strings.Count(text, "NOT raised") + strings.Count(text, "reasoning effort: unchanged")
+		if transitions != 1 {
+			t.Fatalf("%s must carry exactly one effort-transition claim, found %d:\n%s", surface, transitions, text)
 		}
-		for _, pair := range [][2]string{
-			{"NOT raised", "raised to"},
-			{"NOT raised", "reasoning effort: unchanged"},
-			{"reasoning effort: unchanged", "raised to"},
-		} {
-			if strings.Contains(text, pair[0]) && strings.Contains(text, pair[1]) &&
-				!strings.Contains(pair[1], pair[0]) {
-				t.Fatalf("%s makes two different effort claims (%q and %q):\n%s",
-					surface, pair[0], pair[1], text)
-			}
-		}
+	}
+	// /effort still carries the shared delta sentence VERBATIM, exactly once —
+	// it is the one line the posture-switch notice and the status agree on.
+	if n := strings.Count(effortStatus, delta); n != 1 {
+		t.Fatalf("/effort must carry the delta exactly once, found %d:\n%s", n, effortStatus)
 	}
 	// Other profiles must NOT carry the posture's delta text.
 	other := zeromaxingTestModel(t, false)
@@ -476,7 +476,7 @@ func TestSelfCorrectTransitionTracksLiveState(t *testing.T) {
 	if got := m.selfCorrectTransition(); got != execprofile.SelfCorrectRaised {
 		t.Fatalf("transition = %v, want SelfCorrectRaised for an LSP-only session", got)
 	}
-	if !strings.Contains(text, "self-correct: lsp → tests") {
+	if !strings.Contains(text, "lsp → tests") {
 		t.Fatalf("an LSP-only user must be told what changes:\n%s", text)
 	}
 
@@ -507,7 +507,7 @@ func TestSelfCorrectTransitionAlreadyOn(t *testing.T) {
 	if got := m.selfCorrectTransition(); got != execprofile.SelfCorrectAlreadyOn {
 		t.Fatalf("transition = %v, want SelfCorrectAlreadyOn", got)
 	}
-	if !strings.Contains(text, "self-correct: unchanged (tests)") {
+	if !strings.Contains(text, "unchanged (tests)") {
 		t.Fatalf("an already-on user must be told nothing changes:\n%s", text)
 	}
 	if strings.Contains(text, "lsp → tests") {
@@ -566,10 +566,10 @@ func TestProfileEffortFillAgreesWithTheHeadlessPath(t *testing.T) {
 			}
 			// ...and the resolved-state line must not claim an effort the
 			// session does not have.
-			if filled && !strings.Contains(text, "effort: high") {
+			if filled && !strings.Contains(text, "effort high") {
 				t.Fatalf("%s: filled but the status does not say so:\n%s", tc.model, text)
 			}
-			if !filled && strings.Contains(text, "effort: high") {
+			if !filled && strings.Contains(text, "effort high") {
 				t.Fatalf("%s: not filled but the status claims high:\n%s", tc.model, text)
 			}
 		})

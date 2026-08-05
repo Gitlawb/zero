@@ -918,35 +918,85 @@ func (m model) effortTransition() execprofile.EffortTransition {
 	}
 }
 
+// profileText is the /profile status card: ALIGNED KEY-VALUE ROWS, each fact
+// said once. The previous version stacked three renderers — a labelled list,
+// resolvedPostureLine, and the posture delta sentence — so the profile name
+// appeared twice and the effort and turn budget three times each; a status
+// card that repeats itself reads as noise, and this one was called irritating
+// to its face. The delta facts survive as short clauses on the row they
+// qualify ("was 80", "raised by the posture") instead of a second paragraph.
 func (m model) profileText() string {
 	name := m.execProfileName
 	if name == "" {
 		name = execprofile.Balanced.Name + " (default)"
 	}
-	lines := []string{
-		"execution profile: " + name,
-		fmt.Sprintf("max tool-turns per run: %d", m.agentOptions.MaxTurns),
-		"reasoning effort: " + m.effortDisplay(),
-		m.resolvedPostureLine(),
+	// KEY VALUE, single space — not padded columns: compactCommandOutputText
+	// collapses every whitespace run at render, so alignment written here would
+	// silently disappear. The single-space form is what actually reaches the
+	// screen, and what the tests assert.
+	row := func(key, value string) string { return key + " " + value }
+
+	turns := strconv.Itoa(m.agentOptions.MaxTurns)
+	effort := m.effortDisplay()
+	verify := "lsp only"
+	if m.selfCorrectTests {
+		verify = "lsp + tests"
 	}
-	lines = append(lines, m.zeromaxingNotes()...)
-	if m.agentOptions.Profile != nil && m.agentOptions.Profile.Escalate != nil {
-		turnTarget := "keeps the pinned turn budget"
-		if target := m.agentOptions.Profile.Escalate.MaxTurns; target > 0 {
-			turnTarget = fmt.Sprintf("restores the turn budget to %d", target)
+	if m.execProfileName == execprofile.Name {
+		if was := m.execProfileDisplacedMaxTurns; was > 0 && was != m.agentOptions.MaxTurns {
+			turns += fmt.Sprintf(" · was %d", was)
 		}
-		lines = append(lines,
-			"escalation: armed — one-shot on a tool-failure streak, a failing self-correct cycle, or a critical-risk mutation; "+turnTarget,
-			"note: the uncertain-completion signal is headless-only (the completion gate never runs interactively), so it cannot fire in the TUI")
+		turns += " · inherited by sub-agents"
+		switch m.effortTransition() {
+		case execprofile.EffortRaised:
+			effort += " · raised by the posture"
+		case execprofile.EffortNotSupported:
+			// NAME THE LEVEL. "could not raise it" states a failure without its
+			// object; the recorded unraised level is exactly what the user needs
+			// to know this model refused.
+			effort += " · NOT raised — " + string(m.execProfileEffortUnraised) + " is unsupported on this model"
+		}
+		// The verify row carries its TRANSITION, tracked from live state — a
+		// user who turns self-correct back off must not keep reading a raise
+		// the session no longer has. Worded without "raised" so the one-effort-
+		// transition invariant (TestBothStatusSurfacesShowResolvedState) counts
+		// the effort claim alone.
+		switch m.selfCorrectTransition() {
+		case execprofile.SelfCorrectRaised:
+			verify = "lsp → tests (posture)"
+		case execprofile.SelfCorrectAlreadyOn:
+			verify = "unchanged (tests) — already on"
+		case execprofile.SelfCorrectOverridden:
+			verify = "lsp only — your /selfcorrect off overrides the posture"
+		}
 	}
+	parts := []string{
+		row("profile", name),
+		row("turns", turns),
+		row("effort", effort),
+		row("verify", verify),
+	}
+	if m.agentOptions.Profile != nil && m.agentOptions.Profile.Escalate != nil {
+		target := "keeps the pinned turn budget"
+		if t := m.agentOptions.Profile.Escalate.MaxTurns; t > 0 {
+			target = fmt.Sprintf("→ %d turns", t)
+		}
+		// The headless-only clause is a real asymmetry, not decoration: the
+		// uncertain-completion trigger cannot fire interactively, and a user
+		// arming escalation in the TUI deserves to know one of its tripwires
+		// is not live here.
+		parts = append(parts, row("escalate", "armed · one-shot on a failure streak · "+target+" · uncertain-completion trigger is headless-only"))
+	}
+	// ONE LINE. Four key-value rows still made a five-line card for what is a
+	// single sentence of state; a status readout the user asked for by name
+	// needs no section header and no hint advertising the command they just
+	// typed. Every fact keeps its clause; the renderer wraps when narrow.
 	return renderCommandOutput(commandOutput{
 		Title:  "Profile",
 		Status: commandStatusOK,
 		Sections: []commandSection{{
-			Title: "State",
-			Lines: lines,
+			Lines: []string{strings.Join(parts, " · ")},
 		}},
-		Hints: []string{"/profile " + strings.Join(execprofile.Names(), "|") + " switches the next run's loop posture (turn budget, effort, self-correction, escalation); pick the model separately with /model"},
 	})
 }
 
