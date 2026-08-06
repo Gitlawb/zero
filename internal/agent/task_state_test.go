@@ -129,7 +129,7 @@ func TestTaskStateRecordsDurableRuntimeEvidence(t *testing.T) {
 	}})
 
 	snapshot := state.snapshot()
-	if !reflect.DeepEqual(snapshot.Constraints, []string{"Please keep the change focused."}) {
+	if !reflect.DeepEqual(snapshot.Constraints, []string{"Please keep the change focused.", "Never commit generated reports."}) {
 		t.Fatalf("unexpected explicit constraints: %#v", snapshot.Constraints)
 	}
 	if len(snapshot.UnresolvedFailures) != 1 || snapshot.UnresolvedFailures[0].Command != "go test ./internal/agent" || snapshot.UnresolvedFailures[0].Summary != "Error: TestResumeRetainsState failed" {
@@ -141,12 +141,27 @@ func TestTaskStateRecordsDurableRuntimeEvidence(t *testing.T) {
 	if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].Decision != PermissionDecisionAllowForSession || snapshot.Approvals[0].Scope != "/tmp" {
 		t.Fatalf("unexpected approval evidence: %#v", snapshot.Approvals)
 	}
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"path":"a.go"}`, toolResult: ToolResult{
+		ToolCallID: "read-a", Name: "read_file", Status: tools.StatusError, Output: "Error: a.go is unavailable",
+	}})
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"path":"b.go"}`, toolResult: ToolResult{
+		ToolCallID: "read-b", Name: "read_file", Status: tools.StatusOK, Output: "package b",
+	}})
+	if failures := state.snapshot().UnresolvedFailures; len(failures) != 2 || failures[1].Summary != "Error: a.go is unavailable" {
+		t.Fatalf("success for a different target resolved the wrong failure: %#v", failures)
+	}
 
 	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: arguments, toolResult: ToolResult{
 		ToolCallID: "test-2", Name: "exec_command", Status: tools.StatusOK, Output: "ok",
 	}})
+	if failures := state.snapshot().UnresolvedFailures; len(failures) != 1 || failures[0].Summary != "Error: a.go is unavailable" {
+		t.Fatalf("successful retry did not resolve only its matching failure: %#v", failures)
+	}
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"path":"a.go"}`, toolResult: ToolResult{
+		ToolCallID: "read-a-2", Name: "read_file", Status: tools.StatusOK, Output: "package a",
+	}})
 	if failures := state.snapshot().UnresolvedFailures; len(failures) != 0 {
-		t.Fatalf("successful retry did not resolve matching failure: %#v", failures)
+		t.Fatalf("successful non-command retry did not resolve its matching failure: %#v", failures)
 	}
 }
 

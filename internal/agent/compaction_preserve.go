@@ -579,13 +579,23 @@ func mergeTaskFailures(older, newer []taskFailureState, resolved []string) []tas
 	for _, key := range resolved {
 		resolvedSet[key] = struct{}{}
 	}
-	filtered := older[:0]
-	for _, failure := range older {
-		if _, ok := resolvedSet[failure.Key]; !ok {
-			filtered = append(filtered, failure)
+	merged := make([]taskFailureState, 0, len(older)+len(newer))
+	for _, failure := range append(append([]taskFailureState(nil), older...), newer...) {
+		if _, ok := resolvedSet[failure.Key]; ok {
+			continue
 		}
+		withoutSameKey := make([]taskFailureState, 0, len(merged))
+		for _, existing := range merged {
+			if existing.Key != failure.Key {
+				withoutSameKey = append(withoutSameKey, existing)
+			}
+		}
+		merged = append(withoutSameKey, failure)
 	}
-	return mergeBoundedComparable(filtered, newer, maxTaskEvidenceEntries)
+	if len(merged) > maxTaskEvidenceEntries {
+		merged = merged[len(merged)-maxTaskEvidenceEntries:]
+	}
+	return merged
 }
 
 func mergeBoundedComparable[T comparable](older, newer []T, limit int) []T {

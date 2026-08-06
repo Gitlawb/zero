@@ -102,6 +102,10 @@ func TestCompactPreservesRuntimeEvidenceAcrossRepeatedCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"cmd":"go test ./..."}`, toolResult: ToolResult{
+		Name: "exec_command", Status: tools.StatusError, Output: "Error: tests still fail with newer evidence",
+		Meta: map[string]string{"spill_path": ".zero/artifacts/tests.txt"},
+	}})
 	secondInput := append(append([]zeroruntime.Message{}, first...),
 		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "Never add background memory models."},
 		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "understood"},
@@ -119,6 +123,9 @@ func TestCompactPreservesRuntimeEvidenceAcrossRepeatedCompaction(t *testing.T) {
 	state := parsePreservedStateBlock(second[1].Content)
 	if state.Task == nil || len(state.Task.UnresolvedFailures) != 1 || len(state.Task.Approvals) != 1 || len(state.Task.Artifacts) != 1 {
 		t.Fatalf("runtime evidence did not survive repeated compaction: %#v", state.Task)
+	}
+	if got := state.Task.UnresolvedFailures[0].Summary; got != "Error: tests still fail with newer evidence" {
+		t.Fatalf("newer failure evidence did not replace the older summary: %#v", state.Task.UnresolvedFailures)
 	}
 	for _, want := range []string{"Please keep the change focused.", "Never add background memory models."} {
 		if !containsString(state.Task.Constraints, want) {

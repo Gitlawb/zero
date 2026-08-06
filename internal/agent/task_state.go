@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
@@ -233,7 +235,7 @@ const (
 
 func (state *taskState) observeToolEvidence(arguments string, result ToolResult) {
 	command := capTaskEvidence(commandFromArguments(arguments))
-	key := strings.TrimSpace(result.Name + "\x00" + command)
+	key := taskFailureKey(result.Name, command, arguments)
 	if result.Status == tools.StatusOK {
 		if hasTaskFailure(state.snapshotValue.UnresolvedFailures, key) {
 			state.snapshotValue.UnresolvedFailures = removeTaskFailure(state.snapshotValue.UnresolvedFailures, key)
@@ -242,7 +244,7 @@ func (state *taskState) observeToolEvidence(arguments string, result ToolResult)
 	} else {
 		state.snapshotValue.UnresolvedFailures = removeTaskFailure(state.snapshotValue.UnresolvedFailures, key)
 		state.snapshotValue.UnresolvedFailures = appendBounded(state.snapshotValue.UnresolvedFailures, taskFailureState{
-			Key: key, Tool: result.Name, Command: capTaskEvidence(command), Summary: capTaskEvidence(firstLine(result.Output)),
+			Key: key, Tool: result.Name, Command: command, Summary: capTaskEvidence(firstLine(result.Output)),
 		}, maxTaskEvidenceEntries)
 	}
 	for _, metaKey := range []string{"spill_path", "artifact_path"} {
@@ -251,6 +253,22 @@ func (state *taskState) observeToolEvidence(arguments string, result ToolResult)
 				taskArtifactState{Tool: result.Name, Path: capTaskEvidence(path)}, maxTaskEvidenceEntries)
 		}
 	}
+}
+
+func taskFailureKey(toolName, command, arguments string) string {
+	identity := command
+	if identity == "" {
+		canonical := []byte(strings.TrimSpace(arguments))
+		var value any
+		if json.Unmarshal(canonical, &value) == nil {
+			if encoded, err := json.Marshal(value); err == nil {
+				canonical = encoded
+			}
+		}
+		digest := sha256.Sum256(canonical)
+		identity = fmt.Sprintf("args:%x", digest[:8])
+	}
+	return strings.TrimSpace(toolName) + "\x00" + identity
 }
 
 func (state *taskState) observePermission(event PermissionEvent) {
@@ -308,6 +326,7 @@ var explicitConstraintPatterns = []*regexp.Regexp{
 }
 
 func extractExplicitConstraints(text string) []string {
+	var constraints []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if len(line) < 5 || len(line) > 200 || strings.HasSuffix(line, "?") || strings.Contains(line, "?...") {
@@ -315,11 +334,15 @@ func extractExplicitConstraints(text string) []string {
 		}
 		for _, pattern := range explicitConstraintPatterns {
 			if pattern.MatchString(line) {
-				return []string{line}
+				constraints = appendBoundedUnique(constraints, line, maxTaskConstraints)
+				break
 			}
 		}
+		if len(constraints) == maxTaskConstraints {
+			break
+		}
 	}
-	return nil
+	return constraints
 }
 
 func appendBounded[T any](values []T, value T, limit int) []T {
