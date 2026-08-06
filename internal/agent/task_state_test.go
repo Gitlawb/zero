@@ -115,6 +115,41 @@ func TestTaskStateSnapshotIsImmutable(t *testing.T) {
 	}
 }
 
+func TestTaskStateRecordsDurableRuntimeEvidence(t *testing.T) {
+	state := newTaskState("Please keep the change focused.\nNever commit generated reports.", nil)
+	arguments := `{"cmd":"go test ./internal/agent"}`
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: arguments, toolResult: ToolResult{
+		ToolCallID: "test-1", Name: "exec_command", Status: tools.StatusError,
+		Output: "Error: TestResumeRetainsState failed\nfull diagnostic",
+		Meta:   map[string]string{"spill_path": ".zero/artifacts/test-1.txt"},
+	}})
+	state.observe(taskStateEvent{kind: taskStateEventPermission, permission: PermissionEvent{
+		ToolName: "exec_command", DecisionAction: PermissionDecisionAllowForSession,
+		Scope: "/tmp", DecisionReason: "write a temporary fixture",
+	}})
+
+	snapshot := state.snapshot()
+	if !reflect.DeepEqual(snapshot.Constraints, []string{"Please keep the change focused."}) {
+		t.Fatalf("unexpected explicit constraints: %#v", snapshot.Constraints)
+	}
+	if len(snapshot.UnresolvedFailures) != 1 || snapshot.UnresolvedFailures[0].Command != "go test ./internal/agent" || snapshot.UnresolvedFailures[0].Summary != "Error: TestResumeRetainsState failed" {
+		t.Fatalf("unexpected failure evidence: %#v", snapshot.UnresolvedFailures)
+	}
+	if len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].Path != ".zero/artifacts/test-1.txt" {
+		t.Fatalf("unexpected artifact evidence: %#v", snapshot.Artifacts)
+	}
+	if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].Decision != PermissionDecisionAllowForSession || snapshot.Approvals[0].Scope != "/tmp" {
+		t.Fatalf("unexpected approval evidence: %#v", snapshot.Approvals)
+	}
+
+	state.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: arguments, toolResult: ToolResult{
+		ToolCallID: "test-2", Name: "exec_command", Status: tools.StatusOK, Output: "ok",
+	}})
+	if failures := state.snapshot().UnresolvedFailures; len(failures) != 0 {
+		t.Fatalf("successful retry did not resolve matching failure: %#v", failures)
+	}
+}
+
 func TestTaskStatePlanParityUsesLatestPlan(t *testing.T) {
 	state := newTaskState("objective", nil)
 	state.observe(taskStateEvent{kind: taskStateEventPlan, arguments: `{"plan":[{"content":"old","status":"completed"}]}`})

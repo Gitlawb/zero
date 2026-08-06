@@ -216,7 +216,11 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 		}, nil
 	}
 
-	summary, err := opts.Summarize(middle)
+	summaryInput := projectCompactionInput(middle)
+	if len(summaryInput) == 0 {
+		summaryInput = middle
+	}
+	summary, err := opts.Summarize(summaryInput)
 	if err != nil {
 		return CompactionResult{}, err
 	}

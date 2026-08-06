@@ -43,8 +43,8 @@ func TestCompactMessagesReturnsMetadataForManualCompaction(t *testing.T) {
 	if result.SummaryText != "manual summary" {
 		t.Fatalf("SummaryText = %q, want trimmed summary", result.SummaryText)
 	}
-	if len(captured) != 3 || captured[0].Content != "first question" || captured[2].Content != "second question" {
-		t.Fatalf("summarized middle = %#v, want the three non-preserved non-system messages", captured)
+	if len(captured) != 1 || !strings.Contains(captured[0].Content, "first question") || !strings.Contains(captured[0].Content, "second question") {
+		t.Fatalf("summarized projection = %#v, want intent from the non-preserved middle", captured)
 	}
 	if len(result.Messages) != 4 {
 		t.Fatalf("compacted message count = %d, want 4", len(result.Messages))

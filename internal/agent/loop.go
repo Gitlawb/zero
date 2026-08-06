@@ -187,6 +187,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 	guards := newGuardState()
 	task := newTaskState(prompt, options.Trace)
+	onPermission := options.OnPermission
+	options.OnPermission = func(event PermissionEvent) {
+		task.observe(taskStateEvent{kind: taskStateEventPermission, permission: event})
+		if onPermission != nil {
+			onPermission(event)
+		}
+	}
 	compactor := newCompactionState(options, task)
 	defer func() {
 		// A final transcript comparison is observational. It records drift but
@@ -691,7 +698,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
-			task.observe(taskStateEvent{kind: taskStateEventToolResult, toolResult: toolResult})
+			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}

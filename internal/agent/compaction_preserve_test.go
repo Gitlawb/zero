@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -80,6 +81,59 @@ func TestCompactPreservesBoundedTaskContext(t *testing.T) {
 	if len(state.Task.Objective) > maxTaskObjectiveBytes || !utf8.ValidString(state.Task.Objective) {
 		t.Fatalf("objective was not safely bounded: %d bytes %q", len(state.Task.Objective), state.Task.Objective)
 	}
+}
+
+func TestCompactPreservesRuntimeEvidenceAcrossRepeatedCompaction(t *testing.T) {
+	task := newTaskState("Please keep the change focused.", nil)
+	task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: `{"cmd":"go test ./..."}`, toolResult: ToolResult{
+		Name: "exec_command", Status: tools.StatusError, Output: "Error: tests failed",
+		Meta: map[string]string{"spill_path": ".zero/artifacts/tests.txt"},
+	}})
+	task.observe(taskStateEvent{kind: taskStateEventPermission, permission: PermissionEvent{
+		ToolName: "exec_command", DecisionAction: PermissionDecisionAllowForSession, Scope: "/tmp",
+	}})
+	messages := stateConversation()
+
+	first, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "FIRST", nil },
+		taskState:    task.snapshotForCompaction(messages),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := append(append([]zeroruntime.Message{}, first...),
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "Never add background memory models."},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "understood"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "continue"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "working"},
+	)
+	second, err := Compact(secondInput, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SECOND", nil },
+		taskState:    task.snapshotForCompaction(secondInput),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := parsePreservedStateBlock(second[1].Content)
+	if state.Task == nil || len(state.Task.UnresolvedFailures) != 1 || len(state.Task.Approvals) != 1 || len(state.Task.Artifacts) != 1 {
+		t.Fatalf("runtime evidence did not survive repeated compaction: %#v", state.Task)
+	}
+	for _, want := range []string{"Please keep the change focused.", "Never add background memory models."} {
+		if !containsString(state.Task.Constraints, want) {
+			t.Fatalf("constraint %q missing after repeated compaction: %#v", want, state.Task.Constraints)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCompactPreservesObjectiveAfterPlanParityMismatch(t *testing.T) {

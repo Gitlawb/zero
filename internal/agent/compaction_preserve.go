@@ -425,15 +425,19 @@ type preservedState struct {
 }
 
 type preservedTaskState struct {
-	Objective           string     `json:"objective"`
-	Status              taskStatus `json:"status,omitempty"`
-	Pending             int        `json:"pending,omitempty"`
-	InProgress          int        `json:"in_progress,omitempty"`
-	Completed           int        `json:"completed,omitempty"`
-	Failed              int        `json:"failed,omitempty"`
-	VerificationPassed  int        `json:"verification_passed,omitempty"`
-	VerificationFailed  int        `json:"verification_failed,omitempty"`
-	VerificationOutcome Outcome    `json:"verification_outcome,omitempty"`
+	Objective           string              `json:"objective"`
+	Status              taskStatus          `json:"status,omitempty"`
+	Pending             int                 `json:"pending,omitempty"`
+	InProgress          int                 `json:"in_progress,omitempty"`
+	Completed           int                 `json:"completed,omitempty"`
+	Failed              int                 `json:"failed,omitempty"`
+	VerificationPassed  int                 `json:"verification_passed,omitempty"`
+	VerificationFailed  int                 `json:"verification_failed,omitempty"`
+	VerificationOutcome Outcome             `json:"verification_outcome,omitempty"`
+	Constraints         []string            `json:"constraints,omitempty"`
+	UnresolvedFailures  []taskFailureState  `json:"unresolved_failures,omitempty"`
+	Approvals           []taskApprovalState `json:"approvals,omitempty"`
+	Artifacts           []taskArtifactState `json:"artifacts,omitempty"`
 }
 
 type preservedEdit struct {
@@ -468,7 +472,11 @@ func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnap
 	task := priorState.Task
 	if taskSnapshot != nil {
 		task = &preservedTaskState{
-			Objective: capTaskObjective(taskSnapshot.Objective),
+			Objective:          capTaskObjective(taskSnapshot.Objective),
+			Constraints:        mergeBoundedComparable(priorTaskConstraints(priorState.Task), taskSnapshot.Constraints, maxTaskConstraints),
+			UnresolvedFailures: mergeTaskFailures(priorTaskFailures(priorState.Task), taskSnapshot.UnresolvedFailures, taskSnapshot.ResolvedFailureKeys),
+			Approvals:          mergeBoundedComparable(priorTaskApprovals(priorState.Task), taskSnapshot.Approvals, maxTaskEvidenceEntries),
+			Artifacts:          mergeBoundedComparable(priorTaskArtifacts(priorState.Task), taskSnapshot.Artifacts, maxTaskEvidenceEntries),
 		}
 		// Plan parity corroborates only the mutable task projection. The objective
 		// comes directly from the run prompt and is immutable, so it must survive
@@ -483,6 +491,13 @@ func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnap
 			task.VerificationFailed = taskSnapshot.Verification.Failed
 			task.VerificationOutcome = taskSnapshot.Verification.LastOutcome
 		}
+	}
+	freshConstraints := explicitConstraintsFromMessages(middle)
+	if len(freshConstraints) > 0 {
+		if task == nil {
+			task = &preservedTaskState{}
+		}
+		task.Constraints = mergeBoundedComparable(task.Constraints, freshConstraints, maxTaskConstraints)
 	}
 
 	// Plan: a fresh update_plan in middle is authoritative; otherwise carry the
@@ -515,6 +530,78 @@ func appendPreservedState(summary string, middle []zeroruntime.Message, taskSnap
 		summary += "\n\n" + block
 	}
 	return summary
+}
+
+func explicitConstraintsFromMessages(messages []zeroruntime.Message) []string {
+	var constraints []string
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleUser || strings.Contains(message.Content, preservedStateLabel) {
+			continue
+		}
+		if _, body := projectInstructionBlock(message.Content); body != "" {
+			continue
+		}
+		constraints = mergeBoundedComparable(constraints, extractExplicitConstraints(message.Content), maxTaskConstraints)
+	}
+	return constraints
+}
+
+func priorTaskConstraints(task *preservedTaskState) []string {
+	if task == nil {
+		return nil
+	}
+	return task.Constraints
+}
+
+func priorTaskFailures(task *preservedTaskState) []taskFailureState {
+	if task == nil {
+		return nil
+	}
+	return task.UnresolvedFailures
+}
+
+func priorTaskApprovals(task *preservedTaskState) []taskApprovalState {
+	if task == nil {
+		return nil
+	}
+	return task.Approvals
+}
+
+func priorTaskArtifacts(task *preservedTaskState) []taskArtifactState {
+	if task == nil {
+		return nil
+	}
+	return task.Artifacts
+}
+
+func mergeTaskFailures(older, newer []taskFailureState, resolved []string) []taskFailureState {
+	resolvedSet := make(map[string]struct{}, len(resolved))
+	for _, key := range resolved {
+		resolvedSet[key] = struct{}{}
+	}
+	filtered := older[:0]
+	for _, failure := range older {
+		if _, ok := resolvedSet[failure.Key]; !ok {
+			filtered = append(filtered, failure)
+		}
+	}
+	return mergeBoundedComparable(filtered, newer, maxTaskEvidenceEntries)
+}
+
+func mergeBoundedComparable[T comparable](older, newer []T, limit int) []T {
+	merged := make([]T, 0, len(older)+len(newer))
+	seen := make(map[T]struct{}, len(older)+len(newer))
+	for _, value := range append(append([]T(nil), older...), newer...) {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	if len(merged) > limit {
+		merged = merged[len(merged)-limit:]
+	}
+	return merged
 }
 
 func capTaskObjective(objective string) string {
