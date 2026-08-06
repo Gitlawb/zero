@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,10 +121,19 @@ func TestARememberedOutputKeepsItsTail(t *testing.T) {
 func TestASessionNobodyPolledIsStillAnswerable(t *testing.T) {
 	root := t.TempDir()
 	manager := NewProcessManager(ProcessManagerOptions{})
-	command := exec.Command("/bin/sh", "-c", "echo FINAL-RESULT; exit 3")
+	// The behaviour under test — a finished background process staying
+	// answerable — is OS-agnostic, so unlike this package's POSIX-shell tests
+	// this one runs everywhere rather than skipping on Windows.
+	shell, flag := "/bin/sh", "-c"
+	script := "echo FINAL-RESULT; exit 3"
+	if runtime.GOOS == "windows" {
+		shell, flag = "cmd", "/c"
+		script = "echo FINAL-RESULT& exit 3"
+	}
+	command := exec.Command(shell, flag, script)
 	request := Request{
 		Origin: OriginInteractiveCommand, Mode: ModeCaptured,
-		Command:          Command{Name: "/bin/sh", Args: []string{"-c", "echo FINAL-RESULT; exit 3"}},
+		Command:          Command{Name: shell, Args: []string{flag, script}},
 		WorkingDirectory: root, WorkspaceRoots: []string{root},
 	}
 	// A wait of zero: Start returns while it is still running, exactly as it does

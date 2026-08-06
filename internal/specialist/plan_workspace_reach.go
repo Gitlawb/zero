@@ -34,12 +34,18 @@ import (
 // workspace and is not this function's business; a plan that never isolated
 // keeps the parent's tree and cannot have this problem at all.
 
-// absolutePathPattern finds POSIX-style absolute paths in prose.
+// absolutePathPattern finds absolute paths in prose — POSIX (/a/b) and Windows
+// (C:\a\b, C:/a/b) forms, with either separator throughout, because a task
+// prompt written on Windows names Windows paths and a POSIX-only pattern found
+// none of them: the reach check silently never fired there. The character class
+// includes '~' for Windows 8.3 short names (RUNNER~1), which real CI paths
+// contain.
 //
 // Deliberately loose, because the EXISTENCE check below is what makes a match
 // meaningful. It will happily match "/settings" out of a URL and "/v1/pay" out
-// of a sentence; neither exists on disk, so neither survives.
-var absolutePathPattern = regexp.MustCompile(`/[A-Za-z0-9._+@-]+(?:/[A-Za-z0-9._+@-]+)+`)
+// of a sentence; neither exists on disk, so neither survives — and a
+// backslash-shaped candidate on POSIX fails the same Lstat.
+var absolutePathPattern = regexp.MustCompile(`(?:[A-Za-z]:)?[/\\][A-Za-z0-9._+@~-]+(?:[/\\][A-Za-z0-9._+@~-]+)+`)
 
 // unreachablePlanPaths lists paths the plan's own prompts name that the plan's
 // workspace cannot reach. Empty for every plan that is fine — including every
@@ -98,6 +104,11 @@ func resolvedPath(path string) string {
 
 // pathInsideRoot reports containment, SEPARATOR-AWARE: "/a/b" does not contain
 // "/a/bc", which a bare strings.HasPrefix would get wrong.
+//
+// BOTH separators are boundaries on every platform. Keying on
+// filepath.Separator alone made the check answer false for every /-separated
+// pair on Windows — the whole reach guard quietly never contained anything —
+// and prompts freely mix the two spellings of the same path.
 func pathInsideRoot(root, path string) bool {
 	if root == "" || path == "" {
 		return false
@@ -105,7 +116,12 @@ func pathInsideRoot(root, path string) bool {
 	if path == root {
 		return true
 	}
-	return strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+	root = strings.TrimRight(root, `/\`)
+	if root == "" || !strings.HasPrefix(path, root) || len(path) <= len(root) {
+		return false
+	}
+	next := path[len(root)]
+	return next == '/' || next == '\\'
 }
 
 // THE SECOND SHAPE OF THE SAME FAILURE, and the one the absolute-path check
