@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -2788,23 +2789,14 @@ func (m model) View() tea.View {
 	// only when the value changes, so gating this costs nothing (§10).
 	view.KeyboardEnhancements.ReportEventTypes = m.dictation.voiceModeEnabled
 	if m.wantsMouseCapture() {
-		if isRunningUnderPRoot() {
-			// Under PRoot the AllMotion (1003) sequence doesn't work
-			// reliably, breaking touch-gesture scrolling. Fall back to
-			// CellMotion which still delivers wheel events, clicks, and
-			// drag — the only thing lost is hover-highlighting.
-			view.MouseMode = tea.MouseModeCellMotion
-		} else {
-			// AllMotion (not CellMotion) is required for hover highlighting:
-			// it reports cursor movement even with no button pressed.
-			// CellMotion only reports motion while a button is held (drag) —
-			// see bubbletea's MouseMode docs. AllMotion has marginally worse
-			// terminal compatibility but is well supported by the terminals
-			// this app targets; the existing 15ms mouse-event throttle
-			// (mouseEventThrottleInterval) already bounds the redraw rate
-			// from the extra motion events.
-			view.MouseMode = tea.MouseModeAllMotion
-		}
+		// AllMotion (1003) is what hover highlighting needs: it reports cursor
+		// movement with no button pressed, where CellMotion (1002) reports motion
+		// only while a button is held. mouseModeFor decides which is safe here,
+		// and documents why one is not simply better than the other: a terminal
+		// that does not implement 1003 sends nothing at all rather than degrading.
+		// The 15ms throttle (mouseEventThrottleInterval) already bounds the redraw
+		// rate from AllMotion's extra motion events.
+		view.MouseMode = mouseModeFor(runtime.GOOS, os.Getenv, isRunningUnderPRoot())
 	}
 	return view
 }

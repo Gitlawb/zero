@@ -8,6 +8,57 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// mouseModeEnv forces a mouse mode: "all", "cell", or "off"/"none". It exists
+// because the failure it guards against is invisible from here and total for the
+// user: a terminal we guessed wrong about delivers no mouse events at all, and
+// there is no in-app way to recover. Anything unrecognised is ignored rather
+// than treated as "off", so a typo cannot silently kill the mouse.
+const mouseModeEnv = "ZERO_MOUSE_MODE"
+
+// mouseModeFor picks the mouse reporting mode, preferring the widest support
+// over the nicest behaviour.
+//
+// The trade is asymmetric. AllMotion (1003) buys exactly one thing, hover
+// highlighting, because wheel, click and drag all arrive under CellMotion
+// (1002). But when a terminal does not implement 1003, it does not degrade to
+// 1002: no mouse event arrives at all. The app holds the alternate screen, so
+// the terminal's own scrollback and wheel are gone too, and the user is left
+// with no way to scroll by mouse. A long answer then looks like a hang rather
+// than like a missing highlight, which is how #870 was reported.
+//
+// So AllMotion is asked for only where it is known to work.
+func mouseModeFor(goos string, env func(string) string, underPRoot bool) tea.MouseMode {
+	switch strings.ToLower(strings.TrimSpace(env(mouseModeEnv))) {
+	case "all":
+		return tea.MouseModeAllMotion
+	case "cell":
+		return tea.MouseModeCellMotion
+	case "off", "none":
+		return tea.MouseModeNone
+	}
+	if underPRoot {
+		return tea.MouseModeCellMotion
+	}
+	if goos == "windows" && !windowsTerminalReportsAllMotion(env) {
+		return tea.MouseModeCellMotion
+	}
+	return tea.MouseModeAllMotion
+}
+
+// windowsTerminalReportsAllMotion reports whether the Windows terminal in use is
+// one that handles 1003.
+//
+// Identified terminals are trusted: Windows Terminal sets WT_SESSION, and hosts
+// like VS Code and mintty set TERM_PROGRAM. The legacy console host sets
+// neither, and it is what a user gets by double-clicking zero.exe or running it
+// from an old cmd window, so an unidentified Windows terminal is assumed to be
+// that one. Guessing wrong in this direction costs a hover highlight; guessing
+// wrong in the other direction costs every mouse event.
+func windowsTerminalReportsAllMotion(env func(string) string) bool {
+	return strings.TrimSpace(env("WT_SESSION")) != "" ||
+		strings.TrimSpace(env("TERM_PROGRAM")) != ""
+}
+
 // parseTracerPid returns true when /proc/self/status contains a non-zero
 // TracerPid. This detects any ptrace tracer (PRoot, gdb, strace, dlv, etc.),
 // not PRoot specifically. That's intentional: under any ptrace tracer the
