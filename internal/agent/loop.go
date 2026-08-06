@@ -656,6 +656,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// between tool_results breaks strict provider replay) — same after-batch
 		// rationale as turnRequestedModel above.
 		var changedFilesThisBatch []string
+		// Images produced by tools this turn, held until every tool_result is
+		// recorded. They travel as user messages, and a user message between two
+		// tool_results breaks strict provider replay — Anthropic coalesces them
+		// into one user block list and requires the tool_result blocks first, so
+		// interleaving yields [tool_result, text, image, tool_result] and a 400.
+		// Same reason the self-correction feedback below is deferred.
+		var toolImageMessages []zeroruntime.Message
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
@@ -709,6 +716,16 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Content:    toolResult.Output,
 				ToolCallID: toolResult.ToolCallID,
 			})
+			// Images ride a following USER message rather than the tool result
+			// above. Every provider drops images on a tool-role message —
+			// Anthropic's tool_result content is a string, Gemini's is a
+			// functionResponse, and OpenAI guards its image parts to the user role
+			// — so attaching them there would silently deliver nothing. A separate
+			// message also keeps the one-tool-result-per-tool-call pairing intact,
+			// which the providers validate.
+			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
+				toolImageMessages = append(toolImageMessages, imageMessage)
+			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
 			// returns context.Canceled rather than fabricating a headless answer. Stop
@@ -719,11 +736,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if abortErr != nil {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolResult.Output
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
@@ -747,6 +766,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				messages = append(messages, toolImageMessages...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -765,6 +785,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
+		// Every tool_result for this turn is now recorded, including aborted
+		// placeholders, so the images can follow without splitting them.
+		messages = append(messages, toolImageMessages...)
+		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
@@ -1436,6 +1460,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Output:          result.Output,
 		Truncated:       result.Truncated,
 		Meta:            result.Meta,
+		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
 		ChangeSummaries: result.ChangeSummaries,
@@ -3288,4 +3313,38 @@ func copyMessages(messages []Message) []Message {
 		copied[index].Images = zeroruntime.CloneImageBlocks(message.Images)
 	}
 	return copied
+}
+
+// toolResultImageMessage builds the user message that carries a tool's images
+// to the model, or reports false when the tool produced none.
+//
+// The text names the tool so the model can tell which call an image came from
+// when several ran in one turn — the images arrive detached from their tool
+// result, so nothing else associates them.
+func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
+	for _, image := range result.Images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		mediaType := zeroruntime.NormalizeImageMediaType(image.MediaType)
+		if mediaType == "" {
+			// Outside the provider allow-list. Dropping it beats sending bytes a
+			// provider will reject and failing the whole turn.
+			continue
+		}
+		images = append(images, zeroruntime.ImageBlock{MediaType: mediaType, Data: image.Data})
+	}
+	if len(images) == 0 {
+		return zeroruntime.Message{}, false
+	}
+	label := result.Name
+	if label == "" {
+		label = "tool"
+	}
+	return zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "Image output from " + label + ":",
+		Images:  images,
+	}, true
 }
