@@ -26,6 +26,10 @@ type RemoteTool struct {
 type Content struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// MimeType names what a non-text block holds. Decoded but not yet forwarded:
+	// it is what lets a dropped block be described to the model instead of
+	// vanishing (#823). Servers that omit it still decode fine.
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 type CallToolResult struct {
@@ -494,4 +498,53 @@ func TextContent(content []Content) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+// DroppedContentSummary describes the blocks TextContent discards, e.g.
+// "1 image/png block" or "2 resource blocks, 1 audio/wav block". It returns ""
+// when a result is entirely text, so a caller adds nothing to the ordinary case.
+//
+// This exists because dropping silently is the worst available behaviour. A
+// screenshot server returns a valid image, TextContent keeps nothing, and the
+// call is reported as "(empty MCP tool result)" — so the model concludes the
+// tool produced nothing and usually retries, burning another call on the same
+// empty answer. Naming what came back costs nothing and ends that loop even
+// though the payload still cannot be forwarded.
+//
+// Counts are grouped by mime type and ordered by first appearance, so the same
+// result always produces the same sentence.
+func DroppedContentSummary(content []Content) string {
+	labels := make([]string, 0, len(content))
+	counts := make(map[string]int, len(content))
+	for _, item := range content {
+		if item.Type == "text" {
+			continue
+		}
+		// Prefer the mime type: "image/png" tells the reader more than "image".
+		// A server may omit it, so fall back to the block type rather than
+		// printing an empty label.
+		label := strings.TrimSpace(item.MimeType)
+		if label == "" {
+			label = strings.TrimSpace(item.Type)
+		}
+		if label == "" {
+			label = "unknown"
+		}
+		if _, seen := counts[label]; !seen {
+			labels = append(labels, label)
+		}
+		counts[label]++
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(labels))
+	for _, label := range labels {
+		part := fmt.Sprintf("%d %s block", counts[label], label)
+		if counts[label] != 1 {
+			part += "s"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
