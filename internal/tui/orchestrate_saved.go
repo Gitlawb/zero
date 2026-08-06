@@ -241,11 +241,13 @@ func (m model) showSavedPlanText(name string) string {
 // planTaskSummaryLine is the first line of a prompt, bounded. The full prompt
 // stays in the file — a display surface must not become the data path.
 func planTaskSummaryLine(prompt string) string {
-	summary := strings.TrimSpace(prompt)
-	if index := strings.IndexAny(summary, "\r\n"); index >= 0 {
-		summary = summary[:index]
-	}
-	return truncateRunes(summary, planTaskSummaryWidth)
+	// THE SAME SANITIZER THE LIVE PATH USES (planTaskSummary →
+	// sanitizeCardText). A saved plan's prompts are model-authored text read
+	// back from disk — the same trust level as a live task's — and this line
+	// only cut at the first newline, so control characters (ESC included, the
+	// byte that starts an ANSI sequence) reached the display. Untrusted input
+	// is untrusted on every path it enters by.
+	return truncateRunes(sanitizeCardText(prompt), planTaskSummaryWidth)
 }
 
 // runSavedPlan asks the MODEL to run it. See the note at the top of this file:

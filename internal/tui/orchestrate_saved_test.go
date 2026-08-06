@@ -433,3 +433,20 @@ func TestRestartIgnoresProgressWhereResumeHonoursIt(t *testing.T) {
 		t.Fatalf("resume did not narrow: %d vs restart's %d", narrowed.TaskCount(), full.TaskCount())
 	}
 }
+
+// A SAVED PLAN'S PROMPTS ARE MODEL-AUTHORED TEXT READ BACK FROM DISK — the
+// same trust level as a live task's, sanitized on the same chokepoint. The
+// saved path only cut at the first newline, so ESC (the byte that starts an
+// ANSI sequence) and other control characters reached the display.
+func TestSavedPlanSummariesDropControlCharacters(t *testing.T) {
+	got := planTaskSummaryLine("audit \x1b[31mred\x1b[0m thing\x07 done.\nsecond line")
+	if strings.ContainsAny(got, "\x1b\x07\r\n") {
+		t.Fatalf("control characters reached the summary: %q", got)
+	}
+	if !strings.Contains(got, "audit") || !strings.Contains(got, "done.") {
+		t.Fatalf("the printable text must survive: %q", got)
+	}
+	if strings.Contains(got, "second line") {
+		t.Fatalf("only the first line belongs in a summary: %q", got)
+	}
+}
