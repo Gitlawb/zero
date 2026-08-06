@@ -79,10 +79,20 @@ func unreachablePlanPaths(plan Plan, workspace PlanWorkspace) []string {
 // arrives as "…/plan.go." and the bare Stat would miss it — a false NEGATIVE,
 // which is the safe direction but a cheap one to reduce.
 func existingPath(candidate string) (string, bool) {
+	trimmed := strings.TrimRight(candidate, ".,;:)]}\"'")
 	if _, err := os.Lstat(candidate); err == nil {
+		// AN EXACT HIT CAN BE A WINDOWS QUIRK, not a real dotted filename: NTFS
+		// ignores trailing dots, so Lstat("…/streamer.go.") succeeds for the
+		// file named "…/streamer.go" and the sentence's full stop came back as
+		// part of the path. When the trimmed spelling names the SAME file,
+		// prefer it — it is the canonical name on both platforms. A POSIX file
+		// genuinely named with a trailing dot keeps its exact spelling: its
+		// trimmed sibling either does not exist or is a different file.
+		if trimmed != candidate && trimmed != "" && sameLstatFile(candidate, trimmed) {
+			return trimmed, true
+		}
 		return candidate, true
 	}
-	trimmed := strings.TrimRight(candidate, ".,;:)]}\"'")
 	if trimmed == candidate || trimmed == "" {
 		return "", false
 	}
@@ -90,6 +100,20 @@ func existingPath(candidate string) (string, bool) {
 		return trimmed, true
 	}
 	return "", false
+}
+
+// sameLstatFile reports whether two paths name the same file, false on any
+// error — an unanswerable comparison must not rewrite a spelling.
+func sameLstatFile(a, b string) bool {
+	infoA, err := os.Lstat(a)
+	if err != nil {
+		return false
+	}
+	infoB, err := os.Lstat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(infoA, infoB)
 }
 
 // resolvedPath follows symlinks so /var and /private/var are the same place.

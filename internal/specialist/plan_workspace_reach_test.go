@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -511,5 +512,47 @@ func TestAnUnnamedPlanIsStillDescribedInTheRefusal(t *testing.T) {
 	got, _ := planNamesNothingPresent(namedPlan, isolatedWorkspace(worktree))
 	if text := refuseBareWorkspace(namedPlan, isolatedWorkspace(worktree), got).Error(); !strings.Contains(text, `plan "swarm-session-id-leak"`) {
 		t.Fatalf("a named plan lost its name:\n%s", text)
+	}
+}
+
+// AN EXACT HIT CAN BE A WINDOWS QUIRK. NTFS ignores trailing dots, so
+// Lstat("streamer.go.") succeeds for "streamer.go" and the sentence's full stop
+// came back as part of the path — the Windows CI failure this closes. The
+// same-file preference must NOT rewrite a POSIX file genuinely named with a
+// trailing dot, which these cases pin.
+func TestExistingPathPrefersTheCanonicalSpelling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The dotted names below are not creatable on NTFS; the quirk itself is
+		// covered by TestAPathFollowedByPunctuationIsStillFound on the Windows
+		// runner.
+		t.Skip("trailing-dot filenames are not creatable on Windows")
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain.go")
+	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A genuinely dot-suffixed file, alone: its exact spelling must survive.
+	dottedOnly := filepath.Join(dir, "only.")
+	if err := os.WriteFile(dottedOnly, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := existingPath(dottedOnly); !ok || got != dottedOnly {
+		t.Fatalf("a real dotted filename was rewritten: got %q ok=%v", got, ok)
+	}
+	// Both spellings exist as DIFFERENT files: the exact one wins.
+	pairBase := filepath.Join(dir, "pair")
+	pairDotted := pairBase + "."
+	for _, path := range []string{pairBase, pairDotted} {
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, ok := existingPath(pairDotted); !ok || got != pairDotted {
+		t.Fatalf("a distinct dotted sibling was rewritten: got %q ok=%v", got, ok)
+	}
+	// The missing-with-punctuation case keeps its trim.
+	if got, ok := existingPath(plain + "."); !ok || got != plain {
+		t.Fatalf("trailing punctuation must still trim to the real file: got %q ok=%v", got, ok)
 	}
 }
