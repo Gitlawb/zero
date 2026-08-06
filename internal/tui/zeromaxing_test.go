@@ -897,3 +897,39 @@ func TestThePostureSpendBudgetReachesAndLeavesTheRun(t *testing.T) {
 		t.Errorf("removing the posture left a spend budget of %d behind", got)
 	}
 }
+
+// LEAVING THE POSTURE MID-RUN IS THE SAME MUTATION AS ENTERING IT, IN REVERSE.
+// /effort zeromaxing is guarded by the idle-session rule; /effort auto reached
+// revertExecProfile — moving the turn budget, self-correct and the shared
+// orchestrate gate — with no guard at all, leaving one turn running under two
+// different budgets.
+func TestEffortAutoCannotLeaveThePostureMidRun(t *testing.T) {
+	m := zeromaxingTestModel(t, false)
+	m, _ = m.handleEffortCommand(execprofile.Name)
+	if m.agentOptions.MaxTurns != 480 {
+		t.Fatalf("setup: posture not applied, turns=%d", m.agentOptions.MaxTurns)
+	}
+	m.pending = true
+	m, text := m.handleEffortCommand("auto")
+	if m.execProfileName != execprofile.Name || m.agentOptions.MaxTurns != 480 {
+		t.Fatalf("a pending turn must block the revert: profile=%q turns=%d",
+			m.execProfileName, m.agentOptions.MaxTurns)
+	}
+	if !strings.Contains(text, "Finish or stop the current run") {
+		t.Fatalf("the refusal must say why: %q", text)
+	}
+	// Idle again: the same command reverts normally.
+	m.pending = false
+	m, _ = m.handleEffortCommand("auto")
+	if m.execProfileName == execprofile.Name {
+		t.Fatal("an idle session must still be able to leave the posture")
+	}
+	// Plain /effort auto OUTSIDE the posture keeps working mid-run: it only
+	// clears the effort selection, which mutates no shared budget.
+	plain := zeromaxingTestModel(t, false)
+	plain.pending = true
+	plain, _ = plain.handleEffortCommand("auto")
+	if plain.reasoningEffort != "" {
+		t.Fatalf("plain auto mid-run must still clear the effort, got %q", plain.reasoningEffort)
+	}
+}

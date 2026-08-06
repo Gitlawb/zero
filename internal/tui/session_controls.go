@@ -92,6 +92,16 @@ Finish or stop the current run before switching to the zeromaxing posture.`
 		// fast/thorough, /effort auto keeps its existing meaning of "clear the
 		// effort", and reverting there would wrongly drop the whole profile.
 		if m.execProfileName == execprofile.Name {
+			// The SAME idle-session rule entering the posture enforces, because
+			// this is the same mutation in reverse: revertExecProfile moves the
+			// turn budget, the self-correct setting and the shared orchestrate
+			// gate, and doing that mid-run leaves one turn running under two
+			// different budgets. Entering through /effort zeromaxing is guarded;
+			// leaving through /effort auto must not be the unguarded door.
+			if m.pending {
+				return m, `Effort
+Finish or stop the current run before leaving the zeromaxing posture.`
+			}
 			m = m.revertExecProfile()
 			return m, m.profileText()
 		}
