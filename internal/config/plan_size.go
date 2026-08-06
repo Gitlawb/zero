@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -125,14 +124,6 @@ func PlanSizeNames() []string {
 	for _, tier := range planSizeTiers {
 		names = append(names, string(tier.size))
 	}
-	return names
-}
-
-// SortedPlanSizeNames is PlanSizeNames in alphabetical order, for callers that
-// want a stable rendering independent of the tier ordering.
-func SortedPlanSizeNames() []string {
-	names := PlanSizeNames()
-	sort.Strings(names)
 	return names
 }
 

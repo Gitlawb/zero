@@ -1419,15 +1419,6 @@ func (m model) sidebarTokenText() string {
 // divider cell between them, into total-width rows. Both blocks are normalized
 // to their column widths and to the same row count first, so every joined row
 // is exactly chatWidth + 1 + sidebarWidth cells and the columns stay aligned.
-func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
-	// A cell of air on each side of the rule (" │ ") so the columns don't butt
-	// flush against it. The chat side gets its gutter from the leading space; the
-	// sidebar side from the trailing space (plus items' own leading inset, which
-	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
-	return joinColumnsWith(chat, sidebar, chatW, sidebarW, func(int, int) string {
-		return " " + zeroTheme.line.Render("│") + " "
-	})
-}
 
 // joinColumnsWith is joinColumns with a caller-supplied divider painter, so a
 // skin can colour the rule per row (the zeromaxing rail) without this function

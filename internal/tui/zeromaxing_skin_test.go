@@ -59,7 +59,9 @@ func TestPostureOnPaintsTheLabelAndNothingElse(t *testing.T) {
 // bytes, so an idle sidebar does not shimmer between frames.
 func TestPostureSkinIsStableWhenIdle(t *testing.T) {
 	m := skinModel(true)
-	if m.postureHeader("FILES", 40) != m.postureHeader("FILES", 40) {
+	firstRender := m.postureHeader("FILES", 40)
+	secondRender := m.postureHeader("FILES", 40)
+	if firstRender != secondRender {
 		t.Fatal("two idle renders of the same header differ")
 	}
 	m.reducedMotion = true

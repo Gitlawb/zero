@@ -20,7 +20,7 @@ func TestARestoredAgentCardDoesNotRenderTheMaxDuration(t *testing.T) {
 
 	// The shape that produced it: a row rebuilt with no start time.
 	unset := specialistInfo{name: "worker", description: "W1", childSessionID: "c1", status: specialistCompleted}
-	if got := time.Now().Sub(unset.startedAt); got != maxDuration {
+	if got := time.Since(unset.startedAt); got != maxDuration {
 		t.Fatalf("setup: a zero start no longer overflows (%v); this test guards the wrong thing", got)
 	}
 

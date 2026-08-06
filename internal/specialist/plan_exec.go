@@ -304,9 +304,6 @@ type PlanRecorder interface {
 //
 // The order comes from the same Kahn pass that proved the graph acyclic, so
 // admission and execution cannot disagree about it.
-func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder, opts ...ExecOption) PlanReport {
-	return ExecutePlanIn(ctx, plan, PlanWorkspace{}, parentTools, run, recorder, opts...)
-}
 
 // ExecOption tunes one plan execution.
 //
@@ -1264,9 +1261,6 @@ func dependencyBriefingBudget(contextWindow int) (perTask, total int) {
 // would have been six tests changed to keep compiling — and a test edited for
 // that reason is one nobody re-reads. They assert briefing CONTENT, which the
 // fixed caps still produce exactly as before.
-func withDependencyBriefing(task Task, results map[string]TaskResult) string {
-	return withDependencyBriefingBudget(task, results, dependencyBriefingPerTask, dependencyBriefingTotal)
-}
 
 // withDependencyBriefingBudget is the same briefing sized to the reading task.
 func withDependencyBriefingBudget(task Task, results map[string]TaskResult, perTaskBudget, totalBudget int) string {

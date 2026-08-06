@@ -268,3 +268,19 @@ func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, s
 func transcriptViewportForBody(body string, frame transcriptFrameLayout, offset int) transcriptViewport {
 	return newTranscriptViewport(len(viewLines(body)), frame.bodyRect.height, offset)
 }
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempts int, now time.Time) {
+	s.markDoneOn(taskID, outcome, "", "", tokens, attempts, now)
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
+	// A cell of air on each side of the rule (" │ ") so the columns don't butt
+	// flush against it. The chat side gets its gutter from the leading space; the
+	// sidebar side from the trailing space (plus items' own leading inset, which
+	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
+	return joinColumnsWith(chat, sidebar, chatW, sidebarW, func(int, int) string {
+		return " " + zeroTheme.line.Render("│") + " "
+	})
+}

@@ -379,9 +379,9 @@ func assignModelsToTaskArgs(tasks []any, tiers modelTiers, prefs ModelPreference
 			continue
 		}
 		note := task.ID + ": " + string(role) + " → " + model
-		switch pin := prefs.pinned(role); {
-		case pin == "":
-		case pin == model:
+		switch pin := prefs.pinned(role); pin {
+		case "":
+		case model:
 			note += " (pinned)"
 		default:
 			// Say WHY the pin was passed over, or a user who configured one and

@@ -194,10 +194,6 @@ func (s *orchestratePanelState) linkCard(taskID, cardKey string) {
 	}
 }
 
-func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempts int, now time.Time) {
-	s.markDoneOn(taskID, outcome, "", "", tokens, attempts, now)
-}
-
 // markDoneOn is markDone knowing WHICH MODEL ACTUALLY RAN.
 //
 // ranOn is the model the task finished on and is authoritative: empty means it

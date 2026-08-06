@@ -832,10 +832,6 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 // The production path needs a third thing — what routing COST — and gets it from
 // autoAssignModelsCosting below; editing seven tests to thread a value they do
 // not assert on would be seven tests changed to keep compiling.
-func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[string]any, options tools.RunOptions) ([]string, error) {
-	notes, _, err := tool.autoAssignModelsCosting(ctx, args, options)
-	return notes, err
-}
 
 // autoAssignModelsCosting is autoAssignModels, also reporting the tokens the
 // routing call spent — which no task performed and which therefore reached
