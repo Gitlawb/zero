@@ -311,18 +311,22 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize,
 			options.enabledTools, options.disabledTools, planRecorder, orchestrateWiring{
 				DiscoverModels: planModelDiscoverer(workspaceRoot, planProvider),
-				// Same live scope the run's own tools are confined by, so a child
-				// stands on the same ground rather than on less.
+				// The run's EXTRA write roots only — the grants beyond the
+				// workspace — exactly as the TUI wires them (scope.ExtraRoots).
+				// Passing execScope.Roots() here handed the child the PARENT
+				// WORKSPACE ROOT as an extra writable --add-dir, and for an
+				// ISOLATED plan that defeats the isolation outright: the
+				// worktree exists so a write-capable plan cannot touch the
+				// parent tree, and this line was handing the parent tree back.
+				// A child's own workspace comes from its --cwd; only explicit
+				// grants ride along.
 				//
 				// A CLOSURE OVER THE VARIABLE, not over its value: the scope is
 				// built further down this function, and a child is launched long
 				// after both. Reading it here would capture nil forever — the same
 				// reason planGate above is a pointer.
 				ExtraWriteRoots: func() []string {
-					if execScope == nil {
-						return nil
-					}
-					return execScope.Roots()
+					return execChildWriteRoots(execScope)
 				},
 				// The read counterpart: a request_permissions READ grant lands in a
 				// separate scope list the write roots above do not cover, so without
@@ -1719,4 +1723,18 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 func execPlanPaths(workspaceRoot string) specialist.PlanPaths {
 	userConfigDir, _ := config.UserConfigDir()
 	return specialist.DefaultPlanPaths(workspaceRoot, userConfigDir)
+}
+
+// execChildWriteRoots is what a headless run's children may WRITE beyond their
+// own workspace: the run's granted extra roots, and never the parent workspace
+// root itself. It returned execScope.Roots() — workspace included — and for an
+// ISOLATED plan that defeats the isolation outright: the worktree exists so a
+// write-capable plan cannot touch the parent tree, and the wiring was handing
+// the parent tree back as a writable --add-dir. The TUI has always passed only
+// scope.ExtraRoots; the two surfaces now agree.
+func execChildWriteRoots(scope *sandbox.Scope) []string {
+	if scope == nil {
+		return nil
+	}
+	return scope.ExtraRoots()
 }
