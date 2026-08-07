@@ -5,10 +5,156 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
+
+// Non-cancellation dial failure: handshake returns 101 with an Upgrade header
+// equal to the API key so the dial error embeds the key and redaction must strip it.
+func TestOpenAIRealtimeDialFailureRedactsKey(t *testing.T) {
+	const key = "sk-test-dial-key-abcdef"
+	baseURL := dialFailServerWithUpgrade(t, key)
+
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{APIKey: key, BaseURL: baseURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte)
+	close(chunks)
+	_, ferr := tr.StreamTranscribe(context.Background(), chunks, nil)
+	if ferr == nil {
+		t.Fatal("expected dial failure")
+	}
+	if errors.Is(ferr, context.Canceled) {
+		t.Fatalf("dial failure should not be context.Canceled: %v", ferr)
+	}
+	if strings.Contains(ferr.Error(), key) {
+		t.Errorf("API key leaked from dial failure: %v", ferr)
+	}
+	if !strings.Contains(ferr.Error(), "connecting to OpenAI Realtime") {
+		t.Errorf("expected dial-path error prefix, got: %v", ferr)
+	}
+}
+
+// Session-configuration write fails after dial: inject a write error that embeds
+// the API key (peer close cannot reach this path reliably — the session write
+// always lands in the kernel buffer first) and assert redaction.
+func TestOpenAIRealtimeSessionConfigFailureRedactsKey(t *testing.T) {
+	const key = "sk-test-session-key-abcdef"
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		// Hold open; the client fails on the injected session write before reading.
+		<-ctx.Done()
+	})
+
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{
+		APIKey:  key,
+		BaseURL: url,
+		writeErrInjector: func() error {
+			return errors.New("invalid API key " + key)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte)
+	close(chunks)
+	_, ferr := tr.StreamTranscribe(context.Background(), chunks, nil)
+	if ferr == nil {
+		t.Fatal("expected session-config failure")
+	}
+	if errors.Is(ferr, context.Canceled) {
+		t.Fatalf("session-config failure should not be context.Canceled: %v", ferr)
+	}
+	if strings.Contains(ferr.Error(), key) {
+		t.Errorf("API key leaked from session-config failure: %v", ferr)
+	}
+	if !strings.Contains(ferr.Error(), "configuring OpenAI Realtime session") {
+		t.Errorf("expected session-config error prefix, got: %v", ferr)
+	}
+}
+
+// Asynchronous writer failure: session update succeeds, then the audio writer
+// injects a key-bearing write error. The server keeps the connection open and
+// emits a delta so the reader loop observes writeErrCh (not a peer close).
+func TestOpenAIRealtimeWriterFailureRedactsKey(t *testing.T) {
+	const key = "sk-test-writer-key-abcdef"
+	sessionDone := make(chan struct{})
+	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+		close(sessionDone)
+		// Keep reading and emit a delta so the client processes an event and
+		// drains writeErrCh while the connection is still open.
+		_ = c.Write(ctx, websocket.MessageText, []byte(
+			`{"type":"conversation.item.input_audio_transcription.delta","delta":"hi"}`,
+		))
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				return
+			}
+		}
+	})
+
+	var writes atomic.Int32
+	tr, err := NewOpenAIRealtimeTranscriber(OpenAIRealtimeConfig{
+		APIKey:  key,
+		BaseURL: url,
+		writeErrInjector: func() error {
+			// First write is session.update; fail subsequent audio/commit writes.
+			if writes.Add(1) == 1 {
+				return nil
+			}
+			return errors.New("invalid API key " + key)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte, 1)
+	chunks <- make([]byte, 480)
+	// Leave open after the first frame so the writer hits the injected error
+	// on that append rather than a clean commit.
+
+	done := make(chan error, 1)
+	go func() {
+		_, ferr := tr.StreamTranscribe(context.Background(), chunks, func(string, bool) {})
+		done <- ferr
+	}()
+
+	var ferr error
+	select {
+	case ferr = <-done:
+	case <-time.After(5 * time.Second):
+		close(chunks)
+		t.Fatal("StreamTranscribe did not complete after writer failure")
+	}
+	close(chunks)
+
+	if ferr == nil {
+		t.Fatal("expected writer failure")
+	}
+	if errors.Is(ferr, context.Canceled) {
+		t.Fatalf("writer failure should not be context.Canceled: %v", ferr)
+	}
+	if strings.Contains(ferr.Error(), key) {
+		t.Errorf("API key leaked from writer failure: %v", ferr)
+	}
+	if !strings.Contains(ferr.Error(), "OpenAI Realtime stream error") {
+		t.Errorf("expected stream/writer error prefix, got: %v", ferr)
+	}
+	select {
+	case <-sessionDone:
+	default:
+		// Session may race the injected audio write; prefix assertion above is enough.
+	}
+}
 
 func TestOpenAIRealtimeStreamTranscribeErrorRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {

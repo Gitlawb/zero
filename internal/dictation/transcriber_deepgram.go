@@ -77,15 +77,26 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 	// so no conversion (unlike sherpa-onnx, which wants float32).
 	writeErrCh := make(chan error, 1)
 	go func() {
-		for chunk := range chunks {
-			if err := conn.Write(ctx, websocket.MessageBinary, chunk); err != nil {
-				writeErrCh <- err
+		// Select on ctx.Done() while waiting for the next chunk so a cancelled
+		// session does not leave this goroutine blocked on an open idle channel.
+		for {
+			select {
+			case <-ctx.Done():
+				writeErrCh <- ctx.Err()
 				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					// CloseStream flushes any buffered audio and returns final
+					// results before Deepgram closes the socket.
+					writeErrCh <- conn.Write(ctx, websocket.MessageText, []byte(`{"type":"CloseStream"}`))
+					return
+				}
+				if err := conn.Write(ctx, websocket.MessageBinary, chunk); err != nil {
+					writeErrCh <- err
+					return
+				}
 			}
 		}
-		// CloseStream flushes any buffered audio and returns final results before
-		// Deepgram closes the socket.
-		writeErrCh <- conn.Write(ctx, websocket.MessageText, []byte(`{"type":"CloseStream"}`))
 	}()
 
 	// Deepgram results are per-utterance segments, not cumulative: accumulate the

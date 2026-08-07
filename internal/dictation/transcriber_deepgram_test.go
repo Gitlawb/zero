@@ -3,12 +3,68 @@ package dictation
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/coder/websocket"
 )
+
+// Non-cancellation dial failure: handshake returns 101 with an Upgrade header
+// equal to the API key so the dial error embeds the key and redaction must strip it.
+func TestDeepgramDialFailureRedactsKey(t *testing.T) {
+	const key = "sk-test-dial-key-abcdef"
+	baseURL := dialFailServerWithUpgrade(t, key)
+
+	tr, err := NewDeepgramTranscriber(DeepgramConfig{APIKey: key, BaseURL: baseURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := make(chan []byte)
+	close(chunks)
+	_, ferr := tr.StreamTranscribe(context.Background(), chunks, nil)
+	if ferr == nil {
+		t.Fatal("expected dial failure")
+	}
+	if errors.Is(ferr, context.Canceled) {
+		t.Fatalf("dial failure should not be context.Canceled: %v", ferr)
+	}
+	if strings.Contains(ferr.Error(), key) {
+		t.Errorf("API key leaked from dial failure: %v", ferr)
+	}
+	if !strings.Contains(ferr.Error(), "connecting to Deepgram") {
+		t.Errorf("expected dial-path error prefix, got: %v", ferr)
+	}
+}
+
+// dialFailServerWithUpgrade returns a ws URL whose handshake responds 101 with
+// Upgrade set to upgradeValue (not "websocket"), so websocket.Dial fails with
+// that value in the error string. Hijacks and closes immediately to avoid the
+// library's 3s body-drain timeout on failed dials.
+func dialFailServerWithUpgrade(t *testing.T, upgradeValue string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+			return
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		_, _ = bufrw.WriteString("Connection: Upgrade\r\n")
+		_, _ = bufrw.WriteString("Upgrade: " + upgradeValue + "\r\n\r\n")
+		_ = bufrw.Flush()
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
 
 func TestDeepgramStreamTranscribeErrorRedaction(t *testing.T) {
 	url := wsTestServer(t, func(ctx context.Context, c *websocket.Conn) {

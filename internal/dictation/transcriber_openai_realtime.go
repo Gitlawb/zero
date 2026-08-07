@@ -23,6 +23,10 @@ type OpenAIRealtimeConfig struct {
 	Model  string // default "gpt-4o-transcribe"
 	// BaseURL overrides the wss endpoint (tests point it at a fake server).
 	BaseURL string
+	// writeErrInjector, when set, is consulted before each JSON websocket write.
+	// Used by same-package tests to force controllable write failures that embed
+	// secrets; production callers leave it nil.
+	writeErrInjector func() error
 }
 
 type openAIRealtimeTranscriber struct {
@@ -82,7 +86,7 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			},
 		},
 	}
-	if err := writeJSON(ctx, conn, sessionUpdate); err != nil {
+	if err := o.writeJSON(ctx, conn, sessionUpdate); err != nil {
 		// Same cancellation short-circuit as the dial above: an Esc-abort
 		// while the session update is in flight must stay context.Canceled.
 		if ctx.Err() != nil {
@@ -93,18 +97,29 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 
 	writeErrCh := make(chan error, 1)
 	go func() {
-		for chunk := range chunks {
-			appendMsg := map[string]any{
-				"type":  "input_audio_buffer.append",
-				"audio": base64.StdEncoding.EncodeToString(chunk),
-			}
-			if err := writeJSON(ctx, conn, appendMsg); err != nil {
-				writeErrCh <- err
+		// Select on ctx.Done() while waiting for the next chunk so a cancelled
+		// session does not leave this goroutine blocked on an open idle channel.
+		for {
+			select {
+			case <-ctx.Done():
+				writeErrCh <- ctx.Err()
 				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					// Commit the buffered audio to force final transcription.
+					writeErrCh <- o.writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"})
+					return
+				}
+				appendMsg := map[string]any{
+					"type":  "input_audio_buffer.append",
+					"audio": base64.StdEncoding.EncodeToString(chunk),
+				}
+				if err := o.writeJSON(ctx, conn, appendMsg); err != nil {
+					writeErrCh <- err
+					return
+				}
 			}
 		}
-		// Commit the buffered audio to force final transcription of the utterance.
-		writeErrCh <- writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"})
 	}()
 
 	// OpenAI deltas are incremental (append), unlike Deepgram/sherpa's cumulative
@@ -244,6 +259,15 @@ func parseRealtimeEvent(data []byte) realtimeEvent {
 		return realtimeEvent{kind: realtimeError, text: msg.Error.Message}
 	}
 	return realtimeEvent{kind: realtimeOther}
+}
+
+func (o *openAIRealtimeTranscriber) writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
+	if o.cfg.writeErrInjector != nil {
+		if err := o.cfg.writeErrInjector(); err != nil {
+			return err
+		}
+	}
+	return writeJSON(ctx, conn, v)
 }
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
