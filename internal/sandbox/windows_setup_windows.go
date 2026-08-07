@@ -197,7 +197,12 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// this call site shows that, so assert it rather than trusting it to survive
 	// a later refactor. Installing anyway would leave a machine reporting a
 	// successful setup while every offline principal had an open network.
-	if err := assertWindowsNetworkPlanCoversOfflineGroup(networkPlan, resolveWindowsSandboxOfflineGroupSID); err != nil {
+	// Gated on the SAME opt-in that decides whether principals were provisioned
+	// at all (line 36). The offline group is created inside provisioning, so on
+	// an opt-out machine it legitimately does not exist, and asserting there
+	// would refuse a setup that has nothing to get wrong.
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(networkPlan, resolveWindowsSandboxOfflineGroupSID,
+		windowsSandboxIdentityEnabled(config.commandConfig().Env)); err != nil {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
 			return 1

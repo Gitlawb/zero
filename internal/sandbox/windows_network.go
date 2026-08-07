@@ -140,7 +140,17 @@ func WindowsNetworkPlanCoversPrincipals(plan WindowsNetworkPlan, offlineGroupSID
 //     WindowsNetworkPlanCoversPrincipals answers true for an empty SID, correctly
 //     for the pre-provisioning callers that ask it, so the emptiness has to be
 //     rejected here rather than delegated to it.
-func assertWindowsNetworkPlanCoversOfflineGroup(plan WindowsNetworkPlan, resolve func() (string, error)) error {
+//
+// provisioned says whether principals were actually provisioned on this run.
+// When they were not there is no offline group, no principal carrying it, and
+// nothing for the filters to miss, so there is nothing to assert. Running the
+// check anyway turns the ordinary opt-out setup into a hard failure, because a
+// machine with no group resolves to ("", nil) and the empty-SID rejection below
+// is correct only after provisioning.
+func assertWindowsNetworkPlanCoversOfflineGroup(plan WindowsNetworkPlan, resolve func() (string, error), provisioned bool) error {
+	if !provisioned {
+		return nil
+	}
 	if resolve == nil {
 		return errors.New("sandbox offline group resolver is not wired up, so filter coverage cannot be verified")
 	}

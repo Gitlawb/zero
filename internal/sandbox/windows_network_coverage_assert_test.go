@@ -66,7 +66,7 @@ func TestAssertWindowsNetworkPlanCoversOfflineGroupFailsClosed(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := assertWindowsNetworkPlanCoversOfflineGroup(test.plan, test.resolve)
+			err := assertWindowsNetworkPlanCoversOfflineGroup(test.plan, test.resolve, true)
 			if test.wantErr && err == nil {
 				t.Fatalf("assertWindowsNetworkPlanCoversOfflineGroup() = nil, want an error so setup rolls back")
 			}
@@ -84,9 +84,38 @@ func TestAssertWindowsNetworkPlanCoversOfflineGroupFailsClosed(t *testing.T) {
 
 	// The lookup failure has to stay unwrapped-comparable: setup logs it and an
 	// operator needs the underlying Win32 reason, not a flattened string.
-	err := assertWindowsNetworkPlanCoversOfflineGroup(covering, func() (string, error) { return "", lookupFailed })
+	err := assertWindowsNetworkPlanCoversOfflineGroup(covering, func() (string, error) { return "", lookupFailed }, true)
 	if !errors.Is(err, lookupFailed) {
 		t.Fatalf("errors.Is(err, lookupFailed) = false; the cause was dropped: %v", err)
+	}
+}
+
+// The assert only means something AFTER principals were provisioned. The offline
+// group is created inside provisionWindowsSandboxIdentity, which runs only under
+// the ZERO_WINDOWS_SANDBOX_IDENTITY opt-in, so on a default machine there is no
+// group, no principal, and nothing for the filters to miss.
+//
+// Rejecting an empty SID is right once provisioning ran (that is the vacuous
+// pass anandh8x found) and wrong before it: it turned the ordinary opt-out setup
+// into a hard failure, which is the regression jatmn caught on #812.
+func TestAssertWindowsNetworkPlanCoversOfflineGroupSkipsWhenNothingWasProvisioned(t *testing.T) {
+	plan := WindowsNetworkPlan{IdentitySIDs: []string{"S-1-5-21-marker"}}
+
+	// The default machine: no group exists, so the resolver reports ("", nil).
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(plan, func() (string, error) { return "", nil }, false); err != nil {
+		t.Fatalf("opt-out setup was refused: %v", err)
+	}
+	// Same state WITH provisioning claimed: now the missing group is a real fault.
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(plan, func() (string, error) { return "", nil }, true); err == nil {
+		t.Fatal("a missing group after provisioning must still fail closed")
+	}
+	// Not provisioned must not become a licence to skip a lookup failure either:
+	// the resolver is never consulted, so a broken lookup cannot matter here.
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(plan, func() (string, error) {
+		t.Fatal("the resolver must not be consulted when nothing was provisioned")
+		return "", nil
+	}, false); err != nil {
+		t.Fatalf("opt-out setup was refused: %v", err)
 	}
 }
 
@@ -94,7 +123,7 @@ func TestAssertWindowsNetworkPlanCoversOfflineGroupFailsClosed(t *testing.T) {
 // one thing it must not do.
 func TestAssertWindowsNetworkPlanCoversOfflineGroupRejectsNilResolver(t *testing.T) {
 	plan := WindowsNetworkPlan{IdentitySIDs: []string{"S-1-5-32-9999"}}
-	if err := assertWindowsNetworkPlanCoversOfflineGroup(plan, nil); err == nil {
+	if err := assertWindowsNetworkPlanCoversOfflineGroup(plan, nil, true); err == nil {
 		t.Fatal("assertWindowsNetworkPlanCoversOfflineGroup(nil resolver) = nil, want an error")
 	}
 }
