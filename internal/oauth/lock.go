@@ -35,19 +35,22 @@ var lockSeq atomic.Uint64
 // older than that threshold so a crashed holder cannot deadlock the store.
 // Release is ownership-aware: it removes the lock only if it still holds our
 // token, so a stale-broken holder cannot delete a newer holder's lock.
+// The returned token is the contents written into the lock file; lease refresh
+// must re-check it before touching mtime so a replaced holder cannot keep a
+// thief's lock alive.
 //
 // Timing always uses the real wall clock, never the now parameter: now is
 // StoreOptions.Now, which callers may legitimately fix (e.g. a test or an
 // embedded clock). Measuring the deadline with that clock would either never
 // fire (fixed clock) or diverge from the mtime lease stamps (wall-clock).
-func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
+func acquireFileLock(lockPath string, now func() time.Time) (unlock func(), token string, err error) {
 	if now == nil {
 		now = time.Now
 	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), now().UnixNano(), lockSeq.Add(1))
+	token = fmt.Sprintf("%d-%d-%d", os.Getpid(), now().UnixNano(), lockSeq.Add(1))
 	idleDeadline := time.Now().Add(fileLockTimeout)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -58,11 +61,11 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 			if _, werr := f.WriteString(token); werr != nil {
 				_ = f.Close()
 				_ = lockutil.RemoveLockFile(lockPath)
-				return nil, fmt.Errorf("oauth: write token lock: %w", werr)
+				return nil, "", fmt.Errorf("oauth: write token lock: %w", werr)
 			}
 			if cerr := f.Close(); cerr != nil {
 				_ = lockutil.RemoveLockFile(lockPath)
-				return nil, fmt.Errorf("oauth: close token lock: %w", cerr)
+				return nil, "", fmt.Errorf("oauth: close token lock: %w", cerr)
 			}
 			var released bool
 			return func() {
@@ -73,7 +76,7 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
 					_ = lockutil.RemoveLockFile(lockPath)
 				}
-			}, nil
+			}, token, nil
 		}
 		// On Windows a concurrent holder's os.Remove leaves the lock file in a
 		// "delete pending" state, so an O_EXCL create races it with
@@ -81,39 +84,61 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 		// as contention and retry, exactly like ErrExist — otherwise the lock
 		// spuriously fails under concurrency on Windows.
 		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
-			return nil, fmt.Errorf("oauth: acquire token lock: %w", err)
+			return nil, "", fmt.Errorf("oauth: acquire token lock: %w", err)
 		}
 		// Reclaim a stale lock left by a crashed holder — atomically (H3). A blind
 		// Remove lets two racers both reclaim + recreate and so both hold the lock;
 		// reclaimStaleLock renames the file aside (only one rename wins) and restores
 		// it if it turns out fresh, so a live lock is never deleted out from under it.
 		if info, statErr := os.Stat(lockPath); statErr == nil {
-			if time.Since(info.ModTime()) > fileLockStaleAfter {
+			age := time.Since(info.ModTime())
+			// Future mtimes (clock skew, hostile Chtimes) are not healthy leases:
+			// age is negative, so neither the reclaim branch nor the deadline
+			// extension below treats them as live. Contenders time out instead of
+			// waiting forever on a never-stale lock.
+			if age > fileLockStaleAfter {
 				cleared, rerr := lockutil.ReclaimStaleLock(lockPath, token, func(reclaimedPath string) bool {
 					info, err := os.Stat(reclaimedPath)
-					return err == nil && time.Since(info.ModTime()) <= fileLockStaleAfter
+					if err != nil {
+						return false
+					}
+					reclaimedAge := time.Since(info.ModTime())
+					return reclaimedAge >= 0 && reclaimedAge <= fileLockStaleAfter
 				})
 				if rerr != nil {
 					// Reclaim hit a hard failure: the rename aside failed outright, or a
 					// live holder's lock could not be put back (the lock path may be
 					// missing, so re-acquiring would break mutual exclusion). Fail closed
 					// instead of spinning to the deadline.
-					return nil, fmt.Errorf("oauth: reclaim stale token lock: %w", rerr)
+					return nil, "", fmt.Errorf("oauth: reclaim stale token lock: %w", rerr)
 				}
 				if cleared {
 					continue
 				}
-				// Lost the reclaim race (or it was actually fresh) — fall through.
-			} else {
-				// Holder looks healthy (lease refreshed recently). Keep waiting for
-				// the critical section to finish rather than timing out after a fixed
-				// window shorter than a legitimate multi-entry keyring pass.
+				// Lost the reclaim race, or isLive reported a still-fresh holder
+				// (callback true → ReclaimStaleLock restores and returns false).
+				// Refresh the idle deadline so reclaim work that overran the prior
+				// window does not immediately time out a healthy peer.
+				idleDeadline = time.Now().Add(fileLockTimeout)
+			} else if age >= 0 {
+				// Holder looks healthy (lease refreshed recently, mtime not in the
+				// future). Keep waiting for the critical section to finish rather
+				// than timing out after a fixed window shorter than a legitimate
+				// multi-entry keyring pass.
 				idleDeadline = time.Now().Add(fileLockTimeout)
 			}
 		}
 		if time.Now().After(idleDeadline) {
-			return nil, fmt.Errorf("oauth: timed out acquiring token lock %s", filepath.Base(lockPath))
+			return nil, "", fmt.Errorf("oauth: timed out acquiring token lock %s", filepath.Base(lockPath))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// ownLockFile reports whether path still holds token. Used by lease refresh so
+// a holder that was reclaimed after a long pause cannot Chtimes a replacement
+// lock and keep two critical sections alive.
+func ownLockFile(path, token string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && string(data) == token
 }

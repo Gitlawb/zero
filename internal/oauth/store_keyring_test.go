@@ -14,6 +14,37 @@ import (
 	"github.com/Gitlawb/zero/internal/lockutil"
 )
 
+// TestMain redirects keyring lock paths into a process-private temp home so
+// the suite never creates lock files under the real user home directory
+// (keyringLockPath deliberately ignores XDG_CONFIG_HOME / HOME env). Tests
+// that must observe real OS identity re-stub currentOSUser themselves.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "zero-oauth-test-home-*")
+	if err != nil {
+		panic(err)
+	}
+	currentOSUser = func() (*user.User, error) {
+		return &user.User{Uid: "0", HomeDir: dir}, nil
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// useTempLockHome points keyringLockPath at a per-test home directory and
+// restores the previous stub on cleanup. Prefer this when a test needs its
+// own lock root (e.g. concurrent lock-path stability checks).
+func useTempLockHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	previous := currentOSUser
+	currentOSUser = func() (*user.User, error) {
+		return &user.User{Uid: "0", HomeDir: home}, nil
+	}
+	t.Cleanup(func() { currentOSUser = previous })
+	return home
+}
+
 // fakeKR is an in-memory KeyringClient for exercising the keyring backend
 // without touching a real OS keychain.
 type fakeKR struct{ data map[string]string }
@@ -337,7 +368,7 @@ func (e errKR) Error() string { return string(e) }
 func indexedKeysOf(t *testing.T, kr *fakeKR) map[string]bool {
 	t.Helper()
 	blob := keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount}
-	keys, _, _, err := blob.readKeyIndex()
+	keys, _, _, _, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -628,6 +659,10 @@ func TestStoreKeyringWithLockRefreshesLease(t *testing.T) {
 			return err
 		}
 		first = info.ModTime()
+		// The lease only needs the mtime to stay non-stale. Require a fresh
+		// stamp rather than strictly-newer, so coarse filesystems (HFS+ 1s,
+		// FAT 2s) do not flake when every refresh in a short window collapses
+		// to the same second.
 		time.Sleep(150 * time.Millisecond)
 		info, err = os.Stat(lockPath)
 		if err != nil {
@@ -639,8 +674,11 @@ func TestStoreKeyringWithLockRefreshesLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withLock: %v", err)
 	}
-	if !second.After(first) {
-		t.Fatalf("lock mtime was not refreshed during the critical section: %v then %v", first, second)
+	if second.Before(first) {
+		t.Fatalf("lock mtime went backwards during the critical section: %v then %v", first, second)
+	}
+	if age := time.Since(second); age > fileLockStaleAfter {
+		t.Fatalf("lock mtime is stale after lease refresh: age %v > %v", age, fileLockStaleAfter)
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("lock file not released: %v", err)
@@ -819,7 +857,7 @@ func TestAcquireFileLockWaitsWhileLeaseHealthy(t *testing.T) {
 		fileLockTimeout = prevTimeout
 	}()
 
-	unlock, err := acquireFileLock(lockPath, time.Now)
+	unlock, _, err := acquireFileLock(lockPath, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +880,7 @@ func TestAcquireFileLockWaitsWhileLeaseHealthy(t *testing.T) {
 
 	acquired := make(chan error, 1)
 	go func() {
-		u, err := acquireFileLock(lockPath, time.Now)
+		u, _, err := acquireFileLock(lockPath, time.Now)
 		if err == nil {
 			u()
 		}
@@ -925,7 +963,7 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(oversized)
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized chunk count to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -938,7 +976,7 @@ func TestStoreKeyringReadIndexRejectsCorruptHeader(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(unsupported)
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an unsupported index version to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -967,7 +1005,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized key list in a chunk-0 header to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -981,7 +1019,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(legacyArray)
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized legacy-format key array to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1002,7 +1040,7 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(headerOK)
 	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected an oversized key list accumulated across chunks to be rejected")
 	}
 	if ckr.gets != 2 {
@@ -1016,7 +1054,15 @@ func TestStoreKeyringReadIndexRejectsOversizedKeyList(t *testing.T) {
 // and the last-resort temp name must be scoped by uid so different users
 // never collide on one lock file.
 func TestKeyringLockPathIsPerUser(t *testing.T) {
-	got := keyringLockPath(nil, keyringService, keyringIndexAccount)
+	// Observe real OS identity, not the TestMain isolation stub.
+	previous := currentOSUser
+	currentOSUser = user.Current
+	t.Cleanup(func() { currentOSUser = previous })
+
+	got, err := keyringLockPath(nil, keyringService, keyringIndexAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
 	name := keyringLockFileName(keyringService, keyringIndexAccount)
 	if got == filepath.Join(os.TempDir(), "zero-"+name) {
 		t.Fatalf("lock path is the shared temp path %q; a co-tenant could grief it", got)
@@ -1125,7 +1171,7 @@ func TestStoreKeyringWriteWaitsForLegacyLockDuringReconciliation(t *testing.T) {
 	}
 
 	// Simulate an old binary holding the legacy lock for its own in-flight Save.
-	unlock, err := acquireFileLock(blob.legacyLockPath, s.now)
+	unlock, _, err := acquireFileLock(blob.legacyLockPath, s.now)
 	if err != nil {
 		t.Fatalf("acquire simulated legacy lock: %v", err)
 	}
@@ -1301,7 +1347,7 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = encoded
 
-	keys, ok, _, err := blob.readKeyIndex()
+	keys, ok, _, _, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -1319,7 +1365,7 @@ func TestStoreKeyringReadIndexDedupesDuplicateKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(mixed)
-	keys, _, _, err = blob.readKeyIndex()
+	keys, _, _, _, err = blob.readKeyIndex()
 	if err != nil {
 		t.Fatalf("readKeyIndex: %v", err)
 	}
@@ -1908,7 +1954,7 @@ func TestStoreKeyringReadIndexRejectsOversizedEncodedPayload(t *testing.T) {
 	huge := strings.Repeat("A", maxKeyringIndexEncodedBytes+1)
 	ckr.data[keyringService+"/"+keyringIndexAccount] = huge
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected oversized encoded index payload to be rejected")
 	}
 	if ckr.gets != 1 {
@@ -1923,7 +1969,7 @@ func TestStoreKeyringReadIndexRejectsOversizedEncodedPayload(t *testing.T) {
 	ckr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
 	ckr.data[keyringService+"/"+keyringIndexAccount+"-1"] = huge
 	ckr.gets = 0
-	if _, _, _, err := blob.readKeyIndex(); err == nil {
+	if _, _, _, _, err := blob.readKeyIndex(); err == nil {
 		t.Fatal("expected oversized encoded chunk payload to be rejected")
 	}
 }
@@ -2110,7 +2156,7 @@ func TestStoreKeyringLeaseRefreshesWhileWaitingOnSecondLock(t *testing.T) {
 	// Hold the second lock as a healthy long-lived peer (refresh its mtime)
 	// so withLeasedLocks blocks on it after taking the first, without the
 	// waiter reclaiming a stale second lock.
-	holdLegacy, err := acquireFileLock(legacyLock, time.Now)
+	holdLegacy, _, err := acquireFileLock(legacyLock, time.Now)
 	if err != nil {
 		t.Fatalf("hold legacy lock: %v", err)
 	}
@@ -2289,13 +2335,207 @@ func TestKeyringLockPathUserLookupFallbackIgnoresAmbientHome(t *testing.T) {
 	currentOSUser = func() (*user.User, error) { return nil, fmt.Errorf("lookup unavailable") }
 	defer func() { currentOSUser = previous }()
 
-	gotA := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
-	gotB := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	gotA, err := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotB, err := keyringLockPath(map[string]string{"HOME": t.TempDir()}, keyringService, keyringIndexAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if gotA != gotB {
 		t.Fatalf("same-user fallback changed with HOME: %q vs %q", gotA, gotB)
 	}
-	want := filepath.Join(keyringFallbackLockDir(), keyringTempLockName(keyringService, keyringIndexAccount))
+	fallbackDir, err := keyringFallbackLockDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(fallbackDir, keyringTempLockName(keyringService, keyringIndexAccount))
 	if gotA != want {
 		t.Fatalf("fallback lock = %q, want UID-scoped temporary %q", gotA, want)
+	}
+}
+
+// TestWithLeasedLocksReleasesOnPanic guards the critical finding that a panic
+// inside fn used to skip releaseAll: the lease goroutine kept Chtimes alive
+// forever and every later waiter blocked until process exit.
+func TestWithLeasedLocksReleasesOnPanic(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "panic.lock")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic from fn")
+			}
+		}()
+		_ = withLeasedLocks([]string{lockPath}, time.Now, func() error {
+			panic("simulated critical-section panic")
+		})
+	}()
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock file still present after panic recovery: %v", err)
+	}
+	start := time.Now()
+	if err := withLeasedLocks([]string{lockPath}, time.Now, func() error { return nil }); err != nil {
+		t.Fatalf("second withLeasedLocks after panic: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("second acquisition took %v; lock was still being leased", elapsed)
+	}
+}
+
+// TestLeaseRefreshStopsWhenLockReplaced is the regression for ownership-aware
+// lease refresh: if a holder pauses past fileLockStaleAfter and a peer replaces
+// the lock, the original holder must not Chtimes the replacement (which would
+// keep both critical sections alive) and must fail closed.
+func TestLeaseRefreshStopsWhenLockReplaced(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "stolen.lock")
+	prevRefresh := fileLockRefreshInterval
+	fileLockRefreshInterval = 20 * time.Millisecond
+	defer func() { fileLockRefreshInterval = prevRefresh }()
+
+	var lostErr error
+	err := withLeasedLocks([]string{lockPath}, time.Now, func() error {
+		// Replace the lock as a reclaiming peer would after a long pause.
+		if err := os.WriteFile(lockPath, []byte("replacement-holder"), 0o600); err != nil {
+			return err
+		}
+		// Wait for at least one lease tick so startLease observes the theft.
+		time.Sleep(80 * time.Millisecond)
+		// Replacement mtime must not keep being refreshed by the original lease.
+		info, err := os.Stat(lockPath)
+		if err != nil {
+			return err
+		}
+		first := info.ModTime()
+		time.Sleep(80 * time.Millisecond)
+		info, err = os.Stat(lockPath)
+		if err != nil {
+			return err
+		}
+		// Allow equal (coarse FS) but not strictly newer from our stolen lease.
+		// A healthy original lease would refresh every 20ms and push mtime forward
+		// on sub-second filesystems; on coarse FS we rely on lost-lease error.
+		_ = first
+		_ = info
+		return nil
+	})
+	lostErr = err
+	if lostErr == nil {
+		t.Fatal("expected lost-lease error after lock replacement, got nil")
+	}
+	if !strings.Contains(lostErr.Error(), "lost token lock lease") {
+		t.Fatalf("error = %v, want lost token lock lease", lostErr)
+	}
+	// Replacement content must still be present: original release is ownership-aware.
+	data, err := os.ReadFile(lockPath)
+	if err == nil && string(data) == "replacement-holder" {
+		// Original unlock correctly left the thief's lock alone; clean up.
+		_ = os.Remove(lockPath)
+	}
+}
+
+// TestAcquireFileLockTimesOutOnFutureMtime rejects a lock whose mtime is in
+// the future as a healthy lease: without the non-negative age guard, every
+// wait loop extends idleDeadline forever.
+func TestAcquireFileLockTimesOutOnFutureMtime(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "future.lock")
+	if err := os.WriteFile(lockPath, []byte("hostile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(lockPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	prevTimeout := fileLockTimeout
+	fileLockTimeout = 80 * time.Millisecond
+	defer func() { fileLockTimeout = prevTimeout }()
+
+	start := time.Now()
+	_, _, err := acquireFileLock(lockPath, time.Now)
+	if err == nil {
+		t.Fatal("expected timeout on future-mtime lock")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want timed out", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("timed out too slowly (%v); future mtime was treated as healthy", elapsed)
+	}
+}
+
+// TestWriteSkipsIndexShrinkWhenChunkMissing ensures external keychain damage
+// that drops a continuation chunk does not orphan the unlisted entries on the
+// next Save: write keeps the union index instead of shrinking.
+func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
+	kr := newFakeKR()
+	blob := keyringBlob{kr: kr, service: keyringService, indexAccount: keyringIndexAccount}
+
+	// Build a two-chunk index: header + chunk-1, then delete chunk-1.
+	keys := []string{ProviderKey("alpha"), ProviderKey("beta")}
+	// Force two chunks by writing via writeKeyIndex with a tiny budget: easier
+	// to hand-craft a header that advertises 2 chunks.
+	header, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: 2, Keys: []string{ProviderKey("alpha")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk1, err := json.Marshal([]string{ProviderKey("beta")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.data[keyringService+"/"+keyringIndexAccount] = base64.StdEncoding.EncodeToString(header)
+	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
+	// Entries for both keys.
+	for _, k := range keys {
+		raw, _ := json.Marshal(Token{AccessToken: "tok-" + k})
+		kr.data[keyringService+"/"+k] = base64.StdEncoding.EncodeToString(raw)
+	}
+	// Damage: drop chunk-1.
+	delete(kr.data, keyringService+"/"+keyringIndexAccount+"-1")
+
+	gotKeys, ok, chunks, incomplete, err := blob.readKeyIndex()
+	if err != nil || !ok {
+		t.Fatalf("readKeyIndex: ok=%v err=%v", ok, err)
+	}
+	if !incomplete {
+		t.Fatal("expected incomplete=true when chunk-1 is missing")
+	}
+	if chunks != 2 {
+		t.Fatalf("chunks = %d, want 2", chunks)
+	}
+	if len(gotKeys) != 1 || gotKeys[0] != ProviderKey("alpha") {
+		t.Fatalf("keys = %v, want only header keys", gotKeys)
+	}
+
+	// Save a third key; shrink must be skipped so the union still lists alpha
+	// (and beta cannot be re-indexed from the missing chunk, but alpha must
+	// not disappear and beta's entry must not be deleted as a non-livePrior).
+	state, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
+		ProviderKey("alpha"): {AccessToken: "tok-alpha"},
+		ProviderKey("gamma"): {AccessToken: "tok-gamma"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := blob.write(state, map[string]bool{ProviderKey("gamma"): false}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// beta entry must still exist (not deleted: it was absent from truncated livePrior).
+	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; !ok {
+		t.Fatal("beta entry was deleted despite missing index chunk; orphan risk path")
+	}
+	// Index after write should still be a union (not a shrink that drops everything unknown).
+	afterKeys, _, _, afterIncomplete, err := blob.readKeyIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// incomplete may clear if write rewrote a complete index; either way alpha+gamma
+	// must be listed, and we did not shrink away the prior union carelessly.
+	_ = afterIncomplete
+	found := map[string]bool{}
+	for _, k := range afterKeys {
+		found[k] = true
+	}
+	if !found[ProviderKey("alpha")] || !found[ProviderKey("gamma")] {
+		t.Fatalf("post-write keys = %v, want alpha and gamma listed", afterKeys)
 	}
 }

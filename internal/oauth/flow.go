@@ -167,6 +167,14 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 	if trimmed(cfg.TokenEndpoint) == "" {
 		return Token{}, errors.New("oauth: no token endpoint configured for refresh")
 	}
+	// Prefer the scopes the current token was issued with; fall back to the
+	// configured defaults only when the stored token has none. The same set is
+	// sent on the wire and kept as the base so a response that omits scope
+	// cannot report a different grant than the provider just processed.
+	scopes := current.Scopes
+	if len(scopes) == 0 {
+		scopes = cfg.Scopes
+	}
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refresh)
@@ -174,12 +182,8 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 	if secret := trimmed(cfg.ClientSecret); secret != "" {
 		form.Set("client_secret", secret)
 	}
-	if len(cfg.Scopes) > 0 {
-		form.Set("scope", strings.Join(cfg.Scopes, " "))
-	}
-	scopes := current.Scopes
-	if len(scopes) == 0 {
-		scopes = cfg.Scopes
+	if len(scopes) > 0 {
+		form.Set("scope", strings.Join(scopes, " "))
 	}
 	base := Token{Scopes: scopes, RefreshToken: refresh, Account: current.Account, IDToken: current.IDToken, TokenType: current.TokenType}
 	return PostToken(ctx, client, cfg.TokenEndpoint, form, base, now)

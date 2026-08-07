@@ -301,7 +301,10 @@ func TestRefreshPreservesTokenTypeWhenOmitted(t *testing.T) {
 }
 
 func TestRefreshPreservesScopesWhenOmitted(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotScope string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotScope = r.FormValue("scope")
 		_, _ = w.Write([]byte(`{"access_token":"new-at","expires_in":3600}`)) // no scope in response
 	}))
 	defer server.Close()
@@ -310,7 +313,31 @@ func TestRefreshPreservesScopesWhenOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
+	if gotScope != "custom-scope" {
+		t.Fatalf("refresh form scope = %q, want current token scopes", gotScope)
+	}
 	if len(tok.Scopes) != 1 || tok.Scopes[0] != "custom-scope" {
 		t.Fatalf("refresh should carry existing scopes forward, got %v", tok.Scopes)
+	}
+}
+
+func TestRefreshUsesConfigScopesWhenTokenHasNone(t *testing.T) {
+	var gotScope string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotScope = r.FormValue("scope")
+		_, _ = w.Write([]byte(`{"access_token":"new-at","expires_in":3600}`))
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", TokenEndpoint: server.URL, Scopes: []string{"fallback-scope"}}
+	tok, err := Refresh(context.Background(), server.Client(), cfg, Token{RefreshToken: "keep-me"}, nil)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if gotScope != "fallback-scope" {
+		t.Fatalf("refresh form scope = %q, want cfg.Scopes fallback", gotScope)
+	}
+	if len(tok.Scopes) != 1 || tok.Scopes[0] != "fallback-scope" {
+		t.Fatalf("refresh should use cfg scopes when token has none, got %v", tok.Scopes)
 	}
 }

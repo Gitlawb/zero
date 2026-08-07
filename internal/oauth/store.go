@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/keyring"
@@ -253,7 +254,10 @@ func NewStore(options StoreOptions) (*Store, error) {
 		// process's token write. legacyLockPath additionally coordinates with a
 		// still-running pre-PR binary during the supported mixed-version window
 		// (see legacyKeyringLockPath).
-		lockPath := keyringLockPath(options.Env, keyringService, keyringIndexAccount)
+		lockPath, err := keyringLockPath(options.Env, keyringService, keyringIndexAccount)
+		if err != nil {
+			return nil, err
+		}
 		legacyLockPath := legacyKeyringLockPath(options.Env)
 		return &Store{blob: keyringBlob{kr: kr, service: keyringService, legacyAccount: keyringLegacyAccount, indexAccount: keyringIndexAccount, lockPath: lockPath, legacyLockPath: legacyLockPath}, now: now}, nil
 	default:
@@ -287,22 +291,56 @@ func resolveStoreFilePath(options StoreOptions) (string, error) {
 // like HOME, XDG_CACHE_HOME, or TMPDIR: those pick different paths per process
 // (sandboxes, CI harnesses, launcher profiles), so two processes for the same
 // OS user would take different lock files while writing to the same OS keychain.
-func keyringLockPath(env map[string]string, service, account string) string {
+// When the OS user lookup fails, the fallback is a private UID-scoped directory
+// under the process temp root (validated 0700, owned by us); a co-tenant DoS
+// of the shared /tmp name is rejected rather than accepted as the lock path.
+func keyringLockPath(env map[string]string, service, account string) (string, error) {
 	name := keyringLockFileName(service, account)
 	if u, err := currentOSUser(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
-		return filepath.Join(u.HomeDir, ".cache", "zero", name)
+		return filepath.Join(u.HomeDir, ".cache", "zero", name), nil
 	}
 	// Do not fall back to os.UserHomeDir: it reads ambient HOME/USERPROFILE, so
-	// two same-user processes can choose different locks for one keyring. The
-	// temporary name is UID-scoped where UIDs exist.
-	return filepath.Join(keyringFallbackLockDir(), keyringTempLockName(service, account))
+	// two same-user processes can choose different locks for one keyring.
+	dir, err := keyringFallbackLockDir()
+	if err != nil {
+		return "", fmt.Errorf("oauth: keyring lock fallback dir: %w", err)
+	}
+	return filepath.Join(dir, keyringTempLockName(service, account)), nil
 }
 
-func keyringFallbackLockDir() string {
+// keyringFallbackLockDir returns a private directory for last-resort keyring
+// locks when the OS user home cannot be resolved. On Windows the process temp
+// dir is already per-user. Elsewhere a UID-scoped 0700 directory under the
+// process temp root is created and validated so a co-tenant cannot pre-create
+// the lock file (or a world-writable parent) and permanently deny OAuth.
+func keyringFallbackLockDir() (string, error) {
 	if runtime.GOOS == "windows" {
-		return os.TempDir()
+		return os.TempDir(), nil
 	}
-	return "/tmp"
+	name := "zero-oauth-locks"
+	if uid := os.Getuid(); uid >= 0 {
+		name = fmt.Sprintf("zero-oauth-locks-%d", uid)
+	}
+	dir := filepath.Join(os.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("oauth lock fallback %s is not a plain directory", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", fmt.Errorf("tighten oauth lock fallback permissions: %w", err)
+		}
+	}
+	if err := checkOAuthLockDirOwner(info); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // legacyKeyringLockPath returns the lock file a pre-PR binary acquires around
@@ -619,7 +657,7 @@ func createPublicationFile(path string) (*os.File, string, error) {
 }
 
 func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
-	unlock, err := acquireFileLock(b.path+".lockfile", now)
+	unlock, _, err := acquireFileLock(b.path+".lockfile", now)
 	if err != nil {
 		return err
 	}
@@ -668,7 +706,7 @@ type keyringBlob struct {
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
-	keys, ok, _, err := b.readKeyIndex()
+	keys, ok, _, _, err := b.readKeyIndex()
 	if err != nil {
 		return nil, false, err
 	}
@@ -839,7 +877,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("oauth: encode keyring token blob: %w", err)
 	}
-	priorKeys, indexExisted, priorChunks, err := b.readKeyIndex()
+	priorKeys, indexExisted, priorChunks, indexIncomplete, err := b.readKeyIndex()
 	if err != nil {
 		return err
 	}
@@ -976,8 +1014,15 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 	}
 	// 5. Shrink the index to the exact new key set. Legacy is left untouched.
-	if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
-		return err
+	// Skip shrink when a referenced index chunk was missing: livePrior was
+	// computed from a truncated key list, so shrinking would drop those keys
+	// from the published index while leaving their OS keychain entries
+	// stranded and unreachable by Load/Status/Delete. Leaving the union index
+	// in place keeps them listed until an intact read can reconcile them.
+	if !indexIncomplete {
+		if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
+			return err
+		}
 	}
 	// A re-login clears its tombstone only after the replacement entry and exact
 	// index are durable. If any earlier step fails, legacy fallback remains
@@ -1008,7 +1053,7 @@ func (b keyringBlob) tombstoneBlob() keyringBlob {
 // readTombstones returns the durable set of keys deleted by a new binary.
 // Missing account => empty set. Corrupt payloads fail closed.
 func (b keyringBlob) readTombstones() (map[string]bool, error) {
-	keys, ok, _, err := b.tombstoneBlob().readKeyIndex()
+	keys, ok, _, _, err := b.tombstoneBlob().readKeyIndex()
 	if err != nil {
 		return nil, fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
@@ -1028,7 +1073,7 @@ func (b keyringBlob) readTombstones() (map[string]bool, error) {
 // real keyring failures cannot be swallowed.
 func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 	tb := b.tombstoneBlob()
-	_, existed, priorChunks, err := tb.readKeyIndex()
+	_, existed, priorChunks, _, err := tb.readKeyIndex()
 	if err != nil {
 		return fmt.Errorf("oauth: read keyring token tombstones: %w", err)
 	}
@@ -1160,81 +1205,87 @@ func decodeKeyringIndexPayload(enc string, what string) ([]byte, error) {
 	return raw, nil
 }
 
-// readKeyIndex returns the indexed keys, whether an index exists at all, and
-// how many chunk entries it currently occupies. A chunk listed by the header
-// but missing from the keyring (a torn write) is skipped, mirroring how
-// read() skips an indexed key whose entry is missing.
-func (b keyringBlob) readKeyIndex() ([]string, bool, int, error) {
+// readKeyIndex returns the indexed keys, whether an index exists at all,
+// how many chunk entries it currently occupies, and whether a referenced
+// continuation chunk was missing. A missing chunk (external keychain damage
+// or a torn write outside this code's write order) is skipped so reads stay
+// available, but incomplete is true so write() can refuse to shrink the
+// index and strand the unlisted entries as undeletable orphans.
+func (b keyringBlob) readKeyIndex() (keys []string, ok bool, chunks int, incomplete bool, err error) {
 	enc, ok, err := b.kr.Get(b.service, b.indexAccount)
 	if err != nil {
-		return nil, false, 0, err
+		return nil, false, 0, false, err
 	}
 	if !ok {
-		return nil, false, 0, nil
+		return nil, false, 0, false, nil
 	}
 	raw, err := decodeKeyringIndexPayload(enc, "keyring token index")
 	if err != nil {
-		return nil, false, 0, err
+		return nil, false, 0, false, err
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(trimmed, "[") {
 		var rawKeys []string
 		if err := json.Unmarshal(raw, &rawKeys); err != nil {
-			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
+			return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
 		}
 		if len(rawKeys) > maxRawKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 		}
 		keys := dedupeValidKeys(rawKeys)
 		if len(keys) > b.indexKeyLimit() {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 		}
-		return keys, true, 1, nil
+		return keys, true, 1, false, nil
 	}
 	var header keyIndexHeader
 	if err := json.Unmarshal(raw, &header); err != nil {
-		return nil, false, 0, fmt.Errorf("oauth: decode keyring token index: %w", err)
+		return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index: %w", err)
 	}
 	// Reject an unsupported or corrupt header before looping: an out-of-range
 	// Chunks would otherwise drive up to that many blocking keyring lookups
 	// (each up to the 10s command timeout) while the store lock is held, wedging
 	// every Load/Status/Save/Delete instead of failing promptly.
 	if header.Version != 1 {
-		return nil, false, 0, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
+		return nil, false, 0, false, fmt.Errorf("oauth: unsupported keyring token index version %d", header.Version)
 	}
 	if header.Chunks < 1 || header.Chunks > maxKeyringIndexChunks {
-		return nil, false, 0, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
+		return nil, false, 0, false, fmt.Errorf("oauth: keyring token index advertises %d chunks (want 1..%d)", header.Chunks, maxKeyringIndexChunks)
 	}
 	rawKeys := header.Keys
 	if len(rawKeys) > maxRawKeyringIndexKeys {
-		return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
+		return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys), maxRawKeyringIndexKeys)
 	}
+	incomplete = false
 	for i := 1; i < header.Chunks; i++ {
-		chunkEnc, ok, err := b.kr.Get(b.service, b.chunkAccount(i))
+		chunkEnc, chunkOK, err := b.kr.Get(b.service, b.chunkAccount(i))
 		if err != nil {
-			return nil, false, 0, err
+			return nil, false, 0, false, err
 		}
-		if !ok {
+		if !chunkOK {
+			// Skip so Load/Status stay available, but remember the damage so
+			// write() does not shrink away the unlisted keys' entries.
+			incomplete = true
 			continue
 		}
 		chunkRaw, err := decodeKeyringIndexPayload(chunkEnc, fmt.Sprintf("keyring token index chunk %d", i))
 		if err != nil {
-			return nil, false, 0, err
+			return nil, false, 0, false, err
 		}
 		var more []string
 		if err := json.Unmarshal(chunkRaw, &more); err != nil {
-			return nil, false, 0, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
+			return nil, false, 0, false, fmt.Errorf("oauth: decode keyring token index chunk %d: %w", i, err)
 		}
 		if len(rawKeys)+len(more) > maxRawKeyringIndexKeys {
-			return nil, false, 0, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
+			return nil, false, 0, false, errKeyringIndexTooManyKeys(len(rawKeys)+len(more), maxRawKeyringIndexKeys)
 		}
 		rawKeys = append(rawKeys, more...)
 	}
-	keys := dedupeValidKeys(rawKeys)
+	keys = dedupeValidKeys(rawKeys)
 	if len(keys) > b.indexKeyLimit() {
-		return nil, false, 0, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
+		return nil, false, 0, false, errKeyringIndexTooManyKeys(len(keys), b.indexKeyLimit())
 	}
-	return keys, true, header.Chunks, nil
+	return keys, true, header.Chunks, incomplete, nil
 }
 
 // dedupeValidKeys drops duplicates and malformed entries from a decoded
@@ -1337,16 +1388,22 @@ var fileLockRefreshInterval = 10 * time.Second
 // closed. Lease ownership starts at acquisition, not after every path is
 // held: withLock acquires lockPath then may block on legacyLockPath, and a
 // peer must not be able to reclaim the first lock as stale during that wait.
+// Refresh is ownership-aware: if a peer reclaims and replaces the lock while
+// this holder is paused, Chtimes is skipped and lost is set so the critical
+// section can fail closed instead of keeping the thief's lock forever-fresh.
 type leasedPath struct {
 	path   string
+	token  string
 	unlock func()
 	stop   chan struct{}
 	done   chan struct{}
+	lost   atomic.Bool
 }
 
-func startLease(path string, unlock func()) *leasedPath {
+func startLease(path, token string, unlock func()) *leasedPath {
 	l := &leasedPath{
 		path:   path,
+		token:  token,
 		unlock: unlock,
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -1364,9 +1421,18 @@ func startLease(path string, unlock func()) *leasedPath {
 				// judges staleness with real time.Since(mtime), so a fixed or stale
 				// StoreOptions.Now would stamp a live lock with an old mtime that
 				// another process would immediately reclaim, reviving the token-loss
-				// race these locks prevent.
+				// race these locks prevent. Only refresh while we still own the
+				// token: a post-stale reclaim can replace the file, and Chtimes on
+				// the replacement would keep both holders inside the critical section.
+				if !ownLockFile(path, token) {
+					l.lost.Store(true)
+					return
+				}
 				at := time.Now()
-				_ = os.Chtimes(path, at, at)
+				if err := os.Chtimes(path, at, at); err != nil && !ownLockFile(path, token) {
+					l.lost.Store(true)
+					return
+				}
 			}
 		}
 	}()
@@ -1383,10 +1449,19 @@ func (l *leasedPath) release() {
 // lease starts immediately on acquisition (and keeps refreshing while later
 // paths are still being acquired and while fn runs), so a multi-lock wait
 // cannot leave an earlier lock looking abandoned. Locks are released in
-// reverse order once fn returns.
+// reverse order once fn returns — including when fn panics — so a recovered
+// panic cannot leave a forever-refreshed lock that wedges every later waiter.
+// If a lease is replaced under us mid-critical-section, the operation fails
+// closed after fn returns (or with fn's error) rather than treating a dual-
+// entry window as success.
 func withLeasedLocks(paths []string, now func() time.Time, fn func() error) error {
 	var leases []*leasedPath
+	released := false
 	releaseAll := func() {
+		if released {
+			return
+		}
+		released = true
 		for i := len(leases) - 1; i >= 0; i-- {
 			leases[i].release()
 		}
@@ -1395,19 +1470,27 @@ func withLeasedLocks(paths []string, now func() time.Time, fn func() error) erro
 		if p == "" {
 			continue
 		}
-		unlock, err := acquireFileLock(p, now)
+		unlock, token, err := acquireFileLock(p, now)
 		if err != nil {
 			releaseAll()
 			return err
 		}
 		// Start refreshing this lock before blocking on the next path.
-		leases = append(leases, startLease(p, unlock))
+		leases = append(leases, startLease(p, token, unlock))
 	}
 	if len(leases) == 0 {
 		return fn()
 	}
+	defer releaseAll()
 	err := fn()
-	releaseAll()
+	for _, l := range leases {
+		if l.lost.Load() {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("oauth: lost token lock lease on %s", filepath.Base(l.path))
+		}
+	}
 	return err
 }
 
