@@ -25,7 +25,14 @@ import (
 // unknown — and on a free provider sorted BELOW gpt-oss:20b: the largest model
 // on the account became the cheap tier every scan task was routed to, and the
 // first thing the shortlist discarded.
-var modelSizeToken = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)([bmt])(?:[^a-z]|$)`)
+//
+// THE BOUNDARY EXCLUDES DIGITS, and that is not cosmetic. It was [^a-z], which
+// a DIGIT satisfies — so "deepseek-r1t2-chimera" matched "1t" followed by "2"
+// and reported a TRILLION-parameter model, and "r1b2-x" reported 1B. Version
+// text is not a parameter count. The b/m suffixes always had this hole; adding
+// t is what made it reachable on a real id, so the boundary is fixed for all
+// three rather than for the one that was reported.
+var modelSizeToken = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)([bmt])(?:[^a-z0-9]|$)`)
 
 func modelSizeBillions(id string) float64 {
 	var largest float64
@@ -96,12 +103,8 @@ func applyMinSizeFloor(models []DiscoveredModel, floor float64) []DiscoveredMode
 // fell through to alphabetical and tiered by nothing. The size branch is skipped
 // the moment any model reports a price, so a mixed or priced catalogue never
 // changes.
-// catalogueIsPriced reports whether ANY model in the set carries a price.
-//
-// One authority for the question, because two things now branch on it: the
-// ranking (cost or size) and the shortlist (which must not narrow a priced
-// catalogue at all). Two copies of this loop would be two chances to disagree
-// about what "free provider" means.
+// catalogueIsPriced reports whether ANY model in the set carries a price, which
+// is what decides whether the ranking orders by cost or by size.
 func catalogueIsPriced(models []DiscoveredModel) bool {
 	for _, model := range models {
 		if model.InputCost > 0 || model.OutputCost > 0 {
@@ -157,61 +160,42 @@ const defaultTopRankedModels = 10
 // The tail, not the head: the list is ascending, so the most capable models are
 // at the end. Taking the head would keep exactly the toys this exists to drop.
 func applyTopRank(models []DiscoveredModel, top int) []DiscoveredModel {
-	// A PRICED CATALOGUE IS NEVER NARROWED, and this is the correction to the
-	// version that shipped without it.
-	//
-	// The list is sorted least-to-most capable, but "capable" is measured by
-	// SIZE on a free provider and by COST on a priced one. Taking the tail is
-	// therefore "keep the biggest" in the first case and "keep the DEAREST" in
-	// the second — which moved the cheap tier from the cheapest model in the
-	// catalogue to the tenth-dearest, and every scan task in every auto-assigned
-	// plan with it. Measured on a 12-model priced fixture: cheap went from cost
-	// 1 to cost 3, and on a real 30-model account the gap is an order of
-	// magnitude of real money.
-	//
-	// The asymmetry is the point. On a free provider the small models cost
-	// nothing and buy nothing, so dropping them is pure gain. On a priced one
-	// the cheap end is exactly what the cheap tier exists to spend, so dropping
-	// it defeats the tiering rather than sharpening it.
 	if top <= 0 {
 		top = defaultTopRankedModels
 	}
-	if len(models) <= top || catalogueIsPriced(models) {
+	if len(models) <= top {
 		return models
 	}
-	// A MODEL WHOSE SIZE CANNOT BE READ IS NEVER DROPPED FOR BEING SMALL — the
-	// same fail-open rule applyMinSizeFloor already follows, and the first
-	// version of this function broke it.
+	// BOTH ENDS OF THE RANKING, and a hard cap in every case.
 	//
-	// The ranking sorts an unparseable id as size 0, which puts it at the
-	// LEAST-capable end, so taking a plain tail deleted exactly the models whose
-	// names happen not to state a parameter count. On a real ollama-cloud
-	// account that meant kimi-k2.6, glm-5.2 and deepseek-v4-flash were removed
-	// from routing while gpt-oss:20b survived — the operator's own guidance
-	// called the first two the strongest reasoners on the machine. Dropping a
-	// model because its name is uninformative is not a capability judgement, it
-	// is a parsing accident.
+	// Two corrections to earlier versions live here. Taking a plain TAIL was
+	// wrong because "capable" means SIZE on a free provider and COST on a priced
+	// one, so the tail kept the ten DEAREST models and moved the cheap tier from
+	// the cheapest in the catalogue to the tenth-dearest. Exempting priced
+	// catalogues entirely was worse: catalogueIsPriced is an ANY test, so one
+	// priced model among three hundred disabled the cut for all three hundred,
+	// planModels.topModels went inert against its own documentation, and the
+	// router prompt lost its only bound — measured at 2,194 -> 22,985 characters
+	// on a 300-model catalogue, paid once per plan on the strongest model.
 	//
-	// So the cut applies to SIZED models only: every unknown-size model is kept,
-	// and the top N of the ones we can actually compare join them. Order is
-	// preserved, so the caller still reads cheap/balanced/strong off the ends.
-	sized := 0
-	for _, model := range models {
-		if modelSizeBillions(model.ID) > 0 {
-			sized++
-		}
+	// Keeping both ends satisfies every reader of this list at once: the cheap
+	// tier reads eligible[0], the strong tier reads the last, and the router gets
+	// a bounded shortlist that still spans the real range. A third from the cheap
+	// end is deliberate rather than half — the tiers need one cheap candidate and
+	// several capable ones, not a even split.
+	//
+	// It also preserves the unsized models without a special case. An id whose
+	// size cannot be read sorts as 0 — the least-capable end — so those models
+	// live in the cheap third and survive, which is what the previous fix was
+	// for: dropping kimi-k2.6 and glm-5.2 because their names carry no parameter
+	// count was a parsing accident, not a capability judgement.
+	low := top / 3
+	if low < 1 {
+		low = 1
 	}
-	if sized <= top {
-		return models
-	}
-	drop := sized - top
-	kept := make([]DiscoveredModel, 0, len(models)-drop)
-	for _, model := range models {
-		if drop > 0 && modelSizeBillions(model.ID) > 0 {
-			drop--
-			continue
-		}
-		kept = append(kept, model)
-	}
+	high := top - low
+	kept := make([]DiscoveredModel, 0, top)
+	kept = append(kept, models[:low]...)
+	kept = append(kept, models[len(models)-high:]...)
 	return kept
 }

@@ -137,21 +137,22 @@ func TestOnlyTheTopRankedModelsAreOffered(t *testing.T) {
 	if len(ranked) != defaultTopRankedModels {
 		t.Fatalf("offered %d models, want the top %d", len(ranked), defaultTopRankedModels)
 	}
-	// The TAIL is kept — the most capable end. Keeping the head would preserve
-	// exactly the toys this exists to drop.
-	if ranked[0].ID != "m:7b" || ranked[len(ranked)-1].ID != "m:397b" {
-		t.Fatalf("kept %q..%q, want the ten largest (7b..397b)", ranked[0].ID, ranked[len(ranked)-1].ID)
+	// BOTH ENDS are kept, and the middle is what goes. The tiers read
+	// cheap/balanced/strong off this list, so a cut that kept only the capable
+	// end moved the cheap tier up the catalogue — on a priced provider, by an
+	// order of magnitude of real money.
+	if ranked[0].ID != "m:1b" || ranked[len(ranked)-1].ID != "m:397b" {
+		t.Fatalf("kept %q..%q, want both ends of the ranking", ranked[0].ID, ranked[len(ranked)-1].ID)
 	}
-	for _, dropped := range []string{"m:1b", "m:3b"} {
-		for _, model := range ranked {
-			if model.ID == dropped {
-				t.Fatalf("%s survived the shortlist", dropped)
-			}
+	// The middle is thinned: something between the ends must be gone, or this
+	// is not a cut at all.
+	for _, model := range ranked {
+		if model.ID == "m:8b" || model.ID == "m:14b" {
+			t.Fatalf("%s survived; the cut must thin the middle, not the ends", model.ID)
 		}
 	}
-	// The cheap tier now reads the smallest of the GOOD ten, not of everything.
-	if tiers := buildModelTiers(models, ModelPreferences{}); tiers.cheap != "m:7b" {
-		t.Fatalf("cheap tier = %q, want the smallest of the shortlist", tiers.cheap)
+	if tiers := buildModelTiers(models, ModelPreferences{}); tiers.cheap != "m:1b" {
+		t.Fatalf("cheap tier = %q, want the cheapest end of the ranking", tiers.cheap)
 	}
 }
 
@@ -168,8 +169,10 @@ func TestTheShortlistNeverEmptiesTheField(t *testing.T) {
 	if got := applyTopRank(three, -5); len(got) != 3 {
 		t.Fatal("a negative cap must mean the default, never none")
 	}
-	if got := applyTopRank(three, 2); len(got) != 2 || got[0].ID != "m:70b" {
-		t.Fatalf("a configured cap of 2 kept %v, want the two largest", got)
+	// A cap of two keeps one from each end, never two from the same end: the
+	// tiers need a cheap candidate and a capable one.
+	if got := applyTopRank(three, 2); len(got) != 2 || got[0].ID != "m:7b" || got[1].ID != "m:120b" {
+		t.Fatalf("a configured cap of 2 kept %v, want one model from each end", got)
 	}
 	if got := rankedEligibleModels(nil, ModelPreferences{}); len(got) != 0 {
 		t.Fatalf("no models in, %d out", len(got))
@@ -194,30 +197,38 @@ func TestAPinOutsideTheShortlistStillRoutes(t *testing.T) {
 	}
 }
 
-// A PRICED CATALOGUE IS NEVER NARROWED, and this is the case the first version
-// got wrong. The list is sorted least-to-most capable, but "capable" means SIZE
-// on a free provider and COST on a priced one — so taking the tail kept the
-// DEAREST ten and moved the cheap tier from the cheapest model in the catalogue
-// to the tenth-dearest. Measured: 12 models priced 1..12 put cheap at cost 3.
-func TestAPricedCatalogueKeepsItsCheapEnd(t *testing.T) {
+// A PRICED CATALOGUE KEEPS BOTH ENDS, AND STILL HAS A CAP.
+//
+// Two regressions met here. Taking a plain TAIL kept the ten DEAREST models,
+// because a priced catalogue ranks by cost — the cheap tier moved from the
+// cheapest model to the tenth-dearest. Exempting priced catalogues entirely was
+// worse: catalogueIsPriced is an ANY test, so ONE priced model among three
+// hundred disabled the cut for all three hundred, planModels.topModels went
+// inert, and the router prompt lost its only bound.
+func TestAPricedCatalogueKeepsBothEndsAndStaysCapped(t *testing.T) {
 	var priced []DiscoveredModel
-	for i := 1; i <= 12; i++ {
-		priced = append(priced, DiscoveredModel{ID: "m" + strconv.Itoa(i), ToolCall: true, InputCost: float64(i)})
+	for i := 1; i <= 300; i++ {
+		priced = append(priced, DiscoveredModel{ID: "p" + strconv.Itoa(i), ToolCall: true, InputCost: float64(i)})
 	}
-	ranked := rankedEligibleModels(priced, ModelPreferences{})
-	if len(ranked) != 12 {
-		t.Fatalf("a priced catalogue was narrowed to %d; the cheap end is what the cheap tier spends", len(ranked))
+	ranked := rankedEligibleModels(priced, ModelPreferences{TopModels: 10})
+	if len(ranked) > 10 {
+		t.Fatalf("300 priced models with TopModels=10 kept %d; the cap must be real", len(ranked))
 	}
-	if tiers := buildModelTiers(priced, ModelPreferences{}); tiers.cheap != "m1" {
+	tiers := buildModelTiers(priced, ModelPreferences{TopModels: 10})
+	if tiers.cheap != "p1" {
 		t.Fatalf("cheap tier = %q, want the cheapest model in the catalogue", tiers.cheap)
 	}
-	// The free case is unchanged: still narrowed, still keeping the largest.
-	var free []DiscoveredModel
-	for _, size := range []string{"1b", "3b", "7b", "8b", "14b", "20b", "27b", "32b", "70b", "120b", "235b", "397b"} {
-		free = append(free, DiscoveredModel{ID: "m:" + size, ToolCall: true})
+	if tiers.strong != "p300" {
+		t.Fatalf("strong tier = %q, want the most capable model in the catalogue", tiers.strong)
 	}
-	if got := rankedEligibleModels(free, ModelPreferences{}); len(got) != defaultTopRankedModels {
-		t.Fatalf("a free catalogue kept %d, want the top %d", len(got), defaultTopRankedModels)
+	// ONE priced model must not disable the cut for a mostly-free catalogue.
+	mixed := make([]DiscoveredModel, 0, 300)
+	for i := 1; i <= 300; i++ {
+		mixed = append(mixed, DiscoveredModel{ID: "m" + strconv.Itoa(i) + ":" + strconv.Itoa(i) + "b", ToolCall: true})
+	}
+	mixed[0].InputCost = 1
+	if got := rankedEligibleModels(mixed, ModelPreferences{TopModels: 10}); len(got) > 10 {
+		t.Fatalf("one priced model among 300 disabled the cap: kept %d", len(got))
 	}
 }
 
@@ -277,8 +288,41 @@ func TestTheShortlistNeverDropsAnUnsizedModel(t *testing.T) {
 	if kept["phi4:14b"] {
 		t.Error("phi4:14b survived; the shortlist must still cut the smallest sized models")
 	}
-	// Exactly one sized model over the cap is dropped, and nothing else.
-	if want := len(ids) - 1; len(kept) != want {
-		t.Fatalf("kept %d models, want %d (one sized model over the cap)", len(kept), want)
+	// And the cap is still real: the catalogue is larger than it.
+	if len(kept) > defaultTopRankedModels {
+		t.Fatalf("kept %d models, want at most the cap of %d", len(kept), defaultTopRankedModels)
+	}
+}
+
+// VERSION TEXT IS NOT A PARAMETER COUNT.
+//
+// The suffix boundary was [^a-z], which a DIGIT satisfies — so
+// "deepseek-r1t2-chimera" matched "1t" followed by "2" and reported a
+// TRILLION-parameter model, which on a free provider would have made it the
+// strong tier every judgement task was routed to. The b/m suffixes always had
+// the same hole ("r1b2-x" read as 1B); adding t is what made it reachable on a
+// real id, so the boundary is fixed for all three.
+func TestVersionTextIsNotReadAsASize(t *testing.T) {
+	for _, id := range []string{
+		"deepseek-r1t2-chimera", // the reported case
+		"r1b2-x",                // the same hole on b
+		"m3m4-preview",          // and on m
+		"qwen2t5-experimental",
+	} {
+		if got := modelSizeBillions(id); got != 0 {
+			t.Errorf("modelSizeBillions(%q) = %v, want 0 — that is version text, not a size", id, got)
+		}
+	}
+	// Real ids still parse, including at a boundary and mid-id.
+	for id, want := range map[string]float64{
+		"kimi-k2:1t":         1000,
+		"gpt-oss:20b":        20,
+		"qwen3.5:397b":       397,
+		"gpt-oss:120b-cloud": 120,
+		"x:350m":             0.35,
+	} {
+		if got := modelSizeBillions(id); got != want {
+			t.Errorf("modelSizeBillions(%q) = %v, want %v", id, got, want)
+		}
 	}
 }
