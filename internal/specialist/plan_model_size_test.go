@@ -242,3 +242,43 @@ func TestATrillionParameterModelIsNotSizeZero(t *testing.T) {
 		t.Fatalf("strong tier = %q, want the largest model", tiers.strong)
 	}
 }
+
+// A MODEL WHOSE SIZE CANNOT BE READ IS NEVER DROPPED FOR BEING SMALL.
+//
+// The ranking sorts an unparseable id as size 0 — the least-capable end — so
+// the first version of the shortlist deleted exactly the models whose names do
+// not state a parameter count. On a real ollama-cloud account that removed
+// kimi-k2.6, glm-5.2 and deepseek-v4-flash from routing while gpt-oss:20b
+// survived, and the operator's own router guidance called the first two the
+// strongest reasoners on the machine. Dropping a model because its name is
+// uninformative is a parsing accident, not a capability judgement — and
+// applyMinSizeFloor already follows exactly this fail-open rule.
+func TestTheShortlistNeverDropsAnUnsizedModel(t *testing.T) {
+	ids := []string{
+		"gpt-oss:20b", "gpt-oss:120b", "deepseek-v3.1:671b", "qwen3-coder:480b",
+		"qwen3.5:397b", "kimi-k2.6", "glm-5.2", "deepseek-v4-flash",
+		"llama4:400b", "mistral-large:123b", "gemma3:27b", "qwen3:32b",
+		"phi4:14b", "llama3.3:70b",
+	}
+	models := make([]DiscoveredModel, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, DiscoveredModel{ID: id, ToolCall: true})
+	}
+	kept := map[string]bool{}
+	for _, model := range rankedEligibleModels(models, ModelPreferences{}) {
+		kept[model.ID] = true
+	}
+	for _, unsized := range []string{"kimi-k2.6", "glm-5.2", "deepseek-v4-flash"} {
+		if !kept[unsized] {
+			t.Errorf("%s was dropped for having no size in its id", unsized)
+		}
+	}
+	// The cut still applies to models we CAN compare: the smallest sized one goes.
+	if kept["phi4:14b"] {
+		t.Error("phi4:14b survived; the shortlist must still cut the smallest sized models")
+	}
+	// Exactly one sized model over the cap is dropped, and nothing else.
+	if want := len(ids) - 1; len(kept) != want {
+		t.Fatalf("kept %d models, want %d (one sized model over the cap)", len(kept), want)
+	}
+}

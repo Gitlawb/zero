@@ -179,5 +179,39 @@ func applyTopRank(models []DiscoveredModel, top int) []DiscoveredModel {
 	if len(models) <= top || catalogueIsPriced(models) {
 		return models
 	}
-	return models[len(models)-top:]
+	// A MODEL WHOSE SIZE CANNOT BE READ IS NEVER DROPPED FOR BEING SMALL — the
+	// same fail-open rule applyMinSizeFloor already follows, and the first
+	// version of this function broke it.
+	//
+	// The ranking sorts an unparseable id as size 0, which puts it at the
+	// LEAST-capable end, so taking a plain tail deleted exactly the models whose
+	// names happen not to state a parameter count. On a real ollama-cloud
+	// account that meant kimi-k2.6, glm-5.2 and deepseek-v4-flash were removed
+	// from routing while gpt-oss:20b survived — the operator's own guidance
+	// called the first two the strongest reasoners on the machine. Dropping a
+	// model because its name is uninformative is not a capability judgement, it
+	// is a parsing accident.
+	//
+	// So the cut applies to SIZED models only: every unknown-size model is kept,
+	// and the top N of the ones we can actually compare join them. Order is
+	// preserved, so the caller still reads cheap/balanced/strong off the ends.
+	sized := 0
+	for _, model := range models {
+		if modelSizeBillions(model.ID) > 0 {
+			sized++
+		}
+	}
+	if sized <= top {
+		return models
+	}
+	drop := sized - top
+	kept := make([]DiscoveredModel, 0, len(models)-drop)
+	for _, model := range models {
+		if drop > 0 && modelSizeBillions(model.ID) > 0 {
+			drop--
+			continue
+		}
+		kept = append(kept, model)
+	}
+	return kept
 }
