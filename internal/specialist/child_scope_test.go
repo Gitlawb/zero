@@ -241,8 +241,14 @@ func TestTheOrchestrateToolAttachesItsOwnCallIDToEveryTask(t *testing.T) {
 	if result.Status == tools.StatusError {
 		t.Fatalf("plan refused: %s", result.Output)
 	}
-	if len(seen) != 2 {
-		t.Fatalf("expected two dispatched tasks, saw %d", len(seen))
+	// THREE: the plan's own two, plus the verification task the posture appends
+	// to a multi-task plan that names no verifier (plan_verify_stage.go). The
+	// property under test is that EVERY dispatched task carries the originating
+	// call id — an appended one included, since it is dispatched by the same
+	// runner — so the count is asserted as "the plan's tasks plus the verifier"
+	// rather than pinned at the number this plan happens to declare.
+	if len(seen) != 3 {
+		t.Fatalf("expected the two plan tasks plus the appended verifier, saw %d", len(seen))
 	}
 	for index, id := range seen {
 		if id != "call_orchestrate_42" {

@@ -685,6 +685,11 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 	if _, err := ParsePlan(args, tool.limits(options)); err != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
 	}
+	// THE VERIFIER, BEFORE ASSIGNMENT so the appended task is routed and pinned
+	// exactly like a hand-written one — the verify role is precisely the one the
+	// user's strongest pin exists for. After the pre-parse, so a plan that was
+	// going to be refused is refused on what its author wrote.
+	verifyNote := tool.appendVerifyStage(args, options)
 	assignNotes, routerTokens, autoErr := tool.autoAssignModelsCosting(ctx, args, options)
 	if autoErr != nil {
 		return tools.Result{Status: tools.StatusError, Output: "Error: " + autoErr.Error()}
@@ -799,7 +804,8 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 
 	result := tools.Result{
 		Status: tools.StatusOK,
-		Output: report.Summary() + planBudgetWarning(budgetWarning) + planWorkspaceNote(workspace) + autoAssignSummary(assignNotes),
+		Output: report.Summary() + planBudgetWarning(budgetWarning) + planWorkspaceNote(workspace) +
+			autoAssignSummary(assignNotes) + verifyStageSummary(verifyNote),
 		Meta: map[string]string{
 			"plan_status": string(report.Status),
 			"max_speedup": strconv.FormatFloat(report.MaxSpeedup, 'f', 2, 64),
