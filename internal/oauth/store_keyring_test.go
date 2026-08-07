@@ -133,15 +133,15 @@ func TestStoreKeyringManyProvidersStayUnderEntryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A realistically large single token: JWT-shaped access/ID tokens plus an
-	// opaque refresh token, comparable to what OIDC providers actually issue.
+	// A realistically large single token: opaque bulk fixtures (not JWT-shaped,
+	// so secret scanners do not flag test data as generic-api-key / JWT leaks).
 	big := Token{
-		AccessToken:  "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 60) + ".sig",
-		RefreshToken: "rt_" + strings.Repeat("x", 80),
+		AccessToken:  "test-access-" + strings.Repeat("a", 360),
+		RefreshToken: "test-refresh-" + strings.Repeat("x", 80),
 		TokenType:    "Bearer",
 		Scopes:       []string{"openid", "profile", "email", "offline_access"},
 		Account:      "user@example.com",
-		IDToken:      "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 70) + ".sig",
+		IDToken:      "test-id-" + strings.Repeat("b", 420),
 	}
 	providers := []string{"anthropic", "openai", "minimax", "zai", "google"}
 	for _, name := range providers {
@@ -1294,7 +1294,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapChunks(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%s-%d", long, i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, false); err == nil {
 		t.Fatal("writeKeyIndex published an index readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1314,7 +1314,7 @@ func TestStoreKeyringWriteIndexRejectsOverCapKeys(t *testing.T) {
 		// would not catch this over-cap set.
 		keys[i] = fmt.Sprintf("p%d", i)
 	}
-	if _, err := b.writeKeyIndex(keys, 0); err == nil {
+	if _, err := b.writeKeyIndex(keys, 0, false); err == nil {
 		t.Fatal("writeKeyIndex published a key count readKeyIndex would refuse")
 	}
 	if len(kr.data) != 0 {
@@ -1839,7 +1839,7 @@ func TestStoreKeyringRejectsOversizedSingleTokenPayload(t *testing.T) {
 	}
 
 	huge := Token{
-		AccessToken: "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("A", 6000) + ".sig",
+		AccessToken: "test-access-oversized-" + strings.Repeat("A", 6000),
 	}
 	err = s.Save(ProviderKey("huge"), huge)
 	if err == nil {
@@ -2089,13 +2089,14 @@ func TestStoreKeyringNeverWritesPartialLegacySubset(t *testing.T) {
 
 	// Build a legacy map whose base64 encoding exceeds maxKeyringSingleEntryBytes
 	// (pre-PR Linux keyring storage has no corresponding single-secret limit).
+	// Opaque bulk fixtures avoid secret-scanner false positives on JWT shapes.
 	big := Token{
-		AccessToken:  "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 40) + ".sig",
-		RefreshToken: "rt_" + strings.Repeat("y", 60),
+		AccessToken:  "test-access-" + strings.Repeat("a", 240),
+		RefreshToken: "test-refresh-" + strings.Repeat("y", 60),
 		TokenType:    "Bearer",
 		Scopes:       []string{"openid", "profile", "email", "offline_access"},
 		Account:      "user@example.com",
-		IDToken:      "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDRA", 45) + ".sig",
+		IDToken:      "test-id-" + strings.Repeat("b", 270),
 	}
 	tokens := map[string]Token{}
 	for _, name := range []string{"anthropic", "openai", "minimax", "zai", "google", "cohere"} {
@@ -2506,9 +2507,8 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 		t.Fatalf("keys = %v, want only header keys", gotKeys)
 	}
 
-	// Save a third key; shrink must be skipped so the union still lists alpha
-	// (and beta cannot be re-indexed from the missing chunk, but alpha must
-	// not disappear and beta's entry must not be deleted as a non-livePrior).
+	// Save a third key; the union publish must keep advertising 2 chunks so a
+	// restored chunk-1 can still reconcile beta, and must not delete beta's entry.
 	state, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{
 		ProviderKey("alpha"): {AccessToken: "tok-alpha"},
 		ProviderKey("gamma"): {AccessToken: "tok-gamma"},
@@ -2523,19 +2523,38 @@ func TestWriteSkipsIndexShrinkWhenChunkMissing(t *testing.T) {
 	if _, ok := kr.data[keyringService+"/"+ProviderKey("beta")]; !ok {
 		t.Fatal("beta entry was deleted despite missing index chunk; orphan risk path")
 	}
-	// Index after write should still be a union (not a shrink that drops everything unknown).
-	afterKeys, _, _, afterIncomplete, err := blob.readKeyIndex()
+	afterKeys, _, afterChunks, afterIncomplete, err := blob.readKeyIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// incomplete may clear if write rewrote a complete index; either way alpha+gamma
-	// must be listed, and we did not shrink away the prior union carelessly.
-	_ = afterIncomplete
+	if afterChunks != 2 {
+		t.Fatalf("post-write chunks = %d, want 2 (preserve missing-chunk advertisement)", afterChunks)
+	}
+	if !afterIncomplete {
+		t.Fatal("post-write index should still be incomplete until chunk-1 returns")
+	}
 	found := map[string]bool{}
 	for _, k := range afterKeys {
 		found[k] = true
 	}
 	if !found[ProviderKey("alpha")] || !found[ProviderKey("gamma")] {
 		t.Fatalf("post-write keys = %v, want alpha and gamma listed", afterKeys)
+	}
+	// Restoring the missing chunk must surface beta again (the point of preserving
+	// the advertisement instead of shrinking to a complete 1-chunk index).
+	kr.data[keyringService+"/"+keyringIndexAccount+"-1"] = base64.StdEncoding.EncodeToString(chunk1)
+	restored, _, _, incomplete, err := blob.readKeyIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incomplete {
+		t.Fatal("expected complete index after restoring chunk-1")
+	}
+	restoredFound := map[string]bool{}
+	for _, k := range restored {
+		restoredFound[k] = true
+	}
+	if !restoredFound[ProviderKey("beta")] {
+		t.Fatalf("restored keys = %v, want beta recoverable from chunk-1", restored)
 	}
 }

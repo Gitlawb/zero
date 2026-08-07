@@ -982,6 +982,12 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	}
 	// 2. Publish the union of the live prior and new key sets first, so every
 	// entry that exists at any point during this update is indexed.
+	//
+	// When a referenced continuation chunk was missing, livePrior is truncated
+	// and cannot name the unlisted keys. Keep advertising the prior chunk count
+	// (and never delete those chunk accounts) so a later-restored chunk can
+	// still be reconciled; a complete rewrite to only the known keys would
+	// permanently orphan their OS keychain entries.
 	union := keys
 	if len(livePrior) > 0 {
 		merged := make(map[string]bool, len(keys)+len(livePrior))
@@ -994,7 +1000,7 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 		sort.Strings(union)
 	}
-	unionChunks, err := b.writeKeyIndex(union, priorChunks)
+	unionChunks, err := b.writeKeyIndex(union, priorChunks, indexIncomplete)
 	if err != nil {
 		return err
 	}
@@ -1006,6 +1012,8 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 	}
 	// 4. Delete removed entries while the union index still lists them, so a
 	// failed Delete leaves a visible (re-deletable) entry, never an orphan.
+	// Only walk livePrior (keys we could see): entries named only in a missing
+	// chunk stay put so a restored chunk can still find them.
 	for _, key := range livePrior {
 		if _, ok := state.Tokens[key]; !ok {
 			if _, err := b.kr.Delete(b.service, key); err != nil {
@@ -1014,13 +1022,10 @@ func (b keyringBlob) write(data []byte, mutations map[string]bool) error {
 		}
 	}
 	// 5. Shrink the index to the exact new key set. Legacy is left untouched.
-	// Skip shrink when a referenced index chunk was missing: livePrior was
-	// computed from a truncated key list, so shrinking would drop those keys
-	// from the published index while leaving their OS keychain entries
-	// stranded and unreachable by Load/Status/Delete. Leaving the union index
-	// in place keeps them listed until an intact read can reconcile them.
+	// Skip shrink when the prior index was incomplete: a shrink to `keys` would
+	// drop the preserved chunk advertisements and strand unlisted entries.
 	if !indexIncomplete {
-		if _, err := b.writeKeyIndex(keys, unionChunks); err != nil {
+		if _, err := b.writeKeyIndex(keys, unionChunks, false); err != nil {
 			return err
 		}
 	}
@@ -1102,7 +1107,7 @@ func (b keyringBlob) writeTombstones(tombstones map[string]bool) error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if _, err := tb.writeKeyIndex(keys, priorChunks); err != nil {
+	if _, err := tb.writeKeyIndex(keys, priorChunks, false); err != nil {
 		return fmt.Errorf("oauth: write keyring token tombstones: %w", err)
 	}
 	return nil
@@ -1316,12 +1321,18 @@ func dedupeValidKeys(keys []string) []string {
 }
 
 // writeKeyIndex persists keys as a chunked index and reports how many chunk
-// entries it used. Continuation chunks are written before the header that
-// references them, so the authoritative chunk 0 never advertises a chunk that
-// does not exist yet; stale chunks from a previously larger index are removed
-// only after the header stops referencing them (best-effort: an unreferenced
-// chunk is never read).
-func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) {
+// entries the published header advertises. Continuation chunks are written
+// before the header that references them, so the authoritative chunk 0 never
+// advertises a content chunk that does not exist yet; stale chunks from a
+// previously larger index are removed only after the header stops referencing
+// them (best-effort: an unreferenced chunk is never read).
+//
+// keepMissingChunks is set when readKeyIndex reported a missing continuation
+// chunk. In that mode the header keeps advertising at least priorChunks so a
+// later-restored chunk remains reachable, and chunk accounts in that range are
+// not deleted (overwriting or removing them would turn recoverable damage into
+// permanent orphans).
+func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int, keepMissingChunks bool) (int, error) {
 	// Refuse to publish an index the reader would reject: readKeyIndex caps both
 	// total keys and chunk count, and a header beyond either would make every
 	// later Load/Status/Save/Delete fail before it could recover. Check the key
@@ -1334,6 +1345,8 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) 
 	if len(chunks) > maxKeyringIndexChunks {
 		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", len(chunks), maxKeyringIndexChunks)
 	}
+	// Only write content chunks we produced. When preserving a damaged prior
+	// index, higher-numbered accounts may still hold recoverable key lists.
 	for i := 1; i < len(chunks); i++ {
 		chunkData, err := json.Marshal(chunks[i])
 		if err != nil {
@@ -1343,17 +1356,26 @@ func (b keyringBlob) writeKeyIndex(keys []string, priorChunks int) (int, error) 
 			return 0, err
 		}
 	}
-	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: len(chunks), Keys: chunks[0]})
+	advertised := len(chunks)
+	if keepMissingChunks && priorChunks > advertised {
+		advertised = priorChunks
+	}
+	if advertised > maxKeyringIndexChunks {
+		return 0, fmt.Errorf("oauth: keyring key index needs %d chunks, over the %d-chunk cap readers accept; too many stored credentials", advertised, maxKeyringIndexChunks)
+	}
+	headerData, err := json.Marshal(keyIndexHeader{Version: 1, Chunks: advertised, Keys: chunks[0]})
 	if err != nil {
 		return 0, err
 	}
 	if err := b.kr.Set(b.service, b.indexAccount, base64.StdEncoding.EncodeToString(headerData)); err != nil {
 		return 0, err
 	}
-	for i := len(chunks); i < priorChunks; i++ {
-		_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
+	if !keepMissingChunks {
+		for i := len(chunks); i < priorChunks; i++ {
+			_, _ = b.kr.Delete(b.service, b.chunkAccount(i))
+		}
 	}
-	return len(chunks), nil
+	return advertised, nil
 }
 
 // chunkIndexKeys packs keys into chunks whose marshaled JSON stays under
@@ -1424,12 +1446,16 @@ func startLease(path, token string, unlock func()) *leasedPath {
 				// race these locks prevent. Only refresh while we still own the
 				// token: a post-stale reclaim can replace the file, and Chtimes on
 				// the replacement would keep both holders inside the critical section.
+				// Re-check ownership after Chtimes as well: between the pre-check and
+				// the stamp a peer can swap the file, and a successful Chtimes on the
+				// thief's lock would keep both critical sections alive.
 				if !ownLockFile(path, token) {
 					l.lost.Store(true)
 					return
 				}
 				at := time.Now()
-				if err := os.Chtimes(path, at, at); err != nil && !ownLockFile(path, token) {
+				_ = os.Chtimes(path, at, at)
+				if !ownLockFile(path, token) {
 					l.lost.Store(true)
 					return
 				}
