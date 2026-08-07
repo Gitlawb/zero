@@ -31,16 +31,15 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readFileTool{
 		baseTool: baseTool{
 			name:        "read_file",
-			description: "Read a file by 1-based inclusive line range, or by exact byte chunks for oversized single-line files.",
+			description: "Read exact file text with line numbers. Use for comments, formatting, or edits; prefer read_minified_file for initial code understanding. Use offset and limit for a line range.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path":        {Type: "string", Description: "Path of the file to read."},
-					"start_line":  {Type: "integer", Description: "1-based inclusive line number to start reading from.", Minimum: intPtr(1)},
-					"end_line":    {Type: "integer", Description: "1-based inclusive line number to stop reading at.", Minimum: intPtr(1)},
-					"max_lines":   {Type: "integer", Description: "Maximum number of lines to return.", Minimum: intPtr(1)},
-					"byte_offset": {Type: "integer", Description: "Zero-based byte offset for an exact chunk read. Use with byte_limit for oversized single-line files; cannot be combined with line ranges.", Minimum: intPtr(0)},
-					"byte_limit":  {Type: "integer", Description: "Maximum source bytes returned in exact byte mode. Defaults to 65536.", Default: readFileByteChunkMax, Minimum: intPtr(1), Maximum: intPtr(readFileByteChunkMax)},
+					"path":        {Type: "string", Description: "File path."},
+					"offset":      {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
+					"limit":       {Type: "integer", Description: "Optional number of source lines to return.", Minimum: intPtr(1)},
+					"byte_offset": {Type: "integer", Description: "Optional zero-based offset for exact byte reads.", Minimum: intPtr(0)},
+					"byte_limit":  {Type: "integer", Description: "Optional byte count for an exact byte read; use with byte_offset.", Minimum: intPtr(1), Maximum: intPtr(readFileByteChunkMax)},
 				},
 				Required:             []string{"path"},
 				AdditionalProperties: false,
@@ -69,7 +68,27 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
-	startLine, err := intArg(args, "start_line", 1, 1, 0)
+	_, hasOffset := args["offset"]
+	_, hasLimit := args["limit"]
+	_, hasStartLine := args["start_line"]
+	_, hasEndLine := args["end_line"]
+	_, hasMaxLines := args["max_lines"]
+	if hasOffset && hasStartLine {
+		return errorResult("Error: Invalid arguments for read_file: use either offset or start_line, not both")
+	}
+	if hasLimit && (hasEndLine || hasMaxLines) {
+		return errorResult("Error: Invalid arguments for read_file: use limit instead of end_line or max_lines, not both")
+	}
+
+	startKey := "offset"
+	if !hasOffset && hasStartLine {
+		startKey = "start_line"
+	}
+	startLine, err := intArg(args, startKey, 1, 1, 0)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+	}
+	limit, err := intArg(args, "limit", 0, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
@@ -81,19 +100,25 @@ func (tool readFileTool) run(args map[string]any, options RunOptions, directBudg
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
+	if hasLimit {
+		const maxInt = int(^uint(0) >> 1)
+		endLine = startLine + min(limit-1, maxInt-startLine)
+	}
+	hasLineRange := hasOffset || hasLimit || hasStartLine || hasEndLine || hasMaxLines
 	_, hasByteOffset := args["byte_offset"]
 	_, hasByteLimit := args["byte_limit"]
-	byteMode := hasByteOffset || hasByteLimit
-	byteOffset, err := intArg(args, "byte_offset", 0, 0, 0)
-	if err != nil {
-		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-	}
-	byteLimit, err := intArg(args, "byte_limit", readFileByteChunkMax, 1, readFileByteChunkMax)
-	if err != nil {
-		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
-	}
-	if byteMode && (args["start_line"] != nil || args["end_line"] != nil || args["max_lines"] != nil) {
-		return errorResult("Error: Invalid arguments for read_file: byte_offset/byte_limit cannot be combined with line ranges")
+	byteMode := (hasByteOffset || hasByteLimit) && !hasLineRange
+	byteOffset := 0
+	byteLimit := readFileByteChunkMax
+	if byteMode {
+		byteOffset, err = intArg(args, "byte_offset", 0, 0, 0)
+		if err != nil {
+			return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+		}
+		byteLimit, err = intArg(args, "byte_limit", readFileByteChunkMax, 1, readFileByteChunkMax)
+		if err != nil {
+			return errorResult("Error: Invalid arguments for read_file: " + err.Error())
+		}
 	}
 
 	absolutePath, relativePath, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, requestedPath)
@@ -169,7 +194,7 @@ func renderedReadRange(total, start, end, maxLines int) (int, int) {
 
 func renderReadFileRange(absolutePath string, relativePath string, total int, startLine int, endLine int, maxLines int, maxBytes int) Result {
 	if startLine > total {
-		return okResult(fmt.Sprintf("File: %s\n(start_line %d is past the end of the file, which has %d lines)", relativePath, startLine, total))
+		return okResult(fmt.Sprintf("File: %s\n(offset %d is past the end of the file, which has %d lines)", relativePath, startLine, total))
 	}
 	if endLine == 0 || endLine > total {
 		endLine = total
@@ -208,9 +233,9 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 	// Tool.Run calls preserve the legacy prefix-only byte budget.
 	var budgetedOutput *outputBudgetBuilder
 	if maxBytes > 0 {
-		budgetedOutput = newOutputBudgetBuilder(maxBytes, "use start_line/end_line or max_lines for normal files; use byte_offset/byte_limit for an oversized single line")
+		budgetedOutput = newOutputBudgetBuilder(maxBytes, "use offset/limit to request a smaller line range")
 	} else {
-		budgetedOutput = newHeadTailOutputBudgetBuilder(readOutputBudgetBytes, "use start_line/end_line or max_lines for normal files; use byte_offset/byte_limit for an oversized single line")
+		budgetedOutput = newHeadTailOutputBudgetBuilder(readOutputBudgetBytes, "use offset/limit to request a smaller line range")
 	}
 	budgetedOutput.WriteString(header)
 	budgetedOutput.WriteString("\n")
@@ -224,9 +249,9 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 	}
 	if truncated {
 		// The Truncated flag alone is invisible to the model in the rendered
-		// output, so it cannot tell a max_lines cut from a complete read. Make the
+		// output, so it cannot tell a limit cut from a complete read. Make the
 		// cut explicit and tell it how to continue.
-		budgetedOutput.WriteString(fmt.Sprintf("\n\n[truncated: %d more line(s) in the requested range not shown; set start_line=%d to continue]", endLine-lastLine, lastLine+1))
+		budgetedOutput.WriteString(fmt.Sprintf("\n\n[truncated: %d more line(s) in the requested range not shown; set offset=%d to continue]", endLine-lastLine, lastLine+1))
 	}
 
 	budgeted := budgetedOutput.Result()
@@ -241,7 +266,7 @@ func renderReadFileRange(absolutePath string, relativePath string, total int, st
 		if budgeted.Truncated {
 			meta["truncation_reason"] = "byte_budget"
 		} else {
-			meta["truncation_reason"] = "max_lines"
+			meta["truncation_reason"] = "limit"
 		}
 	}
 	return Result{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -292,6 +293,40 @@ func TestEditFileAllowsSeenRangeAndRejectsUnseenRange(t *testing.T) {
 	}
 	if content, err := os.ReadFile(path); err != nil || !strings.Contains(string(content), "bravo") {
 		t.Fatalf("seen-range edit did not update the file: content=%q err=%v", content, err)
+	}
+}
+
+func TestCanonicalLimitedReadAuthorizesEdit(t *testing.T) {
+	dir := t.TempDir()
+	var source strings.Builder
+	for line := 1; line <= 1000; line++ {
+		source.WriteString("line ")
+		source.WriteString(strconv.Itoa(line))
+		source.WriteByte('\n')
+	}
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte(source.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+
+	read := registry.RunWithOptions(context.Background(), "read_file", map[string]any{
+		"path": "f.txt", "offset": 500, "limit": 10,
+	}, opts)
+	if read.Status != StatusOK || read.Truncated {
+		t.Fatalf("bounded canonical read must be exact: status=%s truncated=%v meta=%#v", read.Status, read.Truncated, read.Meta)
+	}
+	if read.Meta["seen_lines"] != "500-509" {
+		t.Fatalf("bounded canonical read did not receive exact-read credit: %#v", read.Meta)
+	}
+
+	edit := registry.RunWithOptions(context.Background(), "edit_file", map[string]any{
+		"path": "f.txt", "old_string": "line 505", "new_string": "updated 505",
+	}, opts)
+	if edit.Status != StatusOK {
+		t.Fatalf("edit inside canonical read range was refused: %s", edit.Output)
 	}
 }
 

@@ -79,8 +79,8 @@ func TestRegisterToolSearchIfEligibleSkipsWhenThresholdZero(t *testing.T) {
 
 func TestDeferredEligibleCountIncludesOptionalBuiltins(t *testing.T) {
 	registry := newCoreRegistry(t.TempDir())
-	if got := deferredEligibleCount(registry, agent.PermissionModeAuto, nil, nil); got < 3 {
-		t.Fatalf("deferredEligibleCount(core) = %d, want at least 3 optional built-ins", got)
+	if got := deferredEligibleCount(registry, agent.PermissionModeAuto, nil, nil); got < 2 {
+		t.Fatalf("deferredEligibleCount(core) = %d, want at least 2 optional built-ins", got)
 	}
 }
 

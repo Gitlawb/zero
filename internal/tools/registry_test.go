@@ -523,25 +523,24 @@ func TestIsDeferralEligibleDecouplesFromDeferred(t *testing.T) {
 
 func TestOptionalBuiltinsUseDeferredDiscovery(t *testing.T) {
 	wantDeferred := map[string]bool{
-		"bash":               true,
-		"browser_action":     true,
-		"browser_click":      true,
-		"browser_connect":    true,
-		"browser_install":    true,
-		"browser_launch":     true,
-		"browser_open":       true,
-		"browser_press":      true,
-		"browser_snapshot":   true,
-		"browser_type":       true,
-		"capture_artifact":   true,
-		"desktop_action":     true,
-		"desktop_snapshot":   true,
-		"desktop_windows":    true,
-		"lsp_navigate":       true,
-		"read_minified_file": true,
-		"terminal_session":   true,
-		"web_fetch":          true,
-		"web_search":         true,
+		"bash":             true,
+		"browser_action":   true,
+		"browser_click":    true,
+		"browser_connect":  true,
+		"browser_install":  true,
+		"browser_launch":   true,
+		"browser_open":     true,
+		"browser_press":    true,
+		"browser_snapshot": true,
+		"browser_type":     true,
+		"capture_artifact": true,
+		"desktop_action":   true,
+		"desktop_snapshot": true,
+		"desktop_windows":  true,
+		"lsp_navigate":     true,
+		"terminal_session": true,
+		"web_fetch":        true,
+		"web_search":       true,
 	}
 	for _, tool := range BuiltinCatalog(t.TempDir()) {
 		if _, listed := wantDeferred[tool.Name()]; listed {
@@ -549,7 +548,7 @@ func TestOptionalBuiltinsUseDeferredDiscovery(t *testing.T) {
 				t.Errorf("%s should be deferred", tool.Name())
 			}
 			delete(wantDeferred, tool.Name())
-		} else if tool.Name() == "read_file" || tool.Name() == "grep" || tool.Name() == ExecCommandToolName || tool.Name() == "edit_file" {
+		} else if tool.Name() == "read_file" || tool.Name() == "read_minified_file" || tool.Name() == "grep" || tool.Name() == ExecCommandToolName || tool.Name() == "edit_file" {
 			if IsDeferred(tool) {
 				t.Errorf("essential tool %s must stay eager", tool.Name())
 			}
