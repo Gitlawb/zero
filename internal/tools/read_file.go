@@ -31,14 +31,14 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readFileTool{
 		baseTool: baseTool{
 			name:        "read_file",
-			description: "Read exact file contents with line numbers. Use this for comments, formatting, or edits; prefer read_minified_file for initial source understanding. Use offset and limit to select a bounded line range.",
+			description: "Read exact file text with line numbers. Use for comments, formatting, or edits; prefer read_minified_file for initial code understanding. Use offset and limit for a line range.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path":        {Type: "string", Description: "Path of the file to read."},
+					"path":        {Type: "string", Description: "File path."},
 					"offset":      {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
 					"limit":       {Type: "integer", Description: "Optional number of source lines to return.", Minimum: intPtr(1)},
-					"byte_offset": {Type: "integer", Description: "Optional zero-based byte offset for exact reads of files with very long lines.", Minimum: intPtr(0)},
+					"byte_offset": {Type: "integer", Description: "Optional zero-based offset for exact byte reads.", Minimum: intPtr(0)},
 					"byte_limit":  {Type: "integer", Description: "Optional byte count for an exact byte read; use with byte_offset.", Minimum: intPtr(1), Maximum: intPtr(readFileByteChunkMax)},
 				},
 				Required:             []string{"path"},

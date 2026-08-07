@@ -28,11 +28,11 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readMinifiedFileTool{
 		baseTool: baseTool{
 			name:        "read_minified_file",
-			description: "Read source code in a safe, token-efficient form using language-aware compaction when available. Use this first to understand code; use read_file when exact text or line numbers are required.",
+			description: "Read source code in a token-efficient, language-aware form. Prefer this for initial understanding; use read_file for exact text or line numbers.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"path":   {Type: "string", Description: "Path of the file to read in minified form."},
+					"path":   {Type: "string", Description: "Source file path."},
 					"offset": {Type: "integer", Description: "Optional 1-based source line to start from.", Minimum: intPtr(1)},
 					"limit":  {Type: "integer", Description: "Optional maximum number of source lines to minify.", Minimum: intPtr(1)},
 				},
