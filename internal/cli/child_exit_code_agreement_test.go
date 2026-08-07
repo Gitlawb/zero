@@ -26,3 +26,26 @@ func TestTheChildIncompleteExitCodeAgreesWithWhatSpecialistExpects(t *testing.T)
 			exitIncomplete, specialistChildExitIncomplete)
 	}
 }
+
+// THE SAME HAZARD, for the same reason, on the provider exit.
+//
+// specialist retries a plan task ONCE when the child died on the provider
+// rather than on the work, and it recognises that from this exit code. If
+// exitProvider moves and specialist's childExitProvider does not, a provider
+// failure stops being recognised, the task silently loses its retry, and a
+// transient 500 goes back to costing the task and everything downstream of it —
+// with nothing failing anywhere to say so.
+func TestTheChildProviderExitCodeAgreesWithWhatSpecialistExpects(t *testing.T) {
+	const specialistChildExitProvider = 3
+	if exitProvider != specialistChildExitProvider {
+		t.Fatalf("exitProvider is %d but internal/specialist retries provider failures on %d — "+
+			"a task killed by a provider error will no longer be retried",
+			exitProvider, specialistChildExitProvider)
+	}
+	// And the two codes must stay DISTINCT: one number meaning both would make
+	// every provider failure look like a decline (or the reverse), and the two
+	// retries have different safety rules — the provider one refuses write tasks.
+	if exitProvider == exitIncomplete {
+		t.Fatal("exitProvider and exitIncomplete collided; the two retries would be indistinguishable")
+	}
+}

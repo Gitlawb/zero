@@ -134,6 +134,21 @@ type TaskResult struct {
 	// that its three sibling tasks read without trouble; the decline cost that
 	// task, its dependent, and the final report — a third of the plan.
 	Declined bool
+	// ProviderFailed reports that the child died on the PROVIDER rather than on
+	// the work: an HTTP failure the transport would not replay.
+	//
+	// A CODE, NOT A MESSAGE, for the same reason Declined is one: the child exits
+	// childExitProvider for exactly this.
+	//
+	// It exists because the transport deliberately does not retry 500/502/504 —
+	// unlike 429/503/529 those do not guarantee the request had no effect, so
+	// REPLAYING THE SAME POST risks paying for the same completion twice
+	// (providerio.ShouldRetryStatus). That is the right call for a replay and the
+	// wrong outcome for a plan: a measured ten-task run lost one task to a bare
+	// "Internal Server Error" after 6 tool calls and 42,524 tokens, and with it
+	// anything that depended on it. A fresh child is not a replay of that POST —
+	// it is a new request that the provider is very likely to answer.
+	ProviderFailed bool
 	// ModelRejected reports that the task died without its assigned model ever
 	// producing anything — the signature of a provider refusing the MODEL rather
 	// than the work failing. Set by the runner, read by runTaskWithRetries to
@@ -902,6 +917,11 @@ type retryPolicy struct {
 // a test asserting they agree — the only defence available.
 const childExitIncomplete = 4
 
+// childExitProvider is the child's exit code for "the provider failed", as
+// opposed to the task failing. Duplicated from internal/cli's exitProvider for
+// the same reason childExitIncomplete is, and pinned by the same agreement test.
+const childExitProvider = 3
+
 // runTaskWithRetries runs one task, retrying it ONLY when it stalled.
 //
 // The retry lives HERE, in the executor, and not in the runner — the executor
@@ -929,6 +949,10 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 	// declines twice is telling us something about the task, not having a bad
 	// moment.
 	retriedAfterDecline := false
+	// retriedAfterProviderFailure bounds the provider retry at exactly one, for
+	// the same reason: a provider failing twice in a row is having an outage, not
+	// a bad moment, and a second retry spends another child to learn that.
+	retriedAfterProviderFailure := false
 
 	for attempt := 1; ; attempt++ {
 		started := time.Now()
@@ -1011,6 +1035,38 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 				fellBackFrom = strings.TrimSpace(policy.task.Model)
 				policy.task.Model = ""
 			}
+			continue
+		case result.ProviderFailed && !retriedAfterProviderFailure && !grantsPlanWriteTool(policy.tools):
+			// THE PROVIDER FAILED, WHICH IS NOT AN ANSWER.
+			//
+			// The branch below is right about a task that read the code and
+			// concluded wrongly: running it again buys the same report. It is not
+			// right about an HTTP 500 — that is a coin flip, and a measured
+			// ten-task run lost one task to a bare "Internal Server Error" after 6
+			// tool calls and 42,524 tokens, taking its dependents with it. The
+			// transport will not replay the POST itself, deliberately: 500/502/504
+			// do not guarantee the request had no effect, so a replay could pay
+			// for the same completion twice (providerio.ShouldRetryStatus). A
+			// fresh child is not that replay — it is a new request.
+			//
+			// READ-ONLY TASKS ONLY, and that bound is the whole safety argument. A
+			// write task may have applied part of its change before the provider
+			// died; re-running it could apply that change twice, and no exit code
+			// can tell us how far it got. A read-only task re-reads, which costs
+			// tokens and nothing else. The same asymmetry the no-tool-call check
+			// below rests on: for writes the inference has to be airtight.
+			//
+			// Gated by the SAME stops as every other retry here, because it spends
+			// the same thing. Not gated by maxRetries: that budget bounds stall
+			// thrashing, where the same model reruns the same work hoping for a
+			// different mood. This is one attempt, bounded by its own flag.
+			if ctx.Err() != nil {
+				return result, err
+			}
+			if policy.wallClock.exhausted() {
+				return result, err
+			}
+			retriedAfterProviderFailure = true
 			continue
 		case !result.Stalled:
 			// Anything other than a stall is an ANSWER, including a failure. The

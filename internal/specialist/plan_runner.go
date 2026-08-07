@@ -307,6 +307,10 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// doing it badly — and that is worth one more attempt in a way a wrong
 			// answer never is.
 			result.Declined = res.ExitCode == childExitIncomplete
+			// THE PROVIDER FAILED, NOT THE TASK. Same structural signal, same
+			// reason it is worth another attempt: nothing about the work produced
+			// this, so repeating the work is not what repeating the request buys.
+			result.ProviderFailed = res.ExitCode == childExitProvider
 			return result, nil
 		}
 		// THE LAST CHECK, and the one a plausible answer gets past. A task granted
